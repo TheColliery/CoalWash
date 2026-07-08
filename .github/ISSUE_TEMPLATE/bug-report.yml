@@ -1,0 +1,45 @@
+name: "Bug report"
+description: "The gauge hook, the engine (discovery/caliper/gate/apply/receipt), the skill flow, or a script misbehaves"
+title: "[bug] <component>: <one-line summary>"
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - session-start gauge / band nudges (hooks/coalwash-conductor.js)
+        - class-B discovery (scripts/lib/class-b.mjs)
+        - caliper / bands / break-even / state (scripts/lib/caliper.mjs)
+        - fidelity gate (scripts/lib/fidelity-gate.mjs)
+        - apply transaction / lock / rollback / pin (scripts/lib/apply.mjs)
+        - receipt (scripts/lib/receipt.mjs)
+        - skill flow / outsider-insider run (skills/coalwash/)
+        - stats / update commands (commands/)
+        - config (config-load.mjs / config-schema.mjs)
+        - verify / build / test scripts
+        - plugin / packaging
+        - docs
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: CoalWash version + platform
+      placeholder: "v0.1.0-beta.1 · Claude Code on Windows 11"  # version-pin: tracks .claude-plugin/plugin.json — bump on release
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce + what happened
+      description: "Exact commands/inputs and exact output. For a fidelity/apply bug, the receipt and gate output — with any memory CONTENT redacted or replaced by placeholders (metrics and counts are enough; never paste private memory text)."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: "What you expected to happen instead."
+    validations:
+      required: false

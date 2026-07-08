@@ -1,0 +1,44 @@
+{
+  // Master switch. auto = the session-start gauge measures class-B footprint and
+  // nudges by band (LEAN silent / PLUMP ask / OBESE strong-ask / FULL economic
+  // force — deletes ALWAYS stay human-gated); manual = gauge silent, you run
+  // /coalwash yourself; off = fully silent.
+  "coalwashMode": "auto",
+
+  // Language for prompts and nudges. auto = follow the conversation's language;
+  // a locked value pins user-facing prose (technical terms stay verbatim).
+  "language": "auto",
+
+  // Hard ceiling as % of platform context capacity (the FULL band's absolute
+  // clamp). Raising it = consciously choosing to carry more memory overhead
+  // ("buying a bigger SSD") — the agent never raises it for you.
+  "fullPercent": 6,
+
+  // Low-water clean-to target as % of capacity (anti-thrash hysteresis: fire at
+  // fullPercent, clean down to targetPercent). Must sit below fullPercent; an
+  // inverted pair degrades to the defaults on read.
+  "targetPercent": 3,
+
+  // Per-file size cap in KB before a class-B file is flagged oversize
+  // (25 = the Claude Code memory-index cap class).
+  "fileMaxSizeKb": 25,
+
+  // Default run tier. quick = the free mechanical pass (dedup, dead links,
+  // index rebuild — no model ever reads the content); full = the paid semantic
+  // pass (always asked as a separate consent, never auto).
+  "quickVsFull": "quick",
+
+  // Trade-secret mode: true = mechanical Quick only — memory content NEVER
+  // passes through a model, zero transmission (deep semantic defrag disabled).
+  "localOnly": false,
+
+  // Self-update (series standard). The session-start hook only SCHEDULES a check
+  // via a throttled local stamp (no network); the AGENT verifies the latest tag
+  // and offers the update, consent-gated. ask = on the first due session, ask
+  // once how to handle updates; auto = standing consent to check + offer;
+  // remind = a free reminder, you run it; off = silent.
+  "updateMode": "ask",
+
+  // Days between self-update checks/reminders (1-365; out-of-range clamps to 14 on read).
+  "updateCheckDays": 14
+}

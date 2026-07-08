@@ -1,0 +1,12 @@
+{
+  "name": "coalwash",
+  "owner": { "name": "TheColliery" },
+  "description": "CoalWash — fidelity-first memory-defragment/cleanup engine. Part of the TheColliery mining series.",
+  "plugins": [
+    {
+      "name": "coalwash",
+      "source": "./plugin",
+      "description": "Memory-defragment/cleanup engine for agent class-B memory (memory + governance files). Fidelity-first: a free mechanical Quick pass plus a code-enforced fidelity gate (zero fact-loss proven by diff, not hoped); the semantic Full pass is consent-gated and deletes are always human-gated. Honest frame: slows how fast memory-overhead grows — it does not eliminate memory cost. Zero-dependency, offline, no API keys."
+    }
+  ]
+}

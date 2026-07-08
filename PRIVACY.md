@@ -1,0 +1,13 @@
+# CoalWash Privacy Policy
+
+**CoalWash collects nothing and phones nowhere — and it treats your memory as the private data it is.**
+
+- **No telemetry.** No usage data, analytics, or identifiers are collected, stored, or transmitted — by the hook, the engine scripts, or the skill.
+- **No network calls.** The hook and every engine script are offline by design (Phoenix #7): local filesystem only, no sockets, no requests. (The self-update *check* is the agent's `/coalwash:update` procedure, run only with your consent — never the hook.)
+- **Your memory IS the data under management — CoalWash minimizes its movement.** Files are processed in place; backups (snapshots) stay in the project's own `.claude/coalwash/` dir and are never transmitted. That dir **self-ignores by construction** — the engine drops a catch-all `.gitignore` inside it, so snapshots stay out of version control even in a project that tracks `.claude/`. The only party that ever reads memory content is your own session's model — the same trust boundary your platform already established by loading those files into context.
+- **`localOnly` is the zero-transmission mode.** Set `localOnly: true` and no spawned sub ever receives memory content, the semantic tier is disabled, and nothing beyond what your platform already loads reaches any model. Mechanical-only, air-gap-friendly.
+- **Receipts are metrics, never content.** Every receipt and gauge line carries sizes, counts, and estimates — never memory-content snippets. Token figures are a local char-heuristic estimate, labeled `~est`, not a platform-verified read.
+- **Error reports are manual and scrubbed.** When something misbehaves, your agent may *offer* to open a GitHub issue; nothing is submitted automatically, you see and edit the contents first, and the report template carries mechanical facts only (operation, counts, error class) — **never the memory text**.
+- **Local files only.** All state lives in files you can read: the caliper state `~/.claude/.coalwash-state.json` (per-project lean floor, session timestamps, snooze — numbers, no content), the transaction dir `[project]/.claude/coalwash/` (lock, WAL journal, snapshots — copies of your own files, on your own disk), the config (`~/.claude/.coalwash.json` global, optional per-project `.coalwash.json`), and the self-update throttle stamp `~/.claude/.coalwash-update-check` (a timestamp, nothing more).
+
+Questions: open an issue at <https://github.com/TheColliery/CoalWash/issues>.

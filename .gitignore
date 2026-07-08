@@ -1,0 +1,29 @@
+# Internal governance + design notes — machine-local, never shipped to the public repo
+CLAUDE.md
+MEMORY*.md
+AGENTS.md
+.claude/
+.agents/
+COALWASH_BLUEPRINT.md
+
+# Dependencies / build cruft
+node_modules/
+
+# Runtime transaction dir (lock + WAL journal + snapshots, created inside a target project at run-time, never committed)
+.claude/coalwash/
+
+# Generated SkillSpector scan reports (provenance recorded in SECURITY.md; the raw report is not shipped)
+skillspector-*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+
+# editor / env / tmp (preventive)
+.vscode/
+.idea/
+.env
+.env.*
+*.tmp
