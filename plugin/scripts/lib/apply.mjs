@@ -1,9 +1,14 @@
 // apply.mjs — the all-or-nothing transactional apply (blueprint §14.5 + §14.11,
 // gap #3): snapshot-marker -> write .tmp -> fsync -> atomic rename -> verify ->
-// deletes LAST -> commit; ANY failure restores the snapshot wholesale. The
-// strongest honest guarantee: the worst realistic outcome of ANY crash is "the
-// run did not happen", NEVER "memory is corrupted" — nothing mutates until a
-// complete, marked snapshot exists on disk.
+// deletes LAST -> commit; a step failure rolls back from the snapshot. The
+// strongest honest guarantee: nothing mutates until a complete, marked snapshot
+// exists on disk, so the worst outcome of a crash BEFORE that marker is "the run
+// did not happen". Honest ceiling (do not over-claim): if the ROLLBACK's own
+// restore fails (e.g. the disk filled), the store can be left MIXED — that case
+// is reported as rolledBack:'partial'/'rollback-failed', the journal + snapshot
+// are KEPT as the backstop, and a cold-start recovery re-attempts rather than
+// clearing over it. So: "wholesale on the common path; partial-and-flagged, with
+// the snapshot retained, when a restore itself fails" — never a silent mixed state.
 //
 // Prior-art shape: WAL + atomic-rename (git ref updates, SQLite, dpkg) — ported,
 // not invented. Honest ceiling: fsync is not stronger than the drive's write
