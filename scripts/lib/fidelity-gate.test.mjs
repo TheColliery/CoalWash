@@ -174,3 +174,121 @@ test('frontmatterKeys: absent or unterminated frontmatter yields no keys (CRLF t
   const crlf = '---\r\npinned: true\r\ntopic: x\r\n---\r\nbody';
   assert.deepStrictEqual([...frontmatterKeys(crlf)].sort(), ['pinned', 'topic']);
 });
+
+// ---------------------------------------------------------------------------
+// codespan-drop
+// ---------------------------------------------------------------------------
+
+test('a dropped `code span` fails with the exact identifier named', () => {
+  const orig = 'Call `checkSharedReferences` before merging.';
+  const next = 'Call the checker before merging.';
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false);
+  assert.deepStrictEqual(r.drops, [{ type: 'codespan-drop', value: 'checkSharedReferences' }]);
+});
+
+test('a code span merely REPOSITIONED or surrounded by edited prose is not a drop', () => {
+  const orig = 'Run `scan.ps1` first, then verify.';
+  const next = 'First verify, then run `scan.ps1`.';
+  assert.strictEqual(checkFidelity(orig, next).pass, true);
+});
+
+test('code spans are case-sensitive and exact (a renamed identifier IS a drop)', () => {
+  const orig = 'See `oldName` for the helper.';
+  const next = 'See `OldName` for the helper.'; // different case = a different token
+  assert.deepStrictEqual(checkFidelity(orig, next).drops, [{ type: 'codespan-drop', value: 'oldName' }]);
+});
+
+// ---------------------------------------------------------------------------
+// quote-drop
+// ---------------------------------------------------------------------------
+
+test('a dropped verbatim quote fails with the exact quoted text named', () => {
+  const LDQ = String.fromCharCode(0x201c), RDQ = String.fromCharCode(0x201d);
+  const orig = `The user said ${LDQ}ship the precise claim, never beats every tool${RDQ} verbatim.`;
+  const next = 'The user gave guidance on the claim, paraphrased here.';
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false);
+  assert.deepStrictEqual(r.drops, [{ type: 'quote-drop', value: 'ship the precise claim, never beats every tool' }]);
+});
+
+test('a quote RESTYLED between curly and straight delimiters is NOT a drop (same precedent as date reformat)', () => {
+  const LDQ = String.fromCharCode(0x201c), RDQ = String.fromCharCode(0x201d);
+  const curly = `She said ${LDQ}exactly this${RDQ} and left.`;
+  const straight = 'She said "exactly this" and left.';
+  assert.strictEqual(checkFidelity(curly, straight).pass, true);
+  assert.strictEqual(checkFidelity(straight, curly).pass, true);
+});
+
+test('straight double quotes: a dropped quoted phrase fails; a kept one (reworded around it) passes', () => {
+  const orig = 'The report called it "a false-LEAN we must never allow".';
+  const next = 'The report warned against it in passing.';
+  assert.deepStrictEqual(checkFidelity(orig, next).drops, [{ type: 'quote-drop', value: 'a false-LEAN we must never allow' }]);
+  const keep = 'As the report says, "a false-LEAN we must never allow" — noted up front.';
+  assert.strictEqual(checkFidelity(orig, keep).pass, true);
+});
+
+// ---------------------------------------------------------------------------
+// number-drop
+// ---------------------------------------------------------------------------
+
+test('a dropped prose count (2+ digit integer) fails', () => {
+  const orig = 'The scan found 22 raw findings, 12 of them LOW.';
+  const next = 'The scan found some raw findings, most of them LOW.';
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false);
+  assert.deepStrictEqual(r.drops.map((d) => d.value).sort(), ['12', '22']);
+});
+
+test('a dropped ratio, percent, and ~k magnitude each fail with the exact token named', () => {
+  assert.deepStrictEqual(checkFidelity('Score 5/7 on the audit.', 'Scored well on the audit.').drops, [{ type: 'number-drop', value: '5/7' }]);
+  assert.deepStrictEqual(checkFidelity('Coverage sits at 43%.', 'Coverage is solid.').drops, [{ type: 'number-drop', value: '43%' }]);
+  assert.deepStrictEqual(checkFidelity('Workers used ~220k tokens.', 'Workers used a lot of tokens.').drops, [{ type: 'number-drop', value: '220k' }]);
+});
+
+test('a decimal (N.N) number drop is caught', () => {
+  const r = checkFidelity('The ratio measured 0.92 in testing.', 'The ratio measured well in testing.');
+  assert.deepStrictEqual(r.drops, [{ type: 'number-drop', value: '0.92' }]);
+});
+
+test('single bare digits are EXCLUDED as noise (deliberate: too common to be a reliable signal)', () => {
+  const r = checkFidelity('This runs a 3-sub lane for the fix.', 'This runs a 4-sub lane for the fix.');
+  assert.strictEqual(r.pass, true, 'a lone single-digit change is not tracked by number-drop');
+});
+
+test('single digits ARE tracked when part of a ratio or percent (the syntax disambiguates intent)', () => {
+  assert.deepStrictEqual(checkFidelity('Passed 4/5 cases.', 'Passed most cases.').drops, [{ type: 'number-drop', value: '4/5' }]);
+  assert.deepStrictEqual(checkFidelity('Held at 5% overhead.', 'Held at low overhead.').drops, [{ type: 'number-drop', value: '5%' }]);
+});
+
+test('number-drop does NOT re-flag digits already covered by date/version/link categories (no redundant noise)', () => {
+  // A version bump: version-drop fires; number-drop must NOT also fire on the
+  // "3.8"/"3.9" substrings (already precisely tracked as a version, not a bare decimal).
+  const r1 = checkFidelity('CoalMine sits at v3.8.4.', 'CoalMine sits at v3.9.2.');
+  assert.deepStrictEqual(r1.drops, [{ type: 'version-drop', value: 'v3.8.4' }]);
+});
+
+test('number-drop does NOT break the endorsed ISO<->DD-Mon-YYYY date reformat (masking prevents the regression)', () => {
+  const orig = 'Audited 15-Jun-2026, shipped 2026-07-08.';
+  const reformatted = 'Audited 2026-06-15, shipped 2026-07-08.';
+  assert.strictEqual(checkFidelity(orig, reformatted).pass, true);
+});
+
+test('gateFiles carries the new categories through the batch, path-tagged', () => {
+  const pairs = [
+    { path: 'a.md', orig: 'keep `foo` here', next: 'keep `foo` here, trimmed' },
+    { path: 'b.md', orig: 'found 22 issues', next: 'found some issues' },
+  ];
+  const g = gateFiles(pairs);
+  assert.strictEqual(g.pass, false);
+  assert.deepStrictEqual(g.drops, [{ path: 'b.md', type: 'number-drop', value: '22' }]);
+});
+
+test('inventory exposes codespans/quotes/numbers alongside the original 5 categories', () => {
+  const LDQ = String.fromCharCode(0x201c), RDQ = String.fromCharCode(0x201d);
+  const inv = inventory(`Run \`scan.ps1\`, ${LDQ}quote this${RDQ}, found 22 issues at 5%.`);
+  assert.deepStrictEqual([...inv.codespans], ['scan.ps1']);
+  assert.deepStrictEqual([...inv.quotes], ['quote this']);
+  assert.ok(inv.numbers.has('22'));
+  assert.ok(inv.numbers.has('5%'));
+});

@@ -163,6 +163,12 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // 3. Project rules tree (.claude/rules/**/*.md): class-B governance store;
   //    loads on demand for the subtree -> alwaysLoaded false unless a file was
   //    already pulled in via an @import above (dedupe keeps the stronger entry).
+  //    Symlink/junction safety (verified empirically, G1): a Dirent from
+  //    readdirSync(withFileTypes) reports a symlink/junction's OWN type
+  //    (isSymbolicLink() true), never isDirectory()/isFile() — so a
+  //    symlinked-outside entry here is silently SKIPPED by construction,
+  //    never traversed. Anything that DOES reach add() below is still
+  //    realpath-and-contained regardless (defense in depth, not the only gate).
   if (projPhys) {
     const rulesRoot = path.join(projPhys, '.claude', 'rules');
     const stack = [rulesRoot];

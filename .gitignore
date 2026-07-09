@@ -5,6 +5,7 @@ AGENTS.md
 .claude/
 .agents/
 COALWASH_BLUEPRINT.md
+SENIOR-INCIDENT-AUDIT.md
 
 # Dependencies / build cruft
 node_modules/

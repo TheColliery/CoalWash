@@ -228,10 +228,29 @@ export function projectState(state, projectRoot) {
   return projects[projKey(projectRoot)] || {};
 }
 
+// State-file orphan prune (#21): a project whose path no longer exists on disk
+// is dropped from the tracking map before the next write. Runs lazily inside
+// every state WRITE below (fail-silent, no new config key — "a dead path is
+// never 'this project'"). Deletes ONLY entries in the state file's OWN
+// projects map — never anything on disk beyond the existsSync stat (the
+// recovery-paths lesson: a mutating path must never do more than it says). A
+// transiently-missing path (an offline drive) is dropped harmlessly; the
+// project self-heals by re-stamping the next time it runs a session.
+function pruneOrphans(state) {
+  const projects = state && state.projects;
+  if (!projects || typeof projects !== 'object') return state;
+  for (const key of Object.keys(projects)) {
+    let exists;
+    try { exists = fs.existsSync(key); } catch { exists = true; } // stat doubt -> keep (never drop on doubt)
+    if (!exists) delete projects[key];
+  }
+  return state;
+}
+
 // Append a session stamp {t, fp} (ring-capped) and return the updated project
 // state. Fail-silent: on any write failure the in-memory view is still returned.
 export function recordStamp(home, projectRoot, footprintTokens, now = Date.now()) {
-  const state = loadState(home);
+  const state = pruneOrphans(loadState(home));
   state.projects = state.projects || {};
   const key = projKey(projectRoot);
   const proj = state.projects[key] || {};
@@ -246,7 +265,7 @@ export function recordStamp(home, projectRoot, footprintTokens, now = Date.now()
 // Stamp the lean floor (the post-clean footprint — call ONLY after a full clean
 // whose fidelity gate passed, else uncleaned fat contaminates the floor).
 export function setLeanFloor(home, projectRoot, tokens, now = Date.now()) {
-  const state = loadState(home);
+  const state = pruneOrphans(loadState(home));
   state.projects = state.projects || {};
   const key = projKey(projectRoot);
   const proj = state.projects[key] || {};
@@ -256,10 +275,28 @@ export function setLeanFloor(home, projectRoot, tokens, now = Date.now()) {
   return saveState(state, home);
 }
 
+// A stored leanFloorTokens that is non-finite/non-positive, OR that GROSSLY
+// exceeds the CURRENTLY measured footprint, is discarded rather than trusted
+// (the #1 poison point: this one persisted value distorts bmi/breakEven for
+// every session downstream, silently, until a real clean overwrites it — which
+// itself may never arm while the poisoned value keeps bmi looking artificially
+// LEAN). Any doubt collapses to 0 (the existing "floor-unmeasured, whole
+// footprint is an upper bound" path) — never throws, never trusts the raw
+// value. Fail direction is conservative: this can only WIDEN the alert surface
+// (false-PLUMP/OBESE/FULL is acceptable), never hide real fat (false-LEAN is not).
+export const LEAN_FLOOR_MAX_MULTIPLE = 10;
+export function sanitizeLeanFloor(rawLeanFloorTokens, footprintTokens) {
+  const floor = Number(rawLeanFloorTokens);
+  if (!Number.isFinite(floor) || floor <= 0) return 0;
+  const fp = Number(footprintTokens);
+  if (Number.isFinite(fp) && fp > 0 && floor > fp * LEAN_FLOOR_MAX_MULTIPLE) return 0;
+  return floor;
+}
+
 // Snooze the band nudge until `untilMs` (a declined/emitted PLUMP or OBESE ask
 // self-throttles — the nudge fires at most once per snooze window).
 export function setSnooze(home, projectRoot, untilMs) {
-  const state = loadState(home);
+  const state = pruneOrphans(loadState(home));
   state.projects = state.projects || {};
   const key = projKey(projectRoot);
   const proj = state.projects[key] || {};

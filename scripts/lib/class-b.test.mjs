@@ -164,3 +164,83 @@ test('containedIn / physicalOrNull primitives behave (equal counts as inside; ab
     assert.strictEqual(physicalOrNull(path.join(home, 'nope', 'nope.md')), null);
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// G1: symlink/junction escape safety on the DISCOVERY/measure walk, and win32
+// case-insensitive containment (apply.mjs's realpath-and-contain was already
+// covered live; this pins the SAME property on the read-only discovery side).
+// ---------------------------------------------------------------------------
+
+test('G1: a directory junction inside .claude/rules pointing OUTSIDE the trees leaks nothing (Windows-unprivileged; skips visibly elsewhere)', (t) => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-escape-')));
+  try {
+    write(path.join(proj, '.claude', 'rules', 'real-rule.md'), 'a real rule');
+    write(path.join(outside, 'leaked-secret.md'), 'SHOULD NEVER APPEAR IN DISCOVERY');
+    const linkPath = path.join(proj, '.claude', 'rules', 'escape-link');
+    try {
+      // 'junction' is the unprivileged shim on Windows (no admin/dev-mode
+      // needed, unlike a real symlink) — the room's own established pattern.
+      fs.symlinkSync(outside, linkPath, 'junction');
+    } catch (e) {
+      t.skip(`junction creation unavailable on this host: ${e.message}`);
+      return;
+    }
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.some((e) => e.path.includes('leaked-secret')), false, 'the outside file must never appear in discovery');
+    assert.ok(d.entries.some((e) => e.path.endsWith('real-rule.md')), 'the real rule is still discovered');
+    assert.strictEqual(d.entries.some((e) => e.path.includes('escape-link')), false, 'the junction entry itself is not treated as governance content');
+  } finally { clean(home, proj, outside); }
+});
+
+test('G1: containment is case-INSENSITIVE-safe on win32 — a differently-cased inside path is still recognized as inside, an outside sibling is never wrongly included', (t) => {
+  if (process.platform !== 'win32') { t.skip('case-insensitivity is a win32-specific property'); return; }
+  const { home, proj } = sandbox();
+  try {
+    const rootPhys = physicalOrNull(proj);
+    const insideMismatchedCase = path.join(proj, 'file.md').toUpperCase();
+    write(path.join(proj, 'file.md'), 'x');
+    assert.strictEqual(containedIn(physicalOrNull(insideMismatchedCase), [rootPhys]), true, 'a case-differing but genuinely-inside path is recognized as contained');
+    const sibling = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-sibling-')));
+    try {
+      assert.strictEqual(containedIn(physicalOrNull(sibling), [rootPhys]), false, 'a genuinely-outside sibling is never wrongly contained');
+    } finally { clean(sibling); }
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// G4: discovery must never wash its own recovery layer — CoalWash's own
+// .claude/coalwash/ tx artifacts, and a sibling session-state dir shaped like
+// CoalHearth's, must never surface as discovered class-B content.
+// ---------------------------------------------------------------------------
+
+test('G4: CoalWash\'s own .claude/coalwash/ artifacts (snapshot/journal/keeps/lock) never surface as discovered class-B', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, '.claude', 'rules', 'real-rule.md'), 'a real rule');
+    const cw = path.join(proj, '.claude', 'coalwash');
+    write(path.join(cw, 'snap-123', 'manifest.json'), '[]');
+    write(path.join(cw, 'snap-123', 'snap.complete'), '123');
+    write(path.join(cw, 'journal.json'), '{}');
+    write(path.join(cw, 'keeps.json'), '[]');
+    write(path.join(cw, '.coalwash.lock'), '{}');
+    write(path.join(cw, '.gitignore'), '*\n');
+
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.some((e) => e.path.includes('coalwash')), false, 'no .claude/coalwash/ artifact ever enters the discovered set');
+    assert.ok(d.entries.some((e) => e.path.endsWith('real-rule.md')), 'the real rule is still discovered');
+  } finally { clean(home, proj); }
+});
+
+test('G4: a sibling session-state dir shaped like CoalHearth\'s (.claude/coalhearth/) never surfaces either', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, '.claude', 'rules', 'real-rule.md'), 'a real rule');
+    const ch = path.join(proj, '.claude', 'coalhearth');
+    write(path.join(ch, 'journal.json'), '{}');
+    write(path.join(ch, 'handoff.md'), 'session recovery state, not class-B memory');
+
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.some((e) => e.path.includes('coalhearth')), false, 'a sibling session-state dir is never discovered');
+  } finally { clean(home, proj); }
+});

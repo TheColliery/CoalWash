@@ -2,6 +2,30 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.6] - 2026-07-09
+
+Fourth same-day hardening pass: three new fidelity-gate classes, a keep-verdict store that ends repeat-adjudication fatigue, state-store self-maintenance, a merge/fold discipline for the one thing the mechanical gate cannot see — claim-strength drift — plus five transactional-apply guards, each porting a classic storage-tool disaster. Engine tests 102 → 148.
+
+### Added
+- **Fidelity gate: 3 new structured-token classes** — `quote-drop` (a quoted span dropped), `number-drop` (a numeral dropped), `codespan-drop` (an inline code span dropped) — joining the existing wikilink/date/version/link/frontmatter-key classes; ANY drop still blocks the apply until restored or explicitly human-approved.
+- **Keep-verdict store** (`.claude/coalwash/keeps.json`, `[{target, reason, date}]`): an insider-adjudicated keep is recorded once and the outsider's contract is handed the list on every later run — a target already kept is not re-flagged without new evidence. The house metaphor: the outsider is a stranger who may challenge a hoarded item, never delete it; the resident answers with a reason, not a feeling, and a settled answer sticks.
+- **State-file orphan prune**: the caliper state (`~/.claude/.coalwash-state.json`) drops a tracked project's entry once its path no longer exists, on the next state read — closes the item queued 2026-07-09 (beta.2 era); fail-silent, no new config key.
+- **BMI floor read-sanity**: the stored lean-floor value is range/type-checked at state read, degrading to "no floor yet" on a corrupt or out-of-range stamp rather than feeding a bad number into the band verdict.
+- **External-writer guard** (`applyPlan`): every rewrite/delete/create target is re-read immediately before its mutation and byte-compared against the plan's recorded baseline — pass the scan-time `expectedOrig` and the guard covers the whole scan→consent→apply window; ANY foreign change (cloud-sync client, external editor, another agent) aborts the transaction via rollback. Ports the WHS KB946676 / dedup co-writer class.
+- **Snapshot verified at creation**: every snapshot copy is read back and byte-compared against a fresh source read BEFORE the destructive phase — a bad snapshot aborts while nothing has changed. Ports the GitLab all-backups-dead class.
+- **Own-artifact retention**: apply-preflight sweeps completed-transaction snapshots beyond the newest 3; a dangling/incomplete transaction's snapshot is NEVER swept; an unreadable or newer-schema journal freezes the sweep entirely. Ports the ReFS thin-pool leak class.
+- **Flag-not-rewrite for unparseable targets**: a NUL-bearing or unclosable-frontmatter file is FLAGGED and excluded from rewrites (the run continues on the rest); deletes keep the stricter pinned refusal. Ports the e2defrag rewrite-what-you-can't-parse class.
+- **Artifact schema-version gates**: the WAL journal (field `version`) and `keeps.json` (field `v`) are version-stamped — an artifact written by a NEWER CoalWash is read-only to an older one, and recovery refuses fail-closed. Ports the XP-deletes-Vista-restore-points class.
+
+### Changed
+- **Merge/fold discipline.** An absorbed block must carry its source facts near-verbatim — compression must never change a claim's strength (an "all fixed except 2 deferred" folding into "all fixed" is a regression, not a tidy-up). Every accepted merge now gets a second, retasked before-vs-after outsider check for claim-strength drift before it applies (same zero-context pattern as the Full-tier outsider); `localOnly` or a no-spawn platform flags the merge for manual review instead of skipping the check.
+- **Consent asks name their target.** The Full-tier consent and the human delete-gate now NAME the store being washed (path + measured size) — consent is always to a named target, never an ambient yes (the wrong-target incident class).
+- **Plain-format invariant stated.** README now states what was true by construction: plain markdown in, plain markdown out — every artifact CoalWash writes (snapshots, WAL journal, `keeps.json`) is a plain file readable without the tool. PRIVACY.md's local-files inventory gains the `keeps.json` keep-verdicts entry.
+- **Doc accuracy sweep:** the fidelity-gate class enumeration in SKILL.md/README extended to match the code (the 3 new classes, plus the previously-unlisted `link-drop` class); the SKILL.md Honest-frame callout now points to the canonical list (step 3) instead of repeating it, so the two never drift apart again.
+- **Scope boundary made explicit — the four washability tests.** A wash target must be a local file · user-owned · PROSE · ACCRETED; failing any one = never-wash even though it rides the session payload (skills/commands/hooks/agent-definitions = programs · configs/state/locks/journals = machine-parsed · other tools' artifacts · vendor-installed products). Discovery already excludes all of these by construction; the SKILL.md Hard Rules now state the boundary so scope can never drift onto them (lint/health of the excluded classes belongs to CoalMine/CoalLedger).
+
+Also verified this round — pinned by new tests, no code gaps found: symlink-skip discovery (G1) · corrupt-state conservative path (G2) · never-wash-own-artifacts (G4).
+
 ## [0.1.0-beta.5] - 2026-07-09
 
 Third **CoalBoard dogfood** (nasa), same day — two honesty findings on top of beta.3's own fix: beta.3 corrected the claims at their PRIMARY location (SKILL.md + the README frame) but left the identical phrasing stale everywhere it was repeated — a "say it once" miss, not a new bug class.

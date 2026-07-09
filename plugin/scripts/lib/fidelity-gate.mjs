@@ -5,10 +5,16 @@
 // Contract: diff orig-vs-new inventories of STRUCTURED tokens — [[wikilinks]]
 // (keyed by TARGET, so a display-text edit is not a drop), dates (canonicalized
 // to YYYY-MM-DD, so an ISO<->DD-Mon-YYYY reformat of the same day is not a drop),
-// version strings, link DESTINATIONS ([text](url) / <autolink> / bare URL), and
-// frontmatter keys. ANY drop = FAIL with the exact list. Set semantics (distinct
-// values): deduplicating a REPEATED mention of one value is legitimate
-// compaction; losing a VALUE entirely is a drop.
+// version strings, link DESTINATIONS ([text](url) / <autolink> / bare URL),
+// frontmatter keys, backtick `code spans` (keyed verbatim), double-quoted
+// "spans"/"spans" (curly or straight, keyed by the quoted text — a style
+// restyle is not a drop), and number-shaped tokens (ratios, percents, ~Nk /
+// N.N forms, and bare integers of 2+ digits — a lone digit is excluded as
+// prose noise; dates/versions/links are masked out first so their digits stay
+// the more precise category's job, not double-counted here). ANY drop = FAIL
+// with the exact list. Set semantics (distinct values): deduplicating a
+// REPEATED mention of one value is legitimate compaction; losing a VALUE
+// entirely is a drop.
 //
 // Plus encoding-corruption tripwires on the NEW text (blueprint §14.3): a
 // rewrite must never INTRODUCE a decomposed Thai sara-am (U+0E4D+U+0E32 for
@@ -45,11 +51,73 @@ function canonDate(d) {
 const SARA_AM_DECOMPOSED = String.fromCharCode(0x0e4d, 0x0e32); // NIKHAHIT + SARA AA (the broken split of U+0E33)
 const ZWSP = String.fromCharCode(0x200b); // zero-width space
 
+// Backtick inline-code spans (`...`) — a dropped identifier/command/flag is a
+// dropped fact the prose regexes above never see (a Full/semantic merge this
+// session silently dropped `checkSharedReferences` from a compaction — this is
+// the mechanical floor closing that hole). Single-line: markdown inline code
+// never spans a paragraph break, matching every other regex in this module.
+const CODESPAN_RE = /`([^`\n]+)`/g;
+
+// Double-quoted spans — curly "..." (the series' house style) and straight
+// "..." — a verbatim QUOTE (a user's exact words) dropped during a
+// "compaction" is exactly the loss the semantic layer alone already missed
+// live once (blueprint-cited incident). Keyed on the quoted TEXT itself so a
+// straight<->curly restyle of the SAME words is not a drop (same precedent as
+// the date canonicalization above).
+const LDQUO = String.fromCharCode(0x201c); // left double quotation mark
+const RDQUO = String.fromCharCode(0x201d); // right double quotation mark
+const CURLY_QUOTE_RE = new RegExp(`${LDQUO}([^${RDQUO}\\n]+)${RDQUO}`, 'g');
+const STRAIGHT_QUOTE_RE = /"([^"\n]+)"/g;
+
+// Numeric tokens likely to be a FACT (a count, a score, a ratio) rather than
+// incidental prose filler. A bare single digit is noise (list markers, "a
+// 3-sub lane") and is excluded from the plain-integer form; a ratio or percent
+// stays eligible at any digit count because the surrounding syntax (/ or %)
+// already disambiguates intent. Order matters (first alternative to match at
+// a position wins): the k-shorthand and percent forms are tried before the
+// bare decimal/integer forms so "43%"/"~150k" register as themselves rather
+// than fragmenting into a bare number.
+const MAGNITUDE_RE = /\b\d+(?:\.\d+)?[kK]\b/g; // "150k", "1.5k" — a leading ~ (if any) is prose, not part of the tracked value
+const PERCENT_RE = /\b\d+(?:\.\d+)?%/g; // "5%", "43.5%" — single digits OK, % disambiguates
+const RATIO_RE = /\b\d+\/\d+\b/g; // "4/5", "22/12" — single digits OK, / disambiguates
+const DECIMAL_RE = /\b\d+\.\d+\b/g; // "3.8", "0.92" — the decimal point disambiguates
+const INTEGER_RE = /\b\d{2,}\b/g; // bare integers: 2+ digits only (the noisy single-digit case excluded)
+
 function matchSet(text, re, group = 0) {
   const out = new Set();
   re.lastIndex = 0;
   let m;
   while ((m = re.exec(text)) !== null) out.add(m[group]);
+  return out;
+}
+
+// Blank out every match of `re` (same-length spaces, so nothing merges across
+// the gap) — used to remove already-precisely-tracked spans (dates/versions/
+// links) from the text BEFORE the generic number scan, so their digits are not
+// re-flagged redundantly under number-drop, and so an ENDORSED reformat (the
+// ISO<->DD-Mon-YYYY date swap) never registers as a numeric drop.
+function maskOut(text, res) {
+  let out = text;
+  for (const re of res) {
+    re.lastIndex = 0;
+    out = out.replace(re, (m) => ' '.repeat(m.length));
+  }
+  return out;
+}
+
+// Numeric-token inventory, scanned on text with dates/versions/links already
+// masked out (see maskOut above). The 5 forms are tried MOST-specific first,
+// each claimed span masked before the next (less-specific) pattern runs — so
+// "43%" registers as itself, not ALSO as a redundant bare "43"; "0.92" is not
+// ALSO a redundant bare "92". Order: magnitude (~Nk) > percent > ratio >
+// decimal > bare integer (2+ digits only — a lone digit is prose noise).
+function numberTokens(text) {
+  let working = maskOut(text, [ISO_DATE_RE, DMY_DATE_RE, VERSION_RE, MDLINK_DEST_RE, AUTOLINK_RE, BAREURL_RE]);
+  const out = new Set();
+  for (const re of [MAGNITUDE_RE, PERCENT_RE, RATIO_RE, DECIMAL_RE, INTEGER_RE]) {
+    for (const v of matchSet(working, re, 0)) out.add(v);
+    working = maskOut(working, [re]);
+  }
   return out;
 }
 
@@ -82,12 +150,16 @@ export function inventory(text) {
     ...matchSet(s, AUTOLINK_RE, 1),
     ...matchSet(s, BAREURL_RE, 0),
   ]);
+  const quotes = new Set([...matchSet(s, CURLY_QUOTE_RE, 1), ...matchSet(s, STRAIGHT_QUOTE_RE, 1)]);
   return {
     wikilinks,
     dates,
     versions: matchSet(s, VERSION_RE),
     links,
     frontmatter: frontmatterKeys(s),
+    codespans: matchSet(s, CODESPAN_RE, 1),
+    quotes,
+    numbers: numberTokens(s),
   };
 }
 
@@ -111,6 +183,9 @@ export function checkFidelity(origText, newText) {
     ...diffDrops(oi.versions, ni.versions, 'version-drop'),
     ...diffDrops(oi.links, ni.links, 'link-drop'),
     ...diffDrops(oi.frontmatter, ni.frontmatter, 'frontmatter-key-drop'),
+    ...diffDrops(oi.codespans, ni.codespans, 'codespan-drop'),
+    ...diffDrops(oi.quotes, ni.quotes, 'quote-drop'),
+    ...diffDrops(oi.numbers, ni.numbers, 'number-drop'),
   ];
   const warnings = [];
 
@@ -133,6 +208,9 @@ export function checkFidelity(origText, newText) {
       versions: { orig: oi.versions.size, kept: oi.versions.size - drops.filter((d) => d.type === 'version-drop').length },
       links: { orig: oi.links.size, kept: oi.links.size - drops.filter((d) => d.type === 'link-drop').length },
       frontmatter: { orig: oi.frontmatter.size, kept: oi.frontmatter.size - drops.filter((d) => d.type === 'frontmatter-key-drop').length },
+      codespans: { orig: oi.codespans.size, kept: oi.codespans.size - drops.filter((d) => d.type === 'codespan-drop').length },
+      quotes: { orig: oi.quotes.size, kept: oi.quotes.size - drops.filter((d) => d.type === 'quote-drop').length },
+      numbers: { orig: oi.numbers.size, kept: oi.numbers.size - drops.filter((d) => d.type === 'number-drop').length },
     },
   };
 }

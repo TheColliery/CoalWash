@@ -26,6 +26,19 @@
 //   - content is written VERBATIM as UTF-8 (no BOM added, no re-encoding, no
 //     normalization) — the engine can never decompose Thai U+0E33 or alter
 //     line endings; what the caller passed is byte-for-byte what lands.
+//   - external-writer guard (the WHS KB946676 stale-commit / cloud-sync
+//     co-writer class): every rewrite/delete target is re-read immediately
+//     before its mutation and byte-compared against the plan's recorded
+//     baseline; a mismatch aborts the whole txn via rollback, naming the file.
+//   - snapshot restorability verify (the GitLab all-backups-dead class): every
+//     snapshot copy is read back and byte-compared BEFORE the completion
+//     marker lands or any destructive step runs.
+//   - binary/unparseable sniff (the e2defrag rewrite-what-you-can't-parse
+//     class): a NUL-bearing or frontmatter-unclosable rewrite target is
+//     FLAGGED and excluded, never rewritten; the run continues on the rest.
+//   - own-artifact retention (the ReFS thin-pool leak class): stale completed
+//     snapshots are swept at preflight; a dangling txn's snapshot is NEVER
+//     swept (recovery owns it).
 //
 // This is a user-invoked engine module (CLI discipline: fail LOUD via the
 // returned result object), NOT a Phoenix hook — but it still never throws
@@ -79,6 +92,21 @@ function containedIn(p, roots) {
     if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return true;
   }
   return false;
+}
+
+// Flag-not-rewrite sniff (ports e2defrag's rewrite-what-you-can't-parse; the
+// NUL-sniff mirrors CoalLedger beta.5's doc-unreadable guard, flock-canonical):
+// a NUL byte marks binary/undecodable content; an opening frontmatter fence
+// that never closes marks a file our frontmatter tooling cannot faithfully
+// parse. Either way the REWRITE is refused (flagged to the caller) — deletes
+// are not sniffed, they stay behind the stricter pinned + human gates.
+export function sniffUnrewritable(buf) {
+  if (buf.includes(0)) return 'binary content (NUL byte) — flagged, not rewritten';
+  const s = buf.toString('utf8');
+  if (/^---\r?\n/.test(s) && !/\r?\n---[ \t]*(?:\r?\n|$)/.test(s.slice(3))) {
+    return 'frontmatter opens but never closes (unparseable) — flagged, not rewritten';
+  }
+  return null;
 }
 
 // pinned: true in a leading frontmatter block = PIN-protected (gap #1) —
@@ -167,7 +195,7 @@ export function txDirFor(projectRoot) {
 // journal/snapshots (memory-content copies) out of version control even when
 // the user's project tracks `.claude/` — code-enforced, not a doc promise.
 // Best-effort (fail-silent): a read-only fs must never block the transaction.
-function ensureSelfIgnore(dir) {
+export function ensureSelfIgnore(dir) {
   // Exclusive create (no exists-then-write TOCTOU): two racing writers both try
   // 'wx'; one wins, the other gets EEXIST — both harmless (the content is
   // identical). Any other error is swallowed (best-effort, must never block a tx).
@@ -178,11 +206,17 @@ function ensureSelfIgnore(dir) {
 // plan = {
 //   projectRoot: abs path (transaction dir + lock live under it),
 //   roots: [abs...]            — the declared class-B roots writes may touch,
-//   actions: [{ type: 'rewrite'|'create'|'delete', path, content? }],
+//   actions: [{ type: 'rewrite'|'create'|'delete', path, content?, expectedOrig? }],
+//     expectedOrig (optional, rewrite/delete): the content the caller SCANNED
+//     and gated against. When provided, the external-writer guard compares the
+//     live file against it — covering the whole scan -> human-gate -> apply
+//     window (a cloud-sync clobber during the approval wait is caught). When
+//     absent, the baseline is the content staged at applyPlan time (the
+//     intra-transaction window only).
 //   deletesApproved: bool      — the OUTER human gate's flag; false blocks deletes,
 //   sessionId?: string,
 // }
-// Returns { ok, deferred?, error?, applied?, snapshotDir?, rolledBack? }.
+// Returns { ok, deferred?, error?, applied?, snapshotDir?, rolledBack?, flagged? }.
 export function applyPlan(plan, opts = {}) {
   const now = opts.now || Date.now();
   try {
@@ -195,6 +229,7 @@ export function applyPlan(plan, opts = {}) {
       if (!a || !['rewrite', 'create', 'delete'].includes(a.type)) return { ok: false, error: `unknown action type: ${a && a.type}` };
       if (!a.path || !path.isAbsolute(a.path)) return { ok: false, error: `action path must be absolute: ${a && a.path}` };
       if ((a.type === 'rewrite' || a.type === 'create') && typeof a.content !== 'string') return { ok: false, error: `${a.type} needs string content: ${a.path}` };
+      if (a.expectedOrig !== undefined && typeof a.expectedOrig !== 'string') return { ok: false, error: `expectedOrig must be a string when provided: ${a.path}` };
     }
 
     // ---- containment: realpath-and-contain BOTH sides, fail-closed ----
@@ -215,12 +250,35 @@ export function applyPlan(plan, opts = {}) {
       resolved.push({ ...a, phys });
     }
 
+    // ---- staging read + content sniff ----
+    // Each rewrite/delete target is read ONCE as raw bytes here — the shared
+    // baseline for the fidelity gate and the external-writer compare below. A
+    // rewrite target that sniffs binary/unparseable is FLAGGED and excluded
+    // (never rewritten — the e2defrag lesson); the run continues on the rest.
+    const flagged = [];
+    const actionable = [];
+    for (const a of resolved) {
+      if (a.type === 'create') { actionable.push(a); continue; }
+      let origBuf;
+      try { origBuf = fs.readFileSync(a.phys); } catch { return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed)` }; }
+      if (a.type === 'rewrite') {
+        const why = sniffUnrewritable(origBuf);
+        if (why) { flagged.push({ path: a.phys, reason: why }); continue; }
+      }
+      // External-writer baseline: the caller's scan-time content when provided
+      // (covers the human-gate wait), else the bytes staged just now.
+      actionable.push({ ...a, origBuf, baseBuf: typeof a.expectedOrig === 'string' ? Buffer.from(a.expectedOrig, 'utf8') : origBuf });
+    }
+    if (!actionable.length) {
+      return { ok: false, flagged, error: `every action was flagged as un-rewritable — nothing applied: ${flagged.map((f) => f.path).join(', ')}` };
+    }
+
     // ---- code-enforced outer gates ----
-    const deletes = resolved.filter((a) => a.type === 'delete');
+    const deletes = actionable.filter((a) => a.type === 'delete');
     if (deletes.length && plan.deletesApproved !== true) {
       return { ok: false, error: `deletes not approved (human gate): ${deletes.map((d) => d.phys).join(', ')}` };
     }
-    const pinned = resolved.filter((a) => a.type !== 'create' && isPinned(a.phys));
+    const pinned = actionable.filter((a) => a.type !== 'create' && isPinned(a.phys));
     if (pinned.length) {
       return { ok: false, error: `PIN-protected (pinned: true) — refuse to touch: ${pinned.map((p) => p.phys).join(', ')}` };
     }
@@ -231,12 +289,14 @@ export function applyPlan(plan, opts = {}) {
     // frontmatter key) or introduced encoding corruption ABORTS before anything
     // mutates, UNLESS the human approved that exact drop (plan.approvedDrops, a
     // list of "type:value"). No approvedDrops => strict: any drop aborts.
+    // The gate baseline = expectedOrig when provided (the content the rewrite
+    // was DERIVED from), else the staged bytes — the same baseline the
+    // external-writer compare enforces at mutation time.
     const approvedDrops = new Set(Array.isArray(plan.approvedDrops) ? plan.approvedDrops : []);
     const unapproved = [];
-    for (const a of resolved) {
+    for (const a of actionable) {
       if (a.type !== 'rewrite') continue;
-      let orig;
-      try { orig = fs.readFileSync(a.phys, 'utf8'); } catch { return { ok: false, error: `fidelity: cannot read ${a.phys} to gate it (fail-closed)` }; }
+      const orig = typeof a.expectedOrig === 'string' ? a.expectedOrig : a.origBuf.toString('utf8');
       for (const d of checkFidelity(orig, a.content).drops) {
         if (!approvedDrops.has(`${d.type}:${d.value}`)) unapproved.push(`${a.phys} — ${d.type}: ${d.value}`);
       }
@@ -257,11 +317,18 @@ export function applyPlan(plan, opts = {}) {
     const writeJournal = (j) => { writeDurable(journalPath, JSON.stringify(j, null, 2)); };
 
     try {
+      // ---- own-artifact retention at preflight (ports the ReFS thin-pool
+      // leak: maintenance that allocates but never releases). Aborted/deferred
+      // runs leave snapshot dirs the commit-time sweep never reaches; reap
+      // them here, inside the lock. Fail-silent housekeeping; sweepSnapshots
+      // itself protects a dangling txn's snapshot (recovery owns it).
+      sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
+
       // ---- snapshot BEFORE the first mutation, then the completion marker ----
       fs.mkdirSync(snapDir, { recursive: true });
       const manifest = [];
       let n = 0;
-      for (const a of resolved) {
+      for (const a of actionable) {
         if (a.type === 'create') continue; // nothing to snapshot
         const snapName = `f${n++}`;
         fs.copyFileSync(a.phys, path.join(snapDir, snapName));
@@ -270,13 +337,24 @@ export function applyPlan(plan, opts = {}) {
         manifest.push({ snap: snapName, original: a.phys });
       }
       writeDurable(path.join(snapDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+      // ---- snapshot restorability verify (ports the GitLab all-backups-dead
+      // incident): prove every copy restores what is on disk RIGHT NOW, before
+      // the completion marker lands and before any destructive step. The
+      // marker therefore means "complete AND verified" — recovery never trusts
+      // an unverified snapshot. Verify failure aborts while "nothing has
+      // happened yet" is still true.
+      const badSnaps = verifySnapshot(snapDir, manifest);
+      if (badSnaps.length) {
+        try { fs.rmSync(snapDir, { recursive: true, force: true }); } catch {}
+        return { ok: false, flagged, error: `snapshot verify failed — refusing to proceed before any change: ${badSnaps.join('; ')}` };
+      }
       writeDurable(path.join(snapDir, SNAP_MARKER), String(now));
       fsyncDirBestEffort(snapDir);
 
       // ---- WAL: the ordered plan; creates+rewrites first, deletes LAST ----
       const ordered = [
-        ...resolved.filter((a) => a.type !== 'delete'),
-        ...resolved.filter((a) => a.type === 'delete'),
+        ...actionable.filter((a) => a.type !== 'delete'),
+        ...actionable.filter((a) => a.type === 'delete'),
       ];
       const journal = {
         version: 1,
@@ -303,7 +381,7 @@ export function applyPlan(plan, opts = {}) {
           try { fs.copyFileSync(path.join(snapDir, m.snap), m.original); } catch { failed++; /* keep restoring the rest */ }
         }
         for (const p of createdPaths) { try { fs.rmSync(p, { force: true }); } catch {} }
-        for (const a of resolved) { try { fs.rmSync(a.phys + '.coalwash-tmp', { force: true }); } catch {} }
+        for (const a of actionable) { try { fs.rmSync(a.phys + '.coalwash-tmp', { force: true }); } catch {} }
         // A PARTIAL rollback must NOT be marked terminal-clean, or a cold-start
         // recoverDangling would clear the journal over a mixed on-disk state.
         journal.status = failed ? 'rollback-failed' : 'rolled-back';
@@ -314,6 +392,23 @@ export function applyPlan(plan, opts = {}) {
       try {
         for (const step of journal.steps) {
           const a = ordered[step.i];
+          // ---- external-writer guard (ports the WHS KB946676 stale-commit /
+          // dedup-co-writer class + the owner's live cloud-sync hazard):
+          // re-read the target immediately before mutating it; bytes no longer
+          // matching the plan's recorded baseline = a foreign writer
+          // interleaved -> abort the whole txn (the rollback below restores
+          // the snapshot, so nothing of this plan is left half-applied). A
+          // target that can no longer be read counts as foreign interference.
+          if (a.type === 'rewrite' || a.type === 'delete') {
+            let cur = null;
+            try { cur = fs.readFileSync(a.phys); } catch { /* handled below */ }
+            if (!cur || Buffer.compare(cur, a.baseBuf) !== 0) {
+              throw new Error(`external writer detected: ${a.phys} changed after the plan was gated — aborting the transaction`);
+            }
+          } else if (fs.existsSync(a.phys)) {
+            // create target appeared mid-txn: same foreign-writer class.
+            throw new Error(`external writer detected: create target ${a.phys} appeared mid-transaction`);
+          }
           if (a.type === 'rewrite' || a.type === 'create') {
             atomicWrite(a.phys, a.content);
             if (a.type === 'create') createdPaths.push(a.phys);
@@ -341,7 +436,7 @@ export function applyPlan(plan, opts = {}) {
       try { fs.rmSync(journalPath, { force: true }); } catch {}
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
 
-      return { ok: true, applied: resolved.length, snapshotDir: snapDir };
+      return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged };
     } finally {
       lock.release();
     }
@@ -350,12 +445,43 @@ export function applyPlan(plan, opts = {}) {
   }
 }
 
+// Snapshot restorability verify (the GitLab all-backups-dead port): read each
+// copy back and byte-compare it against a FRESH read of its source. Compares
+// against disk-now (not the staged baseline) so this isolates COPY corruption;
+// a foreign write is the external-writer guard's job and gets ITS label.
+// Returns [] when every copy restores faithfully, else the failures.
+export function verifySnapshot(snapDir, manifest) {
+  const bad = [];
+  for (const m of manifest) {
+    try {
+      const snapBuf = fs.readFileSync(path.join(snapDir, m.snap));
+      const srcBuf = fs.readFileSync(m.original);
+      if (Buffer.compare(snapBuf, srcBuf) !== 0) bad.push(`${m.original} (copy does not match source)`);
+    } catch (e) {
+      bad.push(`${m.original} (unverifiable: ${e.message})`);
+    }
+  }
+  return bad;
+}
+
 // Keep the newest `keep` snapshot dirs, remove older ones (zero-garbage without
-// discarding the recent backup).
+// discarding the recent backup). Retention NEVER reaps the snapshot a
+// dangling/incomplete txn still references — recovery owns it (the ReFS
+// thin-pool port's one hard rule). Fail direction: an unreadable or
+// newer-schema journal freezes the whole sweep — keeping too much is safe,
+// deleting a needed restore source is not.
 export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
   try {
+    let protect = null;
+    const jp = path.join(txDir, JOURNAL_NAME);
+    if (fs.existsSync(jp)) {
+      let j = null;
+      try { j = JSON.parse(fs.readFileSync(jp, 'utf8')); } catch { /* unreadable -> freeze below */ }
+      if (!j || typeof j !== 'object' || Number(j.version) > 1) return; // cannot know what it references -> sweep nothing
+      if (j.status !== 'committed' && j.status !== 'rolled-back') protect = path.basename(String(j.snapDir || ''));
+    }
     const snaps = fs.readdirSync(txDir)
-      .filter((n) => /^snap-\d+$/.test(n))
+      .filter((n) => /^snap-\d+$/.test(n) && n !== protect)
       .sort((a, b) => Number(b.slice(5)) - Number(a.slice(5)));
     for (const old of snaps.slice(Math.max(0, keep))) {
       fs.rmSync(path.join(txDir, old), { recursive: true, force: true });
@@ -378,6 +504,14 @@ export function recoverDangling(projectRoot, opts = {}) {
       // an unreadable journal with NO readable snapDir cannot be replayed —
       // fail-closed: leave it for a human (never guess at memory state).
       return { recovered: 'none', error: 'journal unreadable — left in place for inspection' };
+    }
+    // Artifact schema-version (ports XP-deletes-Vista-restore-points): a
+    // journal from a NEWER CoalWash schema is untouchable to this older code —
+    // refuse recovery AND refuse cleanup (we cannot know what either would
+    // destroy). Checked BEFORE the terminal-status branch on purpose: an older
+    // tool must not even delete a newer tool's "terminal-looking" journal.
+    if (journal && typeof journal === 'object' && Number(journal.version) > 1) {
+      return { recovered: 'none', error: `journal schema version ${journal.version} is newer than this CoalWash understands — left untouched (for a newer version, or a human)` };
     }
     if (journal.status === 'committed' || journal.status === 'rolled-back') {
       fs.rmSync(journalPath, { force: true });

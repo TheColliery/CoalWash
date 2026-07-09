@@ -4,7 +4,7 @@
 
 > *Coal washing is the real mining process that cleans raw coal — separating the waste without damaging the coal.* This one is a memory washer/defragmenter for your agent: **it cleans the fat, never the meat.**
 
-**A fidelity-first memory-defragment/cleanup engine** for agent class-B memory — the memory and governance files your platform loads into context every session. A free mechanical Quick pass plus a code-enforced fidelity gate prove zero **structured-token** loss by diff (links, dates, versions, URLs, frontmatter — not hope; prose fidelity is the paid semantic layer's job); the semantic Full pass is a separate consent; every delete is human-gated in code.
+**A fidelity-first memory-defragment/cleanup engine** for agent class-B memory — the memory and governance files your platform loads into context every session. A free mechanical Quick pass plus a code-enforced fidelity gate prove zero **structured-token** loss by diff (links, dates, versions, URLs, quotes, numbers, code-spans, frontmatter — not hope; prose fidelity is the paid semantic layer's job); the semantic Full pass is a separate consent; every delete is human-gated in code.
 
 ![version](https://img.shields.io/github/v/tag/TheColliery/CoalWash?label=version&color=blue)
 ![license](https://img.shields.io/badge/license-Apache_2.0-blue)
@@ -24,9 +24,11 @@ Agent memory grows additively and unmanaged. The always-loaded set (memory index
 
 CoalWash is the SSD cleanup + defragment discipline ported to that store, **fidelity-first**:
 
-- **Structured facts are inviolable.** A mechanical fidelity gate diffs every rewrite's structured-token inventory — `[[wikilinks]]`, dates, versions, link/URL destinations, frontmatter keys — and ANY drop blocks the apply: that class of fact-loss is caught by CODE, not hoped. A load-bearing **prose** fact (a sentence like "the rate limit is 5000/hr") is out of the mechanical gate's scope — that fidelity rests on the paid semantic reviewers **and you**, not this gate. The gate's honest scope is stated in the module itself.
+- **Structured facts are inviolable.** A mechanical fidelity gate diffs every rewrite's structured-token inventory — `[[wikilinks]]`, dates, versions, link/URL destinations, quoted spans, numerals, code-spans, frontmatter keys — and ANY drop blocks the apply: that class of fact-loss is caught by CODE, not hoped. A load-bearing **prose** fact (a sentence like "the rate limit is 5000/hr") is out of the mechanical gate's scope — that fidelity rests on the paid semantic reviewers **and you**, not this gate. The gate's honest scope is stated in the module itself.
 - **Deletes are human-gated in code.** The apply engine refuses deletes without explicit approval, and a `pinned: true` file is untouchable — the gates do not depend on agent diligence.
 - **The apply is transactional.** Exclusive lock, marked snapshot before the first mutation, fsync'd WAL, atomic writes, deletes last, wholesale rollback on any failure. The worst realistic outcome of any crash is *"the run did not happen"* — never *"memory is corrupted."*
+- **A foreign mid-run write aborts everything.** If anything else touches your files during a run — a cloud-sync client, an editor, another agent — CoalWash detects it at the moment of writing, stops, and rolls back rather than guessing; and every snapshot is read back and verified before the destructive phase begins.
+- **Plain in, plain out.** CoalWash never transforms your files into a tool-specific format — plain markdown in, plain markdown out; every artifact it writes (snapshots, WAL journal, `keeps.json`) is a plain file you can read without CoalWash.
 
 **Honest frame:** CoalWash **slows how fast your memory-overhead grows** — a rate intervention, not a level reset. It does not eliminate memory cost, reach zero, or stop legitimate growth (the floor of real facts rises with your project; that is meat, not fat).
 
@@ -43,6 +45,8 @@ One standing gauge at the chokepoint (memory is loaded every session, so a sessi
 | Human gate | you | Every delete/merge listed tersely, approved y/n; `pinned` files refused outright |
 | Apply | code | Lock → snapshot → WAL → atomic writes → deletes last → commit, or wholesale rollback |
 | Receipt | code | `class B: X KB -> X' KB · saves ~N tok/session (~est) · removed/trimmed/kept · fidelity gate: PASS` — deterministic bytes, token figures labeled `~est` |
+
+**Why an outsider judges, not you:** it is a stranger walking through a house it has never lived in — it cannot know which things you still use, so it never throws anything out. Its only power is to point and ask, *"what is this, can it go?"* — you, the resident, answer with a concrete reason, never a feeling, and a settled answer sticks (an adjudicated keep is not re-asked next run without new evidence).
 
 The gauge rides **Memory-BMI** = always-loaded footprint / lean floor (floor-relative, so real growth never false-fires):
 

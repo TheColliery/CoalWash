@@ -235,6 +235,55 @@ test('a corrupt state file self-heals: the hook still gauges and exits 0 (Phoeni
   } finally { clean(home, proj); }
 });
 
+test('a poisoned/implausible stored leanFloor is discarded — behaves IDENTICALLY to no-floor-yet', () => {
+  // Same absolute-cap FULL setup either way (band is unaffected by the floor —
+  // the cap check runs before bmi). What's at risk if the floor were TRUSTED
+  // raw is the break-even messaging: fat ~= footprint - hugeFloor <= 0 would
+  // read "not economical" and wrongly DISARM the force-run even though the
+  // hard ceiling is already breached. Rather than pin a specific branch
+  // outcome (fragile to token-arithmetic drift), prove the stronger property
+  // the fix guarantees: a grossly-implausible floor must be INDISTINGUISHABLE
+  // from no floor at all (both sanitize to 0, so every downstream number is
+  // computed identically — same stdout, byte for byte).
+  const seedAndRun = (leanFloorTokens) => {
+    const { home, proj } = sandbox();
+    try {
+      muteUpdate(home);
+      seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // absolute-cap FULL
+      if (leanFloorTokens != null) seedState(home, proj, { leanFloorTokens });
+      const r = run(proj, home);
+      assertGraceful(r);
+      return r.stdout;
+    } finally { clean(home, proj); }
+  };
+  const noFloor = seedAndRun(null);
+  const poisonedFloor = seedAndRun(999999999); // grossly larger than the measured footprint
+  assert.ok(noFloor.includes('memory gauge: FULL (absolute-cap)'), noFloor);
+  assert.strictEqual(poisonedFloor, noFloor, 'a grossly-implausible stored floor must be discarded exactly like no floor at all');
+});
+
+test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no state file at all (conservative, never crashes)', () => {
+  const runWithStateContent = (content) => {
+    const { home, proj } = sandbox();
+    try {
+      muteUpdate(home);
+      seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // absolute-cap FULL either way
+      if (content !== undefined) {
+        fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+        fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), content, 'utf8');
+      }
+      const r = run(proj, home);
+      assertGraceful(r);
+      return r.stdout;
+    } finally { clean(home, proj); }
+  };
+  const baseline = runWithStateContent(undefined); // no state file at all
+  assert.ok(baseline.includes('memory gauge: FULL (absolute-cap)'), baseline);
+  for (const content of ['', '{ definitely not json', '{"projects": {"C:\\\\foo": {"leanFloorTok', '[1,2,3]', 'null']) {
+    assert.strictEqual(runWithStateContent(content), baseline, `state content ${JSON.stringify(content)} must gauge identically to no state file`);
+  }
+});
+
 test('no class-B at all (empty project, no memory dir): silent, exit 0', () => {
   const { home, proj } = sandbox();
   try {

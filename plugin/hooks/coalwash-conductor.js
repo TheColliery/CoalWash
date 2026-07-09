@@ -83,7 +83,10 @@ async function main() {
   if (disc.entries.length) {
     const m = caliper.measureEntries(disc.entries, { readBudgetBytes: READ_BUDGET_BYTES, withGzip: false });
     const proj = caliper.recordStamp(home, projectRoot, m.alwaysLoaded.tokensEst) || {};
-    const leanFloorTokens = Number(proj.leanFloorTokens) || 0;
+    // Never trust the raw stored value: sanitizeLeanFloor discards a
+    // non-finite/non-positive or grossly-implausible floor (conservative —
+    // treats it as floor-unmeasured rather than risk a false-LEAN silence).
+    const leanFloorTokens = caliper.sanitizeLeanFloor(proj.leanFloorTokens, m.alwaysLoaded.tokensEst);
     const verdict = caliper.bandVerdict({
       footprintTokens: m.alwaysLoaded.tokensEst,
       leanFloorTokens,

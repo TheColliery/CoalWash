@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS } from './apply.mjs';
+import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable } from './apply.mjs';
 
 function sandbox() {
   const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj-')));
@@ -371,6 +371,7 @@ test('plan-shape validation fails loud before any effect', () => {
     assert.ok(applyPlan(planFor(proj, store, [{ type: 'chmod', path: path.join(store, 'x') }])).error.includes('unknown action type'));
     assert.ok(applyPlan(planFor(proj, store, [{ type: 'rewrite', path: 'relative.md', content: 'x' }])).error.includes('absolute'));
     assert.ok(applyPlan(planFor(proj, store, [{ type: 'rewrite', path: path.join(store, 'x.md') }])).error.includes('string content'));
+    assert.ok(applyPlan(planFor(proj, store, [{ type: 'rewrite', path: path.join(store, 'x.md'), content: 'x', expectedOrig: 42 }])).error.includes('expectedOrig'));
   } finally { clean(proj); }
 });
 
@@ -384,5 +385,218 @@ test('tx dir self-ignores: a .gitignore containing * lands inside .claude/coalwa
     const gi = path.join(txDirFor(proj), '.gitignore');
     assert.ok(fs.existsSync(gi), 'self-ignore file must exist in the tx dir');
     assert.strictEqual(fs.readFileSync(gi, 'utf8'), '*\n', 'self-ignore is the catch-all pattern');
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// R1 — external-writer guard (WHS KB946676 stale-commit / cloud-sync co-writer)
+// ---------------------------------------------------------------------------
+
+test('R1: a foreign write between plan-gating and apply aborts the txn via rollback; the file is named; the foreign write survives', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'f.md');
+    write(f, 'the content the caller scanned');
+    // the caller derived its rewrite from this content (recorded in the plan)...
+    const plan = planFor(proj, store, [{ type: 'rewrite', path: f, content: 'rewritten from the scanned content', expectedOrig: 'the content the caller scanned' }]);
+    // ...then a cloud-sync client clobbered the file during the human-gate wait.
+    write(f, 'FOREIGN WRITER CONTENT');
+    const r = applyPlan(plan);
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /external writer/);
+    assert.ok(r.error.includes('f.md'), 'the report names the file');
+    assert.strictEqual(r.rolledBack, true, 'aborted through the existing rollback path');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'FOREIGN WRITER CONTENT', 'nothing of the plan landed; the foreign write survives');
+  } finally { clean(proj); }
+});
+
+test('R1: multi-file — the already-written file rolls back too; stale snapshots were reaped at preflight', () => {
+  const { proj, store } = sandbox();
+  try {
+    const txDir = txDirFor(proj);
+    for (const t of [10, 20, 30, 40, 50]) fs.mkdirSync(path.join(txDir, `snap-${t}`), { recursive: true }); // stale completed snaps, no journal
+    const fa = path.join(store, 'a.md');
+    const fb = path.join(store, 'b.md');
+    write(fa, 'alpha original');
+    write(fb, 'beta scanned');
+    const plan = planFor(proj, store, [
+      { type: 'rewrite', path: fa, content: 'alpha rewritten', expectedOrig: 'alpha original' },
+      { type: 'rewrite', path: fb, content: 'beta rewritten', expectedOrig: 'beta scanned' },
+    ]);
+    write(fb, 'beta FOREIGN');
+    const r = applyPlan(plan, { now: 1000 });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /external writer/);
+    assert.strictEqual(fs.readFileSync(fa, 'utf8'), 'alpha original', 'the already-applied file is restored');
+    assert.strictEqual(fs.readFileSync(fb, 'utf8'), 'beta FOREIGN', 'the foreign write is preserved');
+    const stale = fs.readdirSync(txDir).filter((n) => /^snap-(10|20|30|40|50)$/.test(n)).sort();
+    assert.deepStrictEqual(stale, ['snap-30', 'snap-40', 'snap-50'], 'preflight retention reaped the oldest stale snapshots even though this run aborted');
+  } finally { clean(proj); }
+});
+
+test('R1: a delete target that changed since gating is NOT deleted (abort + restore)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'reviewed.md');
+    write(f, 'the reviewed content');
+    const plan = planFor(proj, store, [{ type: 'delete', path: f, expectedOrig: 'the reviewed content' }], { deletesApproved: true });
+    write(f, 'CHANGED AFTER THE HUMAN REVIEWED IT');
+    const r = applyPlan(plan);
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /external writer/);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'CHANGED AFTER THE HUMAN REVIEWED IT', 'the changed file is never deleted — the human approved deleting what they SAW');
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// R2 — snapshot restorability verify (GitLab all-backups-dead)
+// ---------------------------------------------------------------------------
+
+test('R2: an unwritable snapshot slot aborts BEFORE any change', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'precious.md');
+    write(f, 'precious');
+    // pre-plant a DIRECTORY where this run's first snapshot copy must land
+    // (deterministic via the injectable now) -> the copy cannot produce a
+    // restorable snapshot -> the run must refuse before touching anything.
+    fs.mkdirSync(path.join(txDirFor(proj), 'snap-777', 'f0'), { recursive: true });
+    const r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'new' }]), { now: 777 });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'precious', 'nothing mutated when the snapshot cannot be produced');
+  } finally { clean(proj); }
+});
+
+test('R2: verifySnapshot detects a silently-corrupted copy and an unreadable copy; a faithful set passes', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f1 = path.join(store, 's1.md');
+    const f2 = path.join(store, 's2.md');
+    write(f1, 'source one');
+    write(f2, 'source two');
+    const snapDir = path.join(txDirFor(proj), 'snap-1');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.copyFileSync(f1, path.join(snapDir, 'f0'));
+    fs.copyFileSync(f2, path.join(snapDir, 'f1'));
+    const manifest = [{ snap: 'f0', original: f1 }, { snap: 'f1', original: f2 }];
+    assert.deepStrictEqual(verifySnapshot(snapDir, manifest), [], 'a faithful snapshot verifies clean');
+    // silent corruption (the GitLab class: the copy exists but cannot restore)
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'CORRUPTED', 'utf8');
+    // unreadable copy
+    fs.rmSync(path.join(snapDir, 'f1'));
+    const bad = verifySnapshot(snapDir, manifest);
+    assert.strictEqual(bad.length, 2);
+    assert.ok(bad[0].includes('s1.md') && bad[0].includes('does not match'));
+    assert.ok(bad[1].includes('s2.md') && bad[1].includes('unverifiable'));
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// R3 — own-artifact retention protects a dangling txn's snapshot (ReFS leak)
+// ---------------------------------------------------------------------------
+
+test('R3: sweep keeps N completed + NEVER the dangling txn\'s snapshot; unreadable or newer journal freezes the sweep', () => {
+  const { proj } = sandbox();
+  try {
+    const txDir = txDirFor(proj);
+    for (const t of [50, 100, 200, 300, 400, 500]) fs.mkdirSync(path.join(txDir, `snap-${t}`), { recursive: true });
+    const journalPath = path.join(txDir, 'journal.json');
+    // a dangling txn references the OLDEST snapshot
+    fs.writeFileSync(journalPath, JSON.stringify({ version: 1, status: 'applying', snapDir: path.join(txDir, 'snap-50') }), 'utf8');
+    sweepSnapshots(txDir, 3);
+    let left = fs.readdirSync(txDir).filter((n) => n.startsWith('snap-')).sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)));
+    assert.deepStrictEqual(left, ['snap-50', 'snap-300', 'snap-400', 'snap-500'], 'N newest completed kept PLUS the dangling snapshot (recovery owns it)');
+    // a NEWER-schema journal: we cannot know what it references -> sweep nothing
+    fs.writeFileSync(journalPath, JSON.stringify({ version: 99, status: 'applying', snapDir: path.join(txDir, 'snap-300') }), 'utf8');
+    sweepSnapshots(txDir, 1);
+    assert.strictEqual(fs.readdirSync(txDir).filter((n) => n.startsWith('snap-')).length, 4, 'newer-schema journal freezes the sweep entirely');
+    // an unreadable journal: same freeze
+    fs.writeFileSync(journalPath, '{ not json', 'utf8');
+    sweepSnapshots(txDir, 1);
+    assert.strictEqual(fs.readdirSync(txDir).filter((n) => n.startsWith('snap-')).length, 4, 'unreadable journal freezes the sweep entirely');
+    // a TERMINAL journal protects nothing — plain retention applies
+    fs.writeFileSync(journalPath, JSON.stringify({ version: 1, status: 'committed', snapDir: path.join(txDir, 'snap-50') }), 'utf8');
+    sweepSnapshots(txDir, 2);
+    left = fs.readdirSync(txDir).filter((n) => n.startsWith('snap-')).sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)));
+    assert.deepStrictEqual(left, ['snap-400', 'snap-500'], 'a terminal journal gets no protection — plain retention');
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// R4 — binary/unknown content: flag, never rewrite (e2defrag)
+// ---------------------------------------------------------------------------
+
+test('R4: NUL-bearing and unparseable-frontmatter targets are FLAGGED, never rewritten; the run continues on the rest', () => {
+  const { proj, store } = sandbox();
+  try {
+    const NUL = String.fromCharCode(0); // control chars from char codes only (room rule)
+    const fbin = path.join(store, 'binary.md');
+    const ffm = path.join(store, 'broken-fm.md');
+    const fok = path.join(store, 'clean.md');
+    const binContent = 'data' + NUL + 'blob';
+    const fmContent = '---\nnever: closes\nno closing fence anywhere';
+    write(fbin, binContent);
+    write(ffm, fmContent);
+    write(fok, 'clean content');
+    const r = applyPlan(planFor(proj, store, [
+      { type: 'rewrite', path: fbin, content: 'should never land' },
+      { type: 'rewrite', path: ffm, content: 'should never land' },
+      { type: 'rewrite', path: fok, content: 'clean rewritten' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1, 'only the clean file was applied');
+    assert.strictEqual(r.flagged.length, 2);
+    assert.ok(r.flagged.some((x) => x.path === fs.realpathSync(fbin) && /NUL/.test(x.reason)));
+    assert.ok(r.flagged.some((x) => x.path === fs.realpathSync(ffm) && /frontmatter/.test(x.reason)));
+    assert.strictEqual(fs.readFileSync(fbin, 'utf8'), binContent, 'the binary file is byte-untouched');
+    assert.strictEqual(fs.readFileSync(ffm, 'utf8'), fmContent, 'the unparseable file is byte-untouched');
+    assert.strictEqual(fs.readFileSync(fok, 'utf8'), 'clean rewritten', 'the run continued on the rest');
+    // every action flagged -> nothing to do, loud + flagged, nothing touched
+    const r2 = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: fbin, content: 'x' }]));
+    assert.strictEqual(r2.ok, false);
+    assert.strictEqual(r2.flagged.length, 1);
+    assert.match(r2.error, /flagged/);
+    assert.strictEqual(fs.readFileSync(fbin, 'utf8'), binContent);
+    // the sniff unit itself
+    assert.match(String(sniffUnrewritable(Buffer.from(binContent, 'utf8'))), /NUL/);
+    assert.match(String(sniffUnrewritable(Buffer.from(fmContent, 'utf8'))), /frontmatter/);
+    assert.strictEqual(sniffUnrewritable(Buffer.from('---\nok: yes\n---\nbody', 'utf8')), null, 'a CLOSED frontmatter is fine');
+    assert.strictEqual(sniffUnrewritable(Buffer.from('plain text', 'utf8')), null);
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// R5 — artifact schema-version: newer journal is untouchable (XP/Vista)
+// ---------------------------------------------------------------------------
+
+test('R5: a NEWER-schema dangling journal refuses recovery — journal kept, disk unmodified — even though it COULD have replayed', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'f.md');
+    write(f, 'HALF-APPLIED GARBAGE');
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-123');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'the original content');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: f }]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '123');
+    // identical to the restorable-journal fixture EXCEPT version 99: without
+    // the schema gate this WOULD roll back — proving the gate is load-bearing.
+    const journalBytes = JSON.stringify({
+      version: 99, status: 'applying', snapDir, roots: [store],
+      steps: [{ i: 0, type: 'rewrite', path: f, status: 'done' }],
+    });
+    fs.writeFileSync(path.join(txDir, 'journal.json'), journalBytes);
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'none');
+    assert.match(r.error, /newer/);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'HALF-APPLIED GARBAGE', 'nothing restored/modified by the older tool');
+    assert.strictEqual(fs.readFileSync(path.join(txDir, 'journal.json'), 'utf8'), journalBytes, 'the newer journal is byte-untouched');
+    // terminal-LOOKING newer journal: cleanup is refused too (an older tool
+    // must not delete a newer tool's artifact — the XP-deletes-Vista shape).
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({ version: 99, status: 'committed' }));
+    const r2 = recoverDangling(proj);
+    assert.strictEqual(r2.recovered, 'none');
+    assert.ok(fs.existsSync(path.join(txDir, 'journal.json')), 'a terminal-looking newer journal is NOT cleaned up');
   } finally { clean(proj); }
 });

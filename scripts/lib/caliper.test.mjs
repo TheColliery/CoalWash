@@ -7,6 +7,7 @@ import {
   tokensEst, tokensEstFromBytes, gzipRatio, measureEntries,
   bandVerdict, breakEven, sessionsPerDay,
   statePath, loadState, projectState, recordStamp, setLeanFloor, setSnooze,
+  sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
   PLUMP_BMI, OBESE_BMI, FULL_BMI, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX,
 } from './caliper.mjs';
@@ -185,4 +186,118 @@ test('state isolation: two projects under one home do not mix', () => {
     assert.strictEqual(projectState(st, proj).stamps[0].fp, 100);
     assert.strictEqual(projectState(st, proj2).stamps[0].fp, 200);
   } finally { clean(home, proj, proj2); }
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeLeanFloor (floor-sanity at read — the #1 poison-point guard)
+// ---------------------------------------------------------------------------
+
+test('sanitizeLeanFloor: non-finite/zero/negative/non-numeric is discarded to 0 (floor-unmeasured)', () => {
+  assert.strictEqual(sanitizeLeanFloor(NaN, 1000), 0);
+  assert.strictEqual(sanitizeLeanFloor(Infinity, 1000), 0);
+  assert.strictEqual(sanitizeLeanFloor(-Infinity, 1000), 0);
+  assert.strictEqual(sanitizeLeanFloor(0, 1000), 0);
+  assert.strictEqual(sanitizeLeanFloor(-500, 1000), 0);
+  assert.strictEqual(sanitizeLeanFloor('garbage', 1000), 0);
+  assert.strictEqual(sanitizeLeanFloor(undefined, 1000), 0);
+  assert.strictEqual(sanitizeLeanFloor(null, 1000), 0);
+});
+
+test('sanitizeLeanFloor: a plausible floor relative to the current footprint is trusted as-is', () => {
+  assert.strictEqual(sanitizeLeanFloor(1000, 1500), 1000, 'ordinary post-clean floor below a grown footprint');
+  assert.strictEqual(sanitizeLeanFloor(2000, 1000), 2000, 'footprint dipping below the floor is not BY ITSELF implausible');
+  assert.strictEqual(sanitizeLeanFloor('1500', 1000), 1500, 'a numeric string coerces cleanly');
+});
+
+test('sanitizeLeanFloor: a floor GROSSLY exceeding the footprint is discarded — poisoned/stale, never trusted', () => {
+  assert.strictEqual(sanitizeLeanFloor(1_000_000, 1000), 0);
+  // exactly at the multiple is still plausible; one token past it is not
+  assert.strictEqual(sanitizeLeanFloor(1000 * LEAN_FLOOR_MAX_MULTIPLE, 1000), 1000 * LEAN_FLOOR_MAX_MULTIPLE);
+  assert.strictEqual(sanitizeLeanFloor(1000 * LEAN_FLOOR_MAX_MULTIPLE + 1, 1000), 0);
+});
+
+test('sanitizeLeanFloor: without a usable footprint to compare against, basic sanity alone governs', () => {
+  assert.strictEqual(sanitizeLeanFloor(500, 0), 500, 'footprint 0 (nothing measured) cannot itself invalidate a floor');
+  assert.strictEqual(sanitizeLeanFloor(500, NaN), 500);
+  assert.strictEqual(sanitizeLeanFloor(500, undefined), 500);
+});
+
+// ---------------------------------------------------------------------------
+// state orphan prune (#21)
+// ---------------------------------------------------------------------------
+
+test('orphan prune: a project whose path no longer exists is dropped on the next state write; the live project is untouched', () => {
+  const { home, proj } = sandbox();
+  const deadProj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-')));
+  try {
+    recordStamp(home, deadProj, 50);
+    recordStamp(home, proj, 100);
+    assert.ok(projectState(loadState(home), deadProj).stamps, 'dead project tracked before its folder is removed');
+
+    fs.rmSync(deadProj, { recursive: true, force: true }); // the project folder is now gone
+    recordStamp(home, proj, 101); // ANY project's next state write triggers the lazy prune
+
+    const st = loadState(home);
+    assert.deepStrictEqual(projectState(st, deadProj), {}, 'the dead entry is pruned');
+    assert.strictEqual(projectState(st, proj).stamps.length, 2, 'the live project entry is untouched');
+  } finally { clean(home, proj); }
+});
+
+test('orphan prune: fires from setLeanFloor and setSnooze too (every write path, not just recordStamp)', () => {
+  const { home, proj } = sandbox();
+  const dead1 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-lf-')));
+  const dead2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-sn-')));
+  try {
+    recordStamp(home, dead1, 50);
+    fs.rmSync(dead1, { recursive: true, force: true });
+    setLeanFloor(home, proj, 500);
+    assert.deepStrictEqual(projectState(loadState(home), dead1), {}, 'setLeanFloor prunes too');
+
+    recordStamp(home, dead2, 50);
+    fs.rmSync(dead2, { recursive: true, force: true });
+    setSnooze(home, proj, Date.now() + 1000);
+    assert.deepStrictEqual(projectState(loadState(home), dead2), {}, 'setSnooze prunes too');
+  } finally { clean(home, proj); }
+});
+
+test('orphan prune: a still-existing project is NEVER pruned, and nothing on disk is touched beyond the stat', () => {
+  const { home, proj } = sandbox();
+  const liveProj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-live-')));
+  const sentinel = path.join(liveProj, 'still-here.txt');
+  try {
+    fs.writeFileSync(sentinel, 'untouched');
+    recordStamp(home, liveProj, 50);
+    recordStamp(home, proj, 100); // a second write, the prune runs again
+    assert.ok(projectState(loadState(home), liveProj).stamps, 'a still-existing project survives the prune');
+    assert.strictEqual(fs.readFileSync(sentinel, 'utf8'), 'untouched', 'the prune never touches project disk contents');
+  } finally { clean(home, proj, liveProj); }
+});
+
+// ---------------------------------------------------------------------------
+// G2: state-file corruption always lands on the conservative path (never
+// throws, never trusts partial content) — file-level counterpart to
+// sanitizeLeanFloor's value-level guard above.
+// ---------------------------------------------------------------------------
+
+test('G2: every corrupt/truncated/empty/wrong-shaped state file self-heals to {} — never throws', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
+    const cases = [
+      '', // empty file
+      '{"projects": {"C:\\\\foo": {"leanFloorTok', // truncated mid-token
+      '[1,2,3]', // valid JSON, wrong top-level shape (array)
+      '"just a string"',
+      '42',
+      'null',
+      'not json at all { [ garbage',
+      JSON.stringify({ projects: 'not an object' }),
+    ];
+    for (const content of cases) {
+      fs.writeFileSync(statePath(home), content, 'utf8');
+      assert.doesNotThrow(() => loadState(home), `must not throw on: ${JSON.stringify(content)}`);
+      const ps = projectState(loadState(home), proj);
+      assert.strictEqual(sanitizeLeanFloor(ps.leanFloorTokens, 5000), 0, 'no case yields a trusted floor');
+    }
+  } finally { clean(home, proj); }
 });

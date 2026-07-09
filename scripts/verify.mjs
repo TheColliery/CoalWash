@@ -16,7 +16,7 @@ const ok = (m) => console.log(`  ok   ${m}`);
 const fail = (m) => { console.log(`  FAIL ${m}`); fails++; };
 
 const LIBS = [
-  'class-b.mjs', 'caliper.mjs', 'fidelity-gate.mjs', 'apply.mjs', 'receipt.mjs',
+  'class-b.mjs', 'caliper.mjs', 'fidelity-gate.mjs', 'apply.mjs', 'keeps.mjs', 'receipt.mjs',
   'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs',
 ];
 
