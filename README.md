@@ -86,7 +86,7 @@ Every tool in the series supports two config levels — a global `~/.claude/.coa
 
 | Key | Default | What it does |
 |---|---|---|
-| `coalwashMode` | `auto` | Master switch: `auto` = session-start gauge + band nudges · `manual` = gauge silent, `/coalwash` only · `off` = fully silent |
+| `coalwashMode` | `auto` | Gauge switch: `auto` = session-start gauge + band nudges · `manual` = the gauge is silent, `/coalwash` only · `off` = the gauge never runs. (Orthogonal: the self-update nudge has its own switch — `updateMode: "off"` — so `manual` silences the *gauge*, not the periodic update check.) |
 | `language` | `auto` | Language for prompts and nudges (`auto` \| `th` \| `en` \| `ja` \| `zh` \| `es`) |
 | `fullPercent` | `6` | Hard ceiling as % of platform context capacity — the FULL band's absolute clamp; raising it = consciously carrying more overhead ("buying a bigger SSD") |
 | `targetPercent` | `3` | Low-water clean-to target (% of capacity, below `fullPercent`) — anti-thrash hysteresis |

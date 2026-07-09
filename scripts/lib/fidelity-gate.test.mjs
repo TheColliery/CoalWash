@@ -40,7 +40,23 @@ test('a dropped ISO date fails; a dropped DD-Mon-YYYY house date fails', () => {
   const noIso = ORIG.replace(' on 2026-07-08', '');
   assert.deepStrictEqual(checkFidelity(ORIG, noIso).drops, [{ type: 'date-drop', value: '2026-07-08' }]);
   const noDmy = ORIG.replace(' (audited 15-Jun-2026)', '');
-  assert.deepStrictEqual(checkFidelity(ORIG, noDmy).drops, [{ type: 'date-drop', value: '15-Jun-2026' }]);
+  // dates are canonicalized to YYYY-MM-DD in the inventory (so an ISO<->DMY
+  // reformat is not a drop) -> a genuine drop reports the canonical form.
+  assert.deepStrictEqual(checkFidelity(ORIG, noDmy).drops, [{ type: 'date-drop', value: '2026-06-15' }]);
+});
+
+test('a date REFORMAT between the two house formats is NOT a drop (canonicalized); a link-drop IS caught', () => {
+  // 15-Jun-2026 -> 2026-06-15 (same day, endorsed reformat) must PASS.
+  const reformatted = ORIG.replace('15-Jun-2026', '2026-06-15');
+  assert.strictEqual(checkFidelity(ORIG, reformatted).pass, true);
+  // a markdown-link destination is a fact the wikilink RE never saw — dropping it FAILS.
+  const withLink = ORIG + '\nSee the [routing record](https://example.com/routing).';
+  const noLink = ORIG + '\nSee the routing record.';
+  assert.deepStrictEqual(checkFidelity(withLink, noLink).drops, [{ type: 'link-drop', value: 'https://example.com/routing' }]);
+  // editing a wikilink's DISPLAY text (target unchanged) is NOT a drop.
+  const disp1 = 'See [[coal-market-position|the position]].';
+  const disp2 = 'See [[coal-market-position|our market position]].';
+  assert.strictEqual(checkFidelity(disp1, disp2).pass, true);
 });
 
 test('a dropped version string fails (with and without the v prefix, incl. pre-release)', () => {
@@ -145,9 +161,10 @@ test('inventory extraction: counts and shapes', () => {
   const inv = inventory(ORIG);
   assert.deepStrictEqual([...inv.wikilinks].sort(), ['coal-market-position', 'dogfood-to-harden']);
   assert.ok(inv.dates.has('2026-07-08'));
-  assert.ok(inv.dates.has('15-Jun-2026'));
+  assert.ok(inv.dates.has('2026-06-15'), 'DD-Mon-YYYY is canonicalized to ISO in the inventory');
   assert.ok(inv.versions.has('v1.1.1'));
   assert.ok(inv.versions.has('v3.8.4'));
+  assert.ok(inv.links instanceof Set, 'inventory exposes a links set');
   assert.deepStrictEqual([...inv.frontmatter].sort(), ['pinned', 'topic']);
 });
 

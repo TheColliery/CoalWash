@@ -183,6 +183,104 @@ test('acquireLock unit: exclusive while held, reusable after release', () => {
   } finally { clean(proj); }
 });
 
+test('lock release is OWNER-VERIFIED: a stale-stolen holder cannot delete the new holder\'s lock (formal HIGH #4)', () => {
+  const { proj } = sandbox();
+  try {
+    const lockPath = path.join(proj, '.coalwash.lock');
+    const a = acquireLock(lockPath, { sessionId: 'a' });
+    assert.strictEqual(a.acquired, true);
+    // age the lock file past the stale window (mtime-based staleness) so B takes over.
+    const old = new Date(Date.now() - 31 * 60 * 1000);
+    fs.utimesSync(lockPath, old, old);
+    const b = acquireLock(lockPath, { sessionId: 'b' });
+    assert.strictEqual(b.acquired, true, 'B takes over the stale lock');
+    // A (resumed, unaware) calls release — it MUST NOT delete B's lock.
+    a.release();
+    assert.strictEqual(fs.existsSync(lockPath), true, "A's release must not remove B's lock (owner check)");
+    // A fresh acquirer still defers to B (B's lock is fresh now).
+    const c = acquireLock(lockPath, { sessionId: 'c' });
+    assert.strictEqual(c.acquired, false, 'B still holds — a fresh acquire defers');
+    b.release();
+    assert.strictEqual(fs.existsSync(lockPath), false, "B (the owner) can release its own lock");
+  } finally { clean(proj); }
+});
+
+test('recoverDangling REFUSES an out-of-root target from a poisoned journal (empirical A / containment bypass)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-victim-')));
+    const victim = path.join(outside, 'victim.md');
+    write(victim, 'ORIGINAL VICTIM CONTENT');
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-999');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'ATTACKER PAYLOAD'); // would overwrite victim
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: victim }]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '999');
+    // roots declares only the in-project store; the manifest aims OUTSIDE it.
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [store],
+      steps: [{ i: 0, type: 'rewrite', path: victim, status: 'done' }],
+    }));
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'partial', 'an out-of-root target is refused, not replayed');
+    assert.ok(r.refusedOutOfRoot >= 1);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'ORIGINAL VICTIM CONTENT', 'the outside file must be UNTOUCHED');
+    assert.strictEqual(fs.existsSync(path.join(txDir, 'journal.json')), true, 'a refused recovery keeps the journal for a human');
+    clean(outside);
+  } finally { clean(proj); }
+});
+
+test('recoverDangling refuses a journal with NO recorded roots (unverifiable = left for a human)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'f.md');
+    write(f, 'GARBAGE');
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-1');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'orig');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: f }]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '1');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({ version: 1, status: 'applying', snapDir, steps: [{ i: 0, type: 'rewrite', path: f, status: 'done' }] }));
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'none');
+    assert.match(r.error, /no verifiable roots/);
+  } finally { clean(proj); }
+});
+
+test('isPinned is FAIL-CLOSED: an opening frontmatter that never closes counts as pinned (formal MED #5)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'huge-fm.md');
+    // A frontmatter opener with a pinned:true far down but NO closing fence within
+    // the read window -> unverifiable -> must be treated as pinned (refuse to touch).
+    write(f, '---\n' + 'x: y\n'.repeat(20000) + 'pinned: true\n'); // never closes in the window
+    assert.strictEqual(isPinned(f), true, 'an unclosable frontmatter is fail-closed to pinned');
+    // A normal, closed frontmatter without pinned still reads false.
+    const g = path.join(store, 'ok.md');
+    write(g, '---\ntopic: x\n---\nbody');
+    assert.strictEqual(isPinned(g), false);
+  } finally { clean(proj); }
+});
+
+test('fidelity interlock in applyPlan: an UNAPPROVED rewrite drop aborts before any mutation (doctrine B)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'note.md');
+    write(f, 'See [[keep-this]] and the record.');
+    // A rewrite that silently drops the wikilink, with NO approvedDrops -> abort.
+    const bad = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'See the record.' }]));
+    assert.strictEqual(bad.ok, false);
+    assert.match(bad.error, /fidelity: unapproved fact drop/);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'See [[keep-this]] and the record.', 'nothing mutated on a fidelity abort');
+    // The SAME drop, explicitly approved by the human, is allowed through.
+    const ok = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'See the record.' }], { approvedDrops: ['wikilink-drop:keep-this'] }));
+    assert.strictEqual(ok.ok, true, ok.error);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'See the record.');
+  } finally { clean(proj); }
+});
+
 test('create refuses an existing target (fail loud, nothing clobbered)', () => {
   const { proj, store } = sandbox();
   try {
@@ -210,7 +308,7 @@ test('recoverDangling: an interrupted apply (journal=applying + complete snapsho
     const created = path.join(store, 'half-created.md');
     write(created, 'partial');
     fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
-      version: 1, status: 'applying', snapDir,
+      version: 1, status: 'applying', snapDir, roots: [store],
       steps: [
         { i: 0, type: 'rewrite', path: f, status: 'done' },
         { i: 1, type: 'create', path: created, status: 'done' },

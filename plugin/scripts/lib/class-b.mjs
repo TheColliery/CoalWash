@@ -99,9 +99,13 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     };
   }
 
-  const homePhys = physicalOrNull(home) || path.resolve(home);
-  const projPhys = physicalOrNull(projectRoot) || path.resolve(projectRoot);
-  const roots = [homePhys, projPhys];
+  // FAIL-CLOSED (parity with apply.mjs containment): an unresolvable root is
+  // null rather than a non-physical lexical fallback — discovery is "contained
+  // the same way" as the write path, as SECURITY.md claims. The project-anchored
+  // walks below are skipped when projPhys is null (nothing to contain against).
+  const homePhys = physicalOrNull(home);
+  const projPhys = physicalOrNull(projectRoot);
+  const roots = [homePhys, projPhys].filter(Boolean);
   const seen = new Set();
   const entries = [];
   // Windows paths are case-insensitive -> lowercase the dedupe key there ONLY
@@ -143,7 +147,8 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
 
   // 2. Project governance: the CLAUDE.md up-tree walk (projectRoot up to home,
   //    physical compare, never above home) + each file's import closure.
-  {
+  //    Skipped when the project root did not resolve (fail-closed).
+  if (projPhys) {
     let dir = projPhys;
     while (true) {
       const cl = path.join(dir, 'CLAUDE.md');
@@ -158,12 +163,16 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // 3. Project rules tree (.claude/rules/**/*.md): class-B governance store;
   //    loads on demand for the subtree -> alwaysLoaded false unless a file was
   //    already pulled in via an @import above (dedupe keeps the stronger entry).
-  {
+  if (projPhys) {
     const rulesRoot = path.join(projPhys, '.claude', 'rules');
     const stack = [rulesRoot];
-    let count = 0;
-    while (stack.length && count < RULES_FILE_CAP) {
+    let count = 0, dirs = 0;
+    // Cap BOTH the .md count AND the directory traversal (Phoenix #3): a deep/wide
+    // tree with many dirs but few .md files would otherwise keep count < cap
+    // forever and readdirSync the whole tree every SessionStart.
+    while (stack.length && count < RULES_FILE_CAP && dirs < RULES_FILE_CAP) {
       const dir = stack.pop();
+      dirs++;
       let names;
       try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
       for (const d of names) {
@@ -172,7 +181,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
         else if (d.isFile() && d.name.endsWith('.md')) { add(p, { scope: 'project', kind: 'governance', alwaysLoaded: false }); count++; }
       }
     }
-    if (count >= RULES_FILE_CAP) flags.push(`rules tree capped at ${RULES_FILE_CAP} files`);
+    if (count >= RULES_FILE_CAP || dirs >= RULES_FILE_CAP) flags.push(`rules tree capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP})`);
   }
 
   // 4. Memory store: ~/.claude/projects/<slug>/memory/ — MEMORY.md is the

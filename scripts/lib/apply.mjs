@@ -27,6 +27,7 @@
 // across the API boundary; every path returns { ok, ... }.
 import fs from 'node:fs';
 import path from 'node:path';
+import { checkFidelity } from './fidelity-gate.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
@@ -76,45 +77,59 @@ function containedIn(p, roots) {
 }
 
 // pinned: true in a leading frontmatter block = PIN-protected (gap #1) —
-// immune to trim/delete. Read-cheap (first 4KB).
+// immune to trim/delete. FAIL-CLOSED: any state we cannot verify counts as
+// pinned (refuse to touch), matching the realpath/containment fail-closed
+// discipline — "untouchable at all" must not degrade to fail-open on a read
+// error or a frontmatter block we could not fully read.
+const PIN_READ_BYTES = 65536; // covers any sane frontmatter; a block that does not close within this = unverifiable
 export function isPinned(file) {
   try {
     const fd = fs.openSync(file, 'r');
     let head;
     try {
-      const buf = Buffer.alloc(4096);
-      const n = fs.readSync(fd, buf, 0, 4096, 0);
+      const buf = Buffer.alloc(PIN_READ_BYTES);
+      const n = fs.readSync(fd, buf, 0, PIN_READ_BYTES, 0);
       head = buf.toString('utf8', 0, n);
     } finally {
       fs.closeSync(fd);
     }
-    if (!/^---\r?\n/.test(head)) return false;
+    if (!/^---\r?\n/.test(head)) return false; // no frontmatter opener = definitely not pinned
     const end = /\r?\n---[ \t]*(?:\r?\n|$)/.exec(head.slice(3));
-    const block = end ? head.slice(3, 3 + end.index) : head.slice(3);
+    // The opener exists but the block does not CLOSE within the window (a huge or
+    // truncated frontmatter) -> unverifiable -> fail-closed (treat as pinned).
+    if (!end) return true;
+    const block = head.slice(3, 3 + end.index);
     return /^pinned\s*:\s*true\s*$/m.test(block);
   } catch {
-    return false;
+    return true; // read error on a file we are about to mutate -> refuse (fail-closed)
   }
 }
 
 // ---------------------------------------------------------------------------
 // lock — atomic-create + session-id + stale-timeout + defer-on-doubt
 // ---------------------------------------------------------------------------
+// A per-acquire owner TOKEN so the release and the stale-takeover can prove
+// ownership (never delete a lock another run now holds). hrtime.bigint() is a
+// monotonic counter (not wall-clock) — distinct on every call, so two acquires
+// in one process never collide; two processes differ by pid.
+function ownerToken(sessionId) {
+  return `${sessionId}:${process.pid}:${process.hrtime.bigint()}`;
+}
+function readLockToken(lockPath) {
+  try { return JSON.parse(fs.readFileSync(lockPath, 'utf8')).token ?? null; } catch { return null; }
+}
 export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs = LOCK_STALE_MS, now = Date.now() } = {}) {
-  const tryCreate = () => {
-    const fd = fs.openSync(lockPath, 'wx'); // atomic: fails if it exists
-    try {
-      fs.writeSync(fd, JSON.stringify({ sessionId, pid: process.pid, at: now }));
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-  };
+  const token = ownerToken(sessionId);
+  const body = JSON.stringify({ sessionId, pid: process.pid, at: now, token });
+  // release deletes the lock ONLY if it still carries OUR token (a slow/suspended
+  // holder whose lock was stolen must not delete the new holder's lock — HIGH #4).
+  const releaseIfOwner = () => { try { if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { force: true }); } catch {} };
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     ensureSelfIgnore(path.dirname(lockPath));
-    tryCreate();
-    return { acquired: true, release: () => { try { fs.rmSync(lockPath, { force: true }); } catch {} } };
+    const fd = fs.openSync(lockPath, 'wx'); // atomic create: exactly one fresh acquirer wins
+    try { fs.writeSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    return { acquired: true, release: releaseIfOwner };
   } catch (e) {
     if (e && e.code !== 'EEXIST') return { acquired: false, reason: `lock error: ${e.message}` };
   }
@@ -122,9 +137,15 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
   try {
     const st = fs.statSync(lockPath);
     if (now - st.mtimeMs > staleMs) {
-      fs.rmSync(lockPath, { force: true });
-      tryCreate(); // a racing taker wins EEXIST here -> we fall through to defer
-      return { acquired: true, stale: true, release: () => { try { fs.rmSync(lockPath, { force: true }); } catch {} } };
+      // STEAL IN PLACE (no rm -> no missing-file window a third writer could slip
+      // through). Two racing stealers overwrite the same file; whoever's write
+      // lands last owns it, the other's compare-after-write fails -> it defers
+      // (worst case both defer on a byte-interleave = a safe retry, never a
+      // double-hold). Fixed width via truncate so a shorter write leaves no tail.
+      const fd = fs.openSync(lockPath, 'r+');
+      try { fs.ftruncateSync(fd, 0); fs.writeSync(fd, body, 0); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner };
+      return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
     }
   } catch { /* unreadable lock = doubt = defer */ }
   return { acquired: false, reason: 'another CoalWash run (or a live session) holds the store — deferring' };
@@ -198,6 +219,26 @@ export function applyPlan(plan, opts = {}) {
       return { ok: false, error: `PIN-protected (pinned: true) — refuse to touch: ${pinned.map((p) => p.phys).join(', ')}` };
     }
 
+    // ---- FIDELITY INTERLOCK (the flagship gate, code-enforced at the mutation
+    // boundary — not merely a pipeline step a caller could skip). Every rewrite
+    // is diffed original-vs-new; a structured-token drop (link/date/version/
+    // frontmatter key) or introduced encoding corruption ABORTS before anything
+    // mutates, UNLESS the human approved that exact drop (plan.approvedDrops, a
+    // list of "type:value"). No approvedDrops => strict: any drop aborts.
+    const approvedDrops = new Set(Array.isArray(plan.approvedDrops) ? plan.approvedDrops : []);
+    const unapproved = [];
+    for (const a of resolved) {
+      if (a.type !== 'rewrite') continue;
+      let orig;
+      try { orig = fs.readFileSync(a.phys, 'utf8'); } catch { return { ok: false, error: `fidelity: cannot read ${a.phys} to gate it (fail-closed)` }; }
+      for (const d of checkFidelity(orig, a.content).drops) {
+        if (!approvedDrops.has(`${d.type}:${d.value}`)) unapproved.push(`${a.phys} — ${d.type}: ${d.value}`);
+      }
+    }
+    if (unapproved.length) {
+      return { ok: false, error: `fidelity: unapproved fact drop(s) — apply blocked (approve them explicitly or fix the rewrite): ${unapproved.join(' | ')}` };
+    }
+
     // ---- lock ----
     const txDir = opts.txDir || txDirFor(projectRoot);
     fs.mkdirSync(txDir, { recursive: true });
@@ -236,6 +277,10 @@ export function applyPlan(plan, opts = {}) {
         sessionId: plan.sessionId || null,
         startedAt: now,
         snapDir,
+        // The RESOLVED physical roots this transaction was allowed to touch —
+        // recorded so a cold-start recoverDangling can RE-VALIDATE containment
+        // (a poisoned journal must not aim a restore/delete outside these).
+        roots: physRoots,
         status: 'applying',
         steps: ordered.map((a, i) => ({ i, type: a.type, path: a.phys, status: 'pending' })),
       };
@@ -243,15 +288,21 @@ export function applyPlan(plan, opts = {}) {
 
       // ---- execute ----
       const createdPaths = [];
+      // Returns the count of snapshot restores that FAILED — a non-zero count
+      // means the rollback was PARTIAL (some originals could not be restored),
+      // which the caller must surface honestly instead of claiming "wholesale".
       const rollback = () => {
-        // restore every snapshotted original; remove created files; all-or-nothing.
+        let failed = 0;
         for (const m of manifest) {
-          try { fs.copyFileSync(path.join(snapDir, m.snap), m.original); } catch { /* keep restoring the rest */ }
+          try { fs.copyFileSync(path.join(snapDir, m.snap), m.original); } catch { failed++; /* keep restoring the rest */ }
         }
         for (const p of createdPaths) { try { fs.rmSync(p, { force: true }); } catch {} }
         for (const a of resolved) { try { fs.rmSync(a.phys + '.coalwash-tmp', { force: true }); } catch {} }
-        journal.status = 'rolled-back';
+        // A PARTIAL rollback must NOT be marked terminal-clean, or a cold-start
+        // recoverDangling would clear the journal over a mixed on-disk state.
+        journal.status = failed ? 'rollback-failed' : 'rolled-back';
         try { writeJournal(journal); } catch {}
+        return failed;
       };
 
       try {
@@ -273,7 +324,8 @@ export function applyPlan(plan, opts = {}) {
           writeJournal(journal);
         }
       } catch (e) {
-        rollback();
+        const failed = rollback();
+        if (failed) return { ok: false, rolledBack: 'partial', restoreFailures: failed, error: `apply failed AND ${failed} original(s) could not be restored — memory may be mixed; snapshot kept at ${snapDir}: ${e.message}` };
         return { ok: false, rolledBack: true, error: `apply failed at a step — snapshot restored: ${e.message}` };
       }
 
@@ -332,16 +384,43 @@ export function recoverDangling(projectRoot, opts = {}) {
       fs.rmSync(journalPath, { force: true });
       return { recovered: 'no-mutation' };
     }
-    const manifest = JSON.parse(fs.readFileSync(path.join(snapDir, 'manifest.json'), 'utf8'));
-    let restored = 0;
-    for (const m of manifest) {
-      try { fs.copyFileSync(path.join(snapDir, m.snap), m.original); restored++; } catch { /* restore the rest */ }
+    // CONTAINMENT (the journal is UNTRUSTED — a poisoned .claude/coalwash/journal.json
+    // shipped inside a repo must not aim a restore/delete at an arbitrary absolute
+    // path). Re-validate every target against the roots the transaction RECORDED,
+    // realpath-and-contain both sides, fail-closed. A journal without recorded roots
+    // (pre-v-this or tampered) can't be validated -> refuse, leave for a human.
+    const jroots = Array.isArray(journal.roots) ? journal.roots.map((r) => physicalOrNull(r)).filter(Boolean) : [];
+    if (!jroots.length) {
+      return { recovered: 'none', error: 'journal has no verifiable roots — refusing to replay (left for inspection)' };
     }
-    // creates that the interrupted run added are removed (all-or-nothing)
+    const snapPhys = physicalOrNull(snapDir);
+    const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
+    const manifest = JSON.parse(fs.readFileSync(path.join(snapDir, 'manifest.json'), 'utf8'));
+    let restored = 0, failed = 0, refused = 0;
+    for (const m of manifest) {
+      const src = path.join(snapDir, m.snap);
+      const origPhys = physicalOrNull(m.original);
+      // src must sit inside the snapshot dir; target must sit inside a recorded root.
+      if (!inSnap(src) || !origPhys || !containedIn(origPhys, jroots)) { refused++; continue; }
+      try { fs.copyFileSync(src, m.original); restored++; } catch { failed++; /* restore the rest */ }
+    }
+    // creates the interrupted run added are removed — REGARDLESS of the journal's
+    // step.status. A crash BETWEEN atomicWrite and the writeJournal that would
+    // stamp the step 'done' leaves the durable step 'pending' while the file
+    // exists (HIGH #3); rmSync(force) is a safe no-op if it was never written, so
+    // removing every create in a dangling txn cannot orphan one.
     for (const step of journal.steps || []) {
-      if (step.type === 'create' && step.status === 'done') {
+      if (step.type === 'create') {
+        if (!fs.existsSync(step.path)) continue; // never written (or already gone) = nothing to undo
+        const p = physicalOrNull(step.path);
+        if (!p || !containedIn(p, jroots)) { refused++; continue; } // exists but out-of-root = refuse
         try { fs.rmSync(step.path, { force: true }); } catch {}
       }
+    }
+    // Only clear the WAL when the recovery was CLEAN. A partial/refused replay keeps
+    // the journal + snapshot for a human (never report a mixed state as done).
+    if (failed || refused) {
+      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root; journal + snapshot kept at ${snapDir}` };
     }
     fs.rmSync(journalPath, { force: true });
     return { recovered: 'rolled-back', restored };

@@ -2,10 +2,13 @@
 // floor of the zero-fact-loss guarantee (blueprint §14.8, proven live: this
 // exact diff caught 2 silent link-drops + 1 self-inventory undercount).
 //
-// Contract: diff orig-vs-new inventories of STRUCTURED tokens — [[wikilinks]],
-// dates, version strings, frontmatter keys. ANY drop = FAIL with the exact
-// list. Set semantics (distinct values): deduplicating a REPEATED mention of
-// the same value is legitimate compaction; losing a VALUE entirely is a drop.
+// Contract: diff orig-vs-new inventories of STRUCTURED tokens — [[wikilinks]]
+// (keyed by TARGET, so a display-text edit is not a drop), dates (canonicalized
+// to YYYY-MM-DD, so an ISO<->DD-Mon-YYYY reformat of the same day is not a drop),
+// version strings, link DESTINATIONS ([text](url) / <autolink> / bare URL), and
+// frontmatter keys. ANY drop = FAIL with the exact list. Set semantics (distinct
+// values): deduplicating a REPEATED mention of one value is legitimate
+// compaction; losing a VALUE entirely is a drop.
 //
 // Plus encoding-corruption tripwires on the NEW text (blueprint §14.3): a
 // rewrite must never INTRODUCE a decomposed Thai sara-am (U+0E4D+U+0E32 for
@@ -24,6 +27,18 @@ const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g;
 // The series' DD-Mon-YYYY house style ("15-Jun-2026") — used heavily in memory files.
 const DMY_DATE_RE = /\b\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{4}\b/g;
 const VERSION_RE = /\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?\b/g;
+// Link DESTINATIONS are the most common fact-carrier in prose docs — a dropped
+// [text](url), <autolink>, or bare URL is a lost fact the wikilink RE never saw.
+const MDLINK_DEST_RE = /\]\(\s*<?([^\s)>]+)/g; // the URL after ](  (strips an optional < and any title)
+const AUTOLINK_RE = /<((?:https?|ftp|mailto):[^>\s]+)>/g;
+const BAREURL_RE = /(?:https?|ftp):\/\/[^\s<>()[\]]+/g;
+const MONTHS = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' };
+// Canonicalize a date to YYYY-MM-DD so a reformat between the two endorsed house
+// formats (ISO <-> DD-Mon-YYYY) of the SAME day is NOT counted as a drop.
+function canonDate(d) {
+  const m = /^(\d{1,2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(\d{4})$/.exec(d);
+  return m ? `${m[3]}-${MONTHS[m[2]]}-${m[1].padStart(2, '0')}` : d;
+}
 // Built from char codes, never raw literals in source — a decomposed sara-am or a
 // zero-width space is invisible/normalization-fragile under future edits (the
 // edit-tool control-escape hazard).
@@ -57,10 +72,21 @@ export function frontmatterKeys(text) {
 // Extract the full structured-token inventory of a text.
 export function inventory(text) {
   const s = String(text);
+  // Wikilinks key on the TARGET only ([[Target|Display]] -> Target): editing the
+  // display text is not a fact drop, so it must not fail the gate.
+  const wikilinks = new Set();
+  for (const v of matchSet(s, WIKILINK_RE, 1)) wikilinks.add(v.split('|')[0].trim());
+  const dates = new Set([...matchSet(s, ISO_DATE_RE), ...matchSet(s, DMY_DATE_RE)].map(canonDate));
+  const links = new Set([
+    ...matchSet(s, MDLINK_DEST_RE, 1),
+    ...matchSet(s, AUTOLINK_RE, 1),
+    ...matchSet(s, BAREURL_RE, 0),
+  ]);
   return {
-    wikilinks: matchSet(s, WIKILINK_RE, 1),
-    dates: new Set([...matchSet(s, ISO_DATE_RE), ...matchSet(s, DMY_DATE_RE)]),
+    wikilinks,
+    dates,
     versions: matchSet(s, VERSION_RE),
+    links,
     frontmatter: frontmatterKeys(s),
   };
 }
@@ -83,6 +109,7 @@ export function checkFidelity(origText, newText) {
     ...diffDrops(oi.wikilinks, ni.wikilinks, 'wikilink-drop'),
     ...diffDrops(oi.dates, ni.dates, 'date-drop'),
     ...diffDrops(oi.versions, ni.versions, 'version-drop'),
+    ...diffDrops(oi.links, ni.links, 'link-drop'),
     ...diffDrops(oi.frontmatter, ni.frontmatter, 'frontmatter-key-drop'),
   ];
   const warnings = [];
@@ -104,6 +131,7 @@ export function checkFidelity(origText, newText) {
       wikilinks: { orig: oi.wikilinks.size, kept: oi.wikilinks.size - drops.filter((d) => d.type === 'wikilink-drop').length },
       dates: { orig: oi.dates.size, kept: oi.dates.size - drops.filter((d) => d.type === 'date-drop').length },
       versions: { orig: oi.versions.size, kept: oi.versions.size - drops.filter((d) => d.type === 'version-drop').length },
+      links: { orig: oi.links.size, kept: oi.links.size - drops.filter((d) => d.type === 'link-drop').length },
       frontmatter: { orig: oi.frontmatter.size, kept: oi.frontmatter.size - drops.filter((d) => d.type === 'frontmatter-key-drop').length },
     },
   };
