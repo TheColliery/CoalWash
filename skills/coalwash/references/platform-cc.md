@@ -16,7 +16,7 @@ The per-session saving = the **always-loaded** subset delta; the receipt splits 
 
 ## Wiring + state files (all local, user-readable)
 
-- **Conductor:** `hooks/hooks.json` → SessionStart → `hooks/coalwash-conductor.js` (Phoenix-13: fail-silent, no network, no spawn; silent when LEAN/off).
+- **Conductor:** `hooks/hooks.json` → SessionStart + UserPromptSubmit → `hooks/coalwash-conductor.js` (Phoenix-13: fail-silent, no network, no spawn; silent when LEAN/off, or when no FULL verdict is cached/armed).
 - **Caliper state:** `~/.claude/.coalwash-state.json` — per-project lean floor, session stamps (ring-capped), snooze. Loss degrades to bootstrap behavior (bands wake after the first full clean stamps a floor).
 - **Transaction dir:** `[project]/.claude/coalwash/` — `.coalwash.lock` (atomic-create + stale-timeout 30min + defer-on-doubt), `journal.json` (the WAL; CoalHearth-visible location — CH-side recognition lands in a CoalHearth release), `snap-[timestamp]/` (last 3 kept).
 - **Config:** global `~/.claude/.coalwash.json` overlaid by the nearest project `.coalwash.json` (walk stops at home, physical-path compare).

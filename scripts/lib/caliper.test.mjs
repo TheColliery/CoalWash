@@ -8,6 +8,7 @@ import {
   bandVerdict, breakEven, sessionsPerDay,
   statePath, loadState, projectState, recordStamp, setLeanFloor, setSnooze,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
+  recordVerdict, sanitizeVerdict, VERDICT_MAX_AGE_MS,
   PLUMP_BMI, OBESE_BMI, FAT_BUDGET_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX,
 } from './caliper.mjs';
@@ -316,6 +317,63 @@ test('orphan prune: a still-existing project is NEVER pruned, and nothing on dis
 // throws, never trusts partial content) — file-level counterpart to
 // sanitizeLeanFloor's value-level guard above.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// cached verdict (beta.8 #2 — the UserPromptSubmit hot-path gate)
+// ---------------------------------------------------------------------------
+
+test('sanitizeVerdict: only a fresh FULL+economical verdict is armed; every other band/state is null', () => {
+  const now = Date.now();
+  const fresh = (over = {}) => ({ band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: now, ...over });
+  assert.deepStrictEqual(sanitizeVerdict(fresh(), now), { band: 'FULL', reason: 'fat-budget', fatTokens: 4004, at: now });
+
+  assert.strictEqual(sanitizeVerdict(fresh({ band: 'LEAN' }), now), null, 'LEAN never arms');
+  assert.strictEqual(sanitizeVerdict(fresh({ band: 'PLUMP' }), now), null, 'PLUMP never arms');
+  assert.strictEqual(sanitizeVerdict(fresh({ band: 'OBESE' }), now), null, 'OBESE never arms');
+  assert.strictEqual(sanitizeVerdict(fresh({ band: 'FULL', reason: 'externalize', economical: false }), now), null, 'externalize never arms (muscle, not the force-run case)');
+  assert.strictEqual(sanitizeVerdict(fresh({ economical: false }), now), null, 'a disarmed FULL (break-even against) never arms');
+  assert.strictEqual(sanitizeVerdict(fresh({ economical: 'true' }), now), null, 'a non-boolean-true economical is not trusted');
+});
+
+test('sanitizeVerdict: malformed/missing input collapses to null, never throws', () => {
+  for (const bad of [null, undefined, {}, [], 'FULL', 42, { band: 'FULL', economical: true }]) {
+    assert.doesNotThrow(() => sanitizeVerdict(bad));
+    assert.strictEqual(sanitizeVerdict(bad), null, `${JSON.stringify(bad)} must not arm`);
+  }
+});
+
+test('sanitizeVerdict: staleness — just inside VERDICT_MAX_AGE_MS survives, just past it is discarded; a future timestamp is discarded', () => {
+  const now = Date.now();
+  const at = (ms) => ({ band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 100, at: now - ms });
+  assert.notStrictEqual(sanitizeVerdict(at(VERDICT_MAX_AGE_MS - 1), now), null, 'just inside the window is armed');
+  assert.strictEqual(sanitizeVerdict(at(VERDICT_MAX_AGE_MS + 1), now), null, 'just past the window is stale -> null');
+  assert.strictEqual(sanitizeVerdict({ band: 'FULL', economical: true, at: now + 60000 }, now), null, 'a future timestamp is never trusted');
+});
+
+test('recordVerdict: round-trips through state and overwrites the previous session (LEAN clears a stale FULL immediately, not just eventually)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const t1 = Date.now();
+    recordVerdict(home, proj, { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004 }, t1);
+    const armedAfterFull = sanitizeVerdict(projectState(loadState(home), proj).lastVerdict, t1);
+    assert.deepStrictEqual(armedAfterFull, { band: 'FULL', reason: 'fat-budget', fatTokens: 4004, at: t1 });
+
+    const t2 = t1 + 1000;
+    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0 }, t2);
+    assert.strictEqual(sanitizeVerdict(projectState(loadState(home), proj).lastVerdict, t2), null, 'the new LEAN verdict overwrote the stale FULL — no lingering arm');
+  } finally { clean(home, proj); }
+});
+
+test('recordVerdict: orphan-prune still runs on this write path (consistent with setLeanFloor/setSnooze)', () => {
+  const { home, proj } = sandbox();
+  const dead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-verdict-')));
+  try {
+    recordStamp(home, dead, 50);
+    fs.rmSync(dead, { recursive: true, force: true });
+    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0 });
+    assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'recordVerdict prunes too');
+  } finally { clean(home, proj); }
+});
 
 test('G2: every corrupt/truncated/empty/wrong-shaped state file self-heals to {} — never throws', () => {
   const { home, proj } = sandbox();

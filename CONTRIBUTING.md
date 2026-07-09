@@ -43,7 +43,7 @@ Cross-agent by design — the engine is plain Node scripts and class-B discovery
 
 | Path | Purpose |
 |---|---|
-| `hooks/coalwash-conductor.js` | SessionStart hook: the 4-band gauge + self-update scheduling (Phoenix-13). |
+| `hooks/coalwash-conductor.js` | SessionStart + UserPromptSubmit hook: the 4-band gauge, the FULL-band per-turn repeat, and self-update scheduling (Phoenix-13). |
 | `scripts/lib/` | The engine (ESM, shipped): `class-b` discovery · `caliper` measurement/bands/break-even · `fidelity-gate` · `apply` transaction · `receipt` · config modules. |
 | `skills/coalwash/` | `SKILL.md` (the lean orchestration contract) + `references/` (method + platform adapter facts). |
 | `commands/` | `/coalwash:stats` (measurement) · `/coalwash:update` (self-update procedure). |

@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 'use strict';
-// CoalWash SessionStart conductor (Phoenix-13 hook: fail-silent, zero-dep, no
-// network, no spawn, never process.exit — hooks-safety.md). The chokepoint
-// gauge (SKILL-REPO-PATTERN Layer 8): memory is LOADED every session anyway,
-// so a session-start caliper sees the accumulated past, measures the present,
-// and inescapably catches everything written later — the gauge rides ~free.
+// CoalWash conductor (Phoenix-13 hook: fail-silent, zero-dep, no network, no
+// spawn, never process.exit — hooks-safety.md). Two events share this one
+// file (hooks.json), branching on hook_event_name from stdin:
+//   SessionStart     -> the full gauge (discovery + measurement + the 4-band
+//                       verdict). The chokepoint (SKILL-REPO-PATTERN Layer 8):
+//                       memory is LOADED every session anyway, so a
+//                       session-start caliper rides ~free.
+//   UserPromptSubmit -> the persistent per-turn FULL bar (beta.8 #2, below).
 //
 // 4-band model (2026-07-08 amendment, supersedes the blueprint's info-only
 // full-signal): LEAN = silent · PLUMP = ask (question-box; decline = snooze) ·
@@ -13,9 +16,10 @@
 // with the numbers SHOWN every fire (the series' one named consent exception,
 // "economic-dominance"). DELETE/MERGE always stays behind the human gate.
 //
-// CHEAP caliper only on this path: file sizes + stamps; content is read only
-// for the small always-loaded set; gzip only when a nudge will actually be
-// emitted AND the elapsed/size budget still holds (~100ms total wall budget).
+// CHEAP caliper only on the SessionStart path: file sizes + stamps; content is
+// read only for the small always-loaded set; gzip only when a nudge will
+// actually be emitted AND the elapsed/size budget still holds (~100ms total
+// wall budget). The UserPromptSubmit path is cheaper still — see below.
 //
 // NAMED divergence from hooks-safety.md §10 (whose read exception names project
 // CONFIG only): this hook also READS project class-B memory/governance CONTENT
@@ -26,19 +30,31 @@
 // CJS hook and the agent-invoked scripts share ONE implementation (a hook that
 // reimplements config-load silently diverged once in a sibling; never again).
 //
-// LAST-HOP VISIBILITY (beta.7 #2, MEMORY.md evidence chain): a SessionStart
-// hook's stdout is context-injection ONLY — it is never shown to the user, only
-// to the agent (source-grounded against code.claude.com/docs/en/hooks,
-// 2026-07-09). A live dogfood proved a busy/mid-tier agent can silently drop
-// that injected line and never surface it. This file is ALSO registered for
-// the `Notification` hook event (a documented, USER-visible channel via a
-// `terminalSequence` OS notification/bell — no matcher restriction, so it
-// fires on every Notification CC sends) — best-effort, ADDITIVE to the context
-// injection, never a replacement for it: a FULL-band announce with a session_id
-// available hands off a short summary to a session-scoped temp marker; the
-// Notification-event branch below reads + consumes it at most once. No
-// session_id (older platform, or no stdin provided) just skips the hand-off —
-// the context injection remains the primary, always-attempted channel.
+// LAST-HOP VISIBILITY (beta.7 #2 -> RIPPED at beta.8 #0, MEMORY.md): beta.7
+// shipped a SessionStart-written temp marker + a `Notification`-event OS
+// notification, reasoning that a SessionStart hook's stdout (context-injection
+// only, never shown to the user) needed a user-visible carrier. LAB-MEASURED
+// DEAD on this machine: a fresh dogfood session ran the FULL branch (marker
+// written, confirmed) but the marker was never consumed — a 142-transcript
+// sweep found ZERO `Notification` hookEvents ever fired here (the mechanism is
+// real, it simply never fires on this desktop-app surface). Removed: the
+// marker path, the Notification handler, and the `Notification` hooks.json
+// registration.
+//
+// THE REPLACEMENT (beta.8 #2): the blueprint's own original answer — a
+// persistent, un-dismissable per-turn bar — on the channel that demonstrably
+// works instead. The sibling conductors (CoalBoard/CoalTipple) inject on
+// UserPromptSubmit every turn and are observably obeyed: adjacency to the
+// user's own message, not a separate carrier event, is what works. Plain
+// stdout on exit 0 (the same mechanism SessionStart already uses, below) —
+// verified against CB's and CT's shipped, dogfooded `hooks/*-conductor.js`
+// (both plain-stdout on UserPromptSubmit; MEMORY.md: "demonstrably obeyed" in
+// production). The CC hooks reference (code.claude.com/docs/en/hooks)
+// documents a structured `hookSpecificOutput.additionalContext` JSON form for
+// this event and was internally inconsistent (two fetches, one flat
+// contradiction) on whether plain stdout also qualifies — matching the two
+// siblings' proven-live shipped behavior here (one-flock, one-color; a
+// working sibling implementation outranks an ambiguous doc summary).
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
@@ -55,11 +71,11 @@ function lib(name) {
 }
 
 // Read this invocation's hook JSON from stdin ({session_id, hook_event_name,
-// ...} per the CC hook contract). Fail-safe: an absent/short/malformed/
+// ...} per the CC hook contract) — this is how main() tells the SessionStart
+// and UserPromptSubmit branches apart. Fail-safe: an absent/short/malformed/
 // never-closing stdin resolves to {} within STDIN_BUDGET_MS rather than ever
-// blocking the hook (Phoenix #3/#4) — everything downstream that depends on it
-// (session_id for the Notification hand-off) just degrades to "unavailable",
-// never affecting the sanctioned context-injection path.
+// blocking the hook (Phoenix #3/#4) — an unrecognized/missing event name just
+// falls through to the SessionStart gauge (its existing default).
 function readStdinJson() {
   return new Promise((resolve) => {
     let data = '';
@@ -84,50 +100,6 @@ function readStdinJson() {
   });
 }
 
-function sessionSlug(sessionId) {
-  return String(sessionId || '').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 128);
-}
-// Session-scoped hand-off marker (Phoenix #6: state lives in temp files keyed
-// by session_id) — SessionStart writes a short summary here only for the two
-// "must reach the user" FULL variants (economical run-now, externalize); the
-// Notification branch reads + deletes it at most once per session.
-function fullMarkerPath(sessionId) {
-  return path.join(os.tmpdir(), `coalwash-full-${sessionSlug(sessionId)}.txt`);
-}
-
-// ponytail: no TTL/orphan-sweep on stale markers — each is tiny, sits in the
-// OS temp dir, and is scoped to a session_id that (per CC's contract) is never
-// reused, so a marker that's never consumed just self-cleans with the OS's own
-// temp-dir housekeeping. Add a sweep only if leftover temp litter ever proves
-// to be a real problem.
-
-async function handleNotification(input) {
-  const sessionId = input && input.session_id;
-  if (!sessionId) return; // nothing to correlate — silent (Phoenix #13)
-  const p = fullMarkerPath(sessionId);
-  let body;
-  try { body = fs.readFileSync(p, 'utf8'); } catch { return; } // no pending announce
-  try { fs.rmSync(p, { force: true }); } catch { /* best-effort cleanup */ }
-  if (!body) return;
-  // OSC 777 "notify" (iTerm2-style; unsupported terminals just ignore the
-  // escape sequence — harmless). Sanitize against anything that could break
-  // the sequence's own delimiters; the body is metrics-only, never memory
-  // content (same "receipt = metrics only" rule as receipt.mjs).
-  const safeBody = String(body).replace(/[;\r\n\x1b\x07]/g, ' ').slice(0, 200);
-  const seq = `\x1b]777;notify;CoalWash;${safeBody}\x07`;
-  console.log(JSON.stringify({ terminalSequence: seq }));
-}
-
-// Push a FULL-band line to the context injection (the primary, always-run
-// channel) and, best-effort, hand a short summary to the Notification channel
-// via the session-scoped marker above (skipped without a session_id).
-function announceFull(input, notifyBody, contextLine, out) {
-  out.push(contextLine);
-  const sessionId = input && input.session_id;
-  if (!sessionId) return;
-  try { fs.writeFileSync(fullMarkerPath(sessionId), String(notifyBody).slice(0, 200), 'utf8'); } catch { /* best-effort only */ }
-}
-
 // Self-update scheduling (series-standard kind-1, the CoalMine/CoalHearth GOLD
 // shape): the HOOK only SCHEDULES via a throttled crash-safe stamp — written
 // BEFORE the directive prints so a crash never re-nags; no network ever. The
@@ -146,7 +118,7 @@ function updateDue(cfg, clampedRead) {
   } catch { return false; }
 }
 
-async function handleSessionStart(input) {
+async function handleSessionStart() {
   const t0 = Date.now();
   const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, classB, caliper] = await Promise.all([
     import(lib('config-load.mjs')),
@@ -196,6 +168,13 @@ async function handleSessionStart(input) {
       } catch { return ''; }
     };
 
+    // beta.8 #2: feed the UserPromptSubmit hot path's cached read (Phoenix #3
+    // — no discovery there); only a FULL+economical verdict arms the per-turn
+    // bar — recordVerdict below is the write side, sanitizeVerdict (caliper.mjs)
+    // is the read-side gate.
+    let economical = false;
+    const fatTokens = Math.max(0, Math.round(m.alwaysLoaded.tokensEst - leanFloorTokens));
+
     if (verdict.band === 'PLUMP' && !snoozed) {
       caliper.setSnooze(home, projectRoot, now + caliper.PLUMP_SNOOZE_DAYS * DAY_MS); // self-throttle: at most one ask per window
       out.push(`[CoalWash] memory gauge: PLUMP — class-B always-loaded ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session (~est), ${bmiTxt}${gz()}. OFFER the user a /coalwash clean via your question tool (options: run the free mechanical Quick pass now / not now). Declining is fine — this nudge snoozes ${caliper.PLUMP_SNOOZE_DAYS} days either way. Deletes always require explicit human approval.`);
@@ -207,15 +186,13 @@ async function handleSessionStart(input) {
       // reclaim, so washing again cannot help — advise externalizing/
       // splitting, never "wash harder" on legitimate muscle (the growable-full
       // invariant: only the machine-capacity gate is person-independent, and
-      // its remedy is externalize, never wash). Gets the same last-hop
-      // treatment as the economical case below (both are "must reach the
-      // user" FULL variants — MEMORY.md beta.7 #2).
+      // its remedy is externalize, never wash). Context-injection is the
+      // guaranteed-delivery channel (beta.8 #0); this reason never arms the
+      // UserPromptSubmit per-turn bar (recordVerdict below) — the per-turn bar
+      // is for the force-run case only, and washing cannot help all-muscle.
       if (!snoozed) {
         caliper.setSnooze(home, projectRoot, now + caliper.OBESE_SNOOZE_DAYS * DAY_MS);
-        announceFull(input,
-          `FULL (externalize) — ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session, no reclaimable fat`,
-          `[CoalWash] memory gauge: FULL (externalize) — class-B always-loaded ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session (~est), ${bmiTxt}, ~no reclaimable fat (this is muscle, not bloat). SURFACE this line to the user verbatim. CoalWash cannot help further by washing — the store has outgrown this machine's working capacity (hard ceiling ~${verdict.hardCeilingTokens} tok, a rough placeholder). EXTERNALIZE or split older content out of the always-loaded set, or consciously raise fullPercent (the "bigger SSD" choice).`,
-          out);
+        out.push(`[CoalWash] memory gauge: FULL (externalize) — class-B always-loaded ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session (~est), ${bmiTxt}, ~no reclaimable fat (this is muscle, not bloat). SURFACE this line to the user verbatim. CoalWash cannot help further by washing — the store has outgrown this machine's working capacity (hard ceiling ~${verdict.hardCeilingTokens} tok, a rough placeholder). EXTERNALIZE or split older content out of the always-loaded set, or consciously raise fullPercent (the "bigger SSD" choice).`);
       }
     } else if (verdict.band === 'FULL') {
       const econ = caliper.breakEven({
@@ -227,16 +204,21 @@ async function handleSessionStart(input) {
       const fatLabel = econ.floorUnmeasured ? ' (floor unmeasured — an upper bound, the whole footprint counts as fat until a first clean stamps the lean floor)' : '';
       const numbers = `fat ~${econ.fatTokens} tok${fatLabel} loads every session ≈ ${econ.perDay} tok/day at the stamped session rate · one run ≈ ${econ.runCostTokens} tok · carrying it ${econ.horizonDays} days ≈ ${econ.horizonCarryTokens} tok · break-even ~${Number.isFinite(econ.breakEvenDays) ? econ.breakEvenDays.toFixed(1) : '∞'} days`;
       if (econ.economical) {
-        announceFull(input,
-          `FULL (${verdict.reason}) — ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session, clean recommended`,
-          `[CoalWash] memory gauge: FULL (${verdict.reason}) — deterministic break-even (all tokens ~est): ${numbers}. The run costs LESS than carrying the fat -> SURFACE this line to the user verbatim, then RUN the CoalWash pipeline now (economic-dominance rule; numbers shown above): start with the free mechanical Quick pass; escalate to the paid semantic Full pass only with a separate consent. DELETE/MERGE actions still require the human gate — nothing is deleted without explicit approval.`,
-          out);
+        economical = true; // arms the UserPromptSubmit per-turn bar via recordVerdict below
+        out.push(`[CoalWash] memory gauge: FULL (${verdict.reason}) — deterministic break-even (all tokens ~est): ${numbers}. The run costs LESS than carrying the fat -> SURFACE this line to the user verbatim, then RUN the CoalWash pipeline now (economic-dominance rule; numbers shown above): start with the free mechanical Quick pass; escalate to the paid semantic Full pass only with a separate consent. DELETE/MERGE actions still require the human gate — nothing is deleted without explicit approval.`);
       } else if (!snoozed) {
         caliper.setSnooze(home, projectRoot, now + caliper.OBESE_SNOOZE_DAYS * DAY_MS);
         out.push(`[CoalWash] memory gauge: FULL (${verdict.reason}) but the break-even does NOT yet favor a run (${numbers}) — the force-run stays disarmed. STRONGLY RECOMMEND a manual /coalwash review; deletes always require explicit human approval.`);
       }
     }
     // LEAN (or snoozed) -> silent: Phoenix #13, no output on the healthy path.
+
+    // Record this session's verdict for the UserPromptSubmit hot path (a
+    // plain state write, same cost class as recordStamp above). Runs every
+    // time regardless of band/snooze, so it OVERWRITES whatever a prior
+    // session left — a store that goes LEAN after a clean stops arming the
+    // per-turn bar on the very next SessionStart, not just eventually.
+    caliper.recordVerdict(home, projectRoot, { band: verdict.band, reason: verdict.reason, economical, fatTokens }, now);
   }
 
   if (updateDue(cfg, clampedRead)) {
@@ -249,16 +231,49 @@ async function handleSessionStart(input) {
   }
 }
 
+// UserPromptSubmit conductor branch (beta.8 #2 — see the file header). HOT-
+// PATH BUDGET (Phoenix #3): no config load, no discovery, no measureEntries —
+// reads ONLY the cached verdict handleSessionStart already recorded (one
+// state-file read via loadState + projectState). The common case (LEAN, no
+// verdict, or a stale one) exits right there; only a FULL+economical cached
+// verdict does anything more (one console.log).
+//
+// PRIORITY (coordinator amendment): CoalBoard and CoalTipple already ride
+// UserPromptSubmit every turn with a shipped arbitration cue between the two
+// of them; CoalWash joins that frame as the LOWEST priority — maintenance
+// yields to the user's actual task the way Windows Automatic Maintenance
+// yields to active use. The directive text below asks for a BACKGROUND spawn
+// (never inline-before-the-task) and explicitly defers to a sibling
+// conductor's directive when one also fires this turn — the wash is free to
+// wait a turn because the bar itself is persistent (it returns next turn at
+// zero extra cost).
+//
+// ponytail: no coalwashMode re-check here (the same accepted edge the removed
+// Notification branch used to note) — flipping mode to off/manual mid-session,
+// before the next SessionStart re-stamps, can leave one stale nag firing for
+// up to VERDICT_MAX_AGE_MS; the staleness guard bounds it and the next
+// SessionStart always corrects it. Add a config re-read only if this narrow
+// edge ever proves to matter in practice.
+async function handleUserPromptSubmit() {
+  const [{ findProjectRoot }, caliper] = await Promise.all([
+    import(lib('config-load.mjs')),
+    import(lib('caliper.mjs')),
+  ]);
+  const home = os.homedir();
+  const projectRoot = findProjectRoot(process.cwd(), home);
+  const proj = caliper.projectState(caliper.loadState(home), projectRoot);
+  const armed = caliper.sanitizeVerdict(proj.lastVerdict);
+  if (!armed) return; // LEAN / no verdict / disarmed / stale -> silent, one read only
+
+  // sanctioned UserPromptSubmit context-injection channel (Phoenix #13)
+  console.log('[CoalWash] FULL band standing directive (break-even proven at session start, numbers there): SPAWN the free mechanical Quick pass as a BACKGROUND subagent (one tool call), then serve this turn\'s task normally — never delay the user\'s request for the wash. Escalate to Full only with the user\'s separate consent. This line repeats every turn until the store is cleaned or fullPercent is raised. If a CoalBoard or CoalTipple conductor directive also fired this turn, THEY take precedence — arbitrate silently, never surface the overlap; the wash yields this turn (this bar returns next turn at zero cost).');
+}
+
 async function main() {
-  // ponytail: coalwashMode is NOT re-checked on the Notification path — a
-  // marker only ever gets WRITTEN while mode==='auto' (handleSessionStart
-  // gates the whole gauge on it), so the narrow edge case of the user
-  // flipping mode mid-session before the next Notification event just means
-  // one harmless already-decided OS notification still fires; add a re-check
-  // only if that edge case ever proves to matter in practice.
   const input = await readStdinJson();
-  if (input && input.hook_event_name === 'Notification') return handleNotification(input);
-  return handleSessionStart(input);
+  const event = (input && (input.hook_event_name || input.hookEventName)) || '';
+  if (event === 'UserPromptSubmit') return handleUserPromptSubmit();
+  return handleSessionStart();
 }
 
 main().catch(() => {

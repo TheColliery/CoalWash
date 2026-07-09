@@ -344,3 +344,52 @@ export function setSnooze(home, projectRoot, untilMs) {
   state.projects[key] = proj;
   return saveState(state, home);
 }
+
+// ---------------------------------------------------------------------------
+// cached verdict (beta.8 #2 — the UserPromptSubmit hot-path gate). SessionStart
+// already computes the 4-band verdict; recordVerdict stores just enough of it
+// so the per-turn conductor branch (Phoenix #3: no discovery/measureEntries
+// there) can decide whether to fire the persistent FULL standing directive
+// from a single state read, never re-measuring the store itself.
+// ---------------------------------------------------------------------------
+
+// A cached verdict older than this is never trusted (silent) — the next
+// SessionStart always refreshes it, so staleness can only ever WIDEN the
+// silent side, never force a stale nag past one day.
+export const VERDICT_MAX_AGE_MS = DAY_MS;
+
+// Record the SessionStart-computed verdict. Called every time a verdict is
+// computed (whatever the band), so a store that goes LEAN this session
+// overwrites a stale FULL left by a prior one immediately, not just eventually.
+export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
+  const state = pruneOrphans(loadState(home));
+  state.projects = state.projects || {};
+  const key = projKey(projectRoot);
+  const proj = state.projects[key] || {};
+  proj.lastVerdict = {
+    band: String((verdict && verdict.band) || ''),
+    reason: String((verdict && verdict.reason) || ''),
+    economical: !!(verdict && verdict.economical),
+    fatTokens: Number.isFinite(verdict && verdict.fatTokens) ? Math.round(verdict.fatTokens) : 0,
+    at: now,
+  };
+  state.projects[key] = proj;
+  return saveState(state, home);
+}
+
+// Sanitize a project's cached lastVerdict for the UserPromptSubmit hot path:
+// any doubt — a malformed shape, a non-finite/future/stale timestamp, or any
+// band/economical combination other than the ONE case the per-turn bar exists
+// for (FULL + economical, the armed force-run) — collapses to null (silent).
+// Mirrors sanitizeLeanFloor's "any doubt -> the safe default" rule, but here
+// silence IS the safe default: a missed nag self-corrects at the next
+// SessionStart, while a false nag would otherwise repeat every turn on stale
+// or corrupt data.
+export function sanitizeVerdict(rawVerdict, now = Date.now(), maxAgeMs = VERDICT_MAX_AGE_MS) {
+  if (!rawVerdict || typeof rawVerdict !== 'object') return null;
+  const at = Number(rawVerdict.at);
+  if (!Number.isFinite(at) || at > now || now - at > maxAgeMs) return null;
+  if (rawVerdict.band !== 'FULL' || rawVerdict.economical !== true) return null;
+  const fatTokens = Number(rawVerdict.fatTokens);
+  return { band: 'FULL', reason: String(rawVerdict.reason || ''), fatTokens: Number.isFinite(fatTokens) ? fatTokens : 0, at };
+}

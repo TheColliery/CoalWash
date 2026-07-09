@@ -2,6 +2,20 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.8] - 2026-07-10
+
+Reverses beta.7's `Notification`-event OS announce on its own lab measurement (a 142-transcript sweep of this machine found the event never fires here), replacing it with the blueprint's original answer: a persistent per-turn FULL directive that re-injects on `UserPromptSubmit` until the store is cleaned. Engine tests 164 → 171.
+
+### Removed
+- **The beta.7 `Notification`-event OS announce.** Lab-measured dead on this machine: a fresh dogfood session confirmed the FULL branch's session-scoped marker was written, but a 142-transcript sweep found **zero `Notification` hookEvents ever fired here** — the CC mechanism is real per its docs, it simply has no surface on the desktop app this machine runs (docs-true, fires-never — the platform-churns lesson in a new coat, not a bug in the mechanism itself). Removed: the `hooks.json` `Notification` registration, the marker write/consume path, the `handleNotification` handler, and the OSC-777 `terminalSequence` emission.
+
+### Added
+- **Persistent per-turn FULL bar on `UserPromptSubmit`.** SessionStart now unconditionally caches its computed verdict (`recordVerdict` — runs on every band, so a LEAN result immediately overwrites a stale cached FULL) instead of relying on the removed one-shot side-channel. A new `UserPromptSubmit` branch reads that cache (`sanitizeVerdict` — hot path: no discovery, no `measureEntries`, a single state read) and re-injects the FULL standing directive every turn while the store is FULL + economical + the cached verdict is fresher than 24h (`VERDICT_MAX_AGE_MS`). Same plain-stdout context-injection channel the shipped CoalBoard/CoalTipple conductors already use on this event — CoalWash joins it, not a new delivery mechanism. The directive tells the agent to SPAWN the free mechanical Quick pass as a background subagent (never inline-before-the-task) and to yield silently — no surfaced "conflict" — whenever a CoalBoard or CoalTipple conductor directive also fires the same turn (CB > CT > CW, the bottom rung of the shipped arbitration frame); yielding costs nothing because the bar repeats next turn for free. Honest ceiling: flipping `coalwashMode` off/manual mid-session can leave one stale nag firing for up to 24h until the next SessionStart re-stamps and corrects it — silence is the fail-safe side of the guard, never a stuck-on nag (`sanitizeVerdict` collapses a malformed, stale, or future-clock cached verdict to null).
+- **`caliper.mjs`: `recordVerdict` / `sanitizeVerdict` / `VERDICT_MAX_AGE_MS`** — the cache-write and cache-read halves of the per-turn bar above, plus its 24h staleness bound. Tests 164 → 171.
+
+### Changed
+- **Doc sweep: every README/reference claim naming the removed `Notification`/OS-announce channel realigned** to the per-turn bar (README's Compatibility section, `platform-cc.md`'s conductor wiring line, and the SECURITY.md/CONTRIBUTING.md hook descriptions — `hooks/coalwash-conductor.js` now branches on two registered events, SessionStart and UserPromptSubmit, not one).
+
 ## [0.1.0-beta.7] - 2026-07-09
 
 Fifth same-day hardening pass: the growable-full band fix the beta.6 live dogfood run surfaced within the hour (a freshly-cleaned, all-muscle store landed FULL on the old flat absolute-cap instead of LEAN), a user-visible channel for the FULL force-run announce (closing the last-hop visibility gap the same live test exposed — the conductor injected the announce correctly, but the receiving agent never surfaced it), the engine primitives for a global-scope lock/keeps pair on shared governance files (contract wiring follows), and the outer-only human-gate + headroom-quiet reconcile from the same-day design pass. Engine tests 148 → 164.

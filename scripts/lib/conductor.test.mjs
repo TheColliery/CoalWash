@@ -240,53 +240,100 @@ test('growable-full: post-floor all-muscle over the hard cap gets the EXTERNALIZ
 });
 
 // ---------------------------------------------------------------------------
-// LAST-HOP VISIBILITY (beta.7 item #2) — the Notification-channel hand-off.
+// PERSISTENT PER-TURN FULL BAR (beta.8 item #2) — the UserPromptSubmit branch.
+// Replaces the beta.7 Notification hand-off (lab-measured dead on this
+// machine — 142 transcripts, 0 Notification events ever; removed above).
 // ---------------------------------------------------------------------------
 
-test('last-hop visibility: an economical FULL run with a session_id writes a pending marker; a Notification event then emits an OS notification and consumes it once', () => {
+test('UserPromptSubmit: a cached FULL+economical verdict fires the standing per-turn directive', () => {
   const { home, proj } = sandbox();
   try {
-    muteUpdate(home);
-    seedClassB(home, proj, { claudeMdBytes: 20016, indexBytes: 0 }); // fat-budget FULL, economical
-    seedState(home, proj, { leanFloorTokens: 1000 });
-    const sessionId = 'sess-abc-123';
-    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: sessionId, source: 'startup' });
+    seedState(home, proj, { lastVerdict: { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() } });
+    const r = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
     assertGraceful(r);
-    assert.ok(r.stdout.includes('memory gauge: FULL (fat-budget)'), r.stdout);
-
-    const rn = run(proj, home, { hook_event_name: 'Notification', session_id: sessionId });
-    assertGraceful(rn);
-    const out = JSON.parse(rn.stdout);
-    assert.ok(typeof out.terminalSequence === 'string' && out.terminalSequence.includes('CoalWash'), rn.stdout);
-
-    const rn2 = run(proj, home, { hook_event_name: 'Notification', session_id: sessionId });
-    assertGraceful(rn2);
-    assert.strictEqual(rn2.stdout, '', 'the marker is consumed once and never re-fires');
+    assert.ok(r.stdout.includes('[CoalWash] FULL band standing directive'), r.stdout);
+    assert.ok(r.stdout.includes('SPAWN the free mechanical Quick pass as a BACKGROUND subagent'), 'background-spawn, never inline-before-the-task');
+    assert.ok(r.stdout.includes('never delay the user\'s request'), r.stdout);
+    assert.ok(r.stdout.includes('repeats every turn'), r.stdout);
+    assert.ok(r.stdout.includes('CoalBoard or CoalTipple conductor directive also fired'), 'yields to a sibling conductor, lowest priority');
+    assert.ok(r.stdout.includes('arbitrate silently, never surface the overlap'), 'mirrors the CB/CT shipped arbitration-cue shape');
   } finally { clean(home, proj); }
 });
 
-test('last-hop visibility: a Notification event with no pending marker (or no session_id) is a silent no-op', () => {
+test('UserPromptSubmit: LEAN, no verdict, a disarmed FULL, an externalize FULL, and a stale FULL+economical all stay silent', () => {
+  const cases = [
+    undefined, // no state file at all
+    { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0, at: Date.now() },
+    { band: 'FULL', reason: 'fat-budget', economical: false, fatTokens: 5000, at: Date.now() }, // disarmed (break-even against)
+    { band: 'FULL', reason: 'externalize', economical: false, fatTokens: 100, at: Date.now() }, // all-muscle, never arms
+    { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() - 25 * 60 * 60 * 1000 }, // stale, >24h
+  ];
+  for (const lastVerdict of cases) {
+    const { home, proj } = sandbox();
+    try {
+      if (lastVerdict) seedState(home, proj, { lastVerdict });
+      const r = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
+      assertGraceful(r);
+      assert.strictEqual(r.stdout, '', `case ${JSON.stringify(lastVerdict)} must stay silent`);
+    } finally { clean(home, proj); }
+  }
+});
+
+test('verdict-recording round-trip: a FULL-economical SessionStart records an armed verdict the very next UserPromptSubmit reads and fires on', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    const r1 = run(proj, home, { hook_event_name: 'Notification', session_id: 'no-marker-for-this-session' });
-    assertGraceful(r1);
-    assert.strictEqual(r1.stdout, '');
-    const r2 = run(proj, home, { hook_event_name: 'Notification' }); // no session_id at all
-    assertGraceful(r2);
-    assert.strictEqual(r2.stdout, '');
+    seedClassB(home, proj, { claudeMdBytes: 20016, indexBytes: 0 }); // fat-budget FULL, economical (same fixture as the FULL suite above)
+    seedState(home, proj, { leanFloorTokens: 1000 });
+    const rs = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(rs);
+    assert.ok(rs.stdout.includes('memory gauge: FULL (fat-budget)'), rs.stdout);
+
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'FULL');
+    assert.strictEqual(st.lastVerdict.economical, true);
+    assert.ok(st.lastVerdict.at > 0);
+
+    const rp = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
+    assertGraceful(rp);
+    assert.ok(rp.stdout.includes('FULL band standing directive'), rp.stdout);
   } finally { clean(home, proj); }
 });
 
-test('last-hop visibility: without a session_id (no stdin, matching every pre-existing test), SessionStart behaves exactly as before', () => {
+test('verdict-recording round-trip: a LEAN SessionStart records economical:false, so the following UserPromptSubmit stays silent', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    seedClassB(home, proj, { claudeMdBytes: 20016, indexBytes: 0 });
-    seedState(home, proj, { leanFloorTokens: 1000 });
-    const r = run(proj, home); // no stdin at all
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 }); // LEAN
+    const rs = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(rs);
+    assert.strictEqual(rs.stdout, '');
+
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'LEAN');
+    assert.strictEqual(st.lastVerdict.economical, false);
+
+    const rp = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
+    assertGraceful(rp);
+    assert.strictEqual(rp.stdout, '');
+  } finally { clean(home, proj); }
+});
+
+test('UserPromptSubmit hot path: the silent case never runs discovery/measurement (no state file created) and completes fast', () => {
+  const { home, proj } = sandbox();
+  try {
+    // A store that WOULD be FULL via the absolute cap if the full gauge ran —
+    // proves the branch never calls discoverClassB/measureEntries/recordStamp
+    // (Phoenix #3): if it did, this fixture would produce a state file same
+    // as the SessionStart tests above do.
+    seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 });
+    const t0 = Date.now();
+    const r = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
+    const elapsedMs = Date.now() - t0;
     assertGraceful(r);
-    assert.ok(r.stdout.includes('memory gauge: FULL (fat-budget)'), r.stdout);
+    assert.strictEqual(r.stdout, '', 'no cached verdict yet -> silent');
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'the hot path never stamps/discovers/measures — no state file created at all');
+    assert.ok(elapsedMs < 2000, `UserPromptSubmit silent path should be fast (node-startup-dominated); took ${elapsedMs}ms`);
   } finally { clean(home, proj); }
 });
 
