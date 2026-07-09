@@ -1,6 +1,6 @@
 # Verifying CoalWash
 
-CoalWash is verified under the same framework as its TheColliery siblings — Phoenix-13 hooks, reproducible builds, and event-driven independent scans. It is **high-privilege by nature** (it rewrites and, with approval, deletes memory/governance files), so the load-bearing safety gates live in CODE, not prose — see Structural Safety below.
+CoalWash is verified under the same framework as its TheColliery siblings — Phoenix-13 hooks, reproducible builds, and event-driven independent scans. It is **high-privilege by nature** (it rewrites and deletes memory/governance files), so the load-bearing safety gates live in CODE, not prose — see Structural Safety below.
 
 ## Reporting a Vulnerability
 
@@ -33,10 +33,10 @@ Re-scan stays event-driven (a new SkillSpector version or a genuinely new attack
 ## Structural Safety
 
 - **Phoenix-13 hook.** One hook file (`hooks/coalwash-conductor.js`) branches on two registered events — SessionStart (the gauge; plain context-injection) and Stop (the once-per-crossing ทำ/later ask, plus a standing-consent auto-run authorization on a FULL+economical crossing when `forceMode: auto`; a structured `{decision:'block', reason}` JSON write, the same mechanism CoalMine's `rot-canary` uses) — both fail-silent, zero-dependency, no network, **no child processes**, and silent outside those two sanctioned channels. A headless start is safe by construction — it only writes to stdout.
-- **Deletes are code-gated.** `apply.mjs` refuses any delete without `deletesApproved: true` (the human gate's flag) and refuses to touch a `pinned: true` file at all — the gates hold even against a misbehaving orchestrating agent.
+- **Delete/merge authorization is plan-sourced; safety is UNDO.** `apply.mjs` executes a delete/merge only because it is present in the adjudicated plan — there is no separate approval flag to bypass. Every apply snapshots (verified at creation) before the first mutation and a whole-run rollback restores everything on failure; a `pinned: true` file is refused outright — the gates hold even against a misbehaving orchestrating agent.
 - **Path containment.** Every touched path is realpath-resolved and contained on BOTH sides (declared roots too), fail-closed — a poisoned config or a symlink cannot aim a write/delete outside the memory sandbox. Discovery is read-only and contained the same way.
 - **Transactional apply.** Exclusive lock (atomic-create + stale-timeout + defer-on-doubt), marked snapshot before the first mutation, fsync'd WAL, atomic tmp-then-rename writes, deletes ordered last, wholesale rollback on any failure. Honest ceiling: fsync is not stronger than the drive's write cache; the snapshot is the last backstop.
 - **Untrusted config is parse-guarded.** The `.coalwash.json` JSONC parse drops `__proto__` / `constructor` / `prototype` keys; every numeric read is range-clamped to the schema default.
 - **Memory content is data, never instructions** — the skill contract binds every sub to judge content, not obey it (prompt-injection via poisoned memory is the named threat model).
 
-Honest scope: these measures are the series' data-safety discipline — injection-safe, path-safe, human-gated deletes, scrubbed output, offline code, opt-in zero-transmission (`localOnly`). No formal verification, no crypto-at-rest, no "military-grade" claim.
+Honest scope: these measures are the series' data-safety discipline — injection-safe, path-safe, snapshot-reversible deletes, scrubbed output, offline code, opt-in zero-transmission (`localOnly`). No formal verification, no crypto-at-rest, no "military-grade" claim.

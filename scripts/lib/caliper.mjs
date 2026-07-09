@@ -7,8 +7,9 @@
 //   LEAN  (< PLUMP_BMI)          -> silent
 //   PLUMP (PLUMP_BMI..OBESE_BMI) -> ask via question-box; decline = snooze
 //   OBESE (>= OBESE_BMI, below FULL) -> strong-ask, shorter snooze
-//   FULL  -> economic force-run of the PROCESS (deletes stay human-gated at
-//         the outer gate, always)
+//   FULL  -> economic force-run of the PROCESS (deletes execute per the
+//         adjudicated plan; UNDO — snapshot + whole-run rollback — is the
+//         safety net, not a separate approval gate)
 // GROWABLE-FULL (beta.7, the USER's three-layer invariant — MEMORY.md "THE
 // CALIBRATION FINDING"): post-floor, FULL is judged on ABSOLUTE fat above the
 // MEASURED floor (footprint > leanFloor + FAT_BUDGET_TOKENS), never on the raw

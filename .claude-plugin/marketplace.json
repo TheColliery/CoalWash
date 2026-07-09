@@ -6,7 +6,7 @@
     {
       "name": "coalwash",
       "source": "./plugin",
-      "description": "Memory-defragment/cleanup engine for agent class-B memory (memory + governance files). Fidelity-first: a free mechanical Quick pass plus a code-enforced fidelity gate proving zero STRUCTURED-token loss by diff (links, dates, versions, frontmatter; prose fidelity is the paid semantic layer's job); the semantic Full pass is consent-gated and deletes are always human-gated. Honest frame: slows how fast memory-overhead grows — it does not eliminate memory cost. Zero-dependency, offline, no API keys."
+      "description": "Memory-defragment/cleanup engine for agent class-B memory (memory + governance files). Fidelity-first: a free mechanical Quick pass plus a code-enforced fidelity gate proving zero STRUCTURED-token loss by diff (links, dates, versions, frontmatter; prose fidelity is the paid semantic layer's job); the semantic Full pass is consent-gated and every cut is snapshot-backed (whole-run rollback). Honest frame: slows how fast memory-overhead grows — it does not eliminate memory cost. Zero-dependency, offline, no API keys."
     }
   ]
 }

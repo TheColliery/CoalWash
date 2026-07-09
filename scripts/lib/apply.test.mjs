@@ -34,7 +34,7 @@ test('happy path: rewrite + create + approved delete, all-or-nothing artifacts c
       { type: 'rewrite', path: f1, content: 'rewritten one' },
       { type: 'delete', path: f2 },
       { type: 'create', path: f3, content: 'brand new' },
-    ], { deletesApproved: true }));
+    ])); // no deletesApproved anywhere — the delete's presence in the plan IS its authorization
     assert.strictEqual(r.ok, true, r.error);
     assert.strictEqual(r.applied, 3);
     assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'rewritten one');
@@ -76,7 +76,7 @@ test('mid-transaction failure rolls back EVERYTHING (mutated files restored, cre
       { type: 'create', path: path.join(store, 'f9.md'), content: 'should vanish' },
       { type: 'delete', path: f1 },
       { type: 'delete', path: f1 },
-    ], { deletesApproved: true }));
+    ])); // no deletesApproved — rollback-on-delete-path holds without it (item c)
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.rolledBack, true);
     assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'original one', 'mutated file restored from snapshot');
@@ -86,17 +86,38 @@ test('mid-transaction failure rolls back EVERYTHING (mutated files restored, cre
   } finally { clean(proj); }
 });
 
-test('deletes without deletesApproved are refused LOUD, nothing touched (the human gate is code-enforced)', () => {
+test('deletes execute on the PLAN alone — no separate approval flag (the knife-move: authorization is plan-sourced)', () => {
   const { proj, store } = sandbox();
   try {
-    const f = path.join(store, 'keep.md');
-    write(f, 'precious');
-    const r = applyPlan(planFor(proj, store, [{ type: 'delete', path: f }]));
+    const f = path.join(store, 'gone.md');
+    write(f, 'no longer needed');
+    const r = applyPlan(planFor(proj, store, [{ type: 'delete', path: f }])); // no deletesApproved anywhere
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(fs.existsSync(f), false);
+    // UNDO is still the safety net: snapshot kept, WAL cleared, lock released — same as any other apply.
+    assert.ok(fs.existsSync(path.join(r.snapshotDir, 'snap.complete')));
+    assert.strictEqual(fs.existsSync(path.join(txDirFor(proj), 'journal.json')), false, 'WAL cleared on commit');
+  } finally { clean(proj); }
+});
+
+test('the knife-move did not touch the fidelity gate: a delete bundled with an UNAPPROVED rewrite drop still refuses the WHOLE plan (no-silent-drop interlock lives)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const keep = path.join(store, 'source.md');
+    const gone = path.join(store, 'obsolete.md');
+    write(keep, 'See [[keep-this]] and the record.');
+    write(gone, 'old content to remove');
+    // The delete needs no approval flag now — but a sibling rewrite in the
+    // SAME plan silently drops a wikilink (no approvedDrops) -> the fidelity
+    // gate must still abort EVERYTHING, delete included (all-or-nothing).
+    const r = applyPlan(planFor(proj, store, [
+      { type: 'delete', path: gone },
+      { type: 'rewrite', path: keep, content: 'See the record.' },
+    ]));
     assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('deletes not approved'));
-    assert.ok(r.error.includes('keep.md'));
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'precious');
-    assert.strictEqual(fs.existsSync(txDirFor(proj)), false, 'refused before any tx artifact');
+    assert.match(r.error, /fidelity: unapproved fact drop/);
+    assert.strictEqual(fs.existsSync(gone), true, 'the bundled delete must NOT proceed when the plan fails fidelity');
+    assert.strictEqual(fs.readFileSync(keep, 'utf8'), 'See [[keep-this]] and the record.', 'nothing mutated');
   } finally { clean(proj); }
 });
 
@@ -106,7 +127,7 @@ test('PIN protection: pinned: true refuses BOTH delete and rewrite (gap #1)', ()
     const f = path.join(store, 'pinned.md');
     write(f, '---\npinned: true\n---\ncritical directive');
     assert.strictEqual(isPinned(f), true);
-    const del = applyPlan(planFor(proj, store, [{ type: 'delete', path: f }], { deletesApproved: true }));
+    const del = applyPlan(planFor(proj, store, [{ type: 'delete', path: f }])); // no deletesApproved — PIN still refuses
     assert.strictEqual(del.ok, false);
     assert.ok(del.error.includes('PIN-protected'));
     const rw = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'trimmed' }]));
@@ -130,7 +151,7 @@ test('containment is realpath-and-contain, fail-closed: a path outside the decla
     assert.ok(r.error.includes('containment'));
     assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'safe');
     // an unresolvable target is equally fail-closed
-    const r2 = applyPlan(planFor(proj, store, [{ type: 'delete', path: path.join(store, 'ghost.md') }], { deletesApproved: true }));
+    const r2 = applyPlan(planFor(proj, store, [{ type: 'delete', path: path.join(store, 'ghost.md') }])); // no deletesApproved — containment still refuses
     assert.strictEqual(r2.ok, false);
     assert.ok(r2.error.includes('containment'));
   } finally { clean(proj, outside); }
@@ -274,7 +295,7 @@ test('fidelity interlock in applyPlan: an UNAPPROVED rewrite drop aborts before 
     assert.strictEqual(bad.ok, false);
     assert.match(bad.error, /fidelity: unapproved fact drop/);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), 'See [[keep-this]] and the record.', 'nothing mutated on a fidelity abort');
-    // The SAME drop, explicitly approved by the human, is allowed through.
+    // The SAME drop, named in the plan's approvedDrops, is allowed through.
     const ok = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'See the record.' }], { approvedDrops: ['wikilink-drop:keep-this'] }));
     assert.strictEqual(ok.ok, true, ok.error);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), 'See the record.');
@@ -451,7 +472,7 @@ test('R1: a foreign write between plan-gating and apply aborts the txn via rollb
     write(f, 'the content the caller scanned');
     // the caller derived its rewrite from this content (recorded in the plan)...
     const plan = planFor(proj, store, [{ type: 'rewrite', path: f, content: 'rewritten from the scanned content', expectedOrig: 'the content the caller scanned' }]);
-    // ...then a cloud-sync client clobbered the file during the human-gate wait.
+    // ...then a cloud-sync client clobbered the file during the wait before apply.
     write(f, 'FOREIGN WRITER CONTENT');
     const r = applyPlan(plan);
     assert.strictEqual(r.ok, false);
@@ -491,12 +512,12 @@ test('R1: a delete target that changed since gating is NOT deleted (abort + rest
   try {
     const f = path.join(store, 'reviewed.md');
     write(f, 'the reviewed content');
-    const plan = planFor(proj, store, [{ type: 'delete', path: f, expectedOrig: 'the reviewed content' }], { deletesApproved: true });
-    write(f, 'CHANGED AFTER THE HUMAN REVIEWED IT');
+    const plan = planFor(proj, store, [{ type: 'delete', path: f, expectedOrig: 'the reviewed content' }]); // no deletesApproved
+    write(f, 'CHANGED AFTER THE PLAN WAS GATED');
     const r = applyPlan(plan);
     assert.strictEqual(r.ok, false);
     assert.match(r.error, /external writer/);
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'CHANGED AFTER THE HUMAN REVIEWED IT', 'the changed file is never deleted — the human approved deleting what they SAW');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'CHANGED AFTER THE PLAN WAS GATED', 'the changed file is never deleted — the plan authorized deleting what it SCANNED, not what is on disk now');
   } finally { clean(proj); }
 });
 

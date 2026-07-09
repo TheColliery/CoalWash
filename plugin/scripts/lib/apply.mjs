@@ -18,8 +18,10 @@
 // Safety gates enforced IN CODE here (they do not depend on agent diligence):
 //   - realpath-and-contain BOTH sides on EVERY touched path; fail-closed
 //     (an unresolvable or escaping path aborts before anything mutates).
-//   - deletes execute ONLY with plan.deletesApproved === true (the OUTER human
-//     gate sets that flag; this engine never prompts and never assumes).
+//   - deletes/merges execute when the PLAN carries them — authorization is
+//     PLAN-SOURCED (the adjudicated plan IS the authorization; no separate
+//     approval flag); safety instead lives in UNDO: a verified snapshot
+//     before the first mutation and a whole-run rollback on any failure.
 //   - a `pinned: true` frontmatter file refuses delete AND rewrite (gap #1 PIN).
 //   - .coalwash.lock: atomic-create + session-id + stale-timeout;
 //     defer-on-doubt (an unreadable or fresh foreign lock = held -> defer).
@@ -111,7 +113,8 @@ function containedIn(p, roots) {
 // a NUL byte marks binary/undecodable content; an opening frontmatter fence
 // that never closes marks a file our frontmatter tooling cannot faithfully
 // parse. Either way the REWRITE is refused (flagged to the caller) — deletes
-// are not sniffed, they stay behind the stricter pinned + human gates.
+// are not sniffed, they stay behind the stricter pinned + containment gates
+// (delete authorization itself is plan-sourced, below; UNDO is the safety net).
 export function sniffUnrewritable(buf) {
   if (buf.includes(0)) return 'binary content (NUL byte) — flagged, not rewritten';
   const s = buf.toString('utf8');
@@ -221,23 +224,23 @@ export function ensureSelfIgnore(dir) {
 //   actions: [{ type: 'rewrite'|'create'|'delete', path, content?, expectedOrig?, scope? }],
 //     expectedOrig (optional, rewrite/delete): the content the caller SCANNED
 //     and gated against. When provided, the external-writer guard compares the
-//     live file against it — covering the whole scan -> human-gate -> apply
-//     window (a cloud-sync clobber during the approval wait is caught). When
-//     absent, the baseline is the content staged at applyPlan time (the
-//     intra-transaction window only).
+//     live file against it — covering the whole scan -> apply window,
+//     including any wait before the mutation (a cloud-sync clobber during
+//     that wait is caught). When absent, the baseline is the content staged
+//     at applyPlan time (the intra-transaction window only).
 //     scope (optional, 'global'|'project', def 'project'): 'global' means this
 //     target lives in the user home's global class-B (e.g. the global
 //     CLAUDE.md closure) — the transaction ALSO takes a lock beside the global
 //     state file (globalLockPath) so two DIFFERENT projects' runs can never
 //     interleave writes to the same global file, which a per-project lock
 //     alone cannot see.
-//   deletesApproved: bool      — set ONLY on the strength of the Full-tier
-//     human-gate ask (the SKILL's explicit y/n on the terse flagged list) —
-//     this is the OUTER gate's flag, not a second in-code confirmation; the
-//     engine trusts the caller set it truthfully after a real ask, same trust
-//     boundary as `approvedDrops` below. false/absent blocks every delete.
 //   sessionId?: string,
 // }
+// Delete/merge authorization is PLAN-SOURCED, not a separate flag: a delete
+// action present in actions[] is authorized by having come from the
+// adjudicated plan (the insider-adjudication step) — same trust boundary as
+// `approvedDrops` below. There is no `deletesApproved` field to set; UNDO
+// (snapshot + whole-run rollback) is the safety net instead of pre-approval.
 // opts.home (def os.homedir()) — where globalLockPath resolves; override for
 // hermetic tests, exactly like opts.txDir/opts.now/opts.keepSnapshots.
 // Returns { ok, deferred?, error?, applied?, snapshotDir?, rolledBack?, flagged? }.
@@ -291,7 +294,7 @@ export function applyPlan(plan, opts = {}) {
         if (why) { flagged.push({ path: a.phys, reason: why }); continue; }
       }
       // External-writer baseline: the caller's scan-time content when provided
-      // (covers the human-gate wait), else the bytes staged just now.
+      // (covers any wait before the mutation), else the bytes staged just now.
       actionable.push({ ...a, origBuf, baseBuf: typeof a.expectedOrig === 'string' ? Buffer.from(a.expectedOrig, 'utf8') : origBuf });
     }
     if (!actionable.length) {
@@ -299,10 +302,12 @@ export function applyPlan(plan, opts = {}) {
     }
 
     // ---- code-enforced outer gates ----
-    const deletes = actionable.filter((a) => a.type === 'delete');
-    if (deletes.length && plan.deletesApproved !== true) {
-      return { ok: false, error: `deletes not approved (human gate): ${deletes.map((d) => d.phys).join(', ')}` };
-    }
+    // Delete/merge authorization is PLAN-SOURCED: a delete action reaching
+    // here already passed shape-validation + containment above (and, for the
+    // rewrite/create side of a merge, the fidelity gate below) — it is in
+    // actions[] because the adjudicated plan put it there, and that IS the
+    // authorization (no separate approval flag to check). UNDO — the
+    // snapshot + whole-run rollback below — is where safety lives instead.
     const pinned = actionable.filter((a) => a.type !== 'create' && isPinned(a.phys));
     if (pinned.length) {
       return { ok: false, error: `PIN-protected (pinned: true) — refuse to touch: ${pinned.map((p) => p.phys).join(', ')}` };

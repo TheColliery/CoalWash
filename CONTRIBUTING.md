@@ -6,7 +6,7 @@ CoalWash is the fidelity-first memory-defragment/cleanup engine of the [TheColli
 
 ## 🤝 Proposing a Change
 
-1. **Open an issue first** describing the problem, gap, or proposed feature (especially for a `SKILL.md` or engine-safety change — the engine rewrites and deletes memory files, so the fidelity gate, human gate, and containment logic are the load-bearing surfaces).
+1. **Open an issue first** describing the problem, gap, or proposed feature (especially for a `SKILL.md` or engine-safety change — the engine rewrites and deletes memory files, so the fidelity gate, the snapshot/rollback safety net, and containment logic are the load-bearing surfaces).
 2. Make your code changes and keep the verification gates green.
 3. Validate behavior against a real fixture: the org benchmark fixtures ([`TheColliery/.github/benchmarks/CoalWash/fixtures`](https://github.com/TheColliery/.github/tree/main/benchmarks/CoalWash/fixtures)) are planted-ground-truth memory stores made for exactly this — or dogfood on a copy of a real store, never the live one.
 
@@ -26,7 +26,7 @@ node scripts/test.mjs           # zero-dependency test suite (node --test, expli
 
 - **Rebuild the dist after a source change:** edit `hooks/`, `scripts/lib/`, `skills/`, `commands/`, or the manifest, then `node scripts/build-plugin.mjs` to re-sync `plugin/` (verify fails on a stale dist).
 - **`scripts/lib/config-schema.mjs` is the single source of truth** for every `.coalwash.json` key — `verify.mjs` validates the factory template against it; the README key table mirrors it.
-- **Safety gates live in code, keep them there:** deletes require `deletesApproved`, `pinned: true` is refused, every path is realpath-and-contained fail-closed, the apply is snapshot + WAL + rollback. Never move one of these into prompt text.
+- **Safety gates live in code, keep them there:** delete/merge authorization is plan-sourced (no separate approval flag), `pinned: true` is refused, every path is realpath-and-contained fail-closed, the apply is snapshot + WAL + rollback — safety is UNDO, not pre-approval. Never move one of these into prompt text.
 - **Keep the hook Phoenix-pure:** zero dependencies, fail-silent (try/catch, exit 0, never `process.exit()`), no network, no child processes, silent except the sanctioned channel.
 - **Add tests:** every lib change gets a unit test; every hook-behavior change gets a **hermetic spawn test** (spawn the real hook, sandbox TEMP + HOME). Register a new test *file* in `scripts/test.mjs` (the runner fails on an unlisted orphan).
 - **Language & tone:** shipped source and docs stay in English.

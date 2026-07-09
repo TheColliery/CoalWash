@@ -118,7 +118,7 @@ test('PLUMP: emits the ask nudge once and self-snoozes; the snoozed boot is sile
     assertGraceful(r1);
     assert.ok(r1.stdout.includes('[CoalWash] memory gauge: PLUMP'), r1.stdout);
     assert.ok(r1.stdout.includes('question tool'), 'the ask rides the agent question-box');
-    assert.ok(r1.stdout.includes('human approval'), 'deletes stay human-gated in the text');
+    assert.ok(r1.stdout.includes('snapshot-backed'), 'deletes are snapshot-backed/revertible, not human-pre-approved');
     const st = readProjState(home, proj);
     assert.ok(st.snoozeUntil > Date.now(), 'self-snoozed');
     const r2 = run(proj, home);
@@ -161,7 +161,7 @@ test('FULL via fat-budget (growable-full) with the break-even in favor: the dete
     assert.ok(r.stdout.includes('break-even ~'), 'break-even shown');
     assert.ok(r.stdout.includes('RUN the CoalWash pipeline now'), 'economic force directive');
     assert.ok(r.stdout.includes('economic-dominance'), 'the named exception is cited');
-    assert.ok(r.stdout.includes('human gate'), 'deletes stay human-gated even under force');
+    assert.ok(r.stdout.includes('snapshot-backed'), 'deletes are snapshot-backed/revertible even under force');
     assert.ok(r.stdout.includes('SURFACE this line to the user verbatim'), 'the last-hop agent directive is present (beta.7 #2)');
   } finally { clean(home, proj); }
 });
@@ -272,7 +272,7 @@ test('Stop: an unconsumed PLUMP crossing emits the ask (ทำ/later) via the st
     assert.ok(reason.includes('later (dismiss; the offer returns at the next ceiling crossing)'), 'the later option tells the consume-at-emission truth');
     assert.ok(!reason.includes('snooze'), 'no snooze promise — the code never re-fires until the next crossing');
     assert.ok(reason.includes('run the quick wash now'), 'PLUMP defaults to the quick exercise');
-    assert.ok(reason.includes('deletes remain human-gated'), reason);
+    assert.ok(reason.includes('snapshot-backed and revertible'), reason);
 
     const r2 = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r2);
@@ -310,7 +310,7 @@ test('Stop: a FULL+economical crossing with forceMode=auto (the default) emits t
     assert.ok(reason.includes('standing config authorizes'), reason);
     assert.ok(reason.includes('Quick pass NOW'), reason);
     assert.ok(reason.includes('stage-only'), reason);
-    assert.ok(reason.includes('human gate'), reason);
+    assert.ok(reason.includes('snapshot-backed'), reason);
     assert.ok(reason.includes('once per crossing, not per session'), reason);
     assert.ok(!reason.includes('question tool'), 'force never asks');
   } finally { clean(home, proj); }

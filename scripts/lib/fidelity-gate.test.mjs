@@ -125,7 +125,7 @@ test('an introduced zero-width space fails', () => {
   assert.ok(r.drops.some((d) => d.type === 'zwsp-introduced'));
 });
 
-test('emptying a file drops the WHOLE inventory (a delete must go through the human gate, not this one)', () => {
+test('emptying a file drops the WHOLE inventory (a real delete is a distinct action type, not this one)', () => {
   const r = checkFidelity(ORIG, '');
   assert.strictEqual(r.pass, false);
   const types = new Set(r.drops.map((d) => d.type));

@@ -1,7 +1,7 @@
 {
   // Master switch. auto = the session-start gauge measures class-B footprint and
   // nudges by band (LEAN silent / PLUMP ask / OBESE strong-ask / FULL economic
-  // force — deletes ALWAYS stay human-gated); manual = gauge silent, you run
+  // force — every cut snapshot-backed and revertible); manual = gauge silent, you run
   // /coalwash yourself; off = fully silent.
   "coalwashMode": "auto",
 
@@ -53,8 +53,8 @@
 
   // FULL+economical crossing behavior at the Stop hook. auto = standing
   // consent runs the free mechanical Quick pass immediately (the rot-canary
-  // autoFixMode model) — numbers are still shown every fire, deletes still
-  // stay human-gated; ask = FULL asks like other ceilings (ทำ/later);
+  // autoFixMode model) — numbers are still shown every fire, every cut
+  // stays snapshot-backed and revertible; ask = FULL asks like other ceilings (ทำ/later);
   // off = same as ask — never silent: 'ask'/'off' suppress only the auto-run
   // authorization, never the user's awareness of FULL.
   "forceMode": "auto"

@@ -26,7 +26,9 @@
 // OBESE = strong-ask (shorter snooze) · FULL = economic force-run of the
 // PROCESS — armed ONLY by the deterministic break-even proof computed in CODE,
 // with the numbers SHOWN every fire (the series' one named consent exception,
-// "economic-dominance"). DELETE/MERGE always stays behind the human gate.
+// "economic-dominance"). DELETE/MERGE authorization is plan-sourced (the
+// adjudicated plan IS the authorization) — safety is UNDO: every cut is
+// snapshot-backed and revertible (whole-run rollback), never a human pre-approval.
 //
 // CHEAP caliper only on the SessionStart path: file sizes + stamps; content is
 // read only for the small always-loaded set; gzip only when a nudge will
@@ -53,7 +55,7 @@
 //   beta.9  fixed the bar's blanket sibling-yield clause (a structural mute:
 //           CT fires every turn, CB fires on every Thai prompt) so the bar
 //           actually yields to user ACTIVITY, not a sibling's mere presence.
-//   beta.10 (THIS version) "ROUND 4 POSTMORTEM": delivery was STILL 100%
+//   beta.10 "ROUND 4 POSTMORTEM": delivery was STILL 100%
 //           (proven in-transcript, twice) yet a sonnet main ignored the bar
 //           on a no-tool prompt. Root cause: UserPromptSubmit context is a
 //           REQUEST channel — advisory, the agent is free to ignore it,
@@ -65,7 +67,7 @@
 //           UserPromptSubmit bar is RETIRED OUTRIGHT (not throttled further —
 //           removed); Stop becomes the one and only enforcement surface.
 //           Force rides standing config (the rot-canary autoFixMode model:
-//           numbers still shown, deletes still human-gated); PLUMP/OBESE/
+//           numbers still shown, every cut snapshot-backed); PLUMP/OBESE/
 //           FULL-disarmed crossings ride the SAME Stop channel via the
 //           question-box, ONCE per edge-crossing rather than every turn (see
 //           the "edge-crossing state" section of caliper.mjs).
@@ -196,10 +198,10 @@ async function handleSessionStart() {
 
     if (verdict.band === 'PLUMP' && !snoozed) {
       caliper.setSnooze(home, projectRoot, now + caliper.PLUMP_SNOOZE_DAYS * DAY_MS); // self-throttle: at most one ask per window
-      out.push(`[CoalWash] memory gauge: PLUMP — class-B always-loaded ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session (~est), ${bmiTxt}${gz()}. OFFER the user a /coalwash clean via your question tool (options: run the free mechanical Quick pass now / not now). Declining is fine — this nudge snoozes ${caliper.PLUMP_SNOOZE_DAYS} days either way. Deletes always require explicit human approval.`);
+      out.push(`[CoalWash] memory gauge: PLUMP — class-B always-loaded ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session (~est), ${bmiTxt}${gz()}. OFFER the user a /coalwash clean via your question tool (options: run the free mechanical Quick pass now / not now). Declining is fine — this nudge snoozes ${caliper.PLUMP_SNOOZE_DAYS} days either way. Every cut is snapshot-backed and revertible (whole-run rollback).`);
     } else if (verdict.band === 'OBESE' && !snoozed) {
       caliper.setSnooze(home, projectRoot, now + caliper.OBESE_SNOOZE_DAYS * DAY_MS);
-      out.push(`[CoalWash] memory gauge: OBESE — class-B always-loaded ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session (~est), ${bmiTxt}${gz()}. STRONGLY RECOMMEND a /coalwash clean — ask via your question tool (run Quick now / not now); a decline snoozes only ${caliper.OBESE_SNOOZE_DAYS} days. Deletes always require explicit human approval.`);
+      out.push(`[CoalWash] memory gauge: OBESE — class-B always-loaded ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session (~est), ${bmiTxt}${gz()}. STRONGLY RECOMMEND a /coalwash clean — ask via your question tool (run Quick now / not now); a decline snoozes only ${caliper.OBESE_SNOOZE_DAYS} days. Every cut is snapshot-backed and revertible (whole-run rollback).`);
     } else if (verdict.band === 'FULL' && verdict.reason === 'externalize') {
       // Post-floor, all-muscle, over the hard machine ceiling: ~no fat to
       // reclaim, so washing again cannot help — advise externalizing/
@@ -224,10 +226,10 @@ async function handleSessionStart() {
       const numbers = `fat ~${econ.fatTokens} tok${fatLabel} loads every session ≈ ${econ.perDay} tok/day at the stamped session rate · one run ≈ ${econ.runCostTokens} tok · carrying it ${econ.horizonDays} days ≈ ${econ.horizonCarryTokens} tok · break-even ~${Number.isFinite(econ.breakEvenDays) ? econ.breakEvenDays.toFixed(1) : '∞'} days`;
       if (econ.economical) {
         economical = true; // arms the Stop hook's force case via recordVerdict below
-        out.push(`[CoalWash] memory gauge: FULL (${verdict.reason}) — deterministic break-even (all tokens ~est): ${numbers}. The run costs LESS than carrying the fat -> SURFACE this line to the user verbatim, then RUN the CoalWash pipeline now (economic-dominance rule; numbers shown above): start with the free mechanical Quick pass; escalate to the paid semantic Full pass only with a separate consent. DELETE/MERGE actions still require the human gate — nothing is deleted without explicit approval.`);
+        out.push(`[CoalWash] memory gauge: FULL (${verdict.reason}) — deterministic break-even (all tokens ~est): ${numbers}. The run costs LESS than carrying the fat -> SURFACE this line to the user verbatim, then RUN the CoalWash pipeline now (economic-dominance rule; numbers shown above): start with the free mechanical Quick pass; escalate to the paid semantic Full pass only with a separate consent. DELETE/MERGE actions ride the adjudicated plan — every cut is snapshot-backed and revertible, nothing silent.`);
       } else if (!snoozed) {
         caliper.setSnooze(home, projectRoot, now + caliper.OBESE_SNOOZE_DAYS * DAY_MS);
-        out.push(`[CoalWash] memory gauge: FULL (${verdict.reason}) but the break-even does NOT yet favor a run (${numbers}) — the force-run stays disarmed. STRONGLY RECOMMEND a manual /coalwash review; deletes always require explicit human approval.`);
+        out.push(`[CoalWash] memory gauge: FULL (${verdict.reason}) but the break-even does NOT yet favor a run (${numbers}) — the force-run stays disarmed. STRONGLY RECOMMEND a manual /coalwash review; every cut is snapshot-backed and revertible.`);
       }
     }
     // LEAN (or snoozed) -> silent: Phoenix #13, no output on the healthy path.
@@ -319,7 +321,7 @@ async function handleStop(input) {
   let reason;
   if (isForceCrossing && forceMode === 'auto') {
     // case (b): force — standing consent, no ask, mirrors rot-canary's own auto-scan.
-    reason = `[CoalWash] FULL band + break-even proven (numbers: fat ~${verdict.fatTokens} tok): standing config authorizes the free mechanical Quick pass NOW — run it (stage-only; every DELETE/MERGE still waits at the human gate), then note the receipt path to the user in one line. This fires once per crossing, not per session.`;
+    reason = `[CoalWash] FULL band + break-even proven (numbers: fat ~${verdict.fatTokens} tok): standing config authorizes the free mechanical Quick pass NOW — run it (stage-only; every cut is snapshot-backed — one command rolls the whole run back), then note the receipt path to the user in one line. This fires once per crossing, not per session.`;
   } else {
     // case (a): ask ทำ/later — PLUMP, OBESE, a FULL crossing that never armed
     // (economical:false), or a FULL crossing whose AUTO-RUN authorization is
@@ -327,7 +329,7 @@ async function handleStop(input) {
     const fatTokens = Number.isFinite(proj.lastVerdict && proj.lastVerdict.fatTokens) ? Math.round(proj.lastVerdict.fatTokens) : 0;
     const bandKey = crossing.band.toLowerCase();
     const exercise = (exercisePerBand && exercisePerBand[bandKey]) || 'quick';
-    reason = `[CoalWash] memory crossed the ${crossing.band} ceiling (fat ~${fatTokens} tok). Offer the user via your question tool, exactly two options: ทำ (run the ${exercise} wash now — the configured exercise for this ceiling) / later (dismiss; the offer returns at the next ceiling crossing). If the user picks ทำ: run the pipeline per the coalwash skill (deletes remain human-gated). This crossing is marked consumed the moment this ask fires — it will not repeat until the next rise.`;
+    reason = `[CoalWash] memory crossed the ${crossing.band} ceiling (fat ~${fatTokens} tok). Offer the user via your question tool, exactly two options: ทำ (run the ${exercise} wash now — the configured exercise for this ceiling) / later (dismiss; the offer returns at the next ceiling crossing). If the user picks ทำ: run the pipeline per the coalwash skill (every cut is snapshot-backed and revertible). This crossing is marked consumed the moment this ask fires — it will not repeat until the next rise.`;
   }
 
   caliper.consumeCrossing(home, projectRoot, now); // once per crossing (consume-at-emission)

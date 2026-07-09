@@ -2,6 +2,22 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.11] - 2026-07-10
+
+The knife move: removes the last human pre-approval step from delete/merge authorization. Safety was never resting on that flag alone — it now rests entirely on UNDO. Engine tests 194 → 195.
+
+### Changed
+- **Delete/merge authorization is plan-sourced, not human-approved.** A delete or merge action reaching `apply.mjs` is authorized by its presence in the adjudicated plan (the insider-adjudication step already decided it) — there is no separate approval flag to set or check. Safety relocates to UNDO: every apply still snapshots (verified at creation) before the first mutation, and a whole-run rollback (kept 3 snapshots) restores everything on any failure — unchanged since beta.2, now the ONLY safety net for a cut instead of one of two. **The ruling behind the move:** per-name OK-pressing over a list of unread filenames is ceremony, not judgment — a human cannot meaningfully vet memory content by filename alone, so the old "approval" was really the human rubber-stamping the machine's own adjudication. The Windows maintenance model this series ports (Disk Cleanup, Storage Sense, defrag) never asks per-file either — it shows a number ("clean 4.2GB?") and the system is trusted; CoalWash now matches that shape exactly instead of a looser approximation of it.
+- **`hooks/coalwash-conductor.js`'s Stop-hook strings and SessionStart advisories, `skills/coalwash/SKILL.md`'s Hard Rules, and `references/method.md`** reworded throughout from "human-gated"/"deletes require approval" to "every cut is snapshot-backed and revertible" — no gate behavior changed by this pass, only the language describing where the gate lives.
+
+### Removed
+- **The `deletesApproved` plan flag and its refusal check in `apply.mjs`.** There is no field left to set; a delete/merge present in `actions[]` is self-authorizing by construction, since it could only arrive there via the adjudicated plan.
+
+### Still in force (unchanged by this release)
+The fidelity gate's no-silent-drop interlock (any structured-token drop still blocks the apply unless the plan names that exact drop in `approvedDrops` — a different, still-live mechanism from the removed `deletesApproved`) · `pinned: true` refusal · realpath-and-contain containment on both sides · the external-writer (R1) abort-and-rollback · the snapshot + WAL journal + whole-run rollback. The human's job stays exactly 2 presses: run consent, and ทำ/later at a band-ceiling crossing — never a per-item review.
+
+Tests 194 → 195.
+
 ## [0.1.0-beta.10] - 2026-07-10
 
 Moves CoalWash off the advisory request channel entirely and onto the Stop hook's blocking enforcement channel — the same mechanism `rot-canary` already proves daily on this machine. Engine tests 171 → 193.

@@ -36,7 +36,7 @@ Mechanical only; each op is definable without judgment. Compute the new text per
 | Op | Definition |
 |---|---|
 | exact-dedup | Byte-identical repeated paragraph/block within one file → keep the first occurrence. NOT near-duplicates (that is Full). |
-| dead-link fix | A `[[target]]` whose target file no longer exists in the store → FLAG it. A repoint (changing the link value) mechanically registers as a wikilink-drop at the gate — carry it to the human gate as a named, explicitly-approved drop; never silently drop or rewrite a link. |
+| dead-link fix | A `[[target]]` whose target file no longer exists in the store → FLAG it. A repoint (changing the link value) mechanically registers as a wikilink-drop at the gate — carry it in the plan's `approvedDrops` as a named drop; never silently drop or rewrite a link. |
 | whitespace | Collapse 3+ blank lines to 2; strip trailing spaces. Never touch content lines. |
 | index rebuild | Regenerate the memory index's entry list to match the files actually present (missing entry → add; entry for a deleted file → remove). Keep the index's own prose untouched. |
 | oversize / stale | A file past `fileMaxSizeKb`, or TTL-stale by its own dates → FLAG ONLY (a Full candidate), never rewritten by Quick. |
@@ -65,7 +65,7 @@ Per flag, decide: **accept** (genuinely garbage — schedule the cut) · **rejec
 - A rejection (keep) with its concrete reason appends `{target, reason, date}` to `.claude/coalwash/keeps.json` — an adjudicated keep is not re-flagged next run without new evidence; decision-fatigue is real, a settled item stays settled.
 - A `superseded` accept must name WHERE the superseding statement lives (it must survive).
 - `done-point-in-time` with a durable LESSON inside → trim to the lesson, don't delete.
-- Cuts are `rewrite` actions (trim/compact) wherever possible; whole-file `delete` and N→1 `merge` are the human-gated classes.
+- Cuts are `rewrite` actions (trim/compact) wherever possible; whole-file `delete` and N→1 `merge` carry the most weight — get the call right; the safety net is UNDO (snapshot + whole-run rollback), not a pre-approval gate.
 - **Clean to the low-water target, not the threshold edge:** a run triggered near/over the ceiling aims at `targetPercent` (fire high, clean low — hysteresis), so the next session does not immediately re-trip the band. Never force cuts past what the accepted flags give — the target is a stop-early line, not a quota.
 - **Contradiction candidates:** verify against ground truth where checkable (the target's own files beat memory); fix the WRONG copy, never average. Unverifiable → flag to the human, change nothing.
 
@@ -83,11 +83,11 @@ console.log(JSON.stringify(gateFiles(pairs), null, 1));
 "
 ```
 
-For a MERGE (N sources → 1), `orig` = the sources concatenated — the union inventory must survive. `pass: false` → restore every listed drop into the new text and re-gate. The ONLY sanctioned alternative to restoring: a drop that is the direct consequence of a delete or repoint the human authorized at the outer Full-ask (e.g. removing a deleted file's entry link from the index) may proceed — carried **by name** in the plan's `approvedDrops` so the code interlock passes exactly that drop and no other (the itemized drop list is the opt-in programmer surface of SKILL step 4, not a mandatory by-name re-confirmation). Nothing drops silently — that is the whole gate.
+For a MERGE (N sources → 1), `orig` = the sources concatenated — the union inventory must survive. `pass: false` → restore every listed drop into the new text and re-gate. The ONLY sanctioned alternative to restoring: a drop that is the direct consequence of a delete or repoint the adjudicated plan itself carries (e.g. removing a deleted file's entry link from the index) may proceed — carried **by name** in the plan's `approvedDrops` so the code interlock passes exactly that drop and no other (the itemized drop list is the opt-in programmer surface of SKILL step 4, not a mandatory by-name re-confirmation). Nothing drops silently — that is the whole gate.
 
 Merges also need a **claim-strength check** the fidelity gate does not cover (it catches dropped tokens, not softened wording — "usually" → "always" drops nothing structured). Before applying an accepted merge, spawn a second before-vs-after outsider: same zero-context contract, retasked ("ORIGINAL vs MERGED: flag any claim whose strength changed, one line each"). `localOnly` or a no-spawn platform → skip the spawn and flag the merge for manual human review instead.
 
-Apply (deletes only after the human's explicit yes):
+Apply (deletes execute on the adjudicated plan alone — no separate approval flag):
 
 ```bash
 node --input-type=module -e "
@@ -97,7 +97,7 @@ console.log(JSON.stringify(applyPlan(JSON.parse(fs.readFileSync('[PLAN.json]', '
 "
 ```
 
-Plan shape: `{ projectRoot, roots: [the class-B dirs touched], actions: [{type: 'rewrite'|'create'|'delete', path, content?, expectedOrig?}], deletesApproved: bool, sessionId }` — set `expectedOrig` (rewrite/delete) to the scanned/gated original text so the external-writer guard covers the whole scan→apply window, not just the instant of writing. Results: `deferred: true` → lock held, stop + say so · `rolledBack: true` → report, nothing changed · `ok: true` → proceed to receipt. The engine re-refuses pinned files and uncontained paths regardless of what you pass — that is the point.
+Plan shape: `{ projectRoot, roots: [the class-B dirs touched], actions: [{type: 'rewrite'|'create'|'delete', path, content?, expectedOrig?}], sessionId }` — set `expectedOrig` (rewrite/delete) to the scanned/gated original text so the external-writer guard covers the whole scan→apply window, not just the instant of writing. Results: `deferred: true` → lock held, stop + say so · `rolledBack: true` → report, nothing changed · `ok: true` → proceed to receipt. The engine re-refuses pinned files and uncontained paths regardless of what you pass — that is the point.
 
 ## 5. Receipt + floor + state
 
