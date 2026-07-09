@@ -83,3 +83,55 @@ test('a poisoned project config cannot pollute Object.prototype through the merg
     assert.strictEqual(Object.prototype.polluted, undefined);
   } finally { clean(home, proj); }
 });
+
+// --- safer-value-wins monotonic merge (CoalBoard dogfood M3: an untrusted
+//     project config must not weaken a deliberate GLOBAL safety choice) ---
+function writeCfgs(home, proj, g, p) {
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify(g));
+  fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify(p));
+}
+
+test('monotonic: a project CANNOT disable a global localOnly:true (privacy opt-in holds)', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj, { localOnly: true }, { localOnly: false });
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).localOnly, true, 'global privacy setting wins');
+  } finally { clean(home, proj); }
+});
+
+test('monotonic: a project CAN enable localOnly the global left default (more private is allowed)', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj, { fullPercent: 6 }, { localOnly: true });
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).localOnly, true, 'project may make it MORE private');
+  } finally { clean(home, proj); }
+});
+
+test('monotonic: a project may SHUT OFF but not RE-ENABLE past global (the feature holds, the hole closes)', () => {
+  const { home, proj } = sandbox();
+  try {
+    // global auto -> project off wins (the advertised "shut off per project")
+    writeCfgs(home, proj, { coalwashMode: 'auto' }, { coalwashMode: 'off' });
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).coalwashMode, 'off', 'project may disable');
+  } finally { clean(home, proj); }
+  const s2 = sandbox();
+  try {
+    // global off (user disabled) -> project cannot re-enable to auto
+    writeCfgs(s2.home, s2.proj, { coalwashMode: 'off' }, { coalwashMode: 'auto' });
+    assert.strictEqual(loadMergedConfig({ cwd: s2.proj, home: s2.home }).coalwashMode, 'off', 'project cannot re-enable a globally-off tool');
+  } finally { clean(s2.home, s2.proj); }
+});
+
+test('monotonic: a project cannot make updateMode LOUDER (off -> auto blocked); quieter is fine', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj, { updateMode: 'off' }, { updateMode: 'auto' });
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).updateMode, 'off', 'no unsolicited network from a repo config');
+  } finally { clean(home, proj); }
+  const s2 = sandbox();
+  try {
+    writeCfgs(s2.home, s2.proj, { updateMode: 'ask' }, { updateMode: 'off' });
+    assert.strictEqual(loadMergedConfig({ cwd: s2.proj, home: s2.home }).updateMode, 'off', 'quieter is always allowed');
+  } finally { clean(s2.home, s2.proj); }
+});

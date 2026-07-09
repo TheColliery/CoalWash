@@ -54,9 +54,37 @@ function readJsonc(file) {
   }
 }
 
-// Flat shallow merge: project keys overwrite global keys (the schema is flat).
+// Safety-shaping keys merge MONOTONICALLY: a project may only move a value toward
+// the SAFER end, never weaken a deliberate GLOBAL safety choice. This closes the
+// trust boundary (a cloned untrusted repo's `.coalwash.json` cannot flip a user's
+// global privacy/consent setting) AND preserves "shut it off per project" — off is
+// the safe end, so a project may always disable. Every other key: project wins.
+// Ordering index 0 = safest (least activity / no network).
+const SAFER_ENUM = {
+  coalwashMode: ['off', 'manual', 'auto'],
+  updateMode: ['off', 'remind', 'ask', 'auto'],
+};
+const SAFER_TRUE = ['localOnly']; // a bool whose SAFE value is true (privacy opt-in)
+
+export function mergeSafety(global, project) {
+  const out = { ...global, ...project };
+  for (const [key, order] of Object.entries(SAFER_ENUM)) {
+    // Only constrain against an EXPLICIT global choice; if global uses the factory
+    // default (key absent) the project is free to set anything.
+    if (project[key] === undefined || global[key] === undefined) continue;
+    const gi = order.indexOf(global[key]);
+    const pi = order.indexOf(project[key]);
+    if (gi === -1 || pi === -1) continue; // unknown value: leave the shallow-merge result
+    out[key] = pi <= gi ? project[key] : global[key]; // project may not be LOUDER than global
+  }
+  for (const key of SAFER_TRUE) {
+    if (global[key] === true) out[key] = true; // a project cannot turn OFF a global privacy opt-in
+  }
+  return out;
+}
+
 export function loadMergedConfig({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const global = readJsonc(globalConfigPath(home));
   const project = readJsonc(projectConfigPath(cwd, home));
-  return { ...global, ...project };
+  return mergeSafety(global, project);
 }

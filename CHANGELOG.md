@@ -2,6 +2,15 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.3] - 2026-07-09
+
+Second **CoalBoard dogfood** (full-mirror, nasa) — the config trust-boundary + two honesty over-claims.
+
+### Fixed
+- **[MED] an untrusted project config could weaken a global safety/privacy choice.** The two-level cascade merged `{...global, ...project}` (project wins every key), so a cloned repo's `.coalwash.json` could flip a user's global `localOnly: true` → `false` (defeating the privacy opt-out) or a global `coalwashMode/updateMode: off` back on. Safety-shaping keys now merge **monotonically — safer-value-wins**: `localOnly` is OR'd (a project may make it more private, never less), and `coalwashMode`/`updateMode` let a project move only toward the *safer* end (off/quiet). This **preserves "shut off per project"** (off is the safe end, always allowed) while closing the hole. Every other key still project-wins. +4 regression tests (98 → 102).
+- **[MED honesty] "zero fact-loss proven by code" over-claimed.** The mechanical gate proves zero **structured-token** loss (wikilinks, dates, versions, link/URL destinations, frontmatter) — a load-bearing **prose** fact is out of its scope and rests on the paid semantic reviewers + the human (exactly what the module comment already says). README / SKILL / honest-frame wording corrected to match the code.
+- **[MED honesty] `localOnly` was advertised as an absolute code guarantee** ("no spawned sub EVER receives memory content") with no executable enforcing it. Reworded to what it is: a **mode the skill contract runs** (Quick-only, no content-bearing sub) — with the FLAG now merge-protected (a project cannot disable a global `localOnly:true`), and the no-sub behavior honestly attributed to the contract, not an OS sandbox.
+
 ## [0.1.0-beta.2] - 2026-07-09
 
 Launch-day **CoalBoard dogfood** (nasa rigor, 3 opus blind lenses + judge) found real defects a green suite missed — the three lenses returned DISJOINT sets (the sampler + correlated-blind-spot doctrine working). All fixed here; +6 regression tests (92 → 98).

@@ -4,7 +4,7 @@
 
 > *Coal washing is the real mining process that cleans raw coal — separating the waste without damaging the coal.* This one is a memory washer/defragmenter for your agent: **it cleans the fat, never the meat.**
 
-**A fidelity-first memory-defragment/cleanup engine** for agent class-B memory — the memory and governance files your platform loads into context every session. A free mechanical Quick pass plus a code-enforced fidelity gate prove zero fact-loss by diff (not hope); the paid semantic Full pass is a separate consent; every delete is human-gated in code.
+**A fidelity-first memory-defragment/cleanup engine** for agent class-B memory — the memory and governance files your platform loads into context every session. A free mechanical Quick pass plus a code-enforced fidelity gate prove zero **structured-token** loss by diff (links, dates, versions, URLs, frontmatter — not hope; prose fidelity is the paid semantic layer's job); the semantic Full pass is a separate consent; every delete is human-gated in code.
 
 ![version](https://img.shields.io/github/v/tag/TheColliery/CoalWash?label=version&color=blue)
 ![license](https://img.shields.io/badge/license-Apache_2.0-blue)
@@ -24,7 +24,7 @@ Agent memory grows additively and unmanaged. The always-loaded set (memory index
 
 CoalWash is the SSD cleanup + defragment discipline ported to that store, **fidelity-first**:
 
-- **The meat is inviolable.** A mechanical fidelity gate diffs every rewrite's structured-token inventory — `[[wikilinks]]`, dates, versions, frontmatter keys — and ANY drop blocks the apply. Zero fact-loss is proven by code, not promised by a prompt.
+- **Structured facts are inviolable.** A mechanical fidelity gate diffs every rewrite's structured-token inventory — `[[wikilinks]]`, dates, versions, link/URL destinations, frontmatter keys — and ANY drop blocks the apply: that class of fact-loss is caught by CODE, not hoped. A load-bearing **prose** fact (a sentence like "the rate limit is 5000/hr") is out of the mechanical gate's scope — that fidelity rests on the paid semantic reviewers **and you**, not this gate. The gate's honest scope is stated in the module itself.
 - **Deletes are human-gated in code.** The apply engine refuses deletes without explicit approval, and a `pinned: true` file is untouchable — the gates do not depend on agent diligence.
 - **The apply is transactional.** Exclusive lock, marked snapshot before the first mutation, fsync'd WAL, atomic writes, deletes last, wholesale rollback on any failure. The worst realistic outcome of any crash is *"the run did not happen"* — never *"memory is corrupted."*
 
