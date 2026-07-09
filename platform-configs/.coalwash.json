@@ -28,8 +28,9 @@
   // pass (always asked as a separate consent, never auto).
   "quickVsFull": "quick",
 
-  // Trade-secret mode: true = mechanical Quick only — memory content NEVER
-  // passes through a model, zero transmission (deep semantic defrag disabled).
+  // Trade-secret mode: true = mechanical Quick only — no spawned sub ever
+  // receives memory content; nothing beyond what the platform already loads
+  // reaches any model (deep semantic defrag disabled).
   "localOnly": false,
 
   // Self-update (series standard). The session-start hook only SCHEDULES a check
