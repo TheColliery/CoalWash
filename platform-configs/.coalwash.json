@@ -28,9 +28,10 @@
   // pass (always asked as a separate consent, never auto).
   "quickVsFull": "quick",
 
-  // Trade-secret mode: true = mechanical Quick only — no spawned sub ever
-  // receives memory content; nothing beyond what the platform already loads
-  // reaches any model (deep semantic defrag disabled).
+  // Trade-secret mode: true = the SKILL contract runs Quick-only and skips
+  // the semantic tier (deep defrag disabled) — agent-honored, not a
+  // code-enforced transmission block; the flag itself can't be weakened by
+  // a project config once set globally.
   "localOnly": false,
 
   // Self-update (series standard). The session-start hook only SCHEDULES a check

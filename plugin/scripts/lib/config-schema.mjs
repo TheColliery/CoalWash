@@ -24,7 +24,7 @@ export const CONFIG_SCHEMA = [
   { key: 'targetPercent', type: 'number', min: 0.5, max: 49, def: 3, help: 'Low-water clean-to target as % of capacity (must sit below fullPercent; anti-thrash hysteresis; default: 3)' },
   { key: 'fileMaxSizeKb', type: 'int', min: 1, max: 1024, def: 25, help: 'Per-file size cap in KB before a class-B file is flagged oversize (default: 25 — the CC memory-index cap class)' },
   { key: 'quickVsFull', type: 'enum', values: ['quick', 'full'], def: 'quick', help: 'Default run tier: quick = free mechanical pass; full = paid semantic pass (always a separate consent; default: quick)' },
-  { key: 'localOnly', type: 'bool', def: false, help: 'Trade-secret mode: mechanical Quick only — no spawned sub ever receives memory content; nothing beyond what the platform already loads reaches any model (default: false)' },
+  { key: 'localOnly', type: 'bool', def: false, help: "Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config (default: false)" },
   { key: 'updateMode', type: 'enum', values: ['ask', 'auto', 'remind', 'off'], def: 'ask', help: 'Self-update behavior at session start (ask, auto, remind, off; default: ask)' },
   { key: 'updateCheckDays', type: 'int', min: 1, max: 365, def: 14, help: 'Days between self-update checks/reminders (default: 14)' },
 ];

@@ -2,6 +2,30 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.5] - 2026-07-09
+
+Third **CoalBoard dogfood** (nasa), same day — two honesty findings on top of beta.3's own fix: beta.3 corrected the claims at their PRIMARY location (SKILL.md + the README frame) but left the identical phrasing stale everywhere it was repeated — a "say it once" miss, not a new bug class.
+
+### Changed
+- **[MED honesty] "zero fact-loss proven by code" — remaining unscoped copies matched to the SKILL.md/README-established wording.** The mechanical gate proves zero **structured-token** loss only (wikilinks, dates, versions, link/URL destinations, frontmatter); a load-bearing **prose** fact is out of its scope and rests on the paid semantic reviewers + the human gate. Corrected wherever the bare "proven by diff, not hoped" phrasing — no structured-token scope named — still stood.
+- **[MED honesty] `localOnly`'s "no spawned sub EVER receives memory content" absolute reworded to its real enforcement level.** SKILL.md's Hard Rules already carry the honest version (beta.3): a MODE the run contract honors, not an OS/code guarantee — the flag's own integrity is code-enforced (the merge-protection in `config-load.mjs`: a project cannot weaken a global `localOnly:true`), but the no-spawn *behavior* is contract-enforced by the agent honoring SKILL.md, not by a sandbox or hook. The same unhedged "ever" absolute stood wherever it was repeated outside SKILL.md; reworded to the same honest framing.
+
+Removes overclaim, adds no new guarantee: the fidelity gate, the human delete-gate, and `localOnly`'s merge-protection are unchanged — only the wording now matches what the code actually proves, everywhere the claim is repeated, not just at its first mention. Credit: the user's CoalBoard nasa audit, 2026-07-09.
+
+### Fixed
+- **[LOW process] beta.4 shipped with no CHANGELOG entry** — backfilled below, reconstructed from git (the same class CoalLedger backfilled today).
+
+## [0.1.0-beta.4] - 2026-07-09
+
+*(Backfilled 2026-07-09 — shipped with no CHANGELOG entry; reconstructed from git, `v0.1.0-beta.3..v0.1.0-beta.4`.)*
+
+### Fixed
+- **[HIGH CodeQL] `js/file-system-race` (TOCTOU) in `ensureSelfIgnore`** (`scripts/lib/apply.mjs`): the self-ignore `.gitignore` write was exists-then-write; now an exclusive create (`{ flag: 'wx' }`, `EEXIST` swallowed — two racing writers produce identical content, both harmless). The idempotent write made the race harmless in practice; the fix closes the check-then-use window and silences the HIGH. Config-only safety fix, no behavior change.
+
+### Changed
+- **CI:** `github/codeql-action` init/analyze/upload-sarif 4.36.3 → 4.37.0 · `DavidAnson/markdownlint-cli2-action` 23.2.0 → 24.0.0 (Dependabot, SHA-pinned).
+- **Dependabot config:** `github/codeql-action*` grouped into ONE PR (no init/analyze version skew — the skew that reds CodeQL, seen live) + `assignees: [HetCreep]` so bot PRs notify the maintainer at any watch level. Human still reviews + merges (no auto-merge).
+
 ## [0.1.0-beta.3] - 2026-07-09
 
 Second **CoalBoard dogfood** (full-mirror, nasa) — the config trust-boundary + two honesty over-claims.

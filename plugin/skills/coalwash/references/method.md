@@ -106,7 +106,7 @@ After a **gate-passed FULL clean only**, stamp the lean floor (`setLeanFloor(hom
 
 ## 6. localOnly discipline
 
-`localOnly: true` → skip §2–3 entirely (no sub, no semantic pass, decline politely if asked to escalate); Quick ops only on the always-loaded set already in your context; recall-store files get code measurement + FLAGS only. Nothing beyond what the platform already loaded ever reaches a model.
+`localOnly: true` → skip §2–3 entirely (no sub, no semantic pass, decline politely if asked to escalate); Quick ops only on the always-loaded set already in your context; recall-store files get code measurement + FLAGS only. **This is a contract you honor, not a code-enforced transmission block** — no executable intercepts a Task/Agent-tool call, so the no-sub behavior depends on you following this line (same class as the memory-is-DATA rule in SKILL.md's Hard rules). What IS code-enforced: `mergeSafety()` in `config-load.mjs` never lets a project config weaken a global `localOnly:true`.
 
 ## 7. Dry-run
 

@@ -53,7 +53,7 @@ The gauge rides **Memory-BMI** = always-loaded footprint / lean floor (floor-rel
 | OBESE | Strong ask, shorter snooze |
 | FULL | Force-runs the *process* — armed only by a deterministic break-even proof (one run costs less than carrying the fat), with the numbers shown every time. Deletes still stop at the human gate |
 
-**`localOnly` (trade-secret mode):** mechanical Quick only — no spawned sub ever receives memory content, the semantic tier is disabled, nothing beyond what your platform already loads reaches a model. Memory is private data; see [PRIVACY.md](PRIVACY.md).
+**`localOnly` (trade-secret mode):** the SKILL contract runs mechanical Quick only and skips the semantic tier — agent-honored, not a code-enforced transmission block (the flag itself can't be weakened by a project config once set globally). Memory is private data; see [PRIVACY.md](PRIVACY.md).
 
 ## ⚠️ Read before you run it
 
@@ -92,7 +92,7 @@ Every tool in the series supports two config levels — a global `~/.claude/.coa
 | `targetPercent` | `3` | Low-water clean-to target (% of capacity, below `fullPercent`) — anti-thrash hysteresis |
 | `fileMaxSizeKb` | `25` | Per-file cap in KB before a class-B file is flagged oversize |
 | `quickVsFull` | `quick` | Default run tier: `quick` = free mechanical pass · `full` = paid semantic pass (always a separate consent) |
-| `localOnly` | `false` | Trade-secret mode: mechanical Quick only — no **spawned sub** ever receives memory content; nothing beyond what your platform already loads reaches any model |
+| `localOnly` | `false` | Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config |
 | `updateMode` | `ask` | Self-update behavior at session start (`ask` \| `auto` \| `remind` \| `off`) |
 | `updateCheckDays` | `14` | Days between self-update checks/reminders |
 
