@@ -255,8 +255,10 @@ test('UserPromptSubmit: a cached FULL+economical verdict fires the standing per-
     assert.ok(r.stdout.includes('SPAWN the free mechanical Quick pass as a BACKGROUND subagent'), 'background-spawn, never inline-before-the-task');
     assert.ok(r.stdout.includes('never delay the user\'s request'), r.stdout);
     assert.ok(r.stdout.includes('repeats every turn'), r.stdout);
-    assert.ok(r.stdout.includes('CoalBoard or CoalTipple conductor directive also fired'), 'yields to a sibling conductor, lowest priority');
-    assert.ok(r.stdout.includes('arbitrate silently, never surface the overlap'), 'mirrors the CB/CT shipped arbitration-cue shape');
+    assert.ok(r.stdout.includes('background spawn IS the yield'), 'the spawn itself is the yield, not sibling presence');
+    assert.ok(r.stdout.includes('sibling conductor advisories (CoalBoard/CoalTipple) do NOT block it'), 'a sibling firing never mutes the bar');
+    assert.ok(r.stdout.includes('if CoalBoard is actually convening this turn'), 'the one real carve: CB actually convening defers one turn');
+    assert.ok(!r.stdout.includes('THEY take precedence'), 'the old blanket sibling-yield clause is gone (beta.9 fix)');
   } finally { clean(home, proj); }
 });
 

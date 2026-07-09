@@ -55,6 +55,12 @@
 // contradiction) on whether plain stdout also qualifies — matching the two
 // siblings' proven-live shipped behavior here (one-flock, one-color; a
 // working sibling implementation outranks an ambiguous doc summary).
+//
+// BETA.9 (MEMORY.md "ROUND 3 POSTMORTEM"): the bar's blanket sibling-yield
+// clause was a structural mute (CT fires every turn, CB fires on every
+// Thai prompt) — fixed: maintenance yields to user ACTIVITY, never to a
+// sibling advisory's mere PRESENCE; the background spawn IS the yield,
+// with one carve for CoalBoard actually convening.
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
@@ -238,15 +244,17 @@ async function handleSessionStart() {
 // verdict, or a stale one) exits right there; only a FULL+economical cached
 // verdict does anything more (one console.log).
 //
-// PRIORITY (coordinator amendment): CoalBoard and CoalTipple already ride
-// UserPromptSubmit every turn with a shipped arbitration cue between the two
-// of them; CoalWash joins that frame as the LOWEST priority — maintenance
-// yields to the user's actual task the way Windows Automatic Maintenance
-// yields to active use. The directive text below asks for a BACKGROUND spawn
-// (never inline-before-the-task) and explicitly defers to a sibling
-// conductor's directive when one also fires this turn — the wash is free to
-// wait a turn because the bar itself is persistent (it returns next turn at
-// zero extra cost).
+// PRIORITY (beta.9-corrected): CoalBoard and CoalTipple already ride
+// UserPromptSubmit every turn; CoalWash joins that frame at the LOWEST
+// priority the Windows-Automatic-Maintenance way — maintenance yields to the
+// user's ACTUAL ACTIVITY, never to the mere PRESENCE of a sibling advisory
+// (beta.8's "yield when a sibling fired" clause was a structural mute: CT
+// fires every turn by design, CB fires on every Thai-script prompt). The
+// directive text below asks for a BACKGROUND spawn (never inline-before-the-
+// task) — that spawn IS the complete yield already; the ONE carve is
+// CoalBoard actually CONVENING this turn (its consent question-box going
+// up), which defers the spawn one turn (the bar is persistent, so nothing is
+// lost).
 //
 // ponytail: no coalwashMode re-check here (the same accepted edge the removed
 // Notification branch used to note) — flipping mode to off/manual mid-session,
@@ -266,7 +274,7 @@ async function handleUserPromptSubmit() {
   if (!armed) return; // LEAN / no verdict / disarmed / stale -> silent, one read only
 
   // sanctioned UserPromptSubmit context-injection channel (Phoenix #13)
-  console.log('[CoalWash] FULL band standing directive (break-even proven at session start, numbers there): SPAWN the free mechanical Quick pass as a BACKGROUND subagent (one tool call), then serve this turn\'s task normally — never delay the user\'s request for the wash. Escalate to Full only with the user\'s separate consent. This line repeats every turn until the store is cleaned or fullPercent is raised. If a CoalBoard or CoalTipple conductor directive also fired this turn, THEY take precedence — arbitrate silently, never surface the overlap; the wash yields this turn (this bar returns next turn at zero cost).');
+  console.log('[CoalWash] FULL band standing directive (break-even proven at session start, numbers there): SPAWN the free mechanical Quick pass as a BACKGROUND subagent (one tool call), then serve this turn\'s task normally — never delay the user\'s request for the wash. The background spawn IS the yield: sibling conductor advisories (CoalBoard/CoalTipple) do NOT block it. ONE exception: if CoalBoard is actually convening this turn (its consent question-box is going up), defer the spawn to the next turn — this bar returns at zero cost. Escalate to Full only with the user\'s separate consent. This line repeats every turn until the store is cleaned or fullPercent is raised.');
 }
 
 async function main() {

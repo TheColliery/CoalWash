@@ -2,6 +2,13 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.9] - 2026-07-10
+
+Hotfix to beta.8's per-turn FULL bar — one directive string in `hooks/coalwash-conductor.js`, no engine changes.
+
+### Fixed
+- **The bar's blanket sibling-yield clause was a structural mute, not a graceful defer.** A live round-3 test proved delivery in-transcript (the SessionStart directive and the per-turn bar both fired as designed), but CoalTipple fires every turn by design and CoalBoard fires on every Thai-script prompt — so the clause's "yield when a sibling advisory fires" condition was true on every turn for a Thai-typing user, permanently muting the bar even though the agent obeyed the shipped contract exactly. Fixed: maintenance now yields to the user's actual ACTIVITY, never to a sibling advisory's mere presence — the background spawn IS the complete yield; the one carve is CoalBoard actually **convening** this turn (its consent question-box going up), which defers the spawn one turn at zero cost (the bar repeats next turn regardless).
+
 ## [0.1.0-beta.8] - 2026-07-10
 
 Reverses beta.7's `Notification`-event OS announce on its own lab measurement (a 142-transcript sweep of this machine found the event never fires here), replacing it with the blueprint's original answer: a persistent per-turn FULL directive that re-injects on `UserPromptSubmit` until the store is cleaned. Engine tests 164 → 171.
