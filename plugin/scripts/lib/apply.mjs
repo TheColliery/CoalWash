@@ -168,10 +168,11 @@ export function txDirFor(projectRoot) {
 // the user's project tracks `.claude/` — code-enforced, not a doc promise.
 // Best-effort (fail-silent): a read-only fs must never block the transaction.
 function ensureSelfIgnore(dir) {
-  try {
-    const p = path.join(dir, '.gitignore');
-    if (!fs.existsSync(p)) fs.writeFileSync(p, '*\n');
-  } catch {}
+  // Exclusive create (no exists-then-write TOCTOU): two racing writers both try
+  // 'wx'; one wins, the other gets EEXIST — both harmless (the content is
+  // identical). Any other error is swallowed (best-effort, must never block a tx).
+  try { fs.writeFileSync(path.join(dir, '.gitignore'), '*\n', { flag: 'wx' }); }
+  catch (e) { if (e && e.code !== 'EEXIST') { /* read-only fs etc — ignore */ } }
 }
 
 // plan = {

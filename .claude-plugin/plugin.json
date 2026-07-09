@@ -1,6 +1,6 @@
 {
   "name": "coalwash",
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0-beta.4",
   "description": "CoalWash — memory-defragment/cleanup engine for agent class-B memory (memory + governance files). Fidelity-first: a free mechanical Quick pass plus a code-enforced fidelity gate (zero fact-loss proven by diff, not hoped); the semantic Full pass is consent-gated and deletes are always human-gated. Honest frame: slows how fast memory-overhead grows — it does not eliminate memory cost. Zero-dependency, offline, no API keys.",
   "author": { "name": "HetCreep" },
   "homepage": "https://github.com/TheColliery/CoalWash",
