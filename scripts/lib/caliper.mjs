@@ -346,10 +346,12 @@ export function setSnooze(home, projectRoot, untilMs) {
 }
 
 // ---------------------------------------------------------------------------
-// cached verdict (beta.8 #2 — the UserPromptSubmit hot-path gate). SessionStart
-// already computes the 4-band verdict; recordVerdict stores just enough of it
-// so the per-turn conductor branch (Phoenix #3: no discovery/measureEntries
-// there) can decide whether to fire the persistent FULL standing directive
+// cached verdict (built at beta.8 #2 for the since-retired UserPromptSubmit
+// hot path; beta.10 REPOINTS it at the Stop hook instead — the storage and
+// sanitization stay exactly as they were, only the reader changed).
+// SessionStart already computes the 4-band verdict; recordVerdict stores just
+// enough of it so the Stop conductor branch (Phoenix #3: no discovery/
+// measureEntries there) can decide whether to fire the FULL force directive
 // from a single state read, never re-measuring the store itself.
 // ---------------------------------------------------------------------------
 
@@ -377,9 +379,9 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
   return saveState(state, home);
 }
 
-// Sanitize a project's cached lastVerdict for the UserPromptSubmit hot path:
-// any doubt — a malformed shape, a non-finite/future/stale timestamp, or any
-// band/economical combination other than the ONE case the per-turn bar exists
+// Sanitize a project's cached lastVerdict for the Stop hot path: any doubt —
+// a malformed shape, a non-finite/future/stale timestamp, or any
+// band/economical combination other than the ONE case the force case exists
 // for (FULL + economical, the armed force-run) — collapses to null (silent).
 // Mirrors sanitizeLeanFloor's "any doubt -> the safe default" rule, but here
 // silence IS the safe default: a missed nag self-corrects at the next
@@ -392,4 +394,82 @@ export function sanitizeVerdict(rawVerdict, now = Date.now(), maxAgeMs = VERDICT
   if (rawVerdict.band !== 'FULL' || rawVerdict.economical !== true) return null;
   const fatTokens = Number(rawVerdict.fatTokens);
   return { band: 'FULL', reason: String(rawVerdict.reason || ''), fatTokens: Number.isFinite(fatTokens) ? fatTokens : 0, at };
+}
+
+// ---------------------------------------------------------------------------
+// edge-crossing state (beta.10 — MEMORY.md "NORMAL-MODE ASK REDESIGN: ONCE-
+// TIME EDGES"). Retires the beta.8/9 per-turn UserPromptSubmit bar (a REQUEST
+// channel a busy agent proved able to ignore, "ROUND 4 POSTMORTEM") in favor
+// of the Stop hook's BLOCKING channel: instead of nagging every turn, the ask
+// fires ONCE per RISE across a band ceiling, then stays silent until the next
+// rise. Bands rank LEAN < PLUMP < OBESE < FULL; a rise (new rank > previous
+// rank) arms an unconsumed crossing at the new (highest) band reached. This
+// also covers the "qualifying past" case: a project with no verdict on record
+// yet defaults its previous rank to LEAN(0), so a first-ever scan that already
+// lands above LEAN fires immediately, first opportunity, same as a live rise
+// (the Modloader-shaped case). A same-or-falling band does nothing — an
+// existing pending crossing, if any, is left exactly as it is (never
+// re-armed; two SessionStarts at the same band are ONE crossing, not two).
+// LEAN clears any pending crossing outright: the store is clean, nothing left
+// to ask about.
+// ---------------------------------------------------------------------------
+export const BAND_RANK = { LEAN: 0, PLUMP: 1, OBESE: 2, FULL: 3 };
+
+// Called every SessionStart alongside recordVerdict, comparing the NEW band
+// against the band on record from BEFORE this session's recordVerdict call
+// (the caller reads it off the pre-overwrite proj.lastVerdict.band).
+export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.now()) {
+  const state = pruneOrphans(loadState(home));
+  state.projects = state.projects || {};
+  const key = projKey(projectRoot);
+  const proj = state.projects[key] || {};
+  if (newBand === 'LEAN') {
+    delete proj.lastCrossing;
+  } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {
+    proj.lastCrossing = { band: newBand, at: now, consumed: false };
+  }
+  state.projects[key] = proj;
+  return saveState(state, home);
+}
+
+// Sanitize a project's cached lastCrossing for the Stop hot path: any doubt —
+// a malformed shape, an unknown/LEAN band, a future timestamp, or an
+// already-consumed crossing — collapses to null (silent), mirroring
+// sanitizeVerdict's "any doubt -> the safe default" rule. No age-based
+// staleness cutoff (unlike sanitizeVerdict): a crossing records a fact ("a
+// rise happened at time T"), which does not go stale the way a cached
+// footprint measurement does — see the ponytail note on consumeCrossing for
+// why nothing here can go unconsumed forever regardless.
+export function sanitizeCrossing(rawCrossing, now = Date.now()) {
+  if (!rawCrossing || typeof rawCrossing !== 'object') return null;
+  if (rawCrossing.consumed === true) return null;
+  if (!(rawCrossing.band in BAND_RANK) || rawCrossing.band === 'LEAN') return null;
+  const at = Number(rawCrossing.at);
+  if (!Number.isFinite(at) || at > now) return null;
+  return { band: rawCrossing.band, at };
+}
+
+// ponytail: consumption happens at EMISSION time — the Stop hook calls this
+// the instant it surfaces (ask/force) a pending crossing, not on a
+// downstream "the user picked X" signal. There is no CLI surface today for
+// the agent to report the
+// user's choice back into state, so gating consumption on one would leave a
+// crossing pending indefinitely whenever the user never invokes it. This
+// mirrors the EXISTING SessionStart PLUMP/OBESE self-throttle (setSnooze
+// already fires at ask-EMISSION time there too, not on the answer) — one
+// flock, one color within this file. Consequence: nothing can go unconsumed
+// forever, so the once-considered 7-day-TTL/re-arm-once fallback is
+// unnecessary and not implemented here; add a real TTL only if emission-time
+// consumption proves too eager in practice (e.g. a session killed before the
+// Stop hook's feedback ever reached the user).
+export function consumeCrossing(home, projectRoot, now = Date.now()) {
+  const state = pruneOrphans(loadState(home));
+  state.projects = state.projects || {};
+  const key = projKey(projectRoot);
+  const proj = state.projects[key] || {};
+  if (proj.lastCrossing && typeof proj.lastCrossing === 'object') {
+    proj.lastCrossing = { ...proj.lastCrossing, consumed: true, consumedAt: now };
+  }
+  state.projects[key] = proj;
+  return saveState(state, home);
 }

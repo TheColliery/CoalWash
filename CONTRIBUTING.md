@@ -24,7 +24,7 @@ node scripts/test.mjs           # zero-dependency test suite (node --test, expli
 
 ### Development Rules
 
-- **Rebuild the dist after a source change:** edit `bin/`, `hooks/`, `scripts/lib/`, `skills/`, `commands/`, or the manifest, then `node scripts/build-plugin.mjs` to re-sync `plugin/` (verify fails on a stale dist).
+- **Rebuild the dist after a source change:** edit `hooks/`, `scripts/lib/`, `skills/`, `commands/`, or the manifest, then `node scripts/build-plugin.mjs` to re-sync `plugin/` (verify fails on a stale dist).
 - **`scripts/lib/config-schema.mjs` is the single source of truth** for every `.coalwash.json` key — `verify.mjs` validates the factory template against it; the README key table mirrors it.
 - **Safety gates live in code, keep them there:** deletes require `deletesApproved`, `pinned: true` is refused, every path is realpath-and-contained fail-closed, the apply is snapshot + WAL + rollback. Never move one of these into prompt text.
 - **Keep the hook Phoenix-pure:** zero dependencies, fail-silent (try/catch, exit 0, never `process.exit()`), no network, no child processes, silent except the sanctioned channel.
@@ -43,11 +43,11 @@ Cross-agent by design — the engine is plain Node scripts and class-B discovery
 
 | Path | Purpose |
 |---|---|
-| `hooks/coalwash-conductor.js` | SessionStart + UserPromptSubmit hook: the 4-band gauge, the FULL-band per-turn repeat, and self-update scheduling (Phoenix-13). |
+| `hooks/coalwash-conductor.js` | SessionStart + Stop hook: the 4-band gauge, the once-per-crossing ทำ/later ask + `forceMode` standing-consent auto-run, and self-update scheduling (Phoenix-13). |
 | `scripts/lib/` | The engine (ESM, shipped): `class-b` discovery · `caliper` measurement/bands/break-even · `fidelity-gate` · `apply` transaction · `receipt` · config modules. |
 | `skills/coalwash/` | `SKILL.md` (the lean orchestration contract) + `references/` (method + platform adapter facts). |
 | `commands/` | `/coalwash:stats` (measurement) · `/coalwash:update` (self-update procedure). |
-| `hooks/hooks.json` | Hook wiring via `${CLAUDE_PLUGIN_ROOT}/bin/…`. |
+| `hooks/hooks.json` | Hook wiring: SessionStart + Stop → `${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js`. |
 | `scripts/` | Tool scripts: `build-plugin.mjs`, `verify.mjs`, `test.mjs`, plus the unit/hermetic tests. |
 | `plugin/` | Generated Claude Code plugin distribution — never hand-edit. |
 | `platform-configs/.coalwash.json` | Commented factory default configuration. |

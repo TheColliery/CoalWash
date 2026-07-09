@@ -27,6 +27,8 @@ export const CONFIG_SCHEMA = [
   { key: 'localOnly', type: 'bool', def: false, help: "Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config (default: false)" },
   { key: 'updateMode', type: 'enum', values: ['ask', 'auto', 'remind', 'off'], def: 'ask', help: 'Self-update behavior at session start (ask, auto, remind, off; default: ask)' },
   { key: 'updateCheckDays', type: 'int', min: 1, max: 365, def: 14, help: 'Days between self-update checks/reminders (default: 14)' },
+  { key: 'exercisePerBand', type: 'bandmap', values: ['quick', 'full'], def: { plump: 'quick', obese: 'full', full: 'full' }, help: 'Per-ceiling exercise the Stop-hook ask offers (quick|full each, for plump/obese/full); the fat-only scoping refinement is a later release (default: {plump:quick, obese:full, full:full})' },
+  { key: 'forceMode', type: 'enum', values: ['auto', 'ask', 'off'], def: 'auto', help: 'FULL+economical crossing behavior at Stop: auto = standing-consent auto-run (the rot-canary autoFixMode model); ask = FULL asks like other ceilings; off = same as ask — never silent (they suppress only the auto-run authorization, never FULL awareness; default: auto)' },
 ];
 
 // Validate an already-parsed JSON value against a spec.
@@ -50,6 +52,14 @@ export function validateValue(spec, v) {
       return typeof v === 'string' && spec.values.includes(v.toLowerCase())
         ? null
         : `must be one of: ${spec.values.join(', ')}`;
+    case 'bandmap': {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return 'must be an object';
+      for (const k of Object.keys(spec.def)) {
+        if (!(k in v)) return `must include '${k}'`;
+        if (typeof v[k] !== 'string' || !spec.values.includes(v[k].toLowerCase())) return `'${k}' must be one of: ${spec.values.join(', ')}`;
+      }
+      return null;
+    }
     default:
       return `has an unknown spec type '${spec.type}'`;
   }
@@ -77,5 +87,14 @@ export function clampedRead(cfg, key) {
   if (!spec) return undefined;
   const v = cfg ? cfg[key] : undefined;
   if (v === undefined || validateValue(spec, v) !== null) return spec.def;
-  return spec.type === 'enum' ? v.toLowerCase() : v;
+  if (spec.type === 'enum') return v.toLowerCase();
+  if (spec.type === 'bandmap') {
+    // Rebuild from the spec's OWN sub-keys (never the raw value's own key set)
+    // so a malformed/extra sub-key on an otherwise-valid object can't leak
+    // through, and every expected sub-key is guaranteed present.
+    const out = {};
+    for (const k of Object.keys(spec.def)) out[k] = String(v[k]).toLowerCase();
+    return out;
+  }
+  return v;
 }

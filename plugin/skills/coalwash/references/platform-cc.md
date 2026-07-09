@@ -16,7 +16,7 @@ The per-session saving = the **always-loaded** subset delta; the receipt splits 
 
 ## Wiring + state files (all local, user-readable)
 
-- **Conductor:** `hooks/hooks.json` → SessionStart + UserPromptSubmit → `hooks/coalwash-conductor.js` (Phoenix-13: fail-silent, no network, no spawn; silent when LEAN/off, or when no FULL verdict is cached/armed).
+- **Conductor:** `hooks/hooks.json` → SessionStart + Stop → `hooks/coalwash-conductor.js` (Phoenix-13: fail-silent, no network, no spawn; SessionStart silent when `coalwashMode` is off or the band is LEAN/snoozed; Stop silent when no band crossing is pending).
 - **Caliper state:** `~/.claude/.coalwash-state.json` — per-project lean floor, session stamps (ring-capped), snooze. Loss degrades to bootstrap behavior (bands wake after the first full clean stamps a floor).
 - **Transaction dir:** `[project]/.claude/coalwash/` — `.coalwash.lock` (atomic-create + stale-timeout 30min + defer-on-doubt), `journal.json` (the WAL; CoalHearth-visible location — CH-side recognition lands in a CoalHearth release), `snap-[timestamp]/` (last 3 kept).
 - **Config:** global `~/.claude/.coalwash.json` overlaid by the nearest project `.coalwash.json` (walk stops at home, physical-path compare).
@@ -24,5 +24,5 @@ The per-session saving = the **always-loaded** subset delta; the receipt splits 
 
 ## Capacity + spawn
 
-- **Capacity denominator:** conservative constant 200k tokens usable-per-turn (`caliper.mjs CAPACITY_TOKENS`) until a per-model adapter refines it — the gauge is a heuristic made safe by the early-gate margin, never precision-claimed.
+- **Capacity denominator:** rough placeholder ~600k tokens usable-per-turn (`caliper.mjs CAPACITY_TOKENS`) until a per-model adapter refines it — the gauge is a heuristic made safe by the early-gate margin, never precision-claimed.
 - **Outsider spawn:** use the `Explore` agent type (no Agent/Task tool → structurally leaf, no zombie grandchildren) from a neutral cwd (e.g. the OS temp dir) so the up-tree walk loads no project governance into the sub. Reconcile the sub by id on return; a flattened sub only the user's UI can clear — say so rather than pretend a reap.

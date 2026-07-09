@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 // CoalWash dist build — assemble a CLEAN `plugin/` from source so the Claude
-// Code marketplace serves ONLY the plugin (manifest + bin + hooks + the engine
+// Code marketplace serves ONLY the plugin (manifest + hooks + the engine
 // under scripts/lib), never the repo's gate scripts, docs, or design files.
 // Mirrors the CoalHearth build-plugin shape; marketplace.json `source` points
-// at ./plugin. Run after editing bin/hooks/scripts-lib/plugin.json — verify.mjs
+// at ./plugin. Run after editing hooks/scripts-lib/plugin.json — verify.mjs
 // FAILs on drift. Node built-ins only.
 //
 // Named divergence from the hook-only siblings (one-flock rule: name it where
 // it lives): CoalWash ships `scripts/lib/` in the dist because the ENGINE is
 // cross-agent scripts (blueprint §7b code-core — any agent runs `node
-// scripts/lib/... `), and the bin/ conductor imports the same modules so hook
+// scripts/lib/... `), and the hooks/ conductor imports the same modules so hook
 // and engine can never diverge. Tests are filtered out of the dist.
 
 import fs from 'node:fs';

@@ -67,3 +67,41 @@ test('clampedRead normalizes enum case and clamps unknown enum values', () => {
 test('clampedRead on an unknown key returns undefined (programming error, loud in tests)', () => {
   assert.strictEqual(clampedRead({}, 'noSuchKey'), undefined);
 });
+
+// ---------------------------------------------------------------------------
+// beta.10: exercisePerBand (bandmap) + forceMode (enum)
+// ---------------------------------------------------------------------------
+
+test('exercisePerBand: factory default maps plump/obese/full, quick|full only', () => {
+  const spec = CONFIG_SCHEMA.find((s) => s.key === 'exercisePerBand');
+  assert.strictEqual(spec.type, 'bandmap');
+  assert.deepStrictEqual(spec.def, { plump: 'quick', obese: 'full', full: 'full' });
+  assert.deepStrictEqual(spec.values, ['quick', 'full']);
+});
+
+test('validateValue (bandmap): requires every sub-key, each one of the allowed values', () => {
+  const spec = CONFIG_SCHEMA.find((s) => s.key === 'exercisePerBand');
+  assert.strictEqual(validateValue(spec, { plump: 'quick', obese: 'full', full: 'full' }), null);
+  assert.strictEqual(validateValue(spec, { plump: 'QUICK', obese: 'FULL', full: 'Full' }), null, 'case-insensitive');
+  assert.ok(validateValue(spec, { plump: 'quick', obese: 'full' }), 'missing full -> error');
+  assert.ok(validateValue(spec, { plump: 'turbo', obese: 'full', full: 'full' }), 'unknown value -> error');
+  assert.ok(validateValue(spec, 'quick'), 'a non-object -> error');
+  assert.ok(validateValue(spec, ['quick']), 'an array -> error');
+  assert.ok(validateValue(spec, null), 'null -> error');
+});
+
+test('clampedRead (bandmap): valid passes through lowercased; any doubt degrades to the whole default object', () => {
+  assert.deepStrictEqual(clampedRead({ exercisePerBand: { plump: 'QUICK', obese: 'full', full: 'FULL' } }, 'exercisePerBand'), { plump: 'quick', obese: 'full', full: 'full' });
+  assert.deepStrictEqual(clampedRead({ exercisePerBand: { plump: 'turbo', obese: 'full', full: 'full' } }, 'exercisePerBand'), { plump: 'quick', obese: 'full', full: 'full' });
+  assert.deepStrictEqual(clampedRead({}, 'exercisePerBand'), { plump: 'quick', obese: 'full', full: 'full' });
+  assert.deepStrictEqual(clampedRead({ exercisePerBand: { plump: 'quick', obese: 'full', full: 'full', extra: 'nonsense' } }, 'exercisePerBand'), { plump: 'quick', obese: 'full', full: 'full' }, 'an extra sub-key never leaks through');
+});
+
+test('forceMode: enum auto|ask|off, default auto', () => {
+  const spec = CONFIG_SCHEMA.find((s) => s.key === 'forceMode');
+  assert.deepStrictEqual(spec.values, ['auto', 'ask', 'off']);
+  assert.strictEqual(spec.def, 'auto');
+  assert.strictEqual(clampedRead({ forceMode: 'OFF' }, 'forceMode'), 'off');
+  assert.strictEqual(clampedRead({ forceMode: 'sideways' }, 'forceMode'), 'auto');
+  assert.strictEqual(clampedRead({}, 'forceMode'), 'auto');
+});

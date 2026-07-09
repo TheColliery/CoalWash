@@ -2,6 +2,24 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.10] - 2026-07-10
+
+Moves CoalWash off the advisory request channel entirely and onto the Stop hook's blocking enforcement channel — the same mechanism `rot-canary` already proves daily on this machine. Engine tests 171 → 193.
+
+### Changed
+- **ROUND 4 POSTMORTEM: the advisory channel itself was the last-hop failure.** A live transcript showed the SessionStart directive AND the beta.9 per-turn bar BOTH delivered to a sonnet-tier main session — delivery proven twice — yet the agent served a greeting and ignored both. Root cause: `UserPromptSubmit` context is a REQUEST channel — advisory, and an agent (especially a weaker tier on a no-tool turn) is free to ignore it. `rot-canary`'s `Stop` hook lands every time on this same machine because Stop has BLOCKING semantics (the harness holds the stop until the reason is addressed) plus question-box form (a human presses a button — no model-discipline dependence). CoalWash now rides that exact mechanism: SessionStart stays the silent measurement chokepoint; Stop is the one and only place anything gets surfaced or authorized.
+
+### Removed
+- **The beta.8/9 per-turn `UserPromptSubmit` bar** — the `hooks.json` registration and its conductor branch. Superseded same-day by the round-4 live-test evidence above; retired outright, not throttled further.
+
+### Added
+- **`Stop` hook — the enforcement branch** in `hooks/coalwash-conductor.js`: a structured `{decision: 'block', reason}` JSON write (the CoalMine `rot-canary` exemplar), not plain `console.log` — that structure is what makes Claude Code hold the stop and hand `reason` back to the agent as something it must address, instead of a passive context line it was always free to ignore. `stop_hook_active` is checked first, same as `rot-canary`, so CC re-invoking Stop after the agent responds can never loop.
+- **Once-per-crossing edge semantics** (`caliper.mjs`: `recordCrossing` / `sanitizeCrossing` / `consumeCrossing`, `BAND_RANK`). A band RISE (new rank above the previous one) arms exactly one pending crossing at SessionStart; a fall to LEAN clears it outright; a same-or-falling band leaves an existing pending crossing untouched (two SessionStarts at the same band are one crossing, not two). The Stop hook consumes a crossing the instant it surfaces it — ask or force — never on a later "the user picked X" signal, since no CLI exists for the agent to report that back. An ask fires once per crossing; picking "later" dismisses it until the next rise. There is no snooze in the Stop path — SessionStart's existing `setSnooze` remains its own separate self-throttle for the PLUMP/OBESE gauge nudges, unchanged by this release.
+- **`ทำ`/`later` two-button Stop-hook ask** for a PLUMP/OBESE crossing, or a FULL crossing whose auto-run authorization is suppressed: names the crossing band, the fat estimate, and the `exercisePerBand`-configured exercise for that ceiling; "later" defers to the next crossing — never silently forever.
+- **`forceMode` config key** (`auto` \| `ask` \| `off`, default `auto`) — governs only a FULL+economical crossing at Stop. `auto` = standing-consent auto-run of the free mechanical Quick pass (the `rot-canary` `autoFixMode` model): numbers still shown every fire, every DELETE/MERGE still waits at the human gate. `ask`/`off` both degrade to the same ทำ/later ask as any other ceiling — FULL awareness is never suppressed, only the auto-run authorization.
+- **`exercisePerBand` config key** (`{plump, obese, full}`, each `quick` \| `full`, default `{plump: quick, obese: full, full: full}`) — the exercise the Stop-hook ask offers per ceiling.
+- Tests 171 → 193: `caliper.test.mjs` gains the edge-crossing coverage; `conductor.test.mjs` gains hermetic spawn tests for the new Stop branch (asserting the structured block-decision output, the `stop_hook_active` loop guard, and the once-per-crossing consume behavior).
+
 ## [0.1.0-beta.9] - 2026-07-10
 
 Hotfix to beta.8's per-turn FULL bar — one directive string in `hooks/coalwash-conductor.js`, no engine changes.

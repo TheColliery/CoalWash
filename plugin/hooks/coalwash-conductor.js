@@ -3,11 +3,23 @@
 // CoalWash conductor (Phoenix-13 hook: fail-silent, zero-dep, no network, no
 // spawn, never process.exit — hooks-safety.md). Two events share this one
 // file (hooks.json), branching on hook_event_name from stdin:
-//   SessionStart     -> the full gauge (discovery + measurement + the 4-band
-//                       verdict). The chokepoint (SKILL-REPO-PATTERN Layer 8):
-//                       memory is LOADED every session anyway, so a
-//                       session-start caliper rides ~free.
-//   UserPromptSubmit -> the persistent per-turn FULL bar (beta.8 #2, below).
+//   SessionStart -> the full gauge (discovery + measurement + the 4-band
+//                   verdict). The chokepoint (SKILL-REPO-PATTERN Layer 8):
+//                   memory is LOADED every session anyway, so a
+//                   session-start caliper rides ~free. beta.10 adds
+//                   edge-crossing detection alongside the existing verdict
+//                   cache (see "LAST-HOP VISIBILITY" below) — the Stop
+//                   branch's data source.
+//   Stop         -> (beta.10, REPLACES the retired UserPromptSubmit per-turn
+//                   bar) the ENFORCEMENT channel: an unconsumed edge-crossing
+//                   surfaces as a blocking ทำ/later ask; a fresh
+//                   FULL+economical verdict (forceMode=auto) surfaces as a
+//                   standing-consent force-run directive. Mirrors
+//                   rot-canary-stop.js's exact output mechanism — a
+//                   structured `{decision:'block', reason}` JSON write, not
+//                   plain console.log — because THAT is what makes Stop a
+//                   blocking channel the agent must address, unlike a passive
+//                   context injection it was always free to ignore.
 //
 // 4-band model (2026-07-08 amendment, supersedes the blueprint's info-only
 // full-signal): LEAN = silent · PLUMP = ask (question-box; decline = snooze) ·
@@ -19,7 +31,8 @@
 // CHEAP caliper only on the SessionStart path: file sizes + stamps; content is
 // read only for the small always-loaded set; gzip only when a nudge will
 // actually be emitted AND the elapsed/size budget still holds (~100ms total
-// wall budget). The UserPromptSubmit path is cheaper still — see below.
+// wall budget). The Stop path is cheaper still (Phoenix #3) — one state read,
+// no discovery, no measureEntries — see handleStop below.
 //
 // NAMED divergence from hooks-safety.md §10 (whose read exception names project
 // CONFIG only): this hook also READS project class-B memory/governance CONTENT
@@ -30,37 +43,32 @@
 // CJS hook and the agent-invoked scripts share ONE implementation (a hook that
 // reimplements config-load silently diverged once in a sibling; never again).
 //
-// LAST-HOP VISIBILITY (beta.7 #2 -> RIPPED at beta.8 #0, MEMORY.md): beta.7
-// shipped a SessionStart-written temp marker + a `Notification`-event OS
-// notification, reasoning that a SessionStart hook's stdout (context-injection
-// only, never shown to the user) needed a user-visible carrier. LAB-MEASURED
-// DEAD on this machine: a fresh dogfood session ran the FULL branch (marker
-// written, confirmed) but the marker was never consumed — a 142-transcript
-// sweep found ZERO `Notification` hookEvents ever fired here (the mechanism is
-// real, it simply never fires on this desktop-app surface). Removed: the
-// marker path, the Notification handler, and the `Notification` hooks.json
-// registration.
-//
-// THE REPLACEMENT (beta.8 #2): the blueprint's own original answer — a
-// persistent, un-dismissable per-turn bar — on the channel that demonstrably
-// works instead. The sibling conductors (CoalBoard/CoalTipple) inject on
-// UserPromptSubmit every turn and are observably obeyed: adjacency to the
-// user's own message, not a separate carrier event, is what works. Plain
-// stdout on exit 0 (the same mechanism SessionStart already uses, below) —
-// verified against CB's and CT's shipped, dogfooded `hooks/*-conductor.js`
-// (both plain-stdout on UserPromptSubmit; MEMORY.md: "demonstrably obeyed" in
-// production). The CC hooks reference (code.claude.com/docs/en/hooks)
-// documents a structured `hookSpecificOutput.additionalContext` JSON form for
-// this event and was internally inconsistent (two fetches, one flat
-// contradiction) on whether plain stdout also qualifies — matching the two
-// siblings' proven-live shipped behavior here (one-flock, one-color; a
-// working sibling implementation outranks an ambiguous doc summary).
-//
-// BETA.9 (MEMORY.md "ROUND 3 POSTMORTEM"): the bar's blanket sibling-yield
-// clause was a structural mute (CT fires every turn, CB fires on every
-// Thai prompt) — fixed: maintenance yields to user ACTIVITY, never to a
-// sibling advisory's mere PRESENCE; the background spawn IS the yield,
-// with one carve for CoalBoard actually convening.
+// LAST-HOP VISIBILITY, the short history (full detail: MEMORY.md):
+//   beta.7  a SessionStart marker + `Notification`-event OS announce —
+//           LAB-MEASURED DEAD (142-transcript sweep, zero Notification events
+//           ever fired on this desktop-app surface). Ripped at beta.8.
+//   beta.8  replaced it with a persistent per-turn UserPromptSubmit bar
+//           (adjacency to the user's own message, matching CB/CT's proven
+//           shipped pattern).
+//   beta.9  fixed the bar's blanket sibling-yield clause (a structural mute:
+//           CT fires every turn, CB fires on every Thai prompt) so the bar
+//           actually yields to user ACTIVITY, not a sibling's mere presence.
+//   beta.10 (THIS version) "ROUND 4 POSTMORTEM": delivery was STILL 100%
+//           (proven in-transcript, twice) yet a sonnet main ignored the bar
+//           on a no-tool prompt. Root cause: UserPromptSubmit context is a
+//           REQUEST channel — advisory, the agent is free to ignore it,
+//           especially a weaker tier on a no-tool turn. rot-canary's Stop
+//           hook lands every time on this same machine because Stop has
+//           BLOCKING semantics (the harness holds the stop until the reason
+//           is addressed) + question-box form (a human presses a button, no
+//           model-discipline dependence). CONSEQUENCE: the per-turn
+//           UserPromptSubmit bar is RETIRED OUTRIGHT (not throttled further —
+//           removed); Stop becomes the one and only enforcement surface.
+//           Force rides standing config (the rot-canary autoFixMode model:
+//           numbers still shown, deletes still human-gated); PLUMP/OBESE/
+//           FULL-disarmed crossings ride the SAME Stop channel via the
+//           question-box, ONCE per edge-crossing rather than every turn (see
+//           the "edge-crossing state" section of caliper.mjs).
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
@@ -78,7 +86,7 @@ function lib(name) {
 
 // Read this invocation's hook JSON from stdin ({session_id, hook_event_name,
 // ...} per the CC hook contract) — this is how main() tells the SessionStart
-// and UserPromptSubmit branches apart. Fail-safe: an absent/short/malformed/
+// and Stop branches apart. Fail-safe: an absent/short/malformed/
 // never-closing stdin resolves to {} within STDIN_BUDGET_MS rather than ever
 // blocking the hook (Phoenix #3/#4) — an unrecognized/missing event name just
 // falls through to the SessionStart gauge (its existing default).
@@ -150,6 +158,12 @@ async function handleSessionStart() {
   if (disc.entries.length) {
     const m = caliper.measureEntries(disc.entries, { readBudgetBytes: READ_BUDGET_BYTES, withGzip: false });
     const proj = caliper.recordStamp(home, projectRoot, m.alwaysLoaded.tokensEst) || {};
+    // beta.10: read BEFORE recordVerdict below overwrites it — the band this
+    // project was in as of the LAST recorded verdict, for edge-crossing
+    // detection (recordCrossing). No prior verdict (a brand-new project) ->
+    // 'LEAN', so a first-ever scan already above LEAN counts as a rise too
+    // (the "qualifying past" case, MEMORY.md).
+    const prevBand = (proj.lastVerdict && proj.lastVerdict.band) || 'LEAN';
     // Never trust the raw stored value: sanitizeLeanFloor discards a
     // non-finite/non-positive or grossly-implausible floor (conservative —
     // treats it as floor-unmeasured rather than risk a false-LEAN silence).
@@ -174,10 +188,9 @@ async function handleSessionStart() {
       } catch { return ''; }
     };
 
-    // beta.8 #2: feed the UserPromptSubmit hot path's cached read (Phoenix #3
-    // — no discovery there); only a FULL+economical verdict arms the per-turn
-    // bar — recordVerdict below is the write side, sanitizeVerdict (caliper.mjs)
-    // is the read-side gate.
+    // beta.10: feed the Stop hook's cached read (Phoenix #3 — no discovery
+    // there); only a FULL+economical verdict arms the force case — recordVerdict
+    // below is the write side, sanitizeVerdict (caliper.mjs) is the read-side gate.
     let economical = false;
     const fatTokens = Math.max(0, Math.round(m.alwaysLoaded.tokensEst - leanFloorTokens));
 
@@ -194,8 +207,8 @@ async function handleSessionStart() {
       // invariant: only the machine-capacity gate is person-independent, and
       // its remedy is externalize, never wash). Context-injection is the
       // guaranteed-delivery channel (beta.8 #0); this reason never arms the
-      // UserPromptSubmit per-turn bar (recordVerdict below) — the per-turn bar
-      // is for the force-run case only, and washing cannot help all-muscle.
+      // Stop hook's force case (recordVerdict below) — force is for the
+      // economical FULL case only, and washing cannot help all-muscle.
       if (!snoozed) {
         caliper.setSnooze(home, projectRoot, now + caliper.OBESE_SNOOZE_DAYS * DAY_MS);
         out.push(`[CoalWash] memory gauge: FULL (externalize) — class-B always-loaded ~${Math.round(m.alwaysLoaded.tokensEst)} tok/session (~est), ${bmiTxt}, ~no reclaimable fat (this is muscle, not bloat). SURFACE this line to the user verbatim. CoalWash cannot help further by washing — the store has outgrown this machine's working capacity (hard ceiling ~${verdict.hardCeilingTokens} tok, a rough placeholder). EXTERNALIZE or split older content out of the always-loaded set, or consciously raise fullPercent (the "bigger SSD" choice).`);
@@ -210,7 +223,7 @@ async function handleSessionStart() {
       const fatLabel = econ.floorUnmeasured ? ' (floor unmeasured — an upper bound, the whole footprint counts as fat until a first clean stamps the lean floor)' : '';
       const numbers = `fat ~${econ.fatTokens} tok${fatLabel} loads every session ≈ ${econ.perDay} tok/day at the stamped session rate · one run ≈ ${econ.runCostTokens} tok · carrying it ${econ.horizonDays} days ≈ ${econ.horizonCarryTokens} tok · break-even ~${Number.isFinite(econ.breakEvenDays) ? econ.breakEvenDays.toFixed(1) : '∞'} days`;
       if (econ.economical) {
-        economical = true; // arms the UserPromptSubmit per-turn bar via recordVerdict below
+        economical = true; // arms the Stop hook's force case via recordVerdict below
         out.push(`[CoalWash] memory gauge: FULL (${verdict.reason}) — deterministic break-even (all tokens ~est): ${numbers}. The run costs LESS than carrying the fat -> SURFACE this line to the user verbatim, then RUN the CoalWash pipeline now (economic-dominance rule; numbers shown above): start with the free mechanical Quick pass; escalate to the paid semantic Full pass only with a separate consent. DELETE/MERGE actions still require the human gate — nothing is deleted without explicit approval.`);
       } else if (!snoozed) {
         caliper.setSnooze(home, projectRoot, now + caliper.OBESE_SNOOZE_DAYS * DAY_MS);
@@ -219,12 +232,24 @@ async function handleSessionStart() {
     }
     // LEAN (or snoozed) -> silent: Phoenix #13, no output on the healthy path.
 
-    // Record this session's verdict for the UserPromptSubmit hot path (a
-    // plain state write, same cost class as recordStamp above). Runs every
-    // time regardless of band/snooze, so it OVERWRITES whatever a prior
-    // session left — a store that goes LEAN after a clean stops arming the
-    // per-turn bar on the very next SessionStart, not just eventually.
+    // Record this session's verdict for the Stop hook's cached read (a plain
+    // state write, same cost class as recordStamp above). Runs every time
+    // regardless of band/snooze, so it OVERWRITES whatever a prior session
+    // left — a store that goes LEAN after a clean stops arming the force case
+    // on the very next SessionStart, not just eventually.
     caliper.recordVerdict(home, projectRoot, { band: verdict.band, reason: verdict.reason, economical, fatTokens }, now);
+    // beta.10: edge-crossing detection, alongside the verdict cache above —
+    // the Stop hook's OTHER data source (the once-per-crossing ask/force gate;
+    // see caliper.mjs "edge-crossing state"). F1: an externalize-FULL verdict
+    // counts as LEAN here — arming a crossing would put a "run the full wash
+    // now" Stop ask on legitimate all-muscle, the exact steer the growable-
+    // full invariant forbids (never wash-harder on muscle; the SessionStart
+    // externalize advisory above is the only correct surface). Mapping to
+    // LEAN also CLEARS any pending crossing: the store's truth changed to
+    // not-washable, so a stale PLUMP/OBESE ask would lie. Parallel to
+    // sanitizeVerdict, which already excludes externalize from the force case.
+    const crossingBand = verdict.reason === 'externalize' ? 'LEAN' : verdict.band;
+    caliper.recordCrossing(home, projectRoot, crossingBand, prevBand, now);
   }
 
   if (updateDue(cfg, clampedRead)) {
@@ -237,50 +262,82 @@ async function handleSessionStart() {
   }
 }
 
-// UserPromptSubmit conductor branch (beta.8 #2 — see the file header). HOT-
-// PATH BUDGET (Phoenix #3): no config load, no discovery, no measureEntries —
-// reads ONLY the cached verdict handleSessionStart already recorded (one
-// state-file read via loadState + projectState). The common case (LEAN, no
-// verdict, or a stale one) exits right there; only a FULL+economical cached
-// verdict does anything more (one console.log).
+// Stop conductor branch (beta.10 — REPLACES handleUserPromptSubmit; see the
+// file header "ROUND 4 POSTMORTEM"). HOT-PATH BUDGET (Phoenix #3): a config
+// read (2 small JSON files, no discovery/measureEntries) + ONE state read
+// (loadState + projectState) — the same cost class handleSessionStart already
+// pays for its own config+state reads. The common case (no pending crossing)
+// exits right there; only an unconsumed crossing does anything more.
 //
-// PRIORITY (beta.9-corrected): CoalBoard and CoalTipple already ride
-// UserPromptSubmit every turn; CoalWash joins that frame at the LOWEST
-// priority the Windows-Automatic-Maintenance way — maintenance yields to the
-// user's ACTUAL ACTIVITY, never to the mere PRESENCE of a sibling advisory
-// (beta.8's "yield when a sibling fired" clause was a structural mute: CT
-// fires every turn by design, CB fires on every Thai-script prompt). The
-// directive text below asks for a BACKGROUND spawn (never inline-before-the-
-// task) — that spawn IS the complete yield already; the ONE carve is
-// CoalBoard actually CONVENING this turn (its consent question-box going
-// up), which defers the spawn one turn (the bar is persistent, so nothing is
-// lost).
+// OUTPUT MECHANISM (deliberately NOT plain console.log, unlike SessionStart):
+// mirrors rot-canary-stop.js exactly — a structured
+// `{decision:'block', reason}` JSON write to stdout. That structure is what
+// makes Claude Code hold the stop and hand `reason` back to the agent as
+// something it must address, instead of a passive context line it can ignore
+// (the ROUND 4 finding this version exists to fix). `stop_hook_active` is
+// checked first, same as rot-canary, so CC re-invoking Stop after the agent
+// responds to a block decision can never loop.
 //
-// ponytail: no coalwashMode re-check here (the same accepted edge the removed
-// Notification branch used to note) — flipping mode to off/manual mid-session,
-// before the next SessionStart re-stamps, can leave one stale nag firing for
-// up to VERDICT_MAX_AGE_MS; the staleness guard bounds it and the next
-// SessionStart always corrects it. Add a config re-read only if this narrow
-// edge ever proves to matter in practice.
-async function handleUserPromptSubmit() {
-  const [{ findProjectRoot }, caliper] = await Promise.all([
+// CONSUME-AT-EMISSION (ponytail, full rationale in caliper.mjs on
+// consumeCrossing): the crossing is marked consumed the instant this function
+// surfaces it — never on a later "the user picked X" signal, since no CLI
+// exists for the agent to report that back. Every pending crossing SURFACES
+// (ask or force) — there is no silent branch: a silent FULL would be the
+// forbidden third "dismiss and keep growing" path (the saving-guarantee
+// floor); forceMode 'ask'/'off' suppress only the AUTO-RUN authorization,
+// never the user's awareness of FULL.
+// This is also why handleStop never touches setSnooze: that mechanism is
+// SessionStart's own, unrelated self-throttle for its periodic gauge messages
+// — reusing it here would let a SessionStart snooze silently consume a
+// crossing before Stop ever gets a chance to surface it.
+async function handleStop(input) {
+  if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
+  const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, caliper] = await Promise.all([
     import(lib('config-load.mjs')),
+    import(lib('config-schema.mjs')),
     import(lib('caliper.mjs')),
   ]);
+  const cfg = loadMergedConfig();
+  if (clampedRead(cfg, 'coalwashMode') === 'off') return; // fully silent
+  const forceMode = clampedRead(cfg, 'forceMode');
+  const exercisePerBand = clampedRead(cfg, 'exercisePerBand');
+
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
   const proj = caliper.projectState(caliper.loadState(home), projectRoot);
-  const armed = caliper.sanitizeVerdict(proj.lastVerdict);
-  if (!armed) return; // LEAN / no verdict / disarmed / stale -> silent, one read only
+  const crossing = caliper.sanitizeCrossing(proj.lastCrossing);
+  if (!crossing) return; // nothing pending -> silent, one read only (Phoenix #13)
 
-  // sanctioned UserPromptSubmit context-injection channel (Phoenix #13)
-  console.log('[CoalWash] FULL band standing directive (break-even proven at session start, numbers there): SPAWN the free mechanical Quick pass as a BACKGROUND subagent (one tool call), then serve this turn\'s task normally — never delay the user\'s request for the wash. The background spawn IS the yield: sibling conductor advisories (CoalBoard/CoalTipple) do NOT block it. ONE exception: if CoalBoard is actually convening this turn (its consent question-box is going up), defer the spawn to the next turn — this bar returns at zero cost. Escalate to Full only with the user\'s separate consent. This line repeats every turn until the store is cleaned or fullPercent is raised.');
+  const now = Date.now();
+  // sanitizeVerdict is non-null ONLY for a fresh FULL+economical verdict — the
+  // exact gate the force case (b) needs; the ask case (a) below reads the raw
+  // cached fatTokens directly since it must display a number for PLUMP/OBESE
+  // too, which sanitizeVerdict deliberately never arms for.
+  const verdict = caliper.sanitizeVerdict(proj.lastVerdict, now);
+  const isForceCrossing = crossing.band === 'FULL' && !!verdict;
+
+  let reason;
+  if (isForceCrossing && forceMode === 'auto') {
+    // case (b): force — standing consent, no ask, mirrors rot-canary's own auto-scan.
+    reason = `[CoalWash] FULL band + break-even proven (numbers: fat ~${verdict.fatTokens} tok): standing config authorizes the free mechanical Quick pass NOW — run it (stage-only; every DELETE/MERGE still waits at the human gate), then note the receipt path to the user in one line. This fires once per crossing, not per session.`;
+  } else {
+    // case (a): ask ทำ/later — PLUMP, OBESE, a FULL crossing that never armed
+    // (economical:false), or a FULL crossing whose AUTO-RUN authorization is
+    // suppressed (forceMode 'ask'/'off' — both land HERE, never in silence).
+    const fatTokens = Number.isFinite(proj.lastVerdict && proj.lastVerdict.fatTokens) ? Math.round(proj.lastVerdict.fatTokens) : 0;
+    const bandKey = crossing.band.toLowerCase();
+    const exercise = (exercisePerBand && exercisePerBand[bandKey]) || 'quick';
+    reason = `[CoalWash] memory crossed the ${crossing.band} ceiling (fat ~${fatTokens} tok). Offer the user via your question tool, exactly two options: ทำ (run the ${exercise} wash now — the configured exercise for this ceiling) / later (dismiss; the offer returns at the next ceiling crossing). If the user picks ทำ: run the pipeline per the coalwash skill (deletes remain human-gated). This crossing is marked consumed the moment this ask fires — it will not repeat until the next rise.`;
+  }
+
+  caliper.consumeCrossing(home, projectRoot, now); // once per crossing (consume-at-emission)
+  process.stdout.write(JSON.stringify({ decision: 'block', reason })); // sanctioned Stop blocking-feedback channel (Phoenix #13; mirrors rot-canary-stop.js)
 }
 
 async function main() {
   const input = await readStdinJson();
   const event = (input && (input.hook_event_name || input.hookEventName)) || '';
-  if (event === 'UserPromptSubmit') return handleUserPromptSubmit();
+  if (event === 'Stop') return handleStop(input);
   return handleSessionStart();
 }
 

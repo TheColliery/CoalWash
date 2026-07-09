@@ -42,5 +42,20 @@
   "updateMode": "ask",
 
   // Days between self-update checks/reminders (1-365; out-of-range clamps to 14 on read).
-  "updateCheckDays": 14
+  "updateCheckDays": 14,
+
+  // Per-ceiling exercise the Stop-hook ask offers when a band ceiling is
+  // crossed (quick = free mechanical pass; full = the paid semantic pass,
+  // always a separate consent). plump/obese/full key by the DESTINATION band
+  // reached. The fat-only scoping refinement is a later release —
+  // 'full' here is today's shipped Full pass.
+  "exercisePerBand": { "plump": "quick", "obese": "full", "full": "full" },
+
+  // FULL+economical crossing behavior at the Stop hook. auto = standing
+  // consent runs the free mechanical Quick pass immediately (the rot-canary
+  // autoFixMode model) — numbers are still shown every fire, deletes still
+  // stay human-gated; ask = FULL asks like other ceilings (ทำ/later);
+  // off = same as ask — never silent: 'ask'/'off' suppress only the auto-run
+  // authorization, never the user's awareness of FULL.
+  "forceMode": "auto"
 }

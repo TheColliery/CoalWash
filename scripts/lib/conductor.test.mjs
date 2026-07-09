@@ -3,8 +3,10 @@
 // session state, the real ~/.claude/.coalwash.json, and the real memory store
 // can never leak in. Every case asserts the three observable surfaces:
 //   (1) exit code 0 on every path (Phoenix #4);
-//   (2) stderr silent — stdout only on the sanctioned SessionStart channel;
-//   (3) the expected state effect (stamp/snooze written, or nothing).
+//   (2) stderr silent — stdout only on a sanctioned channel: SessionStart's
+//       plain context-injection console.log, or Stop's structured
+//       `{decision:'block', reason}` JSON (beta.10, mirrors rot-canary-stop.js);
+//   (3) the expected state effect (stamp/snooze/crossing written, or nothing).
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
@@ -240,48 +242,175 @@ test('growable-full: post-floor all-muscle over the hard cap gets the EXTERNALIZ
 });
 
 // ---------------------------------------------------------------------------
-// PERSISTENT PER-TURN FULL BAR (beta.8 item #2) — the UserPromptSubmit branch.
-// Replaces the beta.7 Notification hand-off (lab-measured dead on this
-// machine — 142 transcripts, 0 Notification events ever; removed above).
+// STOP HOOK — the once-per-crossing ask/force channel (beta.10, REPLACES the
+// beta.8/9 UserPromptSubmit per-turn bar; MEMORY.md "ROUND 4 POSTMORTEM").
+// Output is the structured `{decision:'block', reason}` JSON (rot-canary's
+// exact mechanism), not plain stdout — asserted explicitly below since that
+// structure is the whole point of the beta.10 move.
 // ---------------------------------------------------------------------------
 
-test('UserPromptSubmit: a cached FULL+economical verdict fires the standing per-turn directive', () => {
+function parseBlock(stdout) {
+  const j = JSON.parse(stdout);
+  assert.strictEqual(j.decision, 'block', 'Stop must use the structured block decision, not plain stdout');
+  return j.reason;
+}
+
+test('Stop: an unconsumed PLUMP crossing emits the ask (ทำ/later) via the structured block decision, then self-consumes', () => {
   const { home, proj } = sandbox();
   try {
-    seedState(home, proj, { lastVerdict: { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() } });
-    const r = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
-    assertGraceful(r);
-    assert.ok(r.stdout.includes('[CoalWash] FULL band standing directive'), r.stdout);
-    assert.ok(r.stdout.includes('SPAWN the free mechanical Quick pass as a BACKGROUND subagent'), 'background-spawn, never inline-before-the-task');
-    assert.ok(r.stdout.includes('never delay the user\'s request'), r.stdout);
-    assert.ok(r.stdout.includes('repeats every turn'), r.stdout);
-    assert.ok(r.stdout.includes('background spawn IS the yield'), 'the spawn itself is the yield, not sibling presence');
-    assert.ok(r.stdout.includes('sibling conductor advisories (CoalBoard/CoalTipple) do NOT block it'), 'a sibling firing never mutes the bar');
-    assert.ok(r.stdout.includes('if CoalBoard is actually convening this turn'), 'the one real carve: CB actually convening defers one turn');
-    assert.ok(!r.stdout.includes('THEY take precedence'), 'the old blanket sibling-yield clause is gone (beta.9 fix)');
+    seedState(home, proj, {
+      lastCrossing: { band: 'PLUMP', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'PLUMP', reason: 'bmi', economical: false, fatTokens: 1234, at: Date.now() },
+    });
+    const r1 = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r1);
+    const reason = parseBlock(r1.stdout);
+    assert.ok(reason.includes('memory crossed the PLUMP ceiling'), reason);
+    assert.ok(reason.includes('fat ~1234 tok'), reason);
+    assert.ok(reason.includes('question tool'), 'rides the agent question-box');
+    assert.ok(reason.includes('ทำ'), reason);
+    assert.ok(reason.includes('later (dismiss; the offer returns at the next ceiling crossing)'), 'the later option tells the consume-at-emission truth');
+    assert.ok(!reason.includes('snooze'), 'no snooze promise — the code never re-fires until the next crossing');
+    assert.ok(reason.includes('run the quick wash now'), 'PLUMP defaults to the quick exercise');
+    assert.ok(reason.includes('deletes remain human-gated'), reason);
+
+    const r2 = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r2);
+    assert.strictEqual(r2.stdout, '', 'consumed at emission — a second Stop for the SAME crossing stays silent');
   } finally { clean(home, proj); }
 });
 
-test('UserPromptSubmit: LEAN, no verdict, a disarmed FULL, an externalize FULL, and a stale FULL+economical all stay silent', () => {
+test('Stop: an unconsumed OBESE crossing offers the config-mapped exercise (default: full)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedState(home, proj, {
+      lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'OBESE', reason: 'bmi', economical: false, fatTokens: 2500, at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('memory crossed the OBESE ceiling'), reason);
+    assert.ok(reason.includes('run the full wash now'), 'OBESE defaults to the full exercise (factory exercisePerBand)');
+  } finally { clean(home, proj); }
+});
+
+test('Stop: a FULL+economical crossing with forceMode=auto (the default) emits the standing-consent force directive, not an ask', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('FULL band + break-even proven'), reason);
+    assert.ok(reason.includes('fat ~4004 tok'), reason);
+    assert.ok(reason.includes('standing config authorizes'), reason);
+    assert.ok(reason.includes('Quick pass NOW'), reason);
+    assert.ok(reason.includes('stage-only'), reason);
+    assert.ok(reason.includes('human gate'), reason);
+    assert.ok(reason.includes('once per crossing, not per session'), reason);
+    assert.ok(!reason.includes('question tool'), 'force never asks');
+  } finally { clean(home, proj); }
+});
+
+test('Stop: forceMode=ask degrades a FULL+economical crossing to the same ask template used by PLUMP/OBESE', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ forceMode: 'ask' }), 'utf8');
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('memory crossed the FULL ceiling'), reason);
+    assert.ok(reason.includes('question tool'), 'ask-degraded, not auto-run');
+    assert.ok(!reason.includes('standing config authorizes'), 'the auto-run authorization is suppressed');
+  } finally { clean(home, proj); }
+});
+
+test('Stop: forceMode=off emits the ask too — never silent (suppresses only the auto-run, never FULL awareness) — and consumes the crossing', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ forceMode: 'off' }), 'utf8');
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('memory crossed the FULL ceiling'), 'a silent FULL would be the forbidden "dismiss and keep growing" third path');
+    assert.ok(reason.includes('question tool'), 'off degrades to the ask, same as ask');
+    assert.ok(!reason.includes('standing config authorizes'), 'the auto-run authorization is suppressed');
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastCrossing.consumed, true, 'consumed at emission, same as every other surfaced crossing');
+  } finally { clean(home, proj); }
+});
+
+test('Stop: nothing pending is silent, exit 0, and creates no state file at all', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'the silent path never writes state');
+  } finally { clean(home, proj); }
+});
+
+test('Stop: an already-consumed crossing never re-emits', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedState(home, proj, { lastCrossing: { band: 'PLUMP', at: Date.now(), consumed: true } });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+  } finally { clean(home, proj); }
+});
+
+test('Stop: a malformed/unknown-band/LEAN-band lastCrossing is silent, never throws', () => {
   const cases = [
-    undefined, // no state file at all
-    { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0, at: Date.now() },
-    { band: 'FULL', reason: 'fat-budget', economical: false, fatTokens: 5000, at: Date.now() }, // disarmed (break-even against)
-    { band: 'FULL', reason: 'externalize', economical: false, fatTokens: 100, at: Date.now() }, // all-muscle, never arms
-    { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() - 25 * 60 * 60 * 1000 }, // stale, >24h
+    { band: 'LEAN', at: Date.now(), consumed: false }, // LEAN is never a crossing target
+    { band: 'GARBAGE', at: Date.now(), consumed: false },
+    { band: 'PLUMP', at: Date.now() + 60 * 60 * 1000, consumed: false }, // future timestamp
+    { band: 'PLUMP' }, // missing `at`
+    'just a string',
+    42,
+    [],
   ];
-  for (const lastVerdict of cases) {
+  for (const lastCrossing of cases) {
     const { home, proj } = sandbox();
     try {
-      if (lastVerdict) seedState(home, proj, { lastVerdict });
-      const r = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
+      seedState(home, proj, { lastCrossing });
+      const r = run(proj, home, { hook_event_name: 'Stop' });
       assertGraceful(r);
-      assert.strictEqual(r.stdout, '', `case ${JSON.stringify(lastVerdict)} must stay silent`);
+      assert.strictEqual(r.stdout, '', `case ${JSON.stringify(lastCrossing)} must stay silent`);
     } finally { clean(home, proj); }
   }
 });
 
-test('verdict-recording round-trip: a FULL-economical SessionStart records an armed verdict the very next UserPromptSubmit reads and fires on', () => {
+test('Stop: coalwashMode=off silences even a pending crossing (the master switch wins)', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { coalwashMode: 'off' });
+    seedState(home, proj, { lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false } });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// SessionStart -> Stop round trips (recordVerdict/sanitizeVerdict stay live as
+// the Stop hook's data source; recordCrossing/sanitizeCrossing are the new
+// once-per-crossing counterpart).
+// ---------------------------------------------------------------------------
+
+test('round trip: a FULL-economical SessionStart records a crossing the following Stop reads and force-fires on', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
@@ -294,15 +423,16 @@ test('verdict-recording round-trip: a FULL-economical SessionStart records an ar
     const st = readProjState(home, proj);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.economical, true);
-    assert.ok(st.lastVerdict.at > 0);
+    assert.strictEqual(st.lastCrossing.band, 'FULL', 'the bootstrap rise (no prior verdict -> LEAN default) armed a crossing');
+    assert.strictEqual(st.lastCrossing.consumed, false);
 
-    const rp = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
+    const rp = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(rp);
-    assert.ok(rp.stdout.includes('FULL band standing directive'), rp.stdout);
+    assert.ok(parseBlock(rp.stdout).includes('FULL band + break-even proven'), rp.stdout);
   } finally { clean(home, proj); }
 });
 
-test('verdict-recording round-trip: a LEAN SessionStart records economical:false, so the following UserPromptSubmit stays silent', () => {
+test('round trip: a LEAN SessionStart records economical:false and no crossing, so the following Stop stays silent', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
@@ -314,28 +444,81 @@ test('verdict-recording round-trip: a LEAN SessionStart records economical:false
     const st = readProjState(home, proj);
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
     assert.strictEqual(st.lastVerdict.economical, false);
+    assert.strictEqual(st.lastCrossing, undefined, 'LEAN never arms a crossing');
 
-    const rp = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
+    const rp = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(rp);
     assert.strictEqual(rp.stdout, '');
   } finally { clean(home, proj); }
 });
 
-test('UserPromptSubmit hot path: the silent case never runs discovery/measurement (no state file created) and completes fast', () => {
+test('round trip: two SessionStarts at the SAME band record only ONE crossing (not re-armed)', () => {
   const { home, proj } = sandbox();
   try {
-    // A store that WOULD be FULL via the absolute cap if the full gauge ran —
-    // proves the branch never calls discoverClassB/measureEntries/recordStamp
-    // (Phoenix #3): if it did, this fixture would produce a state file same
-    // as the SessionStart tests above do.
-    seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 });
-    const t0 = Date.now();
-    const r = run(proj, home, { hook_event_name: 'UserPromptSubmit' });
-    const elapsedMs = Date.now() - t0;
-    assertGraceful(r);
-    assert.strictEqual(r.stdout, '', 'no cached verdict yet -> silent');
-    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'the hot path never stamps/discovers/measures — no state file created at all');
-    assert.ok(elapsedMs < 2000, `UserPromptSubmit silent path should be fast (node-startup-dominated); took ${elapsedMs}ms`);
+    muteUpdate(home);
+    // Same PLUMP fixture as the existing PLUMP gauge test (BMI ~1.35).
+    seedClassB(home, proj, { claudeMdBytes: 4000, indexBytes: 60 });
+    seedState(home, proj, { leanFloorTokens: 750 });
+    const r1 = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r1);
+    const at1 = readProjState(home, proj).lastCrossing.at;
+
+    const r2 = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r2);
+    const crossing2 = readProjState(home, proj).lastCrossing;
+    assert.strictEqual(crossing2.at, at1, 'the second SessionStart at the identical band must not re-arm/overwrite the crossing');
+    assert.strictEqual(crossing2.consumed, false);
+
+    const rp = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp);
+    assert.ok(parseBlock(rp.stdout).includes('memory crossed the PLUMP ceiling'), 'exactly one ask fires for the two identical-band sessions');
+  } finally { clean(home, proj); }
+});
+
+test('round trip: a LEAN SessionStart clears a pending crossing left over from a prior high-band session', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedState(home, proj, { lastCrossing: { band: 'OBESE', at: Date.now() - 1000, consumed: false } });
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 }); // LEAN fixture
+    const rs = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(rs);
+    assert.strictEqual(readProjState(home, proj).lastCrossing, undefined, 'LEAN clears the stale pending crossing');
+
+    const rp = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp);
+    assert.strictEqual(rp.stdout, '', 'nothing left to ask about');
+  } finally { clean(home, proj); }
+});
+
+test('round trip (F1): an externalize-FULL SessionStart never arms a crossing AND clears a pending one — the following Stop is silent', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // Same all-muscle-over-the-hard-cap fixture as the externalize gauge test
+    // above (footprint ~36200 tok, floor 36000 = 6% of CAPACITY_TOKENS), plus
+    // a stale pending PLUMP crossing from an earlier session: the store's
+    // truth changed to not-washable, so the externalize scan must supersede
+    // it — a Stop ask saying "run the full wash now" here would steer the
+    // user into washing legitimate muscle (the growable-full invariant's
+    // forbidden move; SessionStart's externalize advisory is the only
+    // correct surface).
+    seedState(home, proj, {
+      leanFloorTokens: 36000,
+      lastCrossing: { band: 'PLUMP', at: Date.now() - 1000, consumed: false },
+    });
+    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
+    const rs = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(rs);
+    assert.ok(rs.stdout.includes('memory gauge: FULL (externalize)'), rs.stdout);
+
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.reason, 'externalize', 'the verdict cache still records the truth');
+    assert.strictEqual(st.lastCrossing, undefined, 'externalize counts as LEAN for edge detection: no crossing armed, the pending PLUMP crossing cleared');
+
+    const rp = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp);
+    assert.strictEqual(rp.stdout, '', 'Stop stays silent on an all-muscle store');
   } finally { clean(home, proj); }
 });
 

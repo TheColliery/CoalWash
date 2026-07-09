@@ -9,6 +9,7 @@ import {
   statePath, loadState, projectState, recordStamp, setLeanFloor, setSnooze,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
   recordVerdict, sanitizeVerdict, VERDICT_MAX_AGE_MS,
+  BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
   PLUMP_BMI, OBESE_BMI, FAT_BUDGET_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX,
 } from './caliper.mjs';
@@ -395,5 +396,112 @@ test('G2: every corrupt/truncated/empty/wrong-shaped state file self-heals to {}
       const ps = projectState(loadState(home), proj);
       assert.strictEqual(sanitizeLeanFloor(ps.leanFloorTokens, 5000), 0, 'no case yields a trusted floor');
     }
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// edge-crossing state (beta.10 — the Stop hook's once-per-crossing gate)
+// ---------------------------------------------------------------------------
+
+test('BAND_RANK orders LEAN < PLUMP < OBESE < FULL', () => {
+  assert.ok(BAND_RANK.LEAN < BAND_RANK.PLUMP);
+  assert.ok(BAND_RANK.PLUMP < BAND_RANK.OBESE);
+  assert.ok(BAND_RANK.OBESE < BAND_RANK.FULL);
+});
+
+test('recordCrossing: a rise arms an unconsumed crossing at the new band', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'PLUMP', 'LEAN', 1000);
+    const st = projectState(loadState(home), proj);
+    assert.deepStrictEqual(st.lastCrossing, { band: 'PLUMP', at: 1000, consumed: false });
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: the "qualifying past" case — no prior band on record defaults to LEAN, so an already-high first scan fires immediately', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'FULL', undefined, 1000); // prevBand undefined -> rank 0 (LEAN)
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.band, 'FULL');
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: same-or-falling band does nothing — an existing pending crossing is left exactly as it was (two SessionStarts, one crossing)', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'PLUMP', 'LEAN', 1000);
+    recordCrossing(home, proj, 'PLUMP', 'PLUMP', 2000); // same band again
+    let st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.at, 1000, 'the crossing is not re-armed/overwritten by a same-band repeat');
+
+    recordCrossing(home, proj, 'PLUMP', 'FULL', 3000); // falling (FULL -> PLUMP) also does nothing
+    st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.at, 1000, 'a falling band never re-arms either');
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: LEAN clears any pending crossing outright', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'LEAN', 1000);
+    assert.ok(projectState(loadState(home), proj).lastCrossing);
+    recordCrossing(home, proj, 'LEAN', 'OBESE', 2000);
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined);
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: orphan-prune still runs on this write path', () => {
+  const { home, proj } = sandbox();
+  const dead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-crossing-')));
+  try {
+    recordStamp(home, dead, 50);
+    fs.rmSync(dead, { recursive: true, force: true });
+    recordCrossing(home, proj, 'PLUMP', 'LEAN');
+    assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'recordCrossing prunes too');
+  } finally { clean(home, proj); }
+});
+
+test('sanitizeCrossing: a fresh, non-LEAN, unconsumed crossing is trusted as-is', () => {
+  const now = Date.now();
+  assert.deepStrictEqual(sanitizeCrossing({ band: 'PLUMP', at: now, consumed: false }, now), { band: 'PLUMP', at: now });
+  assert.deepStrictEqual(sanitizeCrossing({ band: 'FULL', at: now, consumed: false }, now), { band: 'FULL', at: now });
+});
+
+test('sanitizeCrossing: any doubt collapses to null — consumed, LEAN, unknown band, malformed shape, or a future timestamp', () => {
+  const now = Date.now();
+  assert.strictEqual(sanitizeCrossing({ band: 'PLUMP', at: now, consumed: true }, now), null, 'consumed never re-emits');
+  assert.strictEqual(sanitizeCrossing({ band: 'LEAN', at: now, consumed: false }, now), null, 'LEAN is never a crossing target');
+  assert.strictEqual(sanitizeCrossing({ band: 'GARBAGE', at: now, consumed: false }, now), null);
+  assert.strictEqual(sanitizeCrossing({ band: 'PLUMP', at: now + 60000, consumed: false }, now), null, 'a future timestamp is never trusted');
+  assert.strictEqual(sanitizeCrossing({ band: 'PLUMP', consumed: false }, now), null, 'a missing/non-finite at is discarded');
+  for (const bad of [null, undefined, {}, [], 'FULL', 42]) {
+    assert.doesNotThrow(() => sanitizeCrossing(bad));
+    assert.strictEqual(sanitizeCrossing(bad), null, `${JSON.stringify(bad)} must not arm`);
+  }
+});
+
+test('consumeCrossing: marks a pending crossing consumed; a project with no crossing at all is a harmless no-op', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'LEAN', 1000);
+    assert.strictEqual(consumeCrossing(home, proj, 2000), true);
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.consumed, true);
+    assert.strictEqual(st.lastCrossing.consumedAt, 2000);
+    assert.strictEqual(st.lastCrossing.band, 'OBESE', 'the band/at fields survive consumption');
+    assert.strictEqual(sanitizeCrossing(st.lastCrossing), null, 'a consumed crossing never re-arms');
+
+    assert.doesNotThrow(() => consumeCrossing(home, proj)); // no lastCrossing at all -> no-op, never throws
+  } finally { clean(home, proj); }
+});
+
+test('consumeCrossing: orphan-prune still runs on this write path', () => {
+  const { home, proj } = sandbox();
+  const dead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-consume-')));
+  try {
+    recordStamp(home, dead, 50);
+    fs.rmSync(dead, { recursive: true, force: true });
+    consumeCrossing(home, proj);
+    assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'consumeCrossing prunes too');
   } finally { clean(home, proj); }
 });

@@ -68,7 +68,7 @@ The gauge rides **Memory-BMI** = always-loaded footprint / lean floor (floor-rel
 
 ## 🧭 Compatibility
 
-Cross-agent by design (the engine is zero-dependency Node scripts any agent can run; class-B layout is *discovered* per platform, never hardcoded) — **validated end-to-end on Claude Code only**. Every other platform is designed-degrade-safe, not yet validated: unknown platform → no auto-discovery, conservative flags, manual scope, never auto-delete. The activation ladder is capability-keyed: has lifecycle hooks → the shipped session-start gauge runs automatically (Claude Code today); no hooks → best-effort agent-driven offer (probabilistic, not hook parity); always → manual `/coalwash`. The FULL band's standing directive is persistent, not one-shot: on a platform with lifecycle hooks it re-injects into agent context every turn (the same channel the gauge itself uses) until the store is cleaned or `fullPercent` is raised; a hookless platform gets only the single best-effort offer above, with no repeat mechanism.
+Cross-agent by design (the engine is zero-dependency Node scripts any agent can run; class-B layout is *discovered* per platform, never hardcoded) — **validated end-to-end on Claude Code only**. Every other platform is designed-degrade-safe, not yet validated: unknown platform → no auto-discovery, conservative flags, manual scope, never auto-delete. The activation ladder is capability-keyed: has lifecycle hooks → the shipped session-start gauge runs automatically (Claude Code today); no hooks → best-effort agent-driven offer (probabilistic, not hook parity); always → manual `/coalwash`. Asks are edge-triggered, not persistent: crossing a band ceiling fires one ทำ/later ask on the `Stop` hook — the same blocking channel `rot-canary` uses, so the ask is enforced, not merely suggested — then stays silent until the next crossing, never a repeating per-turn nag. A FULL+economical crossing can instead auto-run the free mechanical Quick pass under standing config (`forceMode: auto`; numbers always shown, deletes still human-gated) — `ask`/`off` fall back to the same two-button ask. A hookless platform gets only the single best-effort offer above, with no repeat mechanism.
 
 ## 🚀 Install
 
@@ -99,6 +99,8 @@ Every tool in the series supports two config levels — a global `~/.claude/.coa
 | `localOnly` | `false` | Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config |
 | `updateMode` | `ask` | Self-update behavior at session start (`ask` \| `auto` \| `remind` \| `off`) |
 | `updateCheckDays` | `14` | Days between self-update checks/reminders |
+| `exercisePerBand` | `{plump: quick, obese: full, full: full}` | Per-ceiling exercise the Stop-hook ask offers (`quick` \| `full` each, for plump/obese/full) |
+| `forceMode` | `auto` | FULL+economical crossing behavior at Stop: `auto` = standing-consent auto-run (the rot-canary `autoFixMode` model) · `ask` = FULL asks like other ceilings · `off` = same as ask — never silent (suppresses only the auto-run authorization, never FULL awareness) |
 
 Full key reference: every key + default lives in [`scripts/lib/config-schema.mjs`](scripts/lib/config-schema.mjs) and the commented template [`platform-configs/.coalwash.json`](platform-configs/.coalwash.json).
 

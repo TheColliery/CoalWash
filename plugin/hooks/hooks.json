@@ -3,7 +3,7 @@
     "SessionStart": [
       { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js\"" }] }
     ],
-    "UserPromptSubmit": [
+    "Stop": [
       { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js\"" }] }
     ]
   }
