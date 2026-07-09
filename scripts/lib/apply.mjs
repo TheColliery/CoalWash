@@ -45,13 +45,25 @@
 // across the API boundary; every path returns { ok, ... }.
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { checkFidelity } from './fidelity-gate.mjs';
+import { claudeBaseDir } from './config-load.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
+const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // beside ~/.claude/.coalwash-state.json
 const SNAP_MARKER = 'snap.complete';
+
+// A target whose files live in the user home's GLOBAL class-B (the global
+// CLAUDE.md closure — class-b.mjs's own scope:'global') additionally locks
+// HERE, beside the global state file — a per-project lock alone cannot see
+// TWO DIFFERENT projects both mutating the same global file (design-pass item,
+// MEMORY.md "THE SHARED GLOBAL SLICE").
+export function globalLockPath(home = os.homedir()) {
+  return path.join(claudeBaseDir(home), GLOBAL_LOCK_NAME);
+}
 
 // ---------------------------------------------------------------------------
 // small durable-write helpers
@@ -206,19 +218,32 @@ export function ensureSelfIgnore(dir) {
 // plan = {
 //   projectRoot: abs path (transaction dir + lock live under it),
 //   roots: [abs...]            — the declared class-B roots writes may touch,
-//   actions: [{ type: 'rewrite'|'create'|'delete', path, content?, expectedOrig? }],
+//   actions: [{ type: 'rewrite'|'create'|'delete', path, content?, expectedOrig?, scope? }],
 //     expectedOrig (optional, rewrite/delete): the content the caller SCANNED
 //     and gated against. When provided, the external-writer guard compares the
 //     live file against it — covering the whole scan -> human-gate -> apply
 //     window (a cloud-sync clobber during the approval wait is caught). When
 //     absent, the baseline is the content staged at applyPlan time (the
 //     intra-transaction window only).
-//   deletesApproved: bool      — the OUTER human gate's flag; false blocks deletes,
+//     scope (optional, 'global'|'project', def 'project'): 'global' means this
+//     target lives in the user home's global class-B (e.g. the global
+//     CLAUDE.md closure) — the transaction ALSO takes a lock beside the global
+//     state file (globalLockPath) so two DIFFERENT projects' runs can never
+//     interleave writes to the same global file, which a per-project lock
+//     alone cannot see.
+//   deletesApproved: bool      — set ONLY on the strength of the Full-tier
+//     human-gate ask (the SKILL's explicit y/n on the terse flagged list) —
+//     this is the OUTER gate's flag, not a second in-code confirmation; the
+//     engine trusts the caller set it truthfully after a real ask, same trust
+//     boundary as `approvedDrops` below. false/absent blocks every delete.
 //   sessionId?: string,
 // }
+// opts.home (def os.homedir()) — where globalLockPath resolves; override for
+// hermetic tests, exactly like opts.txDir/opts.now/opts.keepSnapshots.
 // Returns { ok, deferred?, error?, applied?, snapshotDir?, rolledBack?, flagged? }.
 export function applyPlan(plan, opts = {}) {
   const now = opts.now || Date.now();
+  const home = opts.home || os.homedir();
   try {
     // ---- validate shape (fail loud, nothing touched) ----
     if (!plan || typeof plan !== 'object') return { ok: false, error: 'plan must be an object' };
@@ -305,12 +330,22 @@ export function applyPlan(plan, opts = {}) {
       return { ok: false, error: `fidelity: unapproved fact drop(s) — apply blocked (approve them explicitly or fix the rewrite): ${unapproved.join(' | ')}` };
     }
 
-    // ---- lock ----
+    // ---- lock(s) — GLOBAL first, only when a declared action touches
+    // global-scope class-B (see the plan-shape comment above) ----
+    const touchesGlobal = actions.some((a) => a && a.scope === 'global');
+    let globalLock = null;
+    if (touchesGlobal) {
+      globalLock = acquireLock(globalLockPath(home), { sessionId: plan.sessionId, now });
+      if (!globalLock.acquired) return { ok: false, deferred: true, error: `global scope: ${globalLock.reason}` };
+    }
     const txDir = opts.txDir || txDirFor(projectRoot);
     fs.mkdirSync(txDir, { recursive: true });
     ensureSelfIgnore(txDir);
     const lock = acquireLock(path.join(txDir, LOCK_NAME), { sessionId: plan.sessionId, now });
-    if (!lock.acquired) return { ok: false, deferred: true, error: lock.reason };
+    if (!lock.acquired) {
+      if (globalLock) globalLock.release();
+      return { ok: false, deferred: true, error: lock.reason };
+    }
 
     const journalPath = path.join(txDir, JOURNAL_NAME);
     const snapDir = path.join(txDir, `snap-${now}`);
@@ -439,6 +474,7 @@ export function applyPlan(plan, opts = {}) {
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged };
     } finally {
       lock.release();
+      if (globalLock) globalLock.release();
     }
   } catch (e) {
     return { ok: false, error: `apply: ${e.message}` };

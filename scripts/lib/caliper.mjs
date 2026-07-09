@@ -6,12 +6,23 @@
 // MEAT growth never false-fires — only FAT above the floor moves the band):
 //   LEAN  (< PLUMP_BMI)          -> silent
 //   PLUMP (PLUMP_BMI..OBESE_BMI) -> ask via question-box; decline = snooze
-//   OBESE (OBESE_BMI..FULL_BMI)  -> strong-ask, shorter snooze
-//   FULL  (>= FULL_BMI OR the absolute platform cap) -> economic force-run of
-//         the PROCESS (deletes stay human-gated at the outer gate, always)
-// FULL's force fires ONLY on the deterministic break-even proof (the series'
-// one named consent exception, "economic-dominance" — AGENTS.md): the numbers
-// are computed in CODE and SHOWN every time.
+//   OBESE (>= OBESE_BMI, below FULL) -> strong-ask, shorter snooze
+//   FULL  -> economic force-run of the PROCESS (deletes stay human-gated at
+//         the outer gate, always)
+// GROWABLE-FULL (beta.7, the USER's three-layer invariant — MEMORY.md "THE
+// CALIBRATION FINDING"): post-floor, FULL is judged on ABSOLUTE fat above the
+// MEASURED floor (footprint > leanFloor + FAT_BUDGET_TOKENS), never on the raw
+// BMI ratio — a legitimately large, all-muscle floor must never false-fire no
+// matter how big it grows (LEAN/PLUMP/OBESE stay ratio-based, unchanged). Only
+// the machine's hard capacity gate (fullPercent x CAPACITY_TOKENS) is
+// person-independent and applies regardless of floor state; firing it with
+// ~no fat to reclaim (all-muscle over capacity) gets the DIFFERENT
+// 'externalize' verdict — washing cannot shrink muscle, only splitting/
+// archiving can. Pre-floor (bootstrap, no clean yet) keeps the original
+// absolute-cap-only heuristic — it correctly drove the first real clean.
+// FULL's economic force fires ONLY on the deterministic break-even proof (the
+// series' one named consent exception, "economic-dominance" — AGENTS.md): the
+// numbers are computed in CODE and SHOWN every time.
 //
 // Token counts are ESTIMATES (chars heuristic: ~4 chars/token ASCII, ~1.5
 // chars/token non-ASCII) — always label them "~est"; bytes/chars are the
@@ -29,8 +40,22 @@ import { parseJsonc } from './jsonc.mjs';
 // ---------------------------------------------------------------------------
 export const PLUMP_BMI = 1.3;
 export const OBESE_BMI = 1.6;
-export const FULL_BMI = 2.0;
-export const CAPACITY_TOKENS = 200000; // conservative usable-per-turn window (~est; per-platform adapter refines later)
+// Growable-full (beta.7 #1): the absolute fat allowed above a MEASURED floor
+// before FULL fires, replacing the old ratio-based FULL_BMI(2.0) rung — a
+// benchmark-calibrated placeholder from the first real dogfood clean (a
+// healthy store carried ~1-2k tok of fat on a ~29k floor); budgeted a little
+// above that observed range.
+export const FAT_BUDGET_TOKENS = 4000;
+// Rough placeholder for the session's usable per-turn window — NOT a verified
+// per-model capacity claim (Claude sessions run anywhere from a 200k standard
+// to a 1M-token beta ceiling depending on tier/org; never silently assert
+// either as given). Recalibrated 2026-07-09 off the first real dogfood run (a
+// healthy ~29k-tok floor and a ~44k-tok bootstrap footprint both needed
+// headroom the stale 200k-era guess didn't give, which would otherwise false-
+// FULL on plain muscle forever). Still a fuzzy placeholder by design
+// (blueprint §5 — capacity is inherently approximate); refine later via a
+// per-platform capacity probe, never by guessing higher again.
+export const CAPACITY_TOKENS = 600000;
 export const CC_INDEX_CAP_BYTES = 25 * 1024; // CC memory-index platform cap class (25KB)
 export const CC_INDEX_CAP_LINES = 200; // CC memory-index platform cap class (200 lines)
 export const RUN_COST_MULTIPLIER = 3; // one Full run ~ store read x2 (outsider+insider) + rewrite
@@ -130,13 +155,28 @@ export function bandVerdict({
     indexBytes >= CC_INDEX_CAP_BYTES ||
     indexLines >= CC_INDEX_CAP_LINES;
   const bmi = leanFloorTokens > 0 ? footprintTokens / leanFloorTokens : null;
-  if (capHit) return { band: 'FULL', reason: 'absolute-cap', bmi, hardCeilingTokens };
+
   if (bmi === null) {
-    // Bootstrap: no lean floor measured yet (never cleaned) — only the absolute
-    // cap can fire; BMI bands wake up after the first full clean stamps a floor.
+    // Bootstrap (pre-floor): unchanged absolute-cap-only heuristic — it
+    // correctly drove the first real clean (beta.6). BMI/fat-budget bands
+    // wake up only after a full clean stamps a floor.
+    if (capHit) return { band: 'FULL', reason: 'absolute-cap', bmi, hardCeilingTokens };
     return { band: 'LEAN', reason: 'no-floor-yet', bmi, hardCeilingTokens };
   }
-  if (bmi >= FULL_BMI) return { band: 'FULL', reason: 'bmi', bmi, hardCeilingTokens };
+
+  // Post-floor (growable-full): FULL is judged on FAT above the MEASURED
+  // floor, never the raw ratio, so a legitimately large floor never
+  // false-fires no matter how big it grows. The machine's hard capacity gate
+  // still applies — it is the one PERSON-independent ceiling — but hitting it
+  // with ~no fat to reclaim (all-muscle over capacity) gets DIFFERENT advice:
+  // externalize, never "wash harder" (a wash cannot shrink muscle).
+  const fatTokens = Math.max(0, footprintTokens - leanFloorTokens);
+  if (capHit) {
+    return fatTokens <= FAT_BUDGET_TOKENS
+      ? { band: 'FULL', reason: 'externalize', bmi, hardCeilingTokens }
+      : { band: 'FULL', reason: 'absolute-cap', bmi, hardCeilingTokens };
+  }
+  if (fatTokens > FAT_BUDGET_TOKENS) return { band: 'FULL', reason: 'fat-budget', bmi, hardCeilingTokens };
   if (bmi >= OBESE_BMI) return { band: 'OBESE', reason: 'bmi', bmi, hardCeilingTokens };
   if (bmi >= PLUMP_BMI) return { band: 'PLUMP', reason: 'bmi', bmi, hardCeilingTokens };
   return { band: 'LEAN', reason: 'bmi', bmi, hardCeilingTokens };

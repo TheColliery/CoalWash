@@ -35,8 +35,13 @@ export function buildReceipt(r) {
     lines.push(`one-time cost: ~${ktok(r.oneTimeCostTokens)} tok (~est) · break-even: ${be == null || !Number.isFinite(be) ? 'n/a' : `~${Math.ceil(be)} session(s)`}`);
   }
   lines.push(`removed ${r.removed || 0} · trimmed ${r.trimmed || 0} · kept ${r.kept || 0}${r.flaggedKept ? ` · flagged-kept ${r.flaggedKept}` : ''}`);
-  lines.push(r.gatePass
-    ? 'fidelity gate: PASS (0 facts lost — links/dates/versions/frontmatter all preserved)'
-    : `fidelity gate: FAIL — ${r.gateDrops || '?'} drop(s); the apply is BLOCKED until every drop is restored`);
+  // Degrade to "unknown" when the gate field was never provided — undefined/
+  // null must never read as FAIL (a false failure with no data behind it is
+  // worse than admitting we don't know, per the series' honest-ceiling rule).
+  lines.push(r.gatePass == null
+    ? 'fidelity gate: unknown (fields not provided)'
+    : r.gatePass
+      ? 'fidelity gate: PASS (0 facts lost — links/dates/versions/frontmatter all preserved)'
+      : `fidelity gate: FAIL — ${r.gateDrops || '?'} drop(s); the apply is BLOCKED until every drop is restored`);
   return lines.join('\n');
 }

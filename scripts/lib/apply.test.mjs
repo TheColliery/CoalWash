@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable } from './apply.mjs';
+import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath } from './apply.mjs';
 
 function sandbox() {
   const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj-')));
@@ -386,6 +386,58 @@ test('tx dir self-ignores: a .gitignore containing * lands inside .claude/coalwa
     assert.ok(fs.existsSync(gi), 'self-ignore file must exist in the tx dir');
     assert.strictEqual(fs.readFileSync(gi, 'utf8'), '*\n', 'self-ignore is the catch-all pattern');
   } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// GLOBAL-scope lock (design-pass item, MEMORY.md "THE SHARED GLOBAL SLICE"):
+// a global-scope action ALSO locks beside the global state file so two
+// DIFFERENT projects' runs can never interleave writes to the same global
+// class-B file — a per-project lock alone cannot see across projects.
+// ---------------------------------------------------------------------------
+
+test('global-scope lock: a global-scope action takes a lock beside the global state file and releases it on success', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome-')));
+  try {
+    const g = path.join(store, 'global.md');
+    write(g, 'global content');
+    const r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: g, content: 'new global content', scope: 'global' }]), { home });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(fs.readFileSync(g, 'utf8'), 'new global content');
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), false, 'the global lock is released after a successful apply');
+  } finally { clean(proj, home); }
+});
+
+test('global-scope lock: a held global lock defers a DIFFERENT project\'s global-scope run even though its OWN project lock is free', () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome2-')));
+  const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj2-')));
+  const store2 = path.join(proj2, 'memory');
+  fs.mkdirSync(store2, { recursive: true });
+  try {
+    // A fresh (non-stale) global lock held by "another project's run".
+    fs.mkdirSync(path.dirname(globalLockPath(home)), { recursive: true });
+    fs.writeFileSync(globalLockPath(home), JSON.stringify({ sessionId: 'other-project', at: Date.now(), token: 'x' }));
+    const g2 = path.join(store2, 'global2.md');
+    write(g2, 'v1');
+    const r = applyPlan(planFor(proj2, store2, [{ type: 'rewrite', path: g2, content: 'v2', scope: 'global' }]), { home });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.deferred, true, 'the global lock defers even though proj2 never held any lock of its own');
+    assert.match(r.error, /global scope/);
+    assert.strictEqual(fs.readFileSync(g2, 'utf8'), 'v1', 'nothing touched while deferred');
+    assert.strictEqual(fs.existsSync(path.join(txDirFor(proj2), '.coalwash.lock')), false, 'the per-project lock was never even acquired');
+  } finally { clean(proj2, home); }
+});
+
+test('global-scope lock: a plan with NO global-scope actions never touches the global lock file at all', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome3-')));
+  try {
+    const f = path.join(store, 'local.md');
+    write(f, 'v1');
+    const r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'v2' }]), { home });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), false, 'no global-scope action -> the global lock file is never created');
+  } finally { clean(proj, home); }
 });
 
 // ---------------------------------------------------------------------------

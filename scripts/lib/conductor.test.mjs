@@ -27,12 +27,13 @@ function sandbox() {
 function clean(...dirs) {
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 }
-function run(cwd, home) {
+function run(cwd, home, input) {
   return spawnSync(process.execPath, [HOOK], {
     cwd,
     env: { ...process.env, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, CLAUDE_CONFIG_DIR: '' },
     encoding: 'utf8',
     timeout: 20000,
+    input: input === undefined ? undefined : JSON.stringify(input),
   });
 }
 function writeGlobalCfg(home, cfg) {
@@ -141,23 +142,25 @@ test('OBESE: strong-ask with the shorter snooze window', () => {
   } finally { clean(home, proj); }
 });
 
-test('FULL via BMI with the break-even in favor: the deterministic numbers are SHOWN and the run is directed', () => {
+test('FULL via fat-budget (growable-full) with the break-even in favor: the deterministic numbers are SHOWN and the run is directed', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // footprint ~= 2115 tok; floor 1000 -> BMI ~2.1 (FULL); fat ~1115/day at rate 1
-    // run ~= 3x store ~= 6.3k < 14-day carry ~= 15.6k -> economical
-    seedClassB(home, proj, { claudeMdBytes: 8400, indexBytes: 60 });
+    // footprint = 5004 tok; floor 1000 -> fat 4004 (just over the 4000 fat
+    // budget, growable-full); run ~= 3x store ~= 15k < 14-day carry ~= 56k
+    // -> economical.
+    seedClassB(home, proj, { claudeMdBytes: 20016, indexBytes: 0 });
     seedState(home, proj, { leanFloorTokens: 1000 });
     const r = run(proj, home);
     assertGraceful(r);
-    assert.ok(r.stdout.includes('memory gauge: FULL (bmi)'), r.stdout);
+    assert.ok(r.stdout.includes('memory gauge: FULL (fat-budget)'), r.stdout);
     assert.ok(r.stdout.includes('fat ~'), 'numbers shown');
     assert.ok(/one run \S+ \d+ tok/.test(r.stdout), 'run cost shown');
     assert.ok(r.stdout.includes('break-even ~'), 'break-even shown');
     assert.ok(r.stdout.includes('RUN the CoalWash pipeline now'), 'economic force directive');
     assert.ok(r.stdout.includes('economic-dominance'), 'the named exception is cited');
     assert.ok(r.stdout.includes('human gate'), 'deletes stay human-gated even under force');
+    assert.ok(r.stdout.includes('SURFACE this line to the user verbatim'), 'the last-hop agent directive is present (beta.7 #2)');
   } finally { clean(home, proj); }
 });
 
@@ -179,9 +182,10 @@ test('FULL band but break-even NOT in favor: the force stays DISARMED (strong-as
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // Same FULL-band footprint as the armed case (floor 1000 -> BMI ~2.1, fat ~1115/day)
-    // but a huge recall store inflates the run cost (3x total) far past the 14-day carry.
-    const mem = seedClassB(home, proj, { claudeMdBytes: 8400, indexBytes: 60 });
+    // Same FULL-band footprint as the armed case (floor 1000, fat 5000 > the
+    // 4000 fat budget) but a huge recall store inflates the run cost (3x
+    // total) far past the 14-day carry.
+    const mem = seedClassB(home, proj, { claudeMdBytes: 23940, indexBytes: 60 });
     fs.writeFileSync(path.join(mem, 'recall-big.md'), 'r'.repeat(400 * 1024), 'utf8');
     seedState(home, proj, { leanFloorTokens: 1000 });
     const r = run(proj, home);
@@ -192,6 +196,97 @@ test('FULL band but break-even NOT in favor: the force stays DISARMED (strong-as
     assert.ok(!r.stdout.includes('RUN the CoalWash pipeline now'), 'no run directive when uneconomical');
     const st = readProjState(home, proj);
     assert.ok(st.snoozeUntil > Date.now(), 'disarmed FULL snoozes like a strong-ask');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// Growable-full (beta.7 item #1) — regression tests pinning the live cases.
+// ---------------------------------------------------------------------------
+
+test('growable-full: a large HEALTHY floor (TheColliery-shaped, ~29k) stays LEAN and silent even though the raw footprint is large', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // footprint = (116332+60)/4 = 29098 tok; floor 29054 -> fat 44 (well under
+    // the fat budget), bmi ~1.0015 (well under PLUMP) -> LEAN. Pins the exact
+    // live regression case (MEMORY.md "THE CALIBRATION FINDING").
+    seedClassB(home, proj, { claudeMdBytes: 116332, indexBytes: 60 });
+    seedState(home, proj, { leanFloorTokens: 29054 });
+    const r = run(proj, home);
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '', 'a healthy large floor must never false-fire FULL');
+  } finally { clean(home, proj); }
+});
+
+test('growable-full: post-floor all-muscle over the hard cap gets the EXTERNALIZE advisory, never "wash harder" (regression c)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // footprint 36200 tok; floor 36000 -> fat 200 (well under the fat budget)
+    // but the footprint clears the recalibrated hard ceiling (36000 = 6% of
+    // the recalibrated CAPACITY_TOKENS) -> externalize, not a wash directive.
+    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 36000 });
+    const r = run(proj, home);
+    assertGraceful(r);
+    assert.ok(r.stdout.includes('memory gauge: FULL (externalize)'), r.stdout);
+    assert.ok(r.stdout.includes('EXTERNALIZE'), 'advises externalizing/splitting');
+    assert.ok(r.stdout.includes('no reclaimable fat'), 'names WHY washing cannot help');
+    assert.ok(!r.stdout.includes('RUN the CoalWash pipeline now'), 'never directs a wash on an all-muscle store');
+    assert.ok(r.stdout.includes('SURFACE this line to the user verbatim'), 'the last-hop agent directive is present (beta.7 #2)');
+    const st = readProjState(home, proj);
+    assert.ok(st.snoozeUntil > Date.now(), 'externalize snoozes like a strong-ask (nothing new to say until the store shrinks)');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// LAST-HOP VISIBILITY (beta.7 item #2) — the Notification-channel hand-off.
+// ---------------------------------------------------------------------------
+
+test('last-hop visibility: an economical FULL run with a session_id writes a pending marker; a Notification event then emits an OS notification and consumes it once', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 20016, indexBytes: 0 }); // fat-budget FULL, economical
+    seedState(home, proj, { leanFloorTokens: 1000 });
+    const sessionId = 'sess-abc-123';
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: sessionId, source: 'startup' });
+    assertGraceful(r);
+    assert.ok(r.stdout.includes('memory gauge: FULL (fat-budget)'), r.stdout);
+
+    const rn = run(proj, home, { hook_event_name: 'Notification', session_id: sessionId });
+    assertGraceful(rn);
+    const out = JSON.parse(rn.stdout);
+    assert.ok(typeof out.terminalSequence === 'string' && out.terminalSequence.includes('CoalWash'), rn.stdout);
+
+    const rn2 = run(proj, home, { hook_event_name: 'Notification', session_id: sessionId });
+    assertGraceful(rn2);
+    assert.strictEqual(rn2.stdout, '', 'the marker is consumed once and never re-fires');
+  } finally { clean(home, proj); }
+});
+
+test('last-hop visibility: a Notification event with no pending marker (or no session_id) is a silent no-op', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    const r1 = run(proj, home, { hook_event_name: 'Notification', session_id: 'no-marker-for-this-session' });
+    assertGraceful(r1);
+    assert.strictEqual(r1.stdout, '');
+    const r2 = run(proj, home, { hook_event_name: 'Notification' }); // no session_id at all
+    assertGraceful(r2);
+    assert.strictEqual(r2.stdout, '');
+  } finally { clean(home, proj); }
+});
+
+test('last-hop visibility: without a session_id (no stdin, matching every pre-existing test), SessionStart behaves exactly as before', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 20016, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 1000 });
+    const r = run(proj, home); // no stdin at all
+    assertGraceful(r);
+    assert.ok(r.stdout.includes('memory gauge: FULL (fat-budget)'), r.stdout);
   } finally { clean(home, proj); }
 });
 

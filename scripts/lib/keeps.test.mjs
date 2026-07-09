@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { keepsPath, loadKeeps, recordKeep } from './keeps.mjs';
+import { keepsPath, loadKeeps, recordKeep, globalKeepsPath, loadGlobalKeeps, recordGlobalKeep } from './keeps.mjs';
 import { txDirFor } from './apply.mjs';
 
 function sandbox() {
@@ -115,4 +115,57 @@ test('R5: a NEWER-schema keeps.json is READ-ONLY — loadKeeps [], recordKeep re
     assert.strictEqual(recordKeep(proj, { target: 'y' }), false, 'an older tool must not rewrite a newer artifact');
     assert.strictEqual(fs.readFileSync(keepsPath(proj), 'utf8'), futureBytes, 'the newer file is byte-untouched');
   } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// GLOBAL keeps (design-pass item, MEMORY.md "THE SHARED GLOBAL SLICE"): same
+// shape/schema/upsert semantics, filed beside the global state file so an
+// adjudicated keep on a global target shields it machine-wide.
+// ---------------------------------------------------------------------------
+
+test('global keeps: recordGlobalKeep writes beside the global state file, independent of any project', () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome-')));
+  try {
+    assert.deepStrictEqual(loadGlobalKeeps(home), []);
+    const ok = recordGlobalKeep(home, { target: 'global-claude-md-section', reason: 'shields it machine-wide' });
+    assert.strictEqual(ok, true);
+    const keeps = loadGlobalKeeps(home);
+    assert.strictEqual(keeps.length, 1);
+    assert.strictEqual(keeps[0].target, 'global-claude-md-section');
+    assert.strictEqual(keeps[0].reason, 'shields it machine-wide');
+    assert.ok(fs.existsSync(globalKeepsPath(home)));
+    assert.strictEqual(globalKeepsPath(home), path.join(home, '.claude', '.coalwash-global-keeps.json'));
+  } finally { clean(home); }
+});
+
+test('global keeps: upserts by target (same as the project store) and stays fully isolated from any project keeps.json', () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome2-')));
+  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-proj-')));
+  try {
+    recordGlobalKeep(home, { target: 'x', reason: 'first look', date: '2026-01-01' });
+    recordGlobalKeep(home, { target: 'x', reason: 'second look, still load-bearing', date: '2026-02-02' });
+    assert.strictEqual(loadGlobalKeeps(home).length, 1, 'the same target replaces, not accumulates');
+    assert.strictEqual(loadGlobalKeeps(home)[0].reason, 'second look, still load-bearing');
+
+    recordKeep(proj, { target: 'x', reason: 'project-local, unrelated' }); // same target NAME, different store
+    assert.strictEqual(loadKeeps(proj).length, 1);
+    assert.strictEqual(loadKeeps(proj)[0].reason, 'project-local, unrelated');
+    assert.strictEqual(loadGlobalKeeps(home).length, 1, 'the project write never touched the global store');
+    assert.strictEqual(loadGlobalKeeps(home)[0].reason, 'second look, still load-bearing');
+  } finally { clean(home, proj); }
+});
+
+test('global keeps: [] on missing/corrupt/wrong-shape/newer-schema, same conservative behavior as the project store', () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome3-')));
+  try {
+    assert.deepStrictEqual(loadGlobalKeeps(home), []);
+    fs.mkdirSync(path.dirname(globalKeepsPath(home)), { recursive: true });
+    fs.writeFileSync(globalKeepsPath(home), '{ not json', 'utf8');
+    assert.deepStrictEqual(loadGlobalKeeps(home), []);
+    const futureBytes = JSON.stringify({ v: 99, keeps: [{ target: 'future' }] });
+    fs.writeFileSync(globalKeepsPath(home), futureBytes, 'utf8');
+    assert.deepStrictEqual(loadGlobalKeeps(home), []);
+    assert.strictEqual(recordGlobalKeep(home, { target: 'y' }), false, 'an older tool must not rewrite a newer artifact');
+    assert.strictEqual(fs.readFileSync(globalKeepsPath(home), 'utf8'), futureBytes, 'the newer file is byte-untouched');
+  } finally { clean(home); }
 });

@@ -54,3 +54,14 @@ test('break-even n/a when not finite; one-time line absent when cost not given',
   const r2 = buildReceipt({ ...BASE, oneTimeCostTokens: undefined, breakEvenSessions: undefined });
   assert.ok(!r2.includes('one-time cost'));
 });
+
+test('a receipt built with missing gate fields degrades to "unknown" — never a false FAIL without data', () => {
+  const r1 = buildReceipt({ ...BASE, gatePass: undefined, gateDrops: undefined });
+  assert.ok(r1.includes('fidelity gate: unknown (fields not provided)'));
+  assert.ok(!r1.includes('FAIL'));
+  const r2 = buildReceipt({ ...BASE, gatePass: null });
+  assert.ok(r2.includes('fidelity gate: unknown (fields not provided)'));
+  // explicit true/false are unaffected by the degrade
+  assert.ok(buildReceipt({ ...BASE, gatePass: true }).includes('fidelity gate: PASS'));
+  assert.ok(buildReceipt({ ...BASE, gatePass: false, gateDrops: 1 }).includes('fidelity gate: FAIL'));
+});

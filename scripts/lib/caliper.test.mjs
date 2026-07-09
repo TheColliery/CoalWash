@@ -8,7 +8,7 @@ import {
   bandVerdict, breakEven, sessionsPerDay,
   statePath, loadState, projectState, recordStamp, setLeanFloor, setSnooze,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
-  PLUMP_BMI, OBESE_BMI, FULL_BMI, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
+  PLUMP_BMI, OBESE_BMI, FAT_BUDGET_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX,
 } from './caliper.mjs';
 
@@ -87,14 +87,18 @@ test('measureEntries respects the read budget (over-budget always-loaded falls b
   } finally { clean(home, proj); }
 });
 
-test('bandVerdict: BMI ladder LEAN -> PLUMP -> OBESE -> FULL against a measured floor', () => {
+test('bandVerdict: BMI ladder LEAN -> PLUMP -> OBESE against a measured floor; FULL is fat-budget-gated (growable-full)', () => {
   const floor = 1000;
   const at = (fp) => bandVerdict({ footprintTokens: fp, leanFloorTokens: floor });
   assert.strictEqual(at(Math.round(floor * (PLUMP_BMI - 0.05))).band, 'LEAN');
   assert.strictEqual(at(Math.round(floor * (PLUMP_BMI + 0.05))).band, 'PLUMP');
   assert.strictEqual(at(Math.round(floor * (OBESE_BMI + 0.05))).band, 'OBESE');
-  assert.strictEqual(at(Math.round(floor * (FULL_BMI + 0.05))).band, 'FULL');
-  assert.strictEqual(at(Math.round(floor * (FULL_BMI + 0.05))).reason, 'bmi');
+  // FULL no longer fires on a raw BMI ratio post-floor — exactly at the fat
+  // budget it is still OBESE (not yet OVER); one token past it, FULL.
+  assert.strictEqual(at(floor + FAT_BUDGET_TOKENS).band, 'OBESE', 'at the budget line exactly, still OBESE');
+  const over = at(floor + FAT_BUDGET_TOKENS + 1);
+  assert.strictEqual(over.band, 'FULL');
+  assert.strictEqual(over.reason, 'fat-budget');
 });
 
 test('bandVerdict bootstrap: no floor yet -> LEAN (only the absolute cap can fire)', () => {
@@ -105,8 +109,9 @@ test('bandVerdict bootstrap: no floor yet -> LEAN (only the absolute cap can fir
 });
 
 test('bandVerdict absolute-cap arms FULL regardless of floor: hard ceiling, index bytes, index lines', () => {
-  // hard ceiling: fullPercent(6) x capacity(200000) = 12000 tok
-  const hard = bandVerdict({ footprintTokens: 12000, leanFloorTokens: 0, fullPercent: 6 });
+  // hard ceiling: fullPercent(6) x the recalibrated CAPACITY_TOKENS
+  const ceiling = Math.round(CAPACITY_TOKENS * 6 / 100);
+  const hard = bandVerdict({ footprintTokens: ceiling, leanFloorTokens: 0, fullPercent: 6 });
   assert.strictEqual(hard.band, 'FULL');
   assert.strictEqual(hard.reason, 'absolute-cap');
   const bytes = bandVerdict({ footprintTokens: 10, leanFloorTokens: 10, indexBytes: CC_INDEX_CAP_BYTES });
@@ -116,10 +121,43 @@ test('bandVerdict absolute-cap arms FULL regardless of floor: hard ceiling, inde
 });
 
 test('a raised fullPercent raises the hard ceiling (buying a bigger SSD)', () => {
-  const before = bandVerdict({ footprintTokens: 12000, leanFloorTokens: 0, fullPercent: 6 });
-  const after = bandVerdict({ footprintTokens: 12000, leanFloorTokens: 0, fullPercent: 12 });
+  const ceiling = Math.round(CAPACITY_TOKENS * 6 / 100);
+  const before = bandVerdict({ footprintTokens: ceiling, leanFloorTokens: 0, fullPercent: 6 });
+  const after = bandVerdict({ footprintTokens: ceiling, leanFloorTokens: 0, fullPercent: 12 });
   assert.strictEqual(before.band, 'FULL');
   assert.strictEqual(after.band, 'LEAN');
+});
+
+// ---------------------------------------------------------------------------
+// Growable-full (beta.7 #1 — the USER's three-layer invariant): FULL is
+// judged on ABSOLUTE fat above the measured floor, never the raw ratio, so a
+// large legitimate floor never false-fires. Pins the exact live dogfood cases
+// that exposed the bug (MEMORY.md "THE CALIBRATION FINDING").
+// ---------------------------------------------------------------------------
+
+test('growable-full (a): TheColliery post-clean (floor 29054, footprint ~29098) verdicts LEAN, not FULL', () => {
+  const v = bandVerdict({ footprintTokens: 29098, leanFloorTokens: 29054 });
+  assert.strictEqual(v.band, 'LEAN');
+});
+
+test('growable-full (b): a bootstrap store (no floor, ~44k) still verdicts FULL via the absolute cap (unchanged pre-floor heuristic)', () => {
+  const v = bandVerdict({ footprintTokens: 44000, leanFloorTokens: 0 });
+  assert.strictEqual(v.band, 'FULL');
+  assert.strictEqual(v.reason, 'absolute-cap');
+});
+
+test('growable-full (c): post-floor, all-muscle, over the hard cap -> the externalize variant (never "wash harder" on muscle)', () => {
+  const ceiling = Math.round(CAPACITY_TOKENS * 6 / 100);
+  const v = bandVerdict({ footprintTokens: ceiling + 200, leanFloorTokens: ceiling });
+  assert.strictEqual(v.band, 'FULL');
+  assert.strictEqual(v.reason, 'externalize');
+});
+
+test('growable-full: fat strictly above FAT_BUDGET_TOKENS fires FULL even far below the hard cap, at realistic scale', () => {
+  const floor = 29054;
+  const v = bandVerdict({ footprintTokens: floor + FAT_BUDGET_TOKENS + 1, leanFloorTokens: floor });
+  assert.strictEqual(v.band, 'FULL');
+  assert.strictEqual(v.reason, 'fat-budget');
 });
 
 test('breakEven: deterministic numbers; economical iff horizon carry exceeds the run cost', () => {

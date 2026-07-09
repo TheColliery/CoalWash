@@ -42,20 +42,20 @@ One standing gauge at the chokepoint (memory is loaded every session, so a sessi
 | Quick | code-gated mechanics | Exact-dedup, dead-link fix, whitespace, index rebuild — free, deterministic; oversize/stale files are flagged, never rewritten here |
 | Full | one outsider sub + the insider | Semantic garbage judgment (superseded / duplicate / point-in-time / over-verbose) by a zero-context outsider; the session agent adjudicates every flag — always a separate consent |
 | Fidelity gate | code | Inventory diff, original vs new; any dropped link/date/version/frontmatter key blocks the apply |
-| Human gate | you | Every delete/merge listed tersely, approved y/n; `pinned` files refused outright |
+| Human gate | you | Satisfied by the Full-tier consent above (it already names the target) — no separate mid-run y/n; the flagged list is available on request, `pinned` files refused outright |
 | Apply | code | Lock → snapshot → WAL → atomic writes → deletes last → commit, or wholesale rollback |
 | Receipt | code | `class B: X KB -> X' KB · saves ~N tok/session (~est) · removed/trimmed/kept · fidelity gate: PASS` — deterministic bytes, token figures labeled `~est` |
 
 **Why an outsider judges, not you:** it is a stranger walking through a house it has never lived in — it cannot know which things you still use, so it never throws anything out. Its only power is to point and ask, *"what is this, can it go?"* — you, the resident, answer with a concrete reason, never a feeling, and a settled answer sticks (an adjudicated keep is not re-asked next run without new evidence).
 
-The gauge rides **Memory-BMI** = always-loaded footprint / lean floor (floor-relative, so real growth never false-fires):
+The gauge rides **Memory-BMI** = always-loaded footprint / lean floor (floor-relative, so real growth never false-fires). **The FULL ceiling itself grows with you:** once a floor is measured, FULL's soft trigger is that floor plus a fixed fat allowance — the ceiling rises as legitimate content grows, so an all-muscle store is never stuck FULL. Before any floor is measured (a store's first run), FULL falls back to an absolute-capacity heuristic until that first clean lands. A separate, always-fixed **hard machine-capacity ceiling** exists too: when footprint alone closes in on what the platform can actually hold, that's muscle that outgrew the machine, not fat to wash — the move is to externalize/split, never clean harder. **Only two things ever trigger a band change — Memory-BMI and that capacity ceiling; never time or age.**
 
 | Band | Behavior |
 |---|---|
 | LEAN | Silent — a run would be a no-op, and none is offered |
 | PLUMP | One ask; declining snoozes it for days |
 | OBESE | Strong ask, shorter snooze |
-| FULL | Force-runs the *process* — armed only by a deterministic break-even proof (one run costs less than carrying the fat), with the numbers shown every time. Deletes still stop at the human gate |
+| FULL | Force-runs the *process* — armed only by a deterministic break-even proof (one run costs less than carrying the fat), with the numbers shown every time. Deletes still stop at the human gate. Firing on the hard capacity ceiling with ~no fat found means externalize/split, not another wash |
 
 **`localOnly` (trade-secret mode):** the SKILL contract runs mechanical Quick only and skips the semantic tier — agent-honored, not a code-enforced transmission block (the flag itself can't be weakened by a project config once set globally). Memory is private data; see [PRIVACY.md](PRIVACY.md).
 
@@ -68,7 +68,7 @@ The gauge rides **Memory-BMI** = always-loaded footprint / lean floor (floor-rel
 
 ## 🧭 Compatibility
 
-Cross-agent by design (the engine is zero-dependency Node scripts any agent can run; class-B layout is *discovered* per platform, never hardcoded) — **validated end-to-end on Claude Code only**. Every other platform is designed-degrade-safe, not yet validated: unknown platform → no auto-discovery, conservative flags, manual scope, never auto-delete. The activation ladder is capability-keyed: has lifecycle hooks → the shipped session-start gauge runs automatically (Claude Code today); no hooks → best-effort agent-driven offer (probabilistic, not hook parity); always → manual `/coalwash`.
+Cross-agent by design (the engine is zero-dependency Node scripts any agent can run; class-B layout is *discovered* per platform, never hardcoded) — **validated end-to-end on Claude Code only**. Every other platform is designed-degrade-safe, not yet validated: unknown platform → no auto-discovery, conservative flags, manual scope, never auto-delete. The activation ladder is capability-keyed: has lifecycle hooks → the shipped session-start gauge runs automatically (Claude Code today); no hooks → best-effort agent-driven offer (probabilistic, not hook parity); always → manual `/coalwash`. The FULL-band announce is capability-keyed the same way: where the platform supports a user-visible notification channel, the gauge announce renders to you directly; elsewhere it rides the agent's context alone.
 
 ## 🚀 Install
 
