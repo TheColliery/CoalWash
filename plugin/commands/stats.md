@@ -4,7 +4,7 @@ description: CoalWash stats — current band, Memory-BMI, fat reading, lean floo
 
 Produce the CoalWash stats report for this project, in the user's language. Tables only, minimal prose. Read-only — do not modify any file, stamp, or state.
 
-Run the read-only gauge (the preflight snippet in the skill's `references/method.md`: `discoverClassB` → `measureEntries` → `bandVerdict` → `breakEven` from the engine `scripts/lib/`) plus the state file `~/.claude/.coalwash-state.json` and the transaction dir `[project]/.claude/coalwash/`, and show:
+Run the read-only gauge — the one-shot CLI from the engine `scripts/lib/`: `node "[LIB]/cli.mjs" gauge --json` (recover + discover + measure + verdict + break-even in one call; never hand-compose the lib calls) — plus the state file `~/.claude/.coalwash-state.json` and the transaction dir `[project]/.claude/coalwash/`, and show:
 
 - **Gauge:** current band (LEAN/PLUMP/OBESE/FULL) · always-loaded footprint ~tok/session (label `~est`) · Memory-BMI vs the lean floor, or "no floor yet — bands wake after the first full clean".
 - **Fat reading:** footprint − lean floor (~est tokens) · the break-even numbers when the band is FULL (fat/day at the stamped session rate · one-run cost · break-even days).

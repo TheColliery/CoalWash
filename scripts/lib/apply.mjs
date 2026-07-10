@@ -41,6 +41,11 @@
 //   - own-artifact retention (the ReFS thin-pool leak class): stale completed
 //     snapshots are swept at preflight; a dangling txn's snapshot is NEVER
 //     swept (recovery owns it).
+//   - KEEPS-GATE (beta.12, the r3 "laundering channel" close): an adjudicated
+//     keep carrying an anchor (keeps.mjs, project + global stores) binds the
+//     EXECUTOR mechanically — a plan action that would erase the anchor from
+//     its file is excluded pre-mutation (the file stays untouched) and named,
+//     model-independently.
 //
 // This is a user-invoked engine module (CLI discipline: fail LOUD via the
 // returned result object), NOT a Phoenix hook — but it still never throws
@@ -50,6 +55,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { checkFidelity } from './fidelity-gate.mjs';
 import { claudeBaseDir } from './config-load.mjs';
+// NOTE a deliberate module cycle: keeps.mjs imports txDirFor/ensureSelfIgnore
+// from THIS file. Both sides bind function declarations used only at CALL
+// time, so ESM resolves the cycle safely regardless of entry order.
+import { loadKeepsAt, KEEPS_NAME, globalKeepsPath } from './keeps.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
@@ -284,7 +293,7 @@ export function applyPlan(plan, opts = {}) {
     // rewrite target that sniffs binary/unparseable is FLAGGED and excluded
     // (never rewritten — the e2defrag lesson); the run continues on the rest.
     const flagged = [];
-    const actionable = [];
+    let actionable = []; // let: the KEEPS-GATE below may exclude entries (per-file failure, the sniff pattern)
     for (const a of resolved) {
       if (a.type === 'create') { actionable.push(a); continue; }
       let origBuf;
@@ -313,6 +322,64 @@ export function applyPlan(plan, opts = {}) {
       return { ok: false, error: `PIN-protected (pinned: true) — refuse to touch: ${pinned.map((p) => p.phys).join(', ')}` };
     }
 
+    // ---- KEEPS-GATE (beta.12 — closes the r3 "laundering channel": an
+    // adjudication-level keep did not bind the executor's cuts). Every keep
+    // carrying an enforcement handle (anchor + anchorFile; project AND global
+    // stores) whose file this plan rewrites or deletes must still be present
+    // — exact substring, or whitespace-normalized — in the transaction's
+    // post-edit content (any rewrite/create content counts, so an anchor a
+    // merge legitimately MOVES to its target file passes). A violating action
+    // is EXCLUDED pre-mutation with a named reason: the file's on-disk state
+    // IS the restored state (same end-state as write-then-restore-from-
+    // snapshot, minus the mutation window), and the rest of the plan proceeds
+    // (per-file failure, the sniffUnrewritable pattern). Keeps without the
+    // handle (the pre-beta.12 {target, reason, date} shape) stay advisory —
+    // zero behavior change for existing stores.
+    const txDir = opts.txDir || txDirFor(projectRoot);
+    {
+      const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
+      const foldPath = (p) => {
+        const phys = physicalOrNull(p) || path.resolve(String(p));
+        return process.platform === 'win32' ? phys.toLowerCase() : phys;
+      };
+      let keeps = [];
+      try {
+        keeps = [...loadKeepsAt(path.join(txDir, KEEPS_NAME)), ...loadKeepsAt(globalKeepsPath(home))]
+          .filter((k) => typeof k.anchor === 'string' && k.anchor && typeof k.anchorFile === 'string' && k.anchorFile);
+      } catch { keeps = []; } // an unreadable keeps ledger must never block an apply (it is the shield, not the gate's subject)
+      // Fixpoint: excluding one violating action can remove the very text that
+      // satisfied ANOTHER keep (an anchor "migrated" into a now-excluded
+      // rewrite) — re-check until stable. Each pass strictly shrinks
+      // `actionable`, so this terminates in <= actions.length passes.
+      while (keeps.length) {
+        const postTexts = actionable.filter((a) => a.type !== 'delete').map((a) => a.content);
+        const normTexts = postTexts.map(norm);
+        const survives = (anchor) => postTexts.some((t) => t.includes(anchor)) || normTexts.some((t) => t.includes(norm(anchor)));
+        const excluded = new Set();
+        for (const k of keeps) {
+          const kf = foldPath(k.anchorFile);
+          for (const a of actionable) {
+            if (a.type === 'create' || excluded.has(a)) continue; // a create is never "the keep's file"
+            if (foldPath(a.phys) !== kf) continue;
+            if (survives(k.anchor)) continue;
+            excluded.add(a);
+            // 80 chars = display truncation only (keeps the flag line one-line
+            // readable); the full anchor stays in keeps.json, nothing decided on it.
+            const snip = k.anchor.length > 80 ? `${k.anchor.slice(0, 77)}...` : k.anchor;
+            flagged.push({
+              path: a.phys,
+              reason: `keep enforcement: adjudicated keep "${snip}" (${k.date || 'undated'}${k.reason ? ` — ${k.reason}` : ''}) is missing from the plan's post-edit content — ${a.type} excluded, file left untouched; fix the rewrite or re-adjudicate the keep`,
+            });
+          }
+        }
+        if (!excluded.size) break;
+        actionable = actionable.filter((a) => !excluded.has(a));
+      }
+      if (!actionable.length) {
+        return { ok: false, flagged, error: `every action was excluded (unrewritable or keep-protected) — nothing applied: ${flagged.map((f) => f.path).join(', ')}` };
+      }
+    }
+
     // ---- FIDELITY INTERLOCK (the flagship gate, code-enforced at the mutation
     // boundary — not merely a pipeline step a caller could skip). Every rewrite
     // is diffed original-vs-new; a structured-token drop (link/date/version/
@@ -328,7 +395,7 @@ export function applyPlan(plan, opts = {}) {
       if (a.type !== 'rewrite') continue;
       const orig = typeof a.expectedOrig === 'string' ? a.expectedOrig : a.origBuf.toString('utf8');
       for (const d of checkFidelity(orig, a.content).drops) {
-        if (!approvedDrops.has(`${d.type}:${d.value}`)) unapproved.push(`${a.phys} — ${d.type}: ${d.value}`);
+        if (!approvedDrops.has(`${d.type}:${d.value}`)) unapproved.push(`${a.phys} — ${d.type}: ${d.value}${d.survivor ? ` (survives only as ${d.survivor})` : ''}`);
       }
     }
     if (unapproved.length) {
@@ -343,8 +410,7 @@ export function applyPlan(plan, opts = {}) {
       globalLock = acquireLock(globalLockPath(home), { sessionId: plan.sessionId, now });
       if (!globalLock.acquired) return { ok: false, deferred: true, error: `global scope: ${globalLock.reason}` };
     }
-    const txDir = opts.txDir || txDirFor(projectRoot);
-    fs.mkdirSync(txDir, { recursive: true });
+    fs.mkdirSync(txDir, { recursive: true }); // txDir resolved once, above the KEEPS-GATE
     ensureSelfIgnore(txDir);
     const lock = acquireLock(path.join(txDir, LOCK_NAME), { sessionId: plan.sessionId, now });
     if (!lock.acquired) {

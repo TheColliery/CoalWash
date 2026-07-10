@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath } from './apply.mjs';
+import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 
 function sandbox() {
   const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj-')));
@@ -671,5 +672,156 @@ test('R5: a NEWER-schema dangling journal refuses recovery — journal kept, dis
     const r2 = recoverDangling(proj);
     assert.strictEqual(r2.recovered, 'none');
     assert.ok(fs.existsSync(path.join(txDir, 'journal.json')), 'a terminal-looking newer journal is NOT cleaned up');
+  } finally { clean(proj); }
+});
+// ---------------------------------------------------------------------------
+// KEEPS-GATE (beta.12 — the r3 "laundering channel" close)
+// ---------------------------------------------------------------------------
+
+test('KEEPS-GATE: a rewrite erasing an adjudicated keep anchor is EXCLUDED (file untouched, named reason); the rest applies', () => {
+  const { proj, store } = sandbox();
+  try {
+    const kept = path.join(store, 'kept.md');
+    const other = path.join(store, 'other.md');
+    const keptOrig = 'The decisive clause: asked three times deliberately. Filler prose.';
+    write(kept, keptOrig);
+    write(other, 'trim me');
+    recordKeep(proj, { target: 'kept.md:decisive', reason: 'user-adjudicated', anchor: 'asked three times deliberately', anchorFile: kept });
+    const r = applyPlan(planFor(proj, store, [
+      { type: 'rewrite', path: kept, content: 'The decisive clause: (compressed). Filler prose.' }, // executor over-cut: anchor erased
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error); // per-file failure: the rest of the plan proceeds
+    assert.strictEqual(r.applied, 1);
+    assert.strictEqual(fs.readFileSync(kept, 'utf8'), keptOrig, 'keep-protected file left untouched (auto-restored by exclusion)');
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'trimmed');
+    assert.ok(r.flagged.some((f) => /keep enforcement/.test(f.reason) && /asked three times deliberately/.test(f.reason)),
+      'the exclusion names the keep');
+  } finally { clean(proj); }
+});
+
+test('KEEPS-GATE: an anchor MIGRATED to another file in the same txn passes (a merge keeps the fact alive)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const src = path.join(store, 'src.md');
+    const dst = path.join(store, 'dst.md');
+    write(src, 'Precious: the exact wording survives moves. Other stuff.');
+    write(dst, 'Target file.');
+    recordKeep(proj, { target: 'src.md:precious', anchor: 'the exact wording survives moves', anchorFile: src });
+    const r = applyPlan(planFor(proj, store, [
+      { type: 'delete', path: src },
+      { type: 'rewrite', path: dst, content: 'Target file. Precious: the exact wording survives moves.' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 2);
+    assert.strictEqual(fs.existsSync(src), false, 'the merge-source delete proceeded');
+    assert.match(fs.readFileSync(dst, 'utf8'), /the exact wording survives moves/);
+  } finally { clean(proj); }
+});
+
+test('KEEPS-GATE: deleting the anchored file WITHOUT migrating the anchor is refused (every action excluded = loud fail)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'anchored.md');
+    write(f, 'holds the anchor text here');
+    recordKeep(proj, { target: 'anchored.md', anchor: 'the anchor text here', anchorFile: f });
+    const r = applyPlan(planFor(proj, store, [{ type: 'delete', path: f }]));
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /keep-protected|excluded/);
+    assert.strictEqual(fs.existsSync(f), true, 'nothing deleted');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)));
+  } finally { clean(proj); }
+});
+
+test('KEEPS-GATE: a whitespace-reflowed anchor still matches (normalized form accepted, verbatim preferred)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'flow.md');
+    write(f, 'Rule: the three word rule stands. Tail.');
+    recordKeep(proj, { target: 'flow.md', anchor: 'the three word rule stands', anchorFile: f });
+    const r = applyPlan(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'Rule: the three\nword  rule stands. Tail trimmed.' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1);
+  } finally { clean(proj); }
+});
+
+test('KEEPS-GATE: GLOBAL keeps are consulted too (an adjudicated keep shields machine-wide)', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'shared.md');
+    write(f, 'Global wisdom: never trust a raw floor value. Extra.');
+    recordGlobalKeep(home, { target: 'shared', anchor: 'never trust a raw floor value', anchorFile: f });
+    const r = applyPlan(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'Global wisdom: (trimmed). Extra.' },
+    ]), { home });
+    assert.strictEqual(r.ok, false, 'the only action was keep-excluded');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)));
+    assert.match(fs.readFileSync(f, 'utf8'), /never trust a raw floor value/);
+  } finally { clean(proj, home); }
+});
+
+test('KEEPS-GATE: pre-beta.12 keeps (no anchor handle) stay advisory — zero behavior change', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'old.md');
+    write(f, 'old-shape target content');
+    recordKeep(proj, { target: 'old.md:something', reason: 'no anchor recorded' });
+    const r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'rewritten freely' }]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'rewritten freely');
+  } finally { clean(proj); }
+});
+
+test('the new gate classes are approvable BY NAME through approvedDrops (number-precision + evidence-anchor-drop)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'claims.md');
+    write(f, 'Stamped 44,192 tokens; delivery verified (transcript c19e528b).');
+    const content = 'Stamped ~44k tokens; delivery verified.';
+    const blocked = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content }]));
+    assert.strictEqual(blocked.ok, false);
+    assert.match(blocked.error, /number-precision: 44192 \(survives only as 44k\)/);
+    assert.match(blocked.error, /evidence-anchor-drop: c19e528b/);
+    const approved = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content }],
+      { approvedDrops: ['number-precision:44192', 'evidence-anchor-drop:c19e528b'] }));
+    assert.strictEqual(approved.ok, true, approved.error);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), content);
+  } finally { clean(proj); }
+});
+
+test('KEEPS-GATE fixpoint CASCADE: excluding file A removes the text that satisfied keep B -> B excluded on the next pass; both named, rest proceeds', () => {
+  const { proj, store } = sandbox();
+  try {
+    const a = path.join(store, 'a.md');
+    const b = path.join(store, 'b.md');
+    const c = path.join(store, 'c.md');
+    const aOrig = 'A-file: alpha anchor lives here. Padding.';
+    const bOrig = 'B-file: beta anchor lives here. Padding.';
+    write(a, aOrig);
+    write(b, bOrig);
+    write(c, 'C filler.');
+    recordKeep(proj, { target: 'a.md:alpha', anchor: 'alpha anchor lives here', anchorFile: a });
+    recordKeep(proj, { target: 'b.md:beta', anchor: 'beta anchor lives here', anchorFile: b });
+    const r = applyPlan(planFor(proj, store, [
+      // A's rewrite drops its OWN anchor but carries B's -> pass 1 excludes A
+      // (alpha in no post text) while keep-B is satisfied ONLY via A's content.
+      { type: 'rewrite', path: a, content: 'A-file: compressed. Quoting: beta anchor lives here.' },
+      // B's rewrite drops beta from B itself -> once A is excluded, pass 2
+      // finds beta in NO surviving post text -> B excluded too.
+      { type: 'rewrite', path: b, content: 'B-file: compressed.' },
+      { type: 'rewrite', path: c, content: 'C trimmed.' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1, 'only the keep-free file applies');
+    assert.strictEqual(fs.readFileSync(a, 'utf8'), aOrig, 'A untouched (pass-1 exclusion)');
+    assert.strictEqual(fs.readFileSync(b, 'utf8'), bOrig, 'B untouched (pass-2 cascade exclusion)');
+    assert.strictEqual(fs.readFileSync(c, 'utf8'), 'C trimmed.');
+    const keepFlags = r.flagged.filter((f) => /keep enforcement/.test(f.reason));
+    assert.strictEqual(keepFlags.length, 2, 'both exclusions surface by name');
+    assert.ok(keepFlags.some((f) => f.reason.includes('alpha anchor lives here')));
+    assert.ok(keepFlags.some((f) => f.reason.includes('beta anchor lives here')));
   } finally { clean(proj); }
 });

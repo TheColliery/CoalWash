@@ -9,12 +9,29 @@
 // frontmatter keys, backtick `code spans` (keyed verbatim), double-quoted
 // "spans"/"spans" (curly or straight, keyed by the quoted text — a style
 // restyle is not a drop), and number-shaped tokens (ratios, percents, ~Nk /
-// N.N forms, and bare integers of 2+ digits — a lone digit is excluded as
-// prose noise; dates/versions/links are masked out first so their digits stay
-// the more precise category's job, not double-counted here). ANY drop = FAIL
+// N.N forms, comma-grouped counts like 44,192 keyed comma-less, and bare
+// integers of 2+ digits — a lone digit is excluded as prose noise;
+// dates/versions/links are masked out first so their digits stay the more
+// precise category's job, not double-counted here). ANY drop = FAIL
 // with the exact list. Set semantics (distinct values): deduplicating a
 // REPEATED mention of one value is legitimate compaction; losing a VALUE
 // entirely is a drop.
+//
+// Class 9 — number-precision (beta.12, twice-justified: M29 "exact 44,192
+// survives only as rounded 44k" + M12 "exact 64.6%" -> ~65%): a dropped exact
+// numeric token (>= 2 significant digits) whose quantity SURVIVES only as a
+// strictly-coarser rounded/approximated form is reported as
+// 'number-precision' (with the surviving form named) instead of a bare
+// 'number-drop' — false precision-laundering gets its own named, approvable
+// class.
+//
+// Class 10 — evidence-anchor (beta.12, M27 EVIDENCE-ORPHANING: an authorized
+// compression kept the claim "delivery 100% twice" but cut its transcript id
+// c19e528b = a verdict without its receipt): an evidence token (issue ref,
+// hex id, filename) sitting NEAR a proof-marker ("proven"/"verified"/
+// "measured"/"confirmed"/"100%") in the original must not vanish while its
+// marker still stands in the new text — a proven claim keeps >= 1 evidence
+// anchor or the drop is named ('evidence-anchor-drop').
 //
 // Plus encoding-corruption tripwires on the NEW text (blueprint §14.3): a
 // rewrite must never INTRODUCE a decomposed Thai sara-am (U+0E4D+U+0E32 for
@@ -82,6 +99,14 @@ const PERCENT_RE = /\b\d+(?:\.\d+)?%/g; // "5%", "43.5%" — single digits OK, %
 const RATIO_RE = /\b\d+\/\d+\b/g; // "4/5", "22/12" — single digits OK, / disambiguates
 const DECIMAL_RE = /\b\d+\.\d+\b/g; // "3.8", "0.92" — the decimal point disambiguates
 const INTEGER_RE = /\b\d{2,}\b/g; // bare integers: 2+ digits only (the noisy single-digit case excluded)
+// Comma-grouped counts ("44,192", "1,234.5", optionally "%"-suffixed) — the
+// house style for large exact numbers. Without this form the generic scan
+// FRAGMENTS "44,192" into 44 + 192, so a rounded rewrite ("44k") slips the
+// diff whenever the fragments coincidentally survive elsewhere (the M29 live
+// loss shape). Tried FIRST so the grouped token is claimed whole; keyed
+// COMMA-LESS ("44192") so a 44,192 <-> 44192 regroup of the SAME value is not
+// a drop (same precedent as the date canonicalization above).
+const COMMA_NUM_RE = /\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b%?/g;
 
 function matchSet(text, re, group = 0) {
   const out = new Set();
@@ -114,9 +139,112 @@ function maskOut(text, res) {
 function numberTokens(text) {
   let working = maskOut(text, [ISO_DATE_RE, DMY_DATE_RE, VERSION_RE, MDLINK_DEST_RE, AUTOLINK_RE, BAREURL_RE]);
   const out = new Set();
+  // Comma-grouped first (most specific), keyed comma-less — see COMMA_NUM_RE.
+  for (const v of matchSet(working, COMMA_NUM_RE, 0)) out.add(v.replace(/,/g, ''));
+  working = maskOut(working, [COMMA_NUM_RE]);
   for (const re of [MAGNITUDE_RE, PERCENT_RE, RATIO_RE, DECIMAL_RE, INTEGER_RE]) {
     for (const v of matchSet(working, re, 0)) out.add(v);
     working = maskOut(working, [re]);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// class 9 — number-precision (exact -> rounded survivor detection)
+// ---------------------------------------------------------------------------
+
+// Parse one inventoried numeric token: { kind, value, ulp, sig }.
+//   kind  'percent' | 'plain' | 'ratio' (a ratio has no rounding notion and
+//         never participates in the precision check).
+//   value the quantity the token states ("44k" -> 44000, "64.6%" -> 64.6).
+//   ulp   the unit-in-last-place its own REPRESENTATION claims: "44k" speaks
+//         in thousands -> 1000 · "1.5k" -> 100 · "64.6%" -> 0.1 · a bare
+//         integer's trailing zeros coarsen it ("44000" -> 1000, "44192" -> 1).
+//   sig   significant digits, leading zeros excluded ("0.92" -> 2).
+function parseNumToken(tok) {
+  const percent = tok.endsWith('%');
+  const body = percent ? tok.slice(0, -1) : tok;
+  if (/^\d+\/\d+$/.test(body)) return { kind: 'ratio' };
+  let value, ulp;
+  const k = /^(\d+(?:\.\d+)?)[kK]$/.exec(body);
+  if (k) {
+    const decs = (k[1].split('.')[1] || '').length;
+    value = Number(k[1]) * 1000;
+    ulp = 1000 / 10 ** decs;
+  } else if (/^\d+(?:\.\d+)?$/.test(body)) {
+    const decs = (body.split('.')[1] || '').length;
+    value = Number(body);
+    ulp = decs > 0 ? 1 / 10 ** decs : 10 ** /0*$/.exec(body)[0].length;
+  } else {
+    return { kind: 'unknown' };
+  }
+  const sig = body.replace(/[.kK]/g, '').replace(/^0+/, '').length; // digits only — the k suffix is scale, not a significant digit ("5k" = 1 sig digit)
+  return { kind: percent ? 'percent' : 'plain', value, ulp, sig };
+}
+
+// A dropped exact token "survives only as a rounded form" when a surviving
+// token of the SAME kind (percent<->percent, plain<->plain incl. the k-form)
+// states the same quantity at STRICTLY coarser precision and agrees with it
+// to within its own unit-in-last-place: |orig - cand| < cand.ulp covers
+// round, floor, and ceil writers alike while staying too tight to match an
+// unrelated number ("43k" never claims 44,192). >= 2 significant digits on
+// the ORIG side per the class definition (a 1-digit token has no precision
+// to launder). Returns the surviving form, or null.
+function roundedSurvivor(origTok, nextTokens) {
+  const o = parseNumToken(origTok);
+  if ((o.kind !== 'percent' && o.kind !== 'plain') || o.sig < 2) return null;
+  for (const cand of nextTokens) {
+    const c = parseNumToken(cand);
+    if (c.kind !== o.kind) continue;
+    if (!(c.ulp > o.ulp)) continue; // must be strictly coarser
+    if (Math.abs(o.value - c.value) < c.ulp) return cand;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// class 10 — evidence anchors (proof-marker citations)
+// ---------------------------------------------------------------------------
+
+// Proof markers per the class definition: the four words + a literal "100%".
+const CLAIM_MARKER_RE = /\b(?:proven|verified|measured|confirmed)\b|\b100%/gi;
+// Evidence shapes (conservative allowlist — precision over recall, the broom
+// asymmetry): issue refs (#2014) · lowercase hex ids of 7-40 chars (7 = the
+// git short-hash floor, 40 = a full SHA-1; must mix letters AND digits so a
+// plain number or an English word can never match — transcript ids like
+// c19e528b qualify) · filenames carrying a known extension.
+const ISSUE_REF_RE = /#\d+\b/g;
+const HEX_ID_RE = /\b[0-9a-f]{7,40}\b/g;
+const FILE_REF_RE = /\b[\w][\w.-]*\.(?:md|mjs|cjs|js|json|jsonc|ps1|txt|yml|yaml|log|py|ts|sh)\b/g;
+// "Near" = within this many chars of the marker, clamped to the marker's own
+// line on both sides (evidence on another line belongs to another claim).
+// Birth certificate: the M27 incident's citation sat ~40 chars from its claim;
+// 200 spans a long parenthetical citation while staying inside one clause of
+// the house's single-line bullet style.
+const EVIDENCE_WINDOW_CHARS = 200;
+
+const isHexEvidence = (tok) => /[a-f]/.test(tok) && /\d/.test(tok);
+
+// Evidence tokens sitting near a proof-marker: Map token -> the marker string
+// it anchors (first marker seen wins; set semantics downstream).
+export function evidenceAnchors(text) {
+  const s = String(text);
+  const out = new Map();
+  CLAIM_MARKER_RE.lastIndex = 0;
+  let m;
+  while ((m = CLAIM_MARKER_RE.exec(s)) !== null) {
+    const lineStart = s.lastIndexOf('\n', m.index) + 1;
+    let lineEnd = s.indexOf('\n', m.index);
+    if (lineEnd === -1) lineEnd = s.length;
+    const from = Math.max(lineStart, m.index - EVIDENCE_WINDOW_CHARS);
+    const to = Math.min(lineEnd, m.index + m[0].length + EVIDENCE_WINDOW_CHARS);
+    const win = s.slice(from, to);
+    const toks = [
+      ...matchSet(win, ISSUE_REF_RE),
+      ...[...matchSet(win, HEX_ID_RE)].filter(isHexEvidence),
+      ...matchSet(win, FILE_REF_RE),
+    ];
+    for (const t of toks) if (!out.has(t)) out.set(t, m[0]);
   }
   return out;
 }
@@ -185,8 +313,33 @@ export function checkFidelity(origText, newText) {
     ...diffDrops(oi.frontmatter, ni.frontmatter, 'frontmatter-key-drop'),
     ...diffDrops(oi.codespans, ni.codespans, 'codespan-drop'),
     ...diffDrops(oi.quotes, ni.quotes, 'quote-drop'),
-    ...diffDrops(oi.numbers, ni.numbers, 'number-drop'),
   ];
+  // Numbers: a dropped value with a strictly-coarser rounded survivor is the
+  // class-9 'number-precision' shape (survivor named, approval key stays the
+  // orig token: "number-precision:<value>"); a vanished value stays the plain
+  // class-8 'number-drop'. One entry per dropped value, never both.
+  for (const v of oi.numbers) {
+    if (ni.numbers.has(v)) continue;
+    const survivor = roundedSurvivor(v, ni.numbers);
+    drops.push(survivor ? { type: 'number-precision', value: v, survivor } : { type: 'number-drop', value: v });
+  }
+  // Class 10 — evidence anchors: an orig evidence token near a proof-marker
+  // must not vanish (set semantics: moved elsewhere = kept) while its marker
+  // still stands in the new text. Marker gone too = a whole-claim cut, which
+  // the plan carries as content adjudication, not an orphaning. ACCEPTED
+  // FAIL-SAFE BIAS: markerAlive is a GLOBAL check — cutting a whole claim
+  // whose marker WORD recurs in some OTHER surviving claim still flags
+  // (over-flag, approvable by name), because pairing a marker occurrence to
+  // "its" claim across a rewrite is not mechanically decidable; under-flagging
+  // an orphaned proof would be the unsafe direction (broom asymmetry).
+  const evOrig = evidenceAnchors(orig);
+  for (const [tok, marker] of evOrig) {
+    if (next.includes(tok)) continue;
+    const markerAlive = /^100%$/i.test(marker)
+      ? next.includes('100%')
+      : new RegExp(`\\b${marker}\\b`, 'i').test(next);
+    if (markerAlive) drops.push({ type: 'evidence-anchor-drop', value: tok, marker });
+  }
   const warnings = [];
 
   // Encoding tripwires: fail on INTRODUCED corruption, warn on inherited.
@@ -210,7 +363,8 @@ export function checkFidelity(origText, newText) {
       frontmatter: { orig: oi.frontmatter.size, kept: oi.frontmatter.size - drops.filter((d) => d.type === 'frontmatter-key-drop').length },
       codespans: { orig: oi.codespans.size, kept: oi.codespans.size - drops.filter((d) => d.type === 'codespan-drop').length },
       quotes: { orig: oi.quotes.size, kept: oi.quotes.size - drops.filter((d) => d.type === 'quote-drop').length },
-      numbers: { orig: oi.numbers.size, kept: oi.numbers.size - drops.filter((d) => d.type === 'number-drop').length },
+      numbers: { orig: oi.numbers.size, kept: oi.numbers.size - drops.filter((d) => d.type === 'number-drop' || d.type === 'number-precision').length },
+      evidenceAnchors: { orig: evOrig.size, kept: evOrig.size - drops.filter((d) => d.type === 'evidence-anchor-drop').length },
     },
   };
 }

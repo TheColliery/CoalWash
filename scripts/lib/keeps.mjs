@@ -32,7 +32,7 @@ import os from 'node:os';
 import { txDirFor, ensureSelfIgnore } from './apply.mjs';
 import { claudeBaseDir } from './config-load.mjs';
 
-const KEEPS_NAME = 'keeps.json';
+export const KEEPS_NAME = 'keeps.json'; // exported for apply.mjs's KEEPS-GATE (opts.txDir-aware path build)
 const KEEPS_SCHEMA_V = 1;
 const GLOBAL_KEEPS_NAME = '.coalwash-global-keeps.json';
 
@@ -47,29 +47,43 @@ function rawKeepsOrNull(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
-// Every prior keep-adjudication at `file`: [{ target, reason, date }]. []  on
-// a missing file, corrupt JSON, a wrong/newer schema, or malformed elements
-// (never throws).
-function loadKeepsFrom(file) {
+// Every prior keep-adjudication at `file`: [{ target, reason, date, anchor?,
+// file? }]. [] on a missing file, corrupt JSON, a wrong/newer schema, or
+// malformed elements (never throws). Exported (as loadKeepsAt) so apply.mjs's
+// KEEPS-GATE can read a keeps store at the exact tx-dir path a transaction is
+// actually using (opts.txDir in hermetic tests) — one loader, one schema.
+export function loadKeepsAt(file) {
   const parsed = rawKeepsOrNull(file);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
   if (Number(parsed.v) > KEEPS_SCHEMA_V) return []; // newer schema: unreadable to us
   return Array.isArray(parsed.keeps) ? parsed.keeps.filter((k) => k && typeof k.target === 'string') : [];
 }
+const loadKeepsFrom = loadKeepsAt;
 
 // Record (or refresh) an adjudicated keep at `file`. Upserts by `target` — a
 // re-review of the same target REPLACES the prior entry rather than piling up
 // duplicates (the ledger tracks the LATEST verdict, not a full history).
 // Returns true on a successful write, false on any failure (never throws) —
 // including a keeps.json from a NEWER schema, which is never rewritten.
-function recordKeepAt(file, ensureDir, { target, reason = '', date } = {}) {
+// Optional beta.12 fields (the KEEPS-GATE's enforcement handle): `anchor` =
+// the VERBATIM protected text span, `anchorFile` = the absolute path of the
+// store file it lives in. A keep carrying both is mechanically enforced at
+// applyPlan; a keep without them stays advisory (the pre-beta.12 shape,
+// unchanged behavior).
+function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anchorFile } = {}) {
   if (typeof target !== 'string' || !target) return false;
   try {
     const raw = rawKeepsOrNull(file);
     if (raw && typeof raw === 'object' && !Array.isArray(raw) && Number(raw.v) > KEEPS_SCHEMA_V) return false; // read-only to us
     ensureDir();
     const keeps = loadKeepsFrom(file).filter((k) => k.target !== target);
-    keeps.push({ target, reason: String(reason || ''), date: date || new Date().toISOString().slice(0, 10) });
+    keeps.push({
+      target,
+      reason: String(reason || ''),
+      date: date || new Date().toISOString().slice(0, 10),
+      ...(typeof anchor === 'string' && anchor ? { anchor } : {}),
+      ...(typeof anchorFile === 'string' && anchorFile ? { anchorFile } : {}),
+    });
     const tmp = file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), 'utf8');
     fs.renameSync(tmp, file);

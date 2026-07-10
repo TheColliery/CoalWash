@@ -284,6 +284,90 @@ test('gateFiles carries the new categories through the batch, path-tagged', () =
   assert.deepStrictEqual(g.drops, [{ path: 'b.md', type: 'number-drop', value: '22' }]);
 });
 
+// ---------------------------------------------------------------------------
+// number-precision (class 9) + comma-grouped numbers
+// ---------------------------------------------------------------------------
+
+test('M29 shape: an exact comma-grouped count surviving only as a rounded k-form is a NAMED precision drop, survivor named', () => {
+  const orig = 'The conductor stamped fp=44,192 tokens at gauge time.';
+  const next = 'The conductor stamped ~44k tokens at gauge time.';
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false);
+  assert.deepStrictEqual(r.drops, [{ type: 'number-precision', value: '44192', survivor: '44k' }]);
+});
+
+test('M12 shape: 64.6% surviving only as ~65% is a precision drop; the exact form surviving alongside is NOT', () => {
+  const orig = 'Exact agreement hit 64.6% across arms.';
+  const lossy = 'Agreement hit ~65% across arms.';
+  assert.deepStrictEqual(checkFidelity(orig, lossy).drops, [{ type: 'number-precision', value: '64.6%', survivor: '65%' }]);
+  const keep = 'Agreement hit 64.6% (~65%) across arms.';
+  assert.strictEqual(checkFidelity(orig, keep).pass, true);
+});
+
+test('a vanished number with NO rounded survivor stays a plain number-drop (class 8 unchanged)', () => {
+  const r = checkFidelity('found 44,192 issues', 'found many issues');
+  assert.deepStrictEqual(r.drops, [{ type: 'number-drop', value: '44192' }]);
+});
+
+test('a comma regroup of the SAME value is not a drop (keyed comma-less, the canonicalization precedent)', () => {
+  assert.strictEqual(checkFidelity('count 44,192 total', 'count 44192 total').pass, true);
+  assert.strictEqual(checkFidelity('count 44192 total', 'count 44,192 total').pass, true);
+});
+
+test('percent and plain counts never cross-match (a % is not a rounding of a count)', () => {
+  const r = checkFidelity('scored 65 points', 'scored 65% overall');
+  assert.deepStrictEqual(r.drops.map((d) => d.type), ['number-drop']);
+});
+
+test('equal value at coarser stated precision (64.0% -> 64%) is precision-labelled, not a bare vanish', () => {
+  const r = checkFidelity('measured at 64.0% exactly', 'measured at 64% exactly');
+  assert.deepStrictEqual(r.drops, [{ type: 'number-precision', value: '64.0%', survivor: '64%' }]);
+});
+
+test('an unrelated surviving number does not masquerade as a rounding (agreement must be within the coarser ulp)', () => {
+  // 43k does not claim 44,192 (|44192-43000| >= 1000) -> a plain vanish.
+  const r = checkFidelity('stamped 44,192 tokens', 'stamped ~43k tokens elsewhere');
+  assert.deepStrictEqual(r.drops.map((d) => d.type), ['number-drop']);
+});
+
+// ---------------------------------------------------------------------------
+// evidence-anchor (class 10)
+// ---------------------------------------------------------------------------
+
+test('M27 shape: the claim ("proven 100%") survives while its transcript id vanishes -> evidence-anchor-drop', () => {
+  const orig = 'Delivery proven 100% twice (transcript c19e528b) on this machine.';
+  const next = 'Delivery proven 100% twice on this machine.';
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false);
+  assert.deepStrictEqual(r.drops, [{ type: 'evidence-anchor-drop', value: 'c19e528b', marker: 'proven' }]);
+});
+
+test('evidence merely MOVED elsewhere in the file is kept (set semantics, like every class)', () => {
+  const orig = 'Delivery proven 100% twice (transcript c19e528b) on this machine.';
+  const next = 'Delivery proven 100% twice on this machine. Receipt: transcript c19e528b.';
+  assert.strictEqual(checkFidelity(orig, next).pass, true);
+});
+
+test('the whole claim deleted (marker gone too) is NOT an orphaning — content adjudication owns whole-claim cuts', () => {
+  const orig = 'Delivery proven 100% twice (transcript c19e528b).';
+  const next = 'The delivery story was cut entirely.';
+  const r = checkFidelity(orig, next);
+  assert.ok(!r.drops.some((d) => d.type === 'evidence-anchor-drop'), 'no orphaning when the claim died with its evidence');
+});
+
+test('issue refs and filenames count as evidence anchors near a proof marker', () => {
+  const orig = 'Fix verified against #2014 and the scan.ps1 output.';
+  const next = 'Fix verified against the reported issue and the scanner output.';
+  const ev = checkFidelity(orig, next).drops.filter((d) => d.type === 'evidence-anchor-drop');
+  assert.deepStrictEqual(ev.map((d) => d.value).sort(), ['#2014', 'scan.ps1']);
+});
+
+test('evidence on a DIFFERENT line does not anchor a marker (the window clamps to the marker\'s own line)', () => {
+  const orig = 'Delivery verified in production.\nUnrelated commit deadbee5 changed the docs.';
+  const next = 'Delivery verified in production.\nUnrelated commit note.';
+  assert.strictEqual(checkFidelity(orig, next).pass, true);
+});
+
 test('inventory exposes codespans/quotes/numbers alongside the original 5 categories', () => {
   const LDQ = String.fromCharCode(0x201c), RDQ = String.fromCharCode(0x201d);
   const inv = inventory(`Run \`scan.ps1\`, ${LDQ}quote this${RDQ}, found 22 issues at 5%.`);

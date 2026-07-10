@@ -169,3 +169,17 @@ test('global keeps: [] on missing/corrupt/wrong-shape/newer-schema, same conserv
     assert.strictEqual(fs.readFileSync(globalKeepsPath(home), 'utf8'), futureBytes, 'the newer file is byte-untouched');
   } finally { clean(home); }
 });
+
+test('recordKeep persists the beta.12 enforcement handle (anchor + anchorFile); a handle-less keep stays the old shape', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'f.md:clause', reason: 'adjudicated', anchor: 'the exact protected span', anchorFile: 'C:/store/f.md' });
+    recordKeep(proj, { target: 'plain', reason: 'advisory only' });
+    const keeps = loadKeeps(proj);
+    const armed = keeps.find((k) => k.target === 'f.md:clause');
+    assert.strictEqual(armed.anchor, 'the exact protected span');
+    assert.strictEqual(armed.anchorFile, 'C:/store/f.md');
+    const plain = keeps.find((k) => k.target === 'plain');
+    assert.ok(!('anchor' in plain) && !('anchorFile' in plain), 'no undefined-field pollution on the pre-beta.12 shape');
+  } finally { clean(proj); }
+});

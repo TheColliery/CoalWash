@@ -1,33 +1,16 @@
 # CoalWash method — engine calls, rubric, taxonomy
 
-> On-demand depth for the SKILL.md contract. `LIB` below = the absolute path of the `scripts/lib/` directory shipped with this skill (from `skills/coalwash/SKILL.md`, resolve `../../scripts/lib`). All engine modules are zero-dep ESM (Node 18+); run them via `node --input-type=module -e "..."` with `LIB` substituted. Never paste memory CONTENT into a command line — pass file paths; content stays on disk or in structured JSON files. **Every sub contract below — the outsider flag-pass (§2), the post-merge claim-strength diff (§4), and any future reconcile pass — is spawned VERBATIM from its template here with only the bracketed placeholders filled; composing a fresh prompt is a contract violation, not a shortcut.**
+> On-demand depth for the SKILL.md contract. `LIB` below = the absolute path of the `scripts/lib/` directory shipped with this skill (from `skills/coalwash/SKILL.md`, resolve `../../scripts/lib`). All engine modules are zero-dep ESM (Node 18+). **Substitute `[LIB]` as an ABSOLUTE path with FORWARD slashes** (Windows too: `C:/Users/.../scripts/lib`); every snippet builds its import URL via `pathToFileURL(...)` — construction-proof, so a substituted path can never be misparsed as a URL host (the `file://` two-slash footgun a relative path triggers). **Beyond one line of logic → write a script FILE (in your scratchpad) and run it — never a long inline `-e`** (inline eval quoting fails across shells; two live failures before this rule); the short shipped snippets below (§4 gate + apply, §5 receipt) are the SANCTIONED exception — copied verbatim with only `[...]` placeholders filled, they are pre-tested and stay inside the safe size. Never paste memory CONTENT into a command line — pass file paths; content stays on disk or in structured JSON files. **Every sub contract below — the outsider flag-pass (§2), the post-merge claim-strength diff (§4), and any future reconcile pass — is spawned VERBATIM from its template here with only the bracketed placeholders filled; composing a fresh prompt is a contract violation, not a shortcut.**
 
-## 0. Preflight snippets
+## 0. Preflight — the one-shot gauge CLI
 
-Recover a dangling prior run, then gauge:
-
-```bash
-node --input-type=module -e "
-import { recoverDangling } from 'file://[LIB]/apply.mjs';
-console.log(JSON.stringify(recoverDangling(process.cwd())));
-"
-```
+ONE call does the whole preflight (recoverDangling → discoverClassB → measureEntries → bandVerdict → breakEven; read-only toward CoalWash state — no stamp, no snooze):
 
 ```bash
-node --input-type=module -e "
-import { discoverClassB } from 'file://[LIB]/class-b.mjs';
-import { measureEntries, bandVerdict, breakEven, loadState, projectState, sessionsPerDay } from 'file://[LIB]/caliper.mjs';
-const root = process.cwd();
-const d = discoverClassB({ projectRoot: root });
-const m = measureEntries(d.entries, { withGzip: true });
-const proj = projectState(loadState(), root);
-const v = bandVerdict({ footprintTokens: m.alwaysLoaded.tokensEst, leanFloorTokens: proj.leanFloorTokens || 0, indexBytes: m.index.bytes, indexLines: m.index.lines });
-const e = breakEven({ footprintTokens: m.alwaysLoaded.tokensEst, leanFloorTokens: proj.leanFloorTokens || 0, totalStoreTokens: m.totalTokensEst, sessionsPerDay: sessionsPerDay(proj.stamps) });
-console.log(JSON.stringify({ platform: d.platform, flags: d.flags, files: m.files, measure: m, verdict: v, breakEven: e }, null, 1));
-"
+node "[LIB]/cli.mjs" gauge --json
 ```
 
-Read the JSON; report ONE terse gauge line (band · always-loaded ~tok/session "~est" · BMI or "no floor yet"). `flags` naming an unknown platform → conservative path (SKILL.md step 0).
+Read the JSON; report ONE terse gauge line (band · always-loaded ~tok/session "~est" · BMI or "no floor yet") — `gauge` without `--json` prints exactly that line. `flags` naming an unknown platform → conservative path (SKILL.md step 0). Do NOT hand-compose the five lib calls inline — the CLI exists because two independent agents fumbled that composition.
 
 ## 1. Quick tier — the deterministic op list
 
@@ -76,7 +59,8 @@ Write proposed new content to temp files (never inline), then gate:
 ```bash
 node --input-type=module -e "
 import fs from 'node:fs';
-import { gateFiles } from 'file://[LIB]/fidelity-gate.mjs';
+import { pathToFileURL } from 'node:url';
+const { gateFiles } = await import(pathToFileURL('[LIB]/fidelity-gate.mjs').href);
 const pairs = JSON.parse(fs.readFileSync('[PAIRS.json]', 'utf8'))
   .map(p => ({ path: p.path, orig: fs.readFileSync(p.origFile, 'utf8'), next: fs.readFileSync(p.nextFile, 'utf8') }));
 console.log(JSON.stringify(gateFiles(pairs), null, 1));
@@ -92,7 +76,8 @@ Apply (deletes execute on the adjudicated plan alone — no separate approval fl
 ```bash
 node --input-type=module -e "
 import fs from 'node:fs';
-import { applyPlan } from 'file://[LIB]/apply.mjs';
+import { pathToFileURL } from 'node:url';
+const { applyPlan } = await import(pathToFileURL('[LIB]/apply.mjs').href);
 console.log(JSON.stringify(applyPlan(JSON.parse(fs.readFileSync('[PLAN.json]', 'utf8')))));
 "
 ```
@@ -104,12 +89,13 @@ Plan shape: `{ projectRoot, roots: [the class-B dirs touched], actions: [{type: 
 ```bash
 node --input-type=module -e "
 import fs from 'node:fs';
-import { buildReceipt } from 'file://[LIB]/receipt.mjs';
+import { pathToFileURL } from 'node:url';
+const { buildReceipt } = await import(pathToFileURL('[LIB]/receipt.mjs').href);
 console.log(buildReceipt(JSON.parse(fs.readFileSync('[RECEIPT.json]', 'utf8'))));
 "
 ```
 
-Fill from re-measurement (re-run the gauge snippet post-apply): `beforeBytes/afterBytes` (deterministic), `alwaysBeforeTokens/alwaysAfterTokens` (~est), counts, `gatePass`, `oneTimeCostTokens` (~est of this run's spend; 0 for pure-mechanical Quick), `breakEvenSessions`, `dryRun`. Print the receipt VERBATIM — it is the deliverable.
+Fill from re-measurement (re-run the §0 gauge CLI post-apply): `beforeBytes/afterBytes` (deterministic), `alwaysBeforeTokens/alwaysAfterTokens` (~est), counts, `gatePass`, `oneTimeCostTokens` (~est of this run's spend; 0 for pure-mechanical Quick), `breakEvenSessions`, `dryRun`. Print the receipt VERBATIM — it is the deliverable.
 
 After a **gate-passed FULL clean only**, stamp the lean floor (`setLeanFloor(home, projectRoot, postCleanAlwaysLoadedTokens)` from `caliper.mjs`) — never after Quick or a partial (uncleaned fat contaminates the floor and `full` creeps up wrongly). Snooze/stamps are the conductor's job — do not touch them in a run.
 

@@ -20,6 +20,8 @@ const TESTS = [
   'scripts/lib/fidelity-gate.test.mjs',
   'scripts/lib/apply.test.mjs',
   'scripts/lib/keeps.test.mjs',
+  'scripts/lib/retention-policy.test.mjs',
+  'scripts/lib/cli.test.mjs',
   'scripts/lib/receipt.test.mjs',
   'scripts/lib/conductor.test.mjs',
   'scripts/build-plugin.test.mjs',
