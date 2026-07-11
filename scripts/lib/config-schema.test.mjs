@@ -72,19 +72,25 @@ test('clampedRead on an unknown key returns undefined (programming error, loud i
 // beta.10: exercisePerBand (bandmap) + forceMode (enum)
 // beta.12 band-collapse: the plump rung is retired (merged into the single
 // obese ceiling) — exercisePerBand now maps only {obese, full}.
+// F3 (beta.14, main-adjudicated per the 0f "OBESE never asks" ruling): the
+// bandmap's values are PER-BAND — obese admits ONLY 'quick' (the old 'full'
+// option routed an OBESE crossing to an ask); a legacy obese:'full' config
+// clamps to 'quick' at read, per-band, without clobbering the other band.
 // ---------------------------------------------------------------------------
 
-test('exercisePerBand: factory default maps obese/full, quick|full only', () => {
+test('exercisePerBand: factory default maps obese/full; values are PER-BAND — obese: quick only (F3), full: quick|full', () => {
   const spec = CONFIG_SCHEMA.find((s) => s.key === 'exercisePerBand');
   assert.strictEqual(spec.type, 'bandmap');
   assert.deepStrictEqual(spec.def, { obese: 'quick', full: 'full' });
-  assert.deepStrictEqual(spec.values, ['quick', 'full']);
+  assert.deepStrictEqual(spec.values, { obese: ['quick'], full: ['quick', 'full'] });
 });
 
-test('validateValue (bandmap): requires every sub-key, each one of the allowed values', () => {
+test('validateValue (bandmap): requires every sub-key, each one of ITS band\'s allowed values — obese:\'full\' is now a schema error (F3)', () => {
   const spec = CONFIG_SCHEMA.find((s) => s.key === 'exercisePerBand');
   assert.strictEqual(validateValue(spec, { obese: 'quick', full: 'full' }), null);
   assert.strictEqual(validateValue(spec, { obese: 'QUICK', full: 'Full' }), null, 'case-insensitive');
+  assert.strictEqual(validateValue(spec, { obese: 'quick', full: 'quick' }), null, 'full still admits quick');
+  assert.ok(validateValue(spec, { obese: 'full', full: 'full' }), 'F3: obese no longer admits full — OBESE never asks');
   assert.ok(validateValue(spec, { obese: 'quick' }), 'missing full -> error');
   assert.ok(validateValue(spec, { obese: 'turbo', full: 'full' }), 'unknown value -> error');
   assert.ok(validateValue(spec, 'quick'), 'a non-object -> error');
@@ -92,12 +98,18 @@ test('validateValue (bandmap): requires every sub-key, each one of the allowed v
   assert.ok(validateValue(spec, null), 'null -> error');
 });
 
-test('clampedRead (bandmap): valid passes through lowercased; any doubt degrades to the whole default object', () => {
+test('clampedRead (bandmap): valid passes through lowercased; each band clamps to ITS OWN default on doubt (per-band safer-value-wins, F3)', () => {
   assert.deepStrictEqual(clampedRead({ exercisePerBand: { obese: 'QUICK', full: 'FULL' } }, 'exercisePerBand'), { obese: 'quick', full: 'full' });
   assert.deepStrictEqual(clampedRead({ exercisePerBand: { obese: 'turbo', full: 'full' } }, 'exercisePerBand'), { obese: 'quick', full: 'full' });
   assert.deepStrictEqual(clampedRead({}, 'exercisePerBand'), { obese: 'quick', full: 'full' });
   assert.deepStrictEqual(clampedRead({ exercisePerBand: { obese: 'quick', full: 'full', extra: 'nonsense' } }, 'exercisePerBand'), { obese: 'quick', full: 'full' }, 'an extra sub-key never leaks through');
   assert.deepStrictEqual(clampedRead({ exercisePerBand: { plump: 'full', obese: 'quick', full: 'full' } }, 'exercisePerBand'), { obese: 'quick', full: 'full' }, 'a leftover plump sub-key from an old config is silently dropped, never trusted');
+  // F3, the legacy-config clamp: obese:'full' silently reads 'quick' (no
+  // breakage, CM v3.9.3 safer-value-wins) WITHOUT clobbering the user's
+  // still-valid customization on the full band.
+  assert.deepStrictEqual(clampedRead({ exercisePerBand: { obese: 'full', full: 'quick' } }, 'exercisePerBand'), { obese: 'quick', full: 'quick' }, 'legacy obese:full clamps per-band; the valid full:quick customization survives');
+  // A malformed whole value still degrades every band to its default.
+  assert.deepStrictEqual(clampedRead({ exercisePerBand: 'quick' }, 'exercisePerBand'), { obese: 'quick', full: 'full' });
 });
 
 // ---------------------------------------------------------------------------

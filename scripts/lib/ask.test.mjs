@@ -85,18 +85,18 @@ test('externalizeAdvisory: a missing hardCeilingTokens degrades to a "?" placeho
 // obeseAutoQuick (queue 0d, "OBESE AUTO-QUICK, NO ASK")
 // ---------------------------------------------------------------------------
 
-test('obeseAutoQuick: names the band + fat, no question-tool/ทำ wording (never asks), authorizes Quick NOW, names the oneLineResult-only push and the escalation-out route', () => {
+test('obeseAutoQuick: names the band + fat, no question-tool/ทำ wording (never asks), authorizes Quick NOW, names the oneLineResult-only push — and carries NO escape-hatch route (F3)', () => {
   const r = obeseAutoQuick({ fatTokens: 800.4 });
   assert.ok(r.includes('memory crossed the OBESE ceiling'), r);
   assert.ok(r.includes('fat ~800 tok'), r);
-  assert.ok(!r.includes('question tool'), 'never asks — the exercise config is the standing consent');
+  assert.ok(!r.includes('question tool'), 'never asks — standing config is the consent');
   assert.ok(!r.includes('ทำ'), r);
   assert.ok(r.includes('standing config authorizes'), r);
   assert.ok(r.includes('Quick pass NOW'), r);
   assert.ok(r.includes('snapshot-backed and revertible'), r);
   assert.ok(r.includes('oneLineResult'), 'names pushing ONLY the one-line result, no full receipt/narration');
   assert.ok(r.includes('once per crossing, not per session'), r);
-  assert.ok(r.includes('exercisePerBand.obese') && r.includes('"full"'), 'names the escalate-out route (queue 0d: the ask survives only for the semantic tier)');
+  assert.ok(!r.includes('exercisePerBand.obese'), 'F3: the old "set obese to full for the ask" escape-hatch sentence is GONE — OBESE never asks, so the directive must not advertise a dead route');
 });
 
 test('obeseAutoQuick: carries the payback line when breakEven is supplied; malformed/missing input never throws', () => {
@@ -111,12 +111,14 @@ test('obeseAutoQuick: carries the payback line when breakEven is supplied; malfo
 });
 
 // ---------------------------------------------------------------------------
-// wizardEscalation (queue 0e, "THE OBESE LOOP")
+// wizardEscalation (queue 0f "AUTHORITATIVE 3-FLOW", supersedes 0e "THE
+// OBESE LOOP" — same template shape, now fires on a FULL plateau instead of
+// an OBESE one)
 // ---------------------------------------------------------------------------
 
 test('wizardEscalation: a REAL two-button ask (question tool present) — names the mechanical pass already ran, the wizard heavy tier, and never auto-runs', () => {
   const r = wizardEscalation({ fatTokens: 900 });
-  assert.ok(r.includes('STILL OBESE'), r);
+  assert.ok(r.includes('STILL over the FULL capacity ceiling'), r);
   assert.ok(r.includes('fat ~900 tok'), r);
   assert.ok(r.includes('mechanical Quick pass already ran'), r);
   assert.ok(r.includes('question tool'), 'the semantic escalation is a real ask, unlike obeseAutoQuick/forceAuto');

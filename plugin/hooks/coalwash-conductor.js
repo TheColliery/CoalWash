@@ -16,11 +16,16 @@
 //                   arms/clears the once-per-crossing edge state; the Stop
 //                   hook is the ONLY delivery surface.
 //   Stop         -> the ENFORCEMENT/delivery channel: an unconsumed
-//                   edge-crossing surfaces as a blocking ask (OBESE, or a
-//                   FULL crossing whose auto-run is suppressed), the
-//                   standing-consent FULL force directive (forceMode=auto),
-//                   or the FULL(externalize) pure-information advisory —
-//                   never an ask, since washing cannot help ~all-muscle over
+//                   edge-crossing surfaces as ONE of (per 0d/0f/0g,
+//                   MEMORY.md): the wizard-escalation ask (FULL after a
+//                   force-run's Quick proved insufficient — the SOLE ask
+//                   site, 0f), the standing-consent FULL force directive
+//                   (forceMode=auto + the fresh break-even proof), the
+//                   OBESE auto-Quick directive (0d — standing config, never
+//                   an ask), the plain ทำ/later ask (a suppressed/disarmed
+//                   FULL, or OBESE configured to the paid tier), or the
+//                   FULL(externalize) pure-information advisory — never an
+//                   ask, since washing cannot help ~all-muscle over
 //                   capacity. Mirrors rot-canary-stop.js's exact output
 //                   mechanism — a structured `{decision:'block', reason}`
 //                   JSON write, not plain console.log — because THAT is what
@@ -28,15 +33,19 @@
 //                   unlike a passive context injection it was always free to
 //                   ignore (beta.10 "ROUND 4 POSTMORTEM").
 //
-// BAND COLLAPSE (beta.12, MEMORY.md "THE BAND COLLAPSE"): LEAN/PLUMP/OBESE
-// die as SEPARATE behavior drivers — ONE hysteresis-gated ceiling (OBESE)
-// plus the SEPARATE, person-independent machine-capacity line (FULL) are the
-// only two non-silent states. FULL's economic force fires ONLY on the
-// deterministic break-even proof computed in CODE, numbers SHOWN every fire
-// (the series' one named consent exception, "economic-dominance"). DELETE/
-// MERGE authorization is plan-sourced (the adjudicated plan IS the
-// authorization) — safety is UNDO: every cut is snapshot-backed and
-// revertible (whole-run rollback), never a human pre-approval.
+// BANDS (0g "FULL = THE ECONOMIC CUT-POINT" + 0g-RESOLUTION, MEMORY.md —
+// refines the beta.12 band collapse): purely economic, nested LEAN < OBESE
+// < FULL. OBESE = the hysteresis-gated BMI ceiling armed but carry < wash
+// (auto-Quick-silent); FULL = the ceiling armed AND breakEven.economical
+// (Q1: FULL ⊂ OBESE), LATCHED per episode (Q2 — cleared by the LEAN reset);
+// the WALL (fullPercent x capacity) keeps its three roles (Q3): pre-floor
+// bootstrap cap, wash-first when armed, externalize when ~all-muscle.
+// FULL's economic force fires ONLY on the deterministic break-even proof
+// computed in CODE, numbers SHOWN every fire (the series' one named consent
+// exception, "economic-dominance"). DELETE/MERGE authorization is
+// plan-sourced (the adjudicated plan IS the authorization) — safety is
+// UNDO: every cut is snapshot-backed and revertible (whole-run rollback),
+// never a human pre-approval.
 //
 // TEMPLATE ASKS (beta.12 item 3, ../scripts/lib/ask.mjs): every ask/directive/
 // advisory string is built by CODE from numbers alone — the hook never
@@ -155,17 +164,29 @@ async function handleSessionStart() {
     // (the "qualifying past" case, the Modloader-shaped scenario).
     const prevBand = (proj.lastVerdict && proj.lastVerdict.band) || 'LEAN';
     const wasOver = !!(proj.lastVerdict && proj.lastVerdict.overCeiling);
-    // 0e "THE OBESE LOOP": read BEFORE this session's own state changes —
-    // whether a mechanical Quick pass was already auto-triggered this
-    // episode (see caliper.recordCrossing's escalation-arm branch below).
+    // 0g Q2: the per-episode economic latch, cached/read exactly like the
+    // ceiling's own hysteresis bit above.
+    const wasEconLatched = !!(proj.lastVerdict && proj.lastVerdict.econLatched);
+    // 0d/0f (supersedes 0e "THE OBESE LOOP"): read BEFORE this session's own
+    // state changes — whether a mechanical Quick pass was already
+    // auto-triggered this episode (see caliper.recordCrossing's
+    // escalation-arm branch below).
     const quickTried = !!proj.quickTried;
 
     const now = Date.now();
+    // 0j "BMI ON AT INSTALL": a never-seen store gets a PROVISIONAL floor =
+    // this very footprint (BMI 1.00 live from day one); an existing floor —
+    // real or provisional — passes through UNTOUCHED (never ratchets; only
+    // a gate-passed clean's setLeanFloor overwrites it). Same state file the
+    // stamp/verdict writes on this path already touch — not a new mutation
+    // class (Phoenix #10).
+    const floorInfo = caliper.ensureProvisionalFloor(home, projectRoot, m.alwaysLoaded.tokensEst, now);
     // gaugeVerdict (shared with the Stop hook's gated re-gauge, beta.13 item
-    // 3) does the floor-sanitize -> bandVerdict -> band-gated breakEven glue
-    // in ONE place — see caliper.mjs for why this is factored out rather than
-    // re-derived by hand at a second call site.
-    const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: proj.leanFloorTokens, fullPercent, wasOver, stamps: proj.stamps });
+    // 3) does the floor-sanitize -> economics -> bandVerdict glue in ONE
+    // place (0g Q4: economics now run BEFORE the band, because the band IS
+    // the break-even) — see caliper.mjs for why this is factored out rather
+    // than re-derived by hand at a second call site.
+    const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: floorInfo.floorTokens, floorProvisional: floorInfo.provisional, fullPercent, wasOver, wasEconLatched, stamps: proj.stamps });
     const { verdict, fatTokens, economical, perDay, breakEvenDays, floorUnmeasured } = gv;
 
     // WARP-HOLE (beta.13 item 3): the always-loaded path list + byte total —
@@ -180,7 +201,8 @@ async function handleSessionStart() {
     // the WARP-HOLE re-stat baseline.
     caliper.recordVerdict(home, projectRoot, {
       band: verdict.band, reason: verdict.reason, economical, fatTokens,
-      overCeiling: verdict.over, perDay, breakEvenDays, floorUnmeasured,
+      overCeiling: verdict.over, econLatched: verdict.econLatched,
+      perDay, breakEvenDays, floorUnmeasured,
       hardCeilingTokens: verdict.hardCeilingTokens,
       alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
     }, now);
@@ -189,9 +211,11 @@ async function handleSessionStart() {
     // dispatches on the CACHED reason within the FULL band (see handleStop),
     // so a rise into FULL/externalize is delivered exactly once, the same
     // guarantee every other crossing already gets, instead of being silently
-    // un-trackable. quickTried/fatTokens (0e) additionally arm a same-band
-    // OBESE "escalation" crossing once mechanical cutting already ran this
-    // episode and fat has genuinely grown since — see recordCrossing.
+    // un-trackable. quickTried/fatTokens (0f, supersedes 0e) additionally
+    // arm a same-band FULL "escalation" crossing (the wizard ask) once a
+    // force-run already tried Quick this episode and fat has genuinely
+    // grown since — see recordCrossing. OBESE never arms this any more (0d:
+    // auto-Quick-silent only).
     caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now, { quickTried, fatTokens });
   }
 
@@ -277,11 +301,16 @@ async function handleStop(input) {
       if (deltaTokens > caliper.REGAUGE_DELTA_TOKENS) {
         const disc = classB.discoverClassB({ projectRoot, home, managedPaths });
         const m = caliper.measureEntries(disc.entries, { readBudgetBytes: READ_BUDGET_BYTES, withGzip: false });
-        const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: proj.leanFloorTokens, fullPercent, wasOver: !!lastVerdict.overCeiling, stamps: proj.stamps });
+        // 0j: the SAME provisional-floor door as SessionStart — covers a
+        // store that only grew past FLOOR_MIN mid-session (was too tiny to
+        // stamp at SessionStart, spiked before this Stop).
+        const floorInfo = caliper.ensureProvisionalFloor(home, projectRoot, m.alwaysLoaded.tokensEst, now);
+        const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: floorInfo.floorTokens, floorProvisional: floorInfo.provisional, fullPercent, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps });
         const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
         caliper.recordVerdict(home, projectRoot, {
           band: gv.verdict.band, reason: gv.verdict.reason, economical: gv.economical, fatTokens: gv.fatTokens,
-          overCeiling: gv.verdict.over, perDay: gv.perDay, breakEvenDays: gv.breakEvenDays, floorUnmeasured: gv.floorUnmeasured,
+          overCeiling: gv.verdict.over, econLatched: gv.verdict.econLatched,
+          perDay: gv.perDay, breakEvenDays: gv.breakEvenDays, floorUnmeasured: gv.floorUnmeasured,
           hardCeilingTokens: gv.verdict.hardCeilingTokens, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
         }, now);
         caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens });
@@ -314,30 +343,39 @@ async function handleStop(input) {
     const isForceCrossing = crossing.band === 'FULL' && !!verdict;
     const bandKey = crossing.band.toLowerCase();
     const exercise = (exercisePerBand && exercisePerBand[bandKey]) || 'quick';
-    if (isForceCrossing && forceMode === 'auto') {
+    if (crossing.band === 'FULL' && crossing.escalation) {
+      // case (c) — 0f "AUTHORITATIVE 3-FLOW" (MEMORY.md, supersedes 0e "THE
+      // OBESE LOOP"): a force-run already tried Quick this episode and the
+      // store is STILL over the FULL ceiling — only the wizard's semantic
+      // tier can help now; this IS a real ask, the ONE site the ask
+      // survives for (0d: OBESE is auto-Quick-silent, it never asks).
+      // Checked BEFORE the force branch below so an armed escalation
+      // crossing can never be re-swallowed into another silent auto-force
+      // Quick loop — the exact bug 0f fixes (a plain FULL+economical
+      // crossing would otherwise ALSO satisfy isForceCrossing here).
+      reason = ask.wizardEscalation({ fatTokens, breakEven });
+    } else if (isForceCrossing && forceMode === 'auto') {
       // case (b): FULL force — standing consent, no ask, mirrors rot-canary's
-      // own auto-scan. Force always runs Quick -> counts toward 0e's
-      // "already tried mechanically" state for the loop's OBESE-after-Force leg.
+      // own auto-scan. Force always runs Quick -> counts toward 0f's
+      // "already tried mechanically" state for the wizard-escalation leg above.
       reason = ask.forceAuto({ fatTokens: verdict.fatTokens, breakEven });
       caliper.markQuickTried(home, projectRoot, now);
-    } else if (crossing.band === 'OBESE' && crossing.escalation) {
-      // case (c) — 0e "THE OBESE LOOP": mechanical cutting already ran this
-      // episode and OBESE persists (or returned) — only the wizard's
-      // semantic tier can help now; this IS a real ask (the semantic
-      // escalation is the one case the ask survives for).
-      reason = ask.wizardEscalation({ fatTokens, breakEven });
-    } else if (crossing.band === 'OBESE' && exercise === 'quick') {
-      // case (d) — 0d "OBESE AUTO-QUICK, NO ASK": the configured exercise
-      // itself IS the standing consent (rot-canary autoFixMode precedent) —
-      // no ask, run the free mechanical pass now.
+    } else if (crossing.band === 'OBESE') {
+      // case (d) — 0d "OBESE AUTO-QUICK, NO ASK" + F3 (main-adjudicated per
+      // the thrice-reconfirmed 0f "OBESE never asks, no matter what"):
+      // UNCONDITIONAL — the old exercisePerBand.obese:'full' route to an
+      // ask is removed (the schema admits only 'quick' there now; a legacy
+      // 'full' clamps to 'quick' at read, safer-value-wins). Standing
+      // config IS the consent (rot-canary autoFixMode precedent) — no ask,
+      // run the free mechanical pass now.
       reason = ask.obeseAutoQuick({ fatTokens, breakEven });
       caliper.markQuickTried(home, projectRoot, now);
     } else {
-      // case (a): ask ทำ/later — OBESE configured straight to the semantic
-      // tier (exercisePerBand.obese: 'full'), a FULL crossing that never
-      // armed (economical:false), or a FULL crossing whose AUTO-RUN
-      // authorization is suppressed (forceMode 'ask'/'off' — both land HERE,
-      // never in silence).
+      // case (a): ask ทำ/later — reachable for FULL crossings ONLY (F3):
+      // a FULL crossing that never armed (economical:false), or a FULL
+      // crossing whose AUTO-RUN authorization is suppressed (forceMode
+      // 'ask'/'off' — both land HERE, never in silence: the beta.10
+      // "NO silent branch" rule, review-quoted).
       reason = ask.ceilingAsk({ band: crossing.band, fatTokens, exercise, breakEven });
     }
   }

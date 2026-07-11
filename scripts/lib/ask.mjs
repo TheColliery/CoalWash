@@ -36,10 +36,13 @@ function paybackLine(breakEven, exercise) {
   return ` Carrying this fat costs ~${breakEven.perDay} tok/session${upperBound}; one ${exercise} run pays back in ${be}.`;
 }
 
-// The ceiling ask — ทำ/later — for an OBESE crossing, or a FULL crossing
-// whose auto-run authorization is suppressed/disarmed (forceMode
-// 'ask'/'off', or break-even not in favor). Names the crossing band, the fat
-// estimate, the configured exercise, and (when available) the payback line.
+// The ceiling ask — ทำ/later — for a FULL crossing whose auto-run
+// authorization is suppressed/disarmed (forceMode 'ask'/'off', or break-even
+// not in favor). FULL-only since F3 (OBESE never asks — the 0f ruling; its
+// crossings always take the silent auto-Quick directive below); the `band`
+// param stays generic so the template needs no band knowledge. Names the
+// crossing band, the fat estimate, the configured exercise, and (when
+// available) the payback line.
 export function ceilingAsk(opts) {
   const { band, fatTokens, exercise = 'quick', breakEven } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
@@ -57,40 +60,42 @@ export function forceAuto(opts) {
   return `[CoalWash] FULL band + break-even proven (numbers: fat ~${fat} tok).${payback} standing config authorizes the free mechanical Quick pass NOW — run it (stage-only; every cut is snapshot-backed — one command rolls the whole run back), then note the receipt path to the user in one line. This fires once per crossing, not per session. ${ANSWER_FIRST_REMINDER}`;
 }
 
-// The OBESE + quick auto-directive (queue 0d, "OBESE AUTO-QUICK, NO ASK"):
-// the configured per-band exercise for OBESE IS quick -> that config choice
-// is ITSELF the standing consent (the same "config is a valid consent form"
-// shape as forceMode/rot-canary's autoFixMode), so no ask fires. Unlike
-// FULL's force, this needs no break-even proof: Quick is free/mechanical, so
-// there is no "is it worth paying for" question to prove — the only gate is
-// the exercise config itself. Safety claim (honest form, never "cuts
-// nothing wrong"): reversible-by-construction (snapshot + whole-run
-// rollback) + gate-interlocked (the fidelity gate blocks any drop even from
-// a buggy rule) + structure-scoped (every Quick rule is diff-provable) — the
-// SSD formula: not "no bit flips", "no flip escapes ECC". The ask SURVIVES
-// only when OBESE is configured to escalate straight to the PAID semantic
-// tier (exercisePerBand.obese: 'full' routes to ceilingAsk instead).
+// The OBESE auto-directive (queue 0d "OBESE AUTO-QUICK, NO ASK"; F3 made it
+// UNCONDITIONAL — the old exercisePerBand.obese:'full' escape hatch to an
+// ask is REMOVED, main-adjudicated per the thrice-reconfirmed 0f ruling
+// "OBESE never asks, no matter what"): standing config IS the consent (the
+// same "config is a valid consent form" shape as forceMode/rot-canary's
+// autoFixMode), so no ask fires on this band, ever. Unlike FULL's force,
+// this needs no break-even proof: Quick is free/mechanical, so there is no
+// "is it worth paying for" question to prove. Safety claim (honest form,
+// never "cuts nothing wrong"): reversible-by-construction (snapshot +
+// whole-run rollback) + gate-interlocked (the fidelity gate blocks any drop
+// even from a buggy rule) + structure-scoped (every Quick rule is
+// diff-provable) — the SSD formula: not "no bit flips", "no flip escapes
+// ECC".
 export function obeseAutoQuick(opts) {
   const { fatTokens, breakEven } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
   const payback = paybackLine(breakEven, 'quick');
-  return `[CoalWash] memory crossed the OBESE ceiling (fat ~${fat} tok) — the configured exercise is quick.${payback} standing config authorizes the free mechanical Quick pass NOW, no ask — run it (stage-only; every cut is snapshot-backed and revertible), then push ONLY the one-line result (receipt.mjs's oneLineResult — no full receipt block, no narration; cutting nothing stays silent). This fires once per crossing, not per session. Set exercisePerBand.obese to "full" to route OBESE through the paid semantic ask instead. ${ANSWER_FIRST_REMINDER}`;
+  return `[CoalWash] memory crossed the OBESE ceiling (fat ~${fat} tok) — the configured exercise is quick.${payback} standing config authorizes the free mechanical Quick pass NOW, no ask — run it (stage-only; every cut is snapshot-backed and revertible), then push ONLY the one-line result (receipt.mjs's oneLineResult — no full receipt block, no narration; cutting nothing stays silent). This fires once per crossing, not per session. ${ANSWER_FIRST_REMINDER}`;
 }
 
-// The wizard-escalation ask (queue 0e, "THE OBESE LOOP"): fires when OBESE
-// PERSISTS — or is reached again, e.g. falling back from a FULL force-run —
-// AFTER an auto-Quick pass was already tried this episode. Mechanical
-// cutting is exhausted; only the wizard's semantic tier (the zero-context
-// outsider) can judge what remains, so this IS a real two-button ask — "the
-// ask SURVIVES only for the semantic escalation" (queue 0d). Frequency is
-// gated by fat GROWTH, never a clock (caliper.recordCrossing's own
-// lastEscalationFat check) — every firing rides a genuinely NEW fat lump,
-// never a re-nag of the same unchanged plateau.
+// The wizard-escalation ask (queue 0f, "AUTHORITATIVE 3-FLOW" — SUPERSEDES
+// 0e "THE OBESE LOOP": same mechanism, trigger band relocated OBESE->FULL):
+// fires when a FULL force-run has already tried Quick this episode
+// (quickTried) and the store is STILL over the FULL capacity ceiling.
+// Mechanical cutting is exhausted; only the wizard's semantic tier (the
+// zero-context outsider) can judge what remains, so this IS a real
+// two-button ask — the ONE site the ask survives for (0d: OBESE is
+// auto-Quick-silent, it never asks). Frequency is gated by fat GROWTH, never
+// a clock (caliper.recordCrossing's own lastEscalationFat check) — every
+// firing rides a genuinely NEW fat lump, never a re-nag of the same
+// unchanged plateau.
 export function wizardEscalation(opts) {
   const { fatTokens, breakEven } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
   const payback = paybackLine(breakEven, 'wizard');
-  return `[CoalWash] memory is STILL OBESE (fat ~${fat} tok) after the automatic mechanical Quick pass already ran this episode — the remaining fat needs semantic judgment a script cannot make.${payback} Offer the user via your question tool, exactly two options: ทำ (open the /coalwash wizard now, "Fat + reorganize muscle" tier — the zero-context outsider reviews what mechanical cutting could not) / later (dismiss; carries forward — this same ask returns only once the fat GROWS further, never on a timer). If the user picks ทำ: run the wizard per the coalwash skill. This crossing is marked consumed the moment this ask fires. ${ANSWER_FIRST_REMINDER}`;
+  return `[CoalWash] memory is STILL over the FULL capacity ceiling (fat ~${fat} tok) after the automatic mechanical Quick pass already ran this episode — the remaining fat needs semantic judgment a script cannot make.${payback} Offer the user via your question tool, exactly two options: ทำ (open the /coalwash wizard now, "Fat + reorganize muscle" tier — the zero-context outsider reviews what mechanical cutting could not) / later (dismiss; carries forward — this same ask returns only once the fat GROWS further, never on a timer). If the user picks ทำ: run the wizard per the coalwash skill. This crossing is marked consumed the moment this ask fires. ${ANSWER_FIRST_REMINDER}`;
 }
 
 // The FULL(externalize) advisory — pure information, never an ask (a wash

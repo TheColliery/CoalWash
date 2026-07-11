@@ -70,6 +70,15 @@ function seedState(home, proj, projState) {
   const key = fs.realpathSync(proj);
   fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), JSON.stringify({ projects: { [key]: projState } }), 'utf8');
 }
+// 0g fixture helper: a big RECALL file (stat-only measured, never
+// always-loaded) inflates breakEven's run cost (3x the WHOLE store) far past
+// a small fat's carry, pinning a fixture in the chronic-chubby OBESE zone.
+// Without it, a lean-recall store whose BMI ceiling arms is usually
+// economically FULL under 0g (fat*14 > store*3 at 1 session/day), so the
+// OBESE band these tests exist to pin would be unreachable.
+function seedBigRecall(mem) {
+  fs.writeFileSync(path.join(mem, 'recall-big.md'), 'r'.repeat(400 * 1024), 'utf8');
+}
 function readProjState(home, proj) {
   const raw = JSON.parse(fs.readFileSync(path.join(home, '.claude', '.coalwash-state.json'), 'utf8'));
   return (raw.projects || {})[fs.realpathSync(proj)] || {};
@@ -91,7 +100,7 @@ test('coalwashMode off: fully silent even over a FULL-band store', () => {
   } finally { clean(home, proj); }
 });
 
-test('LEAN (small store, no floor yet): silent — Phoenix #13 healthy path', () => {
+test('LEAN (small store, no floor yet): silent — Phoenix #13 healthy path; 0j stamps NO provisional floor under FLOOR_MIN', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
@@ -102,6 +111,8 @@ test('LEAN (small store, no floor yet): silent — Phoenix #13 healthy path', ()
     const st = readProjState(home, proj);
     assert.strictEqual(st.stamps.length, 1, 'the gauge still stamps the session');
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
+    assert.strictEqual(st.leanFloorTokens, undefined, '0j: a tiny store (footprint < FLOOR_MIN) gets no provisional floor — ratio would be noise');
+    assert.notStrictEqual(st.leanFloorProvisional, true);
   } finally { clean(home, proj); }
 });
 
@@ -125,8 +136,11 @@ test('SessionStart: OBESE crossing is measured+cached SILENTLY (no ask text any 
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // footprint ~= (60080 + 0)/4 = 15020 tok; floor 10000 -> bmi 1.502 (>= 1.5, OBESE), well under the 36000 hard cap.
-    seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
+    // footprint ~= (60080 + 0)/4 = 15020 tok; floor 10000 -> bmi 1.502 (>= 1.5,
+    // ceiling arms), well under the 36000 hard cap; the big recall store keeps
+    // carry < wash (0g) so the band is OBESE, not economically FULL.
+    const mem = seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
+    seedBigRecall(mem);
     seedState(home, proj, { leanFloorTokens: 10000 });
     const r = run(proj, home);
     assertGraceful(r);
@@ -245,8 +259,11 @@ test('hysteresis: a store that armed OBESE and settles into the dead zone stays 
   try {
     muteUpdate(home);
     const floor = 10000;
-    // First boot: bmi 1.502 -> arms OBESE (over=true cached).
-    seedClassB(home, proj, { claudeMdBytes: floor * 1.502 * 4, indexBytes: 0 });
+    // First boot: bmi 1.502 -> arms OBESE (over=true cached). Big recall
+    // store keeps carry < wash both boots (0g) so this stays a pure
+    // BMI-hysteresis test, never economically FULL.
+    const mem = seedClassB(home, proj, { claudeMdBytes: floor * 1.502 * 4, indexBytes: 0 });
+    seedBigRecall(mem);
     seedState(home, proj, { leanFloorTokens: floor });
     const r1 = run(proj, home);
     assertGraceful(r1);
@@ -327,9 +344,14 @@ test('0d: an unconsumed OBESE crossing with the DEFAULT (quick) exercise auto-ru
   } finally { clean(home, proj); }
 });
 
-test('0d: an OBESE crossing configured to escalate straight to full (exercisePerBand.obese=full) still ASKS — the semantic escalation keeps its ask', () => {
+test('F3: a LEGACY config carrying exercisePerBand.obese=full still auto-runs Quick silently — the per-band clamp reads it as quick; OBESE never asks, no matter what', () => {
   const { home, proj } = sandbox();
   try {
+    // The pre-beta.14 escape hatch: this exact config used to route the
+    // OBESE crossing to the ceilingAsk. The 0f ruling killed it (main-
+    // adjudicated); safer-value-wins clamps the value at READ time — the
+    // user's config file itself is never rewritten, and the other band's
+    // customization would survive (config-schema.test.mjs pins that half).
     fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ exercisePerBand: { obese: 'full', full: 'full' } }), 'utf8');
     seedState(home, proj, {
       lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false },
@@ -339,18 +361,10 @@ test('0d: an OBESE crossing configured to escalate straight to full (exercisePer
     assertGraceful(r1);
     const reason = parseBlock(r1.stdout);
     assert.ok(reason.includes('memory crossed the OBESE ceiling'), reason);
-    assert.ok(reason.includes('fat ~1234 tok'), reason);
-    assert.ok(reason.includes('question tool'), 'rides the agent question-box — the semantic tier still needs consent');
-    assert.ok(reason.includes('ทำ'), reason);
-    assert.ok(reason.includes('later (dismiss; the offer returns at the next ceiling crossing)'), 'the later option tells the consume-at-emission truth');
-    assert.ok(!reason.includes('snooze'), 'no snooze wording — the code never re-fires until the next crossing (hysteresis, not a clock)');
-    assert.ok(reason.includes('run the full wash now'), 'the configured exercise (full) is named');
-    assert.ok(reason.includes('snapshot-backed and revertible'), reason);
-    assert.ok(reason.includes("Answer the user's ORIGINAL message"), 'answer-first reminder present (queue item 0)');
-
-    // this path never auto-runs Quick -> quickTried stays unset (the loop's
-    // escalation machinery is specific to the mechanical-first path).
-    assert.strictEqual(readProjState(home, proj).quickTried, undefined);
+    assert.ok(reason.includes('standing config authorizes'), 'the auto-Quick directive fires, not an ask');
+    assert.ok(!reason.includes('question tool'), 'OBESE never asks — the legacy full value cannot re-open the ask path');
+    assert.ok(!reason.includes('ทำ'), reason);
+    assert.strictEqual(readProjState(home, proj).quickTried, true, 'the auto-Quick marked the episode, same as the default path');
 
     const r2 = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r2);
@@ -359,14 +373,16 @@ test('0d: an OBESE crossing configured to escalate straight to full (exercisePer
 });
 
 // ---------------------------------------------------------------------------
-// 0e "THE OBESE LOOP" — mechanical cutting already ran this episode; OBESE
-// persists (or returns, e.g. falling back from a FULL force-run) -> escalate
+// 0f "AUTHORITATIVE 3-FLOW" (MEMORY.md, supersedes 0e "THE OBESE LOOP" — same
+// growth-gated mechanism, trigger band relocated OBESE->FULL): a force-run
+// already tried Quick this episode; FULL persists (or returns) -> escalate
 // to the wizard's semantic tier instead of re-running the (already proven
 // insufficient) mechanical pass, gated on fat having genuinely GROWN since
 // the last time this was flagged (never a clock/re-nag on a static plateau).
+// OBESE never escalates any more — 0d makes it auto-Quick-silent, full stop.
 // ---------------------------------------------------------------------------
 
-test('0e: OBESE persisting after an auto-Quick already ran this episode escalates to the wizard ask, not another auto-run', () => {
+test('0f: an OBESE crossing NEVER routes to the wizard ask any more — even a stale escalation:true flag (old-version leftover state) degrades to the ordinary auto-Quick directive', () => {
   const { home, proj } = sandbox();
   try {
     seedState(home, proj, {
@@ -377,19 +393,39 @@ test('0e: OBESE persisting after an auto-Quick already ran this episode escalate
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
-    assert.ok(reason.includes('STILL OBESE'), reason);
+    assert.ok(reason.includes('memory crossed the OBESE ceiling'), reason);
+    assert.ok(reason.includes('standing config authorizes'), '0f: OBESE is always auto-Quick-silent, regardless of any stale escalation flag');
+    assert.ok(!reason.includes('question tool'), '0f: OBESE never asks any more');
+    assert.ok(!reason.includes('/coalwash wizard'), 'no wizard route for OBESE');
+  } finally { clean(home, proj); }
+});
+
+test('0f: FULL persisting after a force-run already ran Quick this episode escalates to the wizard ask, not another force-run (closes the endless forceAuto loop 0f fixes)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedState(home, proj, {
+      quickTried: true,
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false, escalation: true },
+      // economical:true + forceMode default 'auto' would ALSO satisfy the
+      // plain force branch — proves the escalation check's priority ordering.
+      lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 900, at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('STILL over the FULL capacity ceiling'), reason);
     assert.ok(reason.includes('fat ~900 tok'), reason);
     assert.ok(reason.includes('mechanical Quick pass already ran'), reason);
     assert.ok(reason.includes('question tool'), 'a REAL ask — the semantic escalation needs consent');
     assert.ok(reason.includes('ทำ'), reason);
     assert.ok(reason.includes('/coalwash'), reason);
     assert.ok(reason.includes('Fat + reorganize muscle'), reason);
-    assert.ok(!reason.includes('standing config authorizes'), 'never auto-runs — mechanical cutting already proved insufficient');
+    assert.ok(!reason.includes('standing config authorizes'), 'never auto-runs again — mechanical cutting already proved insufficient, and the escalation check wins priority over the force branch');
     assert.ok(reason.includes("Answer the user's ORIGINAL message"), 'answer-first reminder present');
   } finally { clean(home, proj); }
 });
 
-test('0e: FULL force-run marks quickTried too (Force always runs Quick) — the loop\'s "still OBESE after Force" leg needs this', () => {
+test('0f: FULL force-run marks quickTried too (Force always runs Quick) — the wizard-escalation leg needs this', () => {
   const { home, proj } = sandbox();
   try {
     seedState(home, proj, {
@@ -400,7 +436,176 @@ test('0e: FULL force-run marks quickTried too (Force always runs Quick) — the 
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
     assert.ok(reason.includes('FULL band + break-even proven'), reason);
-    assert.strictEqual(readProjState(home, proj).quickTried, true, 'Force running Quick counts toward the loop\'s "already tried mechanically" state');
+    assert.strictEqual(readProjState(home, proj).quickTried, true, 'Force running Quick counts toward the wizard-escalation leg\'s "already tried mechanically" state');
+  } finally { clean(home, proj); }
+});
+
+test('round trip: a FULL force-run followed by a FULL plateau (still over cap, quickTried set) arms an escalation crossing the following Stop delivers as the wizard ask — proves FLOW 1 end-to-end through two real SessionStarts', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // Same economical FULL/absolute-cap fixture as the existing 'round trip:
+    // a FULL-economical SessionStart...' test below.
+    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 20000 });
+    const rs1 = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(rs1);
+    const rp1 = run(proj, home, { hook_event_name: 'Stop' }); // force-fires, marks quickTried
+    assertGraceful(rp1);
+    assert.ok(parseBlock(rp1.stdout).includes('FULL band + break-even proven'), rp1.stdout);
+    assert.strictEqual(readProjState(home, proj).quickTried, true);
+
+    // Second SessionStart: the fixture is unchanged on disk (simulates "the
+    // Quick pass ran but wasn't enough") -> still FULL, same band as before
+    // (no rise) -> arms the escalation branch instead of a fresh plain crossing.
+    const rs2 = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(rs2);
+    const st2 = readProjState(home, proj);
+    assert.strictEqual(st2.lastCrossing.band, 'FULL');
+    assert.strictEqual(st2.lastCrossing.escalation, true, 'the plateau after a tried Quick arms the wizard-escalation crossing');
+
+    const rp2 = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp2);
+    const reason2 = parseBlock(rp2.stdout);
+    assert.ok(reason2.includes('STILL over the FULL capacity ceiling'), reason2);
+    assert.ok(!reason2.includes('standing config authorizes'), 'no more silent auto-force-loop — this is a real ask now');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// 0g "FULL = THE ECONOMIC CUT-POINT" — conductor-level: the economic FULL
+// (armed ceiling + break-even, NO wall hit) drives the same force pipeline
+// the wall's FULL always did, and the Q2 latch persists across real
+// SessionStarts through a fresh-proof dip, ending only at the LEAN reset.
+// ---------------------------------------------------------------------------
+
+test('0g round trip: an armed store past the break-even (well under the wall) verdicts FULL/economic and the following Stop force-fires on it', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // footprint 15020 tok (bmi 1.502, armed), far under the 36000 wall; lean
+    // recall store -> carry 5020*14 = 70280 > runCost ~45k -> economical.
+    seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 10000 });
+    const rs = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(rs);
+    assert.strictEqual(rs.stdout, '');
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'FULL');
+    assert.strictEqual(st.lastVerdict.reason, 'economic');
+    assert.strictEqual(st.lastVerdict.economical, true);
+    assert.strictEqual(st.lastVerdict.econLatched, true, 'the episode latch is cached for the next gauge');
+    assert.strictEqual(st.lastCrossing.band, 'FULL', 'the rise (LEAN default past) armed a crossing');
+
+    const rp = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp);
+    const reason = parseBlock(rp.stdout);
+    assert.ok(reason.includes('FULL band + break-even proven'), reason);
+    assert.strictEqual(readProjState(home, proj).quickTried, true, 'the economic FULL force marks quickTried — the wizard leg keys on it');
+  } finally { clean(home, proj); }
+});
+
+test('0g Q2 round trip: the latch holds FULL across real SessionStarts through a fresh-proof dip, and the LEAN reset ends the episode', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // Session 1: economic FULL arms + latches (same fixture as above).
+    const mem = seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 10000 });
+    run(proj, home, { hook_event_name: 'SessionStart' });
+    const st1 = readProjState(home, proj);
+    assert.strictEqual(st1.lastVerdict.reason, 'economic');
+    assert.strictEqual(st1.lastVerdict.econLatched, true);
+    const crossingAt = st1.lastCrossing.at;
+
+    // Session 2: the recall store balloons -> the run cost (3x the WHOLE
+    // store) now dwarfs the carry -> the FRESH proof dips false. The BMI
+    // ceiling stays armed (footprint unchanged, bmi 1.502) -> the latch must
+    // hold the band at FULL — no flap back to OBESE, no new crossing.
+    seedBigRecall(mem);
+    run(proj, home, { hook_event_name: 'SessionStart' });
+    const st2 = readProjState(home, proj);
+    assert.strictEqual(st2.lastVerdict.band, 'FULL', 'Q2: the latch holds the band through the dip');
+    assert.strictEqual(st2.lastVerdict.reason, 'economic');
+    assert.strictEqual(st2.lastVerdict.econLatched, true);
+    assert.strictEqual(st2.lastVerdict.economical, false, 'the FORCE disarms on the dipped fresh proof (economic-dominance: numbers must hold at every fire)');
+    assert.strictEqual(st2.lastCrossing.at, crossingAt, 'same band -> the pending crossing is untouched, nothing re-arms');
+
+    // Session 3: the store shrinks to the floor (bmi ~1.0, at/under the
+    // low-water mark) -> LEAN -> the episode ends: latch cleared, crossing
+    // cleared.
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'a'.repeat(40000), 'utf8');
+    run(proj, home, { hook_event_name: 'SessionStart' });
+    const st3 = readProjState(home, proj);
+    assert.strictEqual(st3.lastVerdict.band, 'LEAN');
+    assert.strictEqual(st3.lastVerdict.econLatched, false, 'the LEAN reset clears the latch');
+    assert.strictEqual(st3.lastCrossing, undefined, 'LEAN clears the pending crossing outright');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// 0j "BMI ON AT INSTALL — provisional floor": the first conductor gauge of a
+// never-seen store stamps floor = footprint (BMI 1.00 live day one); growth
+// since install drives the whole 0f/0g flow through the provisional floor;
+// the WALL keeps its day-one absolute-cap diagnosis.
+// ---------------------------------------------------------------------------
+
+test('0j round trip: day-one BMI live — a fresh store above FLOOR_MIN gets the provisional floor stamped and verdicts LEAN at BMI 1.00, no crossing', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 40000, indexBytes: 60 }); // fp = 10000 + 15 = 10015 tok
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.leanFloorTokens, 10015, 'provisional floor = the first-gauge footprint');
+    assert.strictEqual(st.leanFloorProvisional, true);
+    assert.strictEqual(st.lastVerdict.band, 'LEAN', 'BMI 1.00 on day one — no sleeping bootstrap mode');
+    assert.strictEqual(st.lastVerdict.floorUnmeasured, false, 'economics run against a measured baseline, not the bootstrap upper-bound');
+    assert.strictEqual(st.lastCrossing, undefined);
+  } finally { clean(home, proj); }
+});
+
+test('0j round trip: growth-since-install arms the economic FULL through the provisional floor — which itself never ratchets', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // Session 1: install — provisional floor 10015 stamped (as above).
+    seedClassB(home, proj, { claudeMdBytes: 40000, indexBytes: 60 });
+    run(proj, home, { hook_event_name: 'SessionStart' });
+    assert.strictEqual(readProjState(home, proj).leanFloorTokens, 10015);
+
+    // Session 2: the store grows to fp 15065 (bmi 1.504 >= 1.5 arms; fat
+    // ~5050 over a lean recall store -> economical) -> FULL/economic, the
+    // full 0f/0g flow live from a provisional baseline.
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'a'.repeat(60200), 'utf8');
+    run(proj, home, { hook_event_name: 'SessionStart' });
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'FULL');
+    assert.strictEqual(st.lastVerdict.reason, 'economic');
+    assert.strictEqual(st.lastVerdict.economical, true);
+    assert.strictEqual(st.lastCrossing.band, 'FULL', 'the rise armed a crossing — force/wizard reachable from day-one enrollment-free');
+    assert.strictEqual(st.leanFloorTokens, 10015, 'the provisional floor did NOT ratchet up to the grown footprint');
+    assert.strictEqual(st.leanFloorProvisional, true, 'still provisional until a gate-passed clean');
+  } finally { clean(home, proj); }
+});
+
+test('0j round trip: an already-over-wall store on day one still routes FULL/absolute-cap AND gets the provisional floor (BMI live in parallel)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 }); // fp 36200 >= the 36000 wall
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'FULL');
+    assert.strictEqual(st.lastVerdict.reason, 'absolute-cap', '0j: never externalize off a provisional baseline — pre-existing fat may be baked in');
+    assert.strictEqual(st.leanFloorTokens, 36200, 'the provisional floor stamps IN PARALLEL with the wall verdict');
+    assert.strictEqual(st.leanFloorProvisional, true);
+    assert.strictEqual(st.lastVerdict.floorUnmeasured, false, 'BMI/economics live against the day-one baseline (fat-since-install ~0, so no force on day one — manual /coalwash stays the door)');
+    assert.strictEqual(st.lastVerdict.economical, false);
+    assert.strictEqual(st.lastCrossing.band, 'FULL', 'the crossing still arms — Stop delivers the FULL awareness (ask, since force is disarmed)');
   } finally { clean(home, proj); }
 });
 
@@ -417,7 +622,10 @@ test('WARP-HOLE: a within-session spike (a file grown well past REGAUGE_DELTA_TO
     // Seed a LEAN baseline exactly as a prior SessionStart would have cached
     // it: small CLAUDE.md + index, a floor that makes a later grow cross the
     // OBESE ceiling (bmi 1.5 at leanFloorTokens=4000 -> footprint 6000 tok).
+    // Big recall store: keeps the spiked band OBESE (carry < wash, 0g), so
+    // this stays the auto-Quick-directive delivery test it always was.
     const mem = seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 60 });
+    seedBigRecall(mem);
     const claudeMd = path.join(proj, 'CLAUDE.md');
     const memIndex = path.join(mem, 'MEMORY.md');
     seedState(home, proj, {
@@ -692,8 +900,10 @@ test('round trip: two SessionStarts at the SAME band record only ONE crossing (n
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // Same OBESE fixture as the standalone SessionStart OBESE test (bmi ~1.502).
-    seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
+    // Same OBESE fixture as the standalone SessionStart OBESE test (bmi
+    // ~1.502, big recall keeping it out of economic FULL per 0g).
+    const mem = seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
+    seedBigRecall(mem);
     seedState(home, proj, { leanFloorTokens: 10000 });
     const r1 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r1);
@@ -790,36 +1000,31 @@ test('a corrupt state file self-heals: the hook still gauges and exits 0 (Phoeni
   } finally { clean(home, proj); }
 });
 
-test('a poisoned/implausible stored leanFloor is discarded — behaves IDENTICALLY to no-floor-yet (via cached state, not stdout)', () => {
-  // Band text no longer prints from SessionStart at all, so the property this
-  // test pins now lives in the CACHED VERDICT rather than stdout: a
-  // grossly-implausible floor must be INDISTINGUISHABLE from no floor at all
-  // (both sanitize to 0, so every downstream number is computed identically).
-  const seedAndGauge = (leanFloorTokens) => {
-    const { home, proj } = sandbox();
-    try {
-      muteUpdate(home);
-      seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // absolute-cap FULL
-      if (leanFloorTokens != null) seedState(home, proj, { leanFloorTokens });
-      const r = run(proj, home);
-      assertGraceful(r);
-      assert.strictEqual(r.stdout, '');
-      return readProjState(home, proj).lastVerdict;
-    } finally { clean(home, proj); }
-  };
-  const noFloor = seedAndGauge(null);
-  const poisonedFloor = seedAndGauge(999999999); // grossly larger than the measured footprint
-  assert.strictEqual(noFloor.band, 'FULL');
-  assert.strictEqual(noFloor.reason, 'absolute-cap');
-  // `at` legitimately differs (two separate process invocations), and so does
-  // `alwaysLoadedPaths` (beta.13 item 3 — each seedAndGauge() call is its OWN
-  // sandbox with a unique tmpdir, so the cached absolute path LIST is
-  // necessarily sandbox-specific even though the byte counts it feeds match)
-  // — compare every OTHER field, which must be byte-identical if the floor
-  // was truly discarded.
-  const { at: _a, alwaysLoadedPaths: _pa, ...noFloorRest } = noFloor;
-  const { at: _b, alwaysLoadedPaths: _pb, ...poisonedRest } = poisonedFloor;
-  assert.deepStrictEqual(poisonedRest, noFloorRest, 'a grossly-implausible stored floor must be discarded exactly like no floor at all');
+test('a poisoned/implausible stored leanFloor is discarded at read — bootstrap semantics, and 0j never re-stamps over a floor on file', () => {
+  // Pre-0j this test compared poisoned-vs-no-floor for byte-identical
+  // verdicts. 0j legitimately SPLIT those two states: a NEVER-SEEN store now
+  // stamps a provisional baseline (BMI live day one — the 0j tests below pin
+  // it), while a store with a floor ON FILE — even a poisoned one — is never
+  // re-stamped (ensureProvisionalFloor's "any existing floor wins" rule:
+  // overwriting a floor is setLeanFloor's job alone). What this test pins
+  // now: the poisoned value is DISCARDED at read (the sanitizer unchanged),
+  // so the gauge runs bootstrap semantics, and the raw poisoned value
+  // survives in state un-clobbered until a real clean.
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // absolute-cap FULL
+    seedState(home, proj, { leanFloorTokens: 999999999 }); // grossly larger than the measured footprint
+    const r = run(proj, home);
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'FULL');
+    assert.strictEqual(st.lastVerdict.reason, 'absolute-cap');
+    assert.strictEqual(st.lastVerdict.floorUnmeasured, true, 'the poisoned floor was discarded at read — bootstrap economics (fat = an upper bound)');
+    assert.strictEqual(st.leanFloorTokens, 999999999, '0j never re-stamps over a floor on file — poisoned or not, only setLeanFloor overwrites');
+    assert.notStrictEqual(st.leanFloorProvisional, true, 'no provisional flag appears on a store that already had a floor');
+  } finally { clean(home, proj); }
 });
 
 test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no state file at all (conservative, never crashes)', () => {

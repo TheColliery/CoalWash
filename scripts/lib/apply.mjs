@@ -63,10 +63,19 @@ import { claudeBaseDir } from './config-load.mjs';
 // reasoning, identical safety.
 import { loadKeepsAt, KEEPS_NAME, globalKeepsPath } from './keeps.mjs';
 // beta.12 item 4: the two bins' retention sweep (fat-bin 30d / store.old 60d,
-// retention.mjs's pure policy) piggybacks on this SAME preflight touchpoint —
-// a sibling housekeeping call to sweepSnapshots below, same fail-silent
-// discipline (a bin failure must never block the wash it runs alongside).
-import { sweepFatBin, sweepStoreOld } from './bins.mjs';
+// retention.mjs's pure policy; 0i adds the store-proportional size cap)
+// piggybacks on this SAME preflight touchpoint — a sibling housekeeping call
+// to sweepSnapshots below, same fail-silent discipline (a bin failure must
+// never block the wash it runs alongside). 0h: recordBinItem is fed from the
+// COMMIT below — applyPlan is the one choke-point every cut flows through
+// (Quick/Force/wizard all apply through here), so wiring it here wires every
+// cut site at once.
+import { sweepFatBin, sweepStoreOld, recordBinItem, FAT_BIN_NAME, STORE_OLD_NAME } from './bins.mjs';
+// 0i V2: the bins' size budget is a multiple of the MEASURED STORE — read
+// from the session gauge's cached verdict (caliper state; zero new I/O
+// beyond one small state read). caliper imports only config-load/jsonc, so
+// this adds no module cycle.
+import { loadState, projectState } from './caliper.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
@@ -110,6 +119,17 @@ function atomicWrite(target, content) {
   writeDurable(tmp, content);
   fs.renameSync(tmp, target);
   fsyncDirBestEffort(path.dirname(target));
+}
+
+// 0h: what a rewrite CUT — the lines present in the gated original and
+// absent from the rewritten text (blank lines skipped; set-membership, so a
+// merely MOVED line is not "removed"). Line granularity is deliberate: the
+// Quick rules are line-structural and the wizard shrink drops wording by the
+// line; the byte-perfect whole-store undo stays the snapshot's job — the bin
+// is the browsable per-item graveyard, not a second snapshot.
+function removedLines(origText, newText) {
+  const next = new Set(String(newText).split(/\r?\n/));
+  return String(origText).split(/\r?\n/).filter((l) => l.trim() && !next.has(l));
 }
 
 function physicalOrNull(p) {
@@ -252,6 +272,12 @@ export function ensureSelfIgnore(dir) {
 //     interleave writes to the same global file, which a per-project lock
 //     alone cannot see.
 //   sessionId?: string,
+//   origin?: 'program-cut'|'wizard-cut' (def 'program-cut') — 0h bin routing:
+//     which graveyard this plan's cuts land in. Program cuts (Quick/Force
+//     structural rules) ride the default -> FAT bin; a WIZARD-tier plan
+//     (deletes, shrink rewrites) declares 'wizard-cut' -> the wizard bin
+//     (store.old). Anything else folds to 'program-cut' (recordBinItem's own
+//     rule — garbage never persists).
 // }
 // Delete/merge authorization is PLAN-SOURCED, not a separate flag: a delete
 // action present in actions[] is authorized by having come from the
@@ -437,12 +463,19 @@ export function applyPlan(plan, opts = {}) {
       // them here, inside the lock. Fail-silent housekeeping; sweepSnapshots
       // itself protects a dangling txn's snapshot (recovery owns it).
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
-      // ---- bin retention (beta.12 item 4) — the SAME piggyback touchpoint:
-      // every real wash run is a natural, already-existing place to age out
-      // bin items past their horizon. Both are already internally
-      // fail-silent (never throw) — no extra guard needed here.
-      sweepFatBin(projectRoot);
-      sweepStoreOld(projectRoot);
+      // ---- bin retention (beta.12 item 4; 0i adds the size cap) — the SAME
+      // piggyback touchpoint: every real wash run is a natural,
+      // already-existing place to age out bin items past their horizon AND
+      // to bind the store-proportional size budget (0h-GUARD: this preflight
+      // is the ONLY sweep site — run-gated, never a clock). storeBytes =
+      // the session gauge's cached measurement (0i V2 — the store, never the
+      // disk); a project never gauged (no cached verdict) sweeps
+      // horizon-only, the keep-on-doubt direction. Both sweeps are already
+      // internally fail-silent (never throw) — no extra guard needed here.
+      let storeBytes = 0;
+      try { storeBytes = Number(projectState(loadState(home), projectRoot)?.lastVerdict?.alwaysLoadedBytes) || 0; } catch { /* horizon-only */ }
+      sweepFatBin(projectRoot, { storeBytes });
+      sweepStoreOld(projectRoot, { storeBytes });
 
       // ---- snapshot BEFORE the first mutation, then the completion marker ----
       fs.mkdirSync(snapDir, { recursive: true });
@@ -555,6 +588,26 @@ export function applyPlan(plan, opts = {}) {
       writeJournal(journal);
       try { fs.rmSync(journalPath, { force: true }); } catch {}
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
+
+      // ---- bin population (0h "BIN POPULATION WIRING") — AFTER the commit,
+      // so only cuts that actually LANDED are recorded (a rolled-back run cut
+      // nothing; the catch above returns before reaching here). Routing per
+      // plan.origin: program cuts (Quick/Force, the default) -> FAT bin;
+      // wizard cuts (deletes + shrink wording) -> the wizard bin (store.old).
+      // Content = the gated baseline (baseBuf — what the plan was derived
+      // from AND byte-verified on disk at mutation time by the external-
+      // writer guard): a delete banks the whole file, a rewrite banks its
+      // removed lines (nothing removed = nothing banked). recordBinItem is
+      // fail-silent by contract — a stash failure never un-commits the run.
+      const binName = plan.origin === 'wizard-cut' ? STORE_OLD_NAME : FAT_BIN_NAME;
+      const binOrigin = plan.origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut';
+      for (const a of actionable) {
+        if (a.type === 'create') continue; // an addition cut nothing
+        const orig = a.baseBuf.toString('utf8');
+        const cut = a.type === 'delete' ? orig : removedLines(orig, a.content).join('\n');
+        if (!cut) continue;
+        recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
+      }
 
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged };
     } finally {

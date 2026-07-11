@@ -7,19 +7,24 @@
 // or discoverable: both bins live inside the SAME self-ignored tx dir
 // class-b.mjs's G4 test already proves never surfaces as class-B.
 //
-// TWO-BIN SPLIT (MEMORY.md "TWO-BIN SPLIT" — Windows keeps these mechanisms
-// separate, so this copies the separation, not a merged bin):
-//   FAT BIN   (30d horizon) — per-cut records from the normal-mode ceiling
-//             filter (the free, high-churn producer; Recycle-Bin economics).
-//   STORE.OLD (60d horizon) — whole-store pre-surgery images from the
-//             wizard's muscle-reorg tier (rare, surgery-grade caution;
-//             Windows.old economics). Items may carry `origin:
-//             'program-cut'|'wizard-cut'` for future eviction-priority use
-//             (a tag, not a third bin — a new bin needs BOTH different
-//             retention economics AND dangerous cross-class eviction
-//             pressure; wizard-fat passes the first, fails the second
-//             because muscle already escaped to store.old, so the tag alone
-//             is sufficient per the ledger's own bin-split criterion).
+// TWO-BIN SPLIT (MEMORY.md "TWO-BIN SPLIT"; cut ROUTING per 0h "BIN
+// POPULATION WIRING", which supersedes the earlier wizard-fat-tag-in-fat-bin
+// reasoning — Windows keeps these mechanisms separate, so this copies the
+// separation, not a merged bin):
+//   FAT BIN   (30d horizon) — per-cut records from the PROGRAM tier
+//             (Quick/Force structural cuts; the free, high-churn producer;
+//             Recycle-Bin economics). origin 'program-cut'.
+//   STORE.OLD (60d horizon) — the WIZARD bin: wizard deletes, the wizard
+//             shrink's dropped wording, and whole-store pre-surgery images
+//             (judgment-tier material, surgery-grade caution; Windows.old
+//             economics). origin 'wizard-cut'. Still two bins, not three —
+//             the origin tag distinguishes per-cut records from whole-store
+//             images WITHIN the wizard bin.
+// SIZE-CAP ∧ TIME-HORIZON (0i): every sweep below applies BOTH limits,
+// whichever binds first — the horizon (per-bin, above) plus a size budget of
+// BIN_BUDGET_STORE_MULTIPLE x the MEASURED STORE's bytes (never the disk —
+// 0i V2; callers pass `storeBytes` from the session gauge; absent/zero =
+// the cap layer inert, horizon-only, the keep-on-doubt direction).
 //
 // PULL-ONLY CONTAINMENT: `listBin`/`restoreFromBin` are the ONLY discovery
 // surface, and nothing calls them automatically — a snapshot re-entering the
@@ -38,21 +43,34 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { txDirFor, ensureSelfIgnore } from './apply.mjs';
-import { HORIZON_MS, retentionPlan } from './retention.mjs';
+import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE } from './retention.mjs';
 
 export const FAT_BIN_NAME = 'fat-bin';
 export const STORE_OLD_NAME = 'store.old';
-const INDEX_NAME = 'index.json'; // per-bin manifest: [{id, at, original, origin}]
+const INDEX_NAME = 'index.json'; // per-bin manifest: [{id, at, bytes, original, origin}]
 const DEATH_LOG_NAME = 'death.log'; // append-only death certificates, one line per destroyed item
 
 function binDir(projectRoot, name) {
   return path.join(txDirFor(projectRoot), name);
 }
 
+// Bare-filename allowlist (F1 — the umbrella path-traversal lesson: allowlist
+// the shape, never segment-scan): every legitimate bin id is a program-
+// generated FLAT name (`${now}-${rand}`, recordBinItem below), so anything
+// not a bare name (separators, `.`/`..`, absolute paths, drive prefixes) is
+// rejected before it ever reaches a path.join. Guards BOTH trust boundaries
+// at once: the USER-supplied id (restoreFromBin — `restore '..\\x'` would
+// otherwise read arbitrary files to stdout) and a POISONED index.json
+// shipped inside a cloned repo (loadIndex filters below — sweepBinAt rm's
+// through index ids, the recoverDangling-class recovery-path hole).
+function isBareId(id) {
+  return typeof id === 'string' && !!id && id !== '.' && id !== '..' && path.basename(id) === id;
+}
+
 function loadIndex(dir) {
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(dir, INDEX_NAME), 'utf8'));
-    return Array.isArray(parsed) ? parsed.filter((i) => i && typeof i.id === 'string') : [];
+    return Array.isArray(parsed) ? parsed.filter((i) => i && isBareId(i.id)) : [];
   } catch {
     return [];
   }
@@ -84,9 +102,12 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     fs.mkdirSync(dir, { recursive: true });
     ensureSelfIgnore(dir);
     const id = `${now}-${Math.random().toString(36).slice(2, 8)}`;
-    fs.writeFileSync(path.join(dir, id), typeof content === 'string' ? content : '', 'utf8');
+    const body = typeof content === 'string' ? content : '';
+    fs.writeFileSync(path.join(dir, id), body, 'utf8');
     const index = loadIndex(dir);
-    index.push({ id, at: now, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' });
+    // bytes (0i): the size-cap layer's weight — recorded at birth so the
+    // sweep never has to re-stat the common case.
+    index.push({ id, at: now, bytes: Buffer.byteLength(body, 'utf8'), original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' });
     if (!saveIndex(dir, index)) { try { fs.rmSync(path.join(dir, id), { force: true }); } catch {} return null; }
     return id;
   } catch {
@@ -103,8 +124,11 @@ export function listBin(projectRoot, name) {
 // The deliberate walk-in restore door — read one item's content by id.
 // Returns null (not '') on a miss, so a caller can tell "empty file" from
 // "not found" — a restore of a genuinely-empty stash is legitimate.
+// F1: `id` is USER-supplied (the cli restore subcommand) — the bare-name
+// allowlist rejects any traversal shape (`../x`, absolute, `.`/`..`) as a
+// plain not-found before the path is ever built.
 export function restoreFromBin(projectRoot, name, id) {
-  if (typeof id !== 'string' || !id) return null;
+  if (!isBareId(id)) return null;
   try { return fs.readFileSync(path.join(binDir(projectRoot, name), id), 'utf8'); }
   catch { return null; }
 }
@@ -116,10 +140,19 @@ export function restoreFromBin(projectRoot, name, id) {
 // that cannot be verified gone is NOT reported destroyed and stays in the
 // index (never a false "destroyed" — the broom asymmetry: leftover dust
 // waits for the next pass, that is the safe direction).
-function sweepBinAt(dir, horizonMs, now) {
+function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
   const index = loadIndex(dir);
   if (!index.length) return { destroyed: 0, kept: 0 };
-  const { keep, destroy } = retentionPlan(index, now, { horizonMs });
+  // Legacy index entries (pre-0i) carry no bytes — weigh them by a one-time
+  // stat so they participate in the size cap instead of escaping it forever;
+  // an unstattable item stays weightless (keep-on-doubt, retention.mjs's own
+  // rule for weightless items).
+  for (const item of index) {
+    if (!Number.isFinite(Number(item.bytes))) {
+      try { item.bytes = fs.statSync(path.join(dir, item.id)).size; } catch { /* weightless -> never size-evicted */ }
+    }
+  }
+  const { keep, destroy } = retentionPlan(index, now, { horizonMs, budgetBytes });
   const survivors = [...keep];
   const cert = [];
   for (const item of destroy) {
@@ -139,17 +172,28 @@ function sweepBinAt(dir, horizonMs, now) {
   return { destroyed: index.length - survivors.length, kept: survivors.length };
 }
 
+// storeBytes (0i) -> the bin's size budget: BIN_BUDGET_STORE_MULTIPLE x the
+// measured store (never the disk — V2). No measured store (absent/zero/
+// malformed) = Infinity = the cap layer inert, horizon-only: the pre-0i
+// behavior and the keep-on-doubt fail direction.
+function budgetFrom(storeBytes) {
+  const s = Number(storeBytes);
+  return Number.isFinite(s) && s > 0 ? s * BIN_BUDGET_STORE_MULTIPLE : Infinity;
+}
+
 // Sweep the fat bin (30-day horizon — 1 burst-gap, per retention.mjs's own
 // birth certificate) and store.old (60-day horizon — 2 burst-gaps,
-// surgery-grade caution). Fail-silent housekeeping, never fatal to a caller
-// (matches apply.mjs's sweepSnapshots — the sibling housekeeping call this
-// piggybacks alongside).
-export function sweepFatBin(projectRoot, { now = Date.now() } = {}) {
-  try { return sweepBinAt(binDir(projectRoot, FAT_BIN_NAME), HORIZON_MS.fat, now); }
+// surgery-grade caution); BOTH also size-capped against `opts.storeBytes`
+// (0i, whichever limit binds first). Fail-silent housekeeping, never fatal
+// to a caller (matches apply.mjs's sweepSnapshots — the sibling housekeeping
+// call this piggybacks alongside). RUN-GATED (0h-GUARD): callable only from
+// a real wash run's applyPlan preflight — never wire these to a hook/cron.
+export function sweepFatBin(projectRoot, { now = Date.now(), storeBytes } = {}) {
+  try { return sweepBinAt(binDir(projectRoot, FAT_BIN_NAME), HORIZON_MS.fat, now, budgetFrom(storeBytes)); }
   catch { return { destroyed: 0, kept: 0 }; }
 }
-export function sweepStoreOld(projectRoot, { now = Date.now() } = {}) {
-  try { return sweepBinAt(binDir(projectRoot, STORE_OLD_NAME), HORIZON_MS['store.old'], now); }
+export function sweepStoreOld(projectRoot, { now = Date.now(), storeBytes } = {}) {
+  try { return sweepBinAt(binDir(projectRoot, STORE_OLD_NAME), HORIZON_MS['store.old'], now, budgetFrom(storeBytes)); }
   catch { return { destroyed: 0, kept: 0 }; }
 }
 

@@ -11,6 +11,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gauge, gaugeLine } from './cli.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem } from './bins.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(here, 'cli.mjs');
@@ -78,6 +79,75 @@ test('an unknown/missing subcommand fails LOUD: usage on stderr, exit 1', () => 
       const r = run(proj, home, args);
       assert.strictEqual(r.status, 1);
       assert.match(r.stderr, /usage: node scripts\/lib\/cli\.mjs gauge/);
+    }
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// restore <id> — the 0-token human recovery door (0h). Pull-only, read-only:
+// content → stdout (pipeable), the ONE summary line → stderr, never a store
+// write.
+// ---------------------------------------------------------------------------
+
+test('restore round-trip via the CLI: content lands on stdout byte-identical, the one-line summary on stderr, exit 0', () => {
+  const { home, proj } = sandbox();
+  try {
+    const content = 'cut line one\ncut line two\n';
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content, original: path.join(proj, 'f1.md') });
+    const r = run(proj, home, ['restore', id]);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout, content, 'stdout is the pure content — pipeable to a file, byte-identical');
+    const errLines = r.stderr.trim().split(/\r?\n/);
+    assert.strictEqual(errLines.length, 1, 'exactly ONE summary line');
+    assert.ok(errLines[0].includes(id), errLines[0]);
+    assert.ok(errLines[0].includes(FAT_BIN_NAME), 'names which bin held it');
+    assert.ok(errLines[0].includes(`${Buffer.byteLength(content)} bytes`), errLines[0]);
+    assert.ok(errLines[0].includes('f1.md'), 'names the source file it was cut from');
+    assert.ok(errLines[0].includes('nothing was written'), 'states the read-only truth');
+  } finally { clean(home, proj); }
+});
+
+test('restore: an id living only in the wizard bin (store.old) is found second and reported as store.old', () => {
+  const { home, proj } = sandbox();
+  try {
+    const id = recordBinItem(proj, STORE_OLD_NAME, { content: 'wizard-cut wording', origin: 'wizard-cut' });
+    const r = run(proj, home, ['restore', id]);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout, 'wizard-cut wording');
+    assert.ok(r.stderr.includes(STORE_OLD_NAME), 'the summary names the wizard bin');
+  } finally { clean(home, proj); }
+});
+
+test('restore: an unknown id fails LOUD — exit 1, a clean not-found message naming both bins searched, empty stdout', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = run(proj, home, ['restore', 'no-such-id']);
+    assert.strictEqual(r.status, 1);
+    assert.strictEqual(r.stdout, '', 'no content — nothing masquerades as a find');
+    assert.ok(r.stderr.includes("id 'no-such-id' not found"), r.stderr);
+    assert.ok(r.stderr.includes(FAT_BIN_NAME) && r.stderr.includes(STORE_OLD_NAME), 'names where it looked');
+  } finally { clean(home, proj); }
+});
+
+test('restore: a missing id argument is a usage error — exit 1, usage on stderr', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = run(proj, home, ['restore']);
+    assert.strictEqual(r.status, 1);
+    assert.match(r.stderr, /usage: node scripts\/lib\/cli\.mjs gauge \[--json\] \| restore <id>/);
+  } finally { clean(home, proj); }
+});
+
+test('F1: a traversal-shaped id via the CLI is a clean not-found — exit 1, empty stdout, never a file read outside the bins', () => {
+  const { home, proj } = sandbox();
+  try {
+    // A real secret OUTSIDE the bins that a traversal id would otherwise reach.
+    fs.writeFileSync(path.join(proj, 'secret.md'), 'not yours', 'utf8');
+    for (const evil of ['../../secret.md', '..\\..\\secret.md', '..']) {
+      const r = run(proj, home, ['restore', evil]);
+      assert.strictEqual(r.status, 1, `id ${JSON.stringify(evil)} must fail`);
+      assert.strictEqual(r.stdout, '', 'no content ever escapes on a traversal id');
+      assert.ok(r.stderr.includes('not found'), r.stderr);
     }
   } finally { clean(home, proj); }
 });

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath } from './apply.mjs';
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
-import { FAT_BIN_NAME, recordBinItem, listBin } from './bins.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './bins.mjs';
 import { HORIZON_MS } from './retention.mjs';
 
 function sandbox() {
@@ -847,6 +847,78 @@ test('applyPlan preflight ALSO sweeps the bins: an over-horizon fat-bin item is 
     const remaining = listBin(proj, FAT_BIN_NAME).map((i) => i.id);
     assert.ok(!remaining.includes(oldId), 'the over-horizon bin item was swept away by the SAME apply run');
     assert.ok(remaining.includes(freshId), 'a recent bin item survives untouched');
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// 0h "BIN POPULATION WIRING" — applyPlan is the one choke-point every cut
+// flows through (Quick/Force/wizard all apply here), so the COMMIT feeds the
+// bins: program cuts (default origin) -> FAT bin; a wizard plan
+// (origin:'wizard-cut') -> the wizard bin (store.old). Only cuts that
+// actually LANDED are recorded — a rolled-back run banks nothing.
+// ---------------------------------------------------------------------------
+
+test('0h: a committed program-cut plan banks each rewrite\'s REMOVED LINES and each delete\'s WHOLE content in the FAT bin', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f1 = path.join(store, 'f1.md');
+    const f2 = path.join(store, 'f2.md');
+    write(f1, 'kept line\ncut line one\nkept two\ncut line two');
+    write(f2, 'whole file to delete');
+    const r = applyPlan(planFor(proj, store, [
+      { type: 'rewrite', path: f1, content: 'kept line\nkept two' },
+      { type: 'delete', path: f2 },
+      { type: 'create', path: path.join(store, 'f3.md'), content: 'new file' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    const items = listBin(proj, FAT_BIN_NAME);
+    assert.strictEqual(items.length, 2, 'one item per cut file; the create banks nothing');
+    const byOriginal = new Map(items.map((i) => [path.basename(i.original), i]));
+    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, byOriginal.get('f1.md').id), 'cut line one\ncut line two', 'the rewrite banks exactly its removed lines');
+    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, byOriginal.get('f2.md').id), 'whole file to delete', 'the delete banks the whole file');
+    for (const i of items) assert.strictEqual(i.origin, 'program-cut', 'default origin routes as a program cut');
+    assert.strictEqual(listBin(proj, STORE_OLD_NAME).length, 0, 'nothing leaks into the wizard bin');
+  } finally { clean(proj); }
+});
+
+test('0h: a wizard plan (origin:\'wizard-cut\') routes its cuts to the WIZARD bin (store.old), origin-tagged', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f1 = path.join(store, 'shrunk.md');
+    const f2 = path.join(store, 'gone.md');
+    write(f1, 'fact stays\nverbose wording dropped by the shrink');
+    write(f2, 'wizard-deleted memory');
+    const r = applyPlan(planFor(proj, store, [
+      { type: 'rewrite', path: f1, content: 'fact stays' },
+      { type: 'delete', path: f2 },
+    ], { origin: 'wizard-cut' }));
+    assert.strictEqual(r.ok, true, r.error);
+    const items = listBin(proj, STORE_OLD_NAME);
+    assert.strictEqual(items.length, 2, 'wizard deletes AND the shrink\'s dropped wording both land in the wizard bin');
+    for (const i of items) assert.strictEqual(i.origin, 'wizard-cut');
+    assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 0, 'nothing leaks into the fat bin');
+  } finally { clean(proj); }
+});
+
+test('0h: a pure-addition rewrite (nothing removed) banks nothing; a ROLLED-BACK run banks nothing (only landed cuts are recorded)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'f.md');
+    write(f, 'original');
+    const ok = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'original\nplus an added line' }]));
+    assert.strictEqual(ok.ok, true, ok.error);
+    assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 0, 'an addition cut nothing -> the bin stays empty');
+
+    // Roll back: the double-delete fixture (the second delete throws mid-txn).
+    write(f, 'original');
+    const rb = applyPlan(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'would-be cut\n' },
+      { type: 'delete', path: f },
+      { type: 'delete', path: f },
+    ]));
+    assert.strictEqual(rb.ok, false);
+    assert.strictEqual(rb.rolledBack, true);
+    assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 0, 'a rolled-back run cut nothing -> nothing banked');
   } finally { clean(proj); }
 });
 

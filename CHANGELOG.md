@@ -2,6 +2,25 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.14] - 2026-07-11
+
+The authoritative 3-flow + the economics: the wizard ask moves to its ONE ruled site (FULL, after the forced Quick proves insufficient — OBESE never asks), FULL becomes the economic cut-point on top of the armed ceiling, the bins finally get fed and kept on a dual limit, and BMI is live from the moment of install. Reviewed FIX-FIRST → all findings closed. Engine tests 337 → 380.
+
+### Added
+- **Economic FULL (0g):** FULL = `breakEven.economical` on floor-relative fat, on top of the armed OBESE ceiling — `FULL ⊂ OBESE` (a tiny-fat store can never jump LEAN→FULL), latched per episode (LEAN reset clears), and the **force authorization always demands a FRESH economical proof** (numbers shown every fire — the economic-dominance clause is the band now). The fixed capacity line is demoted to the outer WALL: bootstrap `absolute-cap` (no floor yet) / `externalize` (~all muscle).
+- **Bin population (0h):** every landed cut is recorded post-COMMIT into a bin, routed by the plan's `origin` (`program-cut` default → fat bin · `wizard-cut` → `store.old`). Bin sweeps run ONLY from inside `applyPlan` — never a hook, cron, or session-event age-sweep (0h-GUARD: idle days destroy nothing).
+- **Dual-limit retention (0i):** SIZE-CAP (`BIN_BUDGET_STORE_MULTIPLE` 2× the store's own measured bytes — never the disk) ∧ TIME-HORIZON, whichever binds first (the journald model); era-preserving thinning first, hard cap second; the newest item always survives; doubt/weightless items are never size-evicted.
+- **BMI on at install — provisional floor (0j):** the first gauge of a never-seen store stamps a provisional floor = the current footprint → BMI = 1.00 live from day one, no switch command (Single Power Button); the provisional floor never self-ratchets; the first gate-passed Full clean overwrites it (flag cleared); `capHit` + provisional → `absolute-cap`, never `externalize` (a provisional baseline cannot certify all-muscle).
+- **`restore <id>` CLI subcommand (`scripts/lib/cli.mjs`):** the promised 0-token recovery door — stdout = the recovered content (redirect `> file` to keep the bytes out of any context window), stderr = ONE summary line; unknown id → exit 1 naming both bins searched; read-only, never writes to the store.
+
+### Changed
+- **Wizard escalation relocated OBESE → FULL-after-force (0f, the authoritative 3-flow):** the ONE wizard ask now lives at FULL after the forced Quick already ran this episode and the store is still over; it is checked BEFORE the force crossing (kills the silent force-loop). OBESE is auto-Quick-silent, full stop.
+- **`exercisePerBand.obese` clamped to `quick`:** the schema is per-band now (`obese: ['quick']`); a legacy `obese: "full"` config reads as `quick` silently (safer-value-wins) without clobbering a valid `full:` customization. `ceilingAsk` remains solely the FULL forceMode-`ask`/`off` leg.
+- Docs resynced: the stale "no dedicated restore CLI yet" claim removed from SKILL/method (the CLI is real now); blueprint §18 gains the 0j clause.
+
+### Security
+- **Bin id containment (`isBareId`, `bins.mjs`):** `restoreFromBin` rejects any non-bare id (`../x`, `..\x`, absolute, `.`, `..` → not-found) and `loadIndex` filters the same shape — so a traversal id can no longer read outside the bin dir, and a poisoned `index.json` can no longer surface or sweep files outside it (the recovery-path class: same family as beta.2's `recoverDangling` fix). Regression-tested with a planted outside-the-bin victim proven untouched.
+
 ## [0.1.0-beta.13] - 2026-07-11
 
 The lifecycle autopilot: the code tier now sweeps structural fat on its own (Storage-Sense shape — act + one-line report, never a per-run ask), the wizard ask survives only for semantic judgment and re-arms only on fat GROWTH, and a within-session spike is caught at `Stop` through a measured perf gate. Engine tests 302 → 337.

@@ -31,7 +31,13 @@ export const CONFIG_SCHEMA = [
   { key: 'localOnly', type: 'bool', def: false, help: "Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config (default: false)" },
   { key: 'updateMode', type: 'enum', values: ['ask', 'auto', 'remind', 'off'], def: 'ask', help: 'Self-update behavior at session start (ask, auto, remind, off; default: ask)' },
   { key: 'updateCheckDays', type: 'int', min: 1, max: 365, def: 14, help: 'Days between self-update checks/reminders (default: 14)' },
-  { key: 'exercisePerBand', type: 'bandmap', values: ['quick', 'full'], def: { obese: 'quick', full: 'full' }, help: 'Per-ceiling exercise the Stop-hook ask offers (quick|full, for obese/full — beta.12 band-collapse retired the separate plump rung); the fat-only scoping refinement is a later release (default: {obese:quick, full:full})' },
+  // exercisePerBand values are PER-BAND (F3, main-adjudicated per the 0f
+  // ruling "OBESE never asks, no matter what"): obese admits ONLY 'quick' —
+  // the old 'full' option routed an OBESE crossing to an ask, contradicting
+  // the ruling; the key survives (documents the standing behavior, future-
+  // proof) and a legacy obese:'full' config reads as 'quick' silently
+  // (clampedRead's per-band safer-value-wins clamp, the CM v3.9.3 pattern).
+  { key: 'exercisePerBand', type: 'bandmap', values: { obese: ['quick'], full: ['quick', 'full'] }, def: { obese: 'quick', full: 'full' }, help: 'Per-ceiling exercise (obese: quick only — OBESE is auto-Quick-silent by ruling, never an ask; full: quick|full); the fat-only scoping refinement is a later release (default: {obese:quick, full:full})' },
   { key: 'forceMode', type: 'enum', values: ['auto', 'ask', 'off'], def: 'auto', help: 'FULL+economical crossing behavior at Stop: auto = standing-consent auto-run (the rot-canary autoFixMode model); ask = FULL asks like other ceilings; off = same as ask — never silent (they suppress only the auto-run authorization, never FULL awareness; default: auto)' },
   { key: 'managedPaths', type: 'stringList', def: [], help: 'Extra path PREFIXES (relative to their own project/global root, forward-slash form) to auto-declare MANAGED — sync-owned packs never proposed for a local wash, same class as skills (default: [], the byte-identical-across-roots heuristic already covers the common case)' },
 ];
@@ -60,10 +66,13 @@ export function validateValue(spec, v) {
     case 'stringList':
       return Array.isArray(v) && v.every((s) => typeof s === 'string') ? null : 'must be an array of strings';
     case 'bandmap': {
+      // values = a per-sub-key allowlist map (F3: each band declares its own
+      // options — obese admits only 'quick').
       if (!v || typeof v !== 'object' || Array.isArray(v)) return 'must be an object';
       for (const k of Object.keys(spec.def)) {
         if (!(k in v)) return `must include '${k}'`;
-        if (typeof v[k] !== 'string' || !spec.values.includes(v[k].toLowerCase())) return `'${k}' must be one of: ${spec.values.join(', ')}`;
+        const allowed = spec.values[k] || [];
+        if (typeof v[k] !== 'string' || !allowed.includes(v[k].toLowerCase())) return `'${k}' must be one of: ${allowed.join(', ')}`;
       }
       return null;
     }
@@ -93,15 +102,23 @@ export function clampedRead(cfg, key) {
   const spec = CONFIG_SCHEMA.find((s) => s.key === key);
   if (!spec) return undefined;
   const v = cfg ? cfg[key] : undefined;
-  if (v === undefined || validateValue(spec, v) !== null) return spec.def;
-  if (spec.type === 'enum') return v.toLowerCase();
   if (spec.type === 'bandmap') {
-    // Rebuild from the spec's OWN sub-keys (never the raw value's own key set)
-    // so a malformed/extra sub-key on an otherwise-valid object can't leak
-    // through, and every expected sub-key is guaranteed present.
+    // Per-SUB-KEY safer-value-wins clamp (F3, the CM v3.9.3 pattern),
+    // rebuilt from the spec's OWN sub-keys (never the raw value's key set —
+    // a malformed/extra sub-key can't leak through, every expected sub-key
+    // is guaranteed present): each band reads its own value when allowed,
+    // else ITS OWN factory default — so a legacy obese:'full' silently
+    // reads 'quick' (no breakage) WITHOUT clobbering a still-valid
+    // customization on the other band.
+    const raw = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
     const out = {};
-    for (const k of Object.keys(spec.def)) out[k] = String(v[k]).toLowerCase();
+    for (const k of Object.keys(spec.def)) {
+      const val = typeof raw[k] === 'string' ? raw[k].toLowerCase() : null;
+      out[k] = (spec.values[k] || []).includes(val) ? val : spec.def[k];
+    }
     return out;
   }
+  if (v === undefined || validateValue(spec, v) !== null) return spec.def;
+  if (spec.type === 'enum') return v.toLowerCase();
   return v;
 }

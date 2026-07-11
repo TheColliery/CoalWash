@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   tokensEst, tokensEstFromBytes, gzipRatio, measureEntries, statOnlyFootprintBytes,
   bandVerdict, breakEven, sessionsPerDay, gaugeVerdict,
-  statePath, loadState, projectState, recordStamp, setLeanFloor,
+  statePath, loadState, projectState, recordStamp, setLeanFloor, ensureProvisionalFloor,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
   recordVerdict, sanitizeVerdict, VERDICT_MAX_AGE_MS, markQuickTried,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
@@ -639,9 +639,13 @@ test('gaugeVerdict: FULL+economical computes the payback numbers and arms econom
   assert.ok(gv.perDay > 0);
   assert.ok(Number.isFinite(gv.breakEvenDays));
 
-  // OBESE: bmi armed, under the hard cap -> payback computed, economical
-  // stays false (only FULL may arm the force case).
-  const obeseMeasure = { alwaysLoaded: { tokensEst: 16000, bytes: 64000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 16000 };
+  // OBESE: bmi armed, under the hard cap, carry < wash -> payback computed,
+  // economical stays false (only FULL may arm the force case). 0g fixture
+  // note: the recall-heavy totalTokensEst (120000, so runCost = 360k dwarfs
+  // the 84k carry) is what keeps this store in the chronic-chubby zone — the
+  // SAME footprint over a lean recall store would be economically FULL now
+  // (pinned by the economic-FULL tests below).
+  const obeseMeasure = { alwaysLoaded: { tokensEst: 16000, bytes: 64000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 120000 };
   const gvObese = gaugeVerdict({ measure: obeseMeasure, rawLeanFloorTokens: 10000, fullPercent: 6 });
   assert.strictEqual(gvObese.verdict.band, 'OBESE');
   assert.strictEqual(gvObese.economical, false, 'OBESE never arms economical, even though payback IS computed');
@@ -667,6 +671,209 @@ test('gaugeVerdict: a poisoned leanFloor is sanitized exactly like the raw sanit
 });
 
 // ---------------------------------------------------------------------------
+// 0g "FULL = THE ECONOMIC CUT-POINT" + 0g-RESOLUTION (MEMORY.md): FULL ⊂
+// OBESE (Q1 — the economic test fires only with the BMI ceiling armed),
+// LATCHED per episode (Q2 — no flap on boundary drift, no second Schmitt),
+// the wall's three roles preserved (Q3), economics computed before the band
+// (Q4). All pre-0g bandVerdict tests above pass economical/wasEconLatched
+// as their default false, so the pre-0g behavior is pinned unchanged there.
+// ---------------------------------------------------------------------------
+
+test('0g Q1: crossing the economic line while the ceiling is armed lands FULL/economic and sets the latch', () => {
+  const floor = 10000;
+  const v = bandVerdict({ footprintTokens: 15020, leanFloorTokens: floor, economical: true });
+  assert.strictEqual(v.band, 'FULL');
+  assert.strictEqual(v.reason, 'economic');
+  assert.strictEqual(v.over, true, 'FULL ⊂ OBESE: the ceiling itself is armed');
+  assert.strictEqual(v.econLatched, true, 'the per-episode latch sets at the arm');
+});
+
+test('0g Q1: the economic test alone NEVER fires un-armed — no LEAN→FULL jump for a tiny-fat-heavy-use store', () => {
+  const floor = 10000;
+  // Under the arm mark entirely.
+  const under = bandVerdict({ footprintTokens: 11000, leanFloorTokens: floor, economical: true });
+  assert.strictEqual(under.band, 'LEAN');
+  assert.strictEqual(under.econLatched, false);
+  // In the dead zone but never previously armed (wasOver false).
+  const deadZoneUnarmed = bandVerdict({ footprintTokens: 13500, leanFloorTokens: floor, wasOver: false, economical: true });
+  assert.strictEqual(deadZoneUnarmed.band, 'LEAN', 'the dead zone never arms fresh, economics notwithstanding');
+  // Bootstrap (no floor): bmi null -> the ceiling cannot be armed -> only the wall can fire.
+  const bootstrap = bandVerdict({ footprintTokens: 5000, leanFloorTokens: 0, economical: true });
+  assert.strictEqual(bootstrap.band, 'LEAN');
+  assert.strictEqual(bootstrap.reason, 'no-floor-yet');
+  assert.strictEqual(bootstrap.econLatched, false, 'pre-floor can never latch (Q1: economic FULL needs the armed ceiling)');
+});
+
+test('0g: the OBESE zone is armed-but-not-economical (chronic-chubby is CORRECT — carry < wash)', () => {
+  const v = bandVerdict({ footprintTokens: 15020, leanFloorTokens: 10000, economical: false });
+  assert.strictEqual(v.band, 'OBESE');
+  assert.strictEqual(v.reason, 'bmi');
+  assert.strictEqual(v.econLatched, false);
+});
+
+test('0g Q2: the latch holds FULL through an armed session whose fresh proof dipped (boundary drift never flaps the band)', () => {
+  const floor = 10000;
+  // Dead zone (bmi 1.35, over held by wasOver) + fresh economics false + the latch -> still FULL.
+  const held = bandVerdict({ footprintTokens: 13500, leanFloorTokens: floor, wasOver: true, economical: false, wasEconLatched: true });
+  assert.strictEqual(held.band, 'FULL');
+  assert.strictEqual(held.reason, 'economic');
+  assert.strictEqual(held.econLatched, true, 'the latch persists through the dip');
+  // Same store WITHOUT the latch is the control: plain OBESE.
+  const control = bandVerdict({ footprintTokens: 13500, leanFloorTokens: floor, wasOver: true, economical: false, wasEconLatched: false });
+  assert.strictEqual(control.band, 'OBESE', 'without the latch the same dip would drop the band — the latch is the anti-flap');
+});
+
+test('0g Q2: the latch falls with the ceiling — LEAN (the episode reset) clears it, a stale latch can never hold an un-armed store FULL', () => {
+  const floor = 10000;
+  // BMI at/under the low-water mark disarms regardless of latch or fresh economics.
+  const v = bandVerdict({ footprintTokens: 11000, leanFloorTokens: floor, wasOver: true, economical: true, wasEconLatched: true });
+  assert.strictEqual(v.band, 'LEAN');
+  assert.strictEqual(v.over, false);
+  assert.strictEqual(v.econLatched, false, 'LEAN writes the latch false — the episode is over');
+});
+
+test('0g Q3: capHit+over stays FULL/absolute-cap (wash-first) and still carries the latch when the economic condition holds', () => {
+  const v = bandVerdict({ footprintTokens: 36200, leanFloorTokens: 20000, fullPercent: 6, economical: true });
+  assert.strictEqual(v.band, 'FULL');
+  assert.strictEqual(v.reason, 'absolute-cap', 'the wall keeps reason-precedence over economic');
+  assert.strictEqual(v.econLatched, true, 'the episode latch still sets — shrinking back under the wall mid-episode must not drop the band');
+  // ...and the follow-on session under the wall rides the latch into FULL/economic.
+  const after = bandVerdict({ footprintTokens: 35000, leanFloorTokens: 20000, fullPercent: 6, wasOver: true, economical: false, wasEconLatched: true });
+  assert.strictEqual(after.band, 'FULL');
+  assert.strictEqual(after.reason, 'economic');
+});
+
+test('0g Q3: externalize (capHit while un-armed, ~all-muscle) never latches, even against a mistakenly-true economical', () => {
+  const v = bandVerdict({ footprintTokens: 36200, leanFloorTokens: 36000, fullPercent: 6, economical: true });
+  assert.strictEqual(v.band, 'FULL');
+  assert.strictEqual(v.reason, 'externalize');
+  assert.strictEqual(v.econLatched, false);
+});
+
+test('0g gaugeVerdict: a lean-recall armed store past the break-even is FULL/economic end-to-end (economical armed, payback computed, latch out)', () => {
+  // fat 6000, store 16000: carry 6000*14 = 84000 > runCost 16000*3 = 48000.
+  const measure = { alwaysLoaded: { tokensEst: 16000, bytes: 64000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 16000 };
+  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 10000, fullPercent: 6 });
+  assert.strictEqual(gv.verdict.band, 'FULL');
+  assert.strictEqual(gv.verdict.reason, 'economic');
+  assert.strictEqual(gv.economical, true);
+  assert.strictEqual(gv.verdict.econLatched, true);
+  assert.ok(gv.perDay > 0);
+  assert.ok(Number.isFinite(gv.breakEvenDays));
+});
+
+test('0g gaugeVerdict: a LATCHED session whose fresh proof dipped keeps the BAND but not the FORCE — economical reflects the fresh numbers only', () => {
+  // fat 2500, store 12500: carry 35000 < runCost 37500 -> fresh economics
+  // false; bmi 1.25 sits in the dead zone held armed by wasOver.
+  const measure = { alwaysLoaded: { tokensEst: 12500, bytes: 50000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 12500 };
+  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 10000, fullPercent: 6, wasOver: true, wasEconLatched: true });
+  assert.strictEqual(gv.verdict.band, 'FULL', 'Q2: the latch holds the band');
+  assert.strictEqual(gv.verdict.reason, 'economic');
+  assert.strictEqual(gv.verdict.econLatched, true);
+  assert.strictEqual(gv.economical, false, 'the FORCE arms on the fresh deterministic proof only (economic-dominance: numbers must hold at every fire) — a pending crossing degrades to the plain ask, never a forced run');
+  assert.ok(gv.perDay > 0, 'payback numbers still shown on whatever surfaces');
+});
+
+test('0g: recordVerdict round-trips econLatched, and a LEAN overwrite clears it (the episode reset in state)', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordVerdict(home, proj, { band: 'FULL', reason: 'economic', economical: true, fatTokens: 6000, overCeiling: true, econLatched: true }, 1000);
+    assert.strictEqual(projectState(loadState(home), proj).lastVerdict.econLatched, true);
+    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0, overCeiling: false, econLatched: false }, 2000);
+    const st = projectState(loadState(home), proj).lastVerdict;
+    assert.strictEqual(st.econLatched, false, 'LEAN writes the latch false');
+    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi' }, 3000);
+    assert.strictEqual(projectState(loadState(home), proj).lastVerdict.econLatched, false, 'a missing econLatched degrades to false, never undefined/throw');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// 0j "BMI ON AT INSTALL — provisional floor" (MEMORY.md): the first gauge of
+// a never-seen store stamps a PROVISIONAL floor = the current footprint, so
+// BMI is live from day one; it never ratchets; only setLeanFloor (a
+// gate-passed clean) overwrites it; FLOOR_MIN and the WALL are unchanged.
+// ---------------------------------------------------------------------------
+
+test('0j ensureProvisionalFloor: a never-seen store stamps floor = footprint with the provisional flag; day-one BMI = 1.00 through gaugeVerdict', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = ensureProvisionalFloor(home, proj, 10000, 1000);
+    assert.deepStrictEqual(r, { floorTokens: 10000, provisional: true });
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.leanFloorTokens, 10000);
+    assert.strictEqual(st.leanFloorProvisional, true);
+    assert.strictEqual(st.leanFloorAt, 1000);
+
+    const measure = { alwaysLoaded: { tokensEst: 10000, bytes: 40000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 10000 };
+    const gv = gaugeVerdict({ measure, rawLeanFloorTokens: r.floorTokens, floorProvisional: r.provisional, fullPercent: 6 });
+    assert.strictEqual(gv.verdict.band, 'LEAN');
+    assert.strictEqual(gv.verdict.bmi, 1, 'BMI live at exactly 1.00 on day one');
+    assert.strictEqual(gv.floorUnmeasured, false, 'a provisional floor IS a measured baseline — no upper-bound labeling');
+  } finally { clean(home, proj); }
+});
+
+test('0j: the provisional floor NEVER ratchets — a later, bigger gauge returns the original stamp untouched', () => {
+  const { home, proj } = sandbox();
+  try {
+    ensureProvisionalFloor(home, proj, 10000, 1000);
+    const later = ensureProvisionalFloor(home, proj, 25000, 2000); // store grew — the baseline must not follow
+    assert.deepStrictEqual(later, { floorTokens: 10000, provisional: true });
+    assert.strictEqual(projectState(loadState(home), proj).leanFloorTokens, 10000);
+  } finally { clean(home, proj); }
+});
+
+test('0j: an existing REAL floor passes through untouched (no stamp, no flag) — and a poisoned raw floor is likewise never clobbered', () => {
+  const { home, proj } = sandbox();
+  try {
+    setLeanFloor(home, proj, 8000, 500);
+    const r = ensureProvisionalFloor(home, proj, 12000, 1000);
+    assert.deepStrictEqual(r, { floorTokens: 8000, provisional: false });
+    assert.notStrictEqual(projectState(loadState(home), proj).leanFloorProvisional, true);
+
+    // Poisoned floor on file: read-time sanitizing discards it downstream,
+    // but the STAMPING site must not overwrite it (setLeanFloor's job alone).
+    setLeanFloor(home, proj, 999999999, 600);
+    const p = ensureProvisionalFloor(home, proj, 12000, 1100);
+    assert.strictEqual(p.floorTokens, 999999999, 'returned raw — sanitizeLeanFloor handles trust at read');
+    assert.strictEqual(p.provisional, false);
+  } finally { clean(home, proj); }
+});
+
+test('0j: setLeanFloor (a gate-passed clean) overwrites the provisional floor AND clears the flag', () => {
+  const { home, proj } = sandbox();
+  try {
+    ensureProvisionalFloor(home, proj, 10000, 1000);
+    setLeanFloor(home, proj, 7000, 2000);
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.leanFloorTokens, 7000);
+    assert.strictEqual(st.leanFloorProvisional, undefined, 'the real clean cleared the provisional flag');
+    // ...and the now-real floor is passthrough for every later gauge.
+    assert.deepStrictEqual(ensureProvisionalFloor(home, proj, 30000, 3000), { floorTokens: 7000, provisional: false });
+  } finally { clean(home, proj); }
+});
+
+test('0j: a footprint under FLOOR_MIN_TOKENS stamps nothing — the tiny-store guard unchanged', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = ensureProvisionalFloor(home, proj, FLOOR_MIN_TOKENS - 1, 1000);
+    assert.deepStrictEqual(r, { floorTokens: 0, provisional: false });
+    assert.strictEqual(projectState(loadState(home), proj).leanFloorTokens, undefined, 'nothing written');
+    // exactly at the minimum IS stamped (mirrors bandVerdict's own boundary)
+    assert.deepStrictEqual(ensureProvisionalFloor(home, proj, FLOOR_MIN_TOKENS, 2000), { floorTokens: FLOOR_MIN_TOKENS, provisional: true });
+  } finally { clean(home, proj); }
+});
+
+test('0j bandVerdict: capHit with a PROVISIONAL floor stays FULL/absolute-cap (wash first) — a provisional baseline can never certify externalize', () => {
+  // Day-one over-wall store: floor = footprint (provisional), bmi 1.0, un-armed.
+  const v = bandVerdict({ footprintTokens: 36200, leanFloorTokens: 36200, fullPercent: 6, floorProvisional: true });
+  assert.strictEqual(v.band, 'FULL');
+  assert.strictEqual(v.reason, 'absolute-cap', '0j: pre-existing fat may be baked into the provisional baseline — never diagnose "all muscle" from it');
+  // The identical numbers with a REAL floor = the all-muscle externalize case (0g Q3, unchanged).
+  const real = bandVerdict({ footprintTokens: 36200, leanFloorTokens: 36200, fullPercent: 6, floorProvisional: false });
+  assert.strictEqual(real.reason, 'externalize');
+});
+
+// ---------------------------------------------------------------------------
 // markQuickTried (0e "THE OBESE LOOP")
 // ---------------------------------------------------------------------------
 
@@ -685,39 +892,58 @@ test('markQuickTried: sets quickTried + quickTriedAt, persists, and prunes orpha
 });
 
 // ---------------------------------------------------------------------------
-// recordCrossing's escalation-arm branch (0e "THE OBESE LOOP") — additive to
-// the existing rise-arm behavior above, which stays byte-for-byte unchanged
-// (every pre-existing recordCrossing/sanitizeCrossing test above still
-// passes UNMODIFIED — quickTried defaults false, so the new branch is
-// inert unless explicitly opted into).
+// recordCrossing's escalation-arm branch (0f "AUTHORITATIVE 3-FLOW",
+// MEMORY.md — SUPERSEDES 0e "THE OBESE LOOP": same growth-gated mechanism,
+// trigger band relocated OBESE->FULL. OBESE never arms an escalation any
+// more — 0d makes it auto-Quick-silent, full stop). Additive to the existing
+// rise-arm behavior above, which stays byte-for-byte unchanged (every
+// pre-existing recordCrossing/sanitizeCrossing test above still passes
+// UNMODIFIED — quickTried defaults false, so the branch is inert unless
+// explicitly opted into).
 // ---------------------------------------------------------------------------
 
-test('recordCrossing: OBESE persisting (same band, no rise) with quickTried+growth arms an ESCALATION crossing (extra key, only when true)', () => {
+test('recordCrossing: OBESE persisting (same band, no rise) with quickTried+growth NEVER escalates any more — 0f moved the trigger band to FULL (0d: OBESE is auto-Quick-silent only)', () => {
   const { home, proj } = sandbox();
   try {
     recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 });
-    const st = projectState(loadState(home), proj);
-    assert.deepStrictEqual(st.lastCrossing, { band: 'OBESE', at: 1000, consumed: false, escalation: true });
-    assert.strictEqual(st.lastEscalationFat, 500);
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined, 'OBESE never arms an escalation crossing, no matter quickTried/growth');
   } finally { clean(home, proj); }
 });
 
-test('recordCrossing: OBESE persisting WITHOUT quickTried stays inert — a first encounter waits for the plain rise-arm, never escalates', () => {
+test('recordCrossing: OBESE reached again on a FALL (e.g. settling back from FULL) with quickTried+growth also never escalates — 0f', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: false, fatTokens: 500 });
+    recordCrossing(home, proj, 'OBESE', 'FULL', 1000, { quickTried: true, fatTokens: 700 }); // a FALL, not a rise
     assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined);
   } finally { clean(home, proj); }
 });
 
-test('recordCrossing: OBESE persisting with quickTried but NO growth past the last flagged fat level stays SILENT — never a clock/re-nag on an unchanged plateau', () => {
+test('recordCrossing: FULL persisting (same band, no rise) with quickTried+growth arms an ESCALATION crossing (extra key, only when true) — 0f\'s sole ask site', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 }); // first escalation
-    recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { quickTried: true, fatTokens: 500 }); // same fat, later tick
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 });
+    const st = projectState(loadState(home), proj);
+    assert.deepStrictEqual(st.lastCrossing, { band: 'FULL', at: 1000, consumed: false, escalation: true });
+    assert.strictEqual(st.lastEscalationFat, 500);
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: FULL persisting WITHOUT quickTried stays inert — the wizard leg cannot arm until a force-run has actually tried Quick first', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: false, fatTokens: 500 });
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined);
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: FULL persisting with quickTried but NO growth past the last flagged fat level stays SILENT — never a clock/re-nag on an unchanged plateau', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 }); // first escalation
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 500 }); // same fat, later tick
     const st = projectState(loadState(home), proj);
     assert.strictEqual(st.lastCrossing.at, 1000, 'flat fat never re-arms a new escalation');
-    recordCrossing(home, proj, 'OBESE', 'OBESE', 3000, { quickTried: true, fatTokens: 480 }); // fat SHRANK slightly
+    recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 480 }); // fat SHRANK slightly
     assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'a shrink never re-arms either');
   } finally { clean(home, proj); }
 });
@@ -725,11 +951,11 @@ test('recordCrossing: OBESE persisting with quickTried but NO growth past the la
 test('recordCrossing: fat GROWING past the last flagged escalation level re-arms a fresh escalation (the growth-rate frequency rule)', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 });
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 });
     // consumed at emission (the Stop hook's own discipline) — otherwise a
     // still-PENDING escalation must never be clobbered by a second arm.
     consumeCrossing(home, proj, 1500);
-    recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { quickTried: true, fatTokens: 900 }); // genuinely more fat
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 900 }); // genuinely more fat
     const st = projectState(loadState(home), proj);
     assert.strictEqual(st.lastCrossing.at, 2000, 'growth past the last flagged level arms a fresh escalation');
     assert.strictEqual(st.lastCrossing.consumed, false);
@@ -740,29 +966,19 @@ test('recordCrossing: fat GROWING past the last flagged escalation level re-arms
 test('recordCrossing: a still-PENDING (unconsumed) escalation is never clobbered by a later same-band check', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 });
-    recordCrossing(home, proj, 'OBESE', 'OBESE', 5000, { quickTried: true, fatTokens: 9000 }); // huge growth, but never consumed yet
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 });
+    recordCrossing(home, proj, 'FULL', 'FULL', 5000, { quickTried: true, fatTokens: 9000 }); // huge growth, but never consumed yet
     const st = projectState(loadState(home), proj);
     assert.strictEqual(st.lastCrossing.at, 1000, 'a pending, undelivered escalation is left exactly as it is — the existing "never re-arm a pending crossing" rule extends here');
-  } finally { clean(home, proj); }
-});
-
-test('recordCrossing: OBESE reached again on a FALL (e.g. settling back from FULL) with quickTried+growth still escalates — the loop\'s "still OBESE after Force" leg', () => {
-  const { home, proj } = sandbox();
-  try {
-    recordCrossing(home, proj, 'OBESE', 'FULL', 1000, { quickTried: true, fatTokens: 700 }); // a FALL, not a rise
-    const st = projectState(loadState(home), proj);
-    assert.strictEqual(st.lastCrossing.band, 'OBESE');
-    assert.strictEqual(st.lastCrossing.escalation, true);
   } finally { clean(home, proj); }
 });
 
 test('recordCrossing: LEAN clears quickTried + lastEscalationFat too (the episode reset — a future rise gets a fresh, unconditional auto-Quick attempt)', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 });
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 });
     markQuickTried(home, proj, 1000);
-    recordCrossing(home, proj, 'LEAN', 'OBESE', 2000);
+    recordCrossing(home, proj, 'LEAN', 'FULL', 2000);
     const st = projectState(loadState(home), proj);
     assert.strictEqual(st.lastCrossing, undefined);
     assert.strictEqual(st.quickTried, undefined);

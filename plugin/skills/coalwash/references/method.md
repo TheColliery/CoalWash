@@ -4,7 +4,7 @@
 
 ## 0. Preflight — the one-shot gauge CLI
 
-ONE call does the whole preflight (recoverDangling → discoverClassB → measureEntries → bandVerdict → breakEven; read-only toward CoalWash state — no stamp, no snooze):
+ONE call does the whole preflight (recoverDangling → discoverClassB → measureEntries → breakEven → bandVerdict — 0g: economics run BEFORE the band, since the band IS the break-even now; read-only toward CoalWash state — no stamp, no snooze):
 
 ```bash
 node "[LIB]/cli.mjs" gauge --json
@@ -82,7 +82,7 @@ console.log(JSON.stringify(applyPlan(JSON.parse(fs.readFileSync('[PLAN.json]', '
 "
 ```
 
-Plan shape: `{ projectRoot, roots: [the class-B dirs touched], actions: [{type: 'rewrite'|'create'|'delete', path, content?, expectedOrig?}], sessionId }` — set `expectedOrig` (rewrite/delete) to the scanned/gated original text so the external-writer guard covers the whole scan→apply window, not just the instant of writing. Results: `deferred: true` → lock held, stop + say so · `rolledBack: true` → report, nothing changed · `ok: true` → proceed to receipt. The engine re-refuses pinned files and uncontained paths regardless of what you pass — that is the point.
+Plan shape: `{ projectRoot, roots: [the class-B dirs touched], actions: [{type: 'rewrite'|'create'|'delete', path, content?, expectedOrig?}], sessionId, origin? }` — set `expectedOrig` (rewrite/delete) to the scanned/gated original text so the external-writer guard covers the whole scan→apply window, not just the instant of writing. `origin: 'wizard-cut'` on a wizard-tier plan routes its cuts to the `store.old` bin instead of the fat bin (§8) — omit it, or leave it `'program-cut'` (the default), for the ambient Quick/Force pipeline. Results: `deferred: true` → lock held, stop + say so · `rolledBack: true` → report, nothing changed · `ok: true` → proceed to receipt. The engine re-refuses pinned files and uncontained paths regardless of what you pass — that is the point.
 
 ## 5. Receipt + floor + state
 
@@ -109,30 +109,42 @@ User asks for a preview → run the whole pipeline with NO `applyPlan` call, rec
 
 ## 8. The two bins — retention + pull-only restore
 
-`bins.mjs` ships two age-based retention bins beside the per-run snapshot (§4/§5 above) — Recycle-Bin / Windows.old economics, not a new global layer:
+`bins.mjs` ships two DUAL-LIMIT (age + size, 0i) retention bins beside the per-run snapshot (§4/§5 above) — Recycle-Bin / Windows.old economics, not a new global layer. Routing is by the apply plan's `origin` field (§4): `program-cut` (the default) → `fat-bin`; `wizard-cut` → `store.old`. **Every wizard-tier plan MUST set `origin: 'wizard-cut'`** before calling `applyPlan` — a plan that omits it silently lands in the fat bin, correct only for the ambient Quick/Force pipeline.
 
 | Bin | Horizon | What lands there | Economics |
 |---|---|---|---|
-| `fat-bin` | 30 days (1 burst-gap) | per-cut records from the normal ceiling filter | high-churn, cheap — Recycle-Bin |
-| `store.old` | 60 days (2 burst-gaps) | whole-store pre-surgery images from a wizard muscle-reorg | rare, surgery-grade caution — Windows.old |
+| `fat-bin` | 30 days (1 burst-gap) | per-cut records from the normal ceiling filter (`origin: 'program-cut'`) | high-churn, cheap — Recycle-Bin |
+| `store.old` | 60 days (2 burst-gaps) | wizard deletes/shrinks and whole-store pre-surgery images (`origin: 'wizard-cut'`) | rare, surgery-grade caution — Windows.old |
 
-Both share ONE destruction law (`retention.mjs`, a pure function — hermetic-tested, no lab tokens needed): birth is event-only (no clock ever creates an entry) → life is dual-axis thinning (new-replaces-old within a density slot, PLUS an age ladder: keep-all to 48h → last-per-day to 14d → last-per-week to the horizon) → death VERIFIES the delete actually happened, then appends one death-certificate line (`death.log`: name · age · rule) — an unverifiable delete is never claimed dead; it stays in the index for the next pass.
+Both share ONE destruction law (`retention.mjs`, a pure function — hermetic-tested, no lab tokens needed): birth is event-only (no clock ever creates an entry) → life is dual-axis thinning (new-replaces-old within a density slot, PLUS an age ladder: keep-all to 48h → last-per-day to 14d → last-per-week to the horizon) → death VERIFIES the delete actually happened, then appends one death-certificate line (`death.log`: name · age · rule — NIST SP 800-88 Clear-level, a verified delete, never a physical-erasure claim) — an unverifiable delete is never claimed dead; it stays in the index for the next pass.
+
+**SIZE-CAP layer (0i — journald `SystemMaxUse`, runs ALONGSIDE the horizon, whichever binds first):** each bin also carries a byte budget = `BIN_BUDGET_STORE_MULTIPLE` (2, a reasoned placeholder, recalibrate at the fidelity benchmark) × the caller's `storeBytes` — the session's own measured footprint, **never the disk** (a guest skill cannot know the host's SSD capacity). Over budget, the time-thinned survivors density-thin further from the OLDEST first — one survivor per epoch-week is protected while any multi-item week can still give one up; once era-protection alone can't reach the budget, it yields and purely-oldest-first takes over (the newest item overall is the only one that never evicts). This is what catches a heavy wizard-looping session's overflow BEFORE its items even age past 48h — the horizon axis alone cannot. `budgetBytes` absent/zero (no `storeBytes` passed) degrades to `Infinity` — the cap layer goes inert, horizon-only (the keep-on-doubt fail direction).
+
+**RUN-GATED, NEVER A CLOCK (0h-GUARD — a standing invariant, not a preference):** `sweepFatBin`/`sweepStoreOld`/`recordBinItem` are called ONLY from inside `applyPlan` — no daemon, no timer, no SessionStart/Stop age-sweep. A store with zero runs for weeks leaves its bins fully intact past their nominal horizon, because nothing ever swept them; destruction needs BOTH a real run happening AND an item past its horizon/budget at that moment — never the clock alone. Never wire these three functions to a hook, cron, or any time-triggered path.
 
 **PULL-ONLY, by construction:** `listBin(projectRoot, name)` / `restoreFromBin(projectRoot, name, id)` are the *only* discovery surface, and nothing in this codebase calls them automatically — a snapshot re-entering the washable set would undo the very wash that created it. Un-searched within the horizon → silent self-expiry (no ask needed: CoalWash's own artifact in its own sandbox is program jurisdiction).
 
 **Breadcrumb (the "unused-door fear" countermeasure):** a JUDGMENT cut (never a certain-garbage one) should leave `breadcrumb({ date, binPath })`'s one fixed line in the washed file — "washed [date] · removed content recoverable at [bin path] — check the bin/journal before re-deriving; never invent a missing memory." Program-side fixed template, the same discipline as `ask.mjs` — never agent-composed prose.
 
-**Honest status — do not overclaim:** `sweepFatBin`/`sweepStoreOld` (the retention/expiry half) already run at every `applyPlan` call, alongside the snapshot sweep — that housekeeping is live today. `recordBinItem` (writing an actual cut into a bin) and inserting the `breadcrumb()` line are NOT YET called from any pipeline step in this release — they are shipped, hermetically-tested engine primitives (`bins.test.mjs`) awaiting that wiring. Until then, the per-run snapshot (§4-§5 above — verified at creation, kept 3, whole-run rollback) is the *only* live undo path; never tell a user a specific cut is sitting in a bin today.
+**Honest status — do not overclaim:** `sweepFatBin`/`sweepStoreOld` (retention/expiry) AND `recordBinItem` (writing a landed cut into a bin, routed by `origin`, at commit — §5's "bin population" step) are wired and live as of beta.14. Inserting the `breadcrumb()` line is **NOT YET** called from any pipeline step — it is a shipped, hermetically-tested engine primitive (`bins.test.mjs`) awaiting that wiring; until then, a judgment cut leaves no in-file trace pointing back at its bin entry. The per-run snapshot (§4-§5 — verified at creation, kept 3, whole-run rollback) remains the *broader* undo path; the bins are the *per-item* one.
 
-Restore snippet (once an item exists — same construction-proof URL discipline as every snippet above):
+**Restore by reference, never by content:** list the index FIRST — metadata only, no file content ships in this call:
 
 ```bash
 node --input-type=module -e "
 import { pathToFileURL } from 'node:url';
-const { restoreFromBin, FAT_BIN_NAME } = await import(pathToFileURL('[LIB]/bins.mjs').href);
-console.log(restoreFromBin('[PROJECT_ROOT]', FAT_BIN_NAME, '[ITEM_ID]'));
+const { listBin, FAT_BIN_NAME } = await import(pathToFileURL('[LIB]/bins.mjs').href);
+console.log(JSON.stringify(listBin('[PROJECT_ROOT]', FAT_BIN_NAME), null, 1));
 "
 ```
+
+Each entry is `{id, at, bytes, original, origin}` — render one line per item (id · date · original path · origin) for the human/agent to pick from. Then restore exactly ONE id with the dedicated CLI (searches both bins, fat first, and reports which held it):
+
+```bash
+node [LIB]/cli.mjs restore [ITEM_ID] > recovered.md
+```
+
+(Equivalently: `node scripts/lib/cli.mjs restore <id>` from the repo/plugin root.) The item's CONTENT lands on **stdout** — redirect it to a file as above and the recovered bytes never enter the model's context at all; the ONE summary line (id · bin · bytes · source file) rides **stderr**, so the metadata list plus that line are the only things that ever cost tokens. A traversal-shaped or unknown id is a clean not-found, exit 1. The restore never writes to the store — re-inserting recovered content is a deliberate, gated decision.
 
 ## 9. Wizard — engine snippets
 
