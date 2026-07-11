@@ -39,6 +39,13 @@ export const CONFIG_SCHEMA = [
   // (clampedRead's per-band safer-value-wins clamp, the CM v3.9.3 pattern).
   { key: 'exercisePerBand', type: 'bandmap', values: { obese: ['quick'], full: ['quick', 'full'] }, def: { obese: 'quick', full: 'full' }, help: 'Per-ceiling exercise (obese: quick only — OBESE is auto-Quick-silent by ruling, never an ask; full: quick|full); the fat-only scoping refinement is a later release (default: {obese:quick, full:full})' },
   { key: 'managedPaths', type: 'stringList', def: [], help: 'Extra path PREFIXES (relative to their own project/global root, forward-slash form) to auto-declare MANAGED — sync-owned packs never proposed for a local wash, same class as skills (default: [], the byte-identical-across-roots heuristic already covers the common case)' },
+  // 0p WRITE-PATH SEATBELT + AIRBAG: on = both nets (PreToolUse snapshot-on-
+  // first-write to a class-B governance/memory file + the PostToolUse advisory
+  // when a structured token drops); snapshot-only = keep the airbag undo net
+  // but SILENCE the advisory (for a user who finds the FYI line noisy); off =
+  // both off. Advisory-only always (never blocks an edit). coalwashMode:off is
+  // the master kill for this too.
+  { key: 'writeGuard', type: 'enum', values: ['on', 'snapshot-only', 'off'], def: 'on', help: 'Write-path guard for class-B governance/memory files: on = snapshot-on-first-write + drop advisory; snapshot-only = airbag undo net, no advisory; off = disabled (advisory never blocks; default: on)' },
 ];
 
 // 0m tombstone — "FORCE IS A DICTATOR, NO OFF SWITCH" (USER 2026-07-11:

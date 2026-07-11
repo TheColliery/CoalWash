@@ -171,6 +171,28 @@ node [LIB]/cli.mjs restore [ITEM_ID] > recovered.md
 
 (Equivalently: `node scripts/lib/cli.mjs restore <id>` from the repo/plugin root.) The item's CONTENT lands on **stdout** — redirect it to a file as above and the recovered bytes never enter the model's context at all; the ONE summary line (id · bin · bytes · source file) rides **stderr**, so the metadata list plus that line are the only things that ever cost tokens. A traversal-shaped or unknown id is a clean not-found, exit 1. The restore never writes to the store — re-inserting recovered content is a deliberate, gated decision.
 
+## 8b. The write-path guard — seatbelt + airbag (0p, `scripts/lib/writeguard.mjs`)
+
+The wash's fidelity gate protects CoalWash's own knife; the write guard is an **advisory** extension of it to every OTHER hand that edits a class-B governance/memory file (main, subs — tool hooks fire in subs). Two hook-driven engine functions, both fail-silent, both riding the cheap path-shape prefilter (`isGuardedTarget`) so near-all Edit/Write calls skip free — **no discovery walk on the write path** (unlike the SessionStart gauge):
+
+| Piece | Hook | Does | Emits |
+|---|---|---|---|
+| **AIRBAG** | PreToolUse(Edit\|Write\|MultiEdit) | `snapshotOnFirstWrite` — the FIRST write to a guarded file this session ms-copies it into `.claude/coalwash/writeguard/<session>/` (the undo net for the gitignored `MEMORY.md`/`CLAUDE.md`); later writes to the same file skip | nothing (write-only) |
+| **SEATBELT** | PostToolUse(Edit\|Write\|MultiEdit) | `seatbeltCheck` — diffs {airbag snapshot, current disk} through `gateFiles`; on a structured-token drop, ONE FYI advisory (`ask.seatbeltAdvisory`) names the class(es) + the snapshot pointer | one plain stdout line, **advisory only** |
+
+**FP decision (option ii), documented so nobody "improves" it into a heuristic:** the seatbelt fires on ANY structured drop with **no deliberate-vs-careless classifier** — a deliberate section cut and a careless clobber both surface. That is correct: an ambient gate has no `approvedDrops` channel, so it MUST NOT block (blocking a legitimate delete = sabotage), and a false positive costs exactly ONE ignorable FYI line while every fire doubles as a usable undo hint (the snapshot pointer). It **never** writes `{decision:'block'}`, never exits nonzero. Clean edits → silent. Oversize (over `SEATBELT_MAX_BYTES`, 256KB) → snapshot stands, diff skipped, "oversize" note.
+
+**Guarded set (honest ceiling):** the three root governance basenames (`CLAUDE.md`/`AGENTS.md`/`MEMORY.md`) anywhere in the home/project trees, plus any `.md` under a `.claude` tree (global governance/rules + the per-project memory store). CoalWash's own sandbox (`.claude/coalwash/**`) is never guarded (0h-GUARD — never touch a bin). A user's exotic custom `@import` outside a `.claude` tree with a non-governance basename is NOT covered by the cheap prefilter (the full-discovery version would be, at a per-edit budget we refuse to pay — undercount is safe, 0l). Config `writeGuard`: `on` (both) · `snapshot-only` (airbag, no advisory) · `off`; `coalwashMode:off` kills it too. **Not a bin** — prior sessions' snapshots are cleaned at the next SessionStart (`sweepWriteguard`, event-gated, keep-current-drop-prior; no retention.mjs, no clock).
+
+**Recovery — restore by reference, code moves the bytes (0p law, same as the bins):** the agent POINTS at a snapshot by metadata, never reproduces its content (an AI re-authoring "recovery" from memory is the ADD-01 hallucination-twin — a fake that looks original). List metadata, then restore the **byte-exact original** to a file:
+
+```bash
+node [LIB]/cli.mjs writeguard-list                       # name · bytes · session · path (metadata only)
+node [LIB]/cli.mjs writeguard-restore [SNAP_NAME] > [FILE]   # byte-exact original -> file; NEVER re-type it
+```
+
+(Or a plain `cp <snapshotPath> <file>` — the snapshot IS the original bytes.) `writeguard-restore` is `isBareId`-contained (a traversal name is a clean not-found); the bytes go stdout→file, never through the model's context.
+
 ## 9. Wizard — engine snippets
 
 The wizard's 4-step flow lives in SKILL.md ("The wizard" section) — this is only the two engine calls underneath it (`wizard.mjs`), copy-and-fill like every snippet above. The step sequence itself, the background toggle, and running the chosen tier are agent-orchestrated (`wizard.mjs`'s own header: "the step-by-step prose/UX ... is agent-orchestrated content, not this module's job") — nothing below is a coded state machine.

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { ANSWER_FIRST_REMINDER, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory } from './ask.mjs';
+import { ANSWER_FIRST_REMINDER, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory, seatbeltAdvisory } from './ask.mjs';
 
 // (0m: the old `ceilingAsk` template and its tests died with the forceMode
 // knob — force at FULL is unconditional, so no suppressed/disarmed-FULL ask
@@ -65,6 +65,28 @@ test('0o spawn-bill clause: renders on forceAuto AND wizardEscalation only when 
     const r = forceAuto({ fatTokens: 100, spawns });
     assert.ok(!r.includes('sub spawn'), `no clause for ${JSON.stringify(spawns)}`);
     assert.ok(!r.includes('undefined') && !r.includes('NaN'), r);
+  }
+});
+
+test('0p seatbeltAdvisory: FYI-framed, NEVER a block, names the file + dropped classes + the byte-exact snapshot pointer (restore-by-reference, never re-type)', () => {
+  const r = seatbeltAdvisory({ file: '/p/MEMORY.md', classes: ['link-drop', 'number-drop'], snapshotPath: '/p/.claude/coalwash/writeguard/s/MEMORY.md--abc' });
+  assert.ok(r.includes('FYI') && r.includes('not a block'), 'advisory only, never a block');
+  assert.ok(r.includes('/p/MEMORY.md'), 'names the file');
+  assert.ok(r.includes('link-drop, number-drop'), 'names the dropped classes');
+  assert.ok(r.includes('/p/.claude/coalwash/writeguard/s/MEMORY.md--abc'), 'points at the snapshot');
+  assert.ok(r.includes('restore the real bytes') || r.includes('never re-type'), 'restore-by-reference law: the real bytes, never re-authored');
+  assert.ok(!r.includes('undefined') && !r.includes('null'), r);
+});
+
+test('0p seatbeltAdvisory: the oversize note is distinct (diff skipped) and still points at the snapshot; malformed input never renders artifacts', () => {
+  const over = seatbeltAdvisory({ file: '/p/CLAUDE.md', oversize: true, snapshotPath: '/p/.claude/coalwash/writeguard/s/CLAUDE.md--x' });
+  assert.ok(over.includes('oversize'), over);
+  assert.ok(over.includes('diff was skipped') || over.includes('diff skipped'), over);
+  assert.ok(over.includes('CLAUDE.md--x'), 'snapshot pointer present even when the diff is skipped');
+  for (const bad of [undefined, {}, null, { classes: [] }]) {
+    const r = seatbeltAdvisory(bad);
+    assert.ok(r.includes('FYI'), 'always FYI-framed');
+    assert.ok(!r.includes('undefined') && !r.includes('null') && !r.includes('NaN'), r);
   }
 });
 

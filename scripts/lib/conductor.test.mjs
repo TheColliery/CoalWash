@@ -1136,6 +1136,141 @@ test('0o: zero spawns -> the FULL directive carries NO bill clause (no "0 spawns
   } finally { clean(home, proj); }
 });
 
+// ---------------------------------------------------------------------------
+// 0p WRITE-PATH SEATBELT + AIRBAG — hermetic spawn tests. The airbag
+// (PreToolUse) is write-only; the seatbelt (PostToolUse Edit|Write) is
+// advisory-only (plain stdout, NEVER {decision:'block'}). Clean/non-class-B
+// edits stay silent.
+// ---------------------------------------------------------------------------
+
+const GOV_BODY = '# Governance\n\nSee [the guide](https://example.com/guide) and version v1.2.3 on 2026-07-11. ' + 'x'.repeat(300);
+function wgDir(proj) { return path.join(proj, '.claude', 'coalwash', 'writeguard'); }
+
+test('0p airbag: PreToolUse Edit on a class-B file snapshots it once, silently (write-only, nothing on stdout)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, GOV_BODY, 'utf8');
+    const r = run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 'sess-1', tool_input: { file_path: gov } });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '', 'the airbag is write-only — nothing on stdout');
+    const snaps = fs.readdirSync(path.join(wgDir(proj), 'sess-1')).filter((n) => n !== '.gitignore');
+    assert.strictEqual(snaps.length, 1, 'one snapshot taken');
+    assert.strictEqual(fs.readFileSync(path.join(wgDir(proj), 'sess-1', snaps[0]), 'utf8'), GOV_BODY, 'byte-exact orig');
+  } finally { clean(home, proj); }
+});
+
+test('0p airbag: PreToolUse on a SOURCE file snapshots NOTHING and never writes the writeguard dir (the cheap-prefilter skip)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    const src = path.join(proj, 'index.js');
+    fs.writeFileSync(src, 'code', 'utf8');
+    const r = run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Write', session_id: 's', tool_input: { file_path: src } });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+    assert.strictEqual(fs.existsSync(wgDir(proj)), false, 'no writeguard dir for a non-class-B write');
+  } finally { clean(home, proj); }
+});
+
+test('0p seatbelt: a structured-token drop after a guarded edit injects ONE advisory line — plain stdout, FYI-framed, NEVER {decision:block}', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    const gov = path.join(proj, 'CLAUDE.md');
+    fs.writeFileSync(gov, GOV_BODY, 'utf8');
+    // Airbag first (PreToolUse), then the drop, then the seatbelt (PostToolUse).
+    run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 'sess-2', tool_input: { file_path: gov } });
+    fs.writeFileSync(gov, GOV_BODY.replace('[the guide](https://example.com/guide)', 'the guide'), 'utf8');
+    const r = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Edit', session_id: 'sess-2', tool_input: { file_path: gov } });
+    assertGraceful(r);
+    assert.ok(r.stdout.includes('write-guard'), r.stdout);
+    assert.ok(r.stdout.includes('FYI') && r.stdout.includes('not a block'), 'advisory only');
+    assert.ok(r.stdout.includes('link-drop'), 'names the dropped class');
+    assert.ok(r.stdout.includes('CLAUDE.md'), 'names the file + the snapshot pointer');
+    assert.doesNotThrow(() => { if (r.stdout.trim().startsWith('{')) JSON.parse(r.stdout); }, 'not a JSON block decision');
+    assert.ok(!r.stdout.includes('"decision"'), 'never a block decision — advisory only');
+  } finally { clean(home, proj); }
+});
+
+test('0p seatbelt: a CLEAN edit (added a line, dropped nothing) stays SILENT', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, GOV_BODY, 'utf8');
+    run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 's3', tool_input: { file_path: gov } });
+    fs.writeFileSync(gov, GOV_BODY + '\n\nadded, dropped nothing', 'utf8');
+    const r = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Edit', session_id: 's3', tool_input: { file_path: gov } });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '', 'clean edit -> silent (no per-edit output)');
+  } finally { clean(home, proj); }
+});
+
+test('0p seatbelt: a non-class-B (source) PostToolUse edit is SILENT — the cheap-prefilter skip, no diff', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    const src = path.join(proj, 'app.js');
+    fs.writeFileSync(src, 'const x = 1', 'utf8');
+    const r = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Edit', session_id: 's', tool_input: { file_path: src } });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+  } finally { clean(home, proj); }
+});
+
+test('0p writeGuard config: snapshot-only keeps the airbag but silences the advisory; off disables both', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    // snapshot-only: airbag snapshots, seatbelt silent.
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ writeGuard: 'snapshot-only', updateMode: 'off' }), 'utf8');
+    fs.writeFileSync(gov, GOV_BODY, 'utf8');
+    run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 'so', tool_input: { file_path: gov } });
+    assert.ok(fs.existsSync(path.join(wgDir(proj), 'so')), 'snapshot-only still snapshots (airbag on)');
+    fs.writeFileSync(gov, GOV_BODY.replace('v1.2.3', 'gone'), 'utf8');
+    const r1 = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Edit', session_id: 'so', tool_input: { file_path: gov } });
+    assertGraceful(r1);
+    assert.strictEqual(r1.stdout, '', 'snapshot-only silences the advisory');
+
+    // off: no snapshot at all.
+    clean(wgDir(proj));
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ writeGuard: 'off', updateMode: 'off' }), 'utf8');
+    fs.writeFileSync(gov, GOV_BODY, 'utf8');
+    const r2 = run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 'off1', tool_input: { file_path: gov } });
+    assertGraceful(r2);
+    assert.strictEqual(fs.existsSync(wgDir(proj)), false, 'writeGuard off -> no airbag');
+  } finally { clean(home, proj); }
+});
+
+test('0p sweep: SessionStart drops a PRIOR session\'s writeguard snapshots, keeps the CURRENT session\'s', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    const gov = path.join(proj, 'CLAUDE.md');
+    fs.writeFileSync(gov, GOV_BODY, 'utf8');
+    run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 'old', tool_input: { file_path: gov } });
+    assert.ok(fs.existsSync(path.join(wgDir(proj), 'old')));
+    // A new SessionStart with a different session_id sweeps the old dir.
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'new' });
+    assertGraceful(r);
+    assert.strictEqual(fs.existsSync(path.join(wgDir(proj), 'old')), false, 'prior session swept');
+  } finally { clean(home, proj); }
+});
+
+test('0p: coalwashMode off is the master kill — no airbag, no seatbelt', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { coalwashMode: 'off' });
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, GOV_BODY, 'utf8');
+    const r1 = run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 's', tool_input: { file_path: gov } });
+    assertGraceful(r1);
+    assert.strictEqual(fs.existsSync(wgDir(proj)), false, 'coalwashMode off -> no airbag');
+  } finally { clean(home, proj); }
+});
+
 test('self-update: due on first boot (default ask), stamped, then silent inside the window', () => {
   const { home, proj } = sandbox();
   try {

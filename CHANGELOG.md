@@ -2,6 +2,21 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.19] - 2026-07-11
+
+The write-path guard (ruling 0p — the last feature before rc): the fidelity discipline stops being CoalWash-only. Every hand that writes a class-B file — the main, a subagent, any tool — is now watched, because "zero fact loss" enforced only on CoalWash's own knife is half a constraint (the store is edited by other knives daily; four header-clobbers this session were live proof).
+
+### Added
+- **Airbag — snapshot-on-first-write (`scripts/lib/writeguard.mjs`, PreToolUse on `Edit|Write|MultiEdit`):** the first write to a class-B file each session copies it once into the `.claude/coalwash/` sandbox (self-ignored, out of VCS) — the only possible undo net for gitignored governance (MEMORY.md/CLAUDE.md have none). Write-only, idempotent, fail-silent; session-event-gated cleanup (keep current, drop prior — never a clock, 0h-GUARD).
+- **Seatbelt — advisory drop-detector (PostToolUse on `Edit|Write|MultiEdit`):** on a structured-token drop (link/number/quote/frontmatter — the fidelity-gate classes) it injects ONE plain advisory line naming the file + the dropped class + the snapshot path. **Advisory ONLY — never blocks, never a nonzero exit** (a deliberate deletion is legitimate; an ambient gate has no approved-drops channel, so blocking would sabotage real work). Reaches subagents natively (tool hooks fire in subs). FP scoping is honest option (ii): it fires on ANY drop with no deliberate-vs-careless classifier — an FP costs one ignorable FYI line, and the snapshot pointer turns every fire into a usable undo hint.
+- **Recovery by reference (`cli.mjs writeguard-list` / `writeguard-restore`):** an agent points at which snapshot by metadata (name/session/bytes/path — never the content); CODE copies the byte-exact original to stdout (`isBareId`-contained). NO path where an AI re-authors lost content — an AI-retyped "recovery" is a hallucination-twin (lab-caught: ADD-01), a fake that looks like the original. Undo is trustworthy precisely because the bytes are the real bytes, code-moved, model-untouched.
+- **Config `writeGuard`:** `on` (default) / `snapshot-only` (keep the airbag undo net, silence the advisory) / `off`.
+
+### Changed
+- Series law added — `skill-authoring.md §5` "lean cuts TOKENS never the RAILS": a SKILL.md line is a rail (forces behavior) or an explanation (moves to references); a lean pass proves rail-identical behavior by re-running the scenario, not by eye. (Our production standard for Coal\* skills, not a yardstick for others'.)
+
+Tests 397 → 427 (writeguard unit 17 · conductor/cli/ask/config spawn tests 13 — incl. the FP-lab pins, the containment/traversal rejections, and the structural no-copy-on-non-guarded perf proof). Review: SHIP (3 INFO, all non-blocking: a named import divergence, the accepted 0o-class hook cost, the gitignored blueprint). CI-verified under a simulated tracked-files-only checkout.
+
 ## [0.1.0-beta.18] - 2026-07-11
 
 The parcel-audit layer (ruling 0l — the immortal-bird definition): CoalWash keeps NO hand-maintained list of what counts as always-loaded memory; its list is a MIRROR of the real load list, whoever writes to it (the company auto-loads it, the user wires it, or a future platform update adds a surface — it enters by definition, no code change; a hand-kept list rots, a mirror can't).

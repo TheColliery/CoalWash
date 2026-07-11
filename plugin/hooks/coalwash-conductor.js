@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 'use strict';
 // CoalWash conductor (Phoenix-13 hook: fail-silent, zero-dep, no network, no
-// spawn, never process.exit — hooks-safety.md). Two events share this one
-// file (hooks.json), branching on hook_event_name from stdin:
+// spawn, never process.exit — hooks-safety.md). FOUR events share this one
+// file (hooks.json), branching on hook_event_name (+ tool_name) from stdin:
+//   PreToolUse(Edit|Write|MultiEdit) -> the 0p AIRBAG: snapshot-on-first-write
+//                   to a class-B governance/memory file (the undo net for the
+//                   gitignored MEMORY.md/CLAUDE.md). Write-only, emits nothing.
+//   PostToolUse(Agent|Task|Workflow) -> the 0o spawn meter (write-only).
+//   PostToolUse(Edit|Write|MultiEdit) -> the 0p SEATBELT: on a structured-token
+//                   drop vs the airbag snapshot, ONE advisory line (never a
+//                   block). Both PostToolUse matchers dispatch by tool_name.
 //   SessionStart -> the SILENT measurement chokepoint (discovery +
 //                   measurement + the ceiling verdict). beta.12 band collapse
 //                   (queue item 0, "ASK ORDER = ANSWER-FIRST"): SessionStart
@@ -135,7 +142,7 @@ function updateDue(cfg, clampedRead) {
   } catch { return false; }
 }
 
-async function handleSessionStart() {
+async function handleSessionStart(input) {
   const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, classB, caliper] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
@@ -152,6 +159,19 @@ async function handleSessionStart() {
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
   const out = [];
+
+  // 0p writeguard cleanup — run-gated at SessionStart (event, NEVER a clock;
+  // 0h-GUARD spirit): drop every prior session's airbag snapshots, keep this
+  // session's. NOT a bin sweep / no retention.mjs — the same keep-current
+  // discipline as the spawn-meter counter reset. Rides the writeGuard key
+  // independently of the gauge mode (the undo net protects manual-mode users
+  // too); cheap (readdir + rm of stale dirs), fail-silent.
+  if (clampedRead(cfg, 'writeGuard') !== 'off') {
+    try {
+      const { sweepWriteguard } = await import(lib('writeguard.mjs'));
+      sweepWriteguard(projectRoot, input && input.session_id, { home });
+    } catch { /* fail-silent */ }
+  }
 
   // The gauge runs only in auto; manual keeps it silent but the self-update
   // scheduler below still runs (its own off-switch is updateMode — standard
@@ -430,12 +450,90 @@ async function handleSpawnMeter(input) {
   // the 10th spawn, not at any threshold.
 }
 
+// The write tools the 0p seatbelt/airbag ride (hooks.json matchers
+// "Edit|Write|MultiEdit"). This Set is the in-code belt for platforms/versions
+// that ignore matchers — checked BEFORE any import so a non-write tool never
+// pays anything.
+const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit']);
+
+// The touched file path from an Edit/Write/MultiEdit tool_input (the stable CC
+// arg key, confirmed vs rot-canary/CoalHearth's shipped hooks).
+function touchedPath(input) {
+  const inp = input && input.tool_input;
+  return inp && typeof inp.file_path === 'string' ? inp.file_path : '';
+}
+
+// AIRBAG (0p) — PreToolUse(Edit|Write|MultiEdit): snapshot-on-first-write to a
+// guarded class-B file. WRITE-ONLY, emits NOTHING (fail-silent; the airbag's
+// own failure must never block the write). The cheap prefilter
+// (isGuardedTarget) runs inside snapshotOnFirstWrite so a source-code edit
+// skips after one realpath — no discovery walk EVER on the write path.
+async function handleAirbag(input) {
+  try {
+    if (!input || !WRITE_TOOLS.has(input.tool_name)) return; // belt: pre-import, ~free
+    const p = touchedPath(input);
+    if (!p) return;
+    const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, writeguard] = await Promise.all([
+      import(lib('config-load.mjs')),
+      import(lib('config-schema.mjs')),
+      import(lib('writeguard.mjs')),
+    ]);
+    const cfg = loadMergedConfig();
+    if (clampedRead(cfg, 'coalwashMode') === 'off') return; // master kill
+    if (clampedRead(cfg, 'writeGuard') === 'off') return;   // its own off switch
+    const home = os.homedir();
+    const projectRoot = findProjectRoot(process.cwd(), home);
+    writeguard.snapshotOnFirstWrite(projectRoot, input.session_id, p, { home });
+    // NOTHING emitted (airbag is write-only) — Phoenix #13.
+  } catch { /* fail-silent — never block a write */ }
+}
+
+// SEATBELT (0p) — PostToolUse(Edit|Write|MultiEdit): after a guarded write,
+// diff {airbag snapshot, current disk} through the wash's fidelity gate and
+// inject ONE advisory line on a structured-token drop (or the oversize note).
+// ADVISORY ONLY — plain stdout context injection (a sanctioned channel, the
+// same class as the conductor's own SessionStart injection), NEVER
+// {decision:'block'}, NEVER exit nonzero. Clean edits = silent. writeGuard
+// 'snapshot-only'/'off' silences the advisory (the airbag still ran).
+async function handleSeatbelt(input) {
+  try {
+    if (!input || !WRITE_TOOLS.has(input.tool_name)) return; // belt: pre-import, ~free
+    const p = touchedPath(input);
+    if (!p) return;
+    const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, writeguard, ask] = await Promise.all([
+      import(lib('config-load.mjs')),
+      import(lib('config-schema.mjs')),
+      import(lib('writeguard.mjs')),
+      import(lib('ask.mjs')),
+    ]);
+    const cfg = loadMergedConfig();
+    if (clampedRead(cfg, 'coalwashMode') === 'off') return;   // master kill
+    if (clampedRead(cfg, 'writeGuard') !== 'on') return;      // snapshot-only/off = no advisory
+    const home = os.homedir();
+    const projectRoot = findProjectRoot(process.cwd(), home);
+    const r = writeguard.seatbeltCheck(projectRoot, input.session_id, p, { home });
+    if (!r) return;                                    // not guarded / no baseline / clean-read miss -> silent
+    if (!r.oversize && (!r.classes || !r.classes.length)) return; // clean edit -> silent
+    const language = clampedRead(cfg, 'language');
+    const out = ask.seatbeltAdvisory({ file: r.file, classes: r.classes, snapshotPath: r.snapshotPath, oversize: r.oversize });
+    const langLine = language !== 'auto' ? `\n[CoalWash] (language=${language} — deliver user-facing prose in that language; keep technical terms, commands, and paths verbatim)` : '';
+    console.log(out + langLine); // sanctioned advisory context-injection channel (Phoenix #13; advisory only, never a block)
+  } catch { /* fail-silent */ }
+}
+
 async function main() {
   const input = await readStdinJson();
   const event = (input && (input.hook_event_name || input.hookEventName)) || '';
   if (event === 'Stop') return handleStop(input);
-  if (event === 'PostToolUse') return handleSpawnMeter(input);
-  return handleSessionStart();
+  if (event === 'PreToolUse') return handleAirbag(input);
+  if (event === 'PostToolUse') {
+    // Two matchers share PostToolUse: the 0o spawn meter (Agent|Task|Workflow)
+    // and the 0p seatbelt (Edit|Write|MultiEdit). A tool is one or the other,
+    // never both — dispatch by tool_name.
+    if (input && SPAWN_TOOLS.has(input.tool_name)) return handleSpawnMeter(input);
+    return handleSeatbelt(input);
+  }
+  return handleSessionStart(input);
 }
 
 main().catch(() => {

@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gauge, gaugeLine } from './cli.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem } from './bins.mjs';
+import { snapshotOnFirstWrite } from './writeguard.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(here, 'cli.mjs');
@@ -35,6 +36,38 @@ function run(cwd, home, args) {
     timeout: 20000,
   });
 }
+
+test('0p writeguard-restore via CLI: prints the byte-exact ORIGINAL to stdout (redirect to file), metadata to stderr — restore-by-reference, never re-typed', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const orig = '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n';
+    fs.writeFileSync(gov, orig, 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const name = path.basename(snap);
+    const r = run(proj, home, ['writeguard-restore', name]);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout, orig, 'stdout is the byte-exact original — code-moved, model-untouched');
+    assert.ok(r.stderr.includes(name) && r.stderr.includes('byte-exact'), r.stderr);
+  } finally { clean(home, proj); }
+});
+
+test('0p writeguard-list via CLI: metadata only (name/bytes/session/path), never content; a missing snapshot restore fails LOUD (exit 1)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'CLAUDE.md');
+    fs.writeFileSync(gov, '# Gov\n\n[a](https://x.com) body '.padEnd(200, 'y'), 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const list = run(proj, home, ['writeguard-list']);
+    assert.strictEqual(list.status, 0, list.stderr);
+    assert.ok(list.stdout.includes(path.basename(snap)) && list.stdout.includes('bytes'), list.stdout);
+    assert.ok(!list.stdout.includes('[a](https://x.com)'), 'listing never leaks content');
+    const miss = run(proj, home, ['writeguard-restore', 'no-such-snap']);
+    assert.strictEqual(miss.status, 1);
+    assert.strictEqual(miss.stdout, '', 'no content on a miss');
+    assert.ok(miss.stderr.includes('not found'), miss.stderr);
+  } finally { clean(home, proj); }
+});
 
 test('gauge --json: one call returns recover + platform + measure + verdict + breakEven, exit 0', () => {
   const { home, proj } = sandbox();

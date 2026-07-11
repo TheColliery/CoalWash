@@ -125,6 +125,28 @@ export function wizardEscalation(opts) {
   return `[CoalWash] memory is STILL over the FULL capacity ceiling (fat ~${fat} tok) after the automatic mechanical Quick pass already ran this episode — the remaining fat needs semantic judgment a script cannot make.${payback}${spawnBill} Offer the user via your question tool, exactly two options: ทำ (open the /coalwash wizard now, "Fat + reorganize muscle" tier — the zero-context outsider reviews what mechanical cutting could not) / later (dismiss; carries forward — this same ask returns only once the fat GROWS further, never on a timer). If the user picks ทำ: run the wizard per the coalwash skill. This crossing is marked consumed the moment this ask fires. ${ANSWER_FIRST_REMINDER}`;
 }
 
+// The WRITE-GUARD SEATBELT advisory (0p) — a fixed program-side template
+// (the RESIDENT-ASK-CONTAMINATION lesson: the hook never composes prose).
+// ADVISORY ONLY — FYI-framed, never a block, never an error. FP DECISION
+// (option ii): it fires on ANY structured drop with no deliberate-vs-careless
+// heuristic; a deliberate delete is legitimate, so the wording makes clear
+// it's an FYI and points at the pre-edit snapshot so every fire is a usable
+// undo hint (the byte-exact original is at snapshotPath — restore-by-reference,
+// code copies the bytes, never the agent). `classes` = the fidelity-gate drop
+// types present; `oversize` = the file exceeded the diff cap (snapshot stands,
+// diff skipped).
+export function seatbeltAdvisory(opts) {
+  const { file, classes, snapshotPath, oversize } = opts || {};
+  const f = typeof file === 'string' && file ? file : '(unknown file)';
+  const snap = typeof snapshotPath === 'string' && snapshotPath ? snapshotPath : '';
+  const recover = snap ? ` A byte-exact pre-edit snapshot is at ${snap} — copy it back (or \`node scripts/lib/cli.mjs writeguard-restore ${snap.split(/[\\/]/).pop()} > "${f}"\`) if the drop was a slip; never re-type the lost content, restore the real bytes.` : '';
+  if (oversize) {
+    return `[CoalWash] write-guard (FYI, not an error, not a block): ${f} is a class-B governance/memory file over the diff-size cap — a pre-edit snapshot was taken but the fidelity diff was skipped (file oversize).${recover}`;
+  }
+  const list = Array.isArray(classes) && classes.length ? classes.join(', ') : 'structured tokens';
+  return `[CoalWash] write-guard (FYI, not an error, not a block): after this edit, ${f} no longer contains some ${list} it had at the start of the session — a deliberate cut is fine, this only flags it in case it was a slip.${recover}`;
+}
+
 // The FULL(externalize) advisory — pure information, never an ask (a wash
 // cannot help ~all-muscle over capacity; the growable-full invariant forbids
 // steering the user into washing legitimate muscle). Fixed-template for the

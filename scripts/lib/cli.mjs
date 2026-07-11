@@ -9,6 +9,8 @@
 //
 //   node scripts/lib/cli.mjs gauge [--json]
 //   node scripts/lib/cli.mjs restore <id>
+//   node scripts/lib/cli.mjs writeguard-list
+//   node scripts/lib/cli.mjs writeguard-restore <snapName>
 //
 // gauge = one call: recoverDangling (heals a dangling prior txn — its no-op
 // path touches nothing) + discoverClassB + measureEntries + bandVerdict +
@@ -23,6 +25,14 @@
 // NEVER writes to the store: re-inserting recovered content is the human's
 // (or a gated plan's) decision, never this command's — a write here would
 // be a mutation outside applyPlan's gates.
+//
+// writeguard-list / writeguard-restore <snapName> (0p — the airbag undo door,
+// same restore-by-reference law as the bins): list = metadata only (name ·
+// session · bytes · path), the agent POINTS at a snapshot, never reproduces
+// bytes; restore = CODE prints the byte-exact ORIGINAL to stdout (pipeable:
+// `... writeguard-restore <snapName> > MEMORY.md`). An AI re-authoring a
+// "recovery" from memory is the ADD-01 hallucination-twin; undo is trustworthy
+// only because the bytes are the REAL bytes, model-untouched.
 //
 // BOTH subcommands are READ-ONLY toward CoalWash state by design: no stamp,
 // no verdict cache, no crossing is written — those are the SessionStart
@@ -41,6 +51,7 @@ import {
   loadState, projectState, sanitizeLeanFloor,
 } from './caliper.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './bins.mjs';
+import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
 import { loadMergedConfig, findProjectRoot } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
 
@@ -115,7 +126,7 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   return { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id>';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName>';
 
 function main() {
   const args = process.argv.slice(2);
@@ -146,6 +157,28 @@ function main() {
       console.error(`[CoalWash] restored ${r.id} from ${r.bin} (${r.bytes} bytes${r.original ? `, cut from ${r.original}` : ''}) — content on stdout; nothing was written to the store`);
     } catch (e) {
       console.error(`restore failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'writeguard-list') {
+    try {
+      const rows = listWriteguard(findProjectRoot(process.cwd(), os.homedir()), { home: os.homedir() });
+      if (!rows.length) { console.log('[CoalWash] no write-guard snapshots this session.'); return; }
+      // Metadata ONLY — the agent points at a snapshot, never reproduces bytes.
+      for (const r of rows) console.log(`${r.name}\t${r.bytes} bytes\tsession ${r.session}\t${r.snapshotPath}`);
+    } catch (e) {
+      console.error(`writeguard-list failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'writeguard-restore') {
+    const name = args[1];
+    if (!name) { console.error(USAGE); process.exitCode = 1; return; }
+    try {
+      const r = readWriteguardSnapshot(findProjectRoot(process.cwd(), os.homedir()), name, { home: os.homedir() });
+      if (!r) { console.error(`writeguard-restore: snapshot '${name}' not found`); process.exitCode = 1; return; }
+      process.stdout.write(r.content); // the byte-exact ORIGINAL — code-moved, model-untouched
+      console.error(`[CoalWash] restored write-guard snapshot ${r.name} (${r.bytes} bytes, session ${r.session}) — byte-exact original on stdout; redirect it to the file, never re-type it`);
+    } catch (e) {
+      console.error(`writeguard-restore failed: ${e.message}`);
       process.exitCode = 1;
     }
   } else {

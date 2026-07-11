@@ -139,6 +139,17 @@ test('clampedRead (stringList): a valid array passes through as-is; any doubt de
   assert.deepStrictEqual(clampedRead({}, 'managedPaths'), []);
 });
 
+test('0p: writeGuard enum on|snapshot-only|off, default on; clamps unknowns to on', () => {
+  const spec = CONFIG_SCHEMA.find((s) => s.key === 'writeGuard');
+  assert.ok(spec, 'writeGuard is in the schema');
+  assert.deepStrictEqual(spec.values, ['on', 'snapshot-only', 'off']);
+  assert.strictEqual(spec.def, 'on');
+  assert.strictEqual(clampedRead({ writeGuard: 'SNAPSHOT-ONLY' }, 'writeGuard'), 'snapshot-only', 'case-insensitive');
+  assert.strictEqual(clampedRead({ writeGuard: 'off' }, 'writeGuard'), 'off');
+  assert.strictEqual(clampedRead({ writeGuard: 'sideways' }, 'writeGuard'), 'on', 'invalid -> factory default');
+  assert.strictEqual(clampedRead({}, 'writeGuard'), 'on');
+});
+
 test('0m: forceMode is RETIRED — not in the schema (force has no off switch), and a LEGACY config carrying it is read-tolerated: no validation error, no readable value', () => {
   assert.strictEqual(CONFIG_SCHEMA.find((s) => s.key === 'forceMode'), undefined, 'the knob is gone — do not re-add an off switch');
   assert.ok(RETIRED_KEYS.includes('forceMode'), 'tombstoned by name');

@@ -67,5 +67,15 @@
   // file that mirrors a global file at the same relative path); add entries
   // here only for a managed tree that heuristic cannot see (e.g. no global
   // counterpart exists to compare against).
-  "managedPaths": []
+  "managedPaths": [],
+
+  // 0p WRITE-PATH SEATBELT + AIRBAG — the gate follows every hand, not just
+  // CoalWash's own knife. on = snapshot-on-first-write to a class-B
+  // governance/memory file (the undo net for the gitignored MEMORY.md/
+  // CLAUDE.md) + a one-line FYI advisory when an edit drops a structured token
+  // (link/number/quote/frontmatter/...). It NEVER blocks an edit — a deliberate
+  // delete is legitimate; the advisory just flags it and points at the
+  // byte-exact snapshot to restore from. snapshot-only = keep the airbag undo
+  // net, silence the advisory. off = disabled. coalwashMode:"off" kills it too.
+  "writeGuard": "on"
 }
