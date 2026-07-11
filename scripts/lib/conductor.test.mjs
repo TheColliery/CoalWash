@@ -65,16 +65,27 @@ function seedClassB(home, proj, { claudeMdBytes = 100, indexBytes = 60 } = {}) {
   fs.writeFileSync(path.join(mem, 'MEMORY.md'), 'i'.repeat(indexBytes), 'utf8');
   return mem;
 }
-function seedState(home, proj, projState, { stateSchema = 1 } = {}) {
-  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
-  const key = fs.realpathSync(proj);
-  // Stamp the CURRENT stateSchema by default so the rc.2 SessionStart
-  // migration treats a seed as up-to-date (no reset) — a seed models a store
-  // already on the current version. Pass { stateSchema: undefined } to model a
-  // genuinely OLD state that must migrate.
-  const state = { projects: { [key]: projState } };
-  if (stateSchema !== undefined) state.stateSchema = stateSchema;
-  fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), JSON.stringify(state), 'utf8');
+// task #13: per-project state lives at <home>/.claude/projects/<slug>/coalwash/
+// state.json (flat, one file per project). The OLD single-file root is at
+// <home>/.claude/.coalwash-state.json (a migration source only).
+function projStatePath(home, proj) {
+  const slug = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
+  return path.join(home, '.claude', 'projects', slug, 'coalwash', 'state.json');
+}
+function seedState(home, proj, projState, opts = {}) {
+  const schema = Object.prototype.hasOwnProperty.call(opts, 'stateSchema') ? opts.stateSchema : 1;
+  if (schema === undefined) {
+    // Pass { stateSchema: undefined } to model a genuinely OLD, PRE-RELOCATION
+    // store at the OLD-ROOT path (no schema) — SessionStart's first loadState
+    // reads it via the fallback + migrates (location + schema reset).
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), JSON.stringify({ projects: { [fs.realpathSync(proj)]: projState } }), 'utf8');
+    return;
+  }
+  // Default: a store already on the current version at the NEW per-project path.
+  const p = projStatePath(home, proj);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify({ ...projState, stateSchema: schema }), 'utf8');
 }
 // 0g fixture helper: a big RECALL file (stat-only measured, never
 // always-loaded) inflates breakEven's run cost (3x the WHOLE store) far past
@@ -86,8 +97,10 @@ function seedBigRecall(mem) {
   fs.writeFileSync(path.join(mem, 'recall-big.md'), 'r'.repeat(400 * 1024), 'utf8');
 }
 function readProjState(home, proj) {
-  const raw = JSON.parse(fs.readFileSync(path.join(home, '.claude', '.coalwash-state.json'), 'utf8'));
-  return (raw.projects || {})[fs.realpathSync(proj)] || {};
+  try {
+    const raw = JSON.parse(fs.readFileSync(projStatePath(home, proj), 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch { return {}; }
 }
 function assertGraceful(r) {
   assert.strictEqual(r.status, 0, `hook must exit 0 (stderr: ${r.stderr})`);
@@ -130,7 +143,7 @@ test('manual mode: gauge silent (no stamp), but the self-update scheduler still 
     const r = run(proj, home);
     assertGraceful(r);
     assert.ok(r.stdout.includes('[self-update due]'));
-    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'no stamp in manual mode');
+    assert.strictEqual(fs.existsSync(projStatePath(home, proj)), false, 'no stamp in manual mode');
   } finally { clean(home, proj); }
 });
 
@@ -633,7 +646,8 @@ test('rc.2 cross-version un-strand: an OLD-state chronically-FULL store carrying
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     const st = readProjState(home, proj);
-    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(home, '.claude', '.coalwash-state.json'), 'utf8')).stateSchema, 1, 'the schema is stamped current after the boundary read');
+    assert.strictEqual(st.stateSchema, 1, 'the schema is stamped current at the relocated per-project file');
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'the legacy single-file store is drained + removed after the relocation');
     assert.strictEqual(st.leanFloorTokens, 9000, 'the measured baseline SURVIVED the upgrade — the store is not false-FULL off a wiped floor');
     assert.strictEqual(st.leanFloorProvisional, false, 'a measured floor is not downgraded to provisional by the migration');
     assert.strictEqual(st.lastVerdict.band, 'FULL', 'the fresh re-gauge still routes FULL (the store is genuinely over the wall)');
@@ -1019,7 +1033,7 @@ test('Stop: nothing pending is silent, exit 0, and creates no state file at all'
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
-    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'the silent path never writes state');
+    assert.strictEqual(fs.existsSync(projStatePath(home, proj)), false, 'the silent path never writes state');
   } finally { clean(home, proj); }
 });
 
@@ -1210,15 +1224,16 @@ test('0o: a non-spawn tool PostToolUse event exits instantly — no state file i
       assertGraceful(r);
       assert.strictEqual(r.stdout, '');
     }
-    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'no state read or write on the non-match path — structurally free (the warp-gate-style structural proof, never a wall clock)');
+    assert.strictEqual(fs.existsSync(projStatePath(home, proj)), false, 'no state read or write on the non-match path — structurally free (the warp-gate-style structural proof, never a wall clock)');
   } finally { clean(home, proj); }
 });
 
 test('0o: a corrupt state file never breaks the meter — spawn counted at cost 0, exit clean', () => {
   const { home, proj } = sandbox();
   try {
-    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), '{ definitely not json', 'utf8');
+    const sp = projStatePath(home, proj);
+    fs.mkdirSync(path.dirname(sp), { recursive: true });
+    fs.writeFileSync(sp, '{ definitely not json', 'utf8');
     const r = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Agent' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
@@ -1235,7 +1250,7 @@ test('0o: coalwashMode manual -> the meter stays off (it rides the same mode as 
     const r = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Agent' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
-    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false,
+    assert.strictEqual(fs.existsSync(projStatePath(home, proj)), false,
       'manual mode: no gauge, no session boundary, no meter — nothing is even written');
   } finally { clean(home, proj); }
 });
@@ -1425,7 +1440,7 @@ test('self-update: due on first boot (default ask), stamped, then silent inside 
     assertGraceful(r1);
     assert.ok(r1.stdout.includes('[CoalWash] [self-update due]'));
     assert.ok(r1.stdout.includes('never assume'), 'gold no-external-assumption wording');
-    assert.ok(fs.existsSync(path.join(home, '.claude', '.coalwash-update-check')), 'crash-safe stamp written');
+    assert.ok(fs.existsSync(path.join(home, '.claude', 'coal', 'coalwash', 'update-check')), 'crash-safe stamp written to the coal/ namespace (task #13)');
     const r2 = run(proj, home);
     assertGraceful(r2);
     assert.strictEqual(r2.stdout, '', 'inside the window: silent');
@@ -1450,7 +1465,9 @@ test('a corrupt state file self-heals: the hook still gauges and exits 0 (Phoeni
   try {
     muteUpdate(home);
     seedClassB(home, proj, { claudeMdBytes: 200 });
-    fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), '{ definitely not json', 'utf8');
+    const sp = projStatePath(home, proj);
+    fs.mkdirSync(path.dirname(sp), { recursive: true });
+    fs.writeFileSync(sp, '{ definitely not json', 'utf8');
     const r = run(proj, home);
     assertGraceful(r);
     const st = readProjState(home, proj);
@@ -1492,8 +1509,9 @@ test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no sta
       muteUpdate(home);
       seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // absolute-cap FULL either way
       if (content !== undefined) {
-        fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
-        fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), content, 'utf8');
+        const sp = projStatePath(home, proj);
+        fs.mkdirSync(path.dirname(sp), { recursive: true });
+        fs.writeFileSync(sp, content, 'utf8');
       }
       const r = run(proj, home);
       assertGraceful(r);

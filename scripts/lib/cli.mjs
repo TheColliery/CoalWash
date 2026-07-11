@@ -47,7 +47,7 @@ import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
 import {
   measureEntries, bandVerdict, breakEven, sessionsPerDay,
-  loadState, projectState, sanitizeLeanFloor,
+  loadState, sanitizeLeanFloor,
 } from './caliper.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './bins.mjs';
 import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
@@ -65,7 +65,7 @@ export function gauge({ cwd = process.cwd(), home = os.homedir() } = {}) {
 
   const disc = discoverClassB({ projectRoot, home, managedPaths });
   const m = measureEntries(disc.entries, { withGzip: true });
-  const proj = projectState(loadState(home), projectRoot);
+  const proj = loadState(projectRoot, home);
   // Same floor hygiene as the conductor: never trust the raw stored value.
   // 0j note: this READ-ONLY gauge never stamps the provisional floor (the
   // conductor's gauges are the stamping site); it CONSUMES the stored floor

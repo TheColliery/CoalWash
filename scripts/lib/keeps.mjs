@@ -21,9 +21,9 @@
 // GLOBAL variant (design-pass item, MEMORY.md "THE SHARED GLOBAL SLICE"): a
 // keep recorded per-project does not shield a GLOBAL class-B file (the home
 // CLAUDE.md closure) from a DIFFERENT project's outsider re-flagging it —
-// loadGlobalKeeps/recordGlobalKeep file the SAME shape beside the global state
-// file (~/.claude/.coalwash-state.json) instead, so an adjudicated keep on a
-// global target shields it machine-wide. ~/.claude/ is a home dotfile dir, not
+// loadGlobalKeeps/recordGlobalKeep file the SAME shape at the ~/.claude root
+// (.coalwash-global-keeps.json) instead, so an adjudicated keep on a global
+// target shields it machine-wide. ~/.claude/ is a home dotfile dir, not
 // a project repo, so it carries no ensureSelfIgnore (that guard exists only to
 // stop a PROJECT from accidentally version-controlling its own tx dir).
 import fs from 'node:fs';

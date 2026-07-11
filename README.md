@@ -78,6 +78,8 @@ Cross-agent by design (the engine is zero-dependency Node scripts any agent can 
 
 **The list is a mirror, not a list.** CoalWash keeps no hand-maintained inventory of what counts as always-loaded memory — its list *mirrors* the real load list, whoever writes to it: whatever the platform actually delivers into the agent's context is class-B, whether the company wired it, the user wired it, or a future update adds a surface that doesn't exist today. A platform adds a new auto-loaded file → it enters the measurement by definition, no code change (a hand-kept list rots; a mirror can't — it doesn't remember, it reflects). On known platforms this runs as a cheap drift-check at wizard entry (agent-seen vs adapter-listed; a mismatch flags adapter rot the day it happens); every candidate is code-certified — exists, contained in the home/project trees, and its on-disk head matches what the agent actually saw load, so a hallucinated or spoofed entry can never join the measurement. Fail direction: undercount — unseen is unmeasured is uncut.
 
+**A well-behaved guest on your disk.** CoalWash keeps its own per-project bookkeeping (the session gauge's state) *inside* the platform's own project directory — on Claude Code, beside the memory folder it measures — so the platform's own lifecycle carries it: remove a project and its state goes with it, for free. Every path CoalWash derives is realpath-contained to the config root (`~/.claude`) and fails closed — never a byte written outside it. This rides Claude Code's project layout, validated there; on other platforms the same one-namespace discipline is designed-for, not yet validated.
+
 ## 🚀 Install
 
 **Claude Code** — one command pair (also wires the session-start gauge):

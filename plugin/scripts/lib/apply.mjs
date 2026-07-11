@@ -75,13 +75,13 @@ import { sweepFatBin, sweepStoreOld, recordBinItem, FAT_BIN_NAME, STORE_OLD_NAME
 // from the session gauge's cached verdict (caliper state; zero new I/O
 // beyond one small state read). caliper imports only config-load/jsonc, so
 // this adds no module cycle.
-import { loadState, projectState } from './caliper.mjs';
+import { loadState } from './caliper.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
-const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // beside ~/.claude/.coalwash-state.json
+const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
 const SNAP_MARKER = 'snap.complete';
 
 // A target whose files live in the user home's GLOBAL class-B (the global
@@ -473,7 +473,7 @@ export function applyPlan(plan, opts = {}) {
       // horizon-only, the keep-on-doubt direction. Both sweeps are already
       // internally fail-silent (never throw) — no extra guard needed here.
       let storeBytes = 0;
-      try { storeBytes = Number(projectState(loadState(home), projectRoot)?.lastVerdict?.alwaysLoadedBytes) || 0; } catch { /* horizon-only */ }
+      try { storeBytes = Number(loadState(projectRoot, home)?.lastVerdict?.alwaysLoadedBytes) || 0; } catch { /* horizon-only */ }
       sweepFatBin(projectRoot, { storeBytes });
       sweepStoreOld(projectRoot, { storeBytes });
 

@@ -59,6 +59,11 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir } from './config-load.mjs';
 import { parseJsonc } from './jsonc.mjs';
+// task #13 (OS-citizen state): the per-project state path RIDES the CC memory
+// dir, so we reuse the SAME adapter discovery computes (ccMemoryDir/ccProjectSlug)
+// + the SAME realpath containment primitives (physicalOrNull/containedIn) the
+// write path uses — never a re-hardcoded path or a hand-rolled containment.
+import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
 
 // ---------------------------------------------------------------------------
 // constants — PLACEHOLDERS, calibrate at the fidelity benchmark (2026-07-08
@@ -387,130 +392,247 @@ export function gaugeVerdict({ measure, rawLeanFloorTokens, fullPercent = 6, was
 }
 
 // ---------------------------------------------------------------------------
-// state (lean floor + stamp history + verdict/crossing cache) — one file
-// under ~/.claude (sandbox-sanctioned config area), keyed by project root.
-// Atomic writes, fail-silent: state loss degrades to bootstrap behavior,
-// never misbehaves. (The old time-based snooze this section once held died
-// at the beta.12 band collapse — nothing here is a clock.)
+// OS-CITIZEN STATE LAYOUT (task #13, "well-behaved OS citizen — one namespace").
+// PER-PROJECT state RIDES the CC memory dir: it lives BESIDE the platform's own
+// per-project memory folder — <claudeBase>/projects/<slug>/coalwash/state.json —
+// anchored to the SAME dir discoverClassB already resolves (ccMemoryDir), never
+// a re-hardcoded path. Two free wins fall out of riding CC's own directory: CC
+// auto-deletes the slug dir when the project is removed (free orphan-prune — no
+// shared-map to hand-prune any more), and if CC ever relocates projects/, our
+// state rides inside the data CC migrates. CC-FIRST: ccMemoryDir is the Claude
+// Code adapter (class-b.mjs); a future AG/Codex port swaps it for that platform's
+// own memory-dir resolver — the per-platform recipe stays DATA in class-b's
+// adapters, never re-hardcoded here.
+//
+// Atomic writes, fail-silent: state loss degrades to bootstrap behavior, never
+// misbehaves. (The old time-based snooze this section once held died at the
+// beta.12 band collapse — nothing here is a clock.)
 // ---------------------------------------------------------------------------
 
-export function statePath(home = os.homedir()) {
+// Contain a to-be-CREATED path under `base` (the write path does not exist yet,
+// so realpath returns null FOR it). Two gates, both must pass:
+//   (1) LEXICAL — `target` sits under `base` with no '..' escape. Both sides
+//       pre-realpath, so a symlinked home (macOS /var→/private/var) stays
+//       consistent (the walk-stops-at-home hazard).
+//   (2) PHYSICAL — the nearest EXISTING ancestor of `target`, realpath-resolved,
+//       sits inside realpath(base) (apply.mjs's parent-realpath pattern,
+//       generalized because more than the leaf can be missing on a first write).
+//       This is the real security check: it catches an already-existing sub-dir
+//       (e.g. projects/<slug>) symlinked OUT of the sandbox. It only runs when
+//       base itself physically exists — a base that does not exist yet (a fresh
+//       install's ~/.claude) has no existing sub-tree to escape THROUGH, so the
+//       lexical gate alone governs and the real dirs get created under it.
+// Fail-closed: any doubt → false → the caller uses the sandbox fallback (Phoenix
+// #10 — a derived path never writes outside ~/.claude).
+export function containedNewPath(target, base) {
+  const relLex = path.relative(base, target);
+  if (relLex !== '' && (relLex.startsWith('..') || path.isAbsolute(relLex))) return false; // lexical escape
+  const basePhys = physicalOrNull(base);
+  if (!basePhys) return true; // base not created yet: no existing sub-tree to escape; lexical suffices
+  let anc = path.resolve(target);
+  while (!physicalOrNull(anc)) {
+    const parent = path.dirname(anc);
+    if (parent === anc) return false; // walked to the fs root with nothing existing
+    anc = parent;
+  }
+  return containedIn(physicalOrNull(anc), [basePhys]);
+}
+
+// The per-project state path — beside the CC memory dir. Fail-closed to the
+// global coal/coalwash/ namespace (still inside ~/.claude) if the derived path
+// somehow escapes the sandbox (task #13 pt 2). Never throws: ccMemoryDir is a
+// pure path.join (existence-independent), so a slug-rotted / absent memory dir
+// yields a deterministic path here and simply an empty read downstream (pt 5).
+export function statePath(projectRoot, home = os.homedir()) {
+  const base = claudeBaseDir(home);
+  const derived = path.join(path.dirname(ccMemoryDir(projectRoot, home)), 'coalwash', 'state.json');
+  if (containedNewPath(derived, base)) return derived;
+  return path.join(base, 'coal', 'coalwash', `state-${ccProjectSlug(projectRoot)}.json`);
+}
+
+// The OLD single-file, project-keyed state (pre-relocation). Read as a migration
+// fallback; drained + deleted on the first per-project write (dropOldRootEntry).
+export function oldStatePath(home = os.homedir()) {
   return path.join(claudeBaseDir(home), '.coalwash-state.json');
-}
-
-export function loadState(home = os.homedir()) {
-  try {
-    let raw = fs.readFileSync(statePath(home), 'utf8');
-    if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
-    const parsed = parseJsonc(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-// rc.2 STATE SCHEMA VERSION — the "no-old-version-leftover" standard applied
-// to the state layer: a reinstall/upgrade must never carry VERSION-STALE
-// state (a consumed crossing from a pre-0m version is meaningless under
-// force-dictator; a stale cached verdict band suppresses re-evaluation).
-// Bump this integer whenever a state field's SEMANTICS change, and add that
-// field to SCHEMA_RESET_FIELDS below (that is the mechanism the standard
-// needs). migrateState() (below) runs the reset the first time the new code
-// reads an older state.
-export const STATE_SCHEMA = 1;
-// VERSION-SENSITIVE — reset on a schema bump. Their meaning changed across
-// versions, so a value an older version wrote is not trustworthy now. The
-// crossing/edge state changed at 0m (force-dictator); `lastVerdict` is a pure
-// per-gauge CACHE whose stale cached band would otherwise suppress the
-// re-evaluation rise that re-enrolls the store (dropping it costs nothing —
-// the next SessionStart recomputes it, and prevBand→LEAN lets a still-FULL
-// store re-arm via the tested "qualifying past" rise). Resetting these is the
-// SAFE direction: a spurious reset just re-offers, never strands.
-export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastVerdict']);
-// VERSION-STABLE — PRESERVED across a schema bump: the project's real
-// footprint BASELINE + history. Must survive a reinstall/upgrade, or every
-// version bump false-FULLs the store until the next clean. NOT reset:
-// leanFloorTokens · leanFloorProvisional · leanFloorAt · stamps · subSpawns ·
-// subParcelTokensAccum · lastSubSpawnAt. (A future ruling that changes another
-// field's semantics bumps STATE_SCHEMA + adds that field to the reset list.)
-
-function saveState(state, home) {
-  try {
-    const p = statePath(home);
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    if (state && typeof state === 'object' && !Array.isArray(state)) state.stateSchema = STATE_SCHEMA; // stamp the schema on every write
-    const tmp = p + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(state), 'utf8');
-    fs.renameSync(tmp, p);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function projKey(projectRoot) {
   return path.resolve(projectRoot);
 }
 
-export function projectState(state, projectRoot) {
-  const projects = state.projects || {};
-  return projects[projKey(projectRoot)] || {};
+// Parse a state JSON file → a plain object, or null on any doubt (missing,
+// corrupt, wrong-shape, unreadable). Shared by the new-path + old-root reads.
+function readStateFile(p) {
+  try {
+    let raw = fs.readFileSync(p, 'utf8');
+    if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
+    const parsed = parseJsonc(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
-// State-file orphan prune (#21): a project whose path no longer exists on disk
-// is dropped from the tracking map before the next write. Runs lazily inside
-// every state WRITE below (fail-silent, no new config key — "a dead path is
-// never 'this project'"). Deletes ONLY entries in the state file's OWN
-// projects map — never anything on disk beyond the existsSync stat (the
-// recovery-paths lesson: a mutating path must never do more than it says). A
-// transiently-missing path (an offline drive) is dropped harmlessly; the
-// project self-heals by re-stamping the next time it runs a session.
-function pruneOrphans(state) {
-  const projects = state && state.projects;
-  if (!projects || typeof projects !== 'object') return state;
+// rc.2 STATE SCHEMA VERSION — the "no-old-version-leftover" standard applied to
+// the state layer: a reinstall/upgrade must never carry VERSION-STALE state (a
+// consumed crossing from a pre-0m version is meaningless under force-dictator; a
+// stale cached verdict band suppresses re-evaluation). Bump this integer whenever
+// a state field's SEMANTICS change, and add that field to SCHEMA_RESET_FIELDS
+// below. migrateProjSchema() applies the reset lazily on every read; saveState
+// stamps the current schema on every write. (task #13's LOCATION relocation is
+// NOT a schema change — no field's meaning changed — so STATE_SCHEMA stays 1; the
+// location move is its own read-old/write-new mechanism, orthogonal to this reset.)
+export const STATE_SCHEMA = 1;
+// VERSION-SENSITIVE — reset when the stored schema is stale. Their meaning
+// changed across versions, so a value an older version wrote is not trustworthy
+// now. The crossing/edge state changed at 0m (force-dictator); `lastVerdict` is a
+// pure per-gauge CACHE whose stale cached band would otherwise suppress the
+// re-evaluation rise that re-enrolls the store (dropping it costs nothing — the
+// next SessionStart recomputes it, and prevBand→LEAN lets a still-FULL store
+// re-arm via the tested "qualifying past" rise). Resetting these is the SAFE
+// direction: a spurious reset just re-offers, never strands.
+export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastVerdict']);
+// VERSION-STABLE — PRESERVED across a schema bump AND across the location move:
+// the project's real footprint BASELINE + history. Must survive a reinstall/
+// upgrade, or every version bump false-FULLs the store until the next clean. NOT
+// reset: leanFloorTokens · leanFloorProvisional · leanFloorAt · stamps ·
+// subSpawns · subParcelTokensAccum · lastSubSpawnAt. (A future ruling that
+// changes another field's semantics bumps STATE_SCHEMA + adds it to the reset.)
+
+// Pure schema migration: given a raw per-project state object, return the view
+// the current code should act on — reset the version-SENSITIVE fields when the
+// stored schema is MISSING/OLDER/CORRUPT (any doubt → older → reset, the safe
+// direction), preserve the version-stable baseline. Returns a NEW object; never
+// mutates the input, never writes (the stamp lands on the next saveState, so
+// loadState stays a pure read for the CLI/every direct reader).
+function migrateProjSchema(proj) {
+  if (!proj || typeof proj !== 'object' || Array.isArray(proj)) return {};
+  const stored = Number(proj.stateSchema);
+  if (Number.isInteger(stored) && stored >= STATE_SCHEMA) return proj; // current/newer → untouched
+  const out = { ...proj };
+  for (const f of SCHEMA_RESET_FIELDS) delete out[f];
+  return out;
+}
+
+// Read THIS project's entry out of the OLD single-file state (the migration
+// fallback when the new per-project file does not exist yet). Inherits the OLD
+// file's top-level schema stamp onto the entry (the old layout stamped the
+// schema at the top level, not per-entry) so migrateProjSchema resets ONLY a
+// genuinely pre-schema store — an rc.2-era crossing is PRESERVED across the pure
+// LOCATION move (a move is not a version change).
+function readOldRootEntry(projectRoot, home) {
+  const all = readStateFile(oldStatePath(home));
+  if (!all || !all.projects || typeof all.projects !== 'object') return null;
+  const entry = all.projects[projKey(projectRoot)];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const rootSchema = Number(all.stateSchema);
+  return Number.isInteger(rootSchema) ? { ...entry, stateSchema: rootSchema } : entry;
+}
+
+// Drop dead-project entries from an old-root projects map. keep-on-doubt is
+// NARROW here: only a stat that THROWS keeps the entry. `existsSync` returns
+// false (not throw) for an offline/UNC path, so a transiently-unreachable
+// project's LEGACY entry CAN be dropped in this drain — safe because it drains
+// only the old file's own recomputable bookkeeping (never memory content), and a
+// wrongly-drained project simply re-stamps a provisional floor next session (0j).
+// The old shared-map orphan-prune, now scoped to draining the LEGACY file only
+// (the new per-project files ride CC's own dir lifecycle — free orphan-prune).
+function pruneDeadEntries(projects) {
   for (const key of Object.keys(projects)) {
     let exists;
-    try { exists = fs.existsSync(key); } catch { exists = true; } // stat doubt -> keep (never drop on doubt)
+    try { exists = fs.existsSync(key); } catch { exists = true; }
     if (!exists) delete projects[key];
   }
-  return state;
+  return projects;
 }
 
-// rc.2 SCHEMA MIGRATION — run once at the SessionStart chokepoint (the first
-// read after an upgrade). If the stored `stateSchema` is MISSING, OLDER, or
-// CORRUPT (any doubt → treat as older → migrate, the safe direction), reset
-// every project's VERSION-SENSITIVE field (SCHEMA_RESET_FIELDS) while
-// PRESERVING the version-stable baseline, then stamp the current schema.
-// Idempotent (a second run sees the current schema → no-op) and fail-silent
-// (never throws). Deliberately NOT wired into loadState — loadState stays a
-// pure read so the CLI/tests/every direct reader keep their contract; the
-// migration is a session-boundary MUTATION, the same class as recordStamp's
-// spawn-counter reset, so it belongs at the SessionStart write chokepoint.
-// This clears legacy junk ONCE at the version boundary; the session-id re-arm
-// (recordCrossing) handles ongoing within-version fresh-session re-offers —
-// the two compose. (Honest limit: cannot auto-wipe on UNINSTALL — a removed
-// plugin runs no code; this guarantees a reinstall/upgrade never carries
-// version-stale state, the leanFloor baseline correctly surviving.)
-export function migrateState(home = os.homedir()) {
+// On the first per-project write, delete THIS project's entry from the old-root
+// file (no-old-version-leftover). Also drains dead entries so the legacy file
+// empties out and gets removed even when a since-deleted project still has a
+// stale entry. Touches ONLY CoalWash's OWN old-root file — never a wildcard
+// sweep (the recovery-paths lesson). Fail-silent (best-effort migration).
+function dropOldRootEntry(projectRoot, home) {
   try {
-    const state = pruneOrphans(loadState(home));
-    const stored = Number(state && state.stateSchema);
-    if (Number.isInteger(stored) && stored >= STATE_SCHEMA) return false; // current -> no migration
-    const projects = (state && state.projects) || {};
-    // Nothing to migrate on a FRESH install (no state file → loadState = {}) or
-    // an empty map: there is no legacy per-project leftover to clear, so writing
-    // a stamped-but-empty file would only violate the "no stamp until the gauge
-    // runs" contract (manual mode stays state-less). The first real write stamps.
-    if (!Object.keys(projects).length) return false;
-    for (const k of Object.keys(projects)) {
-      const proj = projects[k];
-      if (!proj || typeof proj !== 'object') continue;
-      for (const f of SCHEMA_RESET_FIELDS) delete proj[f];
+    const p = oldStatePath(home);
+    const all = readStateFile(p);
+    if (!all || !all.projects || typeof all.projects !== 'object') return;
+    delete all.projects[projKey(projectRoot)];
+    pruneDeadEntries(all.projects);
+    if (Object.keys(all.projects).length === 0) {
+      fs.rmSync(p, { force: true }); // last entry gone → drop the legacy file
+    } else {
+      const tmp = p + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(all), 'utf8');
+      fs.renameSync(tmp, p);
     }
-    state.projects = projects;
-    saveState(state, home); // stamps stateSchema = STATE_SCHEMA
+  } catch { /* fail-silent — migration is best-effort, never blocks a write */ }
+}
+
+// Load THIS project's flat state (the SCHEMA-migrated view): the new per-project
+// file if present, else the old-root entry (LOCATION fallback), else {}. Always
+// returns the migrated view so every reader — the read-only CLI + Stop paths
+// included — acts on version-clean state without a write. The location move +
+// the schema stamp persist on the next saveState.
+export function loadState(projectRoot, home = os.homedir()) {
+  const fresh = readStateFile(statePath(projectRoot, home));
+  const proj = fresh || readOldRootEntry(projectRoot, home) || {};
+  return migrateProjSchema(proj);
+}
+
+// Persist THIS project's flat state to the new per-project path (atomic
+// tmp→rename), stamp the current schema, and drain the old-root entry. The dir
+// (<claudeBase>/projects/<slug>/coalwash/) sits inside ~/.claude — a data area,
+// not a git tree — so no self-ignore is needed (unlike the project bins).
+function saveState(proj, projectRoot, home) {
+  try {
+    const p = statePath(projectRoot, home);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const toWrite = (proj && typeof proj === 'object' && !Array.isArray(proj)) ? { ...proj, stateSchema: STATE_SCHEMA } : { stateSchema: STATE_SCHEMA };
+    const tmp = p + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(toWrite), 'utf8');
+    fs.renameSync(tmp, p);
+    dropOldRootEntry(projectRoot, home); // no-old-version-leftover
     return true;
-  } catch { return false; } // fail-silent
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GLOBAL (not project-bound) state → the coal/coalwash/ namespace (task #13
+// pt 3). CW's state is otherwise per-project; the self-update scheduler's
+// throttle stamp is the one global piece. Same read-new/fallback-old +
+// write-new/delete-old migration as the per-project state above.
+// ---------------------------------------------------------------------------
+export function updateStampPath(home = os.homedir()) {
+  return path.join(claudeBaseDir(home), 'coal', 'coalwash', 'update-check');
+}
+export function oldUpdateStampPath(home = os.homedir()) {
+  return path.join(claudeBaseDir(home), '.coalwash-update-check');
+}
+// Read the update-check timestamp: the new location, else the old root stamp
+// (migration read). 0 when neither exists / is unreadable.
+export function readUpdateStamp(home = os.homedir()) {
+  for (const p of [updateStampPath(home), oldUpdateStampPath(home)]) {
+    try {
+      const n = Number(String(fs.readFileSync(p, 'utf8')).trim());
+      if (Number.isFinite(n) && n > 0) return n;
+    } catch { /* try the next location */ }
+  }
+  return 0;
+}
+// Write the update-check timestamp to the new location + delete the old stamp
+// (no-old-version-leftover). Fail-silent.
+export function writeUpdateStamp(now, home = os.homedir()) {
+  try {
+    const p = updateStampPath(home);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, String(now));
+    try { fs.rmSync(oldUpdateStampPath(home), { force: true }); } catch { /* best-effort */ }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Append a session stamp {t, fp} (ring-capped) and return the updated project
@@ -520,17 +642,13 @@ export function migrateState(home = os.homedir()) {
 // HERE — the stats line is a session figure, not a lifetime ledger. The
 // counters that then accumulate belong to THIS session's spawns.
 export function recordStamp(home, projectRoot, footprintTokens, now = Date.now()) {
-  const state = pruneOrphans(loadState(home));
-  state.projects = state.projects || {};
-  const key = projKey(projectRoot);
-  const proj = state.projects[key] || {};
+  const proj = loadState(projectRoot, home);
   proj.stamps = Array.isArray(proj.stamps) ? proj.stamps : [];
   proj.stamps.push({ t: now, fp: Math.round(footprintTokens) });
   if (proj.stamps.length > STAMP_RING_MAX) proj.stamps = proj.stamps.slice(-STAMP_RING_MAX);
   delete proj.subSpawns;
   delete proj.subParcelTokensAccum;
-  state.projects[key] = proj;
-  saveState(state, home);
+  saveState(proj, projectRoot, home);
   return proj;
 }
 
@@ -547,17 +665,13 @@ export function recordStamp(home, projectRoot, footprintTokens, now = Date.now()
 // spawned with a different cwd still bills the CURRENT room's cached parcel
 // — conservative, no cwd-detection machinery (no over-engineering per 0o).
 export function recordSubSpawn(home, projectRoot, now = Date.now()) {
-  const state = pruneOrphans(loadState(home));
-  state.projects = state.projects || {};
-  const key = projKey(projectRoot);
-  const proj = state.projects[key] || {};
+  const proj = loadState(projectRoot, home);
   const bytes = Number(proj.lastVerdict && proj.lastVerdict.alwaysLoadedBytes);
   const parcelTokens = Number.isFinite(bytes) && bytes > 0 ? tokensEstFromBytes(bytes) : 0;
   proj.subSpawns = (Number.isFinite(Number(proj.subSpawns)) ? Number(proj.subSpawns) : 0) + 1;
   proj.subParcelTokensAccum = (Number.isFinite(Number(proj.subParcelTokensAccum)) ? Number(proj.subParcelTokensAccum) : 0) + parcelTokens;
   proj.lastSubSpawnAt = now;
-  state.projects[key] = proj;
-  return saveState(state, home);
+  return saveState(proj, projectRoot, home);
 }
 
 // Stamp the lean floor (the post-clean footprint — call ONLY after a full clean
@@ -565,15 +679,11 @@ export function recordSubSpawn(home, projectRoot, now = Date.now()) {
 // Clears the provisional flag (0j): a gate-passed clean's floor is the TRUE
 // lean baseline, superseding any install-time provisional stamp.
 export function setLeanFloor(home, projectRoot, tokens, now = Date.now()) {
-  const state = pruneOrphans(loadState(home));
-  state.projects = state.projects || {};
-  const key = projKey(projectRoot);
-  const proj = state.projects[key] || {};
+  const proj = loadState(projectRoot, home);
   proj.leanFloorTokens = Math.round(tokens);
   proj.leanFloorAt = now;
   delete proj.leanFloorProvisional;
-  state.projects[key] = proj;
-  return saveState(state, home);
+  return saveState(proj, projectRoot, home);
 }
 
 // 0j "BMI ON AT INSTALL — provisional floor" (MEMORY.md): the first gauge of
@@ -594,10 +704,7 @@ export function setLeanFloor(home, projectRoot, tokens, now = Date.now()) {
 // does NOT call this (read-only by contract, pinned by test); it CONSUMES
 // whatever floor the conductor's gauges have stamped.
 export function ensureProvisionalFloor(home, projectRoot, footprintTokens, now = Date.now()) {
-  const state = pruneOrphans(loadState(home));
-  state.projects = state.projects || {};
-  const key = projKey(projectRoot);
-  const proj = state.projects[key] || {};
+  const proj = loadState(projectRoot, home);
   const existing = Number(proj.leanFloorTokens);
   if (Number.isFinite(existing) && existing > 0) {
     return { floorTokens: existing, provisional: proj.leanFloorProvisional === true };
@@ -607,8 +714,7 @@ export function ensureProvisionalFloor(home, projectRoot, footprintTokens, now =
   proj.leanFloorTokens = Math.round(fp);
   proj.leanFloorAt = now;
   proj.leanFloorProvisional = true;
-  state.projects[key] = proj;
-  saveState(state, home);
+  saveState(proj, projectRoot, home);
   return { floorTokens: Math.round(fp), provisional: true };
 }
 
@@ -659,10 +765,7 @@ export function sanitizeLeanFloor(rawLeanFloorTokens, footprintTokens) {
 // `perDay`/`breakEvenDays`/`floorUnmeasured` (breakEven()'s output,
 // optional) back the Stop hook's payback line on ANY ask, not just FULL's.
 export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
-  const state = pruneOrphans(loadState(home));
-  state.projects = state.projects || {};
-  const key = projKey(projectRoot);
-  const proj = state.projects[key] || {};
+  const proj = loadState(projectRoot, home);
   const perDay = Number(verdict && verdict.perDay);
   const breakEvenDays = Number(verdict && verdict.breakEvenDays);
   const hardCeilingTokens = Number(verdict && verdict.hardCeilingTokens);
@@ -689,8 +792,7 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
     alwaysLoadedBytes: Number.isFinite(alwaysLoadedBytes) ? Math.round(alwaysLoadedBytes) : 0,
     at: now,
   };
-  state.projects[key] = proj;
-  return saveState(state, home);
+  return saveState(proj, projectRoot, home);
 }
 
 // 0d/0f (MEMORY.md "AUTHORITATIVE 3-FLOW" — supersedes 0e "THE OBESE LOOP"):
@@ -704,14 +806,10 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
 // auto-Quick-silent, full stop — 0d). Cleared automatically the moment the
 // band returns to LEAN (recordCrossing's own reset), never by a clock.
 export function markQuickTried(home, projectRoot, now = Date.now()) {
-  const state = pruneOrphans(loadState(home));
-  state.projects = state.projects || {};
-  const key = projKey(projectRoot);
-  const proj = state.projects[key] || {};
+  const proj = loadState(projectRoot, home);
   proj.quickTried = true;
   proj.quickTriedAt = now;
-  state.projects[key] = proj;
-  return saveState(state, home);
+  return saveState(proj, projectRoot, home);
 }
 
 // ---------------------------------------------------------------------------
@@ -763,10 +861,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
   // pre-existing 2-key/3-key shape (the shape the unit pins assert).
   const { quickTried = false, fatTokens = 0, session } = opts || {};
   const withSession = (o) => (session !== undefined ? { ...o, session } : o);
-  const state = pruneOrphans(loadState(home));
-  state.projects = state.projects || {};
-  const key = projKey(projectRoot);
-  const proj = state.projects[key] || {};
+  const proj = loadState(projectRoot, home);
   if (newBand === 'LEAN') {
     delete proj.lastCrossing;
     // 0f: LEAN is the episode's clean reset — a FUTURE FULL plateau gets a
@@ -834,8 +929,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
   ) {
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
   }
-  state.projects[key] = proj;
-  return saveState(state, home);
+  return saveState(proj, projectRoot, home);
 }
 
 // Sanitize a project's cached lastCrossing for the Stop hot path: any doubt —
@@ -871,13 +965,9 @@ export function sanitizeCrossing(rawCrossing, now = Date.now()) {
 // one only if emission-time consumption proves too eager in practice (e.g. a
 // session killed before the Stop hook's feedback ever reached the user).
 export function consumeCrossing(home, projectRoot, now = Date.now()) {
-  const state = pruneOrphans(loadState(home));
-  state.projects = state.projects || {};
-  const key = projKey(projectRoot);
-  const proj = state.projects[key] || {};
+  const proj = loadState(projectRoot, home);
   if (proj.lastCrossing && typeof proj.lastCrossing === 'object') {
     proj.lastCrossing = { ...proj.lastCrossing, consumed: true, consumedAt: now };
   }
-  state.projects[key] = proj;
-  return saveState(state, home);
+  return saveState(proj, projectRoot, home);
 }

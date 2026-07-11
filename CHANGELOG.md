@@ -2,6 +2,19 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-rc.3] - 2026-07-12
+
+The well-behaved-OS-citizen relocation (series law: one namespace, no scatter). CoalWash's per-session state stops littering `~/.claude/`'s root as a scattered dotfile and moves into a namespaced, memory-anchored home — with a transparent one-time migration that deletes the old files. rc-line, PATCH-class: a defect fix (the OS-scatter mess), no new capability, migration is transparent (nothing a user relied on breaks). rc → stable resumes after this proves in the field with no further code change.
+
+### Changed
+- **State relocated to a memory-anchored, namespaced home.** Per-project session state moved from the scattered `~/.claude/.coalwash-state.json` to `~/.claude/projects/<slug>/coalwash/state.json` (riding CC's own project directory — a project dir cleaned by CC free-prunes the state with it), and the global update-check stamp to `~/.claude/coal/coalwash/`. The path DERIVES from the platform's real memory dir (class-b's `ccMemoryDir`/`ccProjectSlug`), never a fresh hardcode — an unknown platform leaves the gauge inert, writing no state. Every derived per-project path is realpath-contained to `~/.claude` and fails closed to `~/.claude/coal/coalwash/`.
+- **Transparent one-time migration (the no-old-version-leftover standard, extended to the state layer).** On first read state loads from the new path, else the old-root file (LOCATION fallback); on first write the new file is written AND this project's old-root entry is deleted, the legacy file drained + removed once empty. Touches ONLY CoalWash's own prior state files, never a wildcard sweep. An rc.2-era store is preserved across the pure move (no spurious schema reset). The user config `~/.claude/.coalwash.json` is never touched (different class). A reinstall-then-reinstall no longer strands stale state.
+
+### Fixed
+- SECURITY.md path-containment wording no longer over-generalizes — the per-project path is realpath-contained + fail-closed; the fixed global stamp path is a construct-under-base with no untrusted input in it (two different, both-correct guarantees stated as one before). Corrected a `pruneDeadEntries` comment: keep-on-doubt is narrow (only a *throwing* stat keeps an entry; `existsSync` reads an offline/UNC path as absent, so its LEGACY entry can drain — safe, it is the old file's own recomputable bookkeeping, never memory content, and a wrongly-drained project re-stamps a provisional floor next session).
+
+Tests 448 → 452 (+10 OS-citizen: memory-anchor derivation, containment escape → fail-closed fallback, migration read/write/delete, config-untouched, cross-version un-strand; −6 obsolete shared-map orphan-prune). Review lane: SHIP (0 CRITICAL/HIGH/MEDIUM — every delete is a fixed-path, own-file, lazy-on-write removal inside the sandbox; the schema reset preserves the lean-floor baseline; containment fails closed). verify PASS, `plugin/` dist byte-identical.
+
 ## [0.1.0-rc.2] - 2026-07-12
 
 The first dogfood FIELD bugfix (rc = internal-proven; real use surfaced it). A chronically-FULL store that consumed its crossing — especially one carried across the pre-0m→0m upgrade — went permanently silent: the conductor could never re-arm, so the skill looked dead on a still-fat store. Fixed, plus the state layer joined the no-old-version-leftover guarantee. Bugfix only, no new capability.

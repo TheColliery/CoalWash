@@ -28,6 +28,11 @@ function sandbox() {
 function clean(...dirs) {
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 }
+// task #13: per-project state lives beside the CC memory dir.
+function projStatePath(home, proj) {
+  const slug = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
+  return path.join(home, '.claude', 'projects', slug, 'coalwash', 'state.json');
+}
 function run(cwd, home, args) {
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd,
@@ -89,7 +94,7 @@ test('gauge is READ-ONLY toward CoalWash state: no state file, no stamp, no verd
   try {
     const r = run(proj, home, ['gauge', '--json']);
     assert.strictEqual(r.status, 0, r.stderr);
-    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false,
+    assert.strictEqual(fs.existsSync(projStatePath(home, proj)), false,
       'a CLI gauge is a measurement, not a session event — it must not stamp');
   } finally { clean(home, proj); }
 });
@@ -193,9 +198,9 @@ test('gauge() direct call: honors an explicit home/cwd and applies the floor san
   delete process.env.CLAUDE_CONFIG_DIR;
   try {
     // A poisoned (grossly-implausible) stored floor must be discarded, not trusted.
-    const key = fs.realpathSync(proj);
-    fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'),
-      JSON.stringify({ projects: { [key]: { leanFloorTokens: 10 ** 9 } } }), 'utf8');
+    const sp = projStatePath(home, proj);
+    fs.mkdirSync(path.dirname(sp), { recursive: true });
+    fs.writeFileSync(sp, JSON.stringify({ leanFloorTokens: 10 ** 9 }), 'utf8');
     const g = gauge({ cwd: proj, home });
     assert.strictEqual(g.breakEven.floorUnmeasured, true, 'sanitizeLeanFloor discarded the poisoned floor');
     assert.match(gaugeLine(g), /no floor yet/);

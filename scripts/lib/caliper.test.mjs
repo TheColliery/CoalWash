@@ -6,10 +6,11 @@ import path from 'node:path';
 import {
   tokensEst, tokensEstFromBytes, gzipRatio, measureEntries, statOnlyFootprintBytes,
   bandVerdict, breakEven, sessionsPerDay, gaugeVerdict,
-  statePath, loadState, projectState, recordStamp, setLeanFloor, ensureProvisionalFloor,
-  sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
+  statePath, oldStatePath, loadState, recordStamp, setLeanFloor, ensureProvisionalFloor,
+  sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE, containedNewPath,
   recordVerdict, markQuickTried, recordSubSpawn,
-  migrateState, STATE_SCHEMA, SCHEMA_RESET_FIELDS,
+  STATE_SCHEMA, SCHEMA_RESET_FIELDS,
+  updateStampPath, oldUpdateStampPath, readUpdateStamp, writeUpdateStamp,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
   CEILING_BMI, CEILING_REARM_BMI, FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
@@ -26,6 +27,30 @@ function sandbox() {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-home-')));
   const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj-')));
   return { home, proj };
+}
+
+// task #13: state now lives per-project at <claudeBase>/projects/<slug>/coalwash/
+// state.json (flat). pstate = the project's flat state (the migrated view);
+// statePath(proj, home) is the real per-project file path (used to seed/corrupt).
+function pstate(home, proj) { return loadState(proj, home); }
+// Seed a per-project state file directly (the current-version, new-location
+// shape). Pass { stateSchema: undefined } to OMIT the stamp (model a pre-fix
+// store) — an explicit-undefined must NOT fall back to the current default.
+function seedProj(home, proj, projState, opts = {}) {
+  const p = statePath(proj, home);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  const schema = Object.prototype.hasOwnProperty.call(opts, 'stateSchema') ? opts.stateSchema : STATE_SCHEMA;
+  const obj = schema === undefined ? { ...projState } : { ...projState, stateSchema: schema };
+  fs.writeFileSync(p, JSON.stringify(obj), 'utf8');
+}
+// Seed the OLD single-file root state (pre-relocation) — models a pre-upgrade store.
+function seedOldRoot(home, entriesByProj, { stateSchema } = {}) {
+  const projects = {};
+  for (const [pr, st] of entriesByProj) projects[fs.realpathSync(pr)] = st;
+  const obj = { projects };
+  if (stateSchema !== undefined) obj.stateSchema = stateSchema;
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(oldStatePath(home), JSON.stringify(obj), 'utf8');
 }
 function clean(...dirs) {
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
@@ -231,32 +256,33 @@ test('state: recordStamp persists and ring-caps; floor round-trips; corrupt file
   const { home, proj } = sandbox();
   try {
     for (let i = 0; i < STAMP_RING_MAX + 5; i++) recordStamp(home, proj, 100 + i, 1000 + i);
-    const st = loadState(home);
-    const ps = projectState(st, proj);
+    const ps = pstate(home, proj);
     assert.strictEqual(ps.stamps.length, STAMP_RING_MAX, 'ring-capped');
     assert.strictEqual(ps.stamps[ps.stamps.length - 1].fp, 100 + STAMP_RING_MAX + 4);
 
     assert.strictEqual(setLeanFloor(home, proj, 777), true);
-    const ps2 = projectState(loadState(home), proj);
+    const ps2 = pstate(home, proj);
     assert.strictEqual(ps2.leanFloorTokens, 777);
     assert.strictEqual(ps2.stamps.length, STAMP_RING_MAX, 'the floor write keeps the stamps');
 
-    fs.writeFileSync(statePath(home), '{ corrupt', 'utf8');
-    assert.deepStrictEqual(loadState(home), {}, 'corrupt state self-heals to empty');
+    // task #13: state is per-project — the file lives beside the CC memory dir.
+    assert.strictEqual(statePath(proj, home), path.join(home, '.claude', 'projects', fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-'), 'coalwash', 'state.json'), 'state rides the memory dir');
+    fs.writeFileSync(statePath(proj, home), '{ corrupt', 'utf8');
+    assert.deepStrictEqual(loadState(proj, home), {}, 'corrupt state self-heals to empty');
     const after = recordStamp(home, proj, 42, 999);
     assert.strictEqual(after.stamps.length, 1, 'recording resumes cleanly after corruption');
   } finally { clean(home, proj); }
 });
 
-test('state isolation: two projects under one home do not mix', () => {
+test('state isolation: two projects each get their OWN per-project file — they never mix', () => {
   const { home, proj } = sandbox();
   const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2-')));
   try {
     recordStamp(home, proj, 100, 1);
     recordStamp(home, proj2, 200, 2);
-    const st = loadState(home);
-    assert.strictEqual(projectState(st, proj).stamps[0].fp, 100);
-    assert.strictEqual(projectState(st, proj2).stamps[0].fp, 200);
+    assert.notStrictEqual(statePath(proj, home), statePath(proj2, home), 'distinct slug dirs → distinct files');
+    assert.strictEqual(pstate(home, proj).stamps[0].fp, 100);
+    assert.strictEqual(pstate(home, proj2).stamps[0].fp, 200);
   } finally { clean(home, proj, proj2); }
 });
 
@@ -295,48 +321,159 @@ test('sanitizeLeanFloor: without a usable footprint to compare against, basic sa
 });
 
 // ---------------------------------------------------------------------------
-// state orphan prune (#21)
+// task #13 — OS-CITIZEN STATE RELOCATION: per-project state rides the CC memory
+// dir; migration read-new/fallback-old + write-new/delete-old; hard containment;
+// slug-rot / ride-the-memory / config-untouched; global update stamp → coal/.
+// (The old shared-map orphan-prune is GONE — CC deletes the slug dir on project
+// removal, a free orphan-prune; the legacy file's own drain is tested below.)
 // ---------------------------------------------------------------------------
 
-test('orphan prune: a project whose path no longer exists is dropped on the next state write; the live project is untouched', () => {
+test('(a) new-location round-trip: writes land beside the CC memory dir, reads come back', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordStamp(home, proj, 1234, 1);
+    const p = statePath(proj, home);
+    assert.ok(p.startsWith(path.join(home, '.claude', 'projects')), 'inside ~/.claude/projects');
+    assert.ok(p.endsWith(path.join('coalwash', 'state.json')), 'in the per-project coalwash/ subdir');
+    assert.ok(fs.existsSync(p), 'the per-project file exists on disk');
+    assert.strictEqual(pstate(home, proj).stamps[0].fp, 1234, 'round-trips');
+    assert.strictEqual(JSON.parse(fs.readFileSync(p, 'utf8')).stateSchema, STATE_SCHEMA, 'schema stamped on write');
+  } finally { clean(home, proj); }
+});
+
+test('(b) migration: old-root state present + new absent → read via fallback; first write relocates + drops the old entry, leanFloor PRESERVED', () => {
+  const { home, proj } = sandbox();
+  try {
+    // Pre-upgrade store lives in the OLD single file (rc.2-era: stateSchema 1).
+    seedOldRoot(home, [[proj, { leanFloorTokens: 29054, leanFloorProvisional: false, stamps: [{ t: 1, fp: 100 }], lastVerdict: { band: 'FULL', overCeiling: true } }]], { stateSchema: STATE_SCHEMA });
+    assert.strictEqual(fs.existsSync(statePath(proj, home)), false, 'precondition: no new-location file yet');
+
+    // READ falls back to the old-root entry (no write yet).
+    assert.strictEqual(pstate(home, proj).leanFloorTokens, 29054, 'read via old-root fallback');
+    assert.strictEqual(fs.existsSync(statePath(proj, home)), false, 'a pure read never writes the new file');
+
+    // First WRITE relocates to the new path AND drains the old-root file.
+    recordStamp(home, proj, 500, 2);
+    assert.ok(fs.existsSync(statePath(proj, home)), 'relocated to the per-project path');
+    assert.strictEqual(fs.existsSync(oldStatePath(home)), false, 'the drained legacy file is deleted (no-old-version-leftover)');
+    const st = pstate(home, proj);
+    assert.strictEqual(st.leanFloorTokens, 29054, 'the version-STABLE baseline SURVIVES the move');
+    assert.strictEqual(st.lastVerdict.band, 'FULL', 'an rc.2-era (current-schema) crossing is PRESERVED across the pure LOCATION move');
+    assert.strictEqual(st.stamps.length, 2, 'the migrated stamps + the new one');
+  } finally { clean(home, proj); }
+});
+
+test('(b2) migration also runs the pre-rc.2 SCHEMA reset (old-root with NO schema): version-sensitive cleared, leanFloor kept', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedOldRoot(home, [[proj, { leanFloorTokens: 8000, lastCrossing: { band: 'FULL', at: 1, consumed: true }, quickTried: true, lastVerdict: { band: 'FULL' } }]]); // NO stateSchema → pre-rc.2
+    const view = pstate(home, proj);
+    assert.strictEqual(view.lastCrossing, undefined, 'pre-schema crossing reset on read');
+    assert.strictEqual(view.quickTried, undefined);
+    assert.strictEqual(view.lastVerdict, undefined);
+    assert.strictEqual(view.leanFloorTokens, 8000, 'baseline preserved');
+    recordStamp(home, proj, 100, 5); // persist the migration
+    assert.strictEqual(JSON.parse(fs.readFileSync(statePath(proj, home), 'utf8')).stateSchema, STATE_SCHEMA, 'schema stamped at the new location');
+    assert.strictEqual(fs.existsSync(oldStatePath(home)), false, 'legacy file drained');
+  } finally { clean(home, proj); }
+});
+
+test('(b3) legacy-file drain also prunes a since-deleted project\'s stale entry (keep-on-doubt), so the file can empty out', () => {
   const { home, proj } = sandbox();
   const deadProj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-')));
   try {
-    recordStamp(home, deadProj, 50);
-    recordStamp(home, proj, 100);
-    assert.ok(projectState(loadState(home), deadProj).stamps, 'dead project tracked before its folder is removed');
-
-    fs.rmSync(deadProj, { recursive: true, force: true }); // the project folder is now gone
-    recordStamp(home, proj, 101); // ANY project's next state write triggers the lazy prune
-
-    const st = loadState(home);
-    assert.deepStrictEqual(projectState(st, deadProj), {}, 'the dead entry is pruned');
-    assert.strictEqual(projectState(st, proj).stamps.length, 2, 'the live project entry is untouched');
+    seedOldRoot(home, [[proj, { leanFloorTokens: 5000 }], [deadProj, { leanFloorTokens: 999 }]], { stateSchema: STATE_SCHEMA });
+    fs.rmSync(deadProj, { recursive: true, force: true }); // the dead project's folder is gone
+    recordStamp(home, proj, 100, 1); // the LIVE project migrates; the drain sees the dead entry has no folder
+    assert.strictEqual(fs.existsSync(oldStatePath(home)), false, 'the last live entry migrated + the dead entry pruned → file removed');
   } finally { clean(home, proj); }
 });
 
-test('orphan prune: fires from setLeanFloor too (every write path, not just recordStamp)', () => {
-  const { home, proj } = sandbox();
-  const dead1 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-lf-')));
+test('(c) containment: containedNewPath accepts an in-sandbox path, rejects an out-of-sandbox one', () => {
+  const { home } = sandbox();
+  const base = path.join(home, '.claude');
+  fs.mkdirSync(base, { recursive: true });
   try {
-    recordStamp(home, dead1, 50);
-    fs.rmSync(dead1, { recursive: true, force: true });
-    setLeanFloor(home, proj, 500);
-    assert.deepStrictEqual(projectState(loadState(home), dead1), {}, 'setLeanFloor prunes too');
+    assert.strictEqual(containedNewPath(path.join(base, 'projects', 'x', 'coalwash', 'state.json'), base), true, 'a to-be-created path under base passes');
+    assert.strictEqual(containedNewPath(path.join(home, 'elsewhere', 'evil.json'), base), false, 'a sibling-of-base path is rejected (lexical ..)');
+    assert.strictEqual(containedNewPath(path.join(os.tmpdir(), 'far', 'evil.json'), base), false, 'a fully-outside path is rejected');
+  } finally { clean(home); }
+});
+
+test('(c2) containment fail-closed: a projects/<slug> dir symlinked OUT of ~/.claude → statePath falls back to coal/, never writes outside', (t) => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));
+  const base = path.join(home, '.claude');
+  const slug = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
+  try {
+    fs.mkdirSync(path.join(base, 'projects'), { recursive: true });
+    try {
+      fs.symlinkSync(outside, path.join(base, 'projects', slug), 'junction'); // escape hatch
+    } catch {
+      t.skip('symlink/junction creation unprivileged on this host'); // VISIBLE skip (never a silent vacuous pass)
+      return;
+    }
+    const p = statePath(proj, home);
+    assert.ok(p.startsWith(path.join(base, 'coal', 'coalwash')), 'derived path escaped → fell back to the coal/ namespace');
+    recordStamp(home, proj, 100, 1);
+    assert.strictEqual(fs.existsSync(path.join(outside, 'coalwash')), false, 'nothing was written through the escaping symlink');
+    assert.ok(fs.existsSync(p), 'the state landed in the in-sandbox fallback');
+  } finally { clean(home, proj, outside); }
+});
+
+test('(d) ride-the-memory: the state path follows the memory-dir slug — a different project → a different dir, no ghost at the old one', () => {
+  const { home, proj } = sandbox();
+  const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2b-')));
+  try {
+    const slug1 = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
+    const slug2 = fs.realpathSync(proj2).replace(/[^A-Za-z0-9]/g, '-');
+    assert.ok(statePath(proj, home).includes(slug1), 'proj state rides proj\'s slug dir');
+    assert.ok(statePath(proj2, home).includes(slug2), 'proj2 state rides proj2\'s slug dir');
+    recordStamp(home, proj2, 42, 1);
+    assert.strictEqual(fs.existsSync(statePath(proj, home)), false, 'no ghost state under the other project\'s slug');
+    assert.ok(fs.existsSync(statePath(proj2, home)), 'state followed to proj2\'s memory-dir sibling');
+  } finally { clean(home, proj, proj2); }
+});
+
+test('(e) slug-rot fail-safe: a never-seen project (derived dir unresolvable/empty) yields {} → a fresh provisional floor, never a crash', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.doesNotThrow(() => statePath(proj, home), 'statePath never throws on an absent memory dir');
+    assert.deepStrictEqual(loadState(proj, home), {}, 'no state anywhere → empty, not a throw');
+    const r = ensureProvisionalFloor(home, proj, 12000, 1);
+    assert.deepStrictEqual(r, { floorTokens: 12000, provisional: true }, 'a fresh provisional floor is stamped (0j) — the bootstrap path holds under slug-rot');
   } finally { clean(home, proj); }
 });
 
-test('orphan prune: a still-existing project is NEVER pruned, and nothing on disk is touched beyond the stat', () => {
+test('(f) config file untouched by migration: ~/.claude/.coalwash.json is byte-identical after a relocation write', () => {
   const { home, proj } = sandbox();
-  const liveProj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-live-')));
-  const sentinel = path.join(liveProj, 'still-here.txt');
   try {
-    fs.writeFileSync(sentinel, 'untouched');
-    recordStamp(home, liveProj, 50);
-    recordStamp(home, proj, 100); // a second write, the prune runs again
-    assert.ok(projectState(loadState(home), liveProj).stamps, 'a still-existing project survives the prune');
-    assert.strictEqual(fs.readFileSync(sentinel, 'utf8'), 'untouched', 'the prune never touches project disk contents');
-  } finally { clean(home, proj, liveProj); }
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const cfgPath = path.join(home, '.claude', '.coalwash.json');
+    const cfgBody = JSON.stringify({ coalwashMode: 'auto', fullPercent: 6 });
+    fs.writeFileSync(cfgPath, cfgBody, 'utf8');
+    seedOldRoot(home, [[proj, { leanFloorTokens: 5000 }]], { stateSchema: STATE_SCHEMA });
+    recordStamp(home, proj, 100, 1); // relocates state + drops the old-root file
+    assert.strictEqual(fs.readFileSync(cfgPath, 'utf8'), cfgBody, 'the user CONFIG is never touched by the state migration');
+  } finally { clean(home, proj); }
+});
+
+test('(g) update stamp → coal/coalwash/: write lands there + drops the old root stamp; read migrates old→new', () => {
+  const { home } = sandbox();
+  try {
+    // old stamp only → read finds it via fallback
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(oldUpdateStampPath(home), '111', 'utf8');
+    assert.strictEqual(readUpdateStamp(home), 111, 'reads the old stamp via fallback');
+
+    // write relocates it to coal/ and deletes the old one
+    writeUpdateStamp(222, home);
+    assert.strictEqual(updateStampPath(home), path.join(home, '.claude', 'coal', 'coalwash', 'update-check'));
+    assert.ok(fs.existsSync(updateStampPath(home)), 'new stamp at coal/coalwash/');
+    assert.strictEqual(fs.existsSync(oldUpdateStampPath(home)), false, 'old root stamp deleted (no-old-version-leftover)');
+    assert.strictEqual(readUpdateStamp(home), 222, 'reads the new stamp');
+    assert.strictEqual(readUpdateStamp(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-empty-'))), 0, 'neither stamp → 0');
+  } finally { clean(home); }
 });
 
 // ---------------------------------------------------------------------------
@@ -352,7 +489,7 @@ test('recordVerdict: round-trips through state (incl. overCeiling + payback + ha
   try {
     const t1 = Date.now();
     recordVerdict(home, proj, { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 4004, overCeiling: true, perDay: 500, breakEvenDays: 3.2, floorUnmeasured: false, hardCeilingTokens: 36000 }, t1);
-    const proj1 = projectState(loadState(home), proj);
+    const proj1 = pstate(home, proj);
     assert.strictEqual(proj1.lastVerdict.band, 'FULL');
     assert.strictEqual(proj1.lastVerdict.reason, 'absolute-cap');
     assert.strictEqual(proj1.lastVerdict.economical, true);
@@ -366,7 +503,7 @@ test('recordVerdict: round-trips through state (incl. overCeiling + payback + ha
 
     const t2 = t1 + 1000;
     recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0, overCeiling: false }, t2);
-    const proj2 = projectState(loadState(home), proj);
+    const proj2 = pstate(home, proj);
     assert.strictEqual(proj2.lastVerdict.band, 'LEAN', 'the new LEAN verdict overwrote the stale FULL — nothing lingers');
     assert.strictEqual(proj2.lastVerdict.overCeiling, false, 'the hysteresis bit clears with the band');
   } finally { clean(home, proj); }
@@ -376,7 +513,7 @@ test('recordVerdict: missing/non-finite payback/hardCeilingTokens fields degrade
   const { home, proj } = sandbox();
   try {
     recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi' });
-    const st = projectState(loadState(home), proj).lastVerdict;
+    const st = pstate(home, proj).lastVerdict;
     assert.strictEqual(st.overCeiling, false);
     assert.strictEqual(st.perDay, 0);
     assert.strictEqual(st.breakEvenDays, null);
@@ -385,35 +522,23 @@ test('recordVerdict: missing/non-finite payback/hardCeilingTokens fields degrade
   } finally { clean(home, proj); }
 });
 
-test('recordVerdict: orphan-prune still runs on this write path (consistent with setLeanFloor)', () => {
-  const { home, proj } = sandbox();
-  const dead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-verdict-')));
-  try {
-    recordStamp(home, dead, 50);
-    fs.rmSync(dead, { recursive: true, force: true });
-    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0 });
-    assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'recordVerdict prunes too');
-  } finally { clean(home, proj); }
-});
-
-test('G2: every corrupt/truncated/empty/wrong-shaped state file self-heals to {} — never throws', () => {
+test('G2: every corrupt/truncated/empty/wrong-shaped per-project state file self-heals to {} — never throws', () => {
   const { home, proj } = sandbox();
   try {
-    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
+    fs.mkdirSync(path.dirname(statePath(proj, home)), { recursive: true });
     const cases = [
       '', // empty file
-      '{"projects": {"C:\\\\foo": {"leanFloorTok', // truncated mid-token
+      '{"leanFloorTok', // truncated mid-token
       '[1,2,3]', // valid JSON, wrong top-level shape (array)
       '"just a string"',
       '42',
       'null',
       'not json at all { [ garbage',
-      JSON.stringify({ projects: 'not an object' }),
     ];
     for (const content of cases) {
-      fs.writeFileSync(statePath(home), content, 'utf8');
-      assert.doesNotThrow(() => loadState(home), `must not throw on: ${JSON.stringify(content)}`);
-      const ps = projectState(loadState(home), proj);
+      fs.writeFileSync(statePath(proj, home), content, 'utf8');
+      assert.doesNotThrow(() => loadState(proj, home), `must not throw on: ${JSON.stringify(content)}`);
+      const ps = pstate(home, proj);
       assert.strictEqual(sanitizeLeanFloor(ps.leanFloorTokens, 5000), 0, 'no case yields a trusted floor');
     }
   } finally { clean(home, proj); }
@@ -435,7 +560,7 @@ test('recordCrossing: a rise arms an unconsumed crossing at the new band', () =>
   const { home, proj } = sandbox();
   try {
     recordCrossing(home, proj, 'OBESE', 'LEAN', 1000);
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.deepStrictEqual(st.lastCrossing, { band: 'OBESE', at: 1000, consumed: false });
   } finally { clean(home, proj); }
 });
@@ -444,7 +569,7 @@ test('recordCrossing: the "qualifying past" case — no prior band on record def
   const { home, proj } = sandbox();
   try {
     recordCrossing(home, proj, 'FULL', undefined, 1000); // prevBand undefined -> rank 0 (LEAN)
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.band, 'FULL');
+    assert.strictEqual(pstate(home, proj).lastCrossing.band, 'FULL');
   } finally { clean(home, proj); }
 });
 
@@ -453,11 +578,11 @@ test('recordCrossing: same-or-falling band does nothing — an existing pending 
   try {
     recordCrossing(home, proj, 'OBESE', 'LEAN', 1000);
     recordCrossing(home, proj, 'OBESE', 'OBESE', 2000); // same band again
-    let st = projectState(loadState(home), proj);
+    let st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.at, 1000, 'the crossing is not re-armed/overwritten by a same-band repeat');
 
     recordCrossing(home, proj, 'OBESE', 'FULL', 3000); // falling (FULL -> OBESE) also does nothing
-    st = projectState(loadState(home), proj);
+    st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.at, 1000, 'a falling band never re-arms either');
   } finally { clean(home, proj); }
 });
@@ -466,20 +591,9 @@ test('recordCrossing: LEAN clears any pending crossing outright', () => {
   const { home, proj } = sandbox();
   try {
     recordCrossing(home, proj, 'OBESE', 'LEAN', 1000);
-    assert.ok(projectState(loadState(home), proj).lastCrossing);
+    assert.ok(pstate(home, proj).lastCrossing);
     recordCrossing(home, proj, 'LEAN', 'OBESE', 2000);
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined);
-  } finally { clean(home, proj); }
-});
-
-test('recordCrossing: orphan-prune still runs on this write path', () => {
-  const { home, proj } = sandbox();
-  const dead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-crossing-')));
-  try {
-    recordStamp(home, dead, 50);
-    fs.rmSync(dead, { recursive: true, force: true });
-    recordCrossing(home, proj, 'OBESE', 'LEAN');
-    assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'recordCrossing prunes too');
+    assert.strictEqual(pstate(home, proj).lastCrossing, undefined);
   } finally { clean(home, proj); }
 });
 
@@ -508,24 +622,13 @@ test('consumeCrossing: marks a pending crossing consumed; a project with no cros
   try {
     recordCrossing(home, proj, 'OBESE', 'LEAN', 1000);
     assert.strictEqual(consumeCrossing(home, proj, 2000), true);
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.consumed, true);
     assert.strictEqual(st.lastCrossing.consumedAt, 2000);
     assert.strictEqual(st.lastCrossing.band, 'OBESE', 'the band/at fields survive consumption');
     assert.strictEqual(sanitizeCrossing(st.lastCrossing), null, 'a consumed crossing never re-arms');
 
     assert.doesNotThrow(() => consumeCrossing(home, proj)); // no lastCrossing at all -> no-op, never throws
-  } finally { clean(home, proj); }
-});
-
-test('consumeCrossing: orphan-prune still runs on this write path', () => {
-  const { home, proj } = sandbox();
-  const dead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-consume-')));
-  try {
-    recordStamp(home, dead, 50);
-    fs.rmSync(dead, { recursive: true, force: true });
-    consumeCrossing(home, proj);
-    assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'consumeCrossing prunes too');
   } finally { clean(home, proj); }
 });
 
@@ -779,12 +882,12 @@ test('0g: recordVerdict round-trips econLatched, and a LEAN overwrite clears it 
   const { home, proj } = sandbox();
   try {
     recordVerdict(home, proj, { band: 'FULL', reason: 'economic', economical: true, fatTokens: 6000, overCeiling: true, econLatched: true }, 1000);
-    assert.strictEqual(projectState(loadState(home), proj).lastVerdict.econLatched, true);
+    assert.strictEqual(pstate(home, proj).lastVerdict.econLatched, true);
     recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0, overCeiling: false, econLatched: false }, 2000);
-    const st = projectState(loadState(home), proj).lastVerdict;
+    const st = pstate(home, proj).lastVerdict;
     assert.strictEqual(st.econLatched, false, 'LEAN writes the latch false');
     recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi' }, 3000);
-    assert.strictEqual(projectState(loadState(home), proj).lastVerdict.econLatched, false, 'a missing econLatched degrades to false, never undefined/throw');
+    assert.strictEqual(pstate(home, proj).lastVerdict.econLatched, false, 'a missing econLatched degrades to false, never undefined/throw');
   } finally { clean(home, proj); }
 });
 
@@ -800,7 +903,7 @@ test('0j ensureProvisionalFloor: a never-seen store stamps floor = footprint wit
   try {
     const r = ensureProvisionalFloor(home, proj, 10000, 1000);
     assert.deepStrictEqual(r, { floorTokens: 10000, provisional: true });
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.leanFloorTokens, 10000);
     assert.strictEqual(st.leanFloorProvisional, true);
     assert.strictEqual(st.leanFloorAt, 1000);
@@ -819,7 +922,7 @@ test('0j: the provisional floor NEVER ratchets — a later, bigger gauge returns
     ensureProvisionalFloor(home, proj, 10000, 1000);
     const later = ensureProvisionalFloor(home, proj, 25000, 2000); // store grew — the baseline must not follow
     assert.deepStrictEqual(later, { floorTokens: 10000, provisional: true });
-    assert.strictEqual(projectState(loadState(home), proj).leanFloorTokens, 10000);
+    assert.strictEqual(pstate(home, proj).leanFloorTokens, 10000);
   } finally { clean(home, proj); }
 });
 
@@ -829,7 +932,7 @@ test('0j: an existing REAL floor passes through untouched (no stamp, no flag) �
     setLeanFloor(home, proj, 8000, 500);
     const r = ensureProvisionalFloor(home, proj, 12000, 1000);
     assert.deepStrictEqual(r, { floorTokens: 8000, provisional: false });
-    assert.notStrictEqual(projectState(loadState(home), proj).leanFloorProvisional, true);
+    assert.notStrictEqual(pstate(home, proj).leanFloorProvisional, true);
 
     // Poisoned floor on file: read-time sanitizing discards it downstream,
     // but the STAMPING site must not overwrite it (setLeanFloor's job alone).
@@ -845,7 +948,7 @@ test('0j: setLeanFloor (a gate-passed clean) overwrites the provisional floor AN
   try {
     ensureProvisionalFloor(home, proj, 10000, 1000);
     setLeanFloor(home, proj, 7000, 2000);
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.leanFloorTokens, 7000);
     assert.strictEqual(st.leanFloorProvisional, undefined, 'the real clean cleared the provisional flag');
     // ...and the now-real floor is passthrough for every later gauge.
@@ -858,7 +961,7 @@ test('0j: a footprint under FLOOR_MIN_TOKENS stamps nothing — the tiny-store g
   try {
     const r = ensureProvisionalFloor(home, proj, FLOOR_MIN_TOKENS - 1, 1000);
     assert.deepStrictEqual(r, { floorTokens: 0, provisional: false });
-    assert.strictEqual(projectState(loadState(home), proj).leanFloorTokens, undefined, 'nothing written');
+    assert.strictEqual(pstate(home, proj).leanFloorTokens, undefined, 'nothing written');
     // exactly at the minimum IS stamped (mirrors bandVerdict's own boundary)
     assert.deepStrictEqual(ensureProvisionalFloor(home, proj, FLOOR_MIN_TOKENS, 2000), { floorTokens: FLOOR_MIN_TOKENS, provisional: true });
   } finally { clean(home, proj); }
@@ -885,7 +988,7 @@ test('0o recordSubSpawn: increments the counter and accumulates the CACHED parce
   try {
     // Never gauged: no lastVerdict -> spawn counted, cost 0 (never compute).
     recordSubSpawn(home, proj, 1000);
-    let st = projectState(loadState(home), proj);
+    let st = pstate(home, proj);
     assert.strictEqual(st.subSpawns, 1);
     assert.strictEqual(st.subParcelTokensAccum, 0);
 
@@ -893,7 +996,7 @@ test('0o recordSubSpawn: increments the counter and accumulates the CACHED parce
     recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', alwaysLoadedBytes: 40000 }, 2000); // ~10000 tok
     recordSubSpawn(home, proj, 3000);
     recordSubSpawn(home, proj, 4000);
-    st = projectState(loadState(home), proj);
+    st = pstate(home, proj);
     assert.strictEqual(st.subSpawns, 3, 'N spawns = N silent increments');
     assert.strictEqual(st.subParcelTokensAccum, 20000, 'two billed spawns x 10000 tok cached parcel (the first was cost-0)');
     assert.strictEqual(st.lastSubSpawnAt, 4000);
@@ -906,31 +1009,30 @@ test('0o session boundary: recordStamp (the once-per-session gauge heartbeat) RE
     recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', alwaysLoadedBytes: 4000 }, 500);
     recordSubSpawn(home, proj, 1000);
     recordSubSpawn(home, proj, 1100);
-    assert.strictEqual(projectState(loadState(home), proj).subSpawns, 2);
+    assert.strictEqual(pstate(home, proj).subSpawns, 2);
 
     recordStamp(home, proj, 1000, 2000); // the next session's first gauge
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.subSpawns, undefined, 'counters cleared at the session boundary');
     assert.strictEqual(st.subParcelTokensAccum, undefined);
     assert.ok(st.stamps.length >= 1, 'the stamp itself still lands');
 
     // ...and the new session accumulates fresh.
     recordSubSpawn(home, proj, 3000);
-    assert.strictEqual(projectState(loadState(home), proj).subSpawns, 1);
+    assert.strictEqual(pstate(home, proj).subSpawns, 1);
   } finally { clean(home, proj); }
 });
 
 test('0o recordSubSpawn: corrupt counter values self-heal (non-numeric -> restart from 0+1), never throw', () => {
   const { home, proj } = sandbox();
   try {
-    recordStamp(home, proj, 100, 500); // create the project entry
-    const raw = loadState(home);
-    const key = Object.keys(raw.projects)[0];
-    raw.projects[key].subSpawns = 'garbage';
-    raw.projects[key].subParcelTokensAccum = null;
-    fs.writeFileSync(statePath(home), JSON.stringify(raw), 'utf8');
+    recordStamp(home, proj, 100, 500); // create the per-project file
+    const raw = JSON.parse(fs.readFileSync(statePath(proj, home), 'utf8'));
+    raw.subSpawns = 'garbage';
+    raw.subParcelTokensAccum = null;
+    fs.writeFileSync(statePath(proj, home), JSON.stringify(raw), 'utf8');
     assert.doesNotThrow(() => recordSubSpawn(home, proj, 1000));
-    const after = projectState(loadState(home), proj);
+    const after = pstate(home, proj);
     assert.strictEqual(after.subSpawns, 1, 'garbage collapses to a fresh count');
     assert.strictEqual(after.subParcelTokensAccum, 0);
   } finally { clean(home, proj); }
@@ -940,17 +1042,13 @@ test('0o recordSubSpawn: corrupt counter values self-heal (non-numeric -> restar
 // markQuickTried (0e "THE OBESE LOOP")
 // ---------------------------------------------------------------------------
 
-test('markQuickTried: sets quickTried + quickTriedAt, persists, and prunes orphans on this write path too', () => {
+test('markQuickTried: sets quickTried + quickTriedAt, persists', () => {
   const { home, proj } = sandbox();
-  const dead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-quicktried-')));
   try {
-    recordStamp(home, dead, 50);
-    fs.rmSync(dead, { recursive: true, force: true });
     markQuickTried(home, proj, 1234);
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.quickTried, true);
     assert.strictEqual(st.quickTriedAt, 1234);
-    assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'markQuickTried prunes too');
   } finally { clean(home, proj); }
 });
 
@@ -969,7 +1067,7 @@ test('recordCrossing: OBESE persisting (same band, no rise) with quickTried+grow
   const { home, proj } = sandbox();
   try {
     recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 });
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined, 'OBESE never arms an escalation crossing, no matter quickTried/growth');
+    assert.strictEqual(pstate(home, proj).lastCrossing, undefined, 'OBESE never arms an escalation crossing, no matter quickTried/growth');
   } finally { clean(home, proj); }
 });
 
@@ -977,7 +1075,7 @@ test('recordCrossing: OBESE reached again on a FALL (e.g. settling back from FUL
   const { home, proj } = sandbox();
   try {
     recordCrossing(home, proj, 'OBESE', 'FULL', 1000, { quickTried: true, fatTokens: 700 }); // a FALL, not a rise
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined);
+    assert.strictEqual(pstate(home, proj).lastCrossing, undefined);
   } finally { clean(home, proj); }
 });
 
@@ -986,7 +1084,7 @@ test('recordCrossing: after a PLAIN force is consumed (case-b Quick ran, quickTr
   try {
     seedConsumed(home, proj, { band: 'FULL', at: 500 }); // a plain force just ran + was consumed
     recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 });
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.deepStrictEqual(st.lastCrossing, { band: 'FULL', at: 1000, consumed: false, escalation: true });
     assert.strictEqual(st.lastEscalationFat, 500);
   } finally { clean(home, proj); }
@@ -996,7 +1094,7 @@ test('recordCrossing: FULL persisting WITHOUT quickTried stays inert — the wiz
   const { home, proj } = sandbox();
   try {
     recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: false, fatTokens: 500 });
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined);
+    assert.strictEqual(pstate(home, proj).lastCrossing, undefined);
   } finally { clean(home, proj); }
 });
 
@@ -1007,9 +1105,9 @@ test('recordCrossing: after the ask is armed, a plateau at the same fat stays SI
     recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 }); // ASK arms escalation, lastEscalationFat=500
     consumeCrossing(home, proj, 1100); // user "later" — the escalation is consumed
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 500 }); // same fat, later tick
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'flat fat never re-arms');
+    assert.strictEqual(pstate(home, proj).lastCrossing.at, 1000, 'flat fat never re-arms');
     recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 480 }); // fat SHRANK slightly
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'a shrink never re-arms either');
+    assert.strictEqual(pstate(home, proj).lastCrossing.at, 1000, 'a shrink never re-arms either');
   } finally { clean(home, proj); }
 });
 
@@ -1018,16 +1116,16 @@ test('0m: the FIRST ask of an episode arms after the day-one force at fat≡0 (o
   try {
     seedConsumed(home, proj, { band: 'FULL', at: 500 }); // the day-one force ran + was consumed
     recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 0 });
-    let st = projectState(loadState(home), proj);
+    let st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.escalation, true, 'first ask arms at any fat, 0 included');
     assert.strictEqual(st.lastEscalationFat, 0, 'the flagged level is recorded, 0 included');
     // ...consumed, then an unchanged fat-0 plateau never re-arms.
     consumeCrossing(home, proj, 1500);
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 0 });
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'a fat-0 plateau after the first ask stays silent — growth (past 0) is the only re-arm');
+    assert.strictEqual(pstate(home, proj).lastCrossing.at, 1000, 'a fat-0 plateau after the first ask stays silent — growth (past 0) is the only re-arm');
     // Genuine growth past the flagged 0 re-arms — FORCE FIRST (a PLAIN crossing, USER decision B), the ask follows after.
     recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 50 });
-    st = projectState(loadState(home), proj);
+    st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.at, 3000, 'genuine growth past the flagged level re-arms');
     assert.notStrictEqual(st.lastCrossing.escalation, true, 'growth re-arms a PLAIN force first — the free sweep re-runs before any ask');
   } finally { clean(home, proj); }
@@ -1041,7 +1139,7 @@ test('recordCrossing: fat GROWING past the last-asked level re-arms — FORCE fi
     // consumed at emission (the Stop hook's own discipline).
     consumeCrossing(home, proj, 1500);
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 900 }); // genuinely more fat
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.at, 2000, 'growth past the last-asked level re-arms');
     assert.strictEqual(st.lastCrossing.consumed, false);
     assert.notStrictEqual(st.lastCrossing.escalation, true, 'a PLAIN force crossing — the free sweep re-runs on the new lump first');
@@ -1055,7 +1153,7 @@ test('recordCrossing: a still-PENDING (unconsumed) crossing is never clobbered b
     seedConsumed(home, proj, { band: 'FULL', at: 400 }); // post-force
     recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 }); // arms a PENDING escalation (unconsumed)
     recordCrossing(home, proj, 'FULL', 'FULL', 5000, { quickTried: true, fatTokens: 9000 }); // huge growth, but the escalation is still pending
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.at, 1000, 'a pending, undelivered crossing is left exactly as it is — the "never re-arm a pending crossing" rule holds');
   } finally { clean(home, proj); }
 });
@@ -1066,7 +1164,7 @@ test('recordCrossing: LEAN clears quickTried + lastEscalationFat too (the episod
     recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 });
     markQuickTried(home, proj, 1000);
     recordCrossing(home, proj, 'LEAN', 'FULL', 2000);
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing, undefined);
     assert.strictEqual(st.quickTried, undefined);
     assert.strictEqual(st.lastEscalationFat, undefined);
@@ -1077,7 +1175,7 @@ test('recordCrossing: a plain rise-arm keeps the EXACT pre-existing 2-key shape 
   const { home, proj } = sandbox();
   try {
     recordCrossing(home, proj, 'FULL', 'OBESE', 1000, { quickTried: true, fatTokens: 4000 }); // a genuine rise
-    assert.deepStrictEqual(projectState(loadState(home), proj).lastCrossing, { band: 'FULL', at: 1000, consumed: false });
+    assert.deepStrictEqual(pstate(home, proj).lastCrossing, { band: 'FULL', at: 1000, consumed: false });
   } finally { clean(home, proj); }
 });
 
@@ -1090,14 +1188,11 @@ test('recordCrossing: a plain rise-arm keeps the EXACT pre-existing 2-key shape 
 // ---------------------------------------------------------------------------
 
 // Seed a consumed crossing directly (the state a prior session's Stop leaves).
+// Stamps the CURRENT schema so loadState treats it as an on-version store (these
+// tests exercise the recordCrossing re-arm, not the schema migration).
 function seedConsumed(home, proj, cross, extra = {}) {
-  const state = loadState(home);
-  state.projects = state.projects || {};
-  state.projects[projectStateKey(proj)] = { lastCrossing: { consumed: true, ...cross }, ...extra };
-  fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
-  fs.writeFileSync(statePath(home), JSON.stringify(state), 'utf8');
+  seedProj(home, proj, { lastCrossing: { consumed: true, ...cross }, ...extra });
 }
-function projectStateKey(proj) { return fs.realpathSync(proj); }
 
 test('rc.2 (a) THE LIVE REPRO: a consumed FULL crossing from an EARLIER session with NO session id + NO quickTried (pre-0m) → a new session still FULL with GROWN fat RE-ARMS (the un-strand)', () => {
   const { home, proj } = sandbox();
@@ -1107,7 +1202,7 @@ test('rc.2 (a) THE LIVE REPRO: a consumed FULL crossing from an EARLIER session 
     seedConsumed(home, proj, { band: 'FULL', at: 1000 }); // no session field
     // 23:10, a NEW session, still FULL, fat grew (5189).
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 5189, session: 'sess-B' });
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.consumed, false, 're-armed: a fresh unconsumed crossing');
     assert.strictEqual(st.lastCrossing.band, 'FULL');
     assert.strictEqual(st.lastCrossing.at, 2000);
@@ -1121,7 +1216,7 @@ test('rc.2 (b) SAME session, consumed crossing → NO re-arm (no-nag intact — 
   try {
     seedConsumed(home, proj, { band: 'FULL', at: 1000, session: 'sess-A' });
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 9999, session: 'sess-A' }); // same session, big fat
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.consumed, true, 'still consumed — no re-arm within the same session');
     assert.strictEqual(st.lastCrossing.at, 1000, 'untouched');
   } finally { clean(home, proj); }
@@ -1133,12 +1228,12 @@ test('rc.2 (c) NEW session but fat NOT grown past the last-flagged level (platea
     // A FLAGGED store: a prior escalation recorded lastEscalationFat = 500.
     seedConsumed(home, proj, { band: 'FULL', at: 1000, session: 'sess-A' }, { lastEscalationFat: 500 });
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 500, session: 'sess-B' }); // new session, SAME fat
-    let st = projectState(loadState(home), proj);
+    let st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.consumed, true, 'plateau across sessions stays silent — no re-arm');
     assert.strictEqual(st.lastCrossing.at, 1000);
     // a shrink also never re-arms
     recordCrossing(home, proj, 'FULL', 'FULL', 3000, { fatTokens: 480, session: 'sess-C' });
-    st = projectState(loadState(home), proj);
+    st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.at, 1000, 'a shrink never re-arms either');
   } finally { clean(home, proj); }
 });
@@ -1148,7 +1243,7 @@ test('rc.2 (d) NEW session with fat GROWN past the last-flagged level → re-arm
   try {
     seedConsumed(home, proj, { band: 'FULL', at: 1000, session: 'sess-A' }, { lastEscalationFat: 500 });
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 900, session: 'sess-B' }); // new session, grown fat
-    const st = projectState(loadState(home), proj);
+    const st = pstate(home, proj);
     assert.strictEqual(st.lastCrossing.consumed, false, 'grown fat in a new session re-arms');
     assert.strictEqual(st.lastCrossing.session, 'sess-B');
   } finally { clean(home, proj); }
@@ -1158,9 +1253,9 @@ test('rc.2 (e) LEAN reset still clears everything (branch 1 untouched) — sessi
   const { home, proj } = sandbox();
   try {
     recordCrossing(home, proj, 'FULL', 'OBESE', 1000, { fatTokens: 4000, session: 'sess-A' }); // rise, records session
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.session, 'sess-A');
+    assert.strictEqual(pstate(home, proj).lastCrossing.session, 'sess-A');
     recordCrossing(home, proj, 'LEAN', 'FULL', 2000, { session: 'sess-A' });
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined, 'LEAN clears the crossing (and its session) outright');
+    assert.strictEqual(pstate(home, proj).lastCrossing, undefined, 'LEAN clears the crossing (and its session) outright');
   } finally { clean(home, proj); }
 });
 
@@ -1169,13 +1264,13 @@ test('rc.2 (f) the rise + ask branches carry the session field but behave identi
   try {
     // rise WITH a session: same behavior, session recorded, no other field changes.
     recordCrossing(home, proj, 'FULL', 'OBESE', 1000, { quickTried: true, fatTokens: 4000, session: 'sess-A' });
-    assert.deepStrictEqual(projectState(loadState(home), proj).lastCrossing, { band: 'FULL', at: 1000, consumed: false, session: 'sess-A' });
+    assert.deepStrictEqual(pstate(home, proj).lastCrossing, { band: 'FULL', at: 1000, consumed: false, session: 'sess-A' });
     // ask WITH a session: after a plain force is consumed, the escalation arms with the session field + lastEscalationFat.
     const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2rc-')));
     try {
       seedConsumed(home, proj2, { band: 'FULL', at: 4000, session: 'sess-A' }); // a plain force just ran + consumed
       recordCrossing(home, proj2, 'FULL', 'FULL', 5000, { quickTried: true, fatTokens: 700, session: 'sess-A' });
-      const st = projectState(loadState(home), proj2);
+      const st = pstate(home, proj2);
       assert.deepStrictEqual(st.lastCrossing, { band: 'FULL', at: 5000, consumed: false, escalation: true, session: 'sess-A' });
       assert.strictEqual(st.lastEscalationFat, 700);
     } finally { clean(proj2); }
@@ -1187,7 +1282,7 @@ test('rc.2: a no-session call NEVER re-arms a consumed crossing (undefined !== u
   try {
     seedConsumed(home, proj, { band: 'FULL', at: 1000 }); // no session
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 9999 }); // no session passed
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.consumed, true, 'no session → no re-arm');
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'no session → no re-arm');
   } finally { clean(home, proj); }
 });
 
@@ -1198,7 +1293,7 @@ test('rc.2 (g) FULL-ONLY GATE: an OBESE consumed crossing NEVER re-arms via bran
     // new session, fat grown — under the buggy `>= OBESE` gate this re-armed;
     // FULL-only gate leaves the consumed OBESE crossing consumed.
     recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { fatTokens: 3000, session: 'sess-B' });
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.consumed, true, 'OBESE does NOT re-arm — the FULL-only gate closes the every-session-plateau nag');
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'OBESE does NOT re-arm — the FULL-only gate closes the every-session-plateau nag');
   } finally { clean(home, proj); }
 });
 
@@ -1210,10 +1305,10 @@ test('rc.2 (h) FULL PLATEAU STAYS SILENT: a store post-ask (an ESCALATION was co
     seedConsumed(home, proj, { band: 'FULL', at: 1000, session: 'sess-A', escalation: true }, { lastEscalationFat: 5000 });
     // session B, still FULL, fat UNCHANGED at the flagged level -> silent.
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 5000, session: 'sess-B' });
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.consumed, true, 'FULL plateau at the flagged fat re-arms NOTHING (fat > lastEscalationFat is false)');
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'FULL plateau at the flagged fat re-arms NOTHING (fat > lastEscalationFat is false)');
     // and a THIRD session, still the same fat -> still silent (not a one-off).
     recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 5000, session: 'sess-C' });
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.consumed, true, 'still silent on the third consecutive plateau session');
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'still silent on the third consecutive plateau session');
   } finally { clean(home, proj); }
 });
 
@@ -1225,32 +1320,32 @@ test('rc.2 (i) FULL plateau BREAKS on real growth: a post-ask store re-arms once
     // grown fat past the last-asked level -> FORCE-on-growth arms a PLAIN
     // crossing (the free Quick re-runs on the new lump first); the wizard ask
     // follows on the next tick once the force leaves the store over.
-    const c = projectState(loadState(home), proj).lastCrossing;
+    const c = pstate(home, proj).lastCrossing;
     assert.strictEqual(c.consumed, false, 'grown fat re-offers');
     assert.notStrictEqual(c.escalation, true, 'a PLAIN force crossing first — not the ask (force-then-ask per growth)');
   } finally { clean(home, proj); }
 });
 
 // ---------------------------------------------------------------------------
-// rc.2 STATE SCHEMA GUARD (migrateState) — the "no-old-version-leftover"
-// standard at the state layer: a reinstall/upgrade resets version-SENSITIVE
-// fields on the first read, PRESERVES the version-stable leanFloor baseline.
-// Write the raw old state directly (no stateSchema) to model a pre-fix store.
+// rc.2 STATE SCHEMA GUARD — the "no-old-version-leftover" standard at the state
+// layer: a reinstall/upgrade resets version-SENSITIVE fields on the first read,
+// PRESERVES the version-stable leanFloor baseline. task #13 folded the reset
+// into loadState (lazy per-project) — the standalone migrateState is gone; the
+// reset is now observable directly from the loaded view, the stamp lands on the
+// next saveState. Tests seed a per-project file WITHOUT a schema to model a
+// pre-fix store.
 // ---------------------------------------------------------------------------
 
-test('rc.2 SCHEMA (a): OLD state (no stateSchema, a consumed pre-0m crossing) → first migrate CLEARS the version-sensitive fields, PRESERVES leanFloor, STAMPS the schema', () => {
+test('rc.2 SCHEMA (a): OLD state (no stateSchema, a consumed pre-0m crossing) → the loaded view CLEARS the version-sensitive fields, PRESERVES leanFloor; the next write STAMPS the schema', () => {
   const { home, proj } = sandbox();
   try {
-    const key = fs.realpathSync(proj);
-    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
-    fs.writeFileSync(statePath(home), JSON.stringify({ projects: { [key]: {
+    seedProj(home, proj, {
       lastCrossing: { band: 'FULL', at: 1000, consumed: true }, quickTried: true, quickTriedAt: 900, lastEscalationFat: 5000,
       lastVerdict: { band: 'FULL', reason: 'absolute-cap', overCeiling: true },
       leanFloorTokens: 29054, leanFloorProvisional: false, leanFloorAt: 500, stamps: [{ t: 1, fp: 100 }],
       subSpawns: 3, subParcelTokensAccum: 12000, lastSubSpawnAt: 800,
-    } } }), 'utf8'); // NO stateSchema
-    assert.strictEqual(migrateState(home), true, 'a schema-less state migrates');
-    const st = projectState(loadState(home), proj);
+    }, { stateSchema: undefined }); // NO stateSchema → pre-fix
+    const st = loadState(proj, home);
     // version-SENSITIVE -> cleared
     assert.strictEqual(st.lastCrossing, undefined);
     assert.strictEqual(st.quickTried, undefined);
@@ -1265,64 +1360,60 @@ test('rc.2 SCHEMA (a): OLD state (no stateSchema, a consumed pre-0m crossing) �
     assert.strictEqual(st.subSpawns, 3);
     assert.strictEqual(st.subParcelTokensAccum, 12000);
     assert.strictEqual(st.lastSubSpawnAt, 800);
-    // schema stamped
-    assert.strictEqual(loadState(home).stateSchema, STATE_SCHEMA);
+    // schema stamped on the next write
+    recordStamp(home, proj, 42, 2);
+    assert.strictEqual(JSON.parse(fs.readFileSync(statePath(proj, home), 'utf8')).stateSchema, STATE_SCHEMA);
   } finally { clean(home, proj); }
 });
 
-test('rc.2 SCHEMA (b): a CURRENT-schema state is left untouched (no migration)', () => {
+test('rc.2 SCHEMA (b): a CURRENT-schema state is left untouched (no reset)', () => {
   const { home, proj } = sandbox();
   try {
-    const key = fs.realpathSync(proj);
-    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
-    fs.writeFileSync(statePath(home), JSON.stringify({ stateSchema: STATE_SCHEMA, projects: { [key]: {
-      lastCrossing: { band: 'FULL', at: 1000, consumed: true }, leanFloorTokens: 29054,
-    } } }), 'utf8');
-    assert.strictEqual(migrateState(home), false, 'current schema -> no migration');
-    const st = projectState(loadState(home), proj);
+    seedProj(home, proj, { lastCrossing: { band: 'FULL', at: 1000, consumed: true }, leanFloorTokens: 29054 }); // stamped current
+    const st = loadState(proj, home);
     assert.deepStrictEqual(st.lastCrossing, { band: 'FULL', at: 1000, consumed: true }, 'the crossing is preserved on a current-schema state');
     assert.strictEqual(st.leanFloorTokens, 29054);
   } finally { clean(home, proj); }
 });
 
-test('rc.2 SCHEMA (c): migration is IDEMPOTENT (twice = once)', () => {
+test('rc.2 SCHEMA (c): the reset is IDEMPOTENT (loadState is pure — reading twice = once)', () => {
   const { home, proj } = sandbox();
   try {
-    const key = fs.realpathSync(proj);
-    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
-    fs.writeFileSync(statePath(home), JSON.stringify({ projects: { [key]: { lastCrossing: { band: 'FULL', at: 1, consumed: true }, leanFloorTokens: 100 } } }), 'utf8');
-    assert.strictEqual(migrateState(home), true, 'first run migrates');
-    const after1 = projectState(loadState(home), proj);
-    assert.strictEqual(migrateState(home), false, 'second run is a no-op (schema now current)');
-    assert.deepStrictEqual(projectState(loadState(home), proj), after1, 'state identical after the second run');
+    seedProj(home, proj, { lastCrossing: { band: 'FULL', at: 1, consumed: true }, leanFloorTokens: 100 }, { stateSchema: undefined });
+    const a = loadState(proj, home);
+    const b = loadState(proj, home);
+    assert.deepStrictEqual(a, b, 'a pure read is idempotent');
+    assert.strictEqual(a.lastCrossing, undefined, 'reset applied');
+    // and once a write stamps the schema, a later read no longer resets
+    recordStamp(home, proj, 5, 5);
+    seedProj(home, proj, { lastCrossing: { band: 'FULL', at: 9, consumed: true }, leanFloorTokens: 100 }); // now current-schema
+    assert.deepStrictEqual(loadState(proj, home).lastCrossing, { band: 'FULL', at: 9, consumed: true }, 'a current-schema crossing survives');
   } finally { clean(home, proj); }
 });
 
-test('rc.2 SCHEMA (d): a CORRUPT/non-integer stateSchema is treated as OLDER → safe-migrate, never throws', () => {
+test('rc.2 SCHEMA (d): a CORRUPT/non-integer stateSchema is treated as OLDER → safe-reset, never throws', () => {
   const { home, proj } = sandbox();
   try {
-    const key = fs.realpathSync(proj);
-    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
+    const p = statePath(proj, home);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
     for (const bad of ['"garbage"', 'null', '0', '-1', '0.5']) {
-      fs.writeFileSync(statePath(home), `{ "stateSchema": ${bad}, "projects": { ${JSON.stringify(key)}: { "lastCrossing": { "band": "FULL", "at": 1, "consumed": true }, "leanFloorTokens": 77 } } }`, 'utf8');
-      assert.doesNotThrow(() => migrateState(home));
-      const st = projectState(loadState(home), proj);
-      assert.strictEqual(st.lastCrossing, undefined, `corrupt schema ${bad} → migrated (cleared crossing)`);
-      assert.strictEqual(st.leanFloorTokens, 77, 'baseline preserved through the safe-migrate');
-      assert.strictEqual(loadState(home).stateSchema, STATE_SCHEMA);
+      fs.writeFileSync(p, `{ "stateSchema": ${bad}, "lastCrossing": { "band": "FULL", "at": 1, "consumed": true }, "leanFloorTokens": 77 }`, 'utf8');
+      let st;
+      assert.doesNotThrow(() => { st = loadState(proj, home); });
+      assert.strictEqual(st.lastCrossing, undefined, `corrupt schema ${bad} → reset (cleared crossing)`);
+      assert.strictEqual(st.leanFloorTokens, 77, 'baseline preserved through the safe-reset');
     }
-    // a totally corrupt state file (unparseable) never throws either
-    fs.writeFileSync(statePath(home), '{ not json', 'utf8');
-    assert.doesNotThrow(() => migrateState(home));
+    fs.writeFileSync(p, '{ not json', 'utf8');
+    assert.doesNotThrow(() => loadState(proj, home)); // unparseable never throws
   } finally { clean(home, proj); }
 });
 
-test('rc.2 SCHEMA (f): a FRESH install (no state file) is a NO-OP — migration never CREATES a stamped-but-empty file (manual mode stays state-less)', () => {
+test('rc.2 SCHEMA (f): a FRESH install (no state file) → loadState is {} and writes NOTHING (a pure read never creates a file)', () => {
   const { home, proj } = sandbox();
   try {
-    assert.strictEqual(fs.existsSync(statePath(home)), false, 'precondition: no state file');
-    assert.strictEqual(migrateState(home), false, 'nothing to migrate on a fresh install');
-    assert.strictEqual(fs.existsSync(statePath(home)), false, 'migration wrote NOTHING — no leftover stamp');
+    assert.strictEqual(fs.existsSync(statePath(proj, home)), false, 'precondition: no state file');
+    assert.deepStrictEqual(loadState(proj, home), {}, 'fresh install → empty view');
+    assert.strictEqual(fs.existsSync(statePath(proj, home)), false, 'the read wrote NOTHING — no leftover stamp');
   } finally { clean(home, proj); }
 });
 
@@ -1333,7 +1424,7 @@ test('rc.2 SCHEMA (e): the reset-list constant matches the fields actually clear
   const { home, proj } = sandbox();
   try {
     recordStamp(home, proj, 100, 1);
-    assert.strictEqual(loadState(home).stateSchema, STATE_SCHEMA, 'recordStamp stamped the schema');
+    assert.strictEqual(JSON.parse(fs.readFileSync(statePath(proj, home), 'utf8')).stateSchema, STATE_SCHEMA, 'recordStamp stamped the schema');
   } finally { clean(home, proj); }
 });
 

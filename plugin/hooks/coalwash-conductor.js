@@ -128,16 +128,18 @@ function readStdinJson() {
 // shape): the HOOK only SCHEDULES via a throttled crash-safe stamp — written
 // BEFORE the directive prints so a crash never re-nags; no network ever. The
 // AGENT verifies + offers, consent-gated.
-function updateDue(cfg, clampedRead) {
+function updateDue(cfg, clampedRead, caliper) {
   try {
     if (clampedRead(cfg, 'updateMode') === 'off') return false;
     const days = clampedRead(cfg, 'updateCheckDays');
-    const stamp = path.join(os.homedir(), '.claude', '.coalwash-update-check');
-    let last = 0;
-    try { last = Number(String(fs.readFileSync(stamp, 'utf8')).trim()) || 0; } catch {}
+    const home = os.homedir();
+    // task #13 pt 3: the GLOBAL update stamp lives at ~/.claude/coal/coalwash/
+    // now — read-new/fallback-old, write-new/delete-old (caliper owns the path +
+    // migration so the OS-citizen namespace is single-sourced).
+    const last = caliper.readUpdateStamp(home);
     const now = Date.now();
     if (last && now - last < days * DAY_MS) return false;
-    try { fs.mkdirSync(path.dirname(stamp), { recursive: true }); fs.writeFileSync(stamp, String(now)); } catch {}
+    caliper.writeUpdateStamp(now, home); // written BEFORE the directive prints (crash-safe throttle)
     return true;
   } catch { return false; }
 }
@@ -160,14 +162,14 @@ async function handleSessionStart(input) {
   const projectRoot = findProjectRoot(process.cwd(), home);
   const out = [];
 
-  // rc.2 SCHEMA MIGRATION — the "no-old-version-leftover" guard, run once at
-  // the first SessionStart after an upgrade: reset version-STALE state
-  // (a pre-0m consumed crossing / stale cached verdict) while PRESERVING the
-  // leanFloor baseline, so a reinstall/upgrade never strands a chronically-
-  // FULL store nor false-FULLs it. Idempotent + fail-silent; runs before the
-  // gauge so this session gauges on clean state (prevBand→LEAN → the store
-  // re-enrolls via the qualifying-past rise).
-  caliper.migrateState(home);
+  // rc.2 SCHEMA MIGRATION + task #13 LOCATION MIGRATION are both LAZY now (in
+  // caliper.loadState/saveState): the first gauge read below returns the
+  // schema-migrated view (version-stale crossing/verdict reset, leanFloor
+  // baseline preserved → prevBand reads LEAN so the store re-enrolls via the
+  // qualifying-past rise), and the first gauge WRITE relocates the old-root
+  // state to the per-project path + drops the legacy file. No explicit migrate
+  // pass needed — the read-purity that used to force a separate step is now the
+  // lazy default (a reinstall/upgrade never strands nor false-FULLs the store).
 
   // 0p writeguard cleanup — run-gated at SessionStart (event, NEVER a clock;
   // 0h-GUARD spirit): drop every prior session's airbag snapshots, keep this
@@ -252,7 +254,7 @@ async function handleSessionStart(input) {
     caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now, { quickTried, fatTokens, session: input && input.session_id });
   }
 
-  if (updateDue(cfg, clampedRead)) {
+  if (updateDue(cfg, clampedRead, caliper)) {
     out.push('[CoalWash] [self-update due] Offer the /coalwash:update check: web-check the latest CoalWash tag vs the installed plugin.json version; if newer, OFFER `claude plugin update coalwash@coalwash`; if current, say "up to date"; if git/network is unavailable, say so and suggest updating manually later (never assume). Consent-gated; the hook only scheduled it.');
   }
 
@@ -265,7 +267,7 @@ async function handleSessionStart(input) {
 // Stop conductor branch — the ONLY ask/directive/advisory delivery surface
 // (beta.12 band collapse). HOT-PATH BUDGET (Phoenix #3): a config read (2
 // small JSON files, no discovery/measureEntries) + ONE state read
-// (loadState + projectState) — the TRUE happy case (nothing pending AND the
+// (loadState — one per-project file) — the TRUE happy case (nothing pending AND the
 // WARP-HOLE stat-only gate below finds no meaningful drift) exits at ~0.2ms
 // extra, still no discovery/measureEntries. A pending crossing, or a
 // gate-tripped within-session spike (beta.13 item 3), is the only path that
@@ -309,7 +311,7 @@ async function handleStop(input) {
 
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
-  let proj = caliper.projectState(caliper.loadState(home), projectRoot);
+  let proj = caliper.loadState(projectRoot, home);
   const now = Date.now();
   let lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
   let crossing = caliper.sanitizeCrossing(proj.lastCrossing);
@@ -349,7 +351,7 @@ async function handleStop(input) {
           hardCeilingTokens: gv.verdict.hardCeilingTokens, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
         }, now);
         caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens, session: input && input.session_id });
-        proj = caliper.projectState(caliper.loadState(home), projectRoot); // re-read what we just (maybe) armed
+        proj = caliper.loadState(projectRoot, home); // re-read what we just (maybe) armed
         lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
         crossing = caliper.sanitizeCrossing(proj.lastCrossing);
       }
