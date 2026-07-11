@@ -42,7 +42,6 @@
 // CLI discipline (scripts-quality.md): fail LOUD — a bad subcommand, a
 // missing id, or a pipeline error prints to stderr and exits non-zero.
 import os from 'node:os';
-import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';

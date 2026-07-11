@@ -8,7 +8,7 @@
 
 ![version](https://img.shields.io/github/v/tag/TheColliery/CoalWash?label=version&color=blue)
 ![license](https://img.shields.io/badge/license-Apache_2.0-blue)
-![status](https://img.shields.io/badge/status-beta-orange)
+![status](https://img.shields.io/badge/status-rc-yellow)
 
 [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Releases](https://github.com/TheColliery/CoalWash/releases)
 

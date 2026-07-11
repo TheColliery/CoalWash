@@ -2,6 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-rc.1] - 2026-07-11
+
+**Feature freeze.** The 0f–0p ruling wave is complete and internally proven — 53/53 lab loss-classes covered, 0/33 traps leaked, 427 hermetic tests, an adversarial review SHIP on every wave. That earns **rc**: the structure is durable (the safety floor is code-held, model-independent). It is NOT yet "live" — rc is internal-proven awaiting **field** proof (real global Claude Code use surfaces the operator-drift / last-hop-visibility class the lab can't simulate). rc → stable = a real dogfood stretch with no code change; a field bug → rc.2 (bugfix only, no features).
+
+This release carries the two no-feature cleanups that close the beta line:
+
+### Changed
+- **SKILL.md leaned −46% (26.4K → 14.1K chars body)** per the new series law `skill-authoring.md §5` ("lean cuts TOKENS never the RAILS"): all 17 behavior-forcing rails stay in the always-resident body; the explanation (band-math derivation, analogies, worked examples, install onboarding) moved to `references/method.md` (on-demand) or the README. Verified rail-identical by an independent 5-step scenario trace, not by eye — the proof gate §5 mandates.
+
+### Fixed
+- Removed two CodeQL-flagged unused imports (`path` in `cli.mjs`, `readSnapshot` in `writeguard.test.mjs` — `js/unused-local-variable`, note-level); clears the repo's open code-scanning alerts.
+
 ## [0.1.0-beta.19] - 2026-07-11
 
 The write-path guard (ruling 0p — the last feature before rc): the fidelity discipline stops being CoalWash-only. Every hand that writes a class-B file — the main, a subagent, any tool — is now watched, because "zero fact loss" enforced only on CoalWash's own knife is half a constraint (the store is edited by other knives daily; four header-clobbers this session were live proof).

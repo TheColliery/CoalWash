@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  isGuardedTarget, snapshotOnFirstWrite, readSnapshot, seatbeltCheck,
+  isGuardedTarget, snapshotOnFirstWrite, seatbeltCheck,
   listWriteguard, readWriteguardSnapshot, sweepWriteguard, SEATBELT_MAX_BYTES,
 } from './writeguard.mjs';
 
