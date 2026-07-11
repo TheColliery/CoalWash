@@ -28,6 +28,7 @@ const TESTS = [
   'scripts/lib/bins.test.mjs',
   'scripts/lib/quick.test.mjs',
   'scripts/lib/wizard.test.mjs',
+  'scripts/lib/parcel.test.mjs',
   'scripts/build-plugin.test.mjs',
 ];
 

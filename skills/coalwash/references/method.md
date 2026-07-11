@@ -12,6 +12,31 @@ node "[LIB]/cli.mjs" gauge --json
 
 Read the JSON; report ONE terse gauge line (band · always-loaded ~tok/session "~est" · BMI or "no floor yet") — `gauge` without `--json` prints exactly that line. `flags` naming an unknown platform → conservative path (SKILL.md step 0). Do NOT hand-compose the five lib calls inline — the CLI exists because two independent agents fumbled that composition.
 
+## 0b. Parcel audit (L2) — the drift canary + unknown-platform discovery (0l)
+
+**THE INVARIANT:** CW keeps NO list of its own — its list is a MIRROR of the real load list, whoever writes to it ("load ไหนเข้าบริษัท load นั้นเข้า CW ด้วย"). A hand-kept list rots; a mirror cannot rot because it does not remember — it reflects. The parcel does not distinguish WHO wired a surface: company-added and user-wired enter identically; being delivered IS the membership test. The order is LAW: capture-all (BMI counts the whole parcel) → THEN filter the untouchables out of knife jurisdiction — never invert.
+
+| Layer | What | Cost | Cadence |
+|---|---|---|---|
+| **L1 adapter** | `discoverClassB` — known-platform path walk | 0 tokens (code) | Every session (the hook path — keep) |
+| **L2 parcel audit** | You enumerate the files you SEE auto-loaded in your own context (on CC each parcel block self-labels with its full path), CODE certifies each one | Agent tokens (why L1 stays the every-session path) | Wizard entry / on-demand — a drift canary on CC, never an every-session layer |
+
+Build candidates from your OWN context observation — `[{ path, sample }]` where `sample` = the first ~200 chars of that block AS SEEN (this is the falsifiability handle: a hallucinated candidate can't quote a head it never saw; a spoof file never loaded has no in-context sample to quote). Then run (script file, `pathToFileURL`, same as every snippet):
+
+```bash
+node --input-type=module -e "
+import { pathToFileURL } from 'node:url';
+const { verifyParcelCandidates, compareParcelToAdapter } = await import(pathToFileURL('[LIB]/parcel.mjs').href);
+const { discoverClassB } = await import(pathToFileURL('[LIB]/class-b.mjs').href);
+const cands = [PARCEL_CANDIDATES]; // [{ path, sample }] from YOUR context
+const v = verifyParcelCandidates(cands, { home: '[HOME]', projectRoot: '[PROJECT_ROOT]' });
+const d = compareParcelToAdapter(v.verified, discoverClassB({ projectRoot: '[PROJECT_ROOT]', home: '[HOME]' }).entries);
+console.log(JSON.stringify({ verified: v.verified.length, rejected: v.rejected, drift: d.onlyInParcel, notSeen: d.onlyInAdapter }, null, 1));
+"
+```
+
+Report ONE line only when `drift` (onlyInParcel) is non-empty — "parcel drift: the platform loads X the adapter doesn't list" (adapter rot / a new platform surface → flag for the adapter update). Silent when clean. `notSeen` is informational (recall-store entries are expected-absent and already excluded). **Honest limits (verbatim class from the ledger):** L2 costs agent tokens — L1 stays the every-session path on CC; a platform whose parcel blocks carry no path labels degrades to fuzzy content-match = propose-only, the human confirms; recall-store coverage still rides the parcel's own pointer. L2 feeds MEASUREMENT only — it never feeds the knife (capture-all → filter order law); fail direction = undercount (unseen = unmeasured = uncut, safe).
+
 ## 1. Quick tier — the deterministic op list
 
 Mechanical only; each op is definable without judgment. Compute the new text per file, then gate + apply (below).

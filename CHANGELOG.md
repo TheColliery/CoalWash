@@ -2,6 +2,20 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.18] - 2026-07-11
+
+The parcel-audit layer (ruling 0l — the immortal-bird definition): CoalWash keeps NO hand-maintained list of what counts as always-loaded memory; its list is a MIRROR of the real load list, whoever writes to it (the company auto-loads it, the user wires it, or a future platform update adds a surface — it enters by definition, no code change; a hand-kept list rots, a mirror can't).
+
+### Added
+- **L2 parcel audit (`scripts/lib/parcel.mjs`, read-only):** `verifyParcelCandidates` — an agent lists the files it can SEE auto-loaded in its own context (path + the head it observed); CODE certifies each one — realpath-resolves + contained in the home/project trees (fail-closed on symlink escape, both sides) + the on-disk head matches the observed sample (whitespace-normalized, a 24-char substance floor + a tiny-file whole-content carve). A hallucinated or never-loaded candidate can't quote a matching head, so it's rejected; fail direction is undercount (unseen = unmeasured = uncut). `compareParcelToAdapter` cross-checks the parcel against the L1 adapter's every-session set as a **drift canary** — a mismatch flags a new platform surface or adapter rot the day it happens.
+- **L1 stays the every-session path (0-token); L2 is a wizard-entry / on-demand agent tool** — the module boundary is the two-layer architecture. On an unknown platform the conservative path upgrades from "verify scope manually" to propose → code-verify → human-confirm, still never auto-delete.
+- **Capture-all → filter → wash order preserved:** L2 feeds MEASUREMENT only — it never feeds the knife (wash jurisdiction unchanged).
+
+### Changed
+- Durability-campaign benchmark records published (org `.github/benchmarks/CoalWash/`): the campaign-close summary (53/53 loss classes covered · 0/33 traps leaked · 33/33 Thai tripwires · 10/10 workability parity · the three standing cautions) and the model-independent framing. README Notes 1+2 reframed to the measured protocol (stop at two dry rounds + one varied-angle sweep) and the honest per-tier-matrix-pending scope; the safety-floor-is-code-held claim is the published takeaway. Trap corpus + per-trap identities withheld by design.
+
+Tests 387 → 397 (parcel verifier: legit round-trip, head-mismatch/mid-quote/traversal/junction-escape rejected fail-closed, read-only full-tree proof, compare partitions, recall-excluded). Review: SHIP (one INFO = the already-recorded evidence-of-existence-not-proof-of-load limit; blast radius measurement-only, never the knife).
+
 ## [0.1.0-beta.17] - 2026-07-11
 
 The true-bill spawn meter (ruling 0o-b — the user-found fleet-economics blind spot): every subagent spawned from a room re-pays that room's always-loaded parcel in full (per-prefix cache — a sub cannot share main's warm cache), so the real cost of fat is footprint × (main + every spawn). Measured live: one fat room × ~6 sub-rounds ≈ 460k tok of pure parcel in a single dev day, invisible to every meter before this.
