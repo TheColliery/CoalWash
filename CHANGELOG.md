@@ -2,6 +2,23 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.12] - 2026-07-11
+
+The durability build (phases 1+2 of the 1e-16 ladder), verified by a full lab campaign: all 53 loss classes tested (26 measured in the wear campaign, 27 adversarial-verified through this pipeline) — 0/33 engineered traps flagged-or-cut, 10/10 washed-vs-pristine workability parity. The claim is a STRUCTURE that refuses load-bearing loss even against an adversarial corpus, not model-infallibility. Engine tests 195 → 302.
+
+### Added
+- **Band-collapse (`caliper.mjs`):** the 4-band PLUMP/OBESE/FULL ladder + time-snooze collapse to ONE hysteresis-gated ceiling — `CEILING_BMI` 1.5 arms, `CEILING_REARM_BMI` 1.2 re-arms (a Schmitt trigger replaces the clock) — plus a SEPARATE stateless machine-capacity FULL line (`absolute-cap`, person-independent, needs no floor). Growable-full invariant preserved (BMI = ratio; floor ratchets only on a gate-passed clean; capacity gate person-independent, remedy = externalize). `FLOOR_MIN_TOKENS` floor-sanity.
+- **Template asks (`ask.mjs`, program-side, zero agent composition):** `ceilingAsk` / `forceAuto` / `externalizeAdvisory`. Answer-first — SessionStart is silent for band matters, Stop is the sole ask surface; every template embeds the answer-first reminder; break-even payback numbers on BOTH OBESE and FULL asks.
+- **Bins (`bins.mjs` + `retention.mjs` policy):** two bins (fat / wizard-muscle) + `store.old` pull-only + breadcrumbs + Time-Machine density-thinning + death-certificate destruction, wired into the apply preflight. (Population at cut sites is not wired yet — the restore surface is complete; documented, not overclaimed.)
+- **Quick-ceiling (`quick.mjs`):** `sweepResidue` (own-knife blast-zone only — kills the class-23 residue a prior cut leaves) + `stripEmptyTables` + `flagEmptyHeadings` (flag-only). Mechanical share measured 0% historically (Quick never shipped executable before).
+- **Fidelity-gate classes 9 (number-precision) + 10 (evidence-anchor)** and the **keeps-gate** (pre-mutation exclusion) from phase 1.
+- **Wizard primitives (`wizard.mjs`):** `neutralScan` (measurement-only, no BMI at entry) + `estimateBill` (banded, placeholder rates labeled). Managed-artifact tagging (`class-b.mjs`): byte-identical-across-roots + `managedPaths` config.
+
+### Changed
+- Docs (README/SKILL/stats) resynced to the collapsed band model. The kernel-scope note (README CAUTION + SKILL hard-rule) — high stakes, capped blast radius.
+
+Tests 195 → 302.
+
 ## [0.1.0-beta.11] - 2026-07-10
 
 The knife move: removes the last human pre-approval step from delete/merge authorization. Safety was never resting on that flag alone — it now rests entirely on UNDO. Engine tests 194 → 195.
