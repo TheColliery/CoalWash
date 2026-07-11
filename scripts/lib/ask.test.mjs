@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { ANSWER_FIRST_REMINDER, ceilingAsk, forceAuto, externalizeAdvisory } from './ask.mjs';
+import { ANSWER_FIRST_REMINDER, ceilingAsk, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory } from './ask.mjs';
 
 test('every template embeds the answer-first reminder verbatim (queue item 0)', () => {
   assert.ok(ceilingAsk({ band: 'OBESE', fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
   assert.ok(forceAuto({ fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
+  assert.ok(obeseAutoQuick({ fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
+  assert.ok(wizardEscalation({ fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
 });
 
 test('ceilingAsk: names the band, the fat estimate, exactly two options, and the consume-at-emission truth', () => {
@@ -79,8 +81,65 @@ test('externalizeAdvisory: a missing hardCeilingTokens degrades to a "?" placeho
   assert.ok(externalizeAdvisory({}).includes('~? tok'));
 });
 
+// ---------------------------------------------------------------------------
+// obeseAutoQuick (queue 0d, "OBESE AUTO-QUICK, NO ASK")
+// ---------------------------------------------------------------------------
+
+test('obeseAutoQuick: names the band + fat, no question-tool/ทำ wording (never asks), authorizes Quick NOW, names the oneLineResult-only push and the escalation-out route', () => {
+  const r = obeseAutoQuick({ fatTokens: 800.4 });
+  assert.ok(r.includes('memory crossed the OBESE ceiling'), r);
+  assert.ok(r.includes('fat ~800 tok'), r);
+  assert.ok(!r.includes('question tool'), 'never asks — the exercise config is the standing consent');
+  assert.ok(!r.includes('ทำ'), r);
+  assert.ok(r.includes('standing config authorizes'), r);
+  assert.ok(r.includes('Quick pass NOW'), r);
+  assert.ok(r.includes('snapshot-backed and revertible'), r);
+  assert.ok(r.includes('oneLineResult'), 'names pushing ONLY the one-line result, no full receipt/narration');
+  assert.ok(r.includes('once per crossing, not per session'), r);
+  assert.ok(r.includes('exercisePerBand.obese') && r.includes('"full"'), 'names the escalate-out route (queue 0d: the ask survives only for the semantic tier)');
+});
+
+test('obeseAutoQuick: carries the payback line when breakEven is supplied; malformed/missing input never throws', () => {
+  const bare = obeseAutoQuick({ fatTokens: 800 });
+  assert.ok(!bare.includes('pays back'), bare);
+  const withBE = obeseAutoQuick({ fatTokens: 800, breakEven: { perDay: 150, breakEvenDays: 4, floorUnmeasured: false } });
+  assert.ok(withBE.includes('~150 tok/session'), withBE);
+  assert.ok(withBE.includes('pays back in ~4 session(s)'), withBE);
+  assert.doesNotThrow(() => obeseAutoQuick());
+  assert.doesNotThrow(() => obeseAutoQuick({}));
+  assert.doesNotThrow(() => obeseAutoQuick(null));
+});
+
+// ---------------------------------------------------------------------------
+// wizardEscalation (queue 0e, "THE OBESE LOOP")
+// ---------------------------------------------------------------------------
+
+test('wizardEscalation: a REAL two-button ask (question tool present) — names the mechanical pass already ran, the wizard heavy tier, and never auto-runs', () => {
+  const r = wizardEscalation({ fatTokens: 900 });
+  assert.ok(r.includes('STILL OBESE'), r);
+  assert.ok(r.includes('fat ~900 tok'), r);
+  assert.ok(r.includes('mechanical Quick pass already ran'), r);
+  assert.ok(r.includes('question tool'), 'the semantic escalation is a real ask, unlike obeseAutoQuick/forceAuto');
+  assert.ok(r.includes('ทำ'), r);
+  assert.ok(r.includes('/coalwash'), r);
+  assert.ok(r.includes('Fat + reorganize muscle'), r);
+  assert.ok(r.includes('later'), r);
+  assert.ok(r.includes('never on a timer'), 'names the growth-not-a-clock frequency rule');
+  assert.ok(!r.includes('standing config authorizes'), 'never auto-runs — mechanical cutting already proved insufficient');
+  assert.ok(r.includes('consumed the moment this ask fires'), r);
+});
+
+test('wizardEscalation: carries the payback line when breakEven is supplied; malformed/missing input never throws', () => {
+  const withBE = wizardEscalation({ fatTokens: 900, breakEven: { perDay: 300, breakEvenDays: 5, floorUnmeasured: false } });
+  assert.ok(withBE.includes('~300 tok/session'), withBE);
+  assert.ok(withBE.includes('pays back in ~5 session(s)'), withBE);
+  assert.doesNotThrow(() => wizardEscalation());
+  assert.doesNotThrow(() => wizardEscalation({}));
+  assert.doesNotThrow(() => wizardEscalation(null));
+});
+
 test('every builder tolerates missing/malformed input without throwing', () => {
-  for (const fn of [ceilingAsk, forceAuto, externalizeAdvisory]) {
+  for (const fn of [ceilingAsk, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory]) {
     assert.doesNotThrow(() => fn());
     assert.doesNotThrow(() => fn({}));
     assert.doesNotThrow(() => fn(null));

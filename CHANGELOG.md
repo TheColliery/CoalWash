@@ -2,6 +2,24 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.13] - 2026-07-11
+
+The lifecycle autopilot: the code tier now sweeps structural fat on its own (Storage-Sense shape — act + one-line report, never a per-run ask), the wizard ask survives only for semantic judgment and re-arms only on fat GROWTH, and a within-session spike is caught at `Stop` through a measured perf gate. Engine tests 302 → 337.
+
+### Added
+- **OBESE auto-Quick, no ask (`ask.obeseAutoQuick`):** an OBESE crossing whose configured exercise is `quick` (the factory default) skips the blocking ask and fires a standing-consent auto-run directive — `oneLineResult`-only output, snapshot-backed, revertible. `exercisePerBand.obese: "full"` routes back through the real ask. Consent is standing via config (the `forceMode: auto` / rot-canary `autoFixMode` precedent).
+- **The OBESE loop (`ask.wizardEscalation` + `caliper.markQuickTried`/`lastEscalationFat`):** once Quick can no longer reduce fat and OBESE persists, ONE wizard-escalation ask arms — and re-arms ONLY when fat grows past the level last flagged, never on a plateau, never on a timer (ask frequency tracks the fat-growth rate; the BMI edge is the sole gate). The FULL force-run backstop needs no user at all.
+- **Warp-hole Stop gate (`caliper.statOnlyFootprintBytes` + `REGAUGE_DELTA_TOKENS`):** every `Stop` runs a stat-only footprint delta (measured ~0.2ms — no directory walk, no content read); only real drift past the threshold triggers the full re-gauge (measured ~7-18ms — over the ≤5ms happy-path budget, hence gated, decided by measurement). A within-session spike is now caught same-turn.
+- **Shrink as a first-class wizard outcome (docs + tests):** the outsider runs ONE question — "how much of this is enough to keep?" — with three outcomes: delete / shrink / stand. A shrink (right-sizing an over-verbose muscle: wording down, fact verbatim) is mechanically a `rewrite` under the existing 0-fact-loss gate (proven by regression tests; no new gate class). The merge before/after claim-strength diff instruction now covers shrink.
+
+### Changed
+- README/SKILL/method resynced to the autopilot flow (band table, Stop-gate paragraph, wizard 3-outcome). SKILL description trimmed back under the 1024-char cross-platform cap (1019).
+
+### Lab receipts (this release's ship conditions)
+Auto-Quick trap-regression (unsupervised, code-only, seeded structural fat among 33 engineered traps): 5/5 seeds cut · pre-existing empty heading correctly survived (flag-only) · **33/33 traps intact · 9/9 semantic decoys untouched**. Stop-gate perf pinned by measurement (0.13-0.32ms stat-only vs 6.6-17.9ms full).
+
+Tests 302 → 337.
+
 ## [0.1.0-beta.12] - 2026-07-11
 
 The durability build (phases 1+2 of the 1e-16 ladder), verified by a full lab campaign: all 53 loss classes tested (26 measured in the wear campaign, 27 adversarial-verified through this pipeline) — 0/33 engineered traps flagged-or-cut, 10/10 washed-vs-pristine workability parity. The claim is a STRUCTURE that refuses load-bearing loss even against an adversarial corpus, not model-infallibility. Engine tests 195 → 302.

@@ -46,9 +46,12 @@
 //
 // CHEAP caliper only on the SessionStart path: file sizes + stamps; content is
 // read only for the small always-loaded set; gzip only when informational
-// work is already in budget (~100ms total wall budget). The Stop path is
-// cheaper still (Phoenix #3) — one state read, no discovery, no
-// measureEntries, no gzip — see handleStop below.
+// work is already in budget (~100ms total wall budget). The Stop path stays
+// cheaper still on the COMMON case (Phoenix #3) — one state read, no
+// discovery, no measureEntries, no gzip. beta.13 item 3 (WARP-HOLE) adds ONE
+// more cheap step when nothing is pending: a stat-only re-check of the
+// already-known always-loaded paths (~0.2ms, measured) that GATES a rare,
+// conditional full discovery+measure pass — see handleStop below.
 //
 // NAMED divergence from hooks-safety.md §10 (whose read exception names project
 // CONFIG only): this hook also READS project class-B memory/governance CONTENT
@@ -152,55 +155,44 @@ async function handleSessionStart() {
     // (the "qualifying past" case, the Modloader-shaped scenario).
     const prevBand = (proj.lastVerdict && proj.lastVerdict.band) || 'LEAN';
     const wasOver = !!(proj.lastVerdict && proj.lastVerdict.overCeiling);
-    // Never trust the raw stored value: sanitizeLeanFloor discards a
-    // non-finite/non-positive or grossly-implausible floor (conservative —
-    // treats it as floor-unmeasured rather than risk a false-LEAN silence).
-    const leanFloorTokens = caliper.sanitizeLeanFloor(proj.leanFloorTokens, m.alwaysLoaded.tokensEst);
-    const verdict = caliper.bandVerdict({
-      footprintTokens: m.alwaysLoaded.tokensEst,
-      leanFloorTokens,
-      fullPercent,
-      indexBytes: m.index.bytes,
-      indexLines: m.index.lines,
-      wasOver,
-    });
+    // 0e "THE OBESE LOOP": read BEFORE this session's own state changes —
+    // whether a mechanical Quick pass was already auto-triggered this
+    // episode (see caliper.recordCrossing's escalation-arm branch below).
+    const quickTried = !!proj.quickTried;
 
     const now = Date.now();
-    const fatTokens = Math.max(0, Math.round(m.alwaysLoaded.tokensEst - leanFloorTokens));
-    // Break-even is only meaningful where a wash could actually help (never
-    // for externalize — a wash cannot shrink muscle, the growable-full
-    // invariant's forbidden move) and never for LEAN (nothing to pay back).
-    let economical = false;
-    let perDay = 0, breakEvenDays = null, floorUnmeasured = false;
-    if (verdict.band !== 'LEAN' && verdict.reason !== 'externalize') {
-      const econ = caliper.breakEven({
-        footprintTokens: m.alwaysLoaded.tokensEst,
-        leanFloorTokens,
-        totalStoreTokens: m.totalTokensEst,
-        sessionsPerDay: caliper.sessionsPerDay(proj.stamps),
-      });
-      perDay = econ.perDay;
-      breakEvenDays = econ.breakEvenDays;
-      floorUnmeasured = econ.floorUnmeasured;
-      if (verdict.band === 'FULL') economical = econ.economical; // arms the Stop hook's force case via recordVerdict below
-    }
+    // gaugeVerdict (shared with the Stop hook's gated re-gauge, beta.13 item
+    // 3) does the floor-sanitize -> bandVerdict -> band-gated breakEven glue
+    // in ONE place — see caliper.mjs for why this is factored out rather than
+    // re-derived by hand at a second call site.
+    const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: proj.leanFloorTokens, fullPercent, wasOver, stamps: proj.stamps });
+    const { verdict, fatTokens, economical, perDay, breakEvenDays, floorUnmeasured } = gv;
+
+    // WARP-HOLE (beta.13 item 3): the always-loaded path list + byte total —
+    // the Stop hook's cheap re-stat baseline for catching a within-session
+    // spike without paying for a full re-gauge on every turn.
+    const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
 
     // Cache everything the Stop hook needs to act WITHOUT re-measuring
     // (Phoenix #3): the verdict itself, the ceiling's hysteresis bit
-    // (`overCeiling`, read back next time as `wasOver`), and the payback
-    // numbers (now available to ANY ask, not just FULL's — queue 0c).
+    // (`overCeiling`, read back next time as `wasOver`), the payback
+    // numbers (now available to ANY ask, not just FULL's — queue 0c), and
+    // the WARP-HOLE re-stat baseline.
     caliper.recordVerdict(home, projectRoot, {
       band: verdict.band, reason: verdict.reason, economical, fatTokens,
       overCeiling: verdict.over, perDay, breakEvenDays, floorUnmeasured,
       hardCeilingTokens: verdict.hardCeilingTokens,
+      alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
     }, now);
     // Uniform once-per-crossing arming on the band itself — no more
     // reason-based carve for externalize (beta.10's old F1 rule): Stop now
     // dispatches on the CACHED reason within the FULL band (see handleStop),
     // so a rise into FULL/externalize is delivered exactly once, the same
     // guarantee every other crossing already gets, instead of being silently
-    // un-trackable.
-    caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now);
+    // un-trackable. quickTried/fatTokens (0e) additionally arm a same-band
+    // OBESE "escalation" crossing once mechanical cutting already ran this
+    // episode and fat has genuinely grown since — see recordCrossing.
+    caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now, { quickTried, fatTokens });
   }
 
   if (updateDue(cfg, clampedRead)) {
@@ -216,10 +208,13 @@ async function handleSessionStart() {
 // Stop conductor branch — the ONLY ask/directive/advisory delivery surface
 // (beta.12 band collapse). HOT-PATH BUDGET (Phoenix #3): a config read (2
 // small JSON files, no discovery/measureEntries) + ONE state read
-// (loadState + projectState) — the common case (no pending crossing) exits
-// right there; only an unconsumed crossing does anything more, and even then
-// every template is a pure string builder (ask.mjs) over already-cached
-// numbers — no re-measurement, ever.
+// (loadState + projectState) — the TRUE happy case (nothing pending AND the
+// WARP-HOLE stat-only gate below finds no meaningful drift) exits at ~0.2ms
+// extra, still no discovery/measureEntries. A pending crossing, or a
+// gate-tripped within-session spike (beta.13 item 3), is the only path that
+// does more — and even then every ask/directive is a pure string builder
+// (ask.mjs) over already-cached (or just-refreshed) numbers, never a
+// re-measurement beyond the one gated discovery+measure pass.
 //
 // OUTPUT MECHANISM (deliberately NOT plain console.log, unlike SessionStart):
 // mirrors rot-canary-stop.js exactly — a structured
@@ -239,25 +234,65 @@ async function handleSessionStart() {
 // AUTO-RUN authorization, never the user's awareness of FULL.
 async function handleStop(input) {
   if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
-  const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, caliper, ask] = await Promise.all([
+  const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, caliper, ask, classB] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
     import(lib('caliper.mjs')),
     import(lib('ask.mjs')),
+    import(lib('class-b.mjs')),
   ]);
   const cfg = loadMergedConfig();
   if (clampedRead(cfg, 'coalwashMode') === 'off') return; // fully silent
   const forceMode = clampedRead(cfg, 'forceMode');
   const exercisePerBand = clampedRead(cfg, 'exercisePerBand');
+  const fullPercent = clampedRead(cfg, 'fullPercent');
+  const managedPaths = clampedRead(cfg, 'managedPaths');
 
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
-  const proj = caliper.projectState(caliper.loadState(home), projectRoot);
-  const crossing = caliper.sanitizeCrossing(proj.lastCrossing);
-  if (!crossing) return; // nothing pending -> silent, one read only (Phoenix #13)
-
+  let proj = caliper.projectState(caliper.loadState(home), projectRoot);
   const now = Date.now();
-  const lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
+  let lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
+  let crossing = caliper.sanitizeCrossing(proj.lastCrossing);
+
+  if (!crossing) {
+    // WARP-HOLE (beta.13 item 3, MEMORY.md "WARP-HOLE + WARM COST"): a
+    // within-session spike (e.g. a MEMORY.md crystallize write) sits
+    // uncaught under the pure-cache read above until the NEXT SessionStart.
+    // MEASURED ad-hoc before shipping (not a flaky in-suite ms-assertion — the
+    // WARP-HOLE BEHAVIOR itself is pinned in conductor.test.mjs): an
+    // UNCONDITIONAL full re-gauge
+    // (discoverClassB+measureEntries) costs ~7-18ms on real repos — BLOWS
+    // the Phoenix #3 <=5ms happy-path budget if paid on EVERY Stop call
+    // (Stop fires every turn). The cheap half: an ALWAYS-ON stat-only gate
+    // (re-stat the paths already discovered at the last gauge — no
+    // directory walk, no content read; measured ~0.15-0.3ms on the SAME
+    // repos) decides whether the expensive full re-gauge (rare, and well
+    // under the <=100ms including-a-scan cap) is worth paying for THIS turn.
+    const cachedPaths = Array.isArray(lastVerdict.alwaysLoadedPaths) ? lastVerdict.alwaysLoadedPaths : null;
+    const cachedBytes = Number(lastVerdict.alwaysLoadedBytes);
+    if (cachedPaths && cachedPaths.length && Number.isFinite(cachedBytes)) {
+      const freshBytes = caliper.statOnlyFootprintBytes(cachedPaths);
+      const deltaTokens = caliper.tokensEstFromBytes(Math.abs(freshBytes - cachedBytes));
+      if (deltaTokens > caliper.REGAUGE_DELTA_TOKENS) {
+        const disc = classB.discoverClassB({ projectRoot, home, managedPaths });
+        const m = caliper.measureEntries(disc.entries, { readBudgetBytes: READ_BUDGET_BYTES, withGzip: false });
+        const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: proj.leanFloorTokens, fullPercent, wasOver: !!lastVerdict.overCeiling, stamps: proj.stamps });
+        const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
+        caliper.recordVerdict(home, projectRoot, {
+          band: gv.verdict.band, reason: gv.verdict.reason, economical: gv.economical, fatTokens: gv.fatTokens,
+          overCeiling: gv.verdict.over, perDay: gv.perDay, breakEvenDays: gv.breakEvenDays, floorUnmeasured: gv.floorUnmeasured,
+          hardCeilingTokens: gv.verdict.hardCeilingTokens, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
+        }, now);
+        caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens });
+        proj = caliper.projectState(caliper.loadState(home), projectRoot); // re-read what we just (maybe) armed
+        lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
+        crossing = caliper.sanitizeCrossing(proj.lastCrossing);
+      }
+    }
+    if (!crossing) return; // still nothing pending -> silent (Phoenix #13)
+  }
+
   const fatTokens = Number.isFinite(lastVerdict.fatTokens) ? Math.round(lastVerdict.fatTokens) : 0;
   const breakEven = {
     perDay: Number.isFinite(lastVerdict.perDay) ? lastVerdict.perDay : 0,
@@ -277,15 +312,32 @@ async function handleStop(input) {
     // (never-externalize) verdict — the exact gate the force case needs.
     const verdict = caliper.sanitizeVerdict(lastVerdict, now);
     const isForceCrossing = crossing.band === 'FULL' && !!verdict;
+    const bandKey = crossing.band.toLowerCase();
+    const exercise = (exercisePerBand && exercisePerBand[bandKey]) || 'quick';
     if (isForceCrossing && forceMode === 'auto') {
-      // case (b): force — standing consent, no ask, mirrors rot-canary's own auto-scan.
+      // case (b): FULL force — standing consent, no ask, mirrors rot-canary's
+      // own auto-scan. Force always runs Quick -> counts toward 0e's
+      // "already tried mechanically" state for the loop's OBESE-after-Force leg.
       reason = ask.forceAuto({ fatTokens: verdict.fatTokens, breakEven });
+      caliper.markQuickTried(home, projectRoot, now);
+    } else if (crossing.band === 'OBESE' && crossing.escalation) {
+      // case (c) — 0e "THE OBESE LOOP": mechanical cutting already ran this
+      // episode and OBESE persists (or returned) — only the wizard's
+      // semantic tier can help now; this IS a real ask (the semantic
+      // escalation is the one case the ask survives for).
+      reason = ask.wizardEscalation({ fatTokens, breakEven });
+    } else if (crossing.band === 'OBESE' && exercise === 'quick') {
+      // case (d) — 0d "OBESE AUTO-QUICK, NO ASK": the configured exercise
+      // itself IS the standing consent (rot-canary autoFixMode precedent) —
+      // no ask, run the free mechanical pass now.
+      reason = ask.obeseAutoQuick({ fatTokens, breakEven });
+      caliper.markQuickTried(home, projectRoot, now);
     } else {
-      // case (a): ask ทำ/later — OBESE, a FULL crossing that never armed
-      // (economical:false), or a FULL crossing whose AUTO-RUN authorization
-      // is suppressed (forceMode 'ask'/'off' — both land HERE, never in silence).
-      const bandKey = crossing.band.toLowerCase();
-      const exercise = (exercisePerBand && exercisePerBand[bandKey]) || 'quick';
+      // case (a): ask ทำ/later — OBESE configured straight to the semantic
+      // tier (exercisePerBand.obese: 'full'), a FULL crossing that never
+      // armed (economical:false), or a FULL crossing whose AUTO-RUN
+      // authorization is suppressed (forceMode 'ask'/'off' — both land HERE,
+      // never in silence).
       reason = ask.ceilingAsk({ band: crossing.band, fatTokens, exercise, breakEven });
     }
   }

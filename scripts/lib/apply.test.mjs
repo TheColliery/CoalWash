@@ -849,3 +849,53 @@ test('applyPlan preflight ALSO sweeps the bins: an over-horizon fat-bin item is 
     assert.ok(remaining.includes(freshId), 'a recent bin item survives untouched');
   } finally { clean(proj); }
 });
+
+// ---------------------------------------------------------------------------
+// beta.13 item 5: "SHRINK" (right-sizing an oversized fat-muscle passage —
+// wording trimmed, the FACT kept) is confirmed here to need NO new action
+// type and NO new gate class — it is mechanically indistinguishable from any
+// other `rewrite`. apply.mjs's plan schema is only ever
+// 'rewrite'|'create'|'delete'; a shrink IS a rewrite (same file, shorter
+// content), so it rides the EXACT SAME fidelity-gate + KEEPS-GATE +
+// snapshot/rollback path as a delete-and-rewrite or a merge would. This test
+// PROVES the claim (not just asserts it in prose): a shrink that keeps every
+// structured fact applies cleanly; a shrink that drops one is blocked by the
+// SAME unapproved-fact-drop mechanism a plain rewrite already uses — no
+// shrink-specific code exists anywhere in this module, by construction.
+// ---------------------------------------------------------------------------
+
+test('SHRINK is an ordinary rewrite: a verbose fat-muscle passage right-sized down, keeping every structured fact, applies cleanly through the unmodified rewrite path', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'note.md');
+    const verbose = 'We investigated this at some considerable length and, after quite a lot of back-and-forth discussion among the team, eventually landed on the conclusion that the fix (see [[the-fix]], https://example.com/issue/2014, dated 2026-07-11) reduced the count from 44,192 to 128, a 99.7% improvement, which we consider confirmed.';
+    const shrunk = 'The fix ([[the-fix]], https://example.com/issue/2014, 2026-07-11) reduced 44,192 to 128, a 99.7% improvement — confirmed.';
+    write(f, verbose);
+    const r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: shrunk }]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), shrunk, 'the shrink landed — no shrink-specific code path exists, it is the plain rewrite path');
+  } finally { clean(proj); }
+});
+
+test('SHRINK is an ordinary rewrite: a shrink that accidentally drops a fact (an exact number) is BLOCKED by the SAME unapproved-fact-drop gate as any other rewrite', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'note.md');
+    const verbose = 'The fix cut the count from 44,192 to 128, confirmed correct.';
+    // Over-trimmed: the "from 44,192" clause is gone -> a plain number-drop,
+    // the SAME class a non-shrink rewrite would trip (verified via checkFidelity).
+    const overShrunk = 'The fix cut the count to 128, confirmed correct.';
+    write(f, verbose);
+    const r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: overShrunk }]));
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /fidelity: unapproved fact drop/, 'a shrink is caught by the identical mechanism a plain rewrite uses — no shrink-specific gate needed');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), verbose, 'nothing mutated on a fidelity abort, same as any other rewrite');
+
+    // Naming the drop in approvedDrops (the SAME opt-in surface a plain
+    // rewrite/merge/delete already uses) lets the identical shrink through —
+    // proving the plan-sourced-authorization model needs no shrink carve-out.
+    const approved = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: overShrunk }], { approvedDrops: ['number-drop:44192'] }));
+    assert.strictEqual(approved.ok, true, approved.error);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), overShrunk);
+  } finally { clean(proj); }
+});

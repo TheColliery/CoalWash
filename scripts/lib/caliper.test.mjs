@@ -3,16 +3,18 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
-  tokensEst, tokensEstFromBytes, gzipRatio, measureEntries,
-  bandVerdict, breakEven, sessionsPerDay,
+  tokensEst, tokensEstFromBytes, gzipRatio, measureEntries, statOnlyFootprintBytes,
+  bandVerdict, breakEven, sessionsPerDay, gaugeVerdict,
   statePath, loadState, projectState, recordStamp, setLeanFloor,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
-  recordVerdict, sanitizeVerdict, VERDICT_MAX_AGE_MS,
+  recordVerdict, sanitizeVerdict, VERDICT_MAX_AGE_MS, markQuickTried,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
   CEILING_BMI, CEILING_REARM_BMI, FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
-  RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX,
+  RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
 } from './caliper.mjs';
+import { discoverClassB } from './class-b.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR; // hermetic: sandbox home only
 
@@ -547,4 +549,243 @@ test('consumeCrossing: orphan-prune still runs on this write path', () => {
     consumeCrossing(home, proj);
     assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'consumeCrossing prunes too');
   } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// statOnlyFootprintBytes + the WARP-HOLE PERF GATE (beta.13 item 3) — the
+// cheap half's own cost, measured, and the naive full re-gauge's cost
+// documented alongside it so the ship/no-ship decision is grounded in a
+// number, not assumption. Real (non-sandboxed) numbers observed on this
+// repo's own room (CoalWash, 11 always-loaded files): statOnlyFootprintBytes
+// ~0.15-0.3ms · discoverClassB+measureEntries ~7-18ms. The assertions below
+// use generous CI-safe bounds (never the exact local numbers, to avoid
+// flaking on a slower machine) while still proving the two are on
+// different ORDERS of magnitude.
+// ---------------------------------------------------------------------------
+
+test('statOnlyFootprintBytes: sums current byte sizes for existing paths; a missing path contributes 0 (a legitimate shrink signal, never a throw)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const f1 = path.join(proj, 'a.md');
+    const f2 = path.join(proj, 'b.md');
+    fs.writeFileSync(f1, 'a'.repeat(100), 'utf8');
+    fs.writeFileSync(f2, 'b'.repeat(250), 'utf8');
+    assert.strictEqual(statOnlyFootprintBytes([f1, f2]), 350);
+    assert.strictEqual(statOnlyFootprintBytes([f1, path.join(proj, 'gone.md')]), 100, 'a gone file contributes 0, never throws');
+    assert.strictEqual(statOnlyFootprintBytes([]), 0);
+    assert.strictEqual(statOnlyFootprintBytes(null), 0, 'malformed input degrades to 0, never throws');
+    assert.strictEqual(statOnlyFootprintBytes(undefined), 0);
+  } finally { clean(home, proj); }
+});
+
+test('WARP-HOLE PERF GATE: statOnlyFootprintBytes is cheap enough for the Phoenix #3 happy-path budget; a full discoverClassB+measureEntries re-gauge is measurably (>=3x) more expensive on the SAME repo', () => {
+  // Time against THIS repo's own room (a real, non-trivial governance tree —
+  // the flock's heaviest single store per MEMORY.md's "estate wash" finding)
+  // rather than a synthetic fixture, so the numbers this decision rests on
+  // are the real ones, not a best-case sandbox.
+  // repo root doubles as home+project for this probe (harmless: home only
+  // matters for the global-scope walk, which finds nothing extra here).
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..'); // scripts/lib -> repo root
+  const disc = discoverClassB({ projectRoot: repoRoot, home: repoRoot });
+  const paths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
+  assert.ok(paths.length > 0, 'the probe needs a real always-loaded set to be meaningful');
+
+  // warm the OS file cache identically for both measurements before timing
+  statOnlyFootprintBytes(paths);
+  discoverClassB({ projectRoot: repoRoot, home: repoRoot });
+
+  const t0 = process.hrtime.bigint();
+  statOnlyFootprintBytes(paths);
+  const cheapMs = Number(process.hrtime.bigint() - t0) / 1e6;
+
+  const t1 = process.hrtime.bigint();
+  const d2 = discoverClassB({ projectRoot: repoRoot, home: repoRoot });
+  measureEntries(d2.entries, { readBudgetBytes: 262144, withGzip: false });
+  const fullMs = Number(process.hrtime.bigint() - t1) / 1e6;
+
+  assert.ok(cheapMs < 20, `stat-only gate must stay comfortably under the Phoenix #3 happy-path budget (measured ${cheapMs.toFixed(2)}ms)`);
+  assert.ok(fullMs > cheapMs * 3, `the full re-gauge must be measurably (>=3x) more expensive than the cheap gate it justifies (cheap ${cheapMs.toFixed(2)}ms, full ${fullMs.toFixed(2)}ms) — this is WHY the full pass is gated, not unconditional`);
+});
+
+// ---------------------------------------------------------------------------
+// gaugeVerdict — the shared "measurement -> verdict + economics" composition
+// (beta.13 item 3): SessionStart and the Stop hook's gated re-gauge both call
+// this instead of re-deriving the sanitize->bandVerdict->breakEven glue by
+// hand at a second call site.
+// ---------------------------------------------------------------------------
+
+test('gaugeVerdict: LEAN never computes payback numbers (matches the pre-refactor SessionStart gating exactly)', () => {
+  const measure = { alwaysLoaded: { tokensEst: 200, bytes: 800 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 200 };
+  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 10000, fullPercent: 6 });
+  assert.strictEqual(gv.verdict.band, 'LEAN');
+  assert.strictEqual(gv.economical, false);
+  assert.strictEqual(gv.perDay, 0);
+  assert.strictEqual(gv.breakEvenDays, null);
+  assert.strictEqual(gv.floorUnmeasured, false);
+});
+
+test('gaugeVerdict: FULL+economical computes the payback numbers and arms economical:true; OBESE computes payback but never arms economical', () => {
+  // floor 20000; footprint 36200 (>= the 36000 hard cap at fullPercent=6 of
+  // CAPACITY_TOKENS AND bmi 1.81 >= 1.5) -> FULL/absolute-cap, same fixture
+  // shape as the conductor's own economical-FULL test.
+  const measure = { alwaysLoaded: { tokensEst: 36200, bytes: 144800 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 36200 };
+  // No stamps (< 2 -> sessionsPerDay's own bootstrap default of 1/day) —
+  // matches the conductor's own economical-FULL fixture ("1 stamp -> sessionsPerDay=1").
+  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 20000, fullPercent: 6 });
+  assert.strictEqual(gv.verdict.band, 'FULL');
+  assert.strictEqual(gv.verdict.reason, 'absolute-cap');
+  assert.strictEqual(gv.economical, true);
+  assert.strictEqual(gv.fatTokens, 16200);
+  assert.ok(gv.perDay > 0);
+  assert.ok(Number.isFinite(gv.breakEvenDays));
+
+  // OBESE: bmi armed, under the hard cap -> payback computed, economical
+  // stays false (only FULL may arm the force case).
+  const obeseMeasure = { alwaysLoaded: { tokensEst: 16000, bytes: 64000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 16000 };
+  const gvObese = gaugeVerdict({ measure: obeseMeasure, rawLeanFloorTokens: 10000, fullPercent: 6 });
+  assert.strictEqual(gvObese.verdict.band, 'OBESE');
+  assert.strictEqual(gvObese.economical, false, 'OBESE never arms economical, even though payback IS computed');
+  assert.ok(gvObese.perDay > 0, 'payback numbers ARE computed for OBESE (queue 0c)');
+});
+
+test('gaugeVerdict: FULL(externalize) never computes payback numbers (a wash cannot help ~all-muscle over capacity)', () => {
+  const measure = { alwaysLoaded: { tokensEst: 36200, bytes: 144800 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 36200 };
+  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 36000, fullPercent: 6 });
+  assert.strictEqual(gv.verdict.band, 'FULL');
+  assert.strictEqual(gv.verdict.reason, 'externalize');
+  assert.strictEqual(gv.economical, false);
+  assert.strictEqual(gv.perDay, 0);
+  assert.strictEqual(gv.breakEvenDays, null);
+});
+
+test('gaugeVerdict: a poisoned leanFloor is sanitized exactly like the raw sanitizeLeanFloor call would', () => {
+  const measure = { alwaysLoaded: { tokensEst: 100, bytes: 400 }, index: { bytes: 26 * 1024, lines: 0 }, totalTokensEst: 100 };
+  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 999999999, fullPercent: 6 });
+  assert.strictEqual(gv.leanFloorTokens, 0, 'grossly-implausible floor discarded');
+  assert.strictEqual(gv.verdict.band, 'FULL', 'the index-byte absolute cap still fires');
+  assert.strictEqual(gv.verdict.reason, 'absolute-cap');
+});
+
+// ---------------------------------------------------------------------------
+// markQuickTried (0e "THE OBESE LOOP")
+// ---------------------------------------------------------------------------
+
+test('markQuickTried: sets quickTried + quickTriedAt, persists, and prunes orphans on this write path too', () => {
+  const { home, proj } = sandbox();
+  const dead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-quicktried-')));
+  try {
+    recordStamp(home, dead, 50);
+    fs.rmSync(dead, { recursive: true, force: true });
+    markQuickTried(home, proj, 1234);
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.quickTried, true);
+    assert.strictEqual(st.quickTriedAt, 1234);
+    assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'markQuickTried prunes too');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// recordCrossing's escalation-arm branch (0e "THE OBESE LOOP") — additive to
+// the existing rise-arm behavior above, which stays byte-for-byte unchanged
+// (every pre-existing recordCrossing/sanitizeCrossing test above still
+// passes UNMODIFIED — quickTried defaults false, so the new branch is
+// inert unless explicitly opted into).
+// ---------------------------------------------------------------------------
+
+test('recordCrossing: OBESE persisting (same band, no rise) with quickTried+growth arms an ESCALATION crossing (extra key, only when true)', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 });
+    const st = projectState(loadState(home), proj);
+    assert.deepStrictEqual(st.lastCrossing, { band: 'OBESE', at: 1000, consumed: false, escalation: true });
+    assert.strictEqual(st.lastEscalationFat, 500);
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: OBESE persisting WITHOUT quickTried stays inert — a first encounter waits for the plain rise-arm, never escalates', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: false, fatTokens: 500 });
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined);
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: OBESE persisting with quickTried but NO growth past the last flagged fat level stays SILENT — never a clock/re-nag on an unchanged plateau', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 }); // first escalation
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { quickTried: true, fatTokens: 500 }); // same fat, later tick
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.at, 1000, 'flat fat never re-arms a new escalation');
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 3000, { quickTried: true, fatTokens: 480 }); // fat SHRANK slightly
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'a shrink never re-arms either');
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: fat GROWING past the last flagged escalation level re-arms a fresh escalation (the growth-rate frequency rule)', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 });
+    // consumed at emission (the Stop hook's own discipline) — otherwise a
+    // still-PENDING escalation must never be clobbered by a second arm.
+    consumeCrossing(home, proj, 1500);
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { quickTried: true, fatTokens: 900 }); // genuinely more fat
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.at, 2000, 'growth past the last flagged level arms a fresh escalation');
+    assert.strictEqual(st.lastCrossing.consumed, false);
+    assert.strictEqual(st.lastEscalationFat, 900);
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: a still-PENDING (unconsumed) escalation is never clobbered by a later same-band check', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 });
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 5000, { quickTried: true, fatTokens: 9000 }); // huge growth, but never consumed yet
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.at, 1000, 'a pending, undelivered escalation is left exactly as it is — the existing "never re-arm a pending crossing" rule extends here');
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: OBESE reached again on a FALL (e.g. settling back from FULL) with quickTried+growth still escalates — the loop\'s "still OBESE after Force" leg', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'FULL', 1000, { quickTried: true, fatTokens: 700 }); // a FALL, not a rise
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.band, 'OBESE');
+    assert.strictEqual(st.lastCrossing.escalation, true);
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: LEAN clears quickTried + lastEscalationFat too (the episode reset — a future rise gets a fresh, unconditional auto-Quick attempt)', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 1000, { quickTried: true, fatTokens: 500 });
+    markQuickTried(home, proj, 1000);
+    recordCrossing(home, proj, 'LEAN', 'OBESE', 2000);
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing, undefined);
+    assert.strictEqual(st.quickTried, undefined);
+    assert.strictEqual(st.lastEscalationFat, undefined);
+  } finally { clean(home, proj); }
+});
+
+test('recordCrossing: a plain rise-arm keeps the EXACT pre-existing 2-key shape even when quickTried happens to be true (rise takes priority; not conflated with escalation)', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'FULL', 'OBESE', 1000, { quickTried: true, fatTokens: 4000 }); // a genuine rise
+    assert.deepStrictEqual(projectState(loadState(home), proj).lastCrossing, { band: 'FULL', at: 1000, consumed: false });
+  } finally { clean(home, proj); }
+});
+
+test('sanitizeCrossing: escalation:true passes through; escalation absent/false keeps the EXACT pre-existing 2-key shape', () => {
+  const now = Date.now();
+  assert.deepStrictEqual(sanitizeCrossing({ band: 'OBESE', at: now, consumed: false, escalation: true }, now), { band: 'OBESE', at: now, escalation: true });
+  assert.deepStrictEqual(sanitizeCrossing({ band: 'OBESE', at: now, consumed: false, escalation: false }, now), { band: 'OBESE', at: now });
+  assert.deepStrictEqual(sanitizeCrossing({ band: 'OBESE', at: now, consumed: false }, now), { band: 'OBESE', at: now });
+});
+
+test('REGAUGE_DELTA_TOKENS / ALWAYS_LOADED_PATHS_CAP are positive, sane placeholder constants', () => {
+  assert.ok(REGAUGE_DELTA_TOKENS > 0);
+  assert.ok(ALWAYS_LOADED_PATHS_CAP > 0);
 });

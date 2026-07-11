@@ -76,6 +76,21 @@ export const CC_INDEX_CAP_LINES = 200; // CC memory-index platform cap class (20
 export const RUN_COST_MULTIPLIER = 3; // one Full run ~ store read x2 (outsider+insider) + rewrite
 export const ECON_HORIZON_DAYS = 14; // carry-cost horizon the break-even is judged against
 export const STAMP_RING_MAX = 60; // per-project session-stamp ring buffer cap
+// WARP-HOLE (beta.13 item 3, MEMORY.md "WARP-HOLE + WARM COST"): the Stop
+// hook's cheap gate re-stats the always-loaded paths cached at the last gauge
+// and only pays for a full re-gauge once the byte delta implies a REAL
+// content change. PLACEHOLDER, reasoned not measured (same convention as
+// CAPACITY_TOKENS/FLOOR_MIN_TOKENS): ~500 tok (~2KB ASCII) is small enough to
+// catch a genuine MEMORY.md crystallize append (the scenario this feature
+// exists for) but large enough to ignore incidental noise (a timestamp edit,
+// a few words). Recalibrate at the benchmark once real Stop-tick data exists.
+export const REGAUGE_DELTA_TOKENS = 500;
+// Defensive cap on the always-loaded PATH LIST cached for the re-stat gate —
+// state-size hygiene, the same discipline as STAMP_RING_MAX/RULES_FILE_CAP. A
+// truncated list only narrows the delta gate's visibility (a missed file
+// among the excess never widens past the existing next-SessionStart catch),
+// never breaks anything.
+export const ALWAYS_LOADED_PATHS_CAP = 200;
 const DAY_MS = 86400000;
 
 // ---------------------------------------------------------------------------
@@ -148,6 +163,26 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
     try { m.gzipRatio = Number(gzipRatio(gzParts.join('\n')).toFixed(3)); } catch { /* informational only */ }
   }
   return m;
+}
+
+// WARP-HOLE (beta.13 item 3) — the CHEAP half of the Stop-hook re-gauge gate:
+// sums CURRENT byte sizes for an already-discovered path list via fs.statSync
+// ONLY (no directory walk, no content read). MEASURED ad-hoc during dev
+// (reproduce by timing statOnlyFootprintBytes vs discoverClassB+measureEntries;
+// the WARP-HOLE BEHAVIOR is pinned in conductor.test.mjs — the timing itself is
+// deliberately NOT a flaky in-suite ms-assertion): ~0.15-0.3ms on the
+// flock's heaviest room (CoalWash's own, 11 always-loaded files) vs ~7-18ms
+// for a full discoverClassB+measureEntries re-gauge on the SAME/a bigger
+// root — cheap enough to run on EVERY Stop call, unlike the full pass, which
+// blows the Phoenix #3 <=5ms happy-path budget if paid unconditionally. A
+// path that no longer exists contributes 0 (folds naturally into the delta —
+// a legitimate shrink signal, never a special case).
+export function statOnlyFootprintBytes(paths) {
+  let bytes = 0;
+  for (const p of Array.isArray(paths) ? paths : []) {
+    try { bytes += fs.statSync(p).size; } catch { /* gone -> contributes 0 */ }
+  }
+  return bytes;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +283,48 @@ export function sessionsPerDay(stamps, now = Date.now()) {
   const spanDays = Math.max((now - Math.min(...ts)) / DAY_MS, 1);
   const rate = ts.length / spanDays;
   return Math.min(20, Math.max(0.1, rate));
+}
+
+// gaugeVerdict — the pure "measurement -> verdict + economics" composition
+// shared by SessionStart (the primary chokepoint) and the Stop hook's gated
+// re-gauge (beta.13 item 3, "WARP-HOLE"): both callers already have a fresh
+// `measure` (measureEntries' output) and only need this one shot of glue
+// (floor sanitize -> bandVerdict -> the band-gated breakEven read) instead of
+// re-deriving it by hand at a second call site — the hook's own header
+// names exactly this class of bug as the reason to share code: "a hook that
+// reimplements X silently diverged once in a sibling; never again." No fs
+// access of its own (pure over its inputs) — discovery (class-b.mjs) and
+// state persistence (recordVerdict/recordCrossing) stay the CALLER's job,
+// the same module boundaries as before.
+export function gaugeVerdict({ measure, rawLeanFloorTokens, fullPercent = 6, wasOver = false, stamps } = {}) {
+  const leanFloorTokens = sanitizeLeanFloor(rawLeanFloorTokens, measure.alwaysLoaded.tokensEst);
+  const verdict = bandVerdict({
+    footprintTokens: measure.alwaysLoaded.tokensEst,
+    leanFloorTokens,
+    fullPercent,
+    indexBytes: measure.index.bytes,
+    indexLines: measure.index.lines,
+    wasOver,
+  });
+  const fatTokens = Math.max(0, Math.round(measure.alwaysLoaded.tokensEst - leanFloorTokens));
+  let economical = false;
+  let perDay = 0, breakEvenDays = null, floorUnmeasured = false;
+  // Break-even is only meaningful where a wash could actually help (never for
+  // externalize — a wash cannot shrink muscle — and never for LEAN — nothing
+  // to pay back).
+  if (verdict.band !== 'LEAN' && verdict.reason !== 'externalize') {
+    const econ = breakEven({
+      footprintTokens: measure.alwaysLoaded.tokensEst,
+      leanFloorTokens,
+      totalStoreTokens: measure.totalTokensEst,
+      sessionsPerDay: sessionsPerDay(stamps),
+    });
+    perDay = econ.perDay;
+    breakEvenDays = econ.breakEvenDays;
+    floorUnmeasured = econ.floorUnmeasured;
+    if (verdict.band === 'FULL') economical = econ.economical;
+  }
+  return { verdict, leanFloorTokens, fatTokens, economical, perDay, breakEvenDays, floorUnmeasured };
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +471,8 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
   const perDay = Number(verdict && verdict.perDay);
   const breakEvenDays = Number(verdict && verdict.breakEvenDays);
   const hardCeilingTokens = Number(verdict && verdict.hardCeilingTokens);
+  const alwaysLoadedBytes = Number(verdict && verdict.alwaysLoadedBytes);
+  const rawPaths = (verdict && Array.isArray(verdict.alwaysLoadedPaths)) ? verdict.alwaysLoadedPaths : [];
   proj.lastVerdict = {
     band: String((verdict && verdict.band) || ''),
     reason: String((verdict && verdict.reason) || ''),
@@ -404,6 +483,14 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
     breakEvenDays: Number.isFinite(breakEvenDays) ? breakEvenDays : null,
     floorUnmeasured: !!(verdict && verdict.floorUnmeasured),
     hardCeilingTokens: Number.isFinite(hardCeilingTokens) ? Math.round(hardCeilingTokens) : 0,
+    // WARP-HOLE (beta.13 item 3): the always-loaded path list + its byte total
+    // AT this gauge — the Stop hook's cheap re-stat baseline
+    // (statOnlyFootprintBytes above). Capped defensively (state-size hygiene);
+    // a truncated list only narrows the delta gate's visibility, never breaks
+    // anything (fail-safe: undercounting just delays a re-gauge to the next
+    // SessionStart, the EXISTING behavior this feature is additive to).
+    alwaysLoadedPaths: rawPaths.filter((p) => typeof p === 'string').slice(0, ALWAYS_LOADED_PATHS_CAP),
+    alwaysLoadedBytes: Number.isFinite(alwaysLoadedBytes) ? Math.round(alwaysLoadedBytes) : 0,
     at: now,
   };
   state.projects[key] = proj;
@@ -432,6 +519,25 @@ export function sanitizeVerdict(rawVerdict, now = Date.now(), maxAgeMs = VERDICT
   return { band: 'FULL', reason: String(rawVerdict.reason || ''), fatTokens: Number.isFinite(fatTokens) ? fatTokens : 0, at };
 }
 
+// 0e "THE OBESE LOOP" (MEMORY.md): mark that a mechanical Quick pass was
+// auto-triggered this episode — from EITHER the OBESE auto-Quick directive
+// (queue 0d) or a FULL force-run (which also always runs Quick). Read back
+// at the next SessionStart (or a Stop-triggered re-gauge, beta.13 item 3) as
+// the gate for arming a same-band OBESE "escalation" crossing once
+// mechanical cutting proves insufficient — see recordCrossing below. Cleared
+// automatically the moment the band returns to LEAN (recordCrossing's own
+// reset), never by a clock.
+export function markQuickTried(home, projectRoot, now = Date.now()) {
+  const state = pruneOrphans(loadState(home));
+  state.projects = state.projects || {};
+  const key = projKey(projectRoot);
+  const proj = state.projects[key] || {};
+  proj.quickTried = true;
+  proj.quickTriedAt = now;
+  state.projects[key] = proj;
+  return saveState(state, home);
+}
+
 // ---------------------------------------------------------------------------
 // edge-crossing state (beta.10 — MEMORY.md "NORMAL-MODE ASK REDESIGN: ONCE-
 // TIME EDGES"). Retires the beta.8/9 per-turn UserPromptSubmit bar (a REQUEST
@@ -455,15 +561,46 @@ export const BAND_RANK = { LEAN: 0, OBESE: 1, FULL: 2 };
 // Called every SessionStart alongside recordVerdict, comparing the NEW band
 // against the band on record from BEFORE this session's recordVerdict call
 // (the caller reads it off the pre-overwrite proj.lastVerdict.band).
-export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.now()) {
+//
+// opts.quickTried / opts.fatTokens (beta.13 item 2, "0e THE OBESE LOOP"): a
+// plain RISE always arms exactly as before (untouched — the shape stays
+// `{band, at, consumed:false}`, no new key, so every existing rise-arm
+// assertion keeps holding byte-for-byte). The ADDITIVE case: OBESE
+// PERSISTING (or reached again on a FALL, e.g. settling back from a FULL
+// force-run) after a Quick pass was already tried this episode is a
+// DIFFERENT situation — mechanical cutting is exhausted, only semantic
+// judgment (the wizard) can help further — so it arms an "escalation"
+// crossing (`escalation:true`) even on a non-rise plateau. Gated on fat
+// having GENUINELY GROWN past the fat level at the last time this was
+// flagged (`lastEscalationFat`) — never every session on an unchanged
+// plateau (that would be the class-17 re-nag fatigue the user explicitly
+// rejected; "ask frequency tracks fat-growth rate, never a clock/throttle").
+// FULL is untouched by this branch — it always routes through its own
+// force/ask logic regardless of quickTried.
+export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.now(), opts = {}) {
+  const { quickTried = false, fatTokens = 0 } = opts || {};
   const state = pruneOrphans(loadState(home));
   state.projects = state.projects || {};
   const key = projKey(projectRoot);
   const proj = state.projects[key] || {};
   if (newBand === 'LEAN') {
     delete proj.lastCrossing;
+    // 0e: LEAN is the episode's clean reset — a FUTURE OBESE rise gets a
+    // fresh, unconditional auto-Quick attempt, never treated as "already
+    // tried" leftover from a store that has since been cleaned.
+    delete proj.quickTried;
+    delete proj.quickTriedAt;
+    delete proj.lastEscalationFat;
   } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {
     proj.lastCrossing = { band: newBand, at: now, consumed: false };
+  } else if (
+    newBand === 'OBESE' &&
+    quickTried &&
+    !(proj.lastCrossing && proj.lastCrossing.consumed === false) &&
+    fatTokens > (proj.lastEscalationFat || 0)
+  ) {
+    proj.lastCrossing = { band: newBand, at: now, consumed: false, escalation: true };
+    proj.lastEscalationFat = fatTokens;
   }
   state.projects[key] = proj;
   return saveState(state, home);
@@ -476,14 +613,16 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
 // staleness cutoff (unlike sanitizeVerdict): a crossing records a fact ("a
 // rise happened at time T"), which does not go stale the way a cached
 // footprint measurement does — see the ponytail note on consumeCrossing for
-// why nothing here can go unconsumed forever regardless.
+// why nothing here can go unconsumed forever regardless. `escalation` (0e)
+// passes through ONLY when explicitly true, so a plain rise-crossing keeps
+// the EXACT pre-existing 2-key shape.
 export function sanitizeCrossing(rawCrossing, now = Date.now()) {
   if (!rawCrossing || typeof rawCrossing !== 'object') return null;
   if (rawCrossing.consumed === true) return null;
   if (!(rawCrossing.band in BAND_RANK) || rawCrossing.band === 'LEAN') return null;
   const at = Number(rawCrossing.at);
   if (!Number.isFinite(at) || at > now) return null;
-  return { band: rawCrossing.band, at };
+  return rawCrossing.escalation === true ? { band: rawCrossing.band, at, escalation: true } : { band: rawCrossing.band, at };
 }
 
 // ponytail: consumption happens at EMISSION time — the Stop hook calls this

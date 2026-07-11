@@ -42,7 +42,7 @@ Collect, then **reap/release** the sub (subagent-safety: no zombies; a permissio
 
 ## 3. Insider adjudication (you)
 
-Per flag, decide: **accept** (genuinely garbage — schedule the cut) · **reject** (the outsider lacks context — keep, optionally note why) · **contradiction** (route below). Rules:
+Per flag, decide: **accept** (keep-0%, genuinely garbage — schedule the cut) · **shrink** (keep-partial — an `over-verbose` flag right-sized: the wording shrinks, the fact/link/number/strength survive verbatim; this is the outcome for `over-verbose`, not accept) · **reject** (keep-100%, the outsider lacks context — keep, optionally note why) · **contradiction** (route below). One question governs all three ("how much of this is enough to keep?") — shrink's red line: SIZE may shrink, FUNCTION never; the fidelity gate (§4) blocks the apply on any drop. Rules:
 
 - The owner-blindness asymmetry is WHY the outsider exists: your instinct rates everything "necessary" — reject only with a concrete reason, not a feeling.
 - A rejection (keep) with its concrete reason appends `{target, reason, date}` to `.claude/coalwash/keeps.json` — an adjudicated keep is not re-flagged next run without new evidence; decision-fatigue is real, a settled item stays settled.
@@ -69,7 +69,7 @@ console.log(JSON.stringify(gateFiles(pairs), null, 1));
 
 For a MERGE (N sources → 1), `orig` = the sources concatenated — the union inventory must survive. `pass: false` → restore every listed drop into the new text and re-gate. The ONLY sanctioned alternative to restoring: a drop that is the direct consequence of a delete or repoint the adjudicated plan itself carries (e.g. removing a deleted file's entry link from the index) may proceed — carried **by name** in the plan's `approvedDrops` so the code interlock passes exactly that drop and no other (the itemized drop list is the opt-in programmer surface of SKILL step 4, not a mandatory by-name re-confirmation). Nothing drops silently — that is the whole gate.
 
-Merges also need a **claim-strength check** the fidelity gate does not cover (it catches dropped tokens, not softened wording — "usually" → "always" drops nothing structured). Before applying an accepted merge, spawn a second before-vs-after outsider: same zero-context contract, retasked ("ORIGINAL vs MERGED: flag any claim whose strength changed, one line each"). `localOnly` or a no-spawn platform → skip the spawn and flag the merge for manual human review instead.
+Merges AND shrinks both need a **claim-strength check** the fidelity gate does not cover (it catches dropped tokens, not softened wording — "usually" → "always", or a trimmed sentence that quietly loses its qualifier, drops nothing structured). Before applying an accepted merge OR an accepted shrink (an over-verbose passage right-sized to the same fact — §3's keep-partial outcome; mechanically just another `rewrite`, so it carries the identical risk class), spawn a second before-vs-after outsider: same zero-context contract, retasked ("ORIGINAL vs MERGED/SHRUNK: flag any claim whose strength changed, one line each"). `localOnly` or a no-spawn platform → skip the spawn and flag the merge/shrink for manual human review instead.
 
 Apply (deletes execute on the adjudicated plan alone — no separate approval flag):
 

@@ -131,3 +131,60 @@ test('pipeline: sweepResidue -> stripEmptyTables handles a mixed cut (heading re
   assert.ok(out.includes('## Keep'));
   assert.ok(out.includes('survives'));
 });
+
+// ---------------------------------------------------------------------------
+// 0d SHIP CONDITION (beta.13 item 1, MEMORY.md "KILL-RATE": "before shipping
+// 0d, add a regression: auto-Quick over a trap-laced corpus proving 0 trap
+// touched"). Quick is now auto-run WITHOUT an ask (queue 0d) — a NEW surface;
+// the lab campaign ran Quick agent-supervised, never unattended. sweepResidue
+// and stripEmptyTables are the ONLY two Quick ops that auto-CUT (not merely
+// flag) without a human/outsider in the loop, so THEY are what this
+// regression targets: near-miss shapes engineered to LOOK like residue/
+// empty-table candidates but are load-bearing content, proving the
+// structural scope holds even under adversarial-shaped input (never a full
+// semantic trap-suite — that needs an LLM agent, out of a hermetic
+// node:test's reach; this is the CODE-layer equivalent: 0 trap touched by
+// the two mechanically-auto-cutting rules).
+// ---------------------------------------------------------------------------
+
+test('0d ship condition: a heading with SHORT-but-real surviving content ("still here", a one-word near-miss) is never swept as residue', () => {
+  const orig = '## Notes\nsomething long and detailed\n\n## Keep\nother\n';
+  const newText = '## Notes\nstill here\n\n## Keep\nother\n'; // heavily trimmed, but NOT empty
+  assert.strictEqual(sweepResidue(orig, newText), newText, 'a trimmed-but-nonempty body is never mistaken for residue');
+});
+
+test('0d ship condition: duplicate headings (same title+level) — the ambiguous orig-pairing degrades SAFELY: never over-sweeps a still-meaningful heading', () => {
+  // FIRST "## Dup" is a pre-existing empty placeholder; SECOND had real
+  // content and was JUST emptied by this edit. orig.heads.findIndex always
+  // resolves to the FIRST match (an inherent ambiguity for same-title/level
+  // duplicates) -- verified behavior: this MISSES the second's genuine
+  // residue-sweep opportunity (recall = best-effort) rather than risking a
+  // wrong match (precision = 1.0 mandatory, the broom asymmetry).
+  const orig = '## Dup\n\n## Dup\nreal content\n';
+  const newText = '## Dup\n\n## Dup\n\n';
+  const out = sweepResidue(orig, newText);
+  assert.strictEqual(out, newText, 'the ambiguous pairing under-sweeps (safe), never over-sweeps');
+  assert.strictEqual((out.match(/## Dup/g) || []).length, 2, 'both duplicate headings survive — neither is wrongly destroyed');
+});
+
+test('0d ship condition: a heading whose LEVEL changed (same title, different #-depth) never cross-matches its old self, even when now empty', () => {
+  const orig = '## Notes\nreal content\n';
+  const newText = '### Notes\n\n'; // same title text, promoted to a sub-heading, now empty
+  assert.strictEqual(sweepResidue(orig, newText), newText, 'a level change is treated as a BRAND-NEW heading, never matched to the old one');
+});
+
+test('0d ship condition: a table row with BLANK-LOOKING cells (structurally present, content-empty) still counts as "has data" — the table is never stripped', () => {
+  const text = 'before\n\n| Col1 | Col2 |\n| --- | --- |\n|  |  |\n\nafter\n';
+  assert.strictEqual(stripEmptyTables(text), text, 'a present-but-blank-celled row is conservatively treated as real data — row COUNT, never cell content, decides');
+});
+
+test('0d ship condition: a table separated from its header by a blank line (NOT immediately adjacent) is never treated as a candidate — adjacency is required', () => {
+  const text = '| Col1 | Col2 |\n\n| --- | --- |\n';
+  assert.strictEqual(stripEmptyTables(text), text, 'a non-adjacent separator can never pair with a header — no accidental match');
+});
+
+test('0d ship condition: a heading title containing markdown emphasis/formatting round-trips through sweepResidue unmodified when its body survives', () => {
+  const orig = '## **Bold** Section\ndetail here\n';
+  const newText = '## **Bold** Section\nshorter\n';
+  assert.strictEqual(sweepResidue(orig, newText), newText, 'formatting in a title is opaque to the matcher — exact-string match, no markdown-aware parsing needed for safety');
+});
