@@ -9,6 +9,7 @@ import {
   statePath, loadState, projectState, recordStamp, setLeanFloor, ensureProvisionalFloor,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
   recordVerdict, markQuickTried, recordSubSpawn,
+  migrateState, STATE_SCHEMA, SCHEMA_RESET_FIELDS,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
   CEILING_BMI, CEILING_REARM_BMI, FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
@@ -980,9 +981,10 @@ test('recordCrossing: OBESE reached again on a FALL (e.g. settling back from FUL
   } finally { clean(home, proj); }
 });
 
-test('recordCrossing: FULL persisting (same band, no rise) with quickTried+growth arms an ESCALATION crossing (extra key, only when true) — 0f\'s sole ask site', () => {
+test('recordCrossing: after a PLAIN force is consumed (case-b Quick ran, quickTried set) a still-over FULL arms the wizard ESCALATION — force-THEN-ask (0f\'s sole ask site)', () => {
   const { home, proj } = sandbox();
   try {
+    seedConsumed(home, proj, { band: 'FULL', at: 500 }); // a plain force just ran + was consumed
     recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 });
     const st = projectState(loadState(home), proj);
     assert.deepStrictEqual(st.lastCrossing, { band: 'FULL', at: 1000, consumed: false, escalation: true });
@@ -998,58 +1000,63 @@ test('recordCrossing: FULL persisting WITHOUT quickTried stays inert — the wiz
   } finally { clean(home, proj); }
 });
 
-test('recordCrossing: FULL persisting with quickTried but NO growth past the last flagged fat level stays SILENT — never a clock/re-nag on an unchanged plateau', () => {
+test('recordCrossing: after the ask is armed, a plateau at the same fat stays SILENT — never a clock/re-nag on unchanged fat', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 }); // first escalation
+    seedConsumed(home, proj, { band: 'FULL', at: 500 }); // post-force
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 }); // ASK arms escalation, lastEscalationFat=500
+    consumeCrossing(home, proj, 1100); // user "later" — the escalation is consumed
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 500 }); // same fat, later tick
-    const st = projectState(loadState(home), proj);
-    assert.strictEqual(st.lastCrossing.at, 1000, 'flat fat never re-arms a new escalation');
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'flat fat never re-arms');
     recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 480 }); // fat SHRANK slightly
     assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'a shrink never re-arms either');
   } finally { clean(home, proj); }
 });
 
-test('0m: the FIRST escalation of an episode arms on quickTried alone — fat 0 included (the day-one over-wall store: provisional floor = footprint, fat ≡ 0; the ledger sequence "force → still over → the ONE wizard ask" is unconditional)', () => {
+test('0m: the FIRST ask of an episode arms after the day-one force at fat≡0 (over-wall store: provisional floor = footprint, fat≡0; "force → still over → the ONE ask" is unconditional at the first ask)', () => {
   const { home, proj } = sandbox();
   try {
+    seedConsumed(home, proj, { band: 'FULL', at: 500 }); // the day-one force ran + was consumed
     recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 0 });
-    const st = projectState(loadState(home), proj);
-    assert.strictEqual(st.lastCrossing.escalation, true, 'never flagged before -> arms at any fat level, 0 included');
+    let st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.escalation, true, 'first ask arms at any fat, 0 included');
     assert.strictEqual(st.lastEscalationFat, 0, 'the flagged level is recorded, 0 included');
-    // ...and the no-nag rule guards RE-asks exactly as before: consumed, then
-    // an unchanged fat-0 plateau never re-arms.
+    // ...consumed, then an unchanged fat-0 plateau never re-arms.
     consumeCrossing(home, proj, 1500);
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 0 });
     assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'a fat-0 plateau after the first ask stays silent — growth (past 0) is the only re-arm');
-    // Real growth past the flagged 0 re-arms.
+    // Genuine growth past the flagged 0 re-arms — FORCE FIRST (a PLAIN crossing, USER decision B), the ask follows after.
     recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 50 });
-    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 3000, 'genuine growth past the flagged level re-arms');
+    st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.at, 3000, 'genuine growth past the flagged level re-arms');
+    assert.notStrictEqual(st.lastCrossing.escalation, true, 'growth re-arms a PLAIN force first — the free sweep re-runs before any ask');
   } finally { clean(home, proj); }
 });
 
-test('recordCrossing: fat GROWING past the last flagged escalation level re-arms a fresh escalation (the growth-rate frequency rule)', () => {
+test('recordCrossing: fat GROWING past the last-asked level re-arms — FORCE first (a PLAIN crossing), the ask follows (USER decision B — the growth-rate frequency rule)', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 });
-    // consumed at emission (the Stop hook's own discipline) — otherwise a
-    // still-PENDING escalation must never be clobbered by a second arm.
+    seedConsumed(home, proj, { band: 'FULL', at: 400 }); // post-force
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 }); // ASK → escalation, lastEscalationFat=500
+    // consumed at emission (the Stop hook's own discipline).
     consumeCrossing(home, proj, 1500);
     recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 900 }); // genuinely more fat
     const st = projectState(loadState(home), proj);
-    assert.strictEqual(st.lastCrossing.at, 2000, 'growth past the last flagged level arms a fresh escalation');
+    assert.strictEqual(st.lastCrossing.at, 2000, 'growth past the last-asked level re-arms');
     assert.strictEqual(st.lastCrossing.consumed, false);
-    assert.strictEqual(st.lastEscalationFat, 900);
+    assert.notStrictEqual(st.lastCrossing.escalation, true, 'a PLAIN force crossing — the free sweep re-runs on the new lump first');
+    assert.strictEqual(st.lastEscalationFat, 500, 'lastEscalationFat only climbs when the ASK next fires (after the force)');
   } finally { clean(home, proj); }
 });
 
-test('recordCrossing: a still-PENDING (unconsumed) escalation is never clobbered by a later same-band check', () => {
+test('recordCrossing: a still-PENDING (unconsumed) crossing is never clobbered by a later same-band check', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 });
-    recordCrossing(home, proj, 'FULL', 'FULL', 5000, { quickTried: true, fatTokens: 9000 }); // huge growth, but never consumed yet
+    seedConsumed(home, proj, { band: 'FULL', at: 400 }); // post-force
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 500 }); // arms a PENDING escalation (unconsumed)
+    recordCrossing(home, proj, 'FULL', 'FULL', 5000, { quickTried: true, fatTokens: 9000 }); // huge growth, but the escalation is still pending
     const st = projectState(loadState(home), proj);
-    assert.strictEqual(st.lastCrossing.at, 1000, 'a pending, undelivered escalation is left exactly as it is — the existing "never re-arm a pending crossing" rule extends here');
+    assert.strictEqual(st.lastCrossing.at, 1000, 'a pending, undelivered crossing is left exactly as it is — the "never re-arm a pending crossing" rule holds');
   } finally { clean(home, proj); }
 });
 
@@ -1071,6 +1078,262 @@ test('recordCrossing: a plain rise-arm keeps the EXACT pre-existing 2-key shape 
   try {
     recordCrossing(home, proj, 'FULL', 'OBESE', 1000, { quickTried: true, fatTokens: 4000 }); // a genuine rise
     assert.deepStrictEqual(projectState(loadState(home), proj).lastCrossing, { band: 'FULL', at: 1000, consumed: false });
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// rc.2 THE STRANDED-CONSUMED-CROSSING UN-STRAND — a fresh session on a
+// still-nudge-band store carrying a CONSUMED crossing re-arms (a new offer
+// opportunity), the same no-nag growth gate as escalation. Fixes the live
+// dev-room strand: a pre-0m consumed crossing (force never ran → quickTried
+// unset → the escalation branch unreachable) had no path to re-arm.
+// ---------------------------------------------------------------------------
+
+// Seed a consumed crossing directly (the state a prior session's Stop leaves).
+function seedConsumed(home, proj, cross, extra = {}) {
+  const state = loadState(home);
+  state.projects = state.projects || {};
+  state.projects[projectStateKey(proj)] = { lastCrossing: { consumed: true, ...cross }, ...extra };
+  fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
+  fs.writeFileSync(statePath(home), JSON.stringify(state), 'utf8');
+}
+function projectStateKey(proj) { return fs.realpathSync(proj); }
+
+test('rc.2 (a) THE LIVE REPRO: a consumed FULL crossing from an EARLIER session with NO session id + NO quickTried (pre-0m) → a new session still FULL with GROWN fat RE-ARMS (the un-strand)', () => {
+  const { home, proj } = sandbox();
+  try {
+    // The 19:05 crossing: consumed via "later", no session recorded, force
+    // never ran (no quickTried, no lastEscalationFat).
+    seedConsumed(home, proj, { band: 'FULL', at: 1000 }); // no session field
+    // 23:10, a NEW session, still FULL, fat grew (5189).
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 5189, session: 'sess-B' });
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.consumed, false, 're-armed: a fresh unconsumed crossing');
+    assert.strictEqual(st.lastCrossing.band, 'FULL');
+    assert.strictEqual(st.lastCrossing.at, 2000);
+    assert.strictEqual(st.lastCrossing.session, 'sess-B', 'the re-armed crossing records the current session');
+    assert.notStrictEqual(st.lastCrossing.escalation, true, 're-arm is a PLAIN crossing → the normal FULL force flow, not the wizard escalation');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 (b) SAME session, consumed crossing → NO re-arm (no-nag intact — a same-session re-run never re-offers)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedConsumed(home, proj, { band: 'FULL', at: 1000, session: 'sess-A' });
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 9999, session: 'sess-A' }); // same session, big fat
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.consumed, true, 'still consumed — no re-arm within the same session');
+    assert.strictEqual(st.lastCrossing.at, 1000, 'untouched');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 (c) NEW session but fat NOT grown past the last-flagged level (plateau) → NO re-arm (the sacred no-nag guard)', () => {
+  const { home, proj } = sandbox();
+  try {
+    // A FLAGGED store: a prior escalation recorded lastEscalationFat = 500.
+    seedConsumed(home, proj, { band: 'FULL', at: 1000, session: 'sess-A' }, { lastEscalationFat: 500 });
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 500, session: 'sess-B' }); // new session, SAME fat
+    let st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.consumed, true, 'plateau across sessions stays silent — no re-arm');
+    assert.strictEqual(st.lastCrossing.at, 1000);
+    // a shrink also never re-arms
+    recordCrossing(home, proj, 'FULL', 'FULL', 3000, { fatTokens: 480, session: 'sess-C' });
+    st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.at, 1000, 'a shrink never re-arms either');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 (d) NEW session with fat GROWN past the last-flagged level → re-arms (the growth-rate rule)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedConsumed(home, proj, { band: 'FULL', at: 1000, session: 'sess-A' }, { lastEscalationFat: 500 });
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 900, session: 'sess-B' }); // new session, grown fat
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.consumed, false, 'grown fat in a new session re-arms');
+    assert.strictEqual(st.lastCrossing.session, 'sess-B');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 (e) LEAN reset still clears everything (branch 1 untouched) — session field goes with the deleted crossing', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'FULL', 'OBESE', 1000, { fatTokens: 4000, session: 'sess-A' }); // rise, records session
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.session, 'sess-A');
+    recordCrossing(home, proj, 'LEAN', 'FULL', 2000, { session: 'sess-A' });
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing, undefined, 'LEAN clears the crossing (and its session) outright');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 (f) the rise + ask branches carry the session field but behave identically (regression)', () => {
+  const { home, proj } = sandbox();
+  try {
+    // rise WITH a session: same behavior, session recorded, no other field changes.
+    recordCrossing(home, proj, 'FULL', 'OBESE', 1000, { quickTried: true, fatTokens: 4000, session: 'sess-A' });
+    assert.deepStrictEqual(projectState(loadState(home), proj).lastCrossing, { band: 'FULL', at: 1000, consumed: false, session: 'sess-A' });
+    // ask WITH a session: after a plain force is consumed, the escalation arms with the session field + lastEscalationFat.
+    const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2rc-')));
+    try {
+      seedConsumed(home, proj2, { band: 'FULL', at: 4000, session: 'sess-A' }); // a plain force just ran + consumed
+      recordCrossing(home, proj2, 'FULL', 'FULL', 5000, { quickTried: true, fatTokens: 700, session: 'sess-A' });
+      const st = projectState(loadState(home), proj2);
+      assert.deepStrictEqual(st.lastCrossing, { band: 'FULL', at: 5000, consumed: false, escalation: true, session: 'sess-A' });
+      assert.strictEqual(st.lastEscalationFat, 700);
+    } finally { clean(proj2); }
+  } finally { clean(home, proj); }
+});
+
+test('rc.2: a no-session call NEVER re-arms a consumed crossing (undefined !== undefined is false) — old callers unaffected', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedConsumed(home, proj, { band: 'FULL', at: 1000 }); // no session
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { fatTokens: 9999 }); // no session passed
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.consumed, true, 'no session → no re-arm');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 (g) FULL-ONLY GATE: an OBESE consumed crossing NEVER re-arms via branch 4 — even a fat-grown new session (the blocker fix: OBESE has no lastEscalationFat, so `>= OBESE` re-armed every flat plateau forever; OBESE auto-Quicks through its OWN crossing path, it does not need — and must not get — the FULL wizard re-arm)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedConsumed(home, proj, { band: 'OBESE', at: 1000, session: 'sess-A' });
+    // new session, fat grown — under the buggy `>= OBESE` gate this re-armed;
+    // FULL-only gate leaves the consumed OBESE crossing consumed.
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { fatTokens: 3000, session: 'sess-B' });
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.consumed, true, 'OBESE does NOT re-arm — the FULL-only gate closes the every-session-plateau nag');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 (h) FULL PLATEAU STAYS SILENT: a store post-ask (an ESCALATION was consumed, lastEscalationFat set) does NOT re-arm on a SECOND/THIRD consecutive FULL session at the SAME fat — the multi-session-plateau no-nag', () => {
+  const { home, proj } = sandbox();
+  try {
+    // realistic post-ask state: an ESCALATION crossing was consumed on session A
+    // (escalation:true), lastEscalationFat stamped by that ask.
+    seedConsumed(home, proj, { band: 'FULL', at: 1000, session: 'sess-A', escalation: true }, { lastEscalationFat: 5000 });
+    // session B, still FULL, fat UNCHANGED at the flagged level -> silent.
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 5000, session: 'sess-B' });
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.consumed, true, 'FULL plateau at the flagged fat re-arms NOTHING (fat > lastEscalationFat is false)');
+    // and a THIRD session, still the same fat -> still silent (not a one-off).
+    recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 5000, session: 'sess-C' });
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.consumed, true, 'still silent on the third consecutive plateau session');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 (i) FULL plateau BREAKS on real growth: a post-ask store re-arms once fat grows past the flagged level — FORCE FIRST (a PLAIN crossing, USER decision B), the ask follows after', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedConsumed(home, proj, { band: 'FULL', at: 1000, session: 'sess-A', escalation: true }, { lastEscalationFat: 5000 });
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 9000, session: 'sess-B' });
+    // grown fat past the last-asked level -> FORCE-on-growth arms a PLAIN
+    // crossing (the free Quick re-runs on the new lump first); the wizard ask
+    // follows on the next tick once the force leaves the store over.
+    const c = projectState(loadState(home), proj).lastCrossing;
+    assert.strictEqual(c.consumed, false, 'grown fat re-offers');
+    assert.notStrictEqual(c.escalation, true, 'a PLAIN force crossing first — not the ask (force-then-ask per growth)');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// rc.2 STATE SCHEMA GUARD (migrateState) — the "no-old-version-leftover"
+// standard at the state layer: a reinstall/upgrade resets version-SENSITIVE
+// fields on the first read, PRESERVES the version-stable leanFloor baseline.
+// Write the raw old state directly (no stateSchema) to model a pre-fix store.
+// ---------------------------------------------------------------------------
+
+test('rc.2 SCHEMA (a): OLD state (no stateSchema, a consumed pre-0m crossing) → first migrate CLEARS the version-sensitive fields, PRESERVES leanFloor, STAMPS the schema', () => {
+  const { home, proj } = sandbox();
+  try {
+    const key = fs.realpathSync(proj);
+    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
+    fs.writeFileSync(statePath(home), JSON.stringify({ projects: { [key]: {
+      lastCrossing: { band: 'FULL', at: 1000, consumed: true }, quickTried: true, quickTriedAt: 900, lastEscalationFat: 5000,
+      lastVerdict: { band: 'FULL', reason: 'absolute-cap', overCeiling: true },
+      leanFloorTokens: 29054, leanFloorProvisional: false, leanFloorAt: 500, stamps: [{ t: 1, fp: 100 }],
+      subSpawns: 3, subParcelTokensAccum: 12000, lastSubSpawnAt: 800,
+    } } }), 'utf8'); // NO stateSchema
+    assert.strictEqual(migrateState(home), true, 'a schema-less state migrates');
+    const st = projectState(loadState(home), proj);
+    // version-SENSITIVE -> cleared
+    assert.strictEqual(st.lastCrossing, undefined);
+    assert.strictEqual(st.quickTried, undefined);
+    assert.strictEqual(st.quickTriedAt, undefined);
+    assert.strictEqual(st.lastEscalationFat, undefined);
+    assert.strictEqual(st.lastVerdict, undefined);
+    // version-STABLE -> preserved
+    assert.strictEqual(st.leanFloorTokens, 29054, 'the real footprint baseline SURVIVES the upgrade (never false-FULL)');
+    assert.strictEqual(st.leanFloorProvisional, false);
+    assert.strictEqual(st.leanFloorAt, 500);
+    assert.deepStrictEqual(st.stamps, [{ t: 1, fp: 100 }]);
+    assert.strictEqual(st.subSpawns, 3);
+    assert.strictEqual(st.subParcelTokensAccum, 12000);
+    assert.strictEqual(st.lastSubSpawnAt, 800);
+    // schema stamped
+    assert.strictEqual(loadState(home).stateSchema, STATE_SCHEMA);
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 SCHEMA (b): a CURRENT-schema state is left untouched (no migration)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const key = fs.realpathSync(proj);
+    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
+    fs.writeFileSync(statePath(home), JSON.stringify({ stateSchema: STATE_SCHEMA, projects: { [key]: {
+      lastCrossing: { band: 'FULL', at: 1000, consumed: true }, leanFloorTokens: 29054,
+    } } }), 'utf8');
+    assert.strictEqual(migrateState(home), false, 'current schema -> no migration');
+    const st = projectState(loadState(home), proj);
+    assert.deepStrictEqual(st.lastCrossing, { band: 'FULL', at: 1000, consumed: true }, 'the crossing is preserved on a current-schema state');
+    assert.strictEqual(st.leanFloorTokens, 29054);
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 SCHEMA (c): migration is IDEMPOTENT (twice = once)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const key = fs.realpathSync(proj);
+    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
+    fs.writeFileSync(statePath(home), JSON.stringify({ projects: { [key]: { lastCrossing: { band: 'FULL', at: 1, consumed: true }, leanFloorTokens: 100 } } }), 'utf8');
+    assert.strictEqual(migrateState(home), true, 'first run migrates');
+    const after1 = projectState(loadState(home), proj);
+    assert.strictEqual(migrateState(home), false, 'second run is a no-op (schema now current)');
+    assert.deepStrictEqual(projectState(loadState(home), proj), after1, 'state identical after the second run');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 SCHEMA (d): a CORRUPT/non-integer stateSchema is treated as OLDER → safe-migrate, never throws', () => {
+  const { home, proj } = sandbox();
+  try {
+    const key = fs.realpathSync(proj);
+    fs.mkdirSync(path.dirname(statePath(home)), { recursive: true });
+    for (const bad of ['"garbage"', 'null', '0', '-1', '0.5']) {
+      fs.writeFileSync(statePath(home), `{ "stateSchema": ${bad}, "projects": { ${JSON.stringify(key)}: { "lastCrossing": { "band": "FULL", "at": 1, "consumed": true }, "leanFloorTokens": 77 } } }`, 'utf8');
+      assert.doesNotThrow(() => migrateState(home));
+      const st = projectState(loadState(home), proj);
+      assert.strictEqual(st.lastCrossing, undefined, `corrupt schema ${bad} → migrated (cleared crossing)`);
+      assert.strictEqual(st.leanFloorTokens, 77, 'baseline preserved through the safe-migrate');
+      assert.strictEqual(loadState(home).stateSchema, STATE_SCHEMA);
+    }
+    // a totally corrupt state file (unparseable) never throws either
+    fs.writeFileSync(statePath(home), '{ not json', 'utf8');
+    assert.doesNotThrow(() => migrateState(home));
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 SCHEMA (f): a FRESH install (no state file) is a NO-OP — migration never CREATES a stamped-but-empty file (manual mode stays state-less)', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.strictEqual(fs.existsSync(statePath(home)), false, 'precondition: no state file');
+    assert.strictEqual(migrateState(home), false, 'nothing to migrate on a fresh install');
+    assert.strictEqual(fs.existsSync(statePath(home)), false, 'migration wrote NOTHING — no leftover stamp');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 SCHEMA (e): the reset-list constant matches the fields actually cleared (the mechanism a future ruling extends)', () => {
+  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastVerdict']);
+  assert.strictEqual(STATE_SCHEMA, 1);
+  // every write stamps the schema (round-trip through the public write API)
+  const { home, proj } = sandbox();
+  try {
+    recordStamp(home, proj, 100, 1);
+    assert.strictEqual(loadState(home).stateSchema, STATE_SCHEMA, 'recordStamp stamped the schema');
   } finally { clean(home, proj); }
 });
 

@@ -2,6 +2,17 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-rc.2] - 2026-07-12
+
+The first dogfood FIELD bugfix (rc = internal-proven; real use surfaced it). A chronically-FULL store that consumed its crossing — especially one carried across the pre-0m→0m upgrade — went permanently silent: the conductor could never re-arm, so the skill looked dead on a still-fat store. Fixed, plus the state layer joined the no-old-version-leftover guarantee. Bugfix only, no new capability.
+
+### Fixed
+- **The stranded-crossing un-strand (session-id + growth re-arm).** A consumed FULL crossing now re-arms when either (a) a NEW session opens on a still-FULL store, or (b) fat grows past the last-flagged level MID-session (the Stop-hook warp-gate already re-gauges every turn) — so a dragged single session re-offers on real growth, not only on a fresh session. The re-arm was gated to FULL only (an earlier cut over-reached to OBESE, which re-fired every session on a flat plateau — caught in review, fixed).
+- **Force-then-ask on every growth (USER decision).** Each fat-growth past the flagged level runs the FREE mechanical Quick force FIRST (code, ~0 token — sweeps the certainty), THEN the wizard ask only if judgment-fat remains — never ask-only, never a throttle. Frequency mirrors the fat-growth rate: rapid growth → rapid force+ask, plateau → silent (the no-nag law: silence is "fat didn't move," never a timer).
+- **State schema-version guard (no version-stale state).** The state file stamps a `stateSchema`; reading state written by an older schema migrates it — resetting only the version-SENSITIVE fields whose semantics a ruling changed (the crossing family), PRESERVING the version-STABLE baseline (the lean floor). This is the series' "self-update: no-old-version-leftover" standard extended to the state layer, so a reinstall/upgrade never carries stale crossing state (it un-strands the live pre-0m store on first read). The lean floor is the skill's "electricity" — never reset, or every upgrade would false-FULL until the next clean.
+
+Tests 427 → 448 (session-id re-arm, schema migration, the FORCE→ASK→FORCE→ASK dictator alternation through the real hook, OBESE-plateau silence, force-never-starved / ask-never-starved). Review: SHIP (sequencer traced to a total, mutually-exclusive, non-starving state machine; one LOW = a recurring externalize reminder, safe-by-construction, comment corrected).
+
 ## [0.1.0-rc.1] - 2026-07-11
 
 **Feature freeze.** The 0f–0p ruling wave is complete and internally proven — 53/53 lab loss-classes covered, 0/33 traps leaked, 427 hermetic tests, an adversarial review SHIP on every wave. That earns **rc**: the structure is durable (the safety floor is code-held, model-independent). It is NOT yet "live" — rc is internal-proven awaiting **field** proof (real global Claude Code use surfaces the operator-drift / last-hop-visibility class the lab can't simulate). rc → stable = a real dogfood stretch with no code change; a field bug → rc.2 (bugfix only, no features).

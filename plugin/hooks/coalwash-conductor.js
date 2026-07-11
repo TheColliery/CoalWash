@@ -160,6 +160,15 @@ async function handleSessionStart(input) {
   const projectRoot = findProjectRoot(process.cwd(), home);
   const out = [];
 
+  // rc.2 SCHEMA MIGRATION — the "no-old-version-leftover" guard, run once at
+  // the first SessionStart after an upgrade: reset version-STALE state
+  // (a pre-0m consumed crossing / stale cached verdict) while PRESERVING the
+  // leanFloor baseline, so a reinstall/upgrade never strands a chronically-
+  // FULL store nor false-FULLs it. Idempotent + fail-silent; runs before the
+  // gauge so this session gauges on clean state (prevBand→LEAN → the store
+  // re-enrolls via the qualifying-past rise).
+  caliper.migrateState(home);
+
   // 0p writeguard cleanup — run-gated at SessionStart (event, NEVER a clock;
   // 0h-GUARD spirit): drop every prior session's airbag snapshots, keep this
   // session's. NOT a bin sweep / no retention.mjs — the same keep-current
@@ -240,7 +249,7 @@ async function handleSessionStart(input) {
     // force-run already tried Quick this episode and fat has genuinely
     // grown since — see recordCrossing. OBESE never arms this any more (0d:
     // auto-Quick-silent only).
-    caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now, { quickTried, fatTokens });
+    caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now, { quickTried, fatTokens, session: input && input.session_id });
   }
 
   if (updateDue(cfg, clampedRead)) {
@@ -339,7 +348,7 @@ async function handleStop(input) {
           perDay: gv.perDay, breakEvenDays: gv.breakEvenDays, floorUnmeasured: gv.floorUnmeasured,
           hardCeilingTokens: gv.verdict.hardCeilingTokens, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
         }, now);
-        caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens });
+        caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens, session: input && input.session_id });
         proj = caliper.projectState(caliper.loadState(home), projectRoot); // re-read what we just (maybe) armed
         lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
         crossing = caliper.sanitizeCrossing(proj.lastCrossing);
@@ -363,8 +372,12 @@ async function handleStop(input) {
   if (crossing.band === 'FULL' && lastVerdict.reason === 'externalize') {
     // Pure information — never an ask, never force: washing cannot help
     // ~all-muscle over capacity (the growable-full invariant's forbidden
-    // "wash harder on muscle" move). Delivered exactly once per rise, same
-    // as every other crossing.
+    // "wash harder on muscle" move). Re-emitted once per NEW session while
+    // still over (the session-id re-arm reaches externalize too, and it has
+    // no lastEscalationFat to growth-gate) — a recurring "externalize your
+    // store" reminder, the Windows low-disk-warning model; safe by
+    // construction (reason==='externalize' is checked FIRST, so it can only
+    // ever route here — never a force, never a wizard ask, muscle untouched).
     reason = ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens });
   } else if (crossing.band === 'FULL' && crossing.escalation) {
     // case (c) — 0f "AUTHORITATIVE 3-FLOW": a force-run already tried Quick

@@ -65,10 +65,16 @@ function seedClassB(home, proj, { claudeMdBytes = 100, indexBytes = 60 } = {}) {
   fs.writeFileSync(path.join(mem, 'MEMORY.md'), 'i'.repeat(indexBytes), 'utf8');
   return mem;
 }
-function seedState(home, proj, projState) {
+function seedState(home, proj, projState, { stateSchema = 1 } = {}) {
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   const key = fs.realpathSync(proj);
-  fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), JSON.stringify({ projects: { [key]: projState } }), 'utf8');
+  // Stamp the CURRENT stateSchema by default so the rc.2 SessionStart
+  // migration treats a seed as up-to-date (no reset) — a seed models a store
+  // already on the current version. Pass { stateSchema: undefined } to model a
+  // genuinely OLD state that must migrate.
+  const state = { projects: { [key]: projState } };
+  if (stateSchema !== undefined) state.stateSchema = stateSchema;
+  fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), JSON.stringify(state), 'utf8');
 }
 // 0g fixture helper: a big RECALL file (stat-only measured, never
 // always-loaded) inflates breakEven's run cost (3x the WHOLE store) far past
@@ -611,6 +617,31 @@ test('0j round trip: an already-over-wall store on day one still routes FULL/abs
   } finally { clean(home, proj); }
 });
 
+test('rc.2 cross-version un-strand: an OLD-state chronically-FULL store carrying a CONSUMED pre-0m crossing → SessionStart migrates (schema stamped, legacy crossing cleared, leanFloor PRESERVED) → the fresh re-gauge RE-ENROLLS (a rise arms a fresh unconsumed crossing Stop can force)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 }); // fp 36200 >= the 36000 wall
+    // A genuinely OLD state (no stateSchema): a CONSUMED FULL crossing +
+    // quickTried + a cached FULL verdict from a pre-0m version — the stranded
+    // shape. A real measured leanFloor that MUST survive the upgrade.
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: 500, consumed: true }, quickTried: true, quickTriedAt: 400, lastEscalationFat: 9000,
+      lastVerdict: { band: 'FULL', reason: 'absolute-cap' },
+      leanFloorTokens: 9000, leanFloorProvisional: false, leanFloorAt: 100, stamps: [{ t: 100, fp: 9000 }],
+    }, { stateSchema: undefined });
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    const st = readProjState(home, proj);
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(home, '.claude', '.coalwash-state.json'), 'utf8')).stateSchema, 1, 'the schema is stamped current after the boundary read');
+    assert.strictEqual(st.leanFloorTokens, 9000, 'the measured baseline SURVIVED the upgrade — the store is not false-FULL off a wiped floor');
+    assert.strictEqual(st.leanFloorProvisional, false, 'a measured floor is not downgraded to provisional by the migration');
+    assert.strictEqual(st.lastVerdict.band, 'FULL', 'the fresh re-gauge still routes FULL (the store is genuinely over the wall)');
+    assert.strictEqual(st.lastCrossing.band, 'FULL');
+    assert.strictEqual(st.lastCrossing.consumed, false, 'the un-strand: the legacy consumed crossing is gone; a FRESH unconsumed crossing arms — Stop can force it');
+  } finally { clean(home, proj); }
+});
+
 // ---------------------------------------------------------------------------
 // 0m "FORCE = THE FREE TIER, NO PROOF NEEDED" + "FORCE IS A DICTATOR" — the
 // user's live day-one scenario, end-to-end: WALL day one → silent forced
@@ -751,6 +782,121 @@ test('WARP-HOLE: no cached alwaysLoadedPaths yet (an old state file predating th
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// rc.2 LONG-SESSION growth-gate: a user who drags ONE long session (never
+// opens a new one) after pressing "later" still re-offers when fat GROWS —
+// via the SAME Stop warp-hole re-gauge that catches within-session spikes.
+// The escalation branch (FULL + quickTried + fat > lastEscalationFat) fires
+// mid-session; no new SessionStart, no timer. Grown -> re-arm; flat -> silent.
+// ---------------------------------------------------------------------------
+function seedPostForceFull(home, proj, { claudeMdBytes, leanFloorTokens, lastEscalationFat, escalation = false }) {
+  // A long session mid-episode: a force already ran (quickTried set), the store
+  // is still FULL. The consumed crossing's SHAPE picks the next leg:
+  //   escalation:false (plain-consumed) = a force just ran, ask pending → the
+  //     next re-gauge ASKS; escalation:true = an ask already fired → the next
+  //     growth FORCES first (force-then-ask). This is what the Stop warp reads.
+  const mem = seedClassB(home, proj, { claudeMdBytes, indexBytes: 0 });
+  const claudeMd = path.join(proj, 'CLAUDE.md');
+  const lastCrossing = { band: 'FULL', at: Date.now() - 10000, consumed: true, session: 'sess-A' };
+  if (escalation) lastCrossing.escalation = true;
+  seedState(home, proj, {
+    quickTried: true,
+    lastEscalationFat,
+    leanFloorTokens,
+    leanFloorProvisional: false,
+    lastCrossing,
+    lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: false, fatTokens: lastEscalationFat, overCeiling: true, alwaysLoadedPaths: [claudeMd], alwaysLoadedBytes: claudeMdBytes, at: Date.now() },
+  });
+  return { mem, claudeMd };
+}
+
+test('rc.2 LONG SESSION (grown): fat grows PAST lastEscalationFat within ONE session (no new SessionStart) -> the Stop warp-hole re-gauge arms the escalation + delivers the wizard ask THIS turn (the drag-one-session re-offer)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // over-wall FULL store post-force+later; fat = 36200 - 8000 = 28200 flagged.
+    const { claudeMd } = seedPostForceFull(home, proj, { claudeMdBytes: 144800, leanFloorTokens: 8000, lastEscalationFat: 28200 });
+    // MID-SESSION growth: +4000 bytes (~1000 tok) -> fat ~29200 > 28200, and the
+    // ~1000-tok footprint delta clears REGAUGE_DELTA_TOKENS (500).
+    fs.writeFileSync(claudeMd, 'a'.repeat(148800), 'utf8');
+    const r = run(proj, home, { hook_event_name: 'Stop' }); // SAME session — a Stop, never a SessionStart
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('question tool'), 'the wizard ask fired mid-session on fat growth: ' + reason);
+    assert.ok(reason.includes('STILL over the FULL capacity ceiling'), reason);
+    const st = readProjState(home, proj);
+    assert.ok(st.lastEscalationFat > 28200, 'the escalation re-armed at the NEW higher fat (branch 3 fired in the Stop path), not the seeded level');
+    assert.strictEqual(st.lastCrossing.escalation, true, 'a wizard-escalation crossing (0f), armed + consumed the same turn');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 LONG SESSION (flat): fat does NOT move across turns in one session -> the Stop hook stays SILENT (the plateau is silent because fat did not grow, NOT because of any cooldown/timer)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedPostForceFull(home, proj, { claudeMdBytes: 144800, leanFloorTokens: 8000, lastEscalationFat: 28200 });
+    // NO growth. Two consecutive Stops — both silent (flat = no delta = no
+    // re-gauge = no re-arm; there is no "recently asked" suppression involved).
+    const r1 = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r1);
+    assert.strictEqual(r1.stdout, '', 'flat fat -> silent');
+    const r2 = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r2);
+    assert.strictEqual(r2.stdout, '', 'still silent on the next turn — a plateau never re-nags');
+    assert.strictEqual(readProjState(home, proj).lastEscalationFat, 28200, 'no re-arm — lastEscalationFat unchanged');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 LONG SESSION (force clears it): a growth fires the FORCE; if that free sweep drops the store BELOW FULL the episode ends SILENT — NO ask (the ask follows ONLY a force that left the store over; force-then-ask, not force-then-always-ask)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // post-ask seed → the growth lands on the FORCE leg.
+    const { claudeMd } = seedPostForceFull(home, proj, { claudeMdBytes: 144800, leanFloorTokens: 8000, lastEscalationFat: 28200, escalation: true });
+    fs.writeFileSync(claudeMd, 'a'.repeat(148800), 'utf8'); // growth
+    const rF = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rF);
+    assert.ok(parseBlock(rF.stdout).length > 0 && !parseBlock(rF.stdout).includes('question tool'), 'the growth turn fires the FORCE, not the ask');
+    // the free sweep worked: the store shrinks well below FULL (as if Quick cut the fat).
+    fs.writeFileSync(claudeMd, 'a'.repeat(20000), 'utf8'); // fp ~5000 < floor 8000 -> LEAN
+    const rClean = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rClean);
+    assert.strictEqual(rClean.stdout, '', 'force was enough → below FULL → SILENT, no ask');
+  } finally { clean(home, proj); }
+});
+
+test('rc.2 LONG SESSION (dictator / no throttle): fat growing EVERY turn re-fires FORCE→ASK alternating, one event per growth step, lastEscalationFat climbing on the ask turns — no cooldown/min-interval ever suppresses a rapid-growth re-fire (USER decision B: force-then-ask; 0e: frequency MIRRORS the fat-growth rate)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // POST-ASK seed (escalation-consumed): the first growth this session lands
+    // on the FORCE leg, so the sequence is a clean force → ask → force → ask.
+    const { claudeMd } = seedPostForceFull(home, proj, { claudeMdBytes: 144800, leanFloorTokens: 8000, lastEscalationFat: 28200, escalation: true });
+    let prevFlagged = 28200;
+    const kinds = [];
+    // Each turn grows +4000 bytes (~1000 tok), well past REGAUGE_DELTA (500) and
+    // the previous level — every turn MUST fire something (never silent).
+    for (const bytes of [148800, 152800, 156800, 160800]) {
+      fs.writeFileSync(claudeMd, 'a'.repeat(bytes), 'utf8');
+      const r = run(proj, home, { hook_event_name: 'Stop' }); // consecutive Stops, ONE session
+      assertGraceful(r);
+      const reason = parseBlock(r.stdout);
+      assert.ok(reason.length > 0, `growth turn @${bytes}B must re-fire (dictator, no throttle)`);
+      const isAsk = reason.includes('question tool');
+      kinds.push(isAsk ? 'ASK' : 'FORCE');
+      if (isAsk) {
+        const flagged = readProjState(home, proj).lastEscalationFat;
+        assert.ok(flagged > prevFlagged, `an ASK turn climbs lastEscalationFat (${prevFlagged} -> ${flagged})`);
+        prevFlagged = flagged;
+      }
+    }
+    // force-THEN-ask, one event per growth lump: the free Quick sweep runs on
+    // each new lump BEFORE the ask (USER decision B) — never ask-only, never
+    // force-only, never a silent throttled turn.
+    assert.deepStrictEqual(kinds, ['FORCE', 'ASK', 'FORCE', 'ASK'], 'each growth lump = FORCE first, then its ASK on the next growth — force-then-ask, no throttle');
   } finally { clean(home, proj); }
 });
 

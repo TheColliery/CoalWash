@@ -409,10 +409,36 @@ export function loadState(home = os.homedir()) {
   }
 }
 
+// rc.2 STATE SCHEMA VERSION — the "no-old-version-leftover" standard applied
+// to the state layer: a reinstall/upgrade must never carry VERSION-STALE
+// state (a consumed crossing from a pre-0m version is meaningless under
+// force-dictator; a stale cached verdict band suppresses re-evaluation).
+// Bump this integer whenever a state field's SEMANTICS change, and add that
+// field to SCHEMA_RESET_FIELDS below (that is the mechanism the standard
+// needs). migrateState() (below) runs the reset the first time the new code
+// reads an older state.
+export const STATE_SCHEMA = 1;
+// VERSION-SENSITIVE — reset on a schema bump. Their meaning changed across
+// versions, so a value an older version wrote is not trustworthy now. The
+// crossing/edge state changed at 0m (force-dictator); `lastVerdict` is a pure
+// per-gauge CACHE whose stale cached band would otherwise suppress the
+// re-evaluation rise that re-enrolls the store (dropping it costs nothing —
+// the next SessionStart recomputes it, and prevBand→LEAN lets a still-FULL
+// store re-arm via the tested "qualifying past" rise). Resetting these is the
+// SAFE direction: a spurious reset just re-offers, never strands.
+export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastVerdict']);
+// VERSION-STABLE — PRESERVED across a schema bump: the project's real
+// footprint BASELINE + history. Must survive a reinstall/upgrade, or every
+// version bump false-FULLs the store until the next clean. NOT reset:
+// leanFloorTokens · leanFloorProvisional · leanFloorAt · stamps · subSpawns ·
+// subParcelTokensAccum · lastSubSpawnAt. (A future ruling that changes another
+// field's semantics bumps STATE_SCHEMA + adds that field to the reset list.)
+
 function saveState(state, home) {
   try {
     const p = statePath(home);
     fs.mkdirSync(path.dirname(p), { recursive: true });
+    if (state && typeof state === 'object' && !Array.isArray(state)) state.stateSchema = STATE_SCHEMA; // stamp the schema on every write
     const tmp = p + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(state), 'utf8');
     fs.renameSync(tmp, p);
@@ -448,6 +474,43 @@ function pruneOrphans(state) {
     if (!exists) delete projects[key];
   }
   return state;
+}
+
+// rc.2 SCHEMA MIGRATION — run once at the SessionStart chokepoint (the first
+// read after an upgrade). If the stored `stateSchema` is MISSING, OLDER, or
+// CORRUPT (any doubt → treat as older → migrate, the safe direction), reset
+// every project's VERSION-SENSITIVE field (SCHEMA_RESET_FIELDS) while
+// PRESERVING the version-stable baseline, then stamp the current schema.
+// Idempotent (a second run sees the current schema → no-op) and fail-silent
+// (never throws). Deliberately NOT wired into loadState — loadState stays a
+// pure read so the CLI/tests/every direct reader keep their contract; the
+// migration is a session-boundary MUTATION, the same class as recordStamp's
+// spawn-counter reset, so it belongs at the SessionStart write chokepoint.
+// This clears legacy junk ONCE at the version boundary; the session-id re-arm
+// (recordCrossing) handles ongoing within-version fresh-session re-offers —
+// the two compose. (Honest limit: cannot auto-wipe on UNINSTALL — a removed
+// plugin runs no code; this guarantees a reinstall/upgrade never carries
+// version-stale state, the leanFloor baseline correctly surviving.)
+export function migrateState(home = os.homedir()) {
+  try {
+    const state = pruneOrphans(loadState(home));
+    const stored = Number(state && state.stateSchema);
+    if (Number.isInteger(stored) && stored >= STATE_SCHEMA) return false; // current -> no migration
+    const projects = (state && state.projects) || {};
+    // Nothing to migrate on a FRESH install (no state file → loadState = {}) or
+    // an empty map: there is no legacy per-project leftover to clear, so writing
+    // a stamped-but-empty file would only violate the "no stamp until the gauge
+    // runs" contract (manual mode stays state-less). The first real write stamps.
+    if (!Object.keys(projects).length) return false;
+    for (const k of Object.keys(projects)) {
+      const proj = projects[k];
+      if (!proj || typeof proj !== 'object') continue;
+      for (const f of SCHEMA_RESET_FIELDS) delete proj[f];
+    }
+    state.projects = projects;
+    saveState(state, home); // stamps stateSchema = STATE_SCHEMA
+    return true;
+  } catch { return false; } // fail-silent
 }
 
 // Append a session stamp {t, fp} (ring-capped) and return the updated project
@@ -675,25 +738,31 @@ export const BAND_RANK = { LEAN: 0, OBESE: 1, FULL: 2 };
 // against the band on record from BEFORE this session's recordVerdict call
 // (the caller reads it off the pre-overwrite proj.lastVerdict.band).
 //
-// opts.quickTried / opts.fatTokens (beta.13 item 2, "0e THE OBESE LOOP";
-// SUPERSEDED beta.14 by MEMORY.md 0f "AUTHORITATIVE 3-FLOW" — the trigger
-// band moved from OBESE to FULL, the growth-gated mechanism did not): a
-// plain RISE always arms exactly as before (untouched — the shape stays
-// `{band, at, consumed:false}`, no new key, so every existing rise-arm
-// assertion keeps holding byte-for-byte). The ADDITIVE case: FULL PERSISTING
-// (a plateau, or reached again some other non-rise way) after a force-run
-// already tried Quick this episode is a DIFFERENT situation — mechanical
-// cutting is exhausted, only semantic judgment (the wizard) can help further
-// — so it arms an "escalation" crossing (`escalation:true`) even on a
-// non-rise plateau. Gated on fat having GENUINELY GROWN past the fat level
-// at the last time this was flagged (`lastEscalationFat`) — never every
-// session on an unchanged plateau (that would be the class-17 re-nag fatigue
-// the user explicitly rejected; "ask frequency tracks fat-growth rate, never
-// a clock/throttle"). OBESE is UNTOUCHED by this branch (0f): it is
-// auto-Quick-silent only (0d) and never asks, no matter how it is reached or
-// how much fat has grown.
+// opts.quickTried / opts.fatTokens (beta.13 "0e THE OBESE LOOP"; SUPERSEDED
+// beta.14 by 0f "AUTHORITATIVE 3-FLOW" [trigger band OBESE→FULL]; SHARPENED
+// rc.2 by USER decision B [FORCE-THEN-ASK on every growth]): a plain RISE
+// arms exactly as before (`{band, at, consumed:false}`, no new key — every
+// rise-arm assertion holds byte-for-byte) → the case-b FREE Quick force runs.
+// After that force is CONSUMED and the store is STILL over, two branches take
+// over, sequenced ENTIRELY by the consumed crossing's shape (no extra state):
+//   • ASK — the consumed crossing is PLAIN (`!escalation`): a force just ran →
+//     arm the wizard escalation (`escalation:true`), the ONE ask site (0f).
+//   • FORCE-on-growth — the consumed crossing is an ESCALATION (an ask already
+//     fired) and fat GREW past `lastEscalationFat`: arm a fresh PLAIN crossing
+//     so the FREE Quick force re-runs on the new lump FIRST; the ask follows
+//     via ASK on the next tick. USER decision B: every fat lump may carry NEW
+//     mechanical fat the free code sweeps at ~0 token — never ask the agent to
+//     judge fat the sweep could have cut. Growth-gated (never a plateau
+//     re-nag; "ask frequency tracks fat-growth rate, never a clock"). OBESE is
+//     UNTOUCHED (0f/0d: auto-Quick-silent, never asks, at any fat).
 export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.now(), opts = {}) {
-  const { quickTried = false, fatTokens = 0 } = opts || {};
+  // `session` (rc.2): the CURRENT session id (opts.session; the conductor
+  // passes input.session_id). Recorded ON the crossing so a re-arm can tell a
+  // NEW session from a same-session re-run. Added to the crossing object ONLY
+  // when provided — a caller that passes no session keeps the exact
+  // pre-existing 2-key/3-key shape (the shape the unit pins assert).
+  const { quickTried = false, fatTokens = 0, session } = opts || {};
+  const withSession = (o) => (session !== undefined ? { ...o, session } : o);
   const state = pruneOrphans(loadState(home));
   state.projects = state.projects || {};
   const key = projKey(projectRoot);
@@ -707,24 +776,63 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     delete proj.quickTriedAt;
     delete proj.lastEscalationFat;
   } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {
-    proj.lastCrossing = { band: newBand, at: now, consumed: false };
+    proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
   } else if (
-    newBand === 'FULL' &&
-    quickTried &&
-    !(proj.lastCrossing && proj.lastCrossing.consumed === false) &&
-    // Growth gate with a FIRST-ASK exemption (0m closes the day-one corner):
-    // the very first escalation of an episode arms on quickTried alone —
-    // a day-one over-wall store has fat ≈ 0 by definition (provisional floor
-    // = install footprint), and the ledger's sequence is unconditional
-    // ("force → re-gauge still over → the ONE wizard ask"); requiring
-    // fat > 0 there would strand the user silent at over-wall forever. The
-    // no-nag rule guards RE-asks exactly as before: once flagged
-    // (lastEscalationFat recorded, 0 included), the next escalation needs
-    // fat GENUINELY GROWN past that level — never a plateau re-nag.
+    // ASK (the wizard escalation, 0f's SOLE ask site): a PLAIN force was JUST
+    // consumed (case-b Quick ran this episode → quickTried set) and the store is
+    // STILL over → ask the wizard. Keyed on the consumed crossing being PLAIN
+    // (`!escalation`): this fires EXACTLY ONCE after a force, because the
+    // escalation crossing it arms carries `escalation:true`, which this same
+    // guard then blocks on the next tick — no re-nag on a plateau. Growth-gated
+    // with the day-one exemption: the FIRST ask of an episode arms at any fat
+    // (?? -1 → fat≡0 over-wall store included, provisional floor = footprint);
+    // a later ask needs fat GENUINELY GROWN past the last-flagged level. The
+    // real flow always REACHES this after a rise→force or a FORCE-on-growth→force
+    // (both arm a plain crossing that case-b consumes) — a bare quickTried with
+    // no consumed crossing no longer short-circuits to an ask (that skipped the
+    // free force; USER decision B).
+    newBand === 'FULL' && quickTried &&
+    proj.lastCrossing && proj.lastCrossing.consumed === true && !proj.lastCrossing.escalation &&
     fatTokens > (proj.lastEscalationFat ?? -1)
   ) {
-    proj.lastCrossing = { band: newBand, at: now, consumed: false, escalation: true };
+    proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false, escalation: true });
     proj.lastEscalationFat = fatTokens;
+  } else if (
+    // FORCE-on-growth (arms a PLAIN crossing → the case-b FREE Quick force
+    // re-fires): fat GREW past the last-asked level on a CONSUMED crossing →
+    // re-run the free mechanical sweep FIRST, and only if it leaves the store
+    // over does the ASK branch above deliver the wizard ask on the next tick
+    // (USER decision B — force-THEN-ask on every growth: each new fat lump may
+    // carry NEW mechanical fat the free code sweeps at ~0 token; asking the
+    // agent to judge fat the sweep could have cut is the waste we refuse. "The
+    // program sweeps certainty, cannot judge" — certainty is swept before every
+    // ask). This is the ONE re-arm branch; the consumed-crossing SHAPE sequences
+    // force↔ask with no extra state:
+    //   - a PLAIN-consumed crossing + quickTried = a force just ran, ask pending
+    //     → taken by the ASK branch above, never here (so this never loops back
+    //     into another force before the ask — the ask is never starved);
+    //   - an ESCALATION-consumed crossing = an ask already fired at the old
+    //     level → new growth reaches HERE → arm a fresh PLAIN force → (case b) →
+    //     re-gauge still over → ASK arms the next escalation. Force→ask, once
+    //     per growth lump.
+    //   - the pre-0m STRAND (consumed, quickTried never set → the escalation
+    //     path was historically unreachable) → also arms plain here → force,
+    //     THEN ask (point e), across a NEW session.
+    // FULL band ONLY (OBESE auto-Quick-fires on its own crossing and never asks,
+    // 0d/0f; gating >= OBESE also breaks no-nag — lastEscalationFat is FULL-only,
+    // so an OBESE plateau would read `fat > -1` = re-arm forever).
+    // SAME-SESSION re-arm is allowed ONLY once a force ran (`quickTried` — the
+    // long-session drag: a user riding ONE session past every growth still gets
+    // force→ask per lump); a raw same-session consumed crossing with no force
+    // history (the strand shape) keeps the no-nag session guard so it never
+    // re-offers within the session that armed it. Growth-gated → a plateau at
+    // the same fat stays silent; lastEscalationFat climbs monotonic (set by ASK).
+    newBand === 'FULL' &&
+    proj.lastCrossing && proj.lastCrossing.consumed === true &&
+    fatTokens > (proj.lastEscalationFat ?? -1) &&
+    (quickTried || proj.lastCrossing.session !== session)
+  ) {
+    proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
   }
   state.projects[key] = proj;
   return saveState(state, home);
