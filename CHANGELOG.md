@@ -2,6 +2,17 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.17] - 2026-07-11
+
+The true-bill spawn meter (ruling 0o-b — the user-found fleet-economics blind spot): every subagent spawned from a room re-pays that room's always-loaded parcel in full (per-prefix cache — a sub cannot share main's warm cache), so the real cost of fat is footprint × (main + every spawn). Measured live: one fat room × ~6 sub-rounds ≈ 460k tok of pure parcel in a single dev day, invisible to every meter before this.
+
+### Added
+- **`PostToolUse` spawn meter (`hooks/hooks.json` + the conductor):** matcher `Agent|Task|Workflow` (CC exact-list semantics — `Task` does not match `TaskCreate`; grounded against the live hooks docs + CoalMine's shipped matcher shape) with a pre-import first-line belt for matcher-less platforms. On each completed spawn: silently add the room's **cached** parcel figure (no re-gauge, no content I/O; missing cache = count at cost 0) to session-scoped counters in the existing state entry. **Write-only — no per-spawn output, ever** (the NOISE RULE: N spawns = N silent increments, one louder number in the same one voice). Auto mode only (manual/off = meter off — no session boundary exists there to keep the figure honest); counters reset at the once-per-session gauge heartbeat.
+- **The bill surfaces through existing voices only:** `/coalwash:stats` gains "subs this session: N spawns ≈ X tok parcel" (omitted at zero) and the FULL force/escalation directives gain one clause — "This fat also rode N sub spawn(s) ≈ X tok of parcel (~est) this session" — only when N > 0.
+- Nested spawns count by construction (tool-level hooks follow a sub's own tool calls; a flattened deep spawn becomes a fresh session where the gauge itself boots). Cross-room spawns bill the current room's cached parcel — a named conservative approximation.
+
+Tests 377 → 387 (noise pins assert empty stdout AND stderr; non-spawn tools proven to create no state; manual-mode-off; the full gauge→2-spawns→directive-clause→session-reset round trip). Review: SHIP (matcher semantics grounded; contention analysis: the only losable write is one counter increment — cosmetic; class-B content untouched by construction).
+
 ## [0.1.0-beta.16] - 2026-07-11
 
 Force restored as the free dictator tier (ruling 0m — user-caught live on the day-one store: the heavier band did LESS than the lighter one). The misapplied economic-proof gate is gone from the force leg; the proof requirement was always the PAID wizard's, never the free Quick's.

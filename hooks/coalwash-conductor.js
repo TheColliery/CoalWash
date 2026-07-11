@@ -334,6 +334,10 @@ async function handleStop(input) {
     breakEvenDays: Number.isFinite(lastVerdict.breakEvenDays) ? lastVerdict.breakEvenDays : null,
     floorUnmeasured: !!lastVerdict.floorUnmeasured,
   };
+  // 0o: the session's accumulated sub-spawn parcel bill — rides the FULL
+  // directive numbers as ONE clause (absent at zero; the meter itself never
+  // speaks, this is one of the pre-existing voices).
+  const spawns = { subSpawns: proj.subSpawns, subParcelTokens: proj.subParcelTokensAccum };
 
   let reason;
   if (crossing.band === 'FULL' && lastVerdict.reason === 'externalize') {
@@ -349,7 +353,7 @@ async function handleStop(input) {
     // the whole system (0d: OBESE is auto-Quick-silent, it never asks).
     // Checked BEFORE the force branch below so an armed escalation crossing
     // can never be re-swallowed into another silent force-Quick loop.
-    reason = ask.wizardEscalation({ fatTokens, breakEven });
+    reason = ask.wizardEscalation({ fatTokens, breakEven, spawns });
   } else if (crossing.band === 'FULL') {
     // case (b) — 0m "FORCE = THE FREE TIER, NO PROOF NEEDED" + "FORCE IS A
     // DICTATOR, NO OFF SWITCH": every FULL crossing (economic AND
@@ -369,6 +373,7 @@ async function handleStop(input) {
     reason = ask.forceAuto({
       fatTokens, breakEven, reason: lastVerdict.reason,
       footprintTokens, hardCeilingTokens: lastVerdict.hardCeilingTokens,
+      spawns,
     });
     caliper.markQuickTried(home, projectRoot, now);
   } else {
@@ -384,10 +389,52 @@ async function handleStop(input) {
   process.stdout.write(JSON.stringify({ decision: 'block', reason })); // sanctioned Stop blocking-feedback channel (Phoenix #13; mirrors rot-canary-stop.js)
 }
 
+// 0o "SUBAGENT BLIND SPOT" — the TRUE-BILL COUNTER (spawn meter). The
+// sub-agent spawn tools per the CoalHearth Incident-E precedent: `Agent`
+// (legacy alias `Task`) + `Workflow`. hooks.json's PostToolUse matcher
+// ("Agent|Task|Workflow") is the platform-level skip — every other tool
+// never even invokes this process; this Set is the in-code belt for
+// platforms/versions that ignore matchers, checked BEFORE any import so the
+// non-match path costs ~nothing.
+const SPAWN_TOOLS = new Set(['Agent', 'Task', 'Workflow']);
+
+// PostToolUse(Agent) -> one silent counter increment at the SPAWN SITE
+// (main — the only place the parcel cost is actually incurred; hooks never
+// fire inside subs, the named platform constraint 0o ships honestly).
+// NOISE RULE (0o, pinned, absolute): this branch emits NOTHING on any path —
+// write-only bookkeeping (Phoenix #13); N spawns = N silent increments = one
+// louder NUMBER at the surfaces that already speak (/coalwash:stats · the
+// FULL force/wizard directive numbers). Cost source = the CACHED verdict's
+// alwaysLoadedBytes only (recordSubSpawn reads it — one small state
+// read+write, no discovery, no re-gauge, no content I/O: the Phoenix #3
+// match-path budget is the markQuickTried cost class, structurally proven
+// in the hermetic tests the way the warp-gate structural test is — never a
+// wall-clock CI assertion). Note: PostToolUse fires for a SUB's own tool
+// calls too, so a sub spawning a sub-sub is counted by this same meter.
+async function handleSpawnMeter(input) {
+  if (!input || !SPAWN_TOOLS.has(input.tool_name)) return; // belt: pre-import, ~free
+  const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, caliper] = await Promise.all([
+    import(lib('config-load.mjs')),
+    import(lib('config-schema.mjs')),
+    import(lib('caliper.mjs')),
+  ]);
+  const cfg = loadMergedConfig();
+  // Meter rides the same mode as the gauge lifecycle that resets it
+  // (recordStamp fires only in auto): manual/off = no gauge, no session
+  // boundary, no meter — the stats line stays an honest SESSION figure.
+  if (clampedRead(cfg, 'coalwashMode') !== 'auto') return;
+  const home = os.homedir();
+  const projectRoot = findProjectRoot(process.cwd(), home);
+  caliper.recordSubSpawn(home, projectRoot);
+  // NOTHING is emitted here, ever (the NOISE RULE) — not on success, not on
+  // the 10th spawn, not at any threshold.
+}
+
 async function main() {
   const input = await readStdinJson();
   const event = (input && (input.hook_event_name || input.hookEventName)) || '';
   if (event === 'Stop') return handleStop(input);
+  if (event === 'PostToolUse') return handleSpawnMeter(input);
   return handleSessionStart();
 }
 

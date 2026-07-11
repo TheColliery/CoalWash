@@ -452,6 +452,10 @@ function pruneOrphans(state) {
 
 // Append a session stamp {t, fp} (ring-capped) and return the updated project
 // state. Fail-silent: on any write failure the in-memory view is still returned.
+// 0o session boundary: this is the once-per-session heartbeat (SessionStart's
+// gauge calls it exactly once), so the sub-spawn true-bill counters reset
+// HERE — the stats line is a session figure, not a lifetime ledger. The
+// counters that then accumulate belong to THIS session's spawns.
 export function recordStamp(home, projectRoot, footprintTokens, now = Date.now()) {
   const state = pruneOrphans(loadState(home));
   state.projects = state.projects || {};
@@ -460,9 +464,37 @@ export function recordStamp(home, projectRoot, footprintTokens, now = Date.now()
   proj.stamps = Array.isArray(proj.stamps) ? proj.stamps : [];
   proj.stamps.push({ t: now, fp: Math.round(footprintTokens) });
   if (proj.stamps.length > STAMP_RING_MAX) proj.stamps = proj.stamps.slice(-STAMP_RING_MAX);
+  delete proj.subSpawns;
+  delete proj.subParcelTokensAccum;
   state.projects[key] = proj;
   saveState(state, home);
   return proj;
+}
+
+// 0o "SUBAGENT BLIND SPOT" — the TRUE-BILL COUNTER: every sub spawned from
+// this room carries the full parcel at spawn time, and the cost is incurred
+// AT THE SPAWN SITE (main) — so the meter lives here, fed by the PostToolUse
+// Agent-tool hook. Silent, write-only bookkeeping (the NOISE RULE, pinned):
+// N spawns = N silent increments; the accumulated figure surfaces ONLY
+// through the voices that already exist (/coalwash:stats · the FULL
+// force/wizard directive numbers). The parcel cost = the CACHED verdict's
+// alwaysLoadedBytes (stat-cheap, NO re-gauge, NO discovery walk); a project
+// never gauged counts the spawn at cost 0 — never compute at spawn time.
+// Cross-room honesty (named approximation, deliberately NOT "fixed"): a sub
+// spawned with a different cwd still bills the CURRENT room's cached parcel
+// — conservative, no cwd-detection machinery (no over-engineering per 0o).
+export function recordSubSpawn(home, projectRoot, now = Date.now()) {
+  const state = pruneOrphans(loadState(home));
+  state.projects = state.projects || {};
+  const key = projKey(projectRoot);
+  const proj = state.projects[key] || {};
+  const bytes = Number(proj.lastVerdict && proj.lastVerdict.alwaysLoadedBytes);
+  const parcelTokens = Number.isFinite(bytes) && bytes > 0 ? tokensEstFromBytes(bytes) : 0;
+  proj.subSpawns = (Number.isFinite(Number(proj.subSpawns)) ? Number(proj.subSpawns) : 0) + 1;
+  proj.subParcelTokensAccum = (Number.isFinite(Number(proj.subParcelTokensAccum)) ? Number(proj.subParcelTokensAccum) : 0) + parcelTokens;
+  proj.lastSubSpawnAt = now;
+  state.projects[key] = proj;
+  return saveState(state, home);
 }
 
 // Stamp the lean floor (the post-clean footprint — call ONLY after a full clean

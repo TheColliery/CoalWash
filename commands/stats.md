@@ -10,6 +10,7 @@ Run the read-only gauge — the one-shot CLI from the engine `scripts/lib/`: `no
 - **Fat reading:** footprint − lean floor (~est tokens) · the break-even payback numbers when the band is OBESE or FULL (fat/day at the stamped session rate · one-run cost · break-even days).
 - **Lean floor:** value + when stamped (`leanFloorAt`), or N/A.
 - **Pending ask:** an unconsumed band crossing awaiting the next `Stop` (which band, since when), or none — CoalWash asks once per crossing, never a repeating nag; there is no time-based snooze.
+- **Sub-spawn bill (the 0o true-bill):** from the project's state entry, `subSpawns` + `subParcelTokensAccum` — "subs this session: N spawns ≈ X tok parcel (~est)" (every sub spawned from this room re-carried the room's always-loaded parcel; the meter counts silently at the spawn site — main — since hooks never fire inside subs). Zero/absent → OMIT the line entirely, never print "0 spawns".
 - **Last run:** newest `snap-[timestamp]/` in the transaction dir (= the last apply's snapshot, with date) and whether a dangling `journal.json` exists (an interrupted run awaiting rollback — recommend running `/coalwash` to recover). No transaction dir → no run recorded.
 
 Honest empty state: no state entry, no transaction dir, and nothing measured → say exactly that in one line.

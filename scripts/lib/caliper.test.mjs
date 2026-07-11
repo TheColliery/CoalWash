@@ -8,7 +8,7 @@ import {
   bandVerdict, breakEven, sessionsPerDay, gaugeVerdict,
   statePath, loadState, projectState, recordStamp, setLeanFloor, ensureProvisionalFloor,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
-  recordVerdict, markQuickTried,
+  recordVerdict, markQuickTried, recordSubSpawn,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
   CEILING_BMI, CEILING_REARM_BMI, FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
@@ -871,6 +871,68 @@ test('0j bandVerdict: capHit with a PROVISIONAL floor stays FULL/absolute-cap (w
   // The identical numbers with a REAL floor = the all-muscle externalize case (0g Q3, unchanged).
   const real = bandVerdict({ footprintTokens: 36200, leanFloorTokens: 36200, fullPercent: 6, floorProvisional: false });
   assert.strictEqual(real.reason, 'externalize');
+});
+
+// ---------------------------------------------------------------------------
+// 0o "SUBAGENT BLIND SPOT" — recordSubSpawn (the TRUE-BILL COUNTER) + the
+// recordStamp session-boundary reset. Write-only bookkeeping; the cost is
+// the CACHED verdict's alwaysLoadedBytes only, never a re-gauge.
+// ---------------------------------------------------------------------------
+
+test('0o recordSubSpawn: increments the counter and accumulates the CACHED parcel cost; a never-gauged project counts the spawn at cost 0', () => {
+  const { home, proj } = sandbox();
+  try {
+    // Never gauged: no lastVerdict -> spawn counted, cost 0 (never compute).
+    recordSubSpawn(home, proj, 1000);
+    let st = projectState(loadState(home), proj);
+    assert.strictEqual(st.subSpawns, 1);
+    assert.strictEqual(st.subParcelTokensAccum, 0);
+
+    // Gauge caches the parcel baseline -> later spawns bill it.
+    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', alwaysLoadedBytes: 40000 }, 2000); // ~10000 tok
+    recordSubSpawn(home, proj, 3000);
+    recordSubSpawn(home, proj, 4000);
+    st = projectState(loadState(home), proj);
+    assert.strictEqual(st.subSpawns, 3, 'N spawns = N silent increments');
+    assert.strictEqual(st.subParcelTokensAccum, 20000, 'two billed spawns x 10000 tok cached parcel (the first was cost-0)');
+    assert.strictEqual(st.lastSubSpawnAt, 4000);
+  } finally { clean(home, proj); }
+});
+
+test('0o session boundary: recordStamp (the once-per-session gauge heartbeat) RESETS the spawn counters — a session figure, never a lifetime ledger', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', alwaysLoadedBytes: 4000 }, 500);
+    recordSubSpawn(home, proj, 1000);
+    recordSubSpawn(home, proj, 1100);
+    assert.strictEqual(projectState(loadState(home), proj).subSpawns, 2);
+
+    recordStamp(home, proj, 1000, 2000); // the next session's first gauge
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.subSpawns, undefined, 'counters cleared at the session boundary');
+    assert.strictEqual(st.subParcelTokensAccum, undefined);
+    assert.ok(st.stamps.length >= 1, 'the stamp itself still lands');
+
+    // ...and the new session accumulates fresh.
+    recordSubSpawn(home, proj, 3000);
+    assert.strictEqual(projectState(loadState(home), proj).subSpawns, 1);
+  } finally { clean(home, proj); }
+});
+
+test('0o recordSubSpawn: corrupt counter values self-heal (non-numeric -> restart from 0+1), never throw', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordStamp(home, proj, 100, 500); // create the project entry
+    const raw = loadState(home);
+    const key = Object.keys(raw.projects)[0];
+    raw.projects[key].subSpawns = 'garbage';
+    raw.projects[key].subParcelTokensAccum = null;
+    fs.writeFileSync(statePath(home), JSON.stringify(raw), 'utf8');
+    assert.doesNotThrow(() => recordSubSpawn(home, proj, 1000));
+    const after = projectState(loadState(home), proj);
+    assert.strictEqual(after.subSpawns, 1, 'garbage collapses to a fresh count');
+    assert.strictEqual(after.subParcelTokensAccum, 0);
+  } finally { clean(home, proj); }
 });
 
 // ---------------------------------------------------------------------------

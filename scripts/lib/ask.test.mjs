@@ -48,6 +48,26 @@ test('forceAuto: carries the payback line too when breakEven is supplied; no rea
   assert.ok(r.includes('pays back in ~2 session(s)'), r);
 });
 
+test('0o spawn-bill clause: renders on forceAuto AND wizardEscalation only when subSpawns > 0, with real numbers; zero/absent/malformed = ABSENT', () => {
+  const withSpawns = { subSpawns: 3, subParcelTokens: 57660 };
+  const f = forceAuto({ fatTokens: 100, reason: 'economic', spawns: withSpawns });
+  assert.ok(f.includes('This fat also rode 3 sub spawn(s) ≈ 57660 tok of parcel (~est) this session.'), f);
+  const w = wizardEscalation({ fatTokens: 100, spawns: withSpawns });
+  assert.ok(w.includes('This fat also rode 3 sub spawn(s)'), w);
+
+  // Cost-0 accumulation (never-gauged room) still names the count, no tok figure.
+  const noCost = forceAuto({ fatTokens: 100, spawns: { subSpawns: 2, subParcelTokens: 0 } });
+  assert.ok(noCost.includes('rode 2 sub spawn(s) this session'), noCost);
+  assert.ok(!noCost.includes('≈'), 'no fabricated cost figure when the parcel was never gauged');
+
+  // Zero/absent/malformed -> ABSENT, never "0 spawns", never artifacts.
+  for (const spawns of [undefined, {}, { subSpawns: 0 }, { subSpawns: 'x' }, null]) {
+    const r = forceAuto({ fatTokens: 100, spawns });
+    assert.ok(!r.includes('sub spawn'), `no clause for ${JSON.stringify(spawns)}`);
+    assert.ok(!r.includes('undefined') && !r.includes('NaN'), r);
+  }
+});
+
 test('externalizeAdvisory: pure info, no question-tool/ask wording, names WHY washing cannot help', () => {
   const r = externalizeAdvisory({ hardCeilingTokens: 36000 });
   assert.ok(r.includes('FULL (externalize)'), r);

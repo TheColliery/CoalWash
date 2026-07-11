@@ -1031,6 +1031,111 @@ test('round trip: an externalize-FULL SessionStart arms a crossing the following
   } finally { clean(home, proj); }
 });
 
+// ---------------------------------------------------------------------------
+// 0o "SUBAGENT BLIND SPOT" — the PostToolUse spawn meter (the TRUE-BILL
+// COUNTER). NOISE RULE, absolute: the meter emits NOTHING on any path —
+// write-only bookkeeping; the figure surfaces only via /stats + the FULL
+// directive numbers.
+// ---------------------------------------------------------------------------
+
+test('0o: a PostToolUse Agent event silently increments the spawn counters with the CACHED parcel cost — NOTHING on stdout/stderr (the NOISE RULE)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedState(home, proj, {
+      lastVerdict: { band: 'LEAN', reason: 'bmi', alwaysLoadedBytes: 40000, at: Date.now() }, // ~10000 tok parcel
+    });
+    const r1 = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Agent', tool_input: { prompt: 'x' } });
+    assertGraceful(r1);
+    assert.strictEqual(r1.stdout, '', 'the meter NEVER speaks — write-only (Phoenix #13)');
+    const r2 = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Task' }); // legacy alias counts too
+    assertGraceful(r2);
+    assert.strictEqual(r2.stdout, '');
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.subSpawns, 2, 'N spawns = N silent increments');
+    assert.strictEqual(st.subParcelTokensAccum, 20000, 'each spawn billed the cached parcel figure — no re-gauge');
+  } finally { clean(home, proj); }
+});
+
+test('0o: a non-spawn tool PostToolUse event exits instantly — no state file is ever touched (the pre-import belt; hooks.json\'s matcher is the platform-level skip)', () => {
+  const { home, proj } = sandbox();
+  try {
+    for (const tool of ['Read', 'Edit', 'Bash', 'Write']) {
+      const r = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: tool });
+      assertGraceful(r);
+      assert.strictEqual(r.stdout, '');
+    }
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'no state read or write on the non-match path — structurally free (the warp-gate-style structural proof, never a wall clock)');
+  } finally { clean(home, proj); }
+});
+
+test('0o: a corrupt state file never breaks the meter — spawn counted at cost 0, exit clean', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), '{ definitely not json', 'utf8');
+    const r = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Agent' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.subSpawns, 1, 'self-healed over the corrupt file');
+    assert.strictEqual(st.subParcelTokensAccum, 0, 'no cached verdict -> cost 0, never computed');
+  } finally { clean(home, proj); }
+});
+
+test('0o: coalwashMode manual -> the meter stays off (it rides the same mode as the gauge lifecycle that resets it)', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { coalwashMode: 'manual' });
+    const r = run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Agent' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false,
+      'manual mode: no gauge, no session boundary, no meter — nothing is even written');
+  } finally { clean(home, proj); }
+});
+
+test('0o round trip: spawns accumulate, the FULL directive carries the bill clause with real numbers, and the next session\'s gauge RESETS the counters', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // Session 1: an economic-FULL store (the 0g fixture) + two sub spawns.
+    seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 10000 });
+    run(proj, home, { hook_event_name: 'SessionStart' }); // gauges FULL/economic + caches alwaysLoadedBytes
+    run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Agent' });
+    run(proj, home, { hook_event_name: 'PostToolUse', tool_name: 'Agent' });
+    const st1 = readProjState(home, proj);
+    assert.strictEqual(st1.subSpawns, 2);
+    assert.ok(st1.subParcelTokensAccum > 0, 'the gauged parcel is billed per spawn');
+
+    // Stop: the force directive carries the ONE bill clause with real numbers.
+    const rp = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp);
+    const reason = parseBlock(rp.stdout);
+    assert.ok(reason.includes('This fat also rode 2 sub spawn(s)'), reason);
+    assert.ok(/≈ \d+ tok of parcel/.test(reason), 'real numbers rendered');
+    assert.ok(!reason.includes('undefined') && !reason.includes('NaN'), reason);
+
+    // Session 2: the first gauge resets the counters (session-scoped figure).
+    run(proj, home, { hook_event_name: 'SessionStart' });
+    assert.strictEqual(readProjState(home, proj).subSpawns, undefined, 'reset at the session boundary (recordStamp)');
+  } finally { clean(home, proj); }
+});
+
+test('0o: zero spawns -> the FULL directive carries NO bill clause (no "0 spawns" noise)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: false, fatTokens: 2500, at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(!reason.includes('sub spawn'), 'zero/absent counters render NOTHING');
+  } finally { clean(home, proj); }
+});
+
 test('self-update: due on first boot (default ask), stamped, then silent inside the window', () => {
   const { home, proj } = sandbox();
   try {

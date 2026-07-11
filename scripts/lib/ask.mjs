@@ -36,6 +36,20 @@ function paybackLine(breakEven, exercise) {
   return ` Carrying this fat costs ~${breakEven.perDay} tok/session${upperBound}; one ${exercise} run pays back in ${be}.`;
 }
 
+// 0o true-bill clause — the accumulated sub-spawn parcel bill, rendered ONLY
+// when spawns actually happened this session (zero/absent = the clause is
+// ABSENT, no "0 spawns" noise — the NOISE RULE's surfacing half: the spawn
+// meter itself never speaks; its figure rides as ONE clause on the voices
+// that already exist). `spawns` = { subSpawns, subParcelTokens } read off
+// the project state entry.
+function spawnBillLine(spawns) {
+  const n = Number(spawns && spawns.subSpawns);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const tok = Number(spawns && spawns.subParcelTokens);
+  const cost = Number.isFinite(tok) && tok > 0 ? ` ≈ ${Math.round(tok)} tok of parcel (~est)` : '';
+  return ` This fat also rode ${Math.round(n)} sub spawn(s)${cost} this session.`;
+}
+
 // (0m note: the old `ceilingAsk` ทำ/later template died with the forceMode
 // knob — force at FULL is unconditional now, so no "suppressed/disarmed
 // FULL" state exists to ask about, and OBESE never asks by ruling. The
@@ -55,9 +69,10 @@ function paybackLine(breakEven, exercise) {
 // numbers missing (a pre-beta.13 cache with no byte baseline) degrade to a
 // plain fat figure — never null/undefined artifacts.
 export function forceAuto(opts) {
-  const { fatTokens, breakEven, reason, footprintTokens, hardCeilingTokens } = opts || {};
+  const { fatTokens, breakEven, reason, footprintTokens, hardCeilingTokens, spawns } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
   const payback = paybackLine(breakEven, 'quick');
+  const spawnBill = spawnBillLine(spawns); // 0o: absent when zero spawns
   let headline;
   if (reason === 'absolute-cap') {
     const fp = Number(footprintTokens);
@@ -68,7 +83,7 @@ export function forceAuto(opts) {
   } else {
     headline = `FULL band + break-even proven (numbers: fat ~${fat} tok)`;
   }
-  return `[CoalWash] ${headline}.${payback} force is non-optional at FULL (the OS-maintenance model) — run the free mechanical Quick pass NOW (stage-only; every cut is snapshot-backed — one command rolls the whole run back), then note the receipt path to the user in one line. This fires once per crossing, not per session. ${ANSWER_FIRST_REMINDER}`;
+  return `[CoalWash] ${headline}.${payback}${spawnBill} force is non-optional at FULL (the OS-maintenance model) — run the free mechanical Quick pass NOW (stage-only; every cut is snapshot-backed — one command rolls the whole run back), then note the receipt path to the user in one line. This fires once per crossing, not per session. ${ANSWER_FIRST_REMINDER}`;
 }
 
 // The OBESE auto-directive (queue 0d "OBESE AUTO-QUICK, NO ASK"; F3 made it
@@ -103,10 +118,11 @@ export function obeseAutoQuick(opts) {
 // firing rides a genuinely NEW fat lump, never a re-nag of the same
 // unchanged plateau.
 export function wizardEscalation(opts) {
-  const { fatTokens, breakEven } = opts || {};
+  const { fatTokens, breakEven, spawns } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
   const payback = paybackLine(breakEven, 'wizard');
-  return `[CoalWash] memory is STILL over the FULL capacity ceiling (fat ~${fat} tok) after the automatic mechanical Quick pass already ran this episode — the remaining fat needs semantic judgment a script cannot make.${payback} Offer the user via your question tool, exactly two options: ทำ (open the /coalwash wizard now, "Fat + reorganize muscle" tier — the zero-context outsider reviews what mechanical cutting could not) / later (dismiss; carries forward — this same ask returns only once the fat GROWS further, never on a timer). If the user picks ทำ: run the wizard per the coalwash skill. This crossing is marked consumed the moment this ask fires. ${ANSWER_FIRST_REMINDER}`;
+  const spawnBill = spawnBillLine(spawns); // 0o: absent when zero spawns
+  return `[CoalWash] memory is STILL over the FULL capacity ceiling (fat ~${fat} tok) after the automatic mechanical Quick pass already ran this episode — the remaining fat needs semantic judgment a script cannot make.${payback}${spawnBill} Offer the user via your question tool, exactly two options: ทำ (open the /coalwash wizard now, "Fat + reorganize muscle" tier — the zero-context outsider reviews what mechanical cutting could not) / later (dismiss; carries forward — this same ask returns only once the fat GROWS further, never on a timer). If the user picks ทำ: run the wizard per the coalwash skill. This crossing is marked consumed the moment this ask fires. ${ANSWER_FIRST_REMINDER}`;
 }
 
 // The FULL(externalize) advisory — pure information, never an ask (a wash

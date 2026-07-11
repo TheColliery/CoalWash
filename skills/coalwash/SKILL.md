@@ -85,7 +85,9 @@ Honest ceilings: `MINUTES_PER_PARTITION`/`TOKEN_RATE_PER_KB` (the bill's rate co
 
 ## Activation ladder (capability-keyed, never platform-keyed)
 
-Has lifecycle hooks → the shipped conductor runs the gauge at `SessionStart` (silent measurement) and delivers any pending ask/force at `Stop` (Claude Code today). No hooks → best-effort agent-driven: an always-loaded instruction tells the agent to watch for visible class-B bloat and OFFER the ask-box (probabilistic, never claimed as hook parity). Always → manual `/coalwash`. The moment a platform adds hooks it moves UP (wire the hook, retire the emulation).
+Has lifecycle hooks → the shipped conductor runs the gauge at `SessionStart` (silent measurement), delivers any pending ask/force at `Stop`, and counts sub spawns at `PostToolUse` on the Agent tool (Claude Code today). No hooks → best-effort agent-driven: an always-loaded instruction tells the agent to watch for visible class-B bloat and OFFER the ask-box (probabilistic, never claimed as hook parity). Always → manual `/coalwash`. The moment a platform adds hooks it moves UP (wire the hook, retire the emulation).
+
+**The sub-spawn true-bill (0o):** session hooks fire on the MAIN session only — they can never gauge or force INSIDE a sub (a named platform constraint, not a skill gap). The parcel cost is incurred at the SPAWN SITE anyway, so the meter sits there: every Agent-tool spawn silently adds the room's cached parcel figure to `subSpawns`/`subParcelTokensAccum` (write-only — no per-spawn output, ever). The accumulated bill surfaces ONLY through `/coalwash:stats` and the FULL force/wizard directive numbers, as one clause, absent at zero.
 
 ## Cross-agent scope (honest)
 
