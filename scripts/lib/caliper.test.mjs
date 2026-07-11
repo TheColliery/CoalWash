@@ -8,7 +8,7 @@ import {
   bandVerdict, breakEven, sessionsPerDay, gaugeVerdict,
   statePath, loadState, projectState, recordStamp, setLeanFloor, ensureProvisionalFloor,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
-  recordVerdict, sanitizeVerdict, VERDICT_MAX_AGE_MS, markQuickTried,
+  recordVerdict, markQuickTried,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
   CEILING_BMI, CEILING_REARM_BMI, FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
@@ -340,36 +340,11 @@ test('orphan prune: a still-existing project is NEVER pruned, and nothing on dis
 
 // ---------------------------------------------------------------------------
 // cached verdict (beta.8 #2 — the Stop-hook cache; beta.12 adds overCeiling +
-// the payback fields)
+// the payback fields). 0m note: the old `sanitizeVerdict` FULL+economical
+// force gate is GONE with the forceMode knob — force at FULL is
+// unconditional, keyed on the sanitized CROSSING + the cached reason; the
+// conductor tests pin that dispatch end-to-end.
 // ---------------------------------------------------------------------------
-
-test('sanitizeVerdict: only a fresh FULL+economical verdict is armed; every other band/state is null', () => {
-  const now = Date.now();
-  const fresh = (over = {}) => ({ band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 4004, at: now, ...over });
-  assert.deepStrictEqual(sanitizeVerdict(fresh(), now), { band: 'FULL', reason: 'absolute-cap', fatTokens: 4004, at: now });
-
-  assert.strictEqual(sanitizeVerdict(fresh({ band: 'LEAN' }), now), null, 'LEAN never arms');
-  assert.strictEqual(sanitizeVerdict(fresh({ band: 'OBESE' }), now), null, 'OBESE never arms (it is an ask, not force)');
-  assert.strictEqual(sanitizeVerdict(fresh({ band: 'FULL', reason: 'externalize', economical: false }), now), null, 'externalize never arms (muscle, not the force-run case)');
-  assert.strictEqual(sanitizeVerdict(fresh({ economical: false }), now), null, 'a disarmed FULL (break-even against) never arms');
-  assert.strictEqual(sanitizeVerdict(fresh({ economical: 'true' }), now), null, 'a non-boolean-true economical is not trusted');
-  assert.strictEqual(sanitizeVerdict(fresh({ reason: 'externalize', economical: true }), now), null, 'defense in depth: externalize never arms even if economical was mistakenly true');
-});
-
-test('sanitizeVerdict: malformed/missing input collapses to null, never throws', () => {
-  for (const bad of [null, undefined, {}, [], 'FULL', 42, { band: 'FULL', economical: true }]) {
-    assert.doesNotThrow(() => sanitizeVerdict(bad));
-    assert.strictEqual(sanitizeVerdict(bad), null, `${JSON.stringify(bad)} must not arm`);
-  }
-});
-
-test('sanitizeVerdict: staleness — just inside VERDICT_MAX_AGE_MS survives, just past it is discarded; a future timestamp is discarded', () => {
-  const now = Date.now();
-  const at = (ms) => ({ band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 100, at: now - ms });
-  assert.notStrictEqual(sanitizeVerdict(at(VERDICT_MAX_AGE_MS - 1), now), null, 'just inside the window is armed');
-  assert.strictEqual(sanitizeVerdict(at(VERDICT_MAX_AGE_MS + 1), now), null, 'just past the window is stale -> null');
-  assert.strictEqual(sanitizeVerdict({ band: 'FULL', economical: true, at: now + 60000 }, now), null, 'a future timestamp is never trusted');
-});
 
 test('recordVerdict: round-trips through state (incl. overCeiling + payback + hardCeilingTokens fields) and overwrites the previous session', () => {
   const { home, proj } = sandbox();
@@ -377,8 +352,11 @@ test('recordVerdict: round-trips through state (incl. overCeiling + payback + ha
     const t1 = Date.now();
     recordVerdict(home, proj, { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 4004, overCeiling: true, perDay: 500, breakEvenDays: 3.2, floorUnmeasured: false, hardCeilingTokens: 36000 }, t1);
     const proj1 = projectState(loadState(home), proj);
-    const armedAfterFull = sanitizeVerdict(proj1.lastVerdict, t1);
-    assert.deepStrictEqual(armedAfterFull, { band: 'FULL', reason: 'absolute-cap', fatTokens: 4004, at: t1 });
+    assert.strictEqual(proj1.lastVerdict.band, 'FULL');
+    assert.strictEqual(proj1.lastVerdict.reason, 'absolute-cap');
+    assert.strictEqual(proj1.lastVerdict.economical, true);
+    assert.strictEqual(proj1.lastVerdict.fatTokens, 4004);
+    assert.strictEqual(proj1.lastVerdict.at, t1);
     assert.strictEqual(proj1.lastVerdict.overCeiling, true);
     assert.strictEqual(proj1.lastVerdict.perDay, 500);
     assert.strictEqual(proj1.lastVerdict.breakEvenDays, 3.2);
@@ -388,7 +366,7 @@ test('recordVerdict: round-trips through state (incl. overCeiling + payback + ha
     const t2 = t1 + 1000;
     recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0, overCeiling: false }, t2);
     const proj2 = projectState(loadState(home), proj);
-    assert.strictEqual(sanitizeVerdict(proj2.lastVerdict, t2), null, 'the new LEAN verdict overwrote the stale FULL — no lingering arm');
+    assert.strictEqual(proj2.lastVerdict.band, 'LEAN', 'the new LEAN verdict overwrote the stale FULL — nothing lingers');
     assert.strictEqual(proj2.lastVerdict.overCeiling, false, 'the hysteresis bit clears with the band');
   } finally { clean(home, proj); }
 });
@@ -967,6 +945,24 @@ test('recordCrossing: FULL persisting with quickTried but NO growth past the las
     assert.strictEqual(st.lastCrossing.at, 1000, 'flat fat never re-arms a new escalation');
     recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 480 }); // fat SHRANK slightly
     assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'a shrink never re-arms either');
+  } finally { clean(home, proj); }
+});
+
+test('0m: the FIRST escalation of an episode arms on quickTried alone — fat 0 included (the day-one over-wall store: provisional floor = footprint, fat ≡ 0; the ledger sequence "force → still over → the ONE wizard ask" is unconditional)', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'FULL', 'FULL', 1000, { quickTried: true, fatTokens: 0 });
+    const st = projectState(loadState(home), proj);
+    assert.strictEqual(st.lastCrossing.escalation, true, 'never flagged before -> arms at any fat level, 0 included');
+    assert.strictEqual(st.lastEscalationFat, 0, 'the flagged level is recorded, 0 included');
+    // ...and the no-nag rule guards RE-asks exactly as before: consumed, then
+    // an unchanged fat-0 plateau never re-arms.
+    consumeCrossing(home, proj, 1500);
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 0 });
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 1000, 'a fat-0 plateau after the first ask stays silent — growth (past 0) is the only re-arm');
+    // Real growth past the flagged 0 re-arms.
+    recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 50 });
+    assert.strictEqual(projectState(loadState(home), proj).lastCrossing.at, 3000, 'genuine growth past the flagged level re-arms');
   } finally { clean(home, proj); }
 });
 

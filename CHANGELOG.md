@@ -2,6 +2,21 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.16] - 2026-07-11
+
+Force restored as the free dictator tier (ruling 0m — user-caught live on the day-one store: the heavier band did LESS than the lighter one). The misapplied economic-proof gate is gone from the force leg; the proof requirement was always the PAID wizard's, never the free Quick's.
+
+### Changed
+- **Every FULL crossing (economic AND absolute-cap) force-runs the free mechanical Quick UNCONDITIONALLY** (`hooks/coalwash-conductor.js`): the day-one over-wall store now gets the ruled sequence — silent forced Quick (receipt numbers after) → shrunk below FULL/LEAN = silence → still over = the ONE wizard-escalation ask. `externalize` stays pure advisory (washing cannot shrink muscle). OBESE auto-Quick unchanged.
+- **First-ask exemption (`caliper.mjs` recordCrossing):** the first wizard escalation of an episode arms on `quickTried` alone — required because a provisional-floor store has measured fat ≡ 0; the no-nag law still guards every RE-ask (re-arm only on fat growth past the last flagged level; a plateau never re-asks; a LEAN reset opens a new episode).
+- **`forceAuto` directive headline** now renders the absolute-cap case honestly — "over the capacity wall (store ~X tok vs the ~Y tok wall)" — never a misleading "fat ~0" on a day-one store; the economic break-even headline is unchanged; force text states it is non-optional at FULL (the OS-maintenance model).
+
+### Removed
+- **The `forceMode` knob — force has NO off switch (user ruling: "วินโดว์ไม่เคยมีให้ปิด force ได้ และ force นี้ต้องเผด็จการเท่ากัน").** Key retired from the schema (`RETIRED_KEYS` tombstone: a legacy config carrying it validates clean and reads as nothing); factory template + all docs swept (README gained the "No force off switch — by design" callout). Consent lives in UNDO (verified snapshot · whole-run rollback · bins + `restore <id>`), and the receipt is FULL's surfacing — `coalwashMode: off` remains the skill's whole power switch.
+- `ceilingAsk` (its last caller died with the knob) and `sanitizeVerdict`/`VERDICT_MAX_AGE_MS` (consumer-less; verdict numbers are re-recorded every SessionStart, so the force directive can never render stale figures) — deleted with their tests, no leftovers.
+
+Tests 380 → 377 (14 deleted with dead code, 11 added — incl. the six-invocation day-one round-trip reproducing the live scenario end-to-end, the legacy `forceMode:"off"`-still-forces proof, and the plateau/no-re-nag pins). Review: FIX-FIRST (2 stale doc lines) → closed.
+
 ## [0.1.0-beta.15] - 2026-07-11
 
 ### Fixed

@@ -38,9 +38,20 @@ export const CONFIG_SCHEMA = [
   // proof) and a legacy obese:'full' config reads as 'quick' silently
   // (clampedRead's per-band safer-value-wins clamp, the CM v3.9.3 pattern).
   { key: 'exercisePerBand', type: 'bandmap', values: { obese: ['quick'], full: ['quick', 'full'] }, def: { obese: 'quick', full: 'full' }, help: 'Per-ceiling exercise (obese: quick only — OBESE is auto-Quick-silent by ruling, never an ask; full: quick|full); the fat-only scoping refinement is a later release (default: {obese:quick, full:full})' },
-  { key: 'forceMode', type: 'enum', values: ['auto', 'ask', 'off'], def: 'auto', help: 'FULL+economical crossing behavior at Stop: auto = standing-consent auto-run (the rot-canary autoFixMode model); ask = FULL asks like other ceilings; off = same as ask — never silent (they suppress only the auto-run authorization, never FULL awareness; default: auto)' },
   { key: 'managedPaths', type: 'stringList', def: [], help: 'Extra path PREFIXES (relative to their own project/global root, forward-slash form) to auto-declare MANAGED — sync-owned packs never proposed for a local wash, same class as skills (default: [], the byte-identical-across-roots heuristic already covers the common case)' },
 ];
+
+// 0m tombstone — "FORCE IS A DICTATOR, NO OFF SWITCH" (USER 2026-07-11:
+// "วินโดว์ไม่เคยมีให้ปิด force ได้นะ และ force นี้ต้องเผด็จการเท่ากัน"): the
+// `forceMode` knob (auto/ask/off) is REMOVED — force at FULL is non-optional
+// by design (the Windows critical-space-maintenance model; the knife lives in
+// UNDO, not pre-approval; the receipt is the surfacing, so no-silent-branch
+// holds). The only full stop is `coalwashMode: off` — the skill's own power
+// switch, a whole-skill choice, never a force veto. A LEGACY config still
+// carrying a retired key is read-TOLERATED and ignored: never a validation
+// error, never warning noise (clampedRead has no spec for it, so no consumer
+// can ever read it). Do NOT re-add an off switch.
+export const RETIRED_KEYS = Object.freeze(['forceMode']);
 
 // Validate an already-parsed JSON value against a spec.
 // Returns an error message fragment ("must be ...") or null when valid.
@@ -81,12 +92,14 @@ export function validateValue(spec, v) {
   }
 }
 
-// Validate a full parsed config object (unknown keys are reported, never thrown).
+// Validate a full parsed config object (unknown keys are reported, never
+// thrown; a RETIRED key is tolerated silently — legacy configs keep working).
 export function validateConfig(cfg) {
   const errors = [];
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return ['config must be a JSON object'];
   const byKey = new Map(CONFIG_SCHEMA.map((s) => [s.key, s]));
   for (const [key, v] of Object.entries(cfg)) {
+    if (RETIRED_KEYS.includes(key)) continue; // read-tolerated, ignored (0m tombstone)
     const spec = byKey.get(key);
     if (!spec) { errors.push(`'${key}' not in schema`); continue; }
     const err = validateValue(spec, v);

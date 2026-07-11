@@ -28,7 +28,7 @@ export const ANSWER_FIRST_REMINDER =
 // break-even line, today FULL-only"): shared by the ceiling ask and the force
 // directive so both surfaces show the SAME numbers in the SAME shape.
 // `breakEven` = the object caliper.breakEven() returns (or the cached subset
-// recordVerdict/sanitizeVerdict round-trip); absent/zero-fat degrades to ''.
+// recordVerdict cache round-trip); absent/zero-fat degrades to ''.
 function paybackLine(breakEven, exercise) {
   if (!breakEven || !Number.isFinite(breakEven.perDay) || breakEven.perDay <= 0) return '';
   const be = Number.isFinite(breakEven.breakEvenDays) ? `~${Math.ceil(breakEven.breakEvenDays)} session(s)` : 'n/a';
@@ -36,35 +36,46 @@ function paybackLine(breakEven, exercise) {
   return ` Carrying this fat costs ~${breakEven.perDay} tok/session${upperBound}; one ${exercise} run pays back in ${be}.`;
 }
 
-// The ceiling ask — ทำ/later — for a FULL crossing whose auto-run
-// authorization is suppressed/disarmed (forceMode 'ask'/'off', or break-even
-// not in favor). FULL-only since F3 (OBESE never asks — the 0f ruling; its
-// crossings always take the silent auto-Quick directive below); the `band`
-// param stays generic so the template needs no band knowledge. Names the
-// crossing band, the fat estimate, the configured exercise, and (when
-// available) the payback line.
-export function ceilingAsk(opts) {
-  const { band, fatTokens, exercise = 'quick', breakEven } = opts || {};
-  const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
-  const payback = paybackLine(breakEven, exercise);
-  return `[CoalWash] memory crossed the ${band} ceiling (fat ~${fat} tok).${payback} Offer the user via your question tool, exactly two options: ทำ (run the ${exercise} wash now — the configured exercise for this ceiling) / later (dismiss; the offer returns at the next ceiling crossing). If the user picks ทำ: run the pipeline per the coalwash skill (every cut is snapshot-backed and revertible). This crossing is marked consumed the moment this ask fires — it will not repeat until the next rise. ${ANSWER_FIRST_REMINDER}`;
-}
+// (0m note: the old `ceilingAsk` ทำ/later template died with the forceMode
+// knob — force at FULL is unconditional now, so no "suppressed/disarmed
+// FULL" state exists to ask about, and OBESE never asks by ruling. The
+// wizard-escalation template below is the ONE surviving ask.)
 
-// The FULL+economical force directive (forceMode=auto, the rot-canary
-// autoFixMode model — standing consent, no ask; numbers still shown every
-// fire, per the economic-dominance exception's own transparency clause).
+// The FULL force directive — UNCONDITIONAL (0m "FORCE = THE FREE TIER, NO
+// PROOF NEEDED" + "FORCE IS A DICTATOR, NO OFF SWITCH"): every FULL
+// crossing — economic AND absolute-cap — force-runs the FREE mechanical
+// Quick pass under the same standing consent as OBESE's auto-Quick. No
+// economic proof gates the free tier (the break-even proof governs the PAID
+// wizard); no forceMode knob exists (the Windows critical-space-maintenance
+// model — safety is UNDO, the receipt is the surfacing). The headline names
+// the numbers that actually triggered THIS crossing: the economic band
+// quotes its break-even proof; the wall case quotes footprint-vs-wall (a
+// day-one provisional store has fat ~0 by definition — quoting fat there
+// would read as "nothing to do" on the exact store most over budget); wall
+// numbers missing (a pre-beta.13 cache with no byte baseline) degrade to a
+// plain fat figure — never null/undefined artifacts.
 export function forceAuto(opts) {
-  const { fatTokens, breakEven } = opts || {};
+  const { fatTokens, breakEven, reason, footprintTokens, hardCeilingTokens } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
   const payback = paybackLine(breakEven, 'quick');
-  return `[CoalWash] FULL band + break-even proven (numbers: fat ~${fat} tok).${payback} standing config authorizes the free mechanical Quick pass NOW — run it (stage-only; every cut is snapshot-backed — one command rolls the whole run back), then note the receipt path to the user in one line. This fires once per crossing, not per session. ${ANSWER_FIRST_REMINDER}`;
+  let headline;
+  if (reason === 'absolute-cap') {
+    const fp = Number(footprintTokens);
+    const wall = Number(hardCeilingTokens);
+    headline = (Number.isFinite(fp) && fp > 0 && Number.isFinite(wall) && wall > 0)
+      ? `FULL band — over the capacity wall (store ~${Math.round(fp)} tok vs the ~${Math.round(wall)} tok wall)`
+      : `FULL band crossed (fat ~${fat} tok)`;
+  } else {
+    headline = `FULL band + break-even proven (numbers: fat ~${fat} tok)`;
+  }
+  return `[CoalWash] ${headline}.${payback} force is non-optional at FULL (the OS-maintenance model) — run the free mechanical Quick pass NOW (stage-only; every cut is snapshot-backed — one command rolls the whole run back), then note the receipt path to the user in one line. This fires once per crossing, not per session. ${ANSWER_FIRST_REMINDER}`;
 }
 
 // The OBESE auto-directive (queue 0d "OBESE AUTO-QUICK, NO ASK"; F3 made it
 // UNCONDITIONAL — the old exercisePerBand.obese:'full' escape hatch to an
 // ask is REMOVED, main-adjudicated per the thrice-reconfirmed 0f ruling
 // "OBESE never asks, no matter what"): standing config IS the consent (the
-// same "config is a valid consent form" shape as forceMode/rot-canary's
+// same "config is a valid consent form" shape as rot-canary's
 // autoFixMode), so no ask fires on this band, ever. Unlike FULL's force,
 // this needs no break-even proof: Quick is free/mechanical, so there is no
 // "is it worth paying for" question to prove. Safety claim (honest form,

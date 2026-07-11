@@ -36,9 +36,13 @@
 // (< FLOOR_MIN_TOKENS) both collapse bmi to null — only the wall can fire,
 // matching the original bootstrap heuristic.
 //
-// FULL's economic force fires ONLY on the deterministic break-even proof (the
-// series' one named consent exception, "economic-dominance" — AGENTS.md): the
-// numbers are computed in CODE and SHOWN every time. No FULL flag is
+// FORCE AT FULL IS UNCONDITIONAL (0m "FORCE = THE FREE TIER, NO PROOF
+// NEEDED" + "FORCE IS A DICTATOR, NO OFF SWITCH"): every FULL crossing —
+// economic AND absolute-cap, never externalize — force-runs the FREE
+// mechanical Quick pass under the same standing consent as OBESE's
+// auto-Quick; the deterministic break-even proof is NOT a gate on that free
+// tier (it governs the PAID wizard — it still DEFINES the economic band
+// above and backs the wizard ask's shown numbers). No FULL flag is
 // persisted beyond the two episode bits (MEMORY.md "NO FULL FLAG AT ALL"):
 // the wall is a STATELESS check recomputed fresh at every gauge call from
 // the current footprint alone; only the ceiling's hysteresis bit (`over`,
@@ -533,24 +537,20 @@ export function sanitizeLeanFloor(rawLeanFloorTokens, footprintTokens) {
 
 // ---------------------------------------------------------------------------
 // cached verdict (built at beta.8 #2 for the since-retired UserPromptSubmit
-// hot path; beta.10 REPOINTS it at the Stop hook instead — the storage and
-// sanitization stay exactly as they were, only the reader changed). beta.12
+// hot path; beta.10 REPOINTS it at the Stop hook instead). beta.12
 // band-collapse: the snooze mechanism this cache used to sit beside is GONE
 // (MEMORY.md — a time-based throttle is banned; the ceiling's own hysteresis,
 // `overCeiling` below, is the anti-flapping guard now) and the payload grows
 // two payback fields (`perDay`/`breakEvenDays`/`floorUnmeasured`) so the Stop
-// hook's OBESE ask can show the same break-even numbers the FULL ask already
-// did (queue 0c) without re-measuring the store (Phoenix #3).
-// SessionStart already computes the ceiling verdict; recordVerdict stores
-// just enough of it so the Stop conductor branch (no discovery/measureEntries
-// there) can decide whether to fire the FULL force directive, or show payback
-// numbers on an ask, from a single state read, never re-measuring the store.
+// hook can show break-even numbers without re-measuring the store (Phoenix
+// #3). SessionStart already computes the ceiling verdict; recordVerdict
+// stores just enough of it so the Stop conductor branch (no discovery/
+// measureEntries there) can dispatch on the cached band/reason from a single
+// state read. (0m note: the old `sanitizeVerdict` FULL+economical force gate
+// that lived here is GONE with the forceMode knob — force at FULL is
+// unconditional now, keyed on the sanitized CROSSING + the cached reason;
+// the crossing sanitizer below carries the doubt-collapses-to-silence duty.)
 // ---------------------------------------------------------------------------
-
-// A cached verdict older than this is never trusted (silent) — the next
-// SessionStart always refreshes it, so staleness can only ever WIDEN the
-// silent side, never force a stale nag past one day.
-export const VERDICT_MAX_AGE_MS = DAY_MS;
 
 // Record the SessionStart-computed verdict. Called every time a verdict is
 // computed (whatever the band), so a store that goes LEAN this session
@@ -596,28 +596,6 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
   };
   state.projects[key] = proj;
   return saveState(state, home);
-}
-
-// Sanitize a project's cached lastVerdict for the Stop hot path: any doubt —
-// a malformed shape, a non-finite/future/stale timestamp, or any
-// band/economical combination other than the ONE case the force case exists
-// for (FULL + economical, the armed force-run) — collapses to null (silent).
-// Mirrors sanitizeLeanFloor's "any doubt -> the safe default" rule, but here
-// silence IS the safe default: a missed nag self-corrects at the next
-// SessionStart, while a false nag would otherwise repeat every turn on stale
-// or corrupt data.
-export function sanitizeVerdict(rawVerdict, now = Date.now(), maxAgeMs = VERDICT_MAX_AGE_MS) {
-  if (!rawVerdict || typeof rawVerdict !== 'object') return null;
-  const at = Number(rawVerdict.at);
-  if (!Number.isFinite(at) || at > now || now - at > maxAgeMs) return null;
-  if (rawVerdict.band !== 'FULL' || rawVerdict.economical !== true) return null;
-  // Defense in depth (the growable-full invariant's "never wash-harder on
-  // muscle"): externalize must never arm the force case even if some future
-  // caller mis-set economical on it — SessionStart today never does, but this
-  // gate should not depend on that discipline holding forever.
-  if (rawVerdict.reason === 'externalize') return null;
-  const fatTokens = Number(rawVerdict.fatTokens);
-  return { band: 'FULL', reason: String(rawVerdict.reason || ''), fatTokens: Number.isFinite(fatTokens) ? fatTokens : 0, at };
 }
 
 // 0d/0f (MEMORY.md "AUTHORITATIVE 3-FLOW" — supersedes 0e "THE OBESE LOOP"):
@@ -702,7 +680,16 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     newBand === 'FULL' &&
     quickTried &&
     !(proj.lastCrossing && proj.lastCrossing.consumed === false) &&
-    fatTokens > (proj.lastEscalationFat || 0)
+    // Growth gate with a FIRST-ASK exemption (0m closes the day-one corner):
+    // the very first escalation of an episode arms on quickTried alone —
+    // a day-one over-wall store has fat ≈ 0 by definition (provisional floor
+    // = install footprint), and the ledger's sequence is unconditional
+    // ("force → re-gauge still over → the ONE wizard ask"); requiring
+    // fat > 0 there would strand the user silent at over-wall forever. The
+    // no-nag rule guards RE-asks exactly as before: once flagged
+    // (lastEscalationFat recorded, 0 included), the next escalation needs
+    // fat GENUINELY GROWN past that level — never a plateau re-nag.
+    fatTokens > (proj.lastEscalationFat ?? -1)
   ) {
     proj.lastCrossing = { band: newBand, at: now, consumed: false, escalation: true };
     proj.lastEscalationFat = fatTokens;
@@ -714,13 +701,14 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
 // Sanitize a project's cached lastCrossing for the Stop hot path: any doubt —
 // a malformed shape, an unknown/LEAN band, a future timestamp, or an
 // already-consumed crossing — collapses to null (silent), mirroring
-// sanitizeVerdict's "any doubt -> the safe default" rule. No age-based
-// staleness cutoff (unlike sanitizeVerdict): a crossing records a fact ("a
-// rise happened at time T"), which does not go stale the way a cached
-// footprint measurement does — see the ponytail note on consumeCrossing for
-// why nothing here can go unconsumed forever regardless. `escalation` (0e)
-// passes through ONLY when explicitly true, so a plain rise-crossing keeps
-// the EXACT pre-existing 2-key shape.
+// sanitizeLeanFloor's "any doubt -> the safe default" rule (0m: this is now
+// the ONE hot-path sanitizer — the force leg keys on the crossing it
+// returns, plus the cached reason). No age-based staleness cutoff: a
+// crossing records a fact ("a rise happened at time T"), which does not go
+// stale the way a cached footprint measurement does — see the ponytail note
+// on consumeCrossing for why nothing here can go unconsumed forever
+// regardless. `escalation` (0f) passes through ONLY when explicitly true, so
+// a plain rise-crossing keeps the EXACT pre-existing 2-key shape.
 export function sanitizeCrossing(rawCrossing, now = Date.now()) {
   if (!rawCrossing || typeof rawCrossing !== 'object') return null;
   if (rawCrossing.consumed === true) return null;

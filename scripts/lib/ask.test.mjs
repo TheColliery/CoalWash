@@ -1,58 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { ANSWER_FIRST_REMINDER, ceilingAsk, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory } from './ask.mjs';
+import { ANSWER_FIRST_REMINDER, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory } from './ask.mjs';
+
+// (0m: the old `ceilingAsk` template and its tests died with the forceMode
+// knob — force at FULL is unconditional, so no suppressed/disarmed-FULL ask
+// state exists; wizardEscalation is the ONE surviving ask.)
 
 test('every template embeds the answer-first reminder verbatim (queue item 0)', () => {
-  assert.ok(ceilingAsk({ band: 'OBESE', fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
   assert.ok(forceAuto({ fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
   assert.ok(obeseAutoQuick({ fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
   assert.ok(wizardEscalation({ fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
 });
 
-test('ceilingAsk: names the band, the fat estimate, exactly two options, and the consume-at-emission truth', () => {
-  const r = ceilingAsk({ band: 'OBESE', fatTokens: 1234.6, exercise: 'quick' });
-  assert.ok(r.includes('memory crossed the OBESE ceiling'), r);
-  assert.ok(r.includes('fat ~1235 tok'), r);
-  assert.ok(r.includes('question tool'));
-  assert.ok(r.includes('ทำ'));
-  assert.ok(r.includes('run the quick wash now'));
-  assert.ok(r.includes('later (dismiss; the offer returns at the next ceiling crossing)'));
-  assert.ok(!r.includes('snooze'), 'no time-based snooze wording — hysteresis replaced it');
-  assert.ok(r.includes('snapshot-backed and revertible'));
-});
-
-test('ceilingAsk: FULL band names FULL and the full exercise when configured', () => {
-  const r = ceilingAsk({ band: 'FULL', fatTokens: 4004, exercise: 'full' });
-  assert.ok(r.includes('memory crossed the FULL ceiling'), r);
-  assert.ok(r.includes('run the full wash now'), r);
-});
-
-test('ceilingAsk: no breakEven -> no payback clause; a real breakEven -> the payback numbers appear (queue 0c)', () => {
-  const bare = ceilingAsk({ band: 'OBESE', fatTokens: 500 });
-  assert.ok(!bare.includes('pays back'), bare);
-
-  const withBE = ceilingAsk({ band: 'OBESE', fatTokens: 500, exercise: 'quick', breakEven: { perDay: 200, breakEvenDays: 3.2, floorUnmeasured: false } });
-  assert.ok(withBE.includes('~200 tok/session'), withBE);
-  assert.ok(withBE.includes('pays back in ~4 session(s)'), withBE);
-  assert.ok(!withBE.includes('upper bound'));
-});
-
-test('ceilingAsk: floorUnmeasured payback is labeled an upper bound; zero/absent perDay suppresses the clause', () => {
-  const unmeasured = ceilingAsk({ band: 'FULL', fatTokens: 500, breakEven: { perDay: 50, breakEvenDays: 10, floorUnmeasured: true } });
-  assert.ok(unmeasured.includes('upper bound'), unmeasured);
-
-  const zeroFat = ceilingAsk({ band: 'OBESE', fatTokens: 0, breakEven: { perDay: 0, breakEvenDays: Infinity, floorUnmeasured: false } });
-  assert.ok(!zeroFat.includes('pays back'), zeroFat);
-
-  const malformed = ceilingAsk({ band: 'OBESE', fatTokens: 10, breakEven: { perDay: 'nope' } });
-  assert.ok(!malformed.includes('pays back'), malformed);
-});
-
-test('forceAuto: numbers shown, no question-tool wording (force never asks), the named exception and once-per-crossing truth', () => {
-  const r = forceAuto({ fatTokens: 4004 });
+test('forceAuto (economic): break-even headline, no question-tool wording (force never asks), non-optional named, once-per-crossing truth', () => {
+  const r = forceAuto({ fatTokens: 4004, reason: 'economic' });
   assert.ok(r.includes('FULL band + break-even proven'), r);
   assert.ok(r.includes('fat ~4004 tok'));
-  assert.ok(r.includes('standing config authorizes'));
+  assert.ok(r.includes('non-optional at FULL'), 'names the 0m intent — the OS-maintenance model, no off switch');
   assert.ok(r.includes('Quick pass NOW'));
   assert.ok(r.includes('stage-only'));
   assert.ok(r.includes('snapshot-backed'));
@@ -60,8 +24,26 @@ test('forceAuto: numbers shown, no question-tool wording (force never asks), the
   assert.ok(!r.includes('question tool'), 'force never asks');
 });
 
-test('forceAuto: carries the payback line too when breakEven is supplied', () => {
+test('forceAuto (absolute-cap, 0m): the wall headline quotes footprint-vs-wall — never a misleading "fat ~0" on the day-one store, no null/undefined artifacts', () => {
+  const r = forceAuto({ fatTokens: 0, reason: 'absolute-cap', footprintTokens: 76900, hardCeilingTokens: 36000 });
+  assert.ok(r.includes('over the capacity wall'), r);
+  assert.ok(r.includes('store ~76900 tok'), r);
+  assert.ok(r.includes('~36000 tok wall'), r);
+  assert.ok(!r.includes('break-even proven'), 'the wall case never claims a proof it did not run');
+  assert.ok(!r.includes('fat ~0'), 'a day-one provisional store must not read as "nothing to do"');
+  assert.ok(!r.includes('undefined') && !r.includes('null') && !r.includes('NaN'), r);
+});
+
+test('forceAuto (absolute-cap without wall numbers): degrades to a plain fat figure — a pre-beta.13 cache with no byte baseline never renders artifacts', () => {
+  const r = forceAuto({ fatTokens: 2500, reason: 'absolute-cap' });
+  assert.ok(r.includes('FULL band crossed (fat ~2500 tok)'), r);
+  assert.ok(!r.includes('undefined') && !r.includes('null') && !r.includes('NaN'), r);
+  assert.ok(!r.includes('capacity wall'), 'no wall claim without the numbers to show');
+});
+
+test('forceAuto: carries the payback line too when breakEven is supplied; no reason at all defaults to the economic headline', () => {
   const r = forceAuto({ fatTokens: 4004, breakEven: { perDay: 300, breakEvenDays: 2, floorUnmeasured: false } });
+  assert.ok(r.includes('FULL band + break-even proven'), r);
   assert.ok(r.includes('~300 tok/session'), r);
   assert.ok(r.includes('pays back in ~2 session(s)'), r);
 });
@@ -141,7 +123,7 @@ test('wizardEscalation: carries the payback line when breakEven is supplied; mal
 });
 
 test('every builder tolerates missing/malformed input without throwing', () => {
-  for (const fn of [ceilingAsk, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory]) {
+  for (const fn of [forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory]) {
     assert.doesNotThrow(() => fn());
     assert.doesNotThrow(() => fn({}));
     assert.doesNotThrow(() => fn(null));

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { CONFIG_SCHEMA, validateValue, validateConfig, clampedRead } from './config-schema.mjs';
+import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig, clampedRead } from './config-schema.mjs';
 
 test('every schema key carries a valid default (the clamp target)', () => {
   for (const spec of CONFIG_SCHEMA) {
@@ -69,7 +69,8 @@ test('clampedRead on an unknown key returns undefined (programming error, loud i
 });
 
 // ---------------------------------------------------------------------------
-// beta.10: exercisePerBand (bandmap) + forceMode (enum)
+// beta.10: exercisePerBand (bandmap) + forceMode (enum — RETIRED at 0m, see
+// the tombstone test below: force has no off switch).
 // beta.12 band-collapse: the plump rung is retired (merged into the single
 // obese ceiling) — exercisePerBand now maps only {obese, full}.
 // F3 (beta.14, main-adjudicated per the 0f "OBESE never asks" ruling): the
@@ -138,11 +139,14 @@ test('clampedRead (stringList): a valid array passes through as-is; any doubt de
   assert.deepStrictEqual(clampedRead({}, 'managedPaths'), []);
 });
 
-test('forceMode: enum auto|ask|off, default auto', () => {
-  const spec = CONFIG_SCHEMA.find((s) => s.key === 'forceMode');
-  assert.deepStrictEqual(spec.values, ['auto', 'ask', 'off']);
-  assert.strictEqual(spec.def, 'auto');
-  assert.strictEqual(clampedRead({ forceMode: 'OFF' }, 'forceMode'), 'off');
-  assert.strictEqual(clampedRead({ forceMode: 'sideways' }, 'forceMode'), 'auto');
-  assert.strictEqual(clampedRead({}, 'forceMode'), 'auto');
+test('0m: forceMode is RETIRED — not in the schema (force has no off switch), and a LEGACY config carrying it is read-tolerated: no validation error, no readable value', () => {
+  assert.strictEqual(CONFIG_SCHEMA.find((s) => s.key === 'forceMode'), undefined, 'the knob is gone — do not re-add an off switch');
+  assert.ok(RETIRED_KEYS.includes('forceMode'), 'tombstoned by name');
+  // A legacy config still carrying the key validates CLEAN (ignored, never an error)...
+  assert.deepStrictEqual(validateConfig({ forceMode: 'off' }), [], 'legacy forceMode is tolerated silently');
+  assert.deepStrictEqual(validateConfig({ forceMode: 'auto', coalwashMode: 'auto' }), []);
+  // ...while a genuinely unknown key still reports.
+  assert.deepStrictEqual(validateConfig({ noSuchKey: 1 }), ["'noSuchKey' not in schema"]);
+  // ...and no consumer can ever read it (no spec -> undefined).
+  assert.strictEqual(clampedRead({ forceMode: 'off' }, 'forceMode'), undefined, 'a retired key has no clamped value — dead to all consumers');
 });

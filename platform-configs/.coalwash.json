@@ -53,13 +53,11 @@
   // shipped Full pass.
   "exercisePerBand": { "obese": "quick", "full": "full" },
 
-  // FULL+economical crossing behavior at the Stop hook. auto = standing
-  // consent runs the free mechanical Quick pass immediately (the rot-canary
-  // autoFixMode model) — numbers are still shown every fire, every cut
-  // stays snapshot-backed and revertible; ask = FULL asks like other ceilings (ทำ/later);
-  // off = same as ask — never silent: 'ask'/'off' suppress only the auto-run
-  // authorization, never the user's awareness of FULL.
-  "forceMode": "auto",
+  // NOTE (0m): there is deliberately NO forceMode key — force at FULL is
+  // non-optional by design (the Windows critical-space-maintenance model;
+  // safety lives in UNDO — snapshot + rollback + bins — and the receipt is
+  // the surfacing). A legacy config still carrying forceMode is tolerated
+  // and ignored. The skill's whole power switch is coalwashMode: "off".
 
   // Extra path PREFIXES (relative to their own project/global root, forward
   // slashes) auto-declared MANAGED — a sync-owned pack (e.g. a shared rules

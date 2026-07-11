@@ -16,36 +16,40 @@
 //                   arms/clears the once-per-crossing edge state; the Stop
 //                   hook is the ONLY delivery surface.
 //   Stop         -> the ENFORCEMENT/delivery channel: an unconsumed
-//                   edge-crossing surfaces as ONE of (per 0d/0f/0g,
+//                   edge-crossing surfaces as ONE of (per 0d/0f/0g/0m,
 //                   MEMORY.md): the wizard-escalation ask (FULL after a
 //                   force-run's Quick proved insufficient — the SOLE ask
-//                   site, 0f), the standing-consent FULL force directive
-//                   (forceMode=auto + the fresh break-even proof), the
-//                   OBESE auto-Quick directive (0d — standing config, never
-//                   an ask), the plain ทำ/later ask (a suppressed/disarmed
-//                   FULL, or OBESE configured to the paid tier), or the
-//                   FULL(externalize) pure-information advisory — never an
-//                   ask, since washing cannot help ~all-muscle over
-//                   capacity. Mirrors rot-canary-stop.js's exact output
-//                   mechanism — a structured `{decision:'block', reason}`
-//                   JSON write, not plain console.log — because THAT is what
-//                   makes Stop a blocking channel the agent must address,
-//                   unlike a passive context injection it was always free to
-//                   ignore (beta.10 "ROUND 4 POSTMORTEM").
+//                   site, 0f), the UNCONDITIONAL FULL force directive (0m —
+//                   economic AND absolute-cap, no proof gate, no off
+//                   switch), the OBESE auto-Quick directive (0d — standing
+//                   config, never an ask), or the FULL(externalize)
+//                   pure-information advisory — never an ask, since washing
+//                   cannot help ~all-muscle over capacity. Mirrors
+//                   rot-canary-stop.js's exact output mechanism — a
+//                   structured `{decision:'block', reason}` JSON write, not
+//                   plain console.log — because THAT is what makes Stop a
+//                   blocking channel the agent must address, unlike a
+//                   passive context injection it was always free to ignore
+//                   (beta.10 "ROUND 4 POSTMORTEM").
 //
-// BANDS (0g "FULL = THE ECONOMIC CUT-POINT" + 0g-RESOLUTION, MEMORY.md —
-// refines the beta.12 band collapse): purely economic, nested LEAN < OBESE
-// < FULL. OBESE = the hysteresis-gated BMI ceiling armed but carry < wash
-// (auto-Quick-silent); FULL = the ceiling armed AND breakEven.economical
-// (Q1: FULL ⊂ OBESE), LATCHED per episode (Q2 — cleared by the LEAN reset);
-// the WALL (fullPercent x capacity) keeps its three roles (Q3): pre-floor
-// bootstrap cap, wash-first when armed, externalize when ~all-muscle.
-// FULL's economic force fires ONLY on the deterministic break-even proof
-// computed in CODE, numbers SHOWN every fire (the series' one named consent
-// exception, "economic-dominance"). DELETE/MERGE authorization is
-// plan-sourced (the adjudicated plan IS the authorization) — safety is
-// UNDO: every cut is snapshot-backed and revertible (whole-run rollback),
-// never a human pre-approval.
+// BANDS (0g "FULL = THE ECONOMIC CUT-POINT" + 0g-RESOLUTION + 0m, MEMORY.md
+// — refines the beta.12 band collapse): purely economic, nested LEAN <
+// OBESE < FULL. OBESE = the hysteresis-gated BMI ceiling armed but carry <
+// wash (auto-Quick-silent); FULL = the ceiling armed AND
+// breakEven.economical (Q1: FULL ⊂ OBESE), LATCHED per episode (Q2 —
+// cleared by the LEAN reset); the WALL (fullPercent x capacity) keeps its
+// three roles (Q3): pre-floor bootstrap cap, wash-first when armed,
+// externalize when ~all-muscle. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
+// A DICTATOR"): every FULL crossing force-runs the FREE Quick pass under
+// the same standing consent as OBESE's auto-Quick — no economic proof
+// needed for the free tier (the break-even proof governs the PAID wizard;
+// it also still DEFINES the economic band + backs the wizard ask's shown
+// numbers), and no forceMode knob exists (the Windows critical-space-
+// maintenance model — the only stop is coalwashMode:off, the whole-skill
+// power switch). DELETE/MERGE authorization is plan-sourced (the
+// adjudicated plan IS the authorization) — safety is UNDO: every cut is
+// snapshot-backed and revertible (whole-run rollback), never a human
+// pre-approval; the receipt is the surfacing.
 //
 // TEMPLATE ASKS (beta.12 item 3, ../scripts/lib/ask.mjs): every ask/directive/
 // advisory string is built by CODE from numbers alone — the hook never
@@ -254,8 +258,9 @@ async function handleSessionStart() {
 // exists for the agent to report that back. Every pending crossing SURFACES
 // (ask, force, or the externalize advisory) — there is no silent branch: a
 // silent FULL would be the forbidden third "dismiss and keep growing" path
-// (the saving-guarantee floor); forceMode 'ask'/'off' suppress only the
-// AUTO-RUN authorization, never the user's awareness of FULL.
+// (the saving-guarantee floor). Post-0m the FULL surfacing is the forced
+// run's own receipt numbers (oneLineResult) — the user always sees what
+// happened; the wizard-escalation ask remains the only question ever asked.
 async function handleStop(input) {
   if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
   const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, caliper, ask, classB] = await Promise.all([
@@ -266,9 +271,10 @@ async function handleStop(input) {
     import(lib('class-b.mjs')),
   ]);
   const cfg = loadMergedConfig();
+  // coalwashMode:off = the skill's whole power switch — and the ONLY stop
+  // (0m: force itself has no off switch; a legacy forceMode key in a config
+  // is read-tolerated and ignored, see config-schema.mjs RETIRED_KEYS).
   if (clampedRead(cfg, 'coalwashMode') === 'off') return; // fully silent
-  const forceMode = clampedRead(cfg, 'forceMode');
-  const exercisePerBand = clampedRead(cfg, 'exercisePerBand');
   const fullPercent = clampedRead(cfg, 'fullPercent');
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
@@ -336,48 +342,42 @@ async function handleStop(input) {
     // "wash harder on muscle" move). Delivered exactly once per rise, same
     // as every other crossing.
     reason = ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens });
+  } else if (crossing.band === 'FULL' && crossing.escalation) {
+    // case (c) — 0f "AUTHORITATIVE 3-FLOW": a force-run already tried Quick
+    // this episode and the store is STILL over FULL — only the wizard's
+    // semantic tier can help now; this IS a real ask, the ONE ask site in
+    // the whole system (0d: OBESE is auto-Quick-silent, it never asks).
+    // Checked BEFORE the force branch below so an armed escalation crossing
+    // can never be re-swallowed into another silent force-Quick loop.
+    reason = ask.wizardEscalation({ fatTokens, breakEven });
+  } else if (crossing.band === 'FULL') {
+    // case (b) — 0m "FORCE = THE FREE TIER, NO PROOF NEEDED" + "FORCE IS A
+    // DICTATOR, NO OFF SWITCH": every FULL crossing (economic AND
+    // absolute-cap; externalize already routed above) force-runs the FREE
+    // mechanical Quick pass UNCONDITIONALLY — the same standing consent as
+    // OBESE's auto-Quick (the misapplied economic-dominance proof gate is
+    // gone: that proof governs the PAID wizard, not a ~0-cost undo-backed
+    // code sweep; the old fresh-`economical` requirement made the heavier
+    // band do LESS than OBESE on a day-one over-wall store, the live bug).
+    // No forceMode knob exists any more (the Windows critical-space-
+    // maintenance model — safety lives in UNDO: snapshot + rollback + bins;
+    // the receipt numbers are the surfacing, so no-silent-branch holds).
+    // Force always runs Quick -> markQuickTried arms 0f's wizard-escalation
+    // leg above for the next still-over gauge.
+    const footprintTokens = Number.isFinite(Number(lastVerdict.alwaysLoadedBytes))
+      ? caliper.tokensEstFromBytes(Number(lastVerdict.alwaysLoadedBytes)) : null;
+    reason = ask.forceAuto({
+      fatTokens, breakEven, reason: lastVerdict.reason,
+      footprintTokens, hardCeilingTokens: lastVerdict.hardCeilingTokens,
+    });
+    caliper.markQuickTried(home, projectRoot, now);
   } else {
-    // sanitizeVerdict is non-null ONLY for a fresh FULL+economical
-    // (never-externalize) verdict — the exact gate the force case needs.
-    const verdict = caliper.sanitizeVerdict(lastVerdict, now);
-    const isForceCrossing = crossing.band === 'FULL' && !!verdict;
-    const bandKey = crossing.band.toLowerCase();
-    const exercise = (exercisePerBand && exercisePerBand[bandKey]) || 'quick';
-    if (crossing.band === 'FULL' && crossing.escalation) {
-      // case (c) — 0f "AUTHORITATIVE 3-FLOW" (MEMORY.md, supersedes 0e "THE
-      // OBESE LOOP"): a force-run already tried Quick this episode and the
-      // store is STILL over the FULL ceiling — only the wizard's semantic
-      // tier can help now; this IS a real ask, the ONE site the ask
-      // survives for (0d: OBESE is auto-Quick-silent, it never asks).
-      // Checked BEFORE the force branch below so an armed escalation
-      // crossing can never be re-swallowed into another silent auto-force
-      // Quick loop — the exact bug 0f fixes (a plain FULL+economical
-      // crossing would otherwise ALSO satisfy isForceCrossing here).
-      reason = ask.wizardEscalation({ fatTokens, breakEven });
-    } else if (isForceCrossing && forceMode === 'auto') {
-      // case (b): FULL force — standing consent, no ask, mirrors rot-canary's
-      // own auto-scan. Force always runs Quick -> counts toward 0f's
-      // "already tried mechanically" state for the wizard-escalation leg above.
-      reason = ask.forceAuto({ fatTokens: verdict.fatTokens, breakEven });
-      caliper.markQuickTried(home, projectRoot, now);
-    } else if (crossing.band === 'OBESE') {
-      // case (d) — 0d "OBESE AUTO-QUICK, NO ASK" + F3 (main-adjudicated per
-      // the thrice-reconfirmed 0f "OBESE never asks, no matter what"):
-      // UNCONDITIONAL — the old exercisePerBand.obese:'full' route to an
-      // ask is removed (the schema admits only 'quick' there now; a legacy
-      // 'full' clamps to 'quick' at read, safer-value-wins). Standing
-      // config IS the consent (rot-canary autoFixMode precedent) — no ask,
-      // run the free mechanical pass now.
-      reason = ask.obeseAutoQuick({ fatTokens, breakEven });
-      caliper.markQuickTried(home, projectRoot, now);
-    } else {
-      // case (a): ask ทำ/later — reachable for FULL crossings ONLY (F3):
-      // a FULL crossing that never armed (economical:false), or a FULL
-      // crossing whose AUTO-RUN authorization is suppressed (forceMode
-      // 'ask'/'off' — both land HERE, never in silence: the beta.10
-      // "NO silent branch" rule, review-quoted).
-      reason = ask.ceilingAsk({ band: crossing.band, fatTokens, exercise, breakEven });
-    }
+    // case (d) — OBESE (the only other band sanitizeCrossing admits) — 0d
+    // "OBESE AUTO-QUICK, NO ASK" + F3: UNCONDITIONAL standing-consent
+    // auto-Quick (the schema admits only 'quick' for obese; a legacy 'full'
+    // clamps to 'quick' at read). No ask, run the free mechanical pass now.
+    reason = ask.obeseAutoQuick({ fatTokens, breakEven });
+    caliper.markQuickTried(home, projectRoot, now);
   }
 
   caliper.consumeCrossing(home, projectRoot, now); // once per crossing (consume-at-emission)

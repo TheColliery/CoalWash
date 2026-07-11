@@ -101,8 +101,9 @@ Every tool in the series supports two config levels — a global `~/.claude/.coa
 | `localOnly` | `false` | Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config |
 | `updateMode` | `ask` | Self-update behavior at session start (`ask` \| `auto` \| `remind` \| `off`) |
 | `updateCheckDays` | `14` | Days between self-update checks/reminders |
-| `exercisePerBand` | `{obese: quick, full: full}` | Per-ceiling exercise (`quick` \| `full`, for obese/full — band-collapse retired the separate plump rung; a fat-only scoping refinement is a later release): `quick` auto-runs with no ask, `full` routes that ceiling through the Stop-hook ทำ/later ask instead |
-| `forceMode` | `auto` | FULL+economical crossing behavior at Stop: `auto` = standing-consent auto-run (the rot-canary `autoFixMode` model) · `ask` = FULL asks like other ceilings · `off` = same as ask — never silent (suppresses only the auto-run authorization, never FULL awareness) |
+| `exercisePerBand` | `{obese: quick, full: full}` | Per-ceiling exercise. `obese` admits **only `quick`** (OBESE is auto-Quick-silent by ruling — it never asks; a legacy `full` value is read as `quick`); `full` takes `quick` \| `full` (the tier the wizard leg works at). A fat-only scoping refinement is a later release |
+
+> **No force off switch — by design.** There is deliberately no `forceMode` key: at FULL (economic or capacity-wall) CoalWash force-runs the free mechanical Quick pass unconditionally, the way an OS runs its critical-disk-space maintenance — you can't veto it, and you don't need to: safety lives in **undo** (verified snapshot + whole-run rollback + the recovery bins), every run leaves its receipt numbers, and the paid semantic tier still never runs without your press. A legacy config carrying `forceMode` is tolerated and ignored. The skill's whole power switch remains `coalwashMode: "off"`.
 
 Full key reference: every key + default lives in [`scripts/lib/config-schema.mjs`](scripts/lib/config-schema.mjs) and the commented template [`platform-configs/.coalwash.json`](platform-configs/.coalwash.json).
 

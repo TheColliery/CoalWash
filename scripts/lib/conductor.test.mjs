@@ -406,8 +406,8 @@ test('0f: FULL persisting after a force-run already ran Quick this episode escal
     seedState(home, proj, {
       quickTried: true,
       lastCrossing: { band: 'FULL', at: Date.now(), consumed: false, escalation: true },
-      // economical:true + forceMode default 'auto' would ALSO satisfy the
-      // plain force branch — proves the escalation check's priority ordering.
+      // a plain FULL crossing would ALSO satisfy the (now unconditional)
+      // force branch — proves the escalation check's priority ordering.
       lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 900, at: Date.now() },
     });
     const r = run(proj, home, { hook_event_name: 'Stop' });
@@ -435,7 +435,7 @@ test('0f: FULL force-run marks quickTried too (Force always runs Quick) — the 
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
-    assert.ok(reason.includes('FULL band + break-even proven'), reason);
+    assert.ok(reason.includes('FULL band crossed'), reason); // seeded state has no wall-byte baseline -> the fallback headline
     assert.strictEqual(readProjState(home, proj).quickTried, true, 'Force running Quick counts toward the wizard-escalation leg\'s "already tried mechanically" state');
   } finally { clean(home, proj); }
 });
@@ -452,7 +452,9 @@ test('round trip: a FULL force-run followed by a FULL plateau (still over cap, q
     assertGraceful(rs1);
     const rp1 = run(proj, home, { hook_event_name: 'Stop' }); // force-fires, marks quickTried
     assertGraceful(rp1);
-    assert.ok(parseBlock(rp1.stdout).includes('FULL band + break-even proven'), rp1.stdout);
+    // reason=absolute-cap with a real gauge's cached byte baseline -> the 0m
+    // wall headline (footprint-vs-wall), never the break-even claim.
+    assert.ok(parseBlock(rp1.stdout).includes('over the capacity wall'), rp1.stdout);
     assert.strictEqual(readProjState(home, proj).quickTried, true);
 
     // Second SessionStart: the fixture is unchanged on disk (simulates "the
@@ -603,9 +605,73 @@ test('0j round trip: an already-over-wall store on day one still routes FULL/abs
     assert.strictEqual(st.lastVerdict.reason, 'absolute-cap', '0j: never externalize off a provisional baseline — pre-existing fat may be baked in');
     assert.strictEqual(st.leanFloorTokens, 36200, 'the provisional floor stamps IN PARALLEL with the wall verdict');
     assert.strictEqual(st.leanFloorProvisional, true);
-    assert.strictEqual(st.lastVerdict.floorUnmeasured, false, 'BMI/economics live against the day-one baseline (fat-since-install ~0, so no force on day one — manual /coalwash stays the door)');
-    assert.strictEqual(st.lastVerdict.economical, false);
-    assert.strictEqual(st.lastCrossing.band, 'FULL', 'the crossing still arms — Stop delivers the FULL awareness (ask, since force is disarmed)');
+    assert.strictEqual(st.lastVerdict.floorUnmeasured, false, 'BMI/economics live against the day-one baseline (fat-since-install ~0)');
+    assert.strictEqual(st.lastVerdict.economical, false, 'the break-even proof is fresh-false here — and per 0m it no longer matters to the force leg (the free tier needs no proof)');
+    assert.strictEqual(st.lastCrossing.band, 'FULL', 'the crossing arms — Stop force-runs it unconditionally (the 0m day-one round trip below drives that end-to-end)');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// 0m "FORCE = THE FREE TIER, NO PROOF NEEDED" + "FORCE IS A DICTATOR" — the
+// user's live day-one scenario, end-to-end: WALL day one → silent forced
+// Quick (wall-numbers headline) → re-gauge still over → the ONE wizard ask →
+// store shrinks under the wall → silence. The heavier band never again does
+// less than OBESE.
+// ---------------------------------------------------------------------------
+
+test('0m round trip (the user\'s live scenario): day-one over-wall → provisional floor → forceAuto (NOT an ask) → quickTried → still-over re-gauge → wizardEscalation → shrink under wall → silence', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // Day one: a fresh, never-seen store already over the 36000-tok wall.
+    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 }); // fp 36200
+    run(proj, home, { hook_event_name: 'SessionStart' });
+    const st1 = readProjState(home, proj);
+    assert.strictEqual(st1.leanFloorTokens, 36200, 'provisional floor stamped');
+    assert.strictEqual(st1.lastVerdict.reason, 'absolute-cap');
+    assert.strictEqual(st1.lastVerdict.economical, false, 'no fresh break-even proof — irrelevant to force per 0m');
+
+    // Stop #1: the force directive fires UNCONDITIONALLY — the exact point
+    // the live bug missed (it asked instead).
+    const rp1 = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp1);
+    const reason1 = parseBlock(rp1.stdout);
+    assert.ok(reason1.includes('over the capacity wall'), reason1);
+    assert.ok(reason1.includes('store ~36200 tok'), 'names the footprint');
+    assert.ok(reason1.includes('~36000 tok wall'), 'names the wall');
+    assert.ok(reason1.includes('non-optional at FULL'), reason1);
+    assert.ok(!reason1.includes('question tool'), 'force, not an ask — the day-one bug pinned dead');
+    assert.ok(!reason1.includes('undefined') && !reason1.includes('null') && !reason1.includes('NaN'), reason1);
+    assert.strictEqual(readProjState(home, proj).quickTried, true, 'the forced run marked the episode');
+
+    // Consume-once: a second Stop on the same crossing is silent.
+    const rp1b = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp1b);
+    assert.strictEqual(rp1b.stdout, '', 'consume-once intact');
+
+    // Re-gauge, store unchanged (the Quick could not shrink it under the
+    // wall; fat-since-install = 0 — the first-ask exemption arms anyway).
+    run(proj, home, { hook_event_name: 'SessionStart' });
+    const st2 = readProjState(home, proj);
+    assert.strictEqual(st2.lastCrossing.band, 'FULL');
+    assert.strictEqual(st2.lastCrossing.escalation, true, 'still over + quickTried -> the ONE wizard ask arms (0f leg, fat-0 exempted)');
+
+    const rp2 = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp2);
+    const reason2 = parseBlock(rp2.stdout);
+    assert.ok(reason2.includes('STILL over the FULL capacity ceiling'), reason2);
+    assert.ok(reason2.includes('question tool'), 'the wizard ask is the ONE ask in the system');
+
+    // (g) The store shrinks under the wall (as if the wizard cleaned it):
+    // band machinery ends the episode — silence, nothing more fires.
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'a'.repeat(40000), 'utf8'); // fp ~10000, under everything
+    run(proj, home, { hook_event_name: 'SessionStart' });
+    const st3 = readProjState(home, proj);
+    assert.strictEqual(st3.lastVerdict.band, 'LEAN');
+    assert.strictEqual(st3.lastCrossing, undefined, 'LEAN clears the episode');
+    const rp3 = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp3);
+    assert.strictEqual(rp3.stdout, '', 'below FULL after force -> silence, per the ruling: "ถ้า lean ได้หรือหดลงต่ำกว่านิยาม FULL → จบ ไม่มีอะไร"');
   } finally { clean(home, proj); }
 });
 
@@ -703,23 +769,28 @@ test('Stop: an OBESE ask carries the break-even payback line when it is cached (
   } finally { clean(home, proj); }
 });
 
-test('Stop: an unconsumed FULL(absolute-cap) crossing offers the config-mapped exercise (default: full) when the ask degrades', () => {
+test('0m: a FULL crossing force-runs UNCONDITIONALLY — a disarmed break-even (economical:false, absolute-cap) is NOT an ask any more, the exact live bug', () => {
   const { home, proj } = sandbox();
   try {
-    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ forceMode: 'ask' }), 'utf8');
+    // Pre-0m this exact state (absolute-cap + economical:false) fell through
+    // to the ceilingAsk — the heavier band did LESS than OBESE. The free
+    // tier needs no economic proof.
     seedState(home, proj, {
       lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
-      lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 2500, at: Date.now() },
+      lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: false, fatTokens: 2500, at: Date.now() },
     });
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
-    assert.ok(reason.includes('memory crossed the FULL ceiling'), reason);
-    assert.ok(reason.includes('run the full wash now'), 'FULL defaults to the full exercise (factory exercisePerBand)');
+    assert.ok(reason.includes('FULL band crossed (fat ~2500 tok)'), reason); // no cached wall bytes -> the honest fallback headline
+    assert.ok(reason.includes('non-optional at FULL'), reason);
+    assert.ok(reason.includes('Quick pass NOW'), reason);
+    assert.ok(!reason.includes('question tool'), 'force never asks');
+    assert.strictEqual(readProjState(home, proj).quickTried, true);
   } finally { clean(home, proj); }
 });
 
-test('Stop: a FULL+economical crossing with forceMode=auto (the default) emits the standing-consent force directive, not an ask', () => {
+test('0m: a FULL crossing emits the force directive with the payback numbers when cached — and never an ask', () => {
   const { home, proj } = sandbox();
   try {
     seedState(home, proj, {
@@ -729,9 +800,8 @@ test('Stop: a FULL+economical crossing with forceMode=auto (the default) emits t
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
-    assert.ok(reason.includes('FULL band + break-even proven'), reason);
-    assert.ok(reason.includes('fat ~4004 tok'), reason);
-    assert.ok(reason.includes('standing config authorizes'), reason);
+    assert.ok(reason.includes('FULL band crossed (fat ~4004 tok)'), reason);
+    assert.ok(reason.includes('non-optional at FULL'), reason);
     assert.ok(reason.includes('Quick pass NOW'), reason);
     assert.ok(reason.includes('stage-only'), reason);
     assert.ok(reason.includes('snapshot-backed'), reason);
@@ -741,7 +811,7 @@ test('Stop: a FULL+economical crossing with forceMode=auto (the default) emits t
   } finally { clean(home, proj); }
 });
 
-test('Stop: forceMode=ask degrades a FULL+economical crossing to the same ask template used by OBESE', () => {
+test('0m: a LEGACY config carrying forceMode:"ask" is read-tolerated and IGNORED — force still fires (the knob is dead)', () => {
   const { home, proj } = sandbox();
   try {
     fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ forceMode: 'ask' }), 'utf8');
@@ -752,13 +822,13 @@ test('Stop: forceMode=ask degrades a FULL+economical crossing to the same ask te
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
-    assert.ok(reason.includes('memory crossed the FULL ceiling'), reason);
-    assert.ok(reason.includes('question tool'), 'ask-degraded, not auto-run');
-    assert.ok(!reason.includes('standing config authorizes'), 'the auto-run authorization is suppressed');
+    assert.ok(reason.includes('non-optional at FULL'), reason);
+    assert.ok(!reason.includes('question tool'), 'the legacy knob cannot re-open an ask path');
+    assert.strictEqual(readProjState(home, proj).quickTried, true);
   } finally { clean(home, proj); }
 });
 
-test('Stop: forceMode=off emits the ask too — never silent (suppresses only the auto-run, never FULL awareness) — and consumes the crossing', () => {
+test('0m: a LEGACY config carrying forceMode:"off" is likewise IGNORED — there is NO off switch; force fires and the crossing consumes once', () => {
   const { home, proj } = sandbox();
   try {
     fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ forceMode: 'off' }), 'utf8');
@@ -769,11 +839,13 @@ test('Stop: forceMode=off emits the ask too — never silent (suppresses only th
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
-    assert.ok(reason.includes('memory crossed the FULL ceiling'), 'a silent FULL would be the forbidden "dismiss and keep growing" third path');
-    assert.ok(reason.includes('question tool'), 'off degrades to the ask, same as ask');
-    assert.ok(!reason.includes('standing config authorizes'), 'the auto-run authorization is suppressed');
+    assert.ok(reason.includes('non-optional at FULL'), 'the OS-maintenance model: no veto — the only full stop is coalwashMode:off');
+    assert.ok(!reason.includes('question tool'), 'force never asks');
     const st = readProjState(home, proj);
     assert.strictEqual(st.lastCrossing.consumed, true, 'consumed at emission, same as every other surfaced crossing');
+    const r2 = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r2);
+    assert.strictEqual(r2.stdout, '', 'consume-once intact — the SAME crossing never re-fires');
   } finally { clean(home, proj); }
 });
 
@@ -849,9 +921,9 @@ test('Stop: coalwashMode=off silences even a pending crossing (the master switch
 });
 
 // ---------------------------------------------------------------------------
-// SessionStart -> Stop round trips (recordVerdict/sanitizeVerdict stay live as
-// the Stop hook's data source; recordCrossing/sanitizeCrossing are the
-// once-per-crossing counterpart).
+// SessionStart -> Stop round trips (recordVerdict's cache is the Stop hook's
+// data source; recordCrossing/sanitizeCrossing are the once-per-crossing
+// counterpart — post-0m the ONE hot-path sanitizer).
 // ---------------------------------------------------------------------------
 
 test('round trip: a FULL-economical SessionStart records a crossing the following Stop reads and force-fires on', () => {
@@ -872,7 +944,7 @@ test('round trip: a FULL-economical SessionStart records a crossing the followin
 
     const rp = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(rp);
-    assert.ok(parseBlock(rp.stdout).includes('FULL band + break-even proven'), rp.stdout);
+    assert.ok(parseBlock(rp.stdout).includes('over the capacity wall'), rp.stdout); // absolute-cap + real cached bytes -> the 0m wall headline
   } finally { clean(home, proj); }
 });
 
