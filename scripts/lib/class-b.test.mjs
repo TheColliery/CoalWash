@@ -244,3 +244,104 @@ test('G4: a sibling session-state dir shaped like CoalHearth\'s (.claude/coalhea
     assert.strictEqual(d.entries.some((e) => e.path.includes('coalhearth')), false, 'a sibling session-state dir is never discovered');
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// MANAGED-ARTIFACT AUTO-DECLARATION (beta.12 item 6, arm-3 finding): a
+// sync-owned rule pack is tagged `managed: true` — MEASURED (never hidden
+// from BMI) but excluded from wash proposals downstream (SKILL-level
+// discipline). Two independent signals: byte-identical-across-roots, and the
+// managedPaths config prefix.
+// ---------------------------------------------------------------------------
+
+test('every discovered entry defaults managed:false', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, 'CLAUDE.md'), 'no imports');
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.ok(d.entries.length > 0);
+    assert.ok(d.entries.every((e) => e.managed === false));
+  } finally { clean(home, proj); }
+});
+
+test('managed (1) byte-identical-across-roots: a project rules file mirroring a global rules file at the SAME relative tail is tagged managed on BOTH sides', () => {
+  const { home, proj } = sandbox();
+  try {
+    const shared = 'this pack is synced verbatim by an external tool';
+    write(path.join(proj, '.claude', 'rules', 'ecc', 'domain', 'shared-pack.md'), shared);
+    write(path.join(home, '.claude', 'rules', 'ecc', 'domain', 'shared-pack.md'), shared);
+    // A genuinely project-only rule (no global counterpart) stays unmanaged.
+    write(path.join(proj, '.claude', 'rules', 'ecc', 'domain', 'project-only.md'), 'local rule, never synced');
+
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    const projSide = d.entries.find((e) => e.path.endsWith(path.join('ecc', 'domain', 'shared-pack.md')) && e.scope === 'project');
+    const globSide = d.entries.find((e) => e.path.endsWith(path.join('ecc', 'domain', 'shared-pack.md')) && e.scope === 'global');
+    assert.ok(projSide && globSide, 'both sides of the pair are discovered');
+    assert.strictEqual(projSide.managed, true, 'the project mirror is tagged managed');
+    assert.strictEqual(globSide.managed, true, 'the global source is tagged managed too (the pairing itself proves the sync relationship)');
+
+    const localOnly = d.entries.find((e) => e.path.endsWith('project-only.md'));
+    assert.strictEqual(localOnly.managed, false, 'a file with no global counterpart is never mis-tagged managed');
+  } finally { clean(home, proj); }
+});
+
+test('managed (1) is content-aware, not name-aware: a same-named file with DIFFERENT content is never tagged managed (a real local edit, not a mirror)', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, '.claude', 'rules', 'ecc', 'diverged.md'), 'the project has since customized this rule');
+    write(path.join(home, '.claude', 'rules', 'ecc', 'diverged.md'), 'the original global rule text');
+
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    const projSide = d.entries.find((e) => e.path.endsWith(path.join('ecc', 'diverged.md')) && e.scope === 'project');
+    assert.strictEqual(projSide.managed, false, 'diverged content is a real local customization, never auto-declared managed');
+  } finally { clean(home, proj); }
+});
+
+test('managed (1) generalizes to any pack name — never hardcodes "ecc" or any project-specific directory', () => {
+  const { home, proj } = sandbox();
+  try {
+    const shared = 'a totally differently-named shared pack';
+    write(path.join(proj, '.claude', 'rules', 'whatever-pack-name', 'nested', 'file.md'), shared);
+    write(path.join(home, '.claude', 'rules', 'whatever-pack-name', 'nested', 'file.md'), shared);
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    const projSide = d.entries.find((e) => e.path.endsWith(path.join('whatever-pack-name', 'nested', 'file.md')) && e.scope === 'project');
+    assert.strictEqual(projSide.managed, true);
+  } finally { clean(home, proj); }
+});
+
+test('managed (2) managedPaths config: an explicit prefix (relative to the entry\'s own scope root) tags matching entries managed', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, '.claude', 'rules', 'vendor-pack', 'a.md'), 'vendor content');
+    write(path.join(proj, '.claude', 'rules', 'my-own', 'b.md'), 'my own rule');
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code', managedPaths: ['.claude/rules/vendor-pack'] });
+    const vendor = d.entries.find((e) => e.path.endsWith(path.join('vendor-pack', 'a.md')));
+    const own = d.entries.find((e) => e.path.endsWith(path.join('my-own', 'b.md')));
+    assert.strictEqual(vendor.managed, true);
+    assert.strictEqual(own.managed, false);
+  } finally { clean(home, proj); }
+});
+
+test('managed (2) managedPaths: an empty/absent/malformed list is a harmless no-op, never throws', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, '.claude', 'rules', 'a.md'), 'x');
+    for (const managedPaths of [undefined, [], null, 'not-an-array', [123]]) {
+      assert.doesNotThrow(() => discoverClassB({ projectRoot: proj, home, platform: 'claude-code', managedPaths }));
+      const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code', managedPaths });
+      assert.ok(d.entries.every((e) => e.managed === false));
+    }
+  } finally { clean(home, proj); }
+});
+
+test('managed: both signals can independently tag the same discovery pass', () => {
+  const { home, proj } = sandbox();
+  try {
+    const shared = 'synced content';
+    write(path.join(proj, '.claude', 'rules', 'ecc', 'mirrored.md'), shared);
+    write(path.join(home, '.claude', 'rules', 'ecc', 'mirrored.md'), shared);
+    write(path.join(proj, '.claude', 'rules', 'vendor-only', 'x.md'), 'declared managed by config, no global mirror exists');
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code', managedPaths: ['.claude/rules/vendor-only'] });
+    assert.strictEqual(d.entries.find((e) => e.path.endsWith(path.join('ecc', 'mirrored.md')) && e.scope === 'project').managed, true);
+    assert.strictEqual(d.entries.find((e) => e.path.endsWith(path.join('vendor-only', 'x.md'))).managed, true);
+  } finally { clean(home, proj); }
+});

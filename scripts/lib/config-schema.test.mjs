@@ -70,31 +70,60 @@ test('clampedRead on an unknown key returns undefined (programming error, loud i
 
 // ---------------------------------------------------------------------------
 // beta.10: exercisePerBand (bandmap) + forceMode (enum)
+// beta.12 band-collapse: the plump rung is retired (merged into the single
+// obese ceiling) — exercisePerBand now maps only {obese, full}.
 // ---------------------------------------------------------------------------
 
-test('exercisePerBand: factory default maps plump/obese/full, quick|full only', () => {
+test('exercisePerBand: factory default maps obese/full, quick|full only', () => {
   const spec = CONFIG_SCHEMA.find((s) => s.key === 'exercisePerBand');
   assert.strictEqual(spec.type, 'bandmap');
-  assert.deepStrictEqual(spec.def, { plump: 'quick', obese: 'full', full: 'full' });
+  assert.deepStrictEqual(spec.def, { obese: 'quick', full: 'full' });
   assert.deepStrictEqual(spec.values, ['quick', 'full']);
 });
 
 test('validateValue (bandmap): requires every sub-key, each one of the allowed values', () => {
   const spec = CONFIG_SCHEMA.find((s) => s.key === 'exercisePerBand');
-  assert.strictEqual(validateValue(spec, { plump: 'quick', obese: 'full', full: 'full' }), null);
-  assert.strictEqual(validateValue(spec, { plump: 'QUICK', obese: 'FULL', full: 'Full' }), null, 'case-insensitive');
-  assert.ok(validateValue(spec, { plump: 'quick', obese: 'full' }), 'missing full -> error');
-  assert.ok(validateValue(spec, { plump: 'turbo', obese: 'full', full: 'full' }), 'unknown value -> error');
+  assert.strictEqual(validateValue(spec, { obese: 'quick', full: 'full' }), null);
+  assert.strictEqual(validateValue(spec, { obese: 'QUICK', full: 'Full' }), null, 'case-insensitive');
+  assert.ok(validateValue(spec, { obese: 'quick' }), 'missing full -> error');
+  assert.ok(validateValue(spec, { obese: 'turbo', full: 'full' }), 'unknown value -> error');
   assert.ok(validateValue(spec, 'quick'), 'a non-object -> error');
   assert.ok(validateValue(spec, ['quick']), 'an array -> error');
   assert.ok(validateValue(spec, null), 'null -> error');
 });
 
 test('clampedRead (bandmap): valid passes through lowercased; any doubt degrades to the whole default object', () => {
-  assert.deepStrictEqual(clampedRead({ exercisePerBand: { plump: 'QUICK', obese: 'full', full: 'FULL' } }, 'exercisePerBand'), { plump: 'quick', obese: 'full', full: 'full' });
-  assert.deepStrictEqual(clampedRead({ exercisePerBand: { plump: 'turbo', obese: 'full', full: 'full' } }, 'exercisePerBand'), { plump: 'quick', obese: 'full', full: 'full' });
-  assert.deepStrictEqual(clampedRead({}, 'exercisePerBand'), { plump: 'quick', obese: 'full', full: 'full' });
-  assert.deepStrictEqual(clampedRead({ exercisePerBand: { plump: 'quick', obese: 'full', full: 'full', extra: 'nonsense' } }, 'exercisePerBand'), { plump: 'quick', obese: 'full', full: 'full' }, 'an extra sub-key never leaks through');
+  assert.deepStrictEqual(clampedRead({ exercisePerBand: { obese: 'QUICK', full: 'FULL' } }, 'exercisePerBand'), { obese: 'quick', full: 'full' });
+  assert.deepStrictEqual(clampedRead({ exercisePerBand: { obese: 'turbo', full: 'full' } }, 'exercisePerBand'), { obese: 'quick', full: 'full' });
+  assert.deepStrictEqual(clampedRead({}, 'exercisePerBand'), { obese: 'quick', full: 'full' });
+  assert.deepStrictEqual(clampedRead({ exercisePerBand: { obese: 'quick', full: 'full', extra: 'nonsense' } }, 'exercisePerBand'), { obese: 'quick', full: 'full' }, 'an extra sub-key never leaks through');
+  assert.deepStrictEqual(clampedRead({ exercisePerBand: { plump: 'full', obese: 'quick', full: 'full' } }, 'exercisePerBand'), { obese: 'quick', full: 'full' }, 'a leftover plump sub-key from an old config is silently dropped, never trusted');
+});
+
+// ---------------------------------------------------------------------------
+// beta.12 item 6: managedPaths (stringList) — the auto-declaration config
+// half of the byte-identical-across-roots managed-artifact exclusion.
+// ---------------------------------------------------------------------------
+
+test('managedPaths: stringList, factory default [] (the heuristic covers the common case with no config)', () => {
+  const spec = CONFIG_SCHEMA.find((s) => s.key === 'managedPaths');
+  assert.strictEqual(spec.type, 'stringList');
+  assert.deepStrictEqual(spec.def, []);
+});
+
+test('validateValue (stringList): an array of strings passes; anything else fails', () => {
+  const spec = CONFIG_SCHEMA.find((s) => s.key === 'managedPaths');
+  assert.strictEqual(validateValue(spec, []), null);
+  assert.strictEqual(validateValue(spec, ['.claude/rules/ecc']), null);
+  assert.ok(validateValue(spec, 'not-an-array'));
+  assert.ok(validateValue(spec, [1, 2]), 'non-string elements fail');
+  assert.ok(validateValue(spec, null));
+});
+
+test('clampedRead (stringList): a valid array passes through as-is; any doubt degrades to []', () => {
+  assert.deepStrictEqual(clampedRead({ managedPaths: ['a/b', 'c/d'] }, 'managedPaths'), ['a/b', 'c/d']);
+  assert.deepStrictEqual(clampedRead({ managedPaths: 'nope' }, 'managedPaths'), []);
+  assert.deepStrictEqual(clampedRead({}, 'managedPaths'), []);
 });
 
 test('forceMode: enum auto|ask|off, default auto', () => {

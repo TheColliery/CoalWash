@@ -13,6 +13,23 @@ function ktok(n) {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n));
 }
 
+// One-line RESULT surface (beta.12 item 2 — MEMORY.md "DISPLAY FORMAT FINAL"
+// / "COLLAPSED TO ONE SENTENCE EVER"): the single line CoalWash speaks after
+// ANY wash that actually cut something — a big clean, a small clean, or the
+// autonomous broom, all the SAME template, only the numbers differ. Cutting
+// NOTHING is SILENCE (returns null — no second message type exists, per the
+// user's own trim: "แค่นี้พอ...การมีใบเสร็จมันรกด้วย"). This is the terse
+// PUSH surface; buildReceipt's full block stays the opt-in PULL surface
+// (available on request via /stats or the wizard, never advertised per-run).
+export function oneLineResult(opts) {
+  const { cutTokens, cutPercent, savedTokens } = opts || {};
+  const cut = Math.round(Number(cutTokens) || 0);
+  if (cut <= 0) return null; // nothing cut -> silence IS the system working
+  const pct = Number.isFinite(cutPercent) ? Math.round(cutPercent) : 0;
+  const saved = Math.max(0, Math.round(Number(savedTokens) || 0));
+  return `[CoalWash] cut ~${ktok(cut)} tok fat (−${pct}%), saved ~${ktok(saved)} tok`;
+}
+
 // r = {
 //   when?: ISO date string,
 //   beforeBytes, afterBytes,                    — whole class-B store (deterministic)

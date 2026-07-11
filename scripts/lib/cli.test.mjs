@@ -44,7 +44,7 @@ test('gauge --json: one call returns recover + platform + measure + verdict + br
     assert.strictEqual(g.recover.recovered, 'none');
     assert.strictEqual(g.platform, 'claude-code');
     assert.ok(g.measure.alwaysLoaded.tokensEst > 0, 'the seeded CLAUDE.md was measured');
-    assert.ok(['LEAN', 'PLUMP', 'OBESE', 'FULL'].includes(g.verdict.band));
+    assert.ok(['LEAN', 'OBESE', 'FULL'].includes(g.verdict.band));
     assert.strictEqual(typeof g.breakEven.economical, 'boolean');
     assert.strictEqual(g.breakEven.floorUnmeasured, true, 'no floor stamped in a fresh sandbox');
   } finally { clean(home, proj); }
@@ -67,7 +67,7 @@ test('default output is the terse one-line gauge', () => {
     assert.strictEqual(r.status, 0, r.stderr);
     const lines = r.stdout.trim().split(/\r?\n/);
     assert.strictEqual(lines.length, 1, 'ONE line');
-    assert.match(lines[0], /^\[CoalWash\] (LEAN|PLUMP|OBESE|FULL) — always-loaded ~\d+ tok\/session \(~est\)/);
+    assert.match(lines[0], /^\[CoalWash\] (LEAN|OBESE|FULL) — always-loaded ~\d+ tok\/session \(~est\)/);
   } finally { clean(home, proj); }
 });
 

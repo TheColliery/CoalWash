@@ -106,3 +106,57 @@ After a **gate-passed FULL clean only**, stamp the lean floor (`setLeanFloor(hom
 ## 7. Dry-run
 
 User asks for a preview → run the whole pipeline with NO `applyPlan` call, receipt built with `dryRun: true`. Idempotency check: a second run on the just-cleaned store must find ~nothing — if it keeps finding work, stop and report (that is the over-cleaning smell, not progress).
+
+## 8. The two bins — retention + pull-only restore
+
+`bins.mjs` ships two age-based retention bins beside the per-run snapshot (§4/§5 above) — Recycle-Bin / Windows.old economics, not a new global layer:
+
+| Bin | Horizon | What lands there | Economics |
+|---|---|---|---|
+| `fat-bin` | 30 days (1 burst-gap) | per-cut records from the normal ceiling filter | high-churn, cheap — Recycle-Bin |
+| `store.old` | 60 days (2 burst-gaps) | whole-store pre-surgery images from a wizard muscle-reorg | rare, surgery-grade caution — Windows.old |
+
+Both share ONE destruction law (`retention.mjs`, a pure function — hermetic-tested, no lab tokens needed): birth is event-only (no clock ever creates an entry) → life is dual-axis thinning (new-replaces-old within a density slot, PLUS an age ladder: keep-all to 48h → last-per-day to 14d → last-per-week to the horizon) → death VERIFIES the delete actually happened, then appends one death-certificate line (`death.log`: name · age · rule) — an unverifiable delete is never claimed dead; it stays in the index for the next pass.
+
+**PULL-ONLY, by construction:** `listBin(projectRoot, name)` / `restoreFromBin(projectRoot, name, id)` are the *only* discovery surface, and nothing in this codebase calls them automatically — a snapshot re-entering the washable set would undo the very wash that created it. Un-searched within the horizon → silent self-expiry (no ask needed: CoalWash's own artifact in its own sandbox is program jurisdiction).
+
+**Breadcrumb (the "unused-door fear" countermeasure):** a JUDGMENT cut (never a certain-garbage one) should leave `breadcrumb({ date, binPath })`'s one fixed line in the washed file — "washed [date] · removed content recoverable at [bin path] — check the bin/journal before re-deriving; never invent a missing memory." Program-side fixed template, the same discipline as `ask.mjs` — never agent-composed prose.
+
+**Honest status — do not overclaim:** `sweepFatBin`/`sweepStoreOld` (the retention/expiry half) already run at every `applyPlan` call, alongside the snapshot sweep — that housekeeping is live today. `recordBinItem` (writing an actual cut into a bin) and inserting the `breadcrumb()` line are NOT YET called from any pipeline step in this release — they are shipped, hermetically-tested engine primitives (`bins.test.mjs`) awaiting that wiring. Until then, the per-run snapshot (§4-§5 above — verified at creation, kept 3, whole-run rollback) is the *only* live undo path; never tell a user a specific cut is sitting in a bin today.
+
+Restore snippet (once an item exists — same construction-proof URL discipline as every snippet above):
+
+```bash
+node --input-type=module -e "
+import { pathToFileURL } from 'node:url';
+const { restoreFromBin, FAT_BIN_NAME } = await import(pathToFileURL('[LIB]/bins.mjs').href);
+console.log(restoreFromBin('[PROJECT_ROOT]', FAT_BIN_NAME, '[ITEM_ID]'));
+"
+```
+
+## 9. Wizard — engine snippets
+
+The wizard's 4-step flow lives in SKILL.md ("The wizard" section) — this is only the two engine calls underneath it (`wizard.mjs`), copy-and-fill like every snippet above. The step sequence itself, the background toggle, and running the chosen tier are agent-orchestrated (`wizard.mjs`'s own header: "the step-by-step prose/UX ... is agent-orchestrated content, not this module's job") — nothing below is a coded state machine.
+
+Step 1, the neutral scan (measurement only — never calls `bandVerdict`, so no band/BMI number can leak before the entry choice is made):
+
+```bash
+node --input-type=module -e "
+import { pathToFileURL } from 'node:url';
+const { neutralScan } = await import(pathToFileURL('[LIB]/wizard.mjs').href);
+console.log(JSON.stringify(neutralScan({ projectRoot: '[PROJECT_ROOT]' }), null, 1));
+"
+```
+
+Step 3, the bill (after the entry choice AND the background toggle are both known — `heavy: true` = "Fat + reorganize muscle"; `[FAT_TOKENS]` is a display pass-through from your own gauge/scan, not computed here — pass `null` if you have none):
+
+```bash
+node --input-type=module -e "
+import { pathToFileURL } from 'node:url';
+const { estimateBill, billLine } = await import(pathToFileURL('[LIB]/wizard.mjs').href);
+const bill = estimateBill({ files: [FILES], totalBytes: [TOTAL_BYTES], heavy: [true|false] });
+console.log(billLine({ files: [FILES], fatTokens: [FAT_TOKENS_OR_NULL], bill }));
+"
+```
+
+Print `billLine`'s output VERBATIM — like `ask.mjs`'s templates, this is program-built text; never paraphrase or re-word it. `MINUTES_PER_PARTITION`/`TOKEN_RATE_PER_KB` (the bill's rate constants) are reasoned placeholders, not measured — never present the resulting band as a precise quote. `PARTITION_FILES`/`PARTITION_KB` (150 / 500) are the real, already-shipped partition threshold from §2, reused here as the billing unit.

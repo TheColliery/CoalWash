@@ -43,8 +43,8 @@ Cross-agent by design — the engine is plain Node scripts and class-B discovery
 
 | Path | Purpose |
 |---|---|
-| `hooks/coalwash-conductor.js` | SessionStart + Stop hook: the 4-band gauge, the once-per-crossing ทำ/later ask + `forceMode` standing-consent auto-run, and self-update scheduling (Phoenix-13). |
-| `scripts/lib/` | The engine (ESM, shipped): `class-b` discovery · `caliper` measurement/bands/break-even · `fidelity-gate` · `apply` transaction · `receipt` · config modules. |
+| `hooks/coalwash-conductor.js` | SessionStart (silent gauge) + Stop hook (the once-per-crossing ทำ/later ask + `forceMode` standing-consent auto-run), and self-update scheduling (Phoenix-13). |
+| `scripts/lib/` | The engine (ESM, shipped, zero-dep): `class-b` discovery · `caliper` measurement/ceiling-hysteresis/break-even · `quick` mechanical ops · `ask` program-side templates · `bins`/`retention` cut-content retention + pull-only restore · `keeps` adjudicated-keep store · `fidelity-gate` · `apply` transaction · `wizard` neutral-scan + bill · `cli` the one-shot gauge front door · `receipt` · config modules. |
 | `skills/coalwash/` | `SKILL.md` (the lean orchestration contract) + `references/` (method + platform adapter facts). |
 | `commands/` | `/coalwash:stats` (measurement) · `/coalwash:update` (self-update procedure). |
 | `hooks/hooks.json` | Hook wiring: SessionStart + Stop → `${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js`. |

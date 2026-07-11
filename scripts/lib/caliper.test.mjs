@@ -6,11 +6,11 @@ import path from 'node:path';
 import {
   tokensEst, tokensEstFromBytes, gzipRatio, measureEntries,
   bandVerdict, breakEven, sessionsPerDay,
-  statePath, loadState, projectState, recordStamp, setLeanFloor, setSnooze,
+  statePath, loadState, projectState, recordStamp, setLeanFloor,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE,
   recordVerdict, sanitizeVerdict, VERDICT_MAX_AGE_MS,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
-  PLUMP_BMI, OBESE_BMI, FAT_BUDGET_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
+  CEILING_BMI, CEILING_REARM_BMI, FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX,
 } from './caliper.mjs';
 
@@ -89,18 +89,46 @@ test('measureEntries respects the read budget (over-budget always-loaded falls b
   } finally { clean(home, proj); }
 });
 
-test('bandVerdict: BMI ladder LEAN -> PLUMP -> OBESE against a measured floor; FULL is fat-budget-gated (growable-full)', () => {
-  const floor = 1000;
-  const at = (fp) => bandVerdict({ footprintTokens: fp, leanFloorTokens: floor });
-  assert.strictEqual(at(Math.round(floor * (PLUMP_BMI - 0.05))).band, 'LEAN');
-  assert.strictEqual(at(Math.round(floor * (PLUMP_BMI + 0.05))).band, 'PLUMP');
-  assert.strictEqual(at(Math.round(floor * (OBESE_BMI + 0.05))).band, 'OBESE');
-  // FULL no longer fires on a raw BMI ratio post-floor — exactly at the fat
-  // budget it is still OBESE (not yet OVER); one token past it, FULL.
-  assert.strictEqual(at(floor + FAT_BUDGET_TOKENS).band, 'OBESE', 'at the budget line exactly, still OBESE');
-  const over = at(floor + FAT_BUDGET_TOKENS + 1);
-  assert.strictEqual(over.band, 'FULL');
-  assert.strictEqual(over.reason, 'fat-budget');
+// ---------------------------------------------------------------------------
+// bandVerdict — beta.12 BAND COLLAPSE: ONE ceiling (CEILING_BMI/CEILING_REARM_BMI,
+// hysteresis-gated) replaces the old PLUMP/OBESE ladder + FAT_BUDGET_TOKENS
+// growable-full mechanism. BMI is now FRACTAL/universal — the ceiling itself
+// grows with the floor by construction (a ratio), so no separate additive
+// fat-budget layer is needed.
+// ---------------------------------------------------------------------------
+
+test('bandVerdict: below the ceiling (un-armed) is LEAN; at/above CEILING_BMI (un-armed) arms OBESE', () => {
+  const floor = 10000; // well above FLOOR_MIN_TOKENS
+  const at = (fp, wasOver = false) => bandVerdict({ footprintTokens: fp, leanFloorTokens: floor, wasOver });
+  assert.strictEqual(at(Math.round(floor * (CEILING_BMI - 0.05))).band, 'LEAN');
+  const armed = at(Math.round(floor * CEILING_BMI));
+  assert.strictEqual(armed.band, 'OBESE');
+  assert.strictEqual(armed.reason, 'bmi');
+  assert.strictEqual(armed.over, true);
+});
+
+test('bandVerdict: hysteresis — once armed, BMI must fall to CEILING_REARM_BMI (not just under CEILING_BMI) to disarm', () => {
+  const floor = 10000;
+  const midZone = Math.round(floor * ((CEILING_BMI + CEILING_REARM_BMI) / 2)); // squarely inside the dead zone
+  const stillArmed = bandVerdict({ footprintTokens: midZone, leanFloorTokens: floor, wasOver: true });
+  assert.strictEqual(stillArmed.band, 'OBESE', 'a previously-armed ceiling stays armed inside the dead zone');
+  const neverArmed = bandVerdict({ footprintTokens: midZone, leanFloorTokens: floor, wasOver: false });
+  assert.strictEqual(neverArmed.band, 'LEAN', 'the SAME bmi never arms fresh from an un-armed state (needs the high mark)');
+
+  const atRearm = bandVerdict({ footprintTokens: Math.round(floor * CEILING_REARM_BMI), leanFloorTokens: floor, wasOver: true });
+  assert.strictEqual(atRearm.band, 'LEAN', 'exactly at the low mark disarms (bmi <= CEILING_REARM_BMI clears it)');
+  const justAboveRearm = bandVerdict({ footprintTokens: Math.round(floor * CEILING_REARM_BMI) + 1, leanFloorTokens: floor, wasOver: true });
+  assert.strictEqual(justAboveRearm.band, 'OBESE', 'one token above the low mark stays armed');
+});
+
+test('bandVerdict: a floor too small to trust (< FLOOR_MIN_TOKENS) never measures a ratio — reason floor-too-small', () => {
+  const v = bandVerdict({ footprintTokens: 5000, leanFloorTokens: FLOOR_MIN_TOKENS - 1 });
+  assert.strictEqual(v.band, 'LEAN');
+  assert.strictEqual(v.reason, 'floor-too-small');
+  assert.strictEqual(v.bmi, null);
+  // exactly at the minimum IS trusted
+  const trusted = bandVerdict({ footprintTokens: Math.round(FLOOR_MIN_TOKENS * CEILING_BMI), leanFloorTokens: FLOOR_MIN_TOKENS });
+  assert.strictEqual(trusted.band, 'OBESE');
 });
 
 test('bandVerdict bootstrap: no floor yet -> LEAN (only the absolute cap can fire)', () => {
@@ -131,13 +159,13 @@ test('a raised fullPercent raises the hard ceiling (buying a bigger SSD)', () =>
 });
 
 // ---------------------------------------------------------------------------
-// Growable-full (beta.7 #1 — the USER's three-layer invariant): FULL is
-// judged on ABSOLUTE fat above the measured floor, never the raw ratio, so a
-// large legitimate floor never false-fires. Pins the exact live dogfood cases
-// that exposed the bug (MEMORY.md "THE CALIBRATION FINDING").
+// Growable-full (beta.7 #1, RE-DERIVED under the fractal-BMI ceiling — the
+// USER's three-layer invariant still holds: BMI = ratio, so it grows WITH a
+// legitimately large floor by construction; no separate fat-budget layer is
+// needed any more). Pins the exact live dogfood cases.
 // ---------------------------------------------------------------------------
 
-test('growable-full (a): TheColliery post-clean (floor 29054, footprint ~29098) verdicts LEAN, not FULL', () => {
+test('growable-full (a): TheColliery post-clean (floor 29054, footprint ~29098) verdicts LEAN, not FULL/OBESE', () => {
   const v = bandVerdict({ footprintTokens: 29098, leanFloorTokens: 29054 });
   assert.strictEqual(v.band, 'LEAN');
 });
@@ -153,13 +181,17 @@ test('growable-full (c): post-floor, all-muscle, over the hard cap -> the extern
   const v = bandVerdict({ footprintTokens: ceiling + 200, leanFloorTokens: ceiling });
   assert.strictEqual(v.band, 'FULL');
   assert.strictEqual(v.reason, 'externalize');
+  assert.strictEqual(v.over, false, 'externalize means the ceiling itself is NOT armed — ~all muscle');
 });
 
-test('growable-full: fat strictly above FAT_BUDGET_TOKENS fires FULL even far below the hard cap, at realistic scale', () => {
-  const floor = 29054;
-  const v = bandVerdict({ footprintTokens: floor + FAT_BUDGET_TOKENS + 1, leanFloorTokens: floor });
-  assert.strictEqual(v.band, 'FULL');
-  assert.strictEqual(v.reason, 'fat-budget');
+test('growable-full: a large legitimate floor still ARMS the ceiling once BMI itself reaches it, at realistic scale (never a flat token budget)', () => {
+  // A floor well under the hard capacity ceiling, so this pins the BMI path
+  // in isolation (a floor near 29054 would ALSO trip the absolute-cap at
+  // 1.5x, conflating the two triggers).
+  const floor = 10000;
+  const v = bandVerdict({ footprintTokens: Math.round(floor * CEILING_BMI) + 1, leanFloorTokens: floor });
+  assert.strictEqual(v.band, 'OBESE');
+  assert.strictEqual(v.reason, 'bmi');
 });
 
 test('breakEven: deterministic numbers; economical iff horizon carry exceeds the run cost', () => {
@@ -193,7 +225,7 @@ test('sessionsPerDay: bootstrap 1/day under 2 stamps; measured rate; clamped [0.
   assert.ok(sessionsPerDay(sparse, now) >= 0.1, 'clamped low');
 });
 
-test('state: recordStamp persists and ring-caps; floor + snooze round-trip; corrupt file self-heals', () => {
+test('state: recordStamp persists and ring-caps; floor round-trips; corrupt file self-heals', () => {
   const { home, proj } = sandbox();
   try {
     for (let i = 0; i < STAMP_RING_MAX + 5; i++) recordStamp(home, proj, 100 + i, 1000 + i);
@@ -203,11 +235,9 @@ test('state: recordStamp persists and ring-caps; floor + snooze round-trip; corr
     assert.strictEqual(ps.stamps[ps.stamps.length - 1].fp, 100 + STAMP_RING_MAX + 4);
 
     assert.strictEqual(setLeanFloor(home, proj, 777), true);
-    assert.strictEqual(setSnooze(home, proj, 123456789), true);
     const ps2 = projectState(loadState(home), proj);
     assert.strictEqual(ps2.leanFloorTokens, 777);
-    assert.strictEqual(ps2.snoozeUntil, 123456789);
-    assert.strictEqual(ps2.stamps.length, STAMP_RING_MAX, 'floor/snooze writes keep the stamps');
+    assert.strictEqual(ps2.stamps.length, STAMP_RING_MAX, 'the floor write keeps the stamps');
 
     fs.writeFileSync(statePath(home), '{ corrupt', 'utf8');
     assert.deepStrictEqual(loadState(home), {}, 'corrupt state self-heals to empty');
@@ -283,20 +313,14 @@ test('orphan prune: a project whose path no longer exists is dropped on the next
   } finally { clean(home, proj); }
 });
 
-test('orphan prune: fires from setLeanFloor and setSnooze too (every write path, not just recordStamp)', () => {
+test('orphan prune: fires from setLeanFloor too (every write path, not just recordStamp)', () => {
   const { home, proj } = sandbox();
   const dead1 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-lf-')));
-  const dead2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-sn-')));
   try {
     recordStamp(home, dead1, 50);
     fs.rmSync(dead1, { recursive: true, force: true });
     setLeanFloor(home, proj, 500);
     assert.deepStrictEqual(projectState(loadState(home), dead1), {}, 'setLeanFloor prunes too');
-
-    recordStamp(home, dead2, 50);
-    fs.rmSync(dead2, { recursive: true, force: true });
-    setSnooze(home, proj, Date.now() + 1000);
-    assert.deepStrictEqual(projectState(loadState(home), dead2), {}, 'setSnooze prunes too');
   } finally { clean(home, proj); }
 });
 
@@ -314,26 +338,21 @@ test('orphan prune: a still-existing project is NEVER pruned, and nothing on dis
 });
 
 // ---------------------------------------------------------------------------
-// G2: state-file corruption always lands on the conservative path (never
-// throws, never trusts partial content) — file-level counterpart to
-// sanitizeLeanFloor's value-level guard above.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// cached verdict (beta.8 #2 — the UserPromptSubmit hot-path gate)
+// cached verdict (beta.8 #2 — the Stop-hook cache; beta.12 adds overCeiling +
+// the payback fields)
 // ---------------------------------------------------------------------------
 
 test('sanitizeVerdict: only a fresh FULL+economical verdict is armed; every other band/state is null', () => {
   const now = Date.now();
-  const fresh = (over = {}) => ({ band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: now, ...over });
-  assert.deepStrictEqual(sanitizeVerdict(fresh(), now), { band: 'FULL', reason: 'fat-budget', fatTokens: 4004, at: now });
+  const fresh = (over = {}) => ({ band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 4004, at: now, ...over });
+  assert.deepStrictEqual(sanitizeVerdict(fresh(), now), { band: 'FULL', reason: 'absolute-cap', fatTokens: 4004, at: now });
 
   assert.strictEqual(sanitizeVerdict(fresh({ band: 'LEAN' }), now), null, 'LEAN never arms');
-  assert.strictEqual(sanitizeVerdict(fresh({ band: 'PLUMP' }), now), null, 'PLUMP never arms');
-  assert.strictEqual(sanitizeVerdict(fresh({ band: 'OBESE' }), now), null, 'OBESE never arms');
+  assert.strictEqual(sanitizeVerdict(fresh({ band: 'OBESE' }), now), null, 'OBESE never arms (it is an ask, not force)');
   assert.strictEqual(sanitizeVerdict(fresh({ band: 'FULL', reason: 'externalize', economical: false }), now), null, 'externalize never arms (muscle, not the force-run case)');
   assert.strictEqual(sanitizeVerdict(fresh({ economical: false }), now), null, 'a disarmed FULL (break-even against) never arms');
   assert.strictEqual(sanitizeVerdict(fresh({ economical: 'true' }), now), null, 'a non-boolean-true economical is not trusted');
+  assert.strictEqual(sanitizeVerdict(fresh({ reason: 'externalize', economical: true }), now), null, 'defense in depth: externalize never arms even if economical was mistakenly true');
 });
 
 test('sanitizeVerdict: malformed/missing input collapses to null, never throws', () => {
@@ -345,27 +364,48 @@ test('sanitizeVerdict: malformed/missing input collapses to null, never throws',
 
 test('sanitizeVerdict: staleness — just inside VERDICT_MAX_AGE_MS survives, just past it is discarded; a future timestamp is discarded', () => {
   const now = Date.now();
-  const at = (ms) => ({ band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 100, at: now - ms });
+  const at = (ms) => ({ band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 100, at: now - ms });
   assert.notStrictEqual(sanitizeVerdict(at(VERDICT_MAX_AGE_MS - 1), now), null, 'just inside the window is armed');
   assert.strictEqual(sanitizeVerdict(at(VERDICT_MAX_AGE_MS + 1), now), null, 'just past the window is stale -> null');
   assert.strictEqual(sanitizeVerdict({ band: 'FULL', economical: true, at: now + 60000 }, now), null, 'a future timestamp is never trusted');
 });
 
-test('recordVerdict: round-trips through state and overwrites the previous session (LEAN clears a stale FULL immediately, not just eventually)', () => {
+test('recordVerdict: round-trips through state (incl. overCeiling + payback + hardCeilingTokens fields) and overwrites the previous session', () => {
   const { home, proj } = sandbox();
   try {
     const t1 = Date.now();
-    recordVerdict(home, proj, { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004 }, t1);
-    const armedAfterFull = sanitizeVerdict(projectState(loadState(home), proj).lastVerdict, t1);
-    assert.deepStrictEqual(armedAfterFull, { band: 'FULL', reason: 'fat-budget', fatTokens: 4004, at: t1 });
+    recordVerdict(home, proj, { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 4004, overCeiling: true, perDay: 500, breakEvenDays: 3.2, floorUnmeasured: false, hardCeilingTokens: 36000 }, t1);
+    const proj1 = projectState(loadState(home), proj);
+    const armedAfterFull = sanitizeVerdict(proj1.lastVerdict, t1);
+    assert.deepStrictEqual(armedAfterFull, { band: 'FULL', reason: 'absolute-cap', fatTokens: 4004, at: t1 });
+    assert.strictEqual(proj1.lastVerdict.overCeiling, true);
+    assert.strictEqual(proj1.lastVerdict.perDay, 500);
+    assert.strictEqual(proj1.lastVerdict.breakEvenDays, 3.2);
+    assert.strictEqual(proj1.lastVerdict.floorUnmeasured, false);
+    assert.strictEqual(proj1.lastVerdict.hardCeilingTokens, 36000);
 
     const t2 = t1 + 1000;
-    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0 }, t2);
-    assert.strictEqual(sanitizeVerdict(projectState(loadState(home), proj).lastVerdict, t2), null, 'the new LEAN verdict overwrote the stale FULL — no lingering arm');
+    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi', economical: false, fatTokens: 0, overCeiling: false }, t2);
+    const proj2 = projectState(loadState(home), proj);
+    assert.strictEqual(sanitizeVerdict(proj2.lastVerdict, t2), null, 'the new LEAN verdict overwrote the stale FULL — no lingering arm');
+    assert.strictEqual(proj2.lastVerdict.overCeiling, false, 'the hysteresis bit clears with the band');
   } finally { clean(home, proj); }
 });
 
-test('recordVerdict: orphan-prune still runs on this write path (consistent with setLeanFloor/setSnooze)', () => {
+test('recordVerdict: missing/non-finite payback/hardCeilingTokens fields degrade to safe defaults, never throw', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordVerdict(home, proj, { band: 'LEAN', reason: 'bmi' });
+    const st = projectState(loadState(home), proj).lastVerdict;
+    assert.strictEqual(st.overCeiling, false);
+    assert.strictEqual(st.perDay, 0);
+    assert.strictEqual(st.breakEvenDays, null);
+    assert.strictEqual(st.floorUnmeasured, false);
+    assert.strictEqual(st.hardCeilingTokens, 0);
+  } finally { clean(home, proj); }
+});
+
+test('recordVerdict: orphan-prune still runs on this write path (consistent with setLeanFloor)', () => {
   const { home, proj } = sandbox();
   const dead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-verdict-')));
   try {
@@ -400,21 +440,23 @@ test('G2: every corrupt/truncated/empty/wrong-shaped state file self-heals to {}
 });
 
 // ---------------------------------------------------------------------------
-// edge-crossing state (beta.10 — the Stop hook's once-per-crossing gate)
+// edge-crossing state (beta.10 — the Stop hook's once-per-crossing gate;
+// beta.12 shrinks BAND_RANK to LEAN/OBESE/FULL — the mechanism itself is
+// unchanged, band-string-agnostic)
 // ---------------------------------------------------------------------------
 
-test('BAND_RANK orders LEAN < PLUMP < OBESE < FULL', () => {
-  assert.ok(BAND_RANK.LEAN < BAND_RANK.PLUMP);
-  assert.ok(BAND_RANK.PLUMP < BAND_RANK.OBESE);
+test('BAND_RANK orders LEAN < OBESE < FULL', () => {
+  assert.ok(BAND_RANK.LEAN < BAND_RANK.OBESE);
   assert.ok(BAND_RANK.OBESE < BAND_RANK.FULL);
+  assert.strictEqual(BAND_RANK.PLUMP, undefined, 'PLUMP is retired by the band collapse');
 });
 
 test('recordCrossing: a rise arms an unconsumed crossing at the new band', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'PLUMP', 'LEAN', 1000);
+    recordCrossing(home, proj, 'OBESE', 'LEAN', 1000);
     const st = projectState(loadState(home), proj);
-    assert.deepStrictEqual(st.lastCrossing, { band: 'PLUMP', at: 1000, consumed: false });
+    assert.deepStrictEqual(st.lastCrossing, { band: 'OBESE', at: 1000, consumed: false });
   } finally { clean(home, proj); }
 });
 
@@ -429,12 +471,12 @@ test('recordCrossing: the "qualifying past" case — no prior band on record def
 test('recordCrossing: same-or-falling band does nothing — an existing pending crossing is left exactly as it was (two SessionStarts, one crossing)', () => {
   const { home, proj } = sandbox();
   try {
-    recordCrossing(home, proj, 'PLUMP', 'LEAN', 1000);
-    recordCrossing(home, proj, 'PLUMP', 'PLUMP', 2000); // same band again
+    recordCrossing(home, proj, 'OBESE', 'LEAN', 1000);
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 2000); // same band again
     let st = projectState(loadState(home), proj);
     assert.strictEqual(st.lastCrossing.at, 1000, 'the crossing is not re-armed/overwritten by a same-band repeat');
 
-    recordCrossing(home, proj, 'PLUMP', 'FULL', 3000); // falling (FULL -> PLUMP) also does nothing
+    recordCrossing(home, proj, 'OBESE', 'FULL', 3000); // falling (FULL -> OBESE) also does nothing
     st = projectState(loadState(home), proj);
     assert.strictEqual(st.lastCrossing.at, 1000, 'a falling band never re-arms either');
   } finally { clean(home, proj); }
@@ -456,24 +498,25 @@ test('recordCrossing: orphan-prune still runs on this write path', () => {
   try {
     recordStamp(home, dead, 50);
     fs.rmSync(dead, { recursive: true, force: true });
-    recordCrossing(home, proj, 'PLUMP', 'LEAN');
+    recordCrossing(home, proj, 'OBESE', 'LEAN');
     assert.deepStrictEqual(projectState(loadState(home), dead), {}, 'recordCrossing prunes too');
   } finally { clean(home, proj); }
 });
 
 test('sanitizeCrossing: a fresh, non-LEAN, unconsumed crossing is trusted as-is', () => {
   const now = Date.now();
-  assert.deepStrictEqual(sanitizeCrossing({ band: 'PLUMP', at: now, consumed: false }, now), { band: 'PLUMP', at: now });
+  assert.deepStrictEqual(sanitizeCrossing({ band: 'OBESE', at: now, consumed: false }, now), { band: 'OBESE', at: now });
   assert.deepStrictEqual(sanitizeCrossing({ band: 'FULL', at: now, consumed: false }, now), { band: 'FULL', at: now });
 });
 
-test('sanitizeCrossing: any doubt collapses to null — consumed, LEAN, unknown band, malformed shape, or a future timestamp', () => {
+test('sanitizeCrossing: any doubt collapses to null — consumed, LEAN, unknown band (incl. the retired PLUMP), malformed shape, or a future timestamp', () => {
   const now = Date.now();
-  assert.strictEqual(sanitizeCrossing({ band: 'PLUMP', at: now, consumed: true }, now), null, 'consumed never re-emits');
+  assert.strictEqual(sanitizeCrossing({ band: 'OBESE', at: now, consumed: true }, now), null, 'consumed never re-emits');
   assert.strictEqual(sanitizeCrossing({ band: 'LEAN', at: now, consumed: false }, now), null, 'LEAN is never a crossing target');
+  assert.strictEqual(sanitizeCrossing({ band: 'PLUMP', at: now, consumed: false }, now), null, 'the retired PLUMP band is now unknown -> null');
   assert.strictEqual(sanitizeCrossing({ band: 'GARBAGE', at: now, consumed: false }, now), null);
-  assert.strictEqual(sanitizeCrossing({ band: 'PLUMP', at: now + 60000, consumed: false }, now), null, 'a future timestamp is never trusted');
-  assert.strictEqual(sanitizeCrossing({ band: 'PLUMP', consumed: false }, now), null, 'a missing/non-finite at is discarded');
+  assert.strictEqual(sanitizeCrossing({ band: 'OBESE', at: now + 60000, consumed: false }, now), null, 'a future timestamp is never trusted');
+  assert.strictEqual(sanitizeCrossing({ band: 'OBESE', consumed: false }, now), null, 'a missing/non-finite at is discarded');
   for (const bad of [null, undefined, {}, [], 'FULL', 42]) {
     assert.doesNotThrow(() => sanitizeCrossing(bad));
     assert.strictEqual(sanitizeCrossing(bad), null, `${JSON.stringify(bad)} must not arm`);

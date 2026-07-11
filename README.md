@@ -39,28 +39,29 @@ One standing gauge at the chokepoint (memory is loaded every session, so a sessi
 | Stage | Who | What |
 |---|---|---|
 | Gauge | code | Discover class-B per platform → measure footprint → band verdict → break-even math |
-| Quick | code-gated mechanics | Exact-dedup, dead-link fix, whitespace, index rebuild — free, deterministic; oversize/stale files are flagged, never rewritten here |
+| Quick | code-gated mechanics | Exact-dedup, dead-link fix, whitespace, index rebuild, empty-table removal, own-knife residue sweep — free, deterministic; oversize/stale files are flagged, never rewritten here |
 | Full | one outsider sub + the insider | Semantic garbage judgment (superseded / duplicate / point-in-time / over-verbose) by a zero-context outsider; the session agent adjudicates every flag — always a separate consent |
 | Fidelity gate | code | Inventory diff, original vs new; any dropped link/date/version/frontmatter key blocks the apply |
 | Apply | code | Delete/merge authorization is plan-sourced (no separate approval step) — lock → verified snapshot → WAL → atomic writes → deletes last → commit, or whole-run rollback; `pinned` files refused outright |
-| Receipt | code | `class B: X KB -> X' KB · saves ~N tok/session (~est) · removed/trimmed/kept · fidelity gate: PASS` — deterministic bytes, token figures labeled `~est` |
+| Receipt | code | Pushes **one line** after any run that cut something — `cut ~N tok fat (−P%), saved ~M tok` (silence if nothing was cut); the fuller `class B: X KB -> X' KB · removed/trimmed/kept · fidelity gate: PASS` block is an on-demand pull surface (`/coalwash:stats` or the wizard), never pushed automatically |
 
 **Why an outsider judges, not you:** it is a stranger walking through a house it has never lived in — it cannot know which things you still use, so it never throws anything out. Its only power is to point and ask, *"what is this, can it go?"* — you, the resident, answer with a concrete reason, never a feeling, and a settled answer sticks (an adjudicated keep is not re-asked next run without new evidence).
 
-The gauge rides **Memory-BMI** = always-loaded footprint / lean floor (floor-relative, so real growth never false-fires). **The FULL ceiling itself grows with you:** once a floor is measured, FULL's soft trigger is that floor plus a fixed fat allowance — the ceiling rises as legitimate content grows, so an all-muscle store is never stuck FULL. Before any floor is measured (a store's first run), FULL falls back to an absolute-capacity heuristic until that first clean lands. A separate, always-fixed **hard machine-capacity ceiling** exists too: when footprint alone closes in on what the platform can actually hold, that's muscle that outgrew the machine, not fat to wash — the move is to externalize/split, never clean harder. **Only two things ever trigger a band change — Memory-BMI and that capacity ceiling; never time or age.**
+The gauge rides **Memory-BMI** = always-loaded footprint / lean floor (floor-relative, so real growth never false-fires) against **one hysteresis-gated ceiling**, a Schmitt trigger doing the anti-flapping job a clock used to: BMI reaching 1.5× the floor arms OBESE, and it stays armed until BMI falls back to 1.2× — never a calendar. A separate, always-fixed **hard machine-capacity ceiling** (`fullPercent` of the platform's context capacity) defines FULL — footprint alone closing in on what the platform can hold is muscle that outgrew the machine, not fat to wash. Hitting that ceiling while BMI is still under the OBESE line means externalize/split, never wash-harder; hitting it with BMI also over means real fat remains, so a wash may help first. Before any floor is measured (a store's first run), only the hard capacity ceiling can fire (an absolute-cap heuristic) — BMI itself stays unmeasurable until a clean stamps a floor. **Only two things ever trigger a state change — Memory-BMI and that capacity ceiling; never time or age.**
 
 | Band | Behavior |
 |---|---|
 | LEAN | Silent — a run would be a no-op, and none is offered |
-| PLUMP | One ask; declining snoozes it for days |
-| OBESE | Strong ask, shorter snooze |
-| FULL | Force-runs the *process* — armed only by a deterministic break-even proof (one run costs less than carrying the fat), with the numbers shown every time. Every cut is snapshot-backed and revertible. Firing on the hard capacity ceiling with ~no fat found means externalize/split, not another wash |
+| OBESE | One ask on the next `Stop` (with a break-even payback line); declining leaves it silent until the *next* rise across the ceiling — no snooze, no repeating nag |
+| FULL | Force-runs the *process* under standing config — armed only by a deterministic break-even proof (one run costs less than carrying the fat), with the numbers shown every time. Every cut is snapshot-backed and revertible. Firing on the hard capacity ceiling with ~no fat found means externalize/split, not another wash |
 
 **`localOnly` (trade-secret mode):** the SKILL contract runs mechanical Quick only and skips the semantic tier — agent-honored, not a code-enforced transmission block (the flag itself can't be weakened by a project config once set globally). Memory is private data; see [PRIVACY.md](PRIVACY.md).
 
 ## ⚠️ Read before you run it
 
 > [!CAUTION]
+> **System-level scope.** The files CoalWash washes are the ones that shape your agent's behavior *every session* — its kernel, in OS terms. Kernel-grade reach is exactly why the safety stack exists: verified snapshot before any mutation, a mechanical zero-loss gate, deletes that exist only inside the adjudicated plan, whole-run rollback. High stakes, capped blast radius.
+>
 > **1 — No calendar cadence, ever.** CoalWash triggers on measured BMI, never a clock — a schedule would clean already-lean memory for nothing and re-pay the semantic cost every round. Want to run it back-to-back in one sitting? The recommended ceiling is **benchmark-derived, not guessed** — check the [benchmark records](https://github.com/TheColliery/.github/tree/main/benchmarks/CoalWash/results) for the current published number; without one yet, the conservative default is **one Full run per sitting**.
 >
 > **2 — Past fat-exhaustion, a model can throw away something load-bearing — like a person can.** While real fat remains, cleaning is safe work; once none remains and the loop continues, every further semantic pass is pressure on the meat. That risk **varies by model**; the per-model fact-loss measurements live in the [benchmark records](https://github.com/TheColliery/.github/tree/main/benchmarks/CoalWash/results). The LEAN band exists to make post-exhaustion runs a no-op — trust its silence.
@@ -98,7 +99,7 @@ Every tool in the series supports two config levels — a global `~/.claude/.coa
 | `localOnly` | `false` | Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config |
 | `updateMode` | `ask` | Self-update behavior at session start (`ask` \| `auto` \| `remind` \| `off`) |
 | `updateCheckDays` | `14` | Days between self-update checks/reminders |
-| `exercisePerBand` | `{plump: quick, obese: full, full: full}` | Per-ceiling exercise the Stop-hook ask offers (`quick` \| `full` each, for plump/obese/full) |
+| `exercisePerBand` | `{obese: quick, full: full}` | Per-ceiling exercise the Stop-hook ask offers (`quick` \| `full`, for obese/full — band-collapse retired the separate plump rung; a fat-only scoping refinement is a later release) |
 | `forceMode` | `auto` | FULL+economical crossing behavior at Stop: `auto` = standing-consent auto-run (the rot-canary `autoFixMode` model) · `ask` = FULL asks like other ceilings · `off` = same as ask — never silent (suppresses only the auto-run authorization, never FULL awareness) |
 
 Full key reference: every key + default lives in [`scripts/lib/config-schema.mjs`](scripts/lib/config-schema.mjs) and the commented template [`platform-configs/.coalwash.json`](platform-configs/.coalwash.json).

@@ -16,8 +16,8 @@ The per-session saving = the **always-loaded** subset delta; the receipt splits 
 
 ## Wiring + state files (all local, user-readable)
 
-- **Conductor:** `hooks/hooks.json` → SessionStart + Stop → `hooks/coalwash-conductor.js` (Phoenix-13: fail-silent, no network, no spawn; SessionStart silent when `coalwashMode` is off or the band is LEAN/snoozed; Stop silent when no band crossing is pending).
-- **Caliper state:** `~/.claude/.coalwash-state.json` — per-project lean floor, session stamps (ring-capped), snooze. Loss degrades to bootstrap behavior (bands wake after the first full clean stamps a floor).
+- **Conductor:** `hooks/hooks.json` → SessionStart + Stop → `hooks/coalwash-conductor.js` (Phoenix-13: fail-silent, no network, no spawn; SessionStart ONLY measures + caches — it never asks, at any band; Stop is the sole ask/directive surface and stays silent when no band crossing is pending).
+- **Caliper state:** `~/.claude/.coalwash-state.json` — per-project lean floor, session stamps (ring-capped), the last recorded verdict + ceiling hysteresis bit, and the pending once-per-crossing edge (no time-based snooze). Loss degrades to bootstrap behavior (bands wake after the first full clean stamps a floor).
 - **Transaction dir:** `[project]/.claude/coalwash/` — `.coalwash.lock` (atomic-create + stale-timeout 30min + defer-on-doubt), `journal.json` (the WAL; CoalHearth-visible location — CH-side recognition lands in a CoalHearth release), `snap-[timestamp]/` (last 3 kept).
 - **Config:** global `~/.claude/.coalwash.json` overlaid by the nearest project `.coalwash.json` (walk stops at home, physical-path compare).
 - **Update stamp:** `~/.claude/.coalwash-update-check` (a timestamp; the hook only schedules — the online check is `/coalwash:update`, consent-gated).

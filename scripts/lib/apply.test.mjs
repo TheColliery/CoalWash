@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath } from './apply.mjs';
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
+import { FAT_BIN_NAME, recordBinItem, listBin } from './bins.mjs';
+import { HORIZON_MS } from './retention.mjs';
 
 function sandbox() {
   const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj-')));
@@ -823,5 +825,27 @@ test('KEEPS-GATE fixpoint CASCADE: excluding file A removes the text that satisf
     assert.strictEqual(keepFlags.length, 2, 'both exclusions surface by name');
     assert.ok(keepFlags.some((f) => f.reason.includes('alpha anchor lives here')));
     assert.ok(keepFlags.some((f) => f.reason.includes('beta anchor lives here')));
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// beta.12 item 4: the fat-bin/store.old retention sweep piggybacks on
+// applyPlan's existing preflight housekeeping (the same touchpoint
+// sweepSnapshots already uses).
+// ---------------------------------------------------------------------------
+
+test('applyPlan preflight ALSO sweeps the bins: an over-horizon fat-bin item is gone after a real apply run', () => {
+  const { proj, store } = sandbox();
+  try {
+    const now = Date.now();
+    const oldId = recordBinItem(proj, FAT_BIN_NAME, { content: 'ancient cut', now: now - (HORIZON_MS.fat + 86400000) });
+    const freshId = recordBinItem(proj, FAT_BIN_NAME, { content: 'recent cut', now: now - 3600000 });
+    const f = path.join(store, 'f.md');
+    write(f, 'orig');
+    const r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'new' }]));
+    assert.strictEqual(r.ok, true, r.error);
+    const remaining = listBin(proj, FAT_BIN_NAME).map((i) => i.id);
+    assert.ok(!remaining.includes(oldId), 'the over-horizon bin item was swept away by the SAME apply run');
+    assert.ok(remaining.includes(freshId), 'a recent bin item survives untouched');
   } finally { clean(proj); }
 });

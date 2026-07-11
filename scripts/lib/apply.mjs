@@ -57,8 +57,16 @@ import { checkFidelity } from './fidelity-gate.mjs';
 import { claudeBaseDir } from './config-load.mjs';
 // NOTE a deliberate module cycle: keeps.mjs imports txDirFor/ensureSelfIgnore
 // from THIS file. Both sides bind function declarations used only at CALL
-// time, so ESM resolves the cycle safely regardless of entry order.
+// time, so ESM resolves the cycle safely regardless of entry order. bins.mjs
+// forms the SAME shape of cycle (it imports txDirFor/ensureSelfIgnore from
+// here; this file imports sweepFatBin/sweepStoreOld from there) — identical
+// reasoning, identical safety.
 import { loadKeepsAt, KEEPS_NAME, globalKeepsPath } from './keeps.mjs';
+// beta.12 item 4: the two bins' retention sweep (fat-bin 30d / store.old 60d,
+// retention.mjs's pure policy) piggybacks on this SAME preflight touchpoint —
+// a sibling housekeeping call to sweepSnapshots below, same fail-silent
+// discipline (a bin failure must never block the wash it runs alongside).
+import { sweepFatBin, sweepStoreOld } from './bins.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
@@ -429,6 +437,12 @@ export function applyPlan(plan, opts = {}) {
       // them here, inside the lock. Fail-silent housekeeping; sweepSnapshots
       // itself protects a dangling txn's snapshot (recovery owns it).
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
+      // ---- bin retention (beta.12 item 4) — the SAME piggyback touchpoint:
+      // every real wash run is a natural, already-existing place to age out
+      // bin items past their horizon. Both are already internally
+      // fail-silent (never throw) — no extra guard needed here.
+      sweepFatBin(projectRoot);
+      sweepStoreOld(projectRoot);
 
       // ---- snapshot BEFORE the first mutation, then the completion marker ----
       fs.mkdirSync(snapDir, { recursive: true });

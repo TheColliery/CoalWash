@@ -38,18 +38,25 @@ export function gauge({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const recover = recoverDangling(projectRoot);
   const cfg = loadMergedConfig({ cwd, home });
   const fullPercent = clampedRead(cfg, 'fullPercent');
+  const managedPaths = clampedRead(cfg, 'managedPaths');
 
-  const disc = discoverClassB({ projectRoot, home });
+  const disc = discoverClassB({ projectRoot, home, managedPaths });
   const m = measureEntries(disc.entries, { withGzip: true });
   const proj = projectState(loadState(home), projectRoot);
   // Same floor hygiene as the conductor: never trust the raw stored value.
   const leanFloorTokens = sanitizeLeanFloor(proj.leanFloorTokens, m.alwaysLoaded.tokensEst);
+  // Read-only hysteresis state (never written here — this CLI stamps/records
+  // nothing, per its own doc comment): without it, a probe run between two
+  // SessionStarts would show the ceiling flapping LEAN in the dead zone
+  // instead of reporting the SAME armed state the conductor is tracking.
+  const wasOver = !!(proj.lastVerdict && proj.lastVerdict.overCeiling);
   const verdict = bandVerdict({
     footprintTokens: m.alwaysLoaded.tokensEst,
     leanFloorTokens,
     fullPercent,
     indexBytes: m.index.bytes,
     indexLines: m.index.lines,
+    wasOver,
   });
   const econ = breakEven({
     footprintTokens: m.alwaysLoaded.tokensEst,

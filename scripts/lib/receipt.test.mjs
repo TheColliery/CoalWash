@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { buildReceipt } from './receipt.mjs';
+import { buildReceipt, oneLineResult } from './receipt.mjs';
 
 const BASE = {
   when: '2026-07-09',
@@ -64,4 +64,35 @@ test('a receipt built with missing gate fields degrades to "unknown" — never a
   // explicit true/false are unaffected by the degrade
   assert.ok(buildReceipt({ ...BASE, gatePass: true }).includes('fidelity gate: PASS'));
   assert.ok(buildReceipt({ ...BASE, gatePass: false, gateDrops: 1 }).includes('fidelity gate: FAIL'));
+});
+
+// ---------------------------------------------------------------------------
+// oneLineResult (beta.12 item 2 — the ONE-SENTENCE ambient surface: a big
+// clean, a small clean, and the autonomous broom all speak the SAME template,
+// only the numbers differ; cutting nothing is SILENCE).
+// ---------------------------------------------------------------------------
+
+test('oneLineResult: cuts fat, one line, two numbers, no box-art/receipt narration', () => {
+  const r = oneLineResult({ cutTokens: 12345, cutPercent: 23.7, savedTokens: 12000 });
+  assert.strictEqual(r, '[CoalWash] cut ~12.3k tok fat (−24%), saved ~12.0k tok');
+  assert.strictEqual(r.split('\n').length, 1, 'exactly one line');
+});
+
+test('oneLineResult: cutting nothing is SILENCE (null) — the fail-safe default, never an empty-clean sentence', () => {
+  assert.strictEqual(oneLineResult({ cutTokens: 0, cutPercent: 0, savedTokens: 0 }), null);
+  assert.strictEqual(oneLineResult({ cutTokens: -5 }), null, 'a negative cut is nonsensical -> silence, never a garbled line');
+  assert.strictEqual(oneLineResult(), null, 'missing input degrades to silence, never throws');
+  assert.doesNotThrow(() => oneLineResult(null));
+});
+
+test('oneLineResult: a small cut under 1000 tok renders as a bare number (ktok\'s own convention), never "0.1k"', () => {
+  const r = oneLineResult({ cutTokens: 400, cutPercent: 5, savedTokens: 380 });
+  assert.strictEqual(r, '[CoalWash] cut ~400 tok fat (−5%), saved ~380 tok');
+});
+
+test('oneLineResult: malformed percent/saved degrade to safe zeros/rounding, never NaN/Infinity', () => {
+  const r = oneLineResult({ cutTokens: 1000, cutPercent: NaN, savedTokens: 'nope' });
+  assert.ok(!r.includes('NaN'));
+  assert.ok(!r.includes('Infinity'));
+  assert.strictEqual(r, '[CoalWash] cut ~1.0k tok fat (−0%), saved ~0 tok');
 });

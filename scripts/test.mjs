@@ -24,6 +24,10 @@ const TESTS = [
   'scripts/lib/cli.test.mjs',
   'scripts/lib/receipt.test.mjs',
   'scripts/lib/conductor.test.mjs',
+  'scripts/lib/ask.test.mjs',
+  'scripts/lib/bins.test.mjs',
+  'scripts/lib/quick.test.mjs',
+  'scripts/lib/wizard.test.mjs',
   'scripts/build-plugin.test.mjs',
 ];
 

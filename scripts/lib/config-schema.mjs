@@ -21,14 +21,19 @@ export const CONFIG_SCHEMA = [
   { key: 'coalwashMode', type: 'enum', values: ['auto', 'manual', 'off'], def: 'auto', help: 'Master switch: auto = session-start gauge + band nudges; manual = /coalwash only (gauge silent); off = fully silent' },
   { key: 'language', type: 'enum', values: ['auto', 'th', 'en', 'ja', 'zh', 'es'], def: 'auto', help: 'Language override for prompts and nudges (auto, th, en, ja, zh, es)' },
   { key: 'fullPercent', type: 'number', min: 1, max: 50, def: 6, help: 'Hard ceiling as % of platform context capacity — the FULL band absolute clamp; raising it = consciously carrying more overhead (default: 6)' },
-  { key: 'targetPercent', type: 'number', min: 0.5, max: 49, def: 3, help: 'Low-water clean-to target as % of capacity (must sit below fullPercent; anti-thrash hysteresis; default: 3)' },
+  // targetPercent has NO band-math consumer post-band-collapse: the anti-flap job
+  // moved to caliper.mjs's BMI Schmitt trigger (CEILING_BMI/CEILING_REARM_BMI). It
+  // survives as AGENT guidance for the wash clean-to depth (references/method.md §3);
+  // kept, not removed (removing a shipped config key would be a breaking change).
+  { key: 'targetPercent', type: 'number', min: 0.5, max: 49, def: 3, help: 'Clean-to depth target as % of capacity, below fullPercent — agent guidance for the wash (references/method.md §3); the anti-flap job now lives in caliper.mjs\'s BMI hysteresis, so no band-math reads this key today (default: 3)' },
   { key: 'fileMaxSizeKb', type: 'int', min: 1, max: 1024, def: 25, help: 'Per-file size cap in KB before a class-B file is flagged oversize (default: 25 — the CC memory-index cap class)' },
   { key: 'quickVsFull', type: 'enum', values: ['quick', 'full'], def: 'quick', help: 'Default run tier: quick = free mechanical pass; full = paid semantic pass (always a separate consent; default: quick)' },
   { key: 'localOnly', type: 'bool', def: false, help: "Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config (default: false)" },
   { key: 'updateMode', type: 'enum', values: ['ask', 'auto', 'remind', 'off'], def: 'ask', help: 'Self-update behavior at session start (ask, auto, remind, off; default: ask)' },
   { key: 'updateCheckDays', type: 'int', min: 1, max: 365, def: 14, help: 'Days between self-update checks/reminders (default: 14)' },
-  { key: 'exercisePerBand', type: 'bandmap', values: ['quick', 'full'], def: { plump: 'quick', obese: 'full', full: 'full' }, help: 'Per-ceiling exercise the Stop-hook ask offers (quick|full each, for plump/obese/full); the fat-only scoping refinement is a later release (default: {plump:quick, obese:full, full:full})' },
+  { key: 'exercisePerBand', type: 'bandmap', values: ['quick', 'full'], def: { obese: 'quick', full: 'full' }, help: 'Per-ceiling exercise the Stop-hook ask offers (quick|full, for obese/full — beta.12 band-collapse retired the separate plump rung); the fat-only scoping refinement is a later release (default: {obese:quick, full:full})' },
   { key: 'forceMode', type: 'enum', values: ['auto', 'ask', 'off'], def: 'auto', help: 'FULL+economical crossing behavior at Stop: auto = standing-consent auto-run (the rot-canary autoFixMode model); ask = FULL asks like other ceilings; off = same as ask — never silent (they suppress only the auto-run authorization, never FULL awareness; default: auto)' },
+  { key: 'managedPaths', type: 'stringList', def: [], help: 'Extra path PREFIXES (relative to their own project/global root, forward-slash form) to auto-declare MANAGED — sync-owned packs never proposed for a local wash, same class as skills (default: [], the byte-identical-across-roots heuristic already covers the common case)' },
 ];
 
 // Validate an already-parsed JSON value against a spec.
@@ -52,6 +57,8 @@ export function validateValue(spec, v) {
       return typeof v === 'string' && spec.values.includes(v.toLowerCase())
         ? null
         : `must be one of: ${spec.values.join(', ')}`;
+    case 'stringList':
+      return Array.isArray(v) && v.every((s) => typeof s === 'string') ? null : 'must be an array of strings';
     case 'bandmap': {
       if (!v || typeof v !== 'object' || Array.isArray(v)) return 'must be an object';
       for (const k of Object.keys(spec.def)) {

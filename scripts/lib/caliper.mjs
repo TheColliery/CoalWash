@@ -1,29 +1,37 @@
-// caliper.mjs — footprint measurement + the 4-band verdict + the economic
-// break-even math (session amendment 2026-07-08, supersedes the blueprint §4
-// info-only full-signal).
+// caliper.mjs — footprint measurement + the ceiling verdict + the economic
+// break-even math (beta.12 "THE BAND COLLAPSE" — supersedes the beta.7/beta.8
+// 4-band PLUMP/OBESE/FULL(fat-budget) ladder).
 //
-// Bands ride Memory-BMI = footprint / leanFloor (floor-relative, so legitimate
-// MEAT growth never false-fires — only FAT above the floor moves the band):
-//   LEAN  (< PLUMP_BMI)          -> silent
-//   PLUMP (PLUMP_BMI..OBESE_BMI) -> ask via question-box; decline = snooze
-//   OBESE (>= OBESE_BMI, below FULL) -> strong-ask, shorter snooze
-//   FULL  -> economic force-run of the PROCESS (deletes execute per the
-//         adjudicated plan; UNDO — snapshot + whole-run rollback — is the
-//         safety net, not a separate approval gate)
-// GROWABLE-FULL (beta.7, the USER's three-layer invariant — MEMORY.md "THE
-// CALIBRATION FINDING"): post-floor, FULL is judged on ABSOLUTE fat above the
-// MEASURED floor (footprint > leanFloor + FAT_BUDGET_TOKENS), never on the raw
-// BMI ratio — a legitimately large, all-muscle floor must never false-fire no
-// matter how big it grows (LEAN/PLUMP/OBESE stay ratio-based, unchanged). Only
-// the machine's hard capacity gate (fullPercent x CAPACITY_TOKENS) is
-// person-independent and applies regardless of floor state; firing it with
-// ~no fat to reclaim (all-muscle over capacity) gets the DIFFERENT
-// 'externalize' verdict — washing cannot shrink muscle, only splitting/
-// archiving can. Pre-floor (bootstrap, no clean yet) keeps the original
-// absolute-cap-only heuristic — it correctly drove the first real clean.
+// BAND COLLAPSE (MEMORY.md "THE BAND COLLAPSE" + "THE ONE-CEILING NUMBER" +
+// the INFECTION AUDIT's "BMI goes FRACTAL" ruling — the LATEST, superseding
+// statement): LEAN/PLUMP/OBESE die as SEPARATE behavior drivers. The state
+// machine is BINARY — below-ceiling = silence, past-ceiling = guaranteed
+// action — driven by ONE metric (Memory-BMI = footprint / leanFloor,
+// floor-relative so legitimate MEAT growth never false-fires) and ONE
+// ceiling, HYSTERESIS-gated (a Schmitt trigger, replacing the old time-based
+// snooze as the anti-flapping guard — BMI-only, never a clock):
+//   armed OFF -> ON  requires bmi >= CEILING_BMI   (the high-water mark)
+//   armed ON  -> OFF requires bmi <= CEILING_REARM_BMI (the low-water mark)
+//   the dead zone between the two marks holds whatever state it already had.
+// Bands returned: LEAN (silent) · OBESE (ceiling armed — a wash is due) ·
+// FULL (the SEPARATE, person-independent machine-capacity line: fullPercent x
+// CAPACITY_TOKENS, or the CC index-byte/line caps). FULL's reason is
+// 'absolute-cap' (BMI is also over the ceiling — real fat to reclaim, wash
+// first) or 'externalize' (BMI is under the ceiling — ~all muscle; washing
+// cannot help, advise externalizing/splitting). Pre-floor (bootstrap, no
+// clean yet) or a floor too small to trust (< FLOOR_MIN_TOKENS) both collapse
+// bmi to null — only the absolute-cap can fire, matching the original
+// bootstrap heuristic.
+//
 // FULL's economic force fires ONLY on the deterministic break-even proof (the
 // series' one named consent exception, "economic-dominance" — AGENTS.md): the
-// numbers are computed in CODE and SHOWN every time.
+// numbers are computed in CODE and SHOWN every time. No FULL flag is
+// persisted (MEMORY.md "NO FULL FLAG AT ALL"): the capacity line is a
+// STATELESS check recomputed fresh at every gauge call from the current
+// footprint alone; only the ceiling's hysteresis bit (`over`) is cached
+// (as `overCeiling`, alongside the rest of the verdict cache) so the NEXT
+// gauge call can apply the Schmitt trigger — that single boolean is a fact
+// about the ceiling's own state, not an "armed forever" residue.
 //
 // Token counts are ESTIMATES (chars heuristic: ~4 chars/token ASCII, ~1.5
 // chars/token non-ASCII) — always label them "~est"; bytes/chars are the
@@ -39,14 +47,20 @@ import { parseJsonc } from './jsonc.mjs';
 // constants — PLACEHOLDERS, calibrate at the fidelity benchmark (2026-07-08
 // amendment: "Numbers = placeholder constants in code, calibrate at benchmark")
 // ---------------------------------------------------------------------------
-export const PLUMP_BMI = 1.3;
-export const OBESE_BMI = 1.6;
-// Growable-full (beta.7 #1): the absolute fat allowed above a MEASURED floor
-// before FULL fires, replacing the old ratio-based FULL_BMI(2.0) rung — a
-// benchmark-calibrated placeholder from the first real dogfood clean (a
-// healthy store carried ~1-2k tok of fat on a ~29k floor); budgeted a little
-// above that observed range.
-export const FAT_BUDGET_TOKENS = 4000;
+// THE ONE-CEILING NUMBER (MEMORY.md, recommended for beta.12): the GC-anchor
+// derivation — V8/Java major-GC fire at 1.5-2x heap growth; we take the LOW
+// edge because the sweep is code-only-cheap AND class-B fat charges rent in
+// THROUGHPUT every prompt (unlike RAM fat, which only charges capacity),
+// justifying an earlier trigger. Hysteresis re-arm at 1.2 vs natural
+// accretion ~1-3%/session = months-per-fire on a healthy store.
+export const CEILING_BMI = 1.5;
+export const CEILING_REARM_BMI = 1.2;
+// Floor-sanity lower bound ("<~10KB no-measure", the beta.6 floor-guard
+// family's other half — sanitizeLeanFloor below already guards the UPPER
+// bound): a floor this small can't support a trustworthy RATIO — a trivial
+// absolute difference reads as a huge BMI swing on a near-empty project.
+// ~10KB of ASCII text -> ~2500 tok (the tokensEstFromBytes heuristic, /4).
+export const FLOOR_MIN_TOKENS = 2500;
 // Rough placeholder for the session's usable per-turn window — NOT a verified
 // per-model capacity claim (Claude sessions run anywhere from a 200k standard
 // to a 1M-token beta ceiling depending on tier/org; never silently assert
@@ -61,8 +75,6 @@ export const CC_INDEX_CAP_BYTES = 25 * 1024; // CC memory-index platform cap cla
 export const CC_INDEX_CAP_LINES = 200; // CC memory-index platform cap class (200 lines)
 export const RUN_COST_MULTIPLIER = 3; // one Full run ~ store read x2 (outsider+insider) + rewrite
 export const ECON_HORIZON_DAYS = 14; // carry-cost horizon the break-even is judged against
-export const PLUMP_SNOOZE_DAYS = 7;
-export const OBESE_SNOOZE_DAYS = 2;
 export const STAMP_RING_MAX = 60; // per-project session-stamp ring buffer cap
 const DAY_MS = 86400000;
 
@@ -142,6 +154,9 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
 // band verdict
 // ---------------------------------------------------------------------------
 
+// wasOver: the ceiling's hysteresis state as of the LAST recorded verdict
+// (cached `overCeiling` — see recordVerdict below). Defaults false (a fresh
+// project starts un-armed, the same as the old bootstrap LEAN default).
 export function bandVerdict({
   footprintTokens,
   leanFloorTokens = 0,
@@ -149,38 +164,47 @@ export function bandVerdict({
   fullPercent = 6,
   indexBytes = 0,
   indexLines = 0,
+  wasOver = false,
 } = {}) {
   const hardCeilingTokens = Math.round(capacityTokens * (fullPercent / 100));
   const capHit =
     footprintTokens >= hardCeilingTokens ||
     indexBytes >= CC_INDEX_CAP_BYTES ||
     indexLines >= CC_INDEX_CAP_LINES;
-  const bmi = leanFloorTokens > 0 ? footprintTokens / leanFloorTokens : null;
+  // Fractal BMI (the INFECTION AUDIT's superseding ruling): the floor must
+  // itself be large enough to trust a ratio against (FLOOR_MIN_TOKENS) —
+  // below that, or with no floor stamped yet, bmi collapses to null exactly
+  // like the pre-floor bootstrap case always has.
+  const measurable = leanFloorTokens >= FLOOR_MIN_TOKENS;
+  const bmi = measurable ? footprintTokens / leanFloorTokens : null;
+  // Schmitt-trigger hysteresis: once armed (over), BMI must fall to the LOW
+  // mark to disarm; once disarmed, BMI must reach the HIGH mark to arm again.
+  // This is the anti-flapping guard living in the metric, not a clock.
+  const over = bmi === null ? false : (wasOver ? bmi > CEILING_REARM_BMI : bmi >= CEILING_BMI);
 
   if (bmi === null) {
-    // Bootstrap (pre-floor): unchanged absolute-cap-only heuristic — it
-    // correctly drove the first real clean (beta.6). BMI/fat-budget bands
-    // wake up only after a full clean stamps a floor.
-    if (capHit) return { band: 'FULL', reason: 'absolute-cap', bmi, hardCeilingTokens };
-    return { band: 'LEAN', reason: 'no-floor-yet', bmi, hardCeilingTokens };
+    // Bootstrap (pre-floor) or a floor too small to trust: unchanged
+    // absolute-cap-only heuristic — it correctly drove the first real clean
+    // (beta.6). The ceiling wakes up only once a full clean stamps a
+    // measurable floor.
+    if (capHit) return { band: 'FULL', reason: 'absolute-cap', bmi, over: false, hardCeilingTokens };
+    return { band: 'LEAN', reason: leanFloorTokens > 0 ? 'floor-too-small' : 'no-floor-yet', bmi, over: false, hardCeilingTokens };
   }
 
-  // Post-floor (growable-full): FULL is judged on FAT above the MEASURED
-  // floor, never the raw ratio, so a legitimately large floor never
-  // false-fires no matter how big it grows. The machine's hard capacity gate
-  // still applies — it is the one PERSON-independent ceiling — but hitting it
-  // with ~no fat to reclaim (all-muscle over capacity) gets DIFFERENT advice:
-  // externalize, never "wash harder" (a wash cannot shrink muscle).
-  const fatTokens = Math.max(0, footprintTokens - leanFloorTokens);
+  // Post-floor: the machine's hard capacity gate is the one PERSON-independent
+  // ceiling — but hitting it while BMI is still under the wash ceiling
+  // (~all-muscle, over is false) gets DIFFERENT advice: externalize, never
+  // "wash harder" (a wash cannot shrink muscle). Over the wash ceiling too
+  // (real fat exists) -> absolute-cap (wash first, it may not be enough, but
+  // it helps).
   if (capHit) {
-    return fatTokens <= FAT_BUDGET_TOKENS
-      ? { band: 'FULL', reason: 'externalize', bmi, hardCeilingTokens }
-      : { band: 'FULL', reason: 'absolute-cap', bmi, hardCeilingTokens };
+    return over
+      ? { band: 'FULL', reason: 'absolute-cap', bmi, over, hardCeilingTokens }
+      : { band: 'FULL', reason: 'externalize', bmi, over, hardCeilingTokens };
   }
-  if (fatTokens > FAT_BUDGET_TOKENS) return { band: 'FULL', reason: 'fat-budget', bmi, hardCeilingTokens };
-  if (bmi >= OBESE_BMI) return { band: 'OBESE', reason: 'bmi', bmi, hardCeilingTokens };
-  if (bmi >= PLUMP_BMI) return { band: 'PLUMP', reason: 'bmi', bmi, hardCeilingTokens };
-  return { band: 'LEAN', reason: 'bmi', bmi, hardCeilingTokens };
+  return over
+    ? { band: 'OBESE', reason: 'bmi', bmi, over, hardCeilingTokens }
+    : { band: 'LEAN', reason: 'bmi', bmi, over, hardCeilingTokens };
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +348,7 @@ export function setLeanFloor(home, projectRoot, tokens, now = Date.now()) {
 // LEAN). Any doubt collapses to 0 (the existing "floor-unmeasured, whole
 // footprint is an upper bound" path) — never throws, never trusts the raw
 // value. Fail direction is conservative: this can only WIDEN the alert surface
-// (false-PLUMP/OBESE/FULL is acceptable), never hide real fat (false-LEAN is not).
+// (false-OBESE/FULL is acceptable), never hide real fat (false-LEAN is not).
 export const LEAN_FLOOR_MAX_MULTIPLE = 10;
 export function sanitizeLeanFloor(rawLeanFloorTokens, footprintTokens) {
   const floor = Number(rawLeanFloorTokens);
@@ -334,26 +358,20 @@ export function sanitizeLeanFloor(rawLeanFloorTokens, footprintTokens) {
   return floor;
 }
 
-// Snooze the band nudge until `untilMs` (a declined/emitted PLUMP or OBESE ask
-// self-throttles — the nudge fires at most once per snooze window).
-export function setSnooze(home, projectRoot, untilMs) {
-  const state = pruneOrphans(loadState(home));
-  state.projects = state.projects || {};
-  const key = projKey(projectRoot);
-  const proj = state.projects[key] || {};
-  proj.snoozeUntil = untilMs;
-  state.projects[key] = proj;
-  return saveState(state, home);
-}
-
 // ---------------------------------------------------------------------------
 // cached verdict (built at beta.8 #2 for the since-retired UserPromptSubmit
 // hot path; beta.10 REPOINTS it at the Stop hook instead — the storage and
-// sanitization stay exactly as they were, only the reader changed).
-// SessionStart already computes the 4-band verdict; recordVerdict stores just
-// enough of it so the Stop conductor branch (Phoenix #3: no discovery/
-// measureEntries there) can decide whether to fire the FULL force directive
-// from a single state read, never re-measuring the store itself.
+// sanitization stay exactly as they were, only the reader changed). beta.12
+// band-collapse: the snooze mechanism this cache used to sit beside is GONE
+// (MEMORY.md — a time-based throttle is banned; the ceiling's own hysteresis,
+// `overCeiling` below, is the anti-flapping guard now) and the payload grows
+// two payback fields (`perDay`/`breakEvenDays`/`floorUnmeasured`) so the Stop
+// hook's OBESE ask can show the same break-even numbers the FULL ask already
+// did (queue 0c) without re-measuring the store (Phoenix #3).
+// SessionStart already computes the ceiling verdict; recordVerdict stores
+// just enough of it so the Stop conductor branch (no discovery/measureEntries
+// there) can decide whether to fire the FULL force directive, or show payback
+// numbers on an ask, from a single state read, never re-measuring the store.
 // ---------------------------------------------------------------------------
 
 // A cached verdict older than this is never trusted (silent) — the next
@@ -364,16 +382,28 @@ export const VERDICT_MAX_AGE_MS = DAY_MS;
 // Record the SessionStart-computed verdict. Called every time a verdict is
 // computed (whatever the band), so a store that goes LEAN this session
 // overwrites a stale FULL left by a prior one immediately, not just eventually.
+// `verdict.over` (bandVerdict's hysteresis output) is cached as `overCeiling`
+// — read back as the NEXT gauge call's `wasOver` input (the Schmitt-trigger
+// memory); `perDay`/`breakEvenDays`/`floorUnmeasured` (breakEven()'s output,
+// optional) back the Stop hook's payback line on ANY ask, not just FULL's.
 export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
   const state = pruneOrphans(loadState(home));
   state.projects = state.projects || {};
   const key = projKey(projectRoot);
   const proj = state.projects[key] || {};
+  const perDay = Number(verdict && verdict.perDay);
+  const breakEvenDays = Number(verdict && verdict.breakEvenDays);
+  const hardCeilingTokens = Number(verdict && verdict.hardCeilingTokens);
   proj.lastVerdict = {
     band: String((verdict && verdict.band) || ''),
     reason: String((verdict && verdict.reason) || ''),
     economical: !!(verdict && verdict.economical),
     fatTokens: Number.isFinite(verdict && verdict.fatTokens) ? Math.round(verdict.fatTokens) : 0,
+    overCeiling: !!(verdict && verdict.overCeiling),
+    perDay: Number.isFinite(perDay) ? Math.round(perDay) : 0,
+    breakEvenDays: Number.isFinite(breakEvenDays) ? breakEvenDays : null,
+    floorUnmeasured: !!(verdict && verdict.floorUnmeasured),
+    hardCeilingTokens: Number.isFinite(hardCeilingTokens) ? Math.round(hardCeilingTokens) : 0,
     at: now,
   };
   state.projects[key] = proj;
@@ -393,6 +423,11 @@ export function sanitizeVerdict(rawVerdict, now = Date.now(), maxAgeMs = VERDICT
   const at = Number(rawVerdict.at);
   if (!Number.isFinite(at) || at > now || now - at > maxAgeMs) return null;
   if (rawVerdict.band !== 'FULL' || rawVerdict.economical !== true) return null;
+  // Defense in depth (the growable-full invariant's "never wash-harder on
+  // muscle"): externalize must never arm the force case even if some future
+  // caller mis-set economical on it — SessionStart today never does, but this
+  // gate should not depend on that discipline holding forever.
+  if (rawVerdict.reason === 'externalize') return null;
   const fatTokens = Number(rawVerdict.fatTokens);
   return { band: 'FULL', reason: String(rawVerdict.reason || ''), fatTokens: Number.isFinite(fatTokens) ? fatTokens : 0, at };
 }
@@ -403,7 +438,8 @@ export function sanitizeVerdict(rawVerdict, now = Date.now(), maxAgeMs = VERDICT
 // channel a busy agent proved able to ignore, "ROUND 4 POSTMORTEM") in favor
 // of the Stop hook's BLOCKING channel: instead of nagging every turn, the ask
 // fires ONCE per RISE across a band ceiling, then stays silent until the next
-// rise. Bands rank LEAN < PLUMP < OBESE < FULL; a rise (new rank > previous
+// rise. Bands rank LEAN < OBESE < FULL (beta.12 band-collapse: PLUMP is gone,
+// merged into the single OBESE ceiling); a rise (new rank > previous
 // rank) arms an unconsumed crossing at the new (highest) band reached. This
 // also covers the "qualifying past" case: a project with no verdict on record
 // yet defaults its previous rank to LEAN(0), so a first-ever scan that already
@@ -414,7 +450,7 @@ export function sanitizeVerdict(rawVerdict, now = Date.now(), maxAgeMs = VERDICT
 // LEAN clears any pending crossing outright: the store is clean, nothing left
 // to ask about.
 // ---------------------------------------------------------------------------
-export const BAND_RANK = { LEAN: 0, PLUMP: 1, OBESE: 2, FULL: 3 };
+export const BAND_RANK = { LEAN: 0, OBESE: 1, FULL: 2 };
 
 // Called every SessionStart alongside recordVerdict, comparing the NEW band
 // against the band on record from BEFORE this session's recordVerdict call
@@ -456,13 +492,12 @@ export function sanitizeCrossing(rawCrossing, now = Date.now()) {
 // the agent to report the
 // user's choice back into state, so gating consumption on one would leave a
 // crossing pending indefinitely whenever the user never invokes it. This
-// mirrors the EXISTING SessionStart PLUMP/OBESE self-throttle (setSnooze
-// already fires at ask-EMISSION time there too, not on the answer) — one
-// flock, one color within this file. Consequence: nothing can go unconsumed
-// forever, so the once-considered 7-day-TTL/re-arm-once fallback is
-// unnecessary and not implemented here; add a real TTL only if emission-time
-// consumption proves too eager in practice (e.g. a session killed before the
-// Stop hook's feedback ever reached the user).
+// mirrors the crossing's own once-per-rise design (nothing snoozes by clock
+// any more, beta.12 band-collapse — the ceiling's hysteresis, not a timer, is
+// the anti-flapping guard). Consequence: nothing can go unconsumed forever,
+// so a TTL/re-arm-once fallback is unnecessary and not implemented here; add
+// one only if emission-time consumption proves too eager in practice (e.g. a
+// session killed before the Stop hook's feedback ever reached the user).
 export function consumeCrossing(home, projectRoot, now = Date.now()) {
   const state = pruneOrphans(loadState(home));
   state.projects = state.projects || {};

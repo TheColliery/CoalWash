@@ -4,9 +4,19 @@
 // can never leak in. Every case asserts the three observable surfaces:
 //   (1) exit code 0 on every path (Phoenix #4);
 //   (2) stderr silent — stdout only on a sanctioned channel: SessionStart's
-//       plain context-injection console.log, or Stop's structured
-//       `{decision:'block', reason}` JSON (beta.10, mirrors rot-canary-stop.js);
-//   (3) the expected state effect (stamp/snooze/crossing written, or nothing).
+//       plain context-injection console.log (self-update ONLY, post-beta.12
+//       band-collapse — see below), or Stop's structured
+//       `{decision:'block', reason}` JSON (mirrors rot-canary-stop.js);
+//   (3) the expected state effect (stamp/crossing written, or nothing).
+//
+// BAND COLLAPSE (beta.12): SessionStart is now a SILENT measurement
+// chokepoint for EVERY band — it never prints an ask/directive/advisory of
+// its own (queue item 0, the สวัสดี-flow hole: an ask fired at session start
+// raced the user's own first message). Stop is the ONLY delivery surface —
+// for the ceiling ask (OBESE, or a disarmed/suppressed FULL), the FULL force
+// directive, AND (new this release) the FULL(externalize) advisory, which
+// used to be SessionStart-only and un-trackable (the old F1 carve) and now
+// rides the SAME once-per-crossing Stop channel as everything else.
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
@@ -91,162 +101,192 @@ test('LEAN (small store, no floor yet): silent — Phoenix #13 healthy path', ()
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
     assert.strictEqual(st.stamps.length, 1, 'the gauge still stamps the session');
+    assert.strictEqual(st.lastVerdict.band, 'LEAN');
   } finally { clean(home, proj); }
 });
 
 test('manual mode: gauge silent (no stamp), but the self-update scheduler still runs', () => {
   const { home, proj } = sandbox();
   try {
-    seedClassB(home, proj, { claudeMdBytes: 60000 }); // would be FULL if gauged
+    seedClassB(home, proj, { claudeMdBytes: 60000 }); // would be OBESE/FULL if gauged
     writeGlobalCfg(home, { coalwashMode: 'manual' }); // updateMode defaults to ask -> due on first boot
     const r = run(proj, home);
     assertGraceful(r);
     assert.ok(r.stdout.includes('[self-update due]'));
-    assert.ok(!r.stdout.includes('memory gauge'), 'no gauge output in manual mode');
     assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'no stamp in manual mode');
   } finally { clean(home, proj); }
 });
 
-test('PLUMP: emits the ask nudge once and self-snoozes; the snoozed boot is silent', () => {
-  const { home, proj } = sandbox();
-  try {
-    muteUpdate(home);
-    // footprint ~= (4000 ascii + index 60)/4 tok ~= 1015; floor 750 -> BMI ~1.35 (PLUMP)
-    seedClassB(home, proj, { claudeMdBytes: 4000, indexBytes: 60 });
-    seedState(home, proj, { leanFloorTokens: 750 });
-    const r1 = run(proj, home);
-    assertGraceful(r1);
-    assert.ok(r1.stdout.includes('[CoalWash] memory gauge: PLUMP'), r1.stdout);
-    assert.ok(r1.stdout.includes('question tool'), 'the ask rides the agent question-box');
-    assert.ok(r1.stdout.includes('snapshot-backed'), 'deletes are snapshot-backed/revertible, not human-pre-approved');
-    const st = readProjState(home, proj);
-    assert.ok(st.snoozeUntil > Date.now(), 'self-snoozed');
-    const r2 = run(proj, home);
-    assertGraceful(r2);
-    assert.strictEqual(r2.stdout, '', 'snoozed boot is silent');
-  } finally { clean(home, proj); }
-});
+// ---------------------------------------------------------------------------
+// SessionStart — band-collapse: SILENT for every band, only the cache changes.
+// ---------------------------------------------------------------------------
 
-test('OBESE: strong-ask with the shorter snooze window', () => {
+test('SessionStart: OBESE crossing is measured+cached SILENTLY (no ask text any more — that is Stop\'s job)', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // footprint ~= 1715 tok; floor 1000 -> BMI ~1.7 (OBESE)
-    seedClassB(home, proj, { claudeMdBytes: 6800, indexBytes: 60 });
-    seedState(home, proj, { leanFloorTokens: 1000 });
+    // footprint ~= (60080 + 0)/4 = 15020 tok; floor 10000 -> bmi 1.502 (>= 1.5, OBESE), well under the 36000 hard cap.
+    seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 10000 });
     const r = run(proj, home);
     assertGraceful(r);
-    assert.ok(r.stdout.includes('memory gauge: OBESE'), r.stdout);
-    assert.ok(r.stdout.includes('STRONGLY RECOMMEND'));
+    assert.strictEqual(r.stdout, '', 'SessionStart never prints a band ask/directive any more');
     const st = readProjState(home, proj);
-    const days = (st.snoozeUntil - Date.now()) / 86400000;
-    assert.ok(days > 1 && days < 3, `OBESE snooze ~2 days, got ~${days.toFixed(1)}`);
+    assert.strictEqual(st.lastVerdict.band, 'OBESE');
+    assert.strictEqual(st.lastVerdict.overCeiling, true);
+    assert.strictEqual(st.lastCrossing.band, 'OBESE');
+    assert.strictEqual(st.lastCrossing.consumed, false);
   } finally { clean(home, proj); }
 });
 
-test('FULL via fat-budget (growable-full) with the break-even in favor: the deterministic numbers are SHOWN and the run is directed', () => {
-  const { home, proj } = sandbox();
-  try {
-    muteUpdate(home);
-    // footprint = 5004 tok; floor 1000 -> fat 4004 (just over the 4000 fat
-    // budget, growable-full); run ~= 3x store ~= 15k < 14-day carry ~= 56k
-    // -> economical.
-    seedClassB(home, proj, { claudeMdBytes: 20016, indexBytes: 0 });
-    seedState(home, proj, { leanFloorTokens: 1000 });
-    const r = run(proj, home);
-    assertGraceful(r);
-    assert.ok(r.stdout.includes('memory gauge: FULL (fat-budget)'), r.stdout);
-    assert.ok(r.stdout.includes('fat ~'), 'numbers shown');
-    assert.ok(/one run \S+ \d+ tok/.test(r.stdout), 'run cost shown');
-    assert.ok(r.stdout.includes('break-even ~'), 'break-even shown');
-    assert.ok(r.stdout.includes('RUN the CoalWash pipeline now'), 'economic force directive');
-    assert.ok(r.stdout.includes('economic-dominance'), 'the named exception is cited');
-    assert.ok(r.stdout.includes('snapshot-backed'), 'deletes are snapshot-backed/revertible even under force');
-    assert.ok(r.stdout.includes('SURFACE this line to the user verbatim'), 'the last-hop agent directive is present (beta.7 #2)');
-  } finally { clean(home, proj); }
-});
-
-test('FULL via the absolute index cap fires even with no floor measured (bootstrap backstop)', () => {
+test('SessionStart: FULL via the absolute index cap fires even with no floor measured (bootstrap backstop) — cached, not printed', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
     seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // index over the 25KB cap class
     const r = run(proj, home);
     assertGraceful(r);
-    assert.ok(r.stdout.includes('memory gauge: FULL (absolute-cap)'), r.stdout);
-    if (r.stdout.includes('fat ~')) {
-      assert.ok(r.stdout.includes('floor unmeasured'), 'a never-cleaned store must label its fat figure an upper bound');
-    }
-  } finally { clean(home, proj); }
-});
-
-test('FULL band but break-even NOT in favor: the force stays DISARMED (strong-ask + snooze, no run directive)', () => {
-  const { home, proj } = sandbox();
-  try {
-    muteUpdate(home);
-    // Same FULL-band footprint as the armed case (floor 1000, fat 5000 > the
-    // 4000 fat budget) but a huge recall store inflates the run cost (3x
-    // total) far past the 14-day carry.
-    const mem = seedClassB(home, proj, { claudeMdBytes: 23940, indexBytes: 60 });
-    fs.writeFileSync(path.join(mem, 'recall-big.md'), 'r'.repeat(400 * 1024), 'utf8');
-    seedState(home, proj, { leanFloorTokens: 1000 });
-    const r = run(proj, home);
-    assertGraceful(r);
-    assert.ok(r.stdout.includes('memory gauge: FULL'), r.stdout);
-    assert.ok(r.stdout.includes('does NOT yet favor a run'), 'disarm wording present');
-    assert.ok(r.stdout.includes('force-run stays disarmed'), 'force explicitly disarmed');
-    assert.ok(!r.stdout.includes('RUN the CoalWash pipeline now'), 'no run directive when uneconomical');
+    assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
-    assert.ok(st.snoozeUntil > Date.now(), 'disarmed FULL snoozes like a strong-ask');
+    assert.strictEqual(st.lastVerdict.band, 'FULL');
+    assert.strictEqual(st.lastVerdict.reason, 'absolute-cap');
+    assert.strictEqual(st.lastCrossing.band, 'FULL');
   } finally { clean(home, proj); }
 });
 
-// ---------------------------------------------------------------------------
-// Growable-full (beta.7 item #1) — regression tests pinning the live cases.
-// ---------------------------------------------------------------------------
-
-test('growable-full: a large HEALTHY floor (TheColliery-shaped, ~29k) stays LEAN and silent even though the raw footprint is large', () => {
+test('SessionStart: FULL with the break-even in favor caches economical:true + the payback numbers for Stop', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // footprint = (116332+60)/4 = 29098 tok; floor 29054 -> fat 44 (well under
-    // the fat budget), bmi ~1.0015 (well under PLUMP) -> LEAN. Pins the exact
-    // live regression case (MEMORY.md "THE CALIBRATION FINDING").
-    seedClassB(home, proj, { claudeMdBytes: 116332, indexBytes: 60 });
-    seedState(home, proj, { leanFloorTokens: 29054 });
+    // floor 20000; footprint 36200 (>= the 36000 hard cap AND bmi 1.81 >= 1.5) -> FULL/absolute-cap.
+    // fat 16200/day (1 stamp -> sessionsPerDay=1); runCost = max(36200,36200)*3 = 108600;
+    // horizonCarry = 16200*14 = 226800 > 108600 -> economical.
+    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 20000 });
     const r = run(proj, home);
     assertGraceful(r);
-    assert.strictEqual(r.stdout, '', 'a healthy large floor must never false-fire FULL');
+    assert.strictEqual(r.stdout, '');
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'FULL');
+    assert.strictEqual(st.lastVerdict.reason, 'absolute-cap');
+    assert.strictEqual(st.lastVerdict.economical, true);
+    assert.strictEqual(st.lastVerdict.fatTokens, 16200);
+    assert.ok(st.lastVerdict.perDay > 0, 'payback perDay cached for the Stop ask/force');
+    assert.ok(Number.isFinite(st.lastVerdict.breakEvenDays));
+    assert.strictEqual(st.lastCrossing.band, 'FULL');
   } finally { clean(home, proj); }
 });
 
-test('growable-full: post-floor all-muscle over the hard cap gets the EXTERNALIZE advisory, never "wash harder" (regression c)', () => {
+test('SessionStart: FULL band but break-even NOT in favor caches economical:false (force stays disarmed downstream)', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // footprint 36200 tok; floor 36000 -> fat 200 (well under the fat budget)
-    // but the footprint clears the recalibrated hard ceiling (36000 = 6% of
-    // the recalibrated CAPACITY_TOKENS) -> externalize, not a wash directive.
+    // Same FULL-band footprint as the armed case, but a huge recall store
+    // inflates the run cost (3x total) far past the 14-day carry.
+    const mem = seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
+    fs.writeFileSync(path.join(mem, 'recall-big.md'), 'r'.repeat(400 * 1024), 'utf8');
+    seedState(home, proj, { leanFloorTokens: 20000 });
+    const r = run(proj, home);
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'FULL');
+    assert.strictEqual(st.lastVerdict.economical, false);
+  } finally { clean(home, proj); }
+});
+
+test('SessionStart: FULL(externalize) is cached (reason + hardCeilingTokens) and ARMS a crossing — no longer the un-trackable F1 carve', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // footprint 36200 tok; floor 36000 -> bmi ~1.0056 (well under 1.5, NOT
+    // armed) but the footprint clears the hard ceiling (36000 = 6% of
+    // CAPACITY_TOKENS) -> externalize.
     seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
     seedState(home, proj, { leanFloorTokens: 36000 });
     const r = run(proj, home);
     assertGraceful(r);
-    assert.ok(r.stdout.includes('memory gauge: FULL (externalize)'), r.stdout);
-    assert.ok(r.stdout.includes('EXTERNALIZE'), 'advises externalizing/splitting');
-    assert.ok(r.stdout.includes('no reclaimable fat'), 'names WHY washing cannot help');
-    assert.ok(!r.stdout.includes('RUN the CoalWash pipeline now'), 'never directs a wash on an all-muscle store');
-    assert.ok(r.stdout.includes('SURFACE this line to the user verbatim'), 'the last-hop agent directive is present (beta.7 #2)');
+    assert.strictEqual(r.stdout, '', 'externalize is information, delivered by Stop, never printed at SessionStart');
     const st = readProjState(home, proj);
-    assert.ok(st.snoozeUntil > Date.now(), 'externalize snoozes like a strong-ask (nothing new to say until the store shrinks)');
+    assert.strictEqual(st.lastVerdict.band, 'FULL');
+    assert.strictEqual(st.lastVerdict.reason, 'externalize');
+    assert.strictEqual(st.lastVerdict.economical, false, 'externalize never computes/arms economical');
+    assert.ok(st.lastVerdict.hardCeilingTokens > 0, 'cached for the Stop advisory to quote');
+    assert.strictEqual(st.lastCrossing.band, 'FULL', 'beta.12: externalize now ARMS a crossing (band-uniform), unlike the retired F1 carve');
+  } finally { clean(home, proj); }
+});
+
+test('growable-full: a large HEALTHY floor (TheColliery-shaped, ~29k) stays LEAN, silent, and arms no crossing', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // footprint = (116332+60)/4 = 29098 tok; floor 29054 -> bmi ~1.0015 (well
+    // under the 1.5 ceiling) -> LEAN. Pins the exact live regression case
+    // (MEMORY.md "THE CALIBRATION FINDING").
+    seedClassB(home, proj, { claudeMdBytes: 116332, indexBytes: 60 });
+    seedState(home, proj, { leanFloorTokens: 29054 });
+    const r = run(proj, home);
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '', 'a healthy large floor must never false-fire');
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'LEAN');
+    assert.strictEqual(st.lastCrossing, undefined);
   } finally { clean(home, proj); }
 });
 
 // ---------------------------------------------------------------------------
-// STOP HOOK — the once-per-crossing ask/force channel (beta.10, REPLACES the
-// beta.8/9 UserPromptSubmit per-turn bar; MEMORY.md "ROUND 4 POSTMORTEM").
-// Output is the structured `{decision:'block', reason}` JSON (rot-canary's
-// exact mechanism), not plain stdout — asserted explicitly below since that
-// structure is the whole point of the beta.10 move.
+// Hysteresis (beta.12): the ceiling's Schmitt trigger is the anti-flapping
+// guard now (no more time-based snooze) — a store sitting in the dead zone
+// [CEILING_REARM_BMI, CEILING_BMI) stays whatever it already was.
+// ---------------------------------------------------------------------------
+
+test('hysteresis: a store that armed OBESE and settles into the dead zone stays OBESE (no re-arm needed, no flap to LEAN)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    const floor = 10000;
+    // First boot: bmi 1.502 -> arms OBESE (over=true cached).
+    seedClassB(home, proj, { claudeMdBytes: floor * 1.502 * 4, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: floor });
+    const r1 = run(proj, home);
+    assertGraceful(r1);
+    assert.strictEqual(readProjState(home, proj).lastVerdict.overCeiling, true);
+
+    // Second boot: bmi drops to 1.35 — inside the dead zone (>1.2, <1.5).
+    // Un-armed-from-scratch this would be LEAN; armed, it must STAY OBESE.
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'a'.repeat(Math.round(floor * 1.35 * 4)), 'utf8');
+    const r2 = run(proj, home);
+    assertGraceful(r2);
+    const st2 = readProjState(home, proj);
+    assert.strictEqual(st2.lastVerdict.band, 'OBESE', 'the dead zone holds the PRIOR armed state');
+    assert.strictEqual(st2.lastCrossing.at, readProjState(home, proj).lastCrossing.at, 'no new crossing (same band, no re-arm)');
+  } finally { clean(home, proj); }
+});
+
+test('hysteresis: a store must fall to CEILING_REARM_BMI or below to actually clear back to LEAN', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    const floor = 10000;
+    seedClassB(home, proj, { claudeMdBytes: Math.round(floor * 1.502 * 4), indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: floor });
+    run(proj, home); // arms OBESE
+    assert.strictEqual(readProjState(home, proj).lastVerdict.overCeiling, true);
+
+    // Drop to bmi 1.1 — at/under the 1.2 low-water mark -> clears.
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'a'.repeat(Math.round(floor * 1.1 * 4)), 'utf8');
+    run(proj, home);
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.lastVerdict.band, 'LEAN');
+    assert.strictEqual(st.lastVerdict.overCeiling, false);
+    assert.strictEqual(st.lastCrossing, undefined, 'LEAN clears the crossing outright');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// STOP HOOK — the once-per-crossing ask/force/advisory channel. Output is the
+// structured `{decision:'block', reason}` JSON (rot-canary's exact
+// mechanism), not plain stdout.
 // ---------------------------------------------------------------------------
 
 function parseBlock(stdout) {
@@ -255,24 +295,25 @@ function parseBlock(stdout) {
   return j.reason;
 }
 
-test('Stop: an unconsumed PLUMP crossing emits the ask (ทำ/later) via the structured block decision, then self-consumes', () => {
+test('Stop: an unconsumed OBESE crossing emits the ceiling ask (ทำ/later) via the structured block decision, then self-consumes', () => {
   const { home, proj } = sandbox();
   try {
     seedState(home, proj, {
-      lastCrossing: { band: 'PLUMP', at: Date.now(), consumed: false },
-      lastVerdict: { band: 'PLUMP', reason: 'bmi', economical: false, fatTokens: 1234, at: Date.now() },
+      lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'OBESE', reason: 'bmi', economical: false, fatTokens: 1234, at: Date.now() },
     });
     const r1 = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r1);
     const reason = parseBlock(r1.stdout);
-    assert.ok(reason.includes('memory crossed the PLUMP ceiling'), reason);
+    assert.ok(reason.includes('memory crossed the OBESE ceiling'), reason);
     assert.ok(reason.includes('fat ~1234 tok'), reason);
     assert.ok(reason.includes('question tool'), 'rides the agent question-box');
     assert.ok(reason.includes('ทำ'), reason);
     assert.ok(reason.includes('later (dismiss; the offer returns at the next ceiling crossing)'), 'the later option tells the consume-at-emission truth');
-    assert.ok(!reason.includes('snooze'), 'no snooze promise — the code never re-fires until the next crossing');
-    assert.ok(reason.includes('run the quick wash now'), 'PLUMP defaults to the quick exercise');
+    assert.ok(!reason.includes('snooze'), 'no snooze wording — the code never re-fires until the next crossing (hysteresis, not a clock)');
+    assert.ok(reason.includes('run the quick wash now'), 'OBESE defaults to the quick exercise (factory exercisePerBand)');
     assert.ok(reason.includes('snapshot-backed and revertible'), reason);
+    assert.ok(reason.includes("Answer the user's ORIGINAL message"), 'answer-first reminder present (queue item 0)');
 
     const r2 = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r2);
@@ -280,18 +321,34 @@ test('Stop: an unconsumed PLUMP crossing emits the ask (ทำ/later) via the st
   } finally { clean(home, proj); }
 });
 
-test('Stop: an unconsumed OBESE crossing offers the config-mapped exercise (default: full)', () => {
+test('Stop: an OBESE ask carries the break-even payback line when it is cached (queue 0c — was FULL-only before)', () => {
   const { home, proj } = sandbox();
   try {
     seedState(home, proj, {
       lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false },
-      lastVerdict: { band: 'OBESE', reason: 'bmi', economical: false, fatTokens: 2500, at: Date.now() },
+      lastVerdict: { band: 'OBESE', reason: 'bmi', economical: false, fatTokens: 500, perDay: 200, breakEvenDays: 3.2, floorUnmeasured: false, at: Date.now() },
     });
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
-    assert.ok(reason.includes('memory crossed the OBESE ceiling'), reason);
-    assert.ok(reason.includes('run the full wash now'), 'OBESE defaults to the full exercise (factory exercisePerBand)');
+    assert.ok(reason.includes('~200 tok/session'), reason);
+    assert.ok(reason.includes('pays back in ~4 session(s)'), reason);
+  } finally { clean(home, proj); }
+});
+
+test('Stop: an unconsumed FULL(absolute-cap) crossing offers the config-mapped exercise (default: full) when the ask degrades', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ forceMode: 'ask' }), 'utf8');
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 2500, at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('memory crossed the FULL ceiling'), reason);
+    assert.ok(reason.includes('run the full wash now'), 'FULL defaults to the full exercise (factory exercisePerBand)');
   } finally { clean(home, proj); }
 });
 
@@ -300,7 +357,7 @@ test('Stop: a FULL+economical crossing with forceMode=auto (the default) emits t
   try {
     seedState(home, proj, {
       lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
-      lastVerdict: { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() },
+      lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 4004, perDay: 1200, breakEvenDays: 2, floorUnmeasured: false, at: Date.now() },
     });
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
@@ -312,17 +369,18 @@ test('Stop: a FULL+economical crossing with forceMode=auto (the default) emits t
     assert.ok(reason.includes('stage-only'), reason);
     assert.ok(reason.includes('snapshot-backed'), reason);
     assert.ok(reason.includes('once per crossing, not per session'), reason);
+    assert.ok(reason.includes('~1200 tok/session'), 'the force directive also shows the payback numbers');
     assert.ok(!reason.includes('question tool'), 'force never asks');
   } finally { clean(home, proj); }
 });
 
-test('Stop: forceMode=ask degrades a FULL+economical crossing to the same ask template used by PLUMP/OBESE', () => {
+test('Stop: forceMode=ask degrades a FULL+economical crossing to the same ask template used by OBESE', () => {
   const { home, proj } = sandbox();
   try {
     fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ forceMode: 'ask' }), 'utf8');
     seedState(home, proj, {
       lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
-      lastVerdict: { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() },
+      lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 4004, at: Date.now() },
     });
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
@@ -339,7 +397,7 @@ test('Stop: forceMode=off emits the ask too — never silent (suppresses only th
     fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ forceMode: 'off' }), 'utf8');
     seedState(home, proj, {
       lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
-      lastVerdict: { band: 'FULL', reason: 'fat-budget', economical: true, fatTokens: 4004, at: Date.now() },
+      lastVerdict: { band: 'FULL', reason: 'absolute-cap', economical: true, fatTokens: 4004, at: Date.now() },
     });
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
@@ -349,6 +407,24 @@ test('Stop: forceMode=off emits the ask too — never silent (suppresses only th
     assert.ok(!reason.includes('standing config authorizes'), 'the auto-run authorization is suppressed');
     const st = readProjState(home, proj);
     assert.strictEqual(st.lastCrossing.consumed, true, 'consumed at emission, same as every other surfaced crossing');
+  } finally { clean(home, proj); }
+});
+
+test('Stop: a FULL(externalize) crossing delivers the pure-information advisory — never an ask, never force', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'FULL', reason: 'externalize', economical: false, fatTokens: 200, hardCeilingTokens: 36000, at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('FULL (externalize)'), reason);
+    assert.ok(reason.includes('~36000 tok'), reason);
+    assert.ok(reason.includes('no reclaimable fat'), 'names WHY washing cannot help');
+    assert.ok(!reason.includes('question tool'), 'externalize is information, never an ask');
+    assert.ok(!reason.includes('standing config authorizes'), 'externalize never force-runs');
   } finally { clean(home, proj); }
 });
 
@@ -365,19 +441,20 @@ test('Stop: nothing pending is silent, exit 0, and creates no state file at all'
 test('Stop: an already-consumed crossing never re-emits', () => {
   const { home, proj } = sandbox();
   try {
-    seedState(home, proj, { lastCrossing: { band: 'PLUMP', at: Date.now(), consumed: true } });
+    seedState(home, proj, { lastCrossing: { band: 'OBESE', at: Date.now(), consumed: true } });
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
   } finally { clean(home, proj); }
 });
 
-test('Stop: a malformed/unknown-band/LEAN-band lastCrossing is silent, never throws', () => {
+test('Stop: a malformed/unknown-band/LEAN-band/retired-PLUMP lastCrossing is silent, never throws', () => {
   const cases = [
     { band: 'LEAN', at: Date.now(), consumed: false }, // LEAN is never a crossing target
+    { band: 'PLUMP', at: Date.now(), consumed: false }, // retired by the band collapse -> unknown
     { band: 'GARBAGE', at: Date.now(), consumed: false },
-    { band: 'PLUMP', at: Date.now() + 60 * 60 * 1000, consumed: false }, // future timestamp
-    { band: 'PLUMP' }, // missing `at`
+    { band: 'OBESE', at: Date.now() + 60 * 60 * 1000, consumed: false }, // future timestamp
+    { band: 'OBESE' }, // missing `at`
     'just a string',
     42,
     [],
@@ -406,7 +483,7 @@ test('Stop: coalwashMode=off silences even a pending crossing (the master switch
 
 // ---------------------------------------------------------------------------
 // SessionStart -> Stop round trips (recordVerdict/sanitizeVerdict stay live as
-// the Stop hook's data source; recordCrossing/sanitizeCrossing are the new
+// the Stop hook's data source; recordCrossing/sanitizeCrossing are the
 // once-per-crossing counterpart).
 // ---------------------------------------------------------------------------
 
@@ -414,11 +491,11 @@ test('round trip: a FULL-economical SessionStart records a crossing the followin
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    seedClassB(home, proj, { claudeMdBytes: 20016, indexBytes: 0 }); // fat-budget FULL, economical (same fixture as the FULL suite above)
-    seedState(home, proj, { leanFloorTokens: 1000 });
+    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 }); // same economical FULL fixture as above
+    seedState(home, proj, { leanFloorTokens: 20000 });
     const rs = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(rs);
-    assert.ok(rs.stdout.includes('memory gauge: FULL (fat-budget)'), rs.stdout);
+    assert.strictEqual(rs.stdout, '');
 
     const st = readProjState(home, proj);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
@@ -456,9 +533,9 @@ test('round trip: two SessionStarts at the SAME band record only ONE crossing (n
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // Same PLUMP fixture as the existing PLUMP gauge test (BMI ~1.35).
-    seedClassB(home, proj, { claudeMdBytes: 4000, indexBytes: 60 });
-    seedState(home, proj, { leanFloorTokens: 750 });
+    // Same OBESE fixture as the standalone SessionStart OBESE test (bmi ~1.502).
+    seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 10000 });
     const r1 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r1);
     const at1 = readProjState(home, proj).lastCrossing.at;
@@ -471,7 +548,7 @@ test('round trip: two SessionStarts at the SAME band record only ONE crossing (n
 
     const rp = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(rp);
-    assert.ok(parseBlock(rp.stdout).includes('memory crossed the PLUMP ceiling'), 'exactly one ask fires for the two identical-band sessions');
+    assert.ok(parseBlock(rp.stdout).includes('memory crossed the OBESE ceiling'), 'exactly one ask fires for the two identical-band sessions');
   } finally { clean(home, proj); }
 });
 
@@ -491,34 +568,25 @@ test('round trip: a LEAN SessionStart clears a pending crossing left over from a
   } finally { clean(home, proj); }
 });
 
-test('round trip (F1): an externalize-FULL SessionStart never arms a crossing AND clears a pending one — the following Stop is silent', () => {
+test('round trip: an externalize-FULL SessionStart arms a crossing the following Stop delivers as the pure advisory (beta.12: no longer un-trackable)', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // Same all-muscle-over-the-hard-cap fixture as the externalize gauge test
-    // above (footprint ~36200 tok, floor 36000 = 6% of CAPACITY_TOKENS), plus
-    // a stale pending PLUMP crossing from an earlier session: the store's
-    // truth changed to not-washable, so the externalize scan must supersede
-    // it — a Stop ask saying "run the full wash now" here would steer the
-    // user into washing legitimate muscle (the growable-full invariant's
-    // forbidden move; SessionStart's externalize advisory is the only
-    // correct surface).
-    seedState(home, proj, {
-      leanFloorTokens: 36000,
-      lastCrossing: { band: 'PLUMP', at: Date.now() - 1000, consumed: false },
-    });
     seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 36000 });
     const rs = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(rs);
-    assert.ok(rs.stdout.includes('memory gauge: FULL (externalize)'), rs.stdout);
+    assert.strictEqual(rs.stdout, '');
 
     const st = readProjState(home, proj);
-    assert.strictEqual(st.lastVerdict.reason, 'externalize', 'the verdict cache still records the truth');
-    assert.strictEqual(st.lastCrossing, undefined, 'externalize counts as LEAN for edge detection: no crossing armed, the pending PLUMP crossing cleared');
+    assert.strictEqual(st.lastVerdict.reason, 'externalize');
+    assert.strictEqual(st.lastCrossing.band, 'FULL');
 
     const rp = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(rp);
-    assert.strictEqual(rp.stdout, '', 'Stop stays silent on an all-muscle store');
+    const reason = parseBlock(rp.stdout);
+    assert.ok(reason.includes('FULL (externalize)'), reason);
+    assert.ok(!reason.includes('question tool'));
   } finally { clean(home, proj); }
 });
 
@@ -537,14 +605,15 @@ test('self-update: due on first boot (default ask), stamped, then silent inside 
   } finally { clean(home, proj); }
 });
 
-test('language lock is appended to emitted directives (prose adapts, terms stay verbatim)', () => {
+test('language lock is appended to the self-update directive (band nudges carry no text of their own to translate any more)', () => {
   const { home, proj } = sandbox();
   try {
-    muteUpdate(home, { language: 'th' });
-    seedClassB(home, proj, { claudeMdBytes: 4000, indexBytes: 60 });
-    seedState(home, proj, { leanFloorTokens: 750 }); // PLUMP
+    writeGlobalCfg(home, { language: 'th' }); // updateMode defaults to ask -> due on first boot
+    seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 }); // OBESE-shaped, but SessionStart stays silent regardless
+    seedState(home, proj, { leanFloorTokens: 10000 });
     const r = run(proj, home);
     assertGraceful(r);
+    assert.ok(r.stdout.includes('[self-update due]'), r.stdout);
     assert.ok(r.stdout.includes('(language=th'), r.stdout);
   } finally { clean(home, proj); }
 });
@@ -562,17 +631,12 @@ test('a corrupt state file self-heals: the hook still gauges and exits 0 (Phoeni
   } finally { clean(home, proj); }
 });
 
-test('a poisoned/implausible stored leanFloor is discarded — behaves IDENTICALLY to no-floor-yet', () => {
-  // Same absolute-cap FULL setup either way (band is unaffected by the floor —
-  // the cap check runs before bmi). What's at risk if the floor were TRUSTED
-  // raw is the break-even messaging: fat ~= footprint - hugeFloor <= 0 would
-  // read "not economical" and wrongly DISARM the force-run even though the
-  // hard ceiling is already breached. Rather than pin a specific branch
-  // outcome (fragile to token-arithmetic drift), prove the stronger property
-  // the fix guarantees: a grossly-implausible floor must be INDISTINGUISHABLE
-  // from no floor at all (both sanitize to 0, so every downstream number is
-  // computed identically — same stdout, byte for byte).
-  const seedAndRun = (leanFloorTokens) => {
+test('a poisoned/implausible stored leanFloor is discarded — behaves IDENTICALLY to no-floor-yet (via cached state, not stdout)', () => {
+  // Band text no longer prints from SessionStart at all, so the property this
+  // test pins now lives in the CACHED VERDICT rather than stdout: a
+  // grossly-implausible floor must be INDISTINGUISHABLE from no floor at all
+  // (both sanitize to 0, so every downstream number is computed identically).
+  const seedAndGauge = (leanFloorTokens) => {
     const { home, proj } = sandbox();
     try {
       muteUpdate(home);
@@ -580,13 +644,19 @@ test('a poisoned/implausible stored leanFloor is discarded — behaves IDENTICAL
       if (leanFloorTokens != null) seedState(home, proj, { leanFloorTokens });
       const r = run(proj, home);
       assertGraceful(r);
-      return r.stdout;
+      assert.strictEqual(r.stdout, '');
+      return readProjState(home, proj).lastVerdict;
     } finally { clean(home, proj); }
   };
-  const noFloor = seedAndRun(null);
-  const poisonedFloor = seedAndRun(999999999); // grossly larger than the measured footprint
-  assert.ok(noFloor.includes('memory gauge: FULL (absolute-cap)'), noFloor);
-  assert.strictEqual(poisonedFloor, noFloor, 'a grossly-implausible stored floor must be discarded exactly like no floor at all');
+  const noFloor = seedAndGauge(null);
+  const poisonedFloor = seedAndGauge(999999999); // grossly larger than the measured footprint
+  assert.strictEqual(noFloor.band, 'FULL');
+  assert.strictEqual(noFloor.reason, 'absolute-cap');
+  // `at` legitimately differs (two separate process invocations) — compare
+  // every OTHER field, which must be byte-identical if the floor was truly discarded.
+  const { at: _a, ...noFloorRest } = noFloor;
+  const { at: _b, ...poisonedRest } = poisonedFloor;
+  assert.deepStrictEqual(poisonedRest, noFloorRest, 'a grossly-implausible stored floor must be discarded exactly like no floor at all');
 });
 
 test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no state file at all (conservative, never crashes)', () => {
@@ -601,13 +671,17 @@ test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no sta
       }
       const r = run(proj, home);
       assertGraceful(r);
-      return r.stdout;
+      assert.strictEqual(r.stdout, '');
+      return readProjState(home, proj).lastVerdict;
     } finally { clean(home, proj); }
   };
   const baseline = runWithStateContent(undefined); // no state file at all
-  assert.ok(baseline.includes('memory gauge: FULL (absolute-cap)'), baseline);
+  assert.strictEqual(baseline.band, 'FULL');
+  assert.strictEqual(baseline.reason, 'absolute-cap');
+  const { at: _base, ...baselineRest } = baseline; // `at` legitimately differs per invocation
   for (const content of ['', '{ definitely not json', '{"projects": {"C:\\\\foo": {"leanFloorTok', '[1,2,3]', 'null']) {
-    assert.strictEqual(runWithStateContent(content), baseline, `state content ${JSON.stringify(content)} must gauge identically to no state file`);
+    const { at: _c, ...rest } = runWithStateContent(content);
+    assert.deepStrictEqual(rest, baselineRest, `state content ${JSON.stringify(content)} must gauge identically to no state file`);
   }
 });
 

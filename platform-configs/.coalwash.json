@@ -1,8 +1,8 @@
 {
-  // Master switch. auto = the session-start gauge measures class-B footprint and
-  // nudges by band (LEAN silent / PLUMP ask / OBESE strong-ask / FULL economic
-  // force — every cut snapshot-backed and revertible); manual = gauge silent, you run
-  // /coalwash yourself; off = fully silent.
+  // Master switch. auto = the session-start gauge measures class-B footprint
+  // and arms the Stop-hook ask/directive by ceiling (LEAN silent / OBESE ask /
+  // FULL economic force — every cut snapshot-backed and revertible); manual =
+  // gauge silent, you run /coalwash yourself; off = fully silent.
   "coalwashMode": "auto",
 
   // Language for prompts and nudges. auto = follow the conversation's language;
@@ -14,9 +14,10 @@
   // ("buying a bigger SSD") — the agent never raises it for you.
   "fullPercent": 6,
 
-  // Low-water clean-to target as % of capacity (anti-thrash hysteresis: fire at
-  // fullPercent, clean down to targetPercent). Must sit below fullPercent; an
-  // inverted pair degrades to the defaults on read.
+  // Clean-to depth target as % of capacity (below fullPercent). Agent guidance
+  // for the wash's clean-to depth (references/method.md §3) — NOT the anti-flap
+  // hysteresis (that job moved to caliper.mjs's BMI Schmitt trigger); no band-math
+  // reads this key today. An inverted pair degrades to the defaults on read.
   "targetPercent": 3,
 
   // Per-file size cap in KB before a class-B file is flagged oversize
@@ -46,10 +47,11 @@
 
   // Per-ceiling exercise the Stop-hook ask offers when a band ceiling is
   // crossed (quick = free mechanical pass; full = the paid semantic pass,
-  // always a separate consent). plump/obese/full key by the DESTINATION band
-  // reached. The fat-only scoping refinement is a later release —
-  // 'full' here is today's shipped Full pass.
-  "exercisePerBand": { "plump": "quick", "obese": "full", "full": "full" },
+  // always a separate consent). obese/full key by the DESTINATION band
+  // reached (beta.12 band-collapse retired the separate plump rung). The
+  // fat-only scoping refinement is a later release — 'full' here is today's
+  // shipped Full pass.
+  "exercisePerBand": { "obese": "quick", "full": "full" },
 
   // FULL+economical crossing behavior at the Stop hook. auto = standing
   // consent runs the free mechanical Quick pass immediately (the rot-canary
@@ -57,5 +59,15 @@
   // stays snapshot-backed and revertible; ask = FULL asks like other ceilings (ทำ/later);
   // off = same as ask — never silent: 'ask'/'off' suppress only the auto-run
   // authorization, never the user's awareness of FULL.
-  "forceMode": "auto"
+  "forceMode": "auto",
+
+  // Extra path PREFIXES (relative to their own project/global root, forward
+  // slashes) auto-declared MANAGED — a sync-owned pack (e.g. a shared rules
+  // directory kept in lockstep across projects) is never proposed for a
+  // local wash, the same class as skills/commands/hooks. The default []
+  // relies on the byte-identical-across-roots heuristic alone (a project
+  // file that mirrors a global file at the same relative path); add entries
+  // here only for a managed tree that heuristic cannot see (e.g. no global
+  // counterpart exists to compare against).
+  "managedPaths": []
 }
