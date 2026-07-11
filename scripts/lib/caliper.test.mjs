@@ -3,7 +3,6 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   tokensEst, tokensEstFromBytes, gzipRatio, measureEntries, statOnlyFootprintBytes,
   bandVerdict, breakEven, sessionsPerDay, gaugeVerdict,
@@ -552,15 +551,23 @@ test('consumeCrossing: orphan-prune still runs on this write path', () => {
 });
 
 // ---------------------------------------------------------------------------
-// statOnlyFootprintBytes + the WARP-HOLE PERF GATE (beta.13 item 3) — the
-// cheap half's own cost, measured, and the naive full re-gauge's cost
-// documented alongside it so the ship/no-ship decision is grounded in a
-// number, not assumption. Real (non-sandboxed) numbers observed on this
-// repo's own room (CoalWash, 11 always-loaded files): statOnlyFootprintBytes
-// ~0.15-0.3ms · discoverClassB+measureEntries ~7-18ms. The assertions below
-// use generous CI-safe bounds (never the exact local numbers, to avoid
-// flaking on a slower machine) while still proving the two are on
-// different ORDERS of magnitude.
+// statOnlyFootprintBytes + the WARP-HOLE STRUCTURAL GATE (beta.13 item 3).
+// The design claim ("the stat-only gate is fundamentally cheaper than a full
+// re-gauge") is proven STRUCTURALLY below — zero content reads on the cheap
+// path vs real content reads on the full path — never by a stopwatch: the
+// original PERF-GATE version of this test timed the LIVE REPO as its fixture
+// and asserted a >=3x wall-clock ratio, which failed deterministically on
+// every CI leg (the dev box's class-B store is gitignored MEMORY.md/CLAUDE.md
+// — absent on a CI checkout, so the "full" gauge was as cheap as the stat)
+// — a double violation of our own rules: a hermetic-isolation leak (fixture
+// = untracked dev-machine state) AND a real-clock ratio in a unit test.
+// The measured dev-box numbers stay ON RECORD as engineering data, not a CI
+// gate: statOnlyFootprintBytes ~0.13-0.32ms · discoverClassB+measureEntries
+// ~6.6-17.9ms on the real CoalWash room (11 always-loaded files), recorded
+// 2026-07-11 (see MEMORY.md "WARP-HOLE + WARM COST" / the beta.14 CHANGELOG);
+// caliper.mjs's own statOnlyFootprintBytes comment carries the reproduce
+// recipe — "the timing itself is deliberately NOT a flaky in-suite
+// ms-assertion", which this file now finally conforms to.
 // ---------------------------------------------------------------------------
 
 test('statOnlyFootprintBytes: sums current byte sizes for existing paths; a missing path contributes 0 (a legitimate shrink signal, never a throw)', () => {
@@ -578,33 +585,48 @@ test('statOnlyFootprintBytes: sums current byte sizes for existing paths; a miss
   } finally { clean(home, proj); }
 });
 
-test('WARP-HOLE PERF GATE: statOnlyFootprintBytes is cheap enough for the Phoenix #3 happy-path budget; a full discoverClassB+measureEntries re-gauge is measurably (>=3x) more expensive on the SAME repo', () => {
-  // Time against THIS repo's own room (a real, non-trivial governance tree —
-  // the flock's heaviest single store per MEMORY.md's "estate wash" finding)
-  // rather than a synthetic fixture, so the numbers this decision rests on
-  // are the real ones, not a best-case sandbox.
-  // repo root doubles as home+project for this probe (harmless: home only
-  // matters for the global-scope walk, which finds nothing extra here).
-  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..'); // scripts/lib -> repo root
-  const disc = discoverClassB({ projectRoot: repoRoot, home: repoRoot });
-  const paths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
-  assert.ok(paths.length > 0, 'the probe needs a real always-loaded set to be meaningful');
+test('WARP-HOLE STRUCTURAL GATE: statOnlyFootprintBytes opens ZERO file content (stat only) while the full discoverClassB+measureEntries re-gauge DOES read content — the machine-independent reason the full pass is delta-gated', () => {
+  const { home, proj } = sandbox();
+  const realReadFileSync = fs.readFileSync;
+  try {
+    // Hermetic fixture store — never the live repo (its class-B files are
+    // gitignored and absent on CI). A project-level CLAUDE.md is an
+    // always-loaded class-B entry on any machine; the home/.claude dir is
+    // the platform marker discoverClassB's detection needs (the cli.test
+    // sandbox idiom).
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'a'.repeat(4096), 'utf8');
+    const disc = discoverClassB({ projectRoot: proj, home });
+    const alwaysPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
+    assert.ok(alwaysPaths.length > 0, 'fixture self-check: the sandbox store has an always-loaded set');
+    const expectedBytes = alwaysPaths.reduce((s, p) => s + fs.statSync(p).size, 0);
 
-  // warm the OS file cache identically for both measurements before timing
-  statOnlyFootprintBytes(paths);
-  discoverClassB({ projectRoot: repoRoot, home: repoRoot });
+    // Instrument content reads: node:fs's default export is a shared
+    // singleton, so counting through it observes caliper.mjs/class-b.mjs's
+    // own calls. The wrapper still delegates — nothing can break under it.
+    let contentReads = 0;
+    fs.readFileSync = (...args) => { contentReads++; return realReadFileSync(...args); };
 
-  const t0 = process.hrtime.bigint();
-  statOnlyFootprintBytes(paths);
-  const cheapMs = Number(process.hrtime.bigint() - t0) / 1e6;
+    // The CHEAP half: the stat-only gate must produce the correct byte total
+    // WITHOUT a single content read — that absence is the structural core of
+    // the ">=Nx cheaper" claim (stat = metadata; the full pass pays file
+    // opens + content decode), valid on any machine, no clock involved.
+    contentReads = 0;
+    const bytes = statOnlyFootprintBytes(alwaysPaths);
+    assert.strictEqual(contentReads, 0, 'the stat-only gate NEVER opens content — this is what keeps it inside the Phoenix #3 per-turn budget');
+    assert.strictEqual(bytes, expectedBytes, 'and it still returns the correct byte total from stats alone');
 
-  const t1 = process.hrtime.bigint();
-  const d2 = discoverClassB({ projectRoot: repoRoot, home: repoRoot });
-  measureEntries(d2.entries, { readBudgetBytes: 262144, withGzip: false });
-  const fullMs = Number(process.hrtime.bigint() - t1) / 1e6;
-
-  assert.ok(cheapMs < 20, `stat-only gate must stay comfortably under the Phoenix #3 happy-path budget (measured ${cheapMs.toFixed(2)}ms)`);
-  assert.ok(fullMs > cheapMs * 3, `the full re-gauge must be measurably (>=3x) more expensive than the cheap gate it justifies (cheap ${cheapMs.toFixed(2)}ms, full ${fullMs.toFixed(2)}ms) — this is WHY the full pass is gated, not unconditional`);
+    // The EXPENSIVE half: the full re-gauge genuinely reads content on the
+    // SAME fixture — the cost class the WARP-HOLE delta gate exists to avoid
+    // paying unconditionally on every Stop tick.
+    contentReads = 0;
+    const d2 = discoverClassB({ projectRoot: proj, home });
+    measureEntries(d2.entries, { readBudgetBytes: 262144, withGzip: false });
+    assert.ok(contentReads > 0, `the full discoverClassB+measureEntries pass DOES read content (observed ${contentReads} reads) — structurally heavier than the stat gate on the same store`);
+  } finally {
+    fs.readFileSync = realReadFileSync;
+    clean(home, proj);
+  }
 });
 
 // ---------------------------------------------------------------------------

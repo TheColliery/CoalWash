@@ -2,6 +2,11 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.1.0-beta.15] - 2026-07-11
+
+### Fixed
+- **CI determinism — the warp-hole perf test rewritten structural (`caliper.test.mjs`):** the old "PERF GATE" gauged the LIVE repo as its fixture and asserted a wall-clock ≥3× ratio — green on the dev box (fat gitignored store), deterministically red on every CI checkout (those files don't exist there; failed all 12 matrix legs across beta.13/beta.14, unnoticed at beta.13). Now the **STRUCTURAL GATE**: a hermetic sandbox fixture + an instrumented `fs.readFileSync` proving `statOnlyFootprintBytes` opens ZERO file content (byte-correct from stats alone) while the full re-gauge on the same fixture does read content — the design claim, machine-independent, no clock. The measured dev-box numbers stay recorded as engineering data in the section comment. Verified green under a simulated CI checkout (tracked-files-only copy). No shipped-behavior change; test count 380 unchanged.
+
 ## [0.1.0-beta.14] - 2026-07-11
 
 The authoritative 3-flow + the economics: the wizard ask moves to its ONE ruled site (FULL, after the forced Quick proves insufficient — OBESE never asks), FULL becomes the economic cut-point on top of the armed ceiling, the bins finally get fed and kept on a dual limit, and BMI is live from the moment of install. Reviewed FIX-FIRST → all findings closed. Engine tests 337 → 380.
