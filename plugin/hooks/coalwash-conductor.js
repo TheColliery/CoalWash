@@ -83,7 +83,6 @@
 // reimplements config-load silently diverged once in a sibling; never again).
 const path = require('node:path');
 const os = require('node:os');
-const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 
 const READ_BUDGET_BYTES = 262144; // max always-loaded content read on the hook path
