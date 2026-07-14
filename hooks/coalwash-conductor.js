@@ -143,7 +143,13 @@ function updateDue(cfg, clampedRead, caliper) {
   } catch { return false; }
 }
 
-async function handleSessionStart(input) {
+// opts (used by hooks/coalwash-ag.js — the AG 2.0 adapter reuses this EXACT
+// handler, one implementation): `emit` = the platform's sanctioned injection
+// channel (CC default: plain console.log context injection) · `updateNudge` =
+// false on AG (the nudge's payload — `claude plugin update` — is CC-plugin-
+// specific; AG installs by file-copy, so the CC command would be a wrong
+// instruction there; the same deliberate non-port as CoalHearth's AG shim).
+async function handleSessionStart(input, { emit = (text) => console.log(text), updateNudge = true } = {}) {
   const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, classB, caliper] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
@@ -253,13 +259,13 @@ async function handleSessionStart(input) {
     caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now, { quickTried, fatTokens, session: input && input.session_id });
   }
 
-  if (updateDue(cfg, clampedRead, caliper)) {
+  if (updateNudge && updateDue(cfg, clampedRead, caliper)) {
     out.push('[CoalWash] [self-update due] Offer the /coalwash:update check: web-check the latest CoalWash tag vs the installed plugin.json version; if newer, OFFER `claude plugin update coalwash@coalwash`; if current, say "up to date"; if git/network is unavailable, say so and suggest updating manually later (never assume). Consent-gated; the hook only scheduled it.');
   }
 
   if (out.length) {
     if (language !== 'auto') out.push(`[CoalWash] (language=${language} — deliver user-facing prose in that language; keep technical terms, commands, and paths verbatim)`);
-    console.log(out.join('\n')); // sanctioned SessionStart context-injection channel (Phoenix #13)
+    emit(out.join('\n')); // sanctioned SessionStart context-injection channel (Phoenix #13)
   }
 }
 
@@ -291,7 +297,10 @@ async function handleSessionStart(input) {
 // (the saving-guarantee floor). Post-0m the FULL surfacing is the forced
 // run's own receipt numbers (oneLineResult) — the user always sees what
 // happened; the wizard-escalation ask remains the only question ever asked.
-async function handleStop(input) {
+// opts.emit (AG adapter): AG has NO Stop-block semantics — its adapter injects
+// `{additionalContext}` instead, an honest ADVISORY degrade of this channel
+// (the crossing logic, consume-at-emission included, is byte-shared).
+async function handleStop(input, { emit = (reason) => process.stdout.write(JSON.stringify({ decision: 'block', reason })) } = {}) {
   if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
   const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, caliper, ask, classB] = await Promise.all([
     import(lib('config-load.mjs')),
@@ -420,7 +429,7 @@ async function handleStop(input) {
   }
 
   caliper.consumeCrossing(home, projectRoot, now); // once per crossing (consume-at-emission)
-  process.stdout.write(JSON.stringify({ decision: 'block', reason })); // sanctioned Stop blocking-feedback channel (Phoenix #13; mirrors rot-canary-stop.js)
+  emit(reason); // sanctioned Stop blocking-feedback channel (Phoenix #13; CC default mirrors rot-canary-stop.js)
 }
 
 // 0o "SUBAGENT BLIND SPOT" — the TRUE-BILL COUNTER (spawn meter). The
@@ -509,7 +518,7 @@ async function handleAirbag(input) {
 // same class as the conductor's own SessionStart injection), NEVER
 // {decision:'block'}, NEVER exit nonzero. Clean edits = silent. writeGuard
 // 'snapshot-only'/'off' silences the advisory (the airbag still ran).
-async function handleSeatbelt(input) {
+async function handleSeatbelt(input, { emit = (text) => console.log(text) } = {}) {
   try {
     if (!input || !WRITE_TOOLS.has(input.tool_name)) return; // belt: pre-import, ~free
     const p = touchedPath(input);
@@ -531,7 +540,7 @@ async function handleSeatbelt(input) {
     const language = clampedRead(cfg, 'language');
     const out = ask.seatbeltAdvisory({ file: r.file, classes: r.classes, snapshotPath: r.snapshotPath, oversize: r.oversize });
     const langLine = language !== 'auto' ? `\n[CoalWash] (language=${language} — deliver user-facing prose in that language; keep technical terms, commands, and paths verbatim)` : '';
-    console.log(out + langLine); // sanctioned advisory context-injection channel (Phoenix #13; advisory only, never a block)
+    emit(out + langLine); // sanctioned advisory context-injection channel (Phoenix #13; advisory only, never a block)
   } catch { /* fail-silent */ }
 }
 
@@ -550,7 +559,16 @@ async function main() {
   return handleSessionStart(input);
 }
 
-main().catch(() => {
-  // Phoenix #4: fail-silent, never throw, never crash the parent agent.
-});
+if (require.main === module) {
+  main().catch(() => {
+    // Phoenix #4: fail-silent, never throw, never crash the parent agent.
+  });
+}
 // No process.exit() — Phoenix #4 (would truncate the sanctioned stdout write above).
+
+// Required (never auto-run) by hooks/coalwash-ag.js — the Antigravity 2.0
+// adapter reuses these EXACT handlers (one implementation, no divergence;
+// the same one-flock shape as CoalHearth's shared journal-step core) and
+// injects its own sanctioned emit channel ({additionalContext} JSON) via the
+// opts params above.
+module.exports = { readStdinJson, handleSessionStart, handleStop, handleAirbag, handleSeatbelt, handleSpawnMeter };

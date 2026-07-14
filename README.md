@@ -8,7 +8,7 @@
 
 ![version](https://img.shields.io/github/v/tag/TheColliery/CoalWash?label=version&color=blue)
 ![license](https://img.shields.io/badge/license-Apache_2.0-blue)
-![status](https://img.shields.io/badge/status-rc-yellow)
+![status](https://img.shields.io/badge/status-beta-yellow)
 
 **Compatibility** ·
 ![Claude Code](https://img.shields.io/badge/Claude_Code-validated-brightgreen)
@@ -19,7 +19,7 @@
 ![Cline](https://img.shields.io/badge/Cline-works_with-blue)
 ![Copilot](https://img.shields.io/badge/Copilot-works_with-blue)
 
-<sub>The auto layer — the session-start gauge and the enforce/airbag hooks — is wired on **Claude Code** only today; on every other platform CoalWash runs manually via `/coalwash` after a file-copy install (the hooks are portable, just not yet built there). `validated` = tested end-to-end · `works_with` = runs via that documented install.</sub>
+<sub>The auto layer — the session gauge and the enforce/airbag hooks — is **validated on Claude Code**; on **Antigravity 2.0** the same hooks are now **wired** (adapter built + hermetically tested against the pilot-verified AG hook spec, 2026-07-12 — live AG validation pending, and Stop enforcement degrades to advisory there: [`platform-ag.md`](skills/coalwash/references/platform-ag.md)); on every other platform CoalWash runs manually via `/coalwash` after a file-copy install. `validated` = tested end-to-end · `wired` = built + tested against the verified hook spec, live validation pending · `works_with` = runs via that documented install.</sub>
 
 [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Releases](https://github.com/TheColliery/CoalWash/releases)
 
@@ -89,7 +89,7 @@ One standing gauge sits at the chokepoint — memory loads every session, so a s
 | Aspect | Detail |
 |---|---|
 | **Validation** | Cross-agent by design — zero-dependency Node scripts any agent can run, class-B layout *discovered* per platform, never hardcoded — but **validated end-to-end on Claude Code only**; every other platform is designed-degrade-safe, not yet validated. Unknown platform: the agent proposes files it can *see* auto-loaded in its context, code certifies each, a human confirms — still never auto-delete |
-| **Activation ladder** | Capability-keyed: lifecycle hooks → the gauge runs automatically (Claude Code today); no hooks → best-effort agent-driven offer (probabilistic, not hook parity); always → manual `/coalwash`. Band crossings resolve on the `Stop` hook (the same blocking channel `rot-canary` uses), so whatever surfaces is enforced, not suggested — edge-triggered, never a repeating nag. Hookless platform: one best-effort offer, no repeat |
+| **Activation ladder** | Capability-keyed: lifecycle hooks → the gauge runs automatically (Claude Code validated; Antigravity 2.0 **wired** — designed-for, unvalidated: [`platform-ag.md`](skills/coalwash/references/platform-ag.md)); no hooks → best-effort agent-driven offer (probabilistic, not hook parity); always → manual `/coalwash`. Band crossings resolve on the `Stop` hook (the same blocking channel `rot-canary` uses), so whatever surfaces is enforced, not suggested — edge-triggered, never a repeating nag. **Antigravity has no Stop-block semantics — there the Stop delivery is advisory context injection, and `/coalwash` stays the reliability floor.** Hookless platform: one best-effort offer, no repeat |
 | **The list is a mirror, not a list** | CoalWash keeps no hand-maintained inventory of always-loaded memory — the list *mirrors* the real load list: whatever the platform delivers into the agent's context is class-B, whether company-wired, user-wired, or a future update adds a surface that doesn't exist today. A new auto-loaded file enters the measurement by definition, no code change. On known platforms this runs as a cheap drift-check at wizard entry (agent-seen vs adapter-listed, flagging adapter rot the day it happens); every candidate is code-certified — exists, contained in the home/project trees, on-disk head matches what the agent actually saw load — so a hallucinated or spoofed entry can never join the measurement. Fail direction: undercount — unseen is unmeasured is uncut |
 | **A well-behaved guest on your disk** | CoalWash keeps its own per-project bookkeeping (the session gauge's state) *inside* the platform's own project directory — on Claude Code, beside the memory folder it measures — so the platform's lifecycle carries it: remove a project, its state goes too, for free. Every path CoalWash derives is realpath-contained to the config root (`~/.claude`) and fails closed — never a byte outside it. Validated on Claude Code's layout; other platforms get the same one-namespace discipline, designed-for, not yet validated |
 
@@ -102,7 +102,7 @@ claude plugin marketplace add TheColliery/CoalWash
 claude plugin install coalwash@coalwash
 ```
 
-**Other agents** (Antigravity · Cursor · Codex · Gemini CLI · Cline · Copilot) — file-copy: copy `skills/coalwash/` (skill + references) and `scripts/lib/` (the engine) into your platform's skill directory, keeping the relative layout (`skills/coalwash/SKILL.md` resolves the engine at `../../scripts/lib`). On **Antigravity** that directory is `~/.gemini/config/skills/` (global) or `<workspace>/.agents/skills/` (per-project). The gauge hook is Claude-Code-only; elsewhere run `/coalwash` manually. No API keys, no network, no `npm install`.
+**Other agents** (Antigravity · Cursor · Codex · Gemini CLI · Cline · Copilot) — file-copy: copy `skills/coalwash/` (skill + references) and `scripts/lib/` (the engine) into your platform's skill directory, keeping the relative layout (`skills/coalwash/SKILL.md` resolves the engine at `../../scripts/lib`). On **Antigravity** that directory is `~/.gemini/config/skills/` (global) or `<workspace>/.agents/skills/` (per-project) — and AG 2.0's hook engine can now run the auto layer too (**wired** — designed-for, unvalidated): copy the whole plugin tree (the hook adapter imports `../scripts/lib`), then copy [`platform-configs/hooks.json`](platform-configs/hooks.json) to `<workspace>/.agents/hooks.json` or `~/.gemini/config/hooks.json` and replace `__COALWASH_DIR__`; event mapping, honest degrades (no Stop-block on AG — delivery is advisory context injection), and the 5 named limitations: [`platform-ag.md`](skills/coalwash/references/platform-ag.md). On every other platform run `/coalwash` manually. No API keys, no network, no `npm install`.
 
 > [!TIP]
 > Install **globally** — CoalWash is a maintenance utility you want available everywhere, and it still operates per-project, per-session. A project config can tune or shut it off locally.

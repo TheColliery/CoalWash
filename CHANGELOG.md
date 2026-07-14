@@ -2,6 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.2.0-beta.1] - 2026-07-14
+
+**MINOR — opens the 0.2.0 pre-release line.** The auto layer reaches Antigravity: AG 2.0 shipped a real hook engine (`hooks.json`; empirical pilot 2026-07-12, corroborated against the official docs 2026-07-13). A new capability cannot ride the 0.1.0 rc stream (rc = feature-frozen, bugfix-only by this repo's own gate — and the rc→stable proof requires a field stretch with NO code change), so this ships as the 0.2.0 line's first **beta**; the internal-proven → field-proven discipline continues inside it. Honest tier: **wired / designed-for, UNVALIDATED on AG** — built + hermetically tested against the verified spec; whether AG delivers the injected context into the agent is not live-validated ([`platform-ag.md`](skills/coalwash/references/platform-ag.md)).
+
+### Added
+- **`hooks/coalwash-ag.js`** — a thin AG transport adapter requiring the SAME `hooks/coalwash-conductor.js` handlers (one implementation, no reimplementation): the session gauge rides the FIRST `PreInvocation` of a session (AG never fires `SessionStart`; a per-session tmp marker keeps it once-per-session — PreInvocation fires per model call) · `Stop` delivers the band directive/ask as one `{"additionalContext"}` JSON line — an ADVISORY degrade of Claude Code's Stop-block (AG has no `{decision:'block'}` semantics; the user-press `/coalwash` path remains the reliability floor) · `PreToolUse`/`PostToolUse` run the 0p airbag/seatbelt through a defensive tool-name/args normalize (an unmapped tool is a no-op, never a wrong guard).
+- **`platform-configs/hooks.json`** — the AG wiring template, all four events (copy to `<workspace>/.agents/hooks.json` or `~/.gemini/config/hooks.json`, replace `__COALWASH_DIR__`).
+- **`skills/coalwash/references/platform-ag.md`** — the AG adapter facts: status (designed-for, unvalidated), event mapping, install, and the 5 named limitations.
+- `hooks/coalwash-conductor.js` handlers gained explicit opts parameters for the adapter; defaults are byte-identical on the Claude Code path.
+- **Deliberately NOT wired on AG: the 0o spawn meter** — AG's subagent-spawn tool name is unverified, and a guessed increment would fabricate the true-bill numbers that justify the FULL force (numbers-shown must be TRUE); on AG the bill covers the main session only. The self-update nudge is also not ported (`claude plugin update` is CC plugin machinery; on AG, update by re-copying).
+- +10 hermetic tests → 462.
+
 ## [0.1.0-rc.3] - 2026-07-12
 
 The well-behaved-OS-citizen relocation (series law: one namespace, no scatter). CoalWash's per-session state stops littering `~/.claude/`'s root as a scattered dotfile and moves into a namespaced, memory-anchored home — with a transparent one-time migration that deletes the old files. rc-line, PATCH-class: a defect fix (the OS-scatter mess), no new capability, migration is transparent (nothing a user relied on breaks). rc → stable resumes after this proves in the field with no further code change.
