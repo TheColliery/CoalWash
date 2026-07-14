@@ -24,16 +24,13 @@ const LIBS = [
 console.log('files:');
 for (const [label, p] of [
   ['hooks/coalwash-conductor.js', path.join(repo, 'hooks', 'coalwash-conductor.js')],
-  ['hooks/coalwash-ag.js', path.join(repo, 'hooks', 'coalwash-ag.js')],
   ['hooks/hooks.json', path.join(repo, 'hooks', 'hooks.json')],
-  ['platform-configs/hooks.json (AG template)', path.join(repo, 'platform-configs', 'hooks.json')],
   ['.claude-plugin/plugin.json', path.join(repo, '.claude-plugin', 'plugin.json')],
   ['.claude-plugin/marketplace.json', path.join(repo, '.claude-plugin', 'marketplace.json')],
   ['platform-configs/.coalwash.json', path.join(repo, 'platform-configs', '.coalwash.json')],
   ['skills/coalwash/SKILL.md', path.join(repo, 'skills', 'coalwash', 'SKILL.md')],
   ['skills/coalwash/references/method.md', path.join(repo, 'skills', 'coalwash', 'references', 'method.md')],
   ['skills/coalwash/references/platform-cc.md', path.join(repo, 'skills', 'coalwash', 'references', 'platform-cc.md')],
-  ['skills/coalwash/references/platform-ag.md', path.join(repo, 'skills', 'coalwash', 'references', 'platform-ag.md')],
   ['commands/stats.md', path.join(repo, 'commands', 'stats.md')],
   ['commands/update.md', path.join(repo, 'commands', 'update.md')],
   ['LICENSE', path.join(repo, 'LICENSE')],
