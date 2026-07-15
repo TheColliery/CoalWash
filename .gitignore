@@ -6,6 +6,7 @@ AGENTS.md
 .agents/
 COALWASH_BLUEPRINT.md
 SENIOR-INCIDENT-AUDIT.md
+LAB-ARCHIVE.md
 
 # Dependencies / build cruft
 node_modules/
