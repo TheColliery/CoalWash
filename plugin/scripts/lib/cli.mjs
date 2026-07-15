@@ -12,6 +12,13 @@
 //   node scripts/lib/cli.mjs writeguard-list
 //   node scripts/lib/cli.mjs writeguard-restore <snapName>
 //   node scripts/lib/cli.mjs anchor-diff <path> [--json]
+//   node scripts/lib/cli.mjs estate [--json]
+//
+// estate (class-A ESTATE layer P1, COALWASH_BLUEPRINT.md §19 — REPORT ONLY,
+// zero mutation): discovers this project's own CC session transcripts +
+// overflow dirs, measures total/per-type bytes, flags machine-wide orphan
+// slug dirs (best-effort), and prints a heuristic ~est reclaimable figure.
+// Never deletes/archives/edits anything — P2/P3 are future, separate work.
 //
 // anchor-diff <path> (loss class #54 — generational-compounding, ADVISORY
 // ONLY): diffs the file's OLDEST verified CoalWash snapshot against its
@@ -62,6 +69,7 @@ import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
 import { loadMergedConfig, findProjectRoot } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
+import { estateReport } from './estate.mjs';
 
 // The full gauge, importable (tests and /stats call it directly; the CLI main
 // below is just argv plumbing around it). Pure composition — no state writes.
@@ -134,7 +142,7 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   return { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json]';
 
 function main() {
   const args = process.argv.slice(2);
@@ -200,6 +208,15 @@ function main() {
         : `[CoalWash] ${target}: no verified CoalWash snapshot on disk for this file yet — nothing to compare.`);
     } catch (e) {
       console.error(`anchor-diff failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'estate') {
+    try {
+      const projectRoot = findProjectRoot(process.cwd(), os.homedir());
+      const r = estateReport({ projectRoot, home: os.homedir() });
+      console.log(args.includes('--json') ? JSON.stringify(r, null, 1) : r.text);
+    } catch (e) {
+      console.error(`estate failed: ${e.message}`);
       process.exitCode = 1;
     }
   } else {

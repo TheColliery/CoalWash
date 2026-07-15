@@ -31,6 +31,7 @@ const TESTS = [
   'scripts/lib/parcel.test.mjs',
   'scripts/lib/writeguard.test.mjs',
   'scripts/lib/anchor-diff.test.mjs',
+  'scripts/lib/estate.test.mjs',
   'scripts/build-plugin.test.mjs',
 ];
 
