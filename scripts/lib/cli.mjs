@@ -70,6 +70,10 @@ import { loadMergedConfig, findProjectRoot } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { estateReport } from './estate.mjs';
+import {
+  estateUltraScan, ultraBillLine, runEstate, runEstateReport,
+  searchIndex, searchLines, restoreSession, resolveArchiveDir,
+} from './estate-archive.mjs';
 
 // The full gauge, importable (tests and /stats call it directly; the CLI main
 // below is just argv plumbing around it). Pure composition — no state writes.
@@ -142,7 +146,26 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   return { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>]';
+
+// estate-scan / estate-run / estate-search / estate-restore (ULTRA, blueprint
+// §19 P2 partial — estate-archive.mjs): estate-scan = the non-mutating bill
+// (sessions per band + MB now -> ~MB after); estate-run = the wizard-consented
+// ULTRA execution (RUN-GATED BY CONTRACT: the SKILL invokes it only after the
+// wizard's ULTRA choice — it is never wired to a hook). --session <id> = the
+// caller's own current session id, excluded from every band absolutely.
+// estate-search greps the local dig-index; estate-restore decompresses one
+// archived session byte-exact to a scratch dir (or --to), never the live tree.
+function argAfter(args, flag) {
+  const i = args.indexOf(flag);
+  return i !== -1 && args[i + 1] ? args[i + 1] : null;
+}
+function estateOpts(args) {
+  const home = os.homedir();
+  const projectRoot = findProjectRoot(process.cwd(), home);
+  const estate = clampedRead(loadMergedConfig({ cwd: process.cwd(), home }), 'estate');
+  return { projectRoot, home, estate, currentSessionId: argAfter(args, '--session') };
+}
 
 function main() {
   const args = process.argv.slice(2);
@@ -217,6 +240,46 @@ function main() {
       console.log(args.includes('--json') ? JSON.stringify(r, null, 1) : r.text);
     } catch (e) {
       console.error(`estate failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'estate-scan') {
+    try {
+      const scan = estateUltraScan(estateOpts(args));
+      console.log(args.includes('--json') ? JSON.stringify(scan, null, 1) : ultraBillLine(scan));
+    } catch (e) {
+      console.error(`estate-scan failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'estate-run') {
+    try {
+      const res = runEstate(estateOpts(args));
+      console.log(runEstateReport(res));
+      if (!res.ok) process.exitCode = 1; // deferred/lock-held = loud, nothing touched
+    } catch (e) {
+      console.error(`estate-run failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'estate-search') {
+    const query = args.slice(1).filter((a) => !a.startsWith('--')).join(' ');
+    if (!query) { console.error(USAGE); process.exitCode = 1; return; }
+    try {
+      const { home, estate } = estateOpts(args);
+      console.log(searchLines(searchIndex(query, { archiveDir: resolveArchiveDir(estate, home) })));
+    } catch (e) {
+      console.error(`estate-search failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'estate-restore') {
+    const sessionId = args[1];
+    if (!sessionId || sessionId.startsWith('--')) { console.error(USAGE); process.exitCode = 1; return; }
+    try {
+      const { home, estate } = estateOpts(args);
+      const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: argAfter(args, '--to') });
+      if (!r.ok) { console.error(`estate-restore: ${r.error}`); process.exitCode = 1; return; }
+      console.log(`[CoalWash] restored ${r.files.length} file(s) of session ${sessionId} to ${r.dir} — byte-exact originals; nothing written into the live CC tree${argAfter(args, '--to') ? ' beyond your --to choice' : ''}`);
+      for (const f of r.files) console.log(`  ${f.rel} (${f.bytes} bytes)`);
+    } catch (e) {
+      console.error(`estate-restore failed: ${e.message}`);
       process.exitCode = 1;
     }
   } else {

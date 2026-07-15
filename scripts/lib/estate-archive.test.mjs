@@ -1,0 +1,405 @@
+// Hermetic tests for estate-archive.mjs — the ULTRA estate tier (blueprint
+// §19 P2 partial: compress + index + search + restore). Every test runs
+// against a sandboxed HOME + project; the real ~/.claude is NEVER touched
+// (the commission's hard boundary — the dir SHAPE is simulated, the one
+// real-world check was the read-only `claude project --help` purge probe,
+// documented in estate-archive.mjs's header).
+import { test } from 'node:test';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import {
+  resolveEstateCfg, resolveArchiveDir, chActiveSessionId, listSessions,
+  classifySessions, buildIndexRow, archiveSession, estateUltraScan,
+  ultraBillLine, runEstate, runEstateReport, searchIndex, searchLines,
+  restoreSession, ESTATE_INDEX_NAME,
+} from './estate-archive.mjs';
+import { ccProjectSlug } from './class-b.mjs';
+import { acquireLock, globalLockPath } from './apply.mjs';
+import { CONFIG_SCHEMA, clampedRead, validateConfig } from './config-schema.mjs';
+
+delete process.env.CLAUDE_CONFIG_DIR;
+
+const DAY_MS = 86400000;
+const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+function sandbox() {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwea-home-')));
+  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwea-proj-')));
+  return { home, proj };
+}
+function clean(...dirs) {
+  for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+}
+function write(p, content = 'x') {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, content, 'utf8');
+}
+function slugDirFor(home, proj) {
+  return path.join(home, '.claude', 'projects', ccProjectSlug(proj));
+}
+function ageFile(p, ageDays, now = Date.now()) {
+  const t = new Date(now - ageDays * DAY_MS);
+  fs.utimesSync(p, t, t);
+}
+// A minimal CC-shaped transcript: timestamps + user/assistant turns.
+function transcript(lines) {
+  return lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+}
+function fixtureTranscript() {
+  return transcript([
+    { type: 'user', timestamp: '2026-05-01T10:00:00Z', message: { role: 'user', content: 'Fix the Modloader wash pipeline in CoalWash please' }, cwd: 'x' },
+    { type: 'assistant', timestamp: '2026-05-01T10:01:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Working on Modloader now. CoalWash gate holds.' }] } },
+    { type: 'progress', timestamp: '2026-05-01T10:02:00Z' },
+    { type: 'assistant', timestamp: '2026-05-01T10:03:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Modloader done.' }] } },
+  ]);
+}
+// Seed one aged session (jsonl + meta sibling + tool-results overflow).
+function seedSession(home, proj, id, ageDays, { content } = {}) {
+  const slugDir = slugDirFor(home, proj);
+  const jsonl = path.join(slugDir, `${id}.jsonl`);
+  write(jsonl, content ?? fixtureTranscript());
+  const meta = path.join(slugDir, `${id}.meta.json`);
+  write(meta, '{"m":1}');
+  const tool = path.join(slugDir, id, 'tool-results', 'r1.txt');
+  write(tool, 'tool-output-'.repeat(10));
+  for (const p of [jsonl, meta, tool]) ageFile(p, ageDays);
+  return { jsonl, meta, tool };
+}
+function estateCfg(over = {}) {
+  return { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, ...over };
+}
+
+// ---------------------------------------------------------------------------
+// config: schema clamp + ordering guard + archive dir resolution
+// ---------------------------------------------------------------------------
+
+test('config: estate clamps per sub-key — partial object fills defaults, an invalid sub-key degrades alone, unknown sub-key is a validate error', () => {
+  const spec = CONFIG_SCHEMA.find((s) => s.key === 'estate');
+  assert.ok(spec, 'estate key present in the schema');
+  assert.deepStrictEqual(clampedRead({}, 'estate'), spec.def, 'absent -> full defaults');
+  assert.deepStrictEqual(
+    clampedRead({ estate: { compressAfterDays: 7 } }, 'estate'),
+    { ...spec.def, compressAfterDays: 7 },
+    'partial object keeps the rest at defaults',
+  );
+  const clamped = clampedRead({ estate: { purgeAfterDays: -5, deleteCold: 'yes' } }, 'estate');
+  assert.strictEqual(clamped.purgeAfterDays, 180, 'out-of-range int -> its own default');
+  assert.strictEqual(clamped.deleteCold, false, 'wrong-typed bool -> its own default');
+  assert.ok(validateConfig({ estate: { nope: 1 } }).some((e) => e.includes("unknown sub-key 'nope'")), 'unknown sub-key reported');
+  assert.strictEqual(validateConfig({ estate: { compressAfterDays: 30 } }).length, 0, 'partial estate object is valid');
+});
+
+test('config: resolveEstateCfg ordering guard — an inverted purge<compress clamps purge UP (empty WARM band = less mutation, the safe direction); 0 stays never', () => {
+  assert.strictEqual(resolveEstateCfg(estateCfg({ compressAfterDays: 100, purgeAfterDays: 50 })).purgeAfterDays, 100);
+  assert.strictEqual(resolveEstateCfg(estateCfg({ purgeAfterDays: 0 })).purgeAfterDays, 0, '0 = never-COLD survives the guard');
+});
+
+test('config: resolveArchiveDir — "" and a RELATIVE dir both fall back to ~/.claude/coal/coalwash/estate-archive; an absolute dir is honored', () => {
+  const { home } = sandbox();
+  try {
+    const def = path.join(home, '.claude', 'coal', 'coalwash', 'estate-archive');
+    assert.strictEqual(resolveArchiveDir(estateCfg(), home), def);
+    assert.strictEqual(resolveArchiveDir(estateCfg({ archiveDir: 'rel/dir' }), home), def, 'relative -> default (fail-safe)');
+    const abs = path.join(home, 'elsewhere');
+    assert.strictEqual(resolveArchiveDir(estateCfg({ archiveDir: abs }), home), path.resolve(abs));
+  } finally { clean(home); }
+});
+
+// ---------------------------------------------------------------------------
+// band classification
+// ---------------------------------------------------------------------------
+
+test('bands: mtime classifies active/warm/cold; the current session and a CoalHearth in-progress journal session are ACTIVE regardless of age', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-fresh', 1);
+    seedSession(home, proj, 'sess-warm', 30);
+    seedSession(home, proj, 'sess-cold', 200);
+    seedSession(home, proj, 'sess-current', 40); // old, but IS the caller's session
+    seedSession(home, proj, 'sess-ch', 40); // old, but a CH journal names it in-progress
+    write(path.join(proj, '.claude', 'coalhearth', 'session_handoff.json'),
+      JSON.stringify({ status: 'in_progress', sessionId: 'sess-ch' }));
+
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg(), currentSessionId: 'sess-current' });
+    const band = Object.fromEntries(c.sessions.map((s) => [s.id, s.band]));
+    assert.strictEqual(band['sess-fresh'], 'active', 'younger than compressAfterDays');
+    assert.strictEqual(band['sess-warm'], 'warm');
+    assert.strictEqual(band['sess-cold'], 'cold');
+    assert.strictEqual(band['sess-current'], 'active', 'current-session guard is absolute');
+    assert.strictEqual(band['sess-ch'], 'active', 'CoalHearth in-progress journal guard');
+    assert.strictEqual(chActiveSessionId(proj), 'sess-ch');
+  } finally { clean(home, proj); }
+});
+
+test('bands: a session unit = jsonl + flat <sid>.* siblings + the <sid>/ dir; an orphan dir with no jsonl is NOT a session; a completed CH journal guards nothing', () => {
+  const { home, proj } = sandbox();
+  try {
+    const slugDir = slugDirFor(home, proj);
+    seedSession(home, proj, 'sess-a', 30);
+    write(path.join(slugDir, 'orphan-dir', 'subagents', 'x.jsonl'), 'orphan'); // GH #59248 shape
+    write(path.join(proj, '.claude', 'coalhearth', 'session_handoff.json'),
+      JSON.stringify({ status: 'completed', sessionId: 'sess-a' }));
+
+    const l = listSessions({ projectRoot: proj, home });
+    assert.strictEqual(l.sessions.length, 1, 'only the jsonl-anchored unit');
+    const rels = l.sessions[0].files.map((f) => f.rel.split(path.sep).join('/')).sort();
+    assert.deepStrictEqual(rels, ['sess-a.jsonl', 'sess-a.meta.json', 'sess-a/tool-results/r1.txt']);
+    assert.strictEqual(chActiveSessionId(proj), null, 'completed journal = no guard');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// copy-verify-then-delete
+// ---------------------------------------------------------------------------
+
+test('archive success: originals gone, every .gz decompresses byte-exact, index row appended with the dig fields', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    const origBytes = fs.readFileSync(files.jsonl);
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
+
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.archived.length, 1);
+    assert.strictEqual(res.failed.length, 0);
+    for (const p of Object.values(files)) assert.ok(!fs.existsSync(p), `original deleted: ${p}`);
+    const slug = ccProjectSlug(proj);
+    const gz = path.join(res.archiveDir, slug, 'sess-warm.jsonl.gz');
+    assert.ok(fs.existsSync(gz), 'archive written under <archiveDir>/<slug>/');
+    assert.ok(zlib.gunzipSync(fs.readFileSync(gz)).equals(origBytes), 'archive round-trips byte-exact');
+
+    const rows = fs.readFileSync(path.join(res.archiveDir, ESTATE_INDEX_NAME), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.strictEqual(rows.length, 1);
+    const r = rows[0];
+    assert.strictEqual(r.sessionId, 'sess-warm');
+    assert.strictEqual(r.projectSlug, slug);
+    assert.strictEqual(r.startISO, '2026-05-01T10:00:00Z');
+    assert.strictEqual(r.endISO, '2026-05-01T10:03:00Z');
+    assert.strictEqual(r.msgCount, 3, 'user+assistant turns only (progress line skipped)');
+    assert.ok(r.firstUserLine.startsWith('Fix the Modloader'), 'firstUserLine captured');
+    assert.ok(r.topEntities.includes('Modloader') && r.topEntities.includes('CoalWash'), 'entities extracted');
+    assert.strictEqual(r.bytes, res.archived[0].bytes);
+  } finally { clean(home, proj); }
+});
+
+test('corrupted archive (verify mismatch): originals KEPT, partial .gz removed, failure reported — never a delete on a failed verify', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    // Inject a gzip that emits VALID gzip of the WRONG bytes -> byte-compare fails.
+    const badGzip = () => zlib.gzipSync(Buffer.from('tampered'));
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg(), gzip: badGzip });
+
+    assert.strictEqual(res.archived.length, 0);
+    assert.strictEqual(res.failed.length, 1);
+    assert.ok(res.failed[0].reason.includes('verify mismatch'));
+    for (const p of Object.values(files)) assert.ok(fs.existsSync(p), `original kept: ${p}`);
+    const slugDir = path.join(res.archiveDir, ccProjectSlug(proj));
+    const leftovers = fs.existsSync(slugDir)
+      ? fs.readdirSync(slugDir, { recursive: true }).filter((n) => String(n).endsWith('.gz')) : [];
+    assert.deepStrictEqual(leftovers, [], 'partial archive cleaned up');
+    assert.ok(!fs.existsSync(path.join(res.archiveDir, ESTATE_INDEX_NAME)), 'no index row for a failed session');
+  } finally { clean(home, proj); }
+});
+
+test('mid-run interrupt (gzip throws on the 2nd file): every original intact — deletes are the LAST step per session', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    let calls = 0;
+    const dyingGzip = (buf) => { if (++calls === 2) throw new Error('interrupted'); return zlib.gzipSync(buf); };
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg(), gzip: dyingGzip });
+
+    assert.strictEqual(res.archived.length, 0);
+    assert.strictEqual(res.failed.length, 1);
+    for (const p of Object.values(files)) assert.ok(fs.existsSync(p), `original intact: ${p}`);
+  } finally { clean(home, proj); }
+});
+
+test('external-writer guard: an original that changes between listing and delete aborts the session (originals kept)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const sess = c.sessions.find((s) => s.id === 'sess-warm');
+    // Simulate a live writer landing AFTER the listing snapshot.
+    fs.appendFileSync(files.jsonl, JSON.stringify({ type: 'user', message: { content: 'late write' } }) + '\n');
+    const r = archiveSession(sess, { slug: c.slug, archiveDir: path.join(home, 'arch'), gzip: zlib.gzipSync });
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.reason.includes('changed during run'));
+    assert.ok(fs.existsSync(files.jsonl), 'original kept');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// COLD band — report-only by default, archive-then-delete only on explicit deleteCold
+// ---------------------------------------------------------------------------
+
+test('deleteCold=false (default): a COLD session is NEVER touched — listed in the report, which names the first-party purge lever', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-cold', 200);
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(res.coldListed.length, 1);
+    assert.strictEqual(res.archived.length, 0);
+    for (const p of Object.values(files)) assert.ok(fs.existsSync(p), `cold original untouched: ${p}`);
+    assert.ok(runEstateReport(res).includes('claude project purge'), 'report names the first-party lever');
+  } finally { clean(home, proj); }
+});
+
+test('deleteCold=true (explicit): COLD archives-then-deletes with a death-certificate line and a cold-flagged index row', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-cold', 200);
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg({ deleteCold: true }) });
+    assert.strictEqual(res.archived.length, 1);
+    assert.strictEqual(res.archived[0].cold, true);
+    for (const p of Object.values(files)) assert.ok(!fs.existsSync(p), 'cold original deleted after verified archive');
+    const cert = fs.readFileSync(path.join(res.archiveDir, ccProjectSlug(proj), 'death.log'), 'utf8');
+    assert.ok(cert.includes('destroyed-cold sess-cold') && cert.includes('archived+verified first'), 'death certificate appended');
+    const row = JSON.parse(fs.readFileSync(path.join(res.archiveDir, ESTATE_INDEX_NAME), 'utf8').trim());
+    assert.strictEqual(row.cold, true);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// lock + run-gate + localOnly
+// ---------------------------------------------------------------------------
+
+test('lock: the global CoalWash lock held elsewhere -> deferred, nothing touched', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    const other = acquireLock(globalLockPath(home), { sessionId: 'other-run' });
+    assert.strictEqual(other.acquired, true);
+    try {
+      const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.deferred, true);
+      assert.ok(fs.existsSync(files.jsonl), 'nothing touched while deferred');
+    } finally { other.release(); }
+  } finally { clean(home, proj); }
+});
+
+test('run-gate: no hook ever wires the estate mutators (0h-GUARD sibling — grep hooks/ must stay clean)', () => {
+  const hooksDir = path.join(repoDir, 'hooks');
+  for (const f of fs.readdirSync(hooksDir)) {
+    if (!/\.(js|mjs|cjs)$/.test(f)) continue;
+    const src = fs.readFileSync(path.join(hooksDir, f), 'utf8');
+    for (const name of ['estate-archive', 'runEstate', 'archiveSession', 'estateUltraScan']) {
+      assert.ok(!src.includes(name), `${f} must not reference ${name} — ULTRA is wizard-consented only, never ambient`);
+    }
+  }
+});
+
+test('localOnly does NOT block ULTRA: a localOnly:true config still archives (no content-bearing sub exists; the engine never reads the key)', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ localOnly: true }));
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    // The real CLI path (config load + clamp + run) via a child process, like the shipped commands run.
+    const r = spawnSync(process.execPath, [path.join(repoDir, 'scripts', 'lib', 'cli.mjs'), 'estate-run'], {
+      cwd: proj,
+      env: { ...process.env, USERPROFILE: home, HOME: home, CLAUDE_CONFIG_DIR: '' },
+      encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 0, `estate-run exits 0 (stderr: ${r.stderr})`);
+    assert.ok(r.stdout.includes('1 session(s) archived'), 'archived despite localOnly');
+    assert.ok(!fs.existsSync(files.jsonl), 'original gone');
+    // By-construction proof: the engine has no localOnly consumer — every
+    // mention in estate-archive.mjs is a comment line, never code.
+    const src = fs.readFileSync(path.join(repoDir, 'scripts', 'lib', 'estate-archive.mjs'), 'utf8');
+    for (const line of src.split('\n')) {
+      if (line.includes('localOnly')) assert.ok(line.trim().startsWith('//'), `localOnly must appear in comments only: ${line.trim()}`);
+    }
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// the dig doors — search + restore
+// ---------------------------------------------------------------------------
+
+test('estate-search: finds by entity and by firstUserLine text, case-insensitive; no match = the neutral line', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-warm', 30);
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(res.archived.length, 1);
+
+    const byEntity = searchIndex('modloader', { archiveDir: res.archiveDir });
+    assert.strictEqual(byEntity.length, 1, 'entity hit');
+    const byFirstLine = searchIndex('wash pipeline', { archiveDir: res.archiveDir });
+    assert.strictEqual(byFirstLine.length, 1, 'firstUserLine hit');
+    assert.strictEqual(searchIndex('no-such-thing-xyz', { archiveDir: res.archiveDir }).length, 0);
+    assert.ok(searchLines(byEntity).includes('sess-warm'));
+    assert.ok(searchLines([]).includes('no match'));
+  } finally { clean(home, proj); }
+});
+
+test('estate-restore: round-trips every file byte-exact to a scratch dir OUTSIDE the live tree; --to is honored; a traversal id is a clean error', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    const origJsonl = fs.readFileSync(files.jsonl);
+    const origTool = fs.readFileSync(files.tool);
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
+
+    const r = restoreSession('sess-warm', { archiveDir: res.archiveDir });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.files.length, 3);
+    assert.ok(!r.dir.startsWith(path.join(home, '.claude')), 'default target is a scratch dir, never the live tree');
+    assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm.jsonl')).equals(origJsonl), 'transcript byte-exact');
+    assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm', 'tool-results', 'r1.txt')).equals(origTool), 'overflow byte-exact');
+    clean(r.dir);
+
+    const to = path.join(home, 'chosen-restore');
+    const r2 = restoreSession('sess-warm', { archiveDir: res.archiveDir, to });
+    assert.strictEqual(r2.ok, true);
+    assert.strictEqual(r2.dir, path.resolve(to));
+    assert.ok(fs.existsSync(path.join(to, 'sess-warm.jsonl')));
+
+    const bad = restoreSession('..' + path.sep + 'escape', { archiveDir: res.archiveDir });
+    assert.strictEqual(bad.ok, false, 'traversal-shaped id rejected');
+    assert.strictEqual(restoreSession('sess-unknown', { archiveDir: res.archiveDir }).ok, false, 'unknown session -> clean not-found');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// the bill (pre-consent scan) + index determinism
+// ---------------------------------------------------------------------------
+
+test('estateUltraScan + ultraBillLine: counts per band, MB now -> ~est after, names the archive dir; scan mutates nothing', () => {
+  const { home, proj } = sandbox();
+  try {
+    const warm = seedSession(home, proj, 'sess-warm', 30);
+    seedSession(home, proj, 'sess-fresh', 1);
+    seedSession(home, proj, 'sess-cold', 200);
+    const scan = estateUltraScan({ projectRoot: proj, home, estate: estateCfg() });
+    assert.deepStrictEqual(
+      { sessions: scan.sessions, active: scan.active, warm: scan.warm, cold: scan.cold },
+      { sessions: 3, active: 1, warm: 1, cold: 1 },
+    );
+    assert.ok(scan.warmBytes > 0 && scan.estAfterBytes === Math.round(scan.warmBytes / 10));
+    const line = ultraBillLine(scan);
+    assert.ok(line.includes('~est 10:1') && line.includes(scan.archiveDir) && line.includes('report-only'));
+    assert.ok(fs.existsSync(warm.jsonl), 'scan is read-only');
+  } finally { clean(home, proj); }
+});
+
+test('buildIndexRow is deterministic and null-safe: same buffer -> same row; an unparseable/empty transcript degrades to null fields', () => {
+  const buf = Buffer.from(fixtureTranscript());
+  const a = buildIndexRow({ sessionId: 's', projectSlug: 'p', transcriptBuf: buf, totalBytes: 9, now: 0 });
+  const b = buildIndexRow({ sessionId: 's', projectSlug: 'p', transcriptBuf: buf, totalBytes: 9, now: 0 });
+  assert.deepStrictEqual(a, b, 'deterministic extraction');
+  assert.ok(a.topEntities.length <= 10);
+  const junk = buildIndexRow({ sessionId: 's', projectSlug: 'p', transcriptBuf: Buffer.from('not json\n{broken'), totalBytes: 2, now: 0 });
+  assert.strictEqual(junk.msgCount, 0);
+  assert.strictEqual(junk.firstUserLine, null);
+  assert.strictEqual(junk.startISO, null);
+  assert.deepStrictEqual(junk.topEntities, []);
+});

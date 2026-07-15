@@ -46,6 +46,17 @@ export const CONFIG_SCHEMA = [
   // both off. Advisory-only always (never blocks an edit). coalwashMode:off is
   // the master kill for this too.
   { key: 'writeGuard', type: 'enum', values: ['on', 'snapshot-only', 'off'], def: 'on', help: 'Write-path guard for class-B governance/memory files: on = snapshot-on-first-write + drop advisory; snapshot-only = airbag undo net, no advisory; off = disabled (advisory never blocks; default: on)' },
+  // ULTRA estate tier (class-A at-rest transcripts — blueprint §19 P2 partial,
+  // consumed by estate-archive.mjs ONLY inside a wizard-consented ULTRA run,
+  // never a hook/band). Sub-keys clamp independently (object type below); the
+  // compress<->purge ordering guard lives at the consumer (resolveEstateCfg).
+  { key: 'estate', type: 'object', fields: {
+    compressAfterDays: { type: 'int', min: 1, max: 3650, def: 14 },
+    purgeAfterDays: { type: 'int', min: 0, max: 36500, def: 180 },
+    deleteCold: { type: 'bool', def: false },
+    archiveDir: { type: 'string', def: '' },
+    indexEnabled: { type: 'bool', def: true },
+  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/; indexEnabled = write dig-index rows (default: {14, 180, false, "", true})' },
 ];
 
 // 0m tombstone — "FORCE IS A DICTATOR, NO OFF SWITCH" (USER 2026-07-11:
@@ -81,8 +92,23 @@ export function validateValue(spec, v) {
       return typeof v === 'string' && spec.values.includes(v.toLowerCase())
         ? null
         : `must be one of: ${spec.values.join(', ')}`;
+    case 'string':
+      return typeof v === 'string' ? null : 'must be a string';
     case 'stringList':
       return Array.isArray(v) && v.every((s) => typeof s === 'string') ? null : 'must be an array of strings';
+    case 'object': {
+      // fields = per-sub-key primitive specs; a PARTIAL object is valid (the
+      // clamp fills absent sub-keys with their own defaults), an unknown
+      // sub-key is an error (schema is the allowlist).
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return 'must be an object';
+      for (const [k, sub] of Object.entries(v)) {
+        const fieldSpec = spec.fields[k];
+        if (!fieldSpec) return `has an unknown sub-key '${k}'`;
+        const err = validateValue(fieldSpec, sub);
+        if (err) return `'${k}' ${err}`;
+      }
+      return null;
+    }
     case 'bandmap': {
       // values = a per-sub-key allowlist map (F3: each band declares its own
       // options — obese admits only 'quick').
@@ -122,6 +148,17 @@ export function clampedRead(cfg, key) {
   const spec = CONFIG_SCHEMA.find((s) => s.key === key);
   if (!spec) return undefined;
   const v = cfg ? cfg[key] : undefined;
+  if (spec.type === 'object') {
+    // Per-SUB-KEY clamp, rebuilt from the spec's OWN fields (same shape as
+    // bandmap below): each sub-key reads its value when valid, else ITS OWN
+    // factory default — a malformed sub-key degrades alone, never the block.
+    const raw = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    const out = {};
+    for (const [k, fieldSpec] of Object.entries(spec.fields)) {
+      out[k] = (raw[k] !== undefined && validateValue(fieldSpec, raw[k]) === null) ? raw[k] : fieldSpec.def;
+    }
+    return out;
+  }
   if (spec.type === 'bandmap') {
     // Per-SUB-KEY safer-value-wins clamp (F3, the CM v3.9.3 pattern),
     // rebuilt from the spec's OWN sub-keys (never the raw value's key set —

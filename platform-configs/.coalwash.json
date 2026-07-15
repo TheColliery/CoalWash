@@ -69,6 +69,20 @@
   // counterpart exists to compare against).
   "managedPaths": [],
 
+  // ULTRA estate tier (class-A at-rest transcripts; runs ONLY inside the
+  // wizard's third choice, never a hook/band — estate is disk, not context).
+  // compressAfterDays: sessions with no file younger than this are WARM ->
+  //   gzip-archived under archiveDir with copy-verify-then-delete (byte-exact,
+  //   restorable via `cli.mjs estate-restore <sessionId>`).
+  // purgeAfterDays: older than this = COLD (0 = never). Cold is REPORT-ONLY —
+  //   the first-party `claude project purge` is the delete lever — unless
+  //   deleteCold is explicitly true (archive-then-delete, death-certified).
+  // archiveDir: absolute path (another drive is fine); "" = the default under
+  //   ~/.claude/coal/coalwash/estate-archive.
+  // indexEnabled: append a dig-index row per archived session (searchable via
+  //   `cli.mjs estate-search <query>`; local file, never pushed anywhere).
+  "estate": { "compressAfterDays": 14, "purgeAfterDays": 180, "deleteCold": false, "archiveDir": "", "indexEnabled": true },
+
   // 0p WRITE-PATH SEATBELT + AIRBAG — the gate follows every hand, not just
   // CoalWash's own knife. on = snapshot-on-first-write to a class-B
   // governance/memory file (the undo net for the gitignored MEMORY.md/

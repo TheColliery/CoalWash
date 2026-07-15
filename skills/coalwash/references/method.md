@@ -221,3 +221,28 @@ console.log(billLine({ files: [FILES], fatTokens: [FAT_TOKENS_OR_NULL], bill }))
 ```
 
 Print `billLine`'s output VERBATIM — like `ask.mjs`'s templates, this is program-built text; never paraphrase or re-word it. `MINUTES_PER_PARTITION`/`TOKEN_RATE_PER_KB` (the bill's rate constants) are reasoned placeholders, not measured — never present the resulting band as a precise quote. `PARTITION_FILES`/`PARTITION_KB` (150 / 500) are the real, already-shipped partition threshold from §2, reused here as the billing unit.
+
+## 10. ULTRA — the class-A estate tier (`scripts/lib/estate-archive.mjs`, blueprint §19 P2 partial)
+
+Class-A at-rest = a closed session's files under `~/.claude/projects/<slug>/` (the transcript `<sid>.jsonl` + flat `<sid>.*` siblings + the `<sid>/` overflow dir — one SESSION UNIT). They fail the 4 washability tests (vendor-owned, machine-parsed), so ULTRA **never rewrites a byte inside one** — it only moves whole files recoverably. `memory/` stays class-B (§§0-8); a dir with no sibling `.jsonl` (an orphaned `subagents/` leftover) is never a session unit — the P1 report (`cli.mjs estate`) flags it, ULTRA does not touch it.
+
+**Bands (config `estate`, per session unit, age = the NEWEST file's mtime; uncertainty → ACTIVE):**
+
+| Band | Rule | Treatment |
+|---|---|---|
+| ACTIVE | the caller's own session (`--session <id>`), OR newest mtime younger than `compressAfterDays` (def 14), OR the session a CoalHearth `in_progress` journal names | skipped absolutely |
+| WARM | older than `compressAfterDays`, not COLD | gzip every file to `<archiveDir>/<slug>/<rel>.gz` — **copy-verify-then-delete**: write .gz → decompress it back → byte-compare vs the original → only when EVERY file of the session verifies are originals deleted (mismatch/interrupt = originals kept, partial archive removed, reported). External-writer guard: any original whose size/mtime moved since listing aborts its session. |
+| COLD | older than `purgeAfterDays` (def 180; 0 = never) | **report-only** — the report names the first-party `claude project purge` as the delete lever. Only an explicit `estate.deleteCold: true` archives-then-deletes (same verified protocol + a death-certificate line in `<archiveDir>/<slug>/death.log`). |
+
+**Commands (the whole ULTRA surface — code moves bytes, you never re-author content):**
+
+```bash
+node [LIB]/cli.mjs estate-scan [--session <your session id, if known>]   # the bill — sessions per band, MB now -> ~MB after (~est 10:1), archive dir named; print VERBATIM, only AFTER the ULTRA choice
+node [LIB]/cli.mjs estate-run  [--session <your session id, if known>]   # the consented run; print its report VERBATIM. Lock held elsewhere -> deferred, nothing touched
+node [LIB]/cli.mjs estate-search <query>                                 # dig: case-insensitive match over sessionId/slug/firstUserLine/topEntities in the local index
+node [LIB]/cli.mjs estate-restore <sessionId> [--to <dir>]               # byte-exact decompress to a scratch dir it prints (never the live tree unless --to says so)
+```
+
+**The dig-index** (`<archiveDir>/index.jsonl`, one code-generated row per archived session): `{sessionId, projectSlug, startISO, endISO, bytes, msgCount, firstUserLine (≤200 chars), topEntities (top ~10 uppercase-start tokens by frequency, deterministic), archivedAt, cold?}`. Local file under CoalWash's own namespace — a dig aid, never folded into any pushed report (§9b metrics-only law). `estate.indexEnabled: false` skips rows (restore still works — it scans the archive dir, not the index).
+
+**Honest ceilings:** the ~10:1 "MB after" figure is a display estimate, never a promise (the receipt reports measured bytes). An archived session leaves CC's own picker/resume for that session — VERIFIED as the sanctioned shape (the docs sanction hand-deleting transcripts, "new sessions are unaffected"; `claude project purge` is first-party) but the exact absent-file behavior was not live-mutation-tested — the archive + `estate-restore` path is the undo net regardless. Archive under the default `~/.claude/coal/coalwash/estate-archive/` (OS-citizen namespace) or an absolute `estate.archiveDir` (another drive is fine — the bill names the resolved dir before consent).
