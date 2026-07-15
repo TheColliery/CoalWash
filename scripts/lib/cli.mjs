@@ -13,6 +13,17 @@
 //   node scripts/lib/cli.mjs writeguard-restore <snapName>
 //   node scripts/lib/cli.mjs anchor-diff <path> [--json]
 //   node scripts/lib/cli.mjs estate [--json]
+//   node scripts/lib/cli.mjs dig-gauge <path...> [--json] [--session <id>]
+//
+// dig-gauge <path...> (ULTRA trigger #2 — dig-gauge.mjs, the PRE-READ
+// tollgate): an agent about to DIG old history passes the candidate paths a
+// search already found; dig-gauge stats them (fs.stat BYTES, NEVER a content
+// read → ~est tok at 4 chars/tok) and verdicts CLEAR/CRUSHING against the
+// config `estate.digCrush` priors. On CRUSHING it also surfaces the ULTRA
+// offer ONCE per session (--session dedups). REPORT-ONLY — a CRUSHING verdict
+// exits 0; declining proceeds with the raw dig, nothing is ever blocked. The
+// gauge is ~free insurance (~0.3k tok out) against the >=150k crush a raw dig
+// would re-carry every turn.
 //
 // estate (class-A ESTATE layer P1, COALWASH_BLUEPRINT.md §19 — REPORT ONLY,
 // zero mutation): discovers this project's own CC session transcripts +
@@ -62,8 +73,10 @@ import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
 import {
   measureEntries, bandVerdict, breakEven, sessionsPerDay,
-  loadState, sanitizeLeanFloor,
+  loadState, sanitizeLeanFloor, armDigGauge,
 } from './caliper.mjs';
+import { digGauge, digGaugeLine } from './dig-gauge.mjs';
+import { digGaugeOffer } from './ask.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './bins.mjs';
 import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
 import { loadMergedConfig, findProjectRoot } from './config-load.mjs';
@@ -74,6 +87,7 @@ import {
   estateUltraScan, ultraBillLine, runEstate, runEstateReport,
   searchIndex, searchLines, restoreSession, resolveArchiveDir,
 } from './estate-archive.mjs';
+import { retierScan, retierScanLines, runRetier, runRetierReport } from './retier.mjs';
 
 // The full gauge, importable (tests and /stats call it directly; the CLI main
 // below is just argv plumbing around it). Pure composition — no state writes.
@@ -146,7 +160,7 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   return { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>]';
 
 // estate-scan / estate-run / estate-search / estate-restore (ULTRA, blueprint
 // §19 P2 partial — estate-archive.mjs): estate-scan = the non-mutating bill
@@ -269,6 +283,36 @@ function main() {
       console.error(`estate-search failed: ${e.message}`);
       process.exitCode = 1;
     }
+  } else if (cmd === 'retier-scan') {
+    // RE-TIER (wizard's FOURTH choice) — the bill AFTER the choice: envelope
+    // state (band now vs target/arm/disarm), planned placement per item, #55
+    // contradiction flags. REPORT-ONLY: no lock, no state, no writes.
+    try {
+      const home = os.homedir();
+      const cfg = loadMergedConfig({ cwd: process.cwd(), home });
+      const scan = retierScan({ projectRoot: findProjectRoot(process.cwd(), home), home, retier: clampedRead(cfg, 'retier') });
+      console.log(args.includes('--json') ? JSON.stringify(scan, null, 1) : retierScanLines(scan));
+    } catch (e) {
+      console.error(`retier-scan failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'retier-run') {
+    // The transactional pass (RUN-GATED BY CONTRACT: the SKILL invokes it only
+    // after the wizard's RE-TIER choice — never wired to a hook). Refuses in
+    // the dead zone (LEAN-stop); lock held elsewhere -> deferred, untouched.
+    try {
+      const home = os.homedir();
+      const cfg = loadMergedConfig({ cwd: process.cwd(), home });
+      const res = runRetier({
+        projectRoot: findProjectRoot(process.cwd(), home), home,
+        retier: clampedRead(cfg, 'retier'), estate: clampedRead(cfg, 'estate'),
+      });
+      console.log(runRetierReport(res));
+      if (!res.ok) process.exitCode = 1; // refused/deferred/failed = loud
+    } catch (e) {
+      console.error(`retier-run failed: ${e.message}`);
+      process.exitCode = 1;
+    }
   } else if (cmd === 'estate-restore') {
     const sessionId = args[1];
     if (!sessionId || sessionId.startsWith('--')) { console.error(USAGE); process.exitCode = 1; return; }
@@ -280,6 +324,39 @@ function main() {
       for (const f of r.files) console.log(`  ${f.rel} (${f.bytes} bytes)`);
     } catch (e) {
       console.error(`estate-restore failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'dig-gauge') {
+    // ULTRA trigger #2 (dig-gauge.mjs) — the PRE-READ tollgate. Stats the
+    // candidate PATHS a search already found (NO content read), verdicts them
+    // against the config `digCrush` priors, and on CRUSHING surfaces the ULTRA
+    // offer ONCE per session (armDigGauge, keyed on --session). REPORT-ONLY: a
+    // CRUSHING verdict still exits 0 — declining proceeds with the raw dig,
+    // nothing is ever blocked. The ONE CLI subcommand that writes state (its
+    // own dedup flag only, and only on a CRUSHING+armed surface — a CLEAR dig
+    // writes nothing); every other subcommand's gauge/read stays state-clean.
+    const session = argAfter(args, '--session');
+    const paths = [];
+    for (let i = 1; i < args.length; i++) {
+      if (args[i] === '--json') continue;
+      if (args[i] === '--session') { i++; continue; } // skip the flag AND its value
+      paths.push(args[i]);
+    }
+    if (!paths.length) { console.error(USAGE); process.exitCode = 1; return; }
+    try {
+      const home = os.homedir();
+      const projectRoot = findProjectRoot(process.cwd(), home);
+      const thresholds = clampedRead(loadMergedConfig({ cwd: process.cwd(), home }), 'estate').digCrush;
+      const verdict = digGauge(paths, thresholds);
+      const surface = verdict.band === 'CRUSHING' ? armDigGauge(home, projectRoot, session).surface : false;
+      if (args.includes('--json')) {
+        console.log(JSON.stringify({ ...verdict, surface, offer: surface ? digGaugeOffer(verdict) : null }, null, 1));
+      } else {
+        console.log(digGaugeLine(verdict));
+        if (surface) console.log(digGaugeOffer(verdict));
+      }
+    } catch (e) {
+      console.error(`dig-gauge failed: ${e.message}`);
       process.exitCode = 1;
     }
   } else {

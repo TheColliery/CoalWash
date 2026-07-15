@@ -812,6 +812,29 @@ export function markQuickTried(home, projectRoot, now = Date.now()) {
   return saveState(proj, projectRoot, home);
 }
 
+// dig-gauge once-per-session arm (ULTRA trigger #2, dig-gauge.mjs): a CRUSHING
+// pre-read dig surfaces the ULTRA offer ONCE per session, then stays silent
+// until a NEW session — the same session-keyed shape as recordCrossing's
+// `session` guard (a re-run inside one session is ONE surface, not two).
+// Returns { surface } — true when THIS call should emit the offer. No session
+// id → always surface (fail TOWARD surfacing: a missed crush warning is worse
+// than a repeated one, and declining is free so a repeat never blocks — and
+// with no session id there is nothing to dedup on, so no write happens either).
+// This is the ONE state write the dig-gauge CLI path makes, and it touches ONLY
+// its own dedup flag — never a stamp/verdict/crossing (those stay the
+// SessionStart conductor's session/economics bookkeeping; a dig-gauge call is a
+// measurement, not a session event). Called ONLY on a CRUSHING verdict, so a
+// CLEAR dig writes nothing at all.
+export function armDigGauge(home, projectRoot, session, now = Date.now()) {
+  if (session == null) return { surface: true };
+  const proj = loadState(projectRoot, home);
+  if (proj.digGaugeSession === session) return { surface: false }; // already surfaced this session
+  proj.digGaugeSession = session;
+  proj.digGaugeAt = now;
+  saveState(proj, projectRoot, home);
+  return { surface: true };
+}
+
 // ---------------------------------------------------------------------------
 // edge-crossing state (beta.10 — MEMORY.md "NORMAL-MODE ASK REDESIGN: ONCE-
 // TIME EDGES"). Retires the beta.8/9 per-turn UserPromptSubmit bar (a REQUEST

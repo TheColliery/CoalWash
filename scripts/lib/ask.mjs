@@ -156,3 +156,21 @@ export function externalizeAdvisory(opts) {
   const cap = Number.isFinite(hardCeilingTokens) ? hardCeilingTokens : '?';
   return `[CoalWash] memory gauge: FULL (externalize) — this store has ~no reclaimable fat (muscle, not bloat) but exceeds the machine's working-capacity ceiling (~${cap} tok, a rough placeholder). SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. CoalWash cannot help further by washing — externalize/split older content out of the always-loaded set, or consciously raise fullPercent (the "bigger SSD" choice).`;
 }
+
+// The dig-gauge ULTRA offer (ULTRA trigger #2, dig-gauge.mjs) — fired on a
+// CRUSHING pre-read verdict, BEFORE the agent reads a single candidate.
+// Program-built (the fixed-template discipline above), answer-first (the offer
+// rides the END of the turn — the dig itself serves the user's request, so the
+// offer never preempts it), REPORT-ONLY (declining proceeds with the raw dig;
+// nothing is ever blocked). `verdict` = digGauge()'s output (files/totalTok/
+// largestTok/tripped). The economics name the multiplicative burn (why the
+// gate is pre-READ, not post-read): the pile is re-carried EVERY turn and
+// re-paid on every sub-spawn's prefix, so a one-time read undercounts it.
+export function digGaugeOffer(verdict) {
+  const v = verdict || {};
+  const n = Number(v.files) || 0;
+  const total = Number(v.totalTok) || 0;
+  const largest = Number(v.largestTok) || 0;
+  const why = Array.isArray(v.tripped) && v.tripped.length ? v.tripped.join('+') : 'crush';
+  return `[CoalWash] dig-gauge: CRUSHING (${why}) — reading these ${n} candidate(s) pulls ~${total} tok into context, RE-CARRIED every turn and re-paid on every sub spawn's prefix (the multiplicative burn a one-time read hides). ULTRA (/coalwash → "ULTRA — + estate") archives them + builds a dig-index: estate-search returns compact rows, estate-restore pulls back ONE targeted session (~${largest} tok) on demand — vs carrying the whole ~${total} tok pile. Offer the user ULTRA once; if they decline, proceed with the raw dig (never blocked). ${ANSWER_FIRST_REMINDER}`;
+}

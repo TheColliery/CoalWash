@@ -292,7 +292,9 @@ export function buildIndexRow({ sessionId, projectSlug, transcriptBuf, totalByte
   return row;
 }
 
-function appendIndexRow(archiveDir, row) {
+// Exported for retier.mjs (RE-TIER's demoted-topic dig rows ride the SAME
+// index file + the same append — one implementation, one dig door).
+export function appendIndexRow(archiveDir, row) {
   try {
     fs.mkdirSync(archiveDir, { recursive: true });
     fs.appendFileSync(path.join(archiveDir, ESTATE_INDEX_NAME), JSON.stringify(row) + '\n', 'utf8');
@@ -354,6 +356,12 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // expectedOrig shape): the baseline is the LISTING's own recorded size +
   // mtime — a writer landing any time after the band was computed (a live
   // session mis-banded, a cloud-sync clobber) aborts the session untouched.
+  // (#6 considered + SKIPPED: a content Buffer.equals would only add coverage
+  // for a content-only, same-size+same-mtime change in the SYNCHRONOUS window
+  // between the gzip-read and the delete — no yield point, so unreachable by any
+  // real co-writer; the wide listing->delete window is already stat-bracketed
+  // here. Not analogous to applyPlan, which compares against the SCAN-time
+  // expectedOrig across a wide user-wait window.)
   for (const f of sess.files) {
     let st;
     try { st = fs.statSync(f.path); } catch { st = null; }
@@ -370,9 +378,16 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     try { fs.rmSync(o.path, { force: true }); } catch {}
     if (fs.existsSync(o.path)) deleteFailed.push(o.rel); else deleted++;
   }
-  // Drop the emptied overflow dir tree (best-effort; only when fully emptied).
-  if (!deleteFailed.length) {
-    try { fs.rmSync(path.join(path.dirname(originals[0].path), sess.id), { recursive: true, force: true }); } catch {}
+  // Drop the <sid>/ overflow container — delete_scope == verified_set (loss
+  // class #56). Only now-EMPTY directories are swept (bottom-up); any FILE still
+  // under <sid>/ was NEVER enumerated/verified (the walk hit SESSION_FILE_CAP,
+  // it appeared after the listing, or it is a skipped symlink) and is LEFT
+  // intact + surfaced in `unpruned`. Fail toward keeping unknown bytes — never
+  // the whole-tree rm -rf this used to do.
+  const unpruned = [];
+  if (!deleteFailed.length && originals.length) {
+    const projDir = path.dirname(originals[0].path);
+    pruneEmptyDirs(path.join(projDir, sess.id), projDir, unpruned);
   }
 
   const row = buildIndexRow({ sessionId: sess.id, projectSlug: slug, transcriptBuf, totalBytes: sess.bytes, now, cold });
@@ -380,7 +395,26 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     const ageDays = Math.round((now - sess.newestMtimeMs) / DAY_MS);
     appendDeathCert(archiveDir, slug, `${new Date(now).toISOString()} destroyed-cold ${sess.id} (age ${ageDays}d, ${sess.files.length} file(s), ${sess.bytes} bytes — archived+verified first)`);
   }
-  return { ok: true, deleted, deleteFailed, files: originals.length, bytes: sess.bytes, row };
+  return { ok: true, deleted, deleteFailed, unpruned, files: originals.length, bytes: sess.bytes, row };
+}
+
+// Remove now-EMPTY directories bottom-up; push the rel path (from `base`) of any
+// surviving FILE into `survivors`. rmdirSync (non-recursive) REFUSES a non-empty
+// dir, so a file — enumerated or not — is never destroyed here; only empty
+// scaffolding is swept. This is the loss-class-#56 guard on the <sid>/ container:
+// delete_scope == verified_set (a file we did not archive must not die under a
+// recursive rm just because it shared the container). A symlink Dirent reports
+// its own type (isFile/isDirectory both false) -> it is treated as a survivor,
+// never followed and never deleted.
+function pruneEmptyDirs(dir, base, survivors) {
+  let names;
+  try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; } // absent (no overflow dir) or unreadable
+  for (const d of names) {
+    const p = path.join(dir, d.name);
+    if (d.isDirectory()) pruneEmptyDirs(p, base, survivors);
+    else survivors.push(path.relative(base, p)); // a FILE (or symlink/special) we did not enumerate — keep + surface
+  }
+  try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* still non-empty or already gone */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -448,7 +482,7 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       if (!r.ok) { res.failed.push({ id: sess.id, reason: r.reason }); continue; }
       if (c.cfg.indexEnabled && !appendIndexRow(archiveDir, r.row)) res.failed.push({ id: sess.id, reason: 'index append failed (bytes archived + originals deleted — restore unaffected)' });
       else if (c.cfg.indexEnabled) res.indexRows++;
-      res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed });
+      res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned });
       res.bytesFreed += r.bytes;
     }
     return res;
@@ -462,6 +496,11 @@ export function runEstateReport(res) {
   lines.push(`[CoalWash] ULTRA estate — ${res.archived.length} session(s) archived (${mb(res.bytesFreed)} freed from the live tree), ${res.activeSkipped} active skipped`);
   lines.push(`  archive: ${res.archiveDir} (${res.indexRows} index row(s) appended · restore: cli.mjs estate-restore <sessionId>)`);
   for (const f of res.failed) lines.push(`  KEPT ${f.id}: ${f.reason}`);
+  // #56: a session whose <sid>/ still held un-enumerated files was archived +
+  // its container LEFT in place (never rm -rf'd) — surface the survivors.
+  for (const a of res.archived) {
+    if (a.unpruned && a.unpruned.length) lines.push(`  KEPT-IN-PLACE ${a.id}: ${a.unpruned.length} un-enumerated file(s) under <sid>/ left intact (not archived — appeared post-listing / walk-capped): ${a.unpruned.slice(0, 5).join(', ')}${a.unpruned.length > 5 ? ', …' : ''}`);
+  }
   if (res.coldListed.length) {
     const coldBytes = res.coldListed.reduce((n, s) => n + s.bytes, 0);
     lines.push(`  cold (older than ${res.cfg.purgeAfterDays}d, NOT touched): ${res.coldListed.length} session(s), ${mb(coldBytes)} — the first-party delete lever is \`claude project purge\`; or set estate.deleteCold true for archive-then-delete`);

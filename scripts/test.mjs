@@ -22,6 +22,7 @@ const TESTS = [
   'scripts/lib/keeps.test.mjs',
   'scripts/lib/retention-policy.test.mjs',
   'scripts/lib/cli.test.mjs',
+  'scripts/lib/dig-gauge.test.mjs',
   'scripts/lib/receipt.test.mjs',
   'scripts/lib/conductor.test.mjs',
   'scripts/lib/ask.test.mjs',
@@ -33,6 +34,7 @@ const TESTS = [
   'scripts/lib/anchor-diff.test.mjs',
   'scripts/lib/estate.test.mjs',
   'scripts/lib/estate-archive.test.mjs',
+  'scripts/lib/retier.test.mjs',
   'scripts/build-plugin.test.mjs',
 ];
 

@@ -39,6 +39,20 @@ export const CONFIG_SCHEMA = [
   // (clampedRead's per-band safer-value-wins clamp, the CM v3.9.3 pattern).
   { key: 'exercisePerBand', type: 'bandmap', values: { obese: ['quick'], full: ['quick', 'full'] }, def: { obese: 'quick', full: 'full' }, help: 'Per-ceiling exercise (obese: quick only — OBESE is auto-Quick-silent by ruling, never an ask; full: quick|full); the fat-only scoping refinement is a later release (default: {obese:quick, full:full})' },
   { key: 'managedPaths', type: 'stringList', def: [], help: 'Extra path PREFIXES (relative to their own project/global root, forward-slash form) to auto-declare MANAGED — sync-owned packs never proposed for a local wash, same class as skills (default: [], the byte-identical-across-roots heuristic already covers the common case)' },
+  // RE-TIER envelope (the wizard's FOURTH choice, consumed by retier.mjs ONLY
+  // inside a wizard-consented run — never a hook/band/BMI). A +/- BAND, never
+  // a locked value (the SSD watermark-pair law): targetTokens 4125 = the
+  // cross-AI Tier-1 memory-index cap median (CC 6250 hard · Letta 10000 hard ·
+  // Zep 625 default · LangChain-legacy 2000 default; WHATSNEW-LEDGER row 27,
+  // 2026-07-16) and independently ~2% of the 200k binding envelope. Max 6250 =
+  // the CC hard cap. The envelope decides TIER PLACEMENT ONLY — it may never
+  // choose or escalate a treatment (retier.mjs's core rail).
+  { key: 'retier', type: 'object', fields: {
+    targetTokens: { type: 'int', min: 500, max: 6250, def: 4125 },
+    armPct: { type: 'int', min: 5, max: 50, def: 20 },
+    disarmPct: { type: 'int', min: 5, max: 50, def: 10 },
+    headroomPct: { type: 'int', min: 5, max: 50, def: 10 },
+  }, def: { targetTokens: 4125, armPct: 20, disarmPct: 10, headroomPct: 10 }, help: 'RE-TIER envelope (wizard-only): targetTokens = the per-store hot-index target (500-6250, def 4125 = the cross-AI Tier-1 median); armPct/disarmPct/headroomPct (5-50) derive arm ~ target*(1+arm%), disarm ~ target*(1-disarm%), fill ceiling ~ target*(1-headroom%) — a band, never a locked value; overflow demotes losslessly, nothing deleted (default: {4125, 20, 10, 10})' },
   // 0p WRITE-PATH SEATBELT + AIRBAG: on = both nets (PreToolUse snapshot-on-
   // first-write to a class-B governance/memory file + the PostToolUse advisory
   // when a structured token drops); snapshot-only = keep the airbag undo net
@@ -50,13 +64,28 @@ export const CONFIG_SCHEMA = [
   // consumed by estate-archive.mjs ONLY inside a wizard-consented ULTRA run,
   // never a hook/band). Sub-keys clamp independently (object type below); the
   // compress<->purge ordering guard lives at the consumer (resolveEstateCfg).
+  // digCrush = ULTRA trigger #2 (dig-gauge.mjs) — the PRE-READ tollgate's
+  // thresholds, NESTED in estate (same estate/ULTRA family; clampedRead's
+  // object path recurses so each sub-key clamps INDEPENDENTLY + a partial
+  // config fills the absent sub-keys — the trust-boundary fill). All three are
+  // config-clamped PRIORS from the minimax frame on the 200k binding envelope
+  // (the frame that set RE-TIER's N): singleFileTok ~100k = >=50% of a 200k
+  // worker window (unreadable in one pass) · pileTok ~150k = >=75% of one clean
+  // worker load after overhead · fileCount 8 = 2x the default bandwidth wave
+  // width. Shares are priors → calibrate from real dig telemetry (the a/b
+  // pattern; note it, don't block on it).
   { key: 'estate', type: 'object', fields: {
     compressAfterDays: { type: 'int', min: 1, max: 3650, def: 14 },
     purgeAfterDays: { type: 'int', min: 0, max: 36500, def: 180 },
     deleteCold: { type: 'bool', def: false },
     archiveDir: { type: 'string', def: '' },
     indexEnabled: { type: 'bool', def: true },
-  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/; indexEnabled = write dig-index rows (default: {14, 180, false, "", true})' },
+    digCrush: { type: 'object', fields: {
+      singleFileTok: { type: 'int', min: 20000, max: 200000, def: 100000 },
+      pileTok: { type: 'int', min: 40000, max: 200000, def: 150000 },
+      fileCount: { type: 'int', min: 3, max: 50, def: 8 },
+    }, def: { singleFileTok: 100000, pileTok: 150000, fileCount: 8 } },
+  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, digCrush: { singleFileTok: 100000, pileTok: 150000, fileCount: 8 } }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/; indexEnabled = write dig-index rows; digCrush = the dig-gauge PRE-READ crush thresholds (singleFileTok 20000-200000 / pileTok 40000-200000 / fileCount 3-50 — CRUSHING if any one holds) (default: {14, 180, false, "", true, {100000, 150000, 8}})' },
 ];
 
 // 0m tombstone — "FORCE IS A DICTATOR, NO OFF SWITCH" (USER 2026-07-11:
@@ -141,6 +170,27 @@ export function validateConfig(cfg) {
   return errors;
 }
 
+// Per-SUB-KEY clamp of an 'object' spec, rebuilt from the spec's OWN fields
+// (never the raw value's key set — an extra/unknown sub-key can't leak, every
+// declared sub-key is guaranteed present at its own default): each sub-key
+// reads its value when valid, else ITS OWN factory default — a malformed
+// sub-key degrades alone, never the block. An object-typed sub-field RECURSES
+// (so a nested block like estate.digCrush also clamps per-sub-key + fills a
+// partial config's absent sub-keys — the trust-boundary fill); everything else
+// takes the primitive path. Byte-identical to the old inline object clamp for a
+// primitive-only block (estate's existing fields, retier) — the recursion only
+// activates for the object-typed field.
+function clampObject(spec, v) {
+  const raw = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  const out = {};
+  for (const [k, fieldSpec] of Object.entries(spec.fields)) {
+    out[k] = fieldSpec.type === 'object'
+      ? clampObject(fieldSpec, raw[k])
+      : (raw[k] !== undefined && validateValue(fieldSpec, raw[k]) === null) ? raw[k] : fieldSpec.def;
+  }
+  return out;
+}
+
 // Clamped read: return the config value for `key` if valid, else the factory
 // default (enums normalized to lowercase). An unknown key returns undefined —
 // that is a programming error, surfaced loud in tests, silent at runtime.
@@ -148,17 +198,7 @@ export function clampedRead(cfg, key) {
   const spec = CONFIG_SCHEMA.find((s) => s.key === key);
   if (!spec) return undefined;
   const v = cfg ? cfg[key] : undefined;
-  if (spec.type === 'object') {
-    // Per-SUB-KEY clamp, rebuilt from the spec's OWN fields (same shape as
-    // bandmap below): each sub-key reads its value when valid, else ITS OWN
-    // factory default — a malformed sub-key degrades alone, never the block.
-    const raw = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
-    const out = {};
-    for (const [k, fieldSpec] of Object.entries(spec.fields)) {
-      out[k] = (raw[k] !== undefined && validateValue(fieldSpec, raw[k]) === null) ? raw[k] : fieldSpec.def;
-    }
-    return out;
-  }
+  if (spec.type === 'object') return clampObject(spec, v);
   if (spec.type === 'bandmap') {
     // Per-SUB-KEY safer-value-wins clamp (F3, the CM v3.9.3 pattern),
     // rebuilt from the spec's OWN sub-keys (never the raw value's key set —

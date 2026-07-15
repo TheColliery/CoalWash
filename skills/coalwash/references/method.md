@@ -234,6 +234,8 @@ Class-A at-rest = a closed session's files under `~/.claude/projects/<slug>/` (t
 | WARM | older than `compressAfterDays`, not COLD | gzip every file to `<archiveDir>/<slug>/<rel>.gz` — **copy-verify-then-delete**: write .gz → decompress it back → byte-compare vs the original → only when EVERY file of the session verifies are originals deleted (mismatch/interrupt = originals kept, partial archive removed, reported). External-writer guard: any original whose size/mtime moved since listing aborts its session. |
 | COLD | older than `purgeAfterDays` (def 180; 0 = never) | **report-only** — the report names the first-party `claude project purge` as the delete lever. Only an explicit `estate.deleteCold: true` archives-then-deletes (same verified protocol + a death-certificate line in `<archiveDir>/<slug>/death.log`). |
 
+**DELETE-SCOPE == VERIFIED-SET (loss class #56, WARM + deleteCold share this code):** only the ENUMERATED, byte-verified originals are deleted; the `<sid>/` container is then pruned bottom-up ONLY where empty (`rmdirSync` refuses a non-empty dir). A file that landed under `<sid>/` AFTER the listing — the walk hit the file cap, a late writer, a skipped symlink — was never enumerated, so it is LEFT intact and surfaced (`unpruned`), never destroyed by a recursive `rm`. Fail toward keeping unknown bytes.
+
 **Commands (the whole ULTRA surface — code moves bytes, you never re-author content):**
 
 ```bash
@@ -246,3 +248,55 @@ node [LIB]/cli.mjs estate-restore <sessionId> [--to <dir>]               # byte-
 **The dig-index** (`<archiveDir>/index.jsonl`, one code-generated row per archived session): `{sessionId, projectSlug, startISO, endISO, bytes, msgCount, firstUserLine (≤200 chars), topEntities (top ~10 uppercase-start tokens by frequency, deterministic), archivedAt, cold?}`. Local file under CoalWash's own namespace — a dig aid, never folded into any pushed report (§9b metrics-only law). `estate.indexEnabled: false` skips rows (restore still works — it scans the archive dir, not the index).
 
 **Honest ceilings:** the ~10:1 "MB after" figure is a display estimate, never a promise (the receipt reports measured bytes). An archived session leaves CC's own picker/resume for that session — VERIFIED as the sanctioned shape (the docs sanction hand-deleting transcripts, "new sessions are unaffected"; `claude project purge` is first-party) but the exact absent-file behavior was not live-mutation-tested — the archive + `estate-restore` path is the undo net regardless. Archive under the default `~/.claude/coal/coalwash/estate-archive/` (OS-citizen namespace) or an absolute `estate.archiveDir` (another drive is fine — the bill names the resolved dir before consent).
+
+### 10a. dig-gauge — the PRE-READ tollgate (ULTRA trigger #2, `scripts/lib/dig-gauge.mjs`)
+
+The tollgate between a search and the first Read. An agent deliberately digging old history gets BURIED by the document pile — so run the gauge BEFORE reading any candidate. A search returns a hit-list of PATHS; dig-gauge stats those paths (`fs.stat` BYTES, `~est` tok at 4 chars/tok) and verdicts them — **ZERO file content enters context** (metadata only; the zero-read invariant is a pinned structural test).
+
+```bash
+node [LIB]/cli.mjs dig-gauge <candidate path...> [--session <your session id, if known>]   # CLEAR / CRUSHING + numbers; on CRUSHING, offers ULTRA once per session. --json for the rail
+```
+
+**Thresholds (config `estate.digCrush`, clamped priors — CRUSHING if ANY one holds):**
+
+| Rule | CRUSHING when | Prior (the WHY) |
+|---|---|---|
+| single | a single candidate's `~est` tok ≥ `singleFileTok` (def 100000; clamp 20000-200000) | ≥50% of a 200k worker window — unreadable in one pass |
+| pile | Σ(bytes of all candidates) as `~est` tok ≥ `pileTok` (def 150000; clamp 40000-200000) | ≥75% of one clean worker load after overhead |
+| count | candidate COUNT ≥ `fileCount` (def 8; clamp 3-50) | 2× the default bandwidth wave width (dispersion) |
+
+**Why the gate is PRE-read (the multiplicative burn a one-time read hides):** (1) the pile is re-carried in context EVERY turn — not a one-time cost; (2) it is re-paid on every sub-spawn's prefix (per-prefix fan-out); (3) a fat context feeds the compaction spiral (`/compact` re-summarizes the whole thing). So the gauge output (~0.3k tok) buys insurance against a ≥150k crush re-carried for the rest of the session (~1:500). **REPORT-ONLY** — a CRUSHING verdict never blocks: declining proceeds with the raw dig. The offer surfaces ONCE per session (a session-scoped arm, consumed on surface; a new session re-arms) — the ONE state write this CLI path makes (its own dedup flag only, only on a CRUSHING surface). **Provenance:** all three priors derive from the minimax frame on the 200k binding envelope (the frame that set RE-TIER's N=100%) — PRIORS, calibrate from real dig telemetry later (the a/b pattern; note it, don't block on it).
+
+## 11. RE-TIER — the envelope x treatment-table redistributor (`scripts/lib/retier.mjs`, blueprint §19.3)
+
+RE-TIER = merge-all class-B memory stores (the main `memory/` store + each `.claude/agent-memory/<role>/`) → redistribute by the ENVELOPE → overflow cascades DOWN the tier ladder (hot index → topic file → estate archive). Two mechanisms, deliberately separated — their combination point is the quota-driven-loss damage surface:
+
+**Mechanism 1 — the ENVELOPE (config `retier`, clamped on read: target 500-6250, pcts 5-50).** A ± BAND, never a locked value (the SSD watermark-pair law). `targetTokens` 4,125 = the cross-AI Tier-1 memory-index cap MEDIAN (Claude Code 6,250 hard [the 25 KB index cap /4] · Letta 10,000 hard · Zep 625 default · LangChain-legacy 2,000 default) and independently ~2% of the 200k binding context envelope. Derived: **arm** = target×(1+armPct/100) ≈ 4,950 · **disarm** = target×(1−disarmPct/100) ≈ 3,712 · **fill ceiling** = target×(1−headroomPct/100) — a run refills the index only to the fill ceiling, never TO target (over-provisioning). Between disarm and arm = the DEAD ZONE: no action, no re-trigger flap. Token measure = the caliper char-heuristic, ~est. **The envelope decides TIER PLACEMENT ONLY — it may never choose or escalate a treatment.**
+
+**Mechanism 2 — the PER-TYPE TREATMENT TABLE (CODE, `RETIER_TREATMENTS`; anything stronger than a cell = refused loud):**
+
+| Type | Allowed in RE-TIER | Note |
+|---|---|---|
+| class-b-index (MEMORY.md — main + agent stores) | ข้าม · ย่อ-via-gate | ย่อ = the EXISTING wash tiers only (adjudicated); RE-TIER itself never condenses |
+| class-b-topic (memory topic files) | ข้าม · บีบ(demote) · ย่อ-via-gate | บีบ = a LOSSLESS move down one tier, byte-identical |
+| governance (CLAUDE.md/AGENTS.md/rules) | ข้าม only | the wash owns governance's semantic work |
+| machine-parsed (configs/state/locks/journals/skills) | ข้าม always | the 4-test excludees |
+| vendor-artifact (transcripts/tool-results) | ULTRA's own bands | delegation to §10's machinery, never a RE-TIER move |
+| unknown (ambiguous path/shape) | ข้าม always | fail-closed |
+
+**ทิ้ง (delete) appears in NO cell** — deletion stays ULTRA-COLD's gated path + the wash's adjudicated plan. RE-TIER moves and demotes; it never deletes content.
+
+**THE CORE RAIL (separation of powers):** envelope pressure (index over arm) resolves ONLY by DEMOTION down the ladder — index LINES (largest-first, a deterministic value-neutral rule; the index keeps a pointer line to `retier-overflow.md` so every demoted line stays reachable by normal recall) and UNREFERENCED topic files (basename/stem mentioned nowhere else; oldest first) to the estate archive (gzip copy-verify-then-delete, dig-index row, `estate-restore` round-trips byte-exact). Pressure NEVER escalates a treatment. Candidates exhausted while still over fill = reported shortfall — the gated wash (ย่อ, human-adjudicated) is the next lever, never an auto-condense.
+
+**DEMOTE CANDIDATES ARE FAIL-CLOSED (the treatment table, enforced not hardcoded):** a topic file is a demotion candidate ONLY when `classifyRetier` returns `class-b-topic` **AND** it is not `pinned`. `classifyRetier` keys on NAME/PATH IDENTITY, not directory location — a governance/program file (CLAUDE.md/AGENTS.md/rules · SKILL.md and anything under skills/commands/hooks) that ends up INSIDE a store dir stays governance/machine-parsed = skip-only, never demoted (the memory-dir shape no longer masks it). A `pinned: true` file protects itself WITHOUT vetoing the rest of the multi-store plan (it is filtered before `applyPlan`, whose pin guard would otherwise abort the whole run). And under `estate.indexEnabled: false`, a topic that is the SOLE live home of a top-anchor is KEPT in the tree — demoting it with no persisted dig row would leave the anchor search-unreachable (fail toward reachability).
+
+**Gate stack (all existing machinery, wired not rebuilt):** one `applyPlan` transaction across every store (snapshot before first mutation · external-writer guard · deletes LAST · whole-run rollback) · the fidelity gate on the index rewrite via MOVE-VERIFY (every demoted line verbatim-present in the overflow content + the union move-convention `gateFiles` check — only machine-proved lossless moves are approved) · #54 anchor-diff advisory lines in the scan (oldest verified snapshot) · #55 reconcile at merge: report-only cross-store contradiction flags (version tokens + LIVE/wired/validated/regressed/closed claims, keyed by subject; incompatible values from different stores are flagged — NO auto-fix) · the closing TOP-ANCHOR SURVIVAL probe: the 20 most-referenced wikilinks/code-spans/version-tokens pre-pass must still resolve in the post-pass tree (hot, topic, or archive dig rows); any miss = FAIL + rollback from the verified snapshot.
+
+**Commands (wizard-ONLY — never a hook/band/BMI trigger; both respect the global lock → `deferred`, nothing touched):**
+
+```bash
+node [LIB]/cli.mjs retier-scan [--json]   # the bill — band now vs target/arm/disarm, planned placement per item, demotion counts, #55 flags; print VERBATIM, only AFTER the RE-TIER choice
+node [LIB]/cli.mjs retier-run             # the transactional pass; REFUSES below arm ("dead zone, no action" — the LEAN-stop law); print its report VERBATIM
+```
+
+Undo: the run's snapshot (kept 3) + the wizard bin (`store.old`) + the estate archive (`estate-search`/`estate-restore`). Demoted index lines re-promote by moving the line back from `retier-overflow.md` by hand — a plain text move, no tool needed.

@@ -236,6 +236,50 @@ test('external-writer guard: an original that changes between listing and delete
   } finally { clean(home, proj); }
 });
 
+test('#56 loss class (delete_scope == verified_set): a file in <sid>/ NOT in the enumerated set SURVIVES the archive delete; the container is kept + the survivor surfaces in unpruned — never a whole-tree rm -rf', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-warm', 30);
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const sess = c.sessions.find((s) => s.id === 'sess-warm');
+    // A file lands under <sid>/ AFTER the listing snapshot (a walk that hit
+    // SESSION_FILE_CAP, a post-listing writer, or a stat-skipped symlink): it is
+    // NOT in sess.files, so enumerate+verify+delete never covers it. The old
+    // rm -rf of <sid>/ destroyed it un-archived + unrecoverable.
+    const slugDir = slugDirFor(home, proj);
+    const survivor = path.join(slugDir, 'sess-warm', 'unindexed.jsonl');
+    write(survivor, 'un-enumerated bytes that must survive');
+    const r = archiveSession(sess, { slug: c.slug, archiveDir: path.join(home, 'arch'), gzip: zlib.gzipSync });
+    assert.strictEqual(r.ok, true, 'the enumerated originals archive + delete normally');
+    assert.ok(fs.existsSync(survivor), 'the un-enumerated file SURVIVES (delete-scope == verified-set)');
+    assert.strictEqual(fs.readFileSync(survivor, 'utf8'), 'un-enumerated bytes that must survive', 'byte-exact, untouched');
+    assert.ok(
+      Array.isArray(r.unpruned) && r.unpruned.some((u) => u.split(path.sep).join('/').endsWith('sess-warm/unindexed.jsonl')),
+      `the survivor is surfaced in unpruned (got ${JSON.stringify(r.unpruned)})`,
+    );
+    assert.ok(fs.existsSync(path.join(slugDir, 'sess-warm')), 'the <sid>/ container is kept because it is non-empty');
+  } finally { clean(home, proj); }
+});
+
+test('#56: when <sid>/ ends fully empty after the enumerated deletes, the container AND its now-empty subdirs are swept (bottom-up rmdir), unpruned is [] — shared by WARM and deleteCold', () => {
+  const { home, proj } = sandbox();
+  try {
+    // seedSession lays down <sid>/tool-results/r1.txt (all enumerated) — after the
+    // deletes, tool-results/ and <sid>/ are empty and must be removed cleanly.
+    seedSession(home, proj, 'sess-warm', 30);
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(res.archived.length, 1);
+    assert.deepStrictEqual(res.archived[0].unpruned, [], 'no survivors — every file was enumerated');
+    assert.ok(!fs.existsSync(path.join(slugDirFor(home, proj), 'sess-warm')), 'empty container + empty subdirs swept');
+    // deleteCold shares the SAME archiveSession removal code -> same guarantee.
+    seedSession(home, proj, 'sess-cold', 200);
+    const res2 = runEstate({ projectRoot: proj, home, estate: estateCfg({ deleteCold: true }) });
+    const cold = res2.archived.find((a) => a.id === 'sess-cold');
+    assert.deepStrictEqual(cold.unpruned, [], 'deleteCold path prunes the same way');
+    assert.ok(!fs.existsSync(path.join(slugDirFor(home, proj), 'sess-cold')), 'cold container swept when empty');
+  } finally { clean(home, proj); }
+});
+
 // ---------------------------------------------------------------------------
 // COLD band — report-only by default, archive-then-delete only on explicit deleteCold
 // ---------------------------------------------------------------------------

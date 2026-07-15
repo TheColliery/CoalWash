@@ -81,7 +81,29 @@
   //   ~/.claude/coal/coalwash/estate-archive.
   // indexEnabled: append a dig-index row per archived session (searchable via
   //   `cli.mjs estate-search <query>`; local file, never pushed anywhere).
-  "estate": { "compressAfterDays": 14, "purgeAfterDays": 180, "deleteCold": false, "archiveDir": "", "indexEnabled": true },
+  // digCrush: ULTRA trigger #2 — the dig-gauge PRE-READ tollgate. An agent runs
+  //   `cli.mjs dig-gauge <candidates>` BEFORE a raw transcript dig (report-only,
+  //   never blocks). CRUSHING if ANY one holds: one candidate >= singleFileTok
+  //   ~est tok (~100k = >=50% of a 200k worker window; clamp 20000-200000) · the
+  //   pile sum >= pileTok (~150k = >=75% of one clean worker load; 40000-200000)
+  //   · candidate count >= fileCount (8 = 2x the default wave width; 3-50).
+  //   Priors from the 200k-envelope minimax — calibrate from real dig telemetry.
+  "estate": { "compressAfterDays": 14, "purgeAfterDays": 180, "deleteCold": false, "archiveDir": "", "indexEnabled": true, "digCrush": { "singleFileTok": 100000, "pileTok": 150000, "fileCount": 8 } },
+
+  // RE-TIER envelope (the wizard's FOURTH choice; wizard-only, never a
+  // hook/band/BMI trigger). A +/- BAND around targetTokens, never a locked
+  // value (the SSD watermark-pair law):
+  // targetTokens: the per-store hot memory-index target (500-6250; 4125 = the
+  //   cross-AI Tier-1 index-cap median — CC 6250 hard / Letta 10000 / Zep 625 /
+  //   LangChain-legacy 2000 — and ~2% of the 200k binding context envelope).
+  // armPct: RE-TIER may act only ABOVE target*(1+armPct/100) (~4950).
+  // disarmPct: disarmed BELOW target*(1-disarmPct/100) (~3712); between the
+  //   two = the dead zone — no action, no re-trigger flap.
+  // headroomPct: a run refills the index only to target*(1-headroomPct/100)
+  //   (never TO target — the over-provisioning analog).
+  // Overflow DEMOTES down the ladder losslessly (index line -> topic file ->
+  // estate archive); RE-TIER never summarizes or deletes content.
+  "retier": { "targetTokens": 4125, "armPct": 20, "disarmPct": 10, "headroomPct": 10 },
 
   // 0p WRITE-PATH SEATBELT + AIRBAG — the gate follows every hand, not just
   // CoalWash's own knife. on = snapshot-on-first-write to a class-B
