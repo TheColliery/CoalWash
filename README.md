@@ -109,7 +109,7 @@ claude plugin install coalwash@coalwash
 
 ## 🔧 Configure
 
-Every tool in the series supports two config levels — a global `~/.claude/.coalwash.json` and a per-project `.coalwash.json` override (project wins) — so a globally-installed skill can be tuned or **shut off per project** (`coalwashMode: "off"` is the off-switch). The main keys:
+Every tool in the series supports two config levels — a global `~/.claude/.coalwash.json` and a per-project `.coalwash.json` override (project wins) — so a globally-installed skill can be tuned or **shut off per project** (`coalwashMode: "off"` is the off-switch) — a skill you don't need in a given project stops loading (and burning tokens) there. The main keys:
 
 | Key | Default | What it does |
 |---|---|---|
