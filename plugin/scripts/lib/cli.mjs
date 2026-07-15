@@ -11,6 +11,14 @@
 //   node scripts/lib/cli.mjs restore <id>
 //   node scripts/lib/cli.mjs writeguard-list
 //   node scripts/lib/cli.mjs writeguard-restore <snapName>
+//   node scripts/lib/cli.mjs anchor-diff <path> [--json]
+//
+// anchor-diff <path> (loss class #54 — generational-compounding, ADVISORY
+// ONLY): diffs the file's OLDEST verified CoalWash snapshot against its
+// current content + every recorded bin drop since, and reports structured-
+// token CANDIDATES missing from both — see anchor-diff.mjs's own doc comment.
+// Never blocks, never restores; a clean lineage or a file CoalWash has never
+// snapshotted both print a neutral "nothing to report" line, never an error.
 //
 // gauge = one call: recoverDangling (heals a dangling prior txn — its no-op
 // path touches nothing) + discoverClassB + measureEntries + bandVerdict +
@@ -53,6 +61,7 @@ import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './bins.mj
 import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
 import { loadMergedConfig, findProjectRoot } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
+import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 
 // The full gauge, importable (tests and /stats call it directly; the CLI main
 // below is just argv plumbing around it). Pure composition — no state writes.
@@ -125,7 +134,7 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   return { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName>';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json]';
 
 function main() {
   const args = process.argv.slice(2);
@@ -178,6 +187,19 @@ function main() {
       console.error(`[CoalWash] restored write-guard snapshot ${r.name} (${r.bytes} bytes, session ${r.session}) — byte-exact original on stdout; redirect it to the file, never re-type it`);
     } catch (e) {
       console.error(`writeguard-restore failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'anchor-diff') {
+    const target = args[1];
+    if (!target) { console.error(USAGE); process.exitCode = 1; return; }
+    try {
+      const projectRoot = findProjectRoot(process.cwd(), os.homedir());
+      const report = anchorDiff(target, { projectRoot, home: os.homedir() });
+      if (args.includes('--json')) { console.log(JSON.stringify(report, null, 1)); return; }
+      console.log(report ? (anchorDiffLine(report) || `[CoalWash] ${target}: clean lineage since its oldest snapshot — 0 candidates.`)
+        : `[CoalWash] ${target}: no verified CoalWash snapshot on disk for this file yet — nothing to compare.`);
+    } catch (e) {
+      console.error(`anchor-diff failed: ${e.message}`);
       process.exitCode = 1;
     }
   } else {
