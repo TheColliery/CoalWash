@@ -12,14 +12,14 @@
 
 **Compatibility** ·
 ![Claude Code](https://img.shields.io/badge/Claude_Code-validated-brightgreen)
-![Antigravity](https://img.shields.io/badge/Antigravity-works_with-blue)
-![Cursor](https://img.shields.io/badge/Cursor-works_with-blue)
-![Codex](https://img.shields.io/badge/Codex-works_with-blue)
-![Gemini CLI](https://img.shields.io/badge/Gemini_CLI-works_with-blue)
-![Cline](https://img.shields.io/badge/Cline-works_with-blue)
-![Copilot](https://img.shields.io/badge/Copilot-works_with-blue)
+![Antigravity](https://img.shields.io/badge/Antigravity-manual-blue)
+![Cursor](https://img.shields.io/badge/Cursor-manual-blue)
+![Codex](https://img.shields.io/badge/Codex-manual-blue)
+![Gemini CLI](https://img.shields.io/badge/Gemini_CLI-manual-blue)
+![Cline](https://img.shields.io/badge/Cline-manual-blue)
+![Copilot](https://img.shields.io/badge/Copilot-manual-blue)
 
-<sub>The auto layer — the session-start gauge and the enforce/airbag hooks — is wired on **Claude Code** only today; on every other platform CoalWash runs manually via `/coalwash` after a file-copy install (the hooks are portable, just not yet built there). `validated` = tested end-to-end · `works_with` = runs via that documented install.</sub>
+<sub>The auto layer — the session-start gauge and the enforce/airbag hooks — runs on **Claude Code** only today; every other platform sits at the **manual** rung of the capability-keyed activation ladder (hooks → best-effort agent-driven offer → manual): `/coalwash` by hand after a file-copy install. `validated` = ran end-to-end on that platform · `manual` = the documented file-copy install — designed-degrade-safe, not yet run there.</sub>
 
 [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Releases](https://github.com/TheColliery/CoalWash/releases)
 
@@ -88,7 +88,7 @@ One standing gauge sits at the chokepoint — memory loads every session, so a s
 
 | Aspect | Detail |
 |---|---|
-| **Validation** | Cross-agent by design — zero-dependency Node scripts any agent can run, class-B layout *discovered* per platform, never hardcoded — but **validated end-to-end on Claude Code only**; every other platform is designed-degrade-safe, not yet validated. Unknown platform: the agent proposes files it can *see* auto-loaded in its context, code certifies each, a human confirms — still never auto-delete |
+| **Validation** | Cross-agent by design — zero-dependency Node scripts any agent can run, class-B layout *discovered* per platform, never hardcoded — but **validated end-to-end on Claude Code only**; every other platform is the **manual** tier — designed-degrade-safe, not yet validated. Unknown platform: the agent proposes files it can *see* auto-loaded in its context, code certifies each, a human confirms — still never auto-delete |
 | **Activation ladder** | Capability-keyed: lifecycle hooks → the gauge runs automatically (Claude Code today); no hooks → best-effort agent-driven offer (probabilistic, not hook parity); always → manual `/coalwash`. Band crossings resolve on the `Stop` hook (the same blocking channel `rot-canary` uses), so whatever surfaces is enforced, not suggested — edge-triggered, never a repeating nag. Hookless platform: one best-effort offer, no repeat |
 | **The list is a mirror, not a list** | CoalWash keeps no hand-maintained inventory of always-loaded memory — the list *mirrors* the real load list: whatever the platform delivers into the agent's context is class-B, whether company-wired, user-wired, or a future update adds a surface that doesn't exist today. A new auto-loaded file enters the measurement by definition, no code change. On known platforms this runs as a cheap drift-check at wizard entry (agent-seen vs adapter-listed, flagging adapter rot the day it happens); every candidate is code-certified — exists, contained in the home/project trees, on-disk head matches what the agent actually saw load — so a hallucinated or spoofed entry can never join the measurement. Fail direction: undercount — unseen is unmeasured is uncut |
 | **A well-behaved guest on your disk** | CoalWash keeps its own per-project bookkeeping (the session gauge's state) *inside* the platform's own project directory — on Claude Code, beside the memory folder it measures — so the platform's lifecycle carries it: remove a project, its state goes too, for free. Every path CoalWash derives is realpath-contained to the config root (`~/.claude`) and fails closed — never a byte outside it. Validated on Claude Code's layout; other platforms get the same one-namespace discipline, designed-for, not yet validated |
