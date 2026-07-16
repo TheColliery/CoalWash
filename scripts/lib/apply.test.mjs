@@ -3,7 +3,8 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath } from './apply.mjs';
+import { fileURLToPath } from 'node:url';
+import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine } from './apply.mjs';
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './bins.mjs';
 import { HORIZON_MS } from './retention.mjs';
@@ -969,5 +970,102 @@ test('SHRINK is an ordinary rewrite: a shrink that accidentally drops a fact (an
     const approved = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: overShrunk }], { approvedDrops: ['number-drop:44192'] }));
     assert.strictEqual(approved.ok, true, approved.error);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), overShrunk);
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// #57 FILESYSTEM-SEMANTICS-ASSUMPTION (MASTER-LOSS-TAXONOMY loss class #57):
+// rename-atomicity and O_EXCL-exclusivity are LOCAL-filesystem semantics.
+// ---------------------------------------------------------------------------
+
+test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mid-apply FAILS CLOSED — whole-run rollback, target unchanged, no stranded .coalwash-tmp', () => {
+  const { proj, store } = sandbox();
+  const f1 = path.join(store, 'f1.md');
+  write(f1, 'original bytes');
+  const origRename = fs.renameSync;
+  // Monkey-patch the shared fs object: the ONLY renameSync in the txn path is
+  // atomicWrite's tmp->target hop (journal/snapshot writes never rename).
+  fs.renameSync = () => {
+    const e = new Error('EXDEV: cross-device link not permitted');
+    e.code = 'EXDEV';
+    throw e;
+  };
+  let r;
+  try {
+    r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'new bytes' }]));
+  } finally { fs.renameSync = origRename; }
+  try {
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.rolledBack, true, 'the step failure takes the rollback path');
+    assert.match(r.error, /EXDEV/, 'the error surfaces, never silent');
+    assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'original bytes', 'target unchanged');
+    assert.strictEqual(fs.readdirSync(store).some((n) => n.includes('.coalwash-tmp')), false, 'no stranded tmp (rollback sweeps the sibling)');
+  } finally { clean(proj); }
+});
+
+test('#57: the cross-device archive hop (estate-archive + retier) NEVER uses rename — copy-verify-then-delete only (an archiveDir may sit on another drive by design)', () => {
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  for (const f of ['estate-archive.mjs', 'retier.mjs']) {
+    const src = fs.readFileSync(path.join(libDir, f), 'utf8');
+    assert.ok(!src.includes('renameSync'), `${f} must not rename across a potential device boundary`);
+  }
+});
+
+test('#57 lock: an exclusive-create "win" whose re-read shows a FOREIGN token (a broken-O_EXCL lost race — the SVN BDB-on-NFS shape) DEFERS instead of proceeding', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-lock-'));
+  const lockPath = path.join(dir, '.coalwash.lock');
+  const origRead = fs.readFileSync;
+  // Simulate: our 'wx' create + write "succeeded", but the bytes on disk at
+  // verify time belong to ANOTHER writer (what a non-local mount can do).
+  fs.readFileSync = function (p, ...rest) {
+    if (String(p) === lockPath) {
+      fs.readFileSync = origRead;
+      return JSON.stringify({ token: 'foreign-token' });
+    }
+    return origRead.call(fs, p, ...rest);
+  };
+  try {
+    const a = acquireLock(lockPath, { sessionId: 'a' });
+    assert.strictEqual(a.acquired, false, 'a foreign token on re-read = the win was an illusion');
+    assert.match(a.reason, /lost a race/);
+  } finally {
+    fs.readFileSync = origRead;
+    clean(dir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// wikilink-orphan advisory (the git filter-branch cross-reference lesson)
+// ---------------------------------------------------------------------------
+
+test('wikilink-orphan advisory: deleting a topic a SURVIVING file still links to fires ONE advisory on the result — never a block; deleting an unlinked topic stays silent', () => {
+  const { proj, store } = sandbox();
+  try {
+    const linker = path.join(store, 'linker.md');
+    const gone = path.join(store, 'gone-topic.md');
+    const solo = path.join(store, 'solo.md');
+    write(linker, 'Background lives in [[gone-topic]] — read it first.');
+    write(gone, 'topic body about the background');
+    write(solo, 'nothing points at this file');
+
+    // Case 1: the linked topic — advisory fires, apply still lands (advisory != block).
+    const r1 = applyPlan(planFor(proj, store, [{ type: 'delete', path: gone }]));
+    assert.strictEqual(r1.ok, true, r1.error);
+    assert.strictEqual(fs.existsSync(gone), false, 'the delete landed — advisory never blocks');
+    assert.deepStrictEqual(r1.deadLinks, ['gone-topic.md'], 'the surviving [[wikilink]] target is named');
+    assert.match(r1.deadLinkLine, /advisory: 1 deleted topic/);
+    assert.ok(r1.deadLinkLine.includes('gone-topic.md'));
+
+    // Case 2: the unlinked topic — silence (null line, empty list). The FAT
+    // bin now holds case 1's cut bytes under .claude/coalwash — the tx-dir
+    // exclusion keeps them out of the survivor scan (no false "referenced").
+    const r2 = applyPlan(planFor(proj, store, [{ type: 'delete', path: solo }]));
+    assert.strictEqual(r2.ok, true, r2.error);
+    assert.deepStrictEqual(r2.deadLinks, [], 'unlinked topic -> empty');
+    assert.strictEqual(r2.deadLinkLine, null, 'silence is the norm');
+
+    // deadLinkLine unit shape
+    assert.strictEqual(deadLinkLine([]), null);
+    assert.match(deadLinkLine(['a.md']), /1 deleted topic/);
   } finally { clean(proj); }
 });

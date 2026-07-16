@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ccProjectSlug, ccMemoryDir, parseImports, discoverClassB, detectPlatform, containedIn, physicalOrNull } from './class-b.mjs';
+import { ccProjectSlug, ccMemoryDir, parseImports, discoverClassB, detectPlatform, containedIn, physicalOrNull, physicalForCreate } from './class-b.mjs';
 
 // Hermetic: the real machine's CLAUDE_CONFIG_DIR must never leak into
 // sandbox-home resolution (node --test runs each file in its own process).
@@ -344,4 +344,25 @@ test('managed: both signals can independently tag the same discovery pass', () =
     assert.strictEqual(d.entries.find((e) => e.path.endsWith(path.join('ecc', 'mirrored.md')) && e.scope === 'project').managed, true);
     assert.strictEqual(d.entries.find((e) => e.path.endsWith(path.join('vendor-only', 'x.md'))).managed, true);
   } finally { clean(home, proj); }
+});
+
+test('physicalForCreate (#57 write-side twin of physicalOrNull): resolves the deepest EXISTING ancestor physically, reattaches the missing tail, collapses `..`, surfaces a symlinked intermediate at its REAL location, null when nothing exists', () => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwcb-pfc-')));
+  try {
+    // missing tail reattached under the existing physical ancestor
+    assert.strictEqual(physicalForCreate(path.join(base, 'a', 'b', 'c.gz')), path.join(base, 'a', 'b', 'c.gz'));
+    // `..` collapsed lexically BEFORE the walk -> the escape is visible to containedIn
+    const escaped = physicalForCreate(path.join(base, 'inside', '..', '..', 'evil.gz'));
+    assert.strictEqual(escaped, path.join(path.dirname(base), 'evil.gz'));
+    assert.strictEqual(containedIn(escaped, [base]), false, 'the collapsed path fails containment');
+    // a symlinked intermediate dir resolves to its target (junction = unprivileged Windows shim)
+    const outside = path.join(base, 'outside');
+    const root = path.join(base, 'root');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.mkdirSync(root, { recursive: true });
+    fs.symlinkSync(outside, path.join(root, 'link'), 'junction');
+    const viaLink = physicalForCreate(path.join(root, 'link', 'new.gz'));
+    assert.strictEqual(viaLink, path.join(outside, 'new.gz'), 'symlink resolved to the real location');
+    assert.strictEqual(containedIn(viaLink, [root]), false, 'the linked-out dest fails containment against root');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

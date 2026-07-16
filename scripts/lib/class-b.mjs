@@ -59,6 +59,28 @@ export function containedIn(p, roots) {
   return false;
 }
 
+// Physical form of a path ABOUT TO BE CREATED (it may not exist yet, so
+// realpathSync alone fails): realpath the deepest EXISTING ancestor, then
+// reattach the missing tail. path.resolve collapses any `..` LEXICALLY before
+// the walk, and the existing part resolves PHYSICALLY — so both a
+// `..`-carrying derivation and a symlinked intermediate dir surface at their
+// REAL location for a containedIn check. Write-side realpath-and-contain, the
+// destination twin of physicalOrNull (loss class #57 / the git
+// GHSA-2hvf-7c8p-28fx side-artifact-path mechanism). null = no existing
+// ancestor at all -> fail-closed.
+export function physicalForCreate(p) {
+  let cur = path.resolve(p);
+  const tail = []; // ponytail: local mutation, never escapes
+  for (;;) {
+    const phys = physicalOrNull(cur);
+    if (phys) return tail.length ? path.join(phys, ...tail.reverse()) : phys;
+    const parent = path.dirname(cur);
+    if (parent === cur) return null;
+    tail.push(path.basename(cur));
+    cur = parent;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code adapter
 // ---------------------------------------------------------------------------

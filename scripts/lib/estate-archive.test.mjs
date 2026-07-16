@@ -13,7 +13,7 @@ import zlib from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  resolveEstateCfg, resolveArchiveDir, chActiveSessionId, listSessions,
+  resolveEstateCfg, resolveArchiveDir, chJournalGuard, listSessions,
   classifySessions, buildIndexRow, archiveSession, estateUltraScan,
   ultraBillLine, runEstate, runEstateReport, searchIndex, searchLines,
   restoreSession, ESTATE_INDEX_NAME,
@@ -73,6 +73,22 @@ function seedSession(home, proj, id, ageDays, { content } = {}) {
 function estateCfg(over = {}) {
   return { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, ...over };
 }
+// EXACTLY the key set CoalHearth's production writer persists (CoalHearth
+// lib/state-snapshot.js buildStateSnapshot): status + checklist +
+// modifiedFiles + inFlightAgents + activePlan — NO sessionId, ever. Nothing
+// is imported from CH (hermetic); the shape is replicated so the fixture can
+// never re-collude with a guard keyed on a field the sibling does not write
+// (the MED-1 fixture-collusion lesson).
+function chJournal(over = {}) {
+  return JSON.stringify({
+    status: 'in_progress',
+    checklist: [{ step: 'wire the fix', done: false }],
+    modifiedFiles: ['lib/thing.js'],
+    inFlightAgents: [],
+    activePlan: { goal: 'fix the thing', nextSteps: ['test it'], constraints: [] },
+    ...over,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // config: schema clamp + ordering guard + archive dir resolution
@@ -114,16 +130,13 @@ test('config: resolveArchiveDir — "" and a RELATIVE dir both fall back to ~/.c
 // band classification
 // ---------------------------------------------------------------------------
 
-test('bands: mtime classifies active/warm/cold; the current session and a CoalHearth in-progress journal session are ACTIVE regardless of age', () => {
+test('bands: mtime classifies active/warm/cold; the current session is ACTIVE regardless of age', () => {
   const { home, proj } = sandbox();
   try {
     seedSession(home, proj, 'sess-fresh', 1);
     seedSession(home, proj, 'sess-warm', 30);
     seedSession(home, proj, 'sess-cold', 200);
     seedSession(home, proj, 'sess-current', 40); // old, but IS the caller's session
-    seedSession(home, proj, 'sess-ch', 40); // old, but a CH journal names it in-progress
-    write(path.join(proj, '.claude', 'coalhearth', 'session_handoff.json'),
-      JSON.stringify({ status: 'in_progress', sessionId: 'sess-ch' }));
 
     const c = classifySessions({ projectRoot: proj, home, estate: estateCfg(), currentSessionId: 'sess-current' });
     const band = Object.fromEntries(c.sessions.map((s) => [s.id, s.band]));
@@ -131,8 +144,53 @@ test('bands: mtime classifies active/warm/cold; the current session and a CoalHe
     assert.strictEqual(band['sess-warm'], 'warm');
     assert.strictEqual(band['sess-cold'], 'cold');
     assert.strictEqual(band['sess-current'], 'active', 'current-session guard is absolute');
-    assert.strictEqual(band['sess-ch'], 'active', 'CoalHearth in-progress journal guard');
-    assert.strictEqual(chActiveSessionId(proj), 'sess-ch');
+  } finally { clean(home, proj); }
+});
+
+// --- MED-1: the CoalHearth guard, keyed on what CH ACTUALLY writes ---------
+
+test('MED-1: a REAL-shaped CH in_progress journal (NO sessionId) with a FRESH mtime protects the newest session unit even when every transcript mtime reads old — and does NOT protect-everything', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-idle', 40);   // live-but-idle: transcript mtime reads old
+    seedSession(home, proj, 'sess-older', 100); // a genuinely old sibling — must STILL archive
+    write(path.join(proj, '.claude', 'coalhearth', 'session_handoff.json'), chJournal()); // just written = fresh mtime
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const band = Object.fromEntries(c.sessions.map((s) => [s.id, s.band]));
+    assert.strictEqual(band['sess-idle'], 'active', 'fresh in_progress journal protects the NEWEST unit (fail toward protecting)');
+    assert.strictEqual(band['sess-older'], 'warm', 'not protect-everything — older units still archive (ULTRA stays functional)');
+    const g = chJournalGuard(proj);
+    assert.strictEqual(g.inProgress, true);
+    assert.strictEqual(g.sessionId, null, 'CH never persists sessionId — the guard must not require it');
+  } finally { clean(home, proj); }
+});
+
+test('MED-1: a STALE in_progress journal (old mtime — a crashed months-old handoff) blocks nothing; the session archives end-to-end', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-idle', 40);
+    const j = path.join(proj, '.claude', 'coalhearth', 'session_handoff.json');
+    write(j, chJournal());
+    ageFile(j, 40); // the journal itself is 40 days old — no live claim
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(c.sessions.find((s) => s.id === 'sess-idle').band, 'warm', 'a stale handoff must not freeze estate archiving forever');
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(res.archived.length, 1, 'archives end-to-end');
+  } finally { clean(home, proj); }
+});
+
+test('MED-1: a future CH that DOES write sessionId gets id-exact protection regardless of freshness or which unit is newest', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-named', 40);
+    seedSession(home, proj, 'sess-newer', 20);
+    const j = path.join(proj, '.claude', 'coalhearth', 'session_handoff.json');
+    write(j, chJournal({ sessionId: 'sess-named' }));
+    ageFile(j, 40); // even stale: an id-NAMED in_progress handoff shields ITS session's resume material
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const band = Object.fromEntries(c.sessions.map((s) => [s.id, s.band]));
+    assert.strictEqual(band['sess-named'], 'active', 'id match protects the named session');
+    assert.strictEqual(band['sess-newer'], 'warm', 'a stale journal grants no newest-unit protection');
   } finally { clean(home, proj); }
 });
 
@@ -143,13 +201,13 @@ test('bands: a session unit = jsonl + flat <sid>.* siblings + the <sid>/ dir; an
     seedSession(home, proj, 'sess-a', 30);
     write(path.join(slugDir, 'orphan-dir', 'subagents', 'x.jsonl'), 'orphan'); // GH #59248 shape
     write(path.join(proj, '.claude', 'coalhearth', 'session_handoff.json'),
-      JSON.stringify({ status: 'completed', sessionId: 'sess-a' }));
+      chJournal({ status: 'completed' }));
 
     const l = listSessions({ projectRoot: proj, home });
     assert.strictEqual(l.sessions.length, 1, 'only the jsonl-anchored unit');
     const rels = l.sessions[0].files.map((f) => f.rel.split(path.sep).join('/')).sort();
     assert.deepStrictEqual(rels, ['sess-a.jsonl', 'sess-a.meta.json', 'sess-a/tool-results/r1.txt']);
-    assert.strictEqual(chActiveSessionId(proj), null, 'completed journal = no guard');
+    assert.strictEqual(chJournalGuard(proj).inProgress, false, 'completed journal = no guard');
   } finally { clean(home, proj); }
 });
 
@@ -278,6 +336,78 @@ test('#56: when <sid>/ ends fully empty after the enumerated deletes, the contai
     assert.deepStrictEqual(cold.unpruned, [], 'deleteCold path prunes the same way');
     assert.ok(!fs.existsSync(path.join(slugDirFor(home, proj), 'sess-cold')), 'cold container swept when empty');
   } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// #57 write-side containment — archive DESTINATIONS (the GHSA-2hvf-7c8p-28fx
+// mechanism: source enumeration contained, destination derivation not)
+// ---------------------------------------------------------------------------
+
+test('#57 (FILESYSTEM-SEMANTICS-ASSUMPTION / loss class #57): a session whose derived dest escapes the archive root is REFUSED before any write — nothing lands outside, originals kept, reason reported', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const sess = c.sessions.find((s) => s.id === 'sess-warm');
+    // Craft the side-artifact escape: a rel that climbs OUT of <archiveDir>/<slug>/.
+    // listSessions cannot produce this shape, but archiveSession must hold its
+    // OWN invariant regardless of caller (the git lesson: the main target was
+    // checked, the side-artifact path was not).
+    sess.files[0] = { ...sess.files[0], rel: path.join('..', '..', 'outside', 'evil.jsonl') };
+    const archiveDir = path.join(home, 'arch');
+    const r = archiveSession(sess, { slug: c.slug, archiveDir, gzip: zlib.gzipSync });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.reason, /escapes the archive root/);
+    assert.ok(!fs.existsSync(path.join(home, 'outside')), 'nothing landed outside the archive root');
+    for (const p of Object.values(files)) assert.ok(fs.existsSync(p), `original kept: ${p}`);
+  } finally { clean(home, proj); }
+});
+
+test('#57: a symlinked slug dir INSIDE the archive root redirecting outside is caught by the physical resolve — refused, nothing written through the link (junction = the unprivileged Windows shim)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const sess = c.sessions.find((s) => s.id === 'sess-warm');
+    const archiveDir = path.join(home, 'arch');
+    const outside = path.join(home, 'outside-target');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.mkdirSync(archiveDir, { recursive: true });
+    fs.symlinkSync(outside, path.join(archiveDir, c.slug), 'junction');
+    const r = archiveSession(sess, { slug: c.slug, archiveDir, gzip: zlib.gzipSync });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.reason, /escapes the archive root/);
+    assert.deepStrictEqual(fs.readdirSync(outside), [], 'nothing written through the link');
+    for (const p of Object.values(files)) assert.ok(fs.existsSync(p), `original kept: ${p}`);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// #56639-class pin — deleteCold safe-default regression (the Archive-button
+// drift: a UI/call-site layer silently hardcoding the destructive override)
+// ---------------------------------------------------------------------------
+
+test('#56639-class pin: the literal deleteCold:true appears in NO code line under scripts/ or skills/ outside test files — only the user config may flip it (comments/docs may NAME the lever; config-schema derives the default)', () => {
+  const re = /deleteCold\s*:\s*true/;
+  const walk = (dir, out) => {
+    let names = [];
+    try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+    for (const d of names) {
+      const p = path.join(dir, d.name);
+      if (d.isDirectory()) walk(p, out);
+      else if (/\.(mjs|js|cjs)$/.test(d.name) && !/\.test\.mjs$/.test(d.name)) out.push(p);
+    }
+    return out;
+  };
+  const files = [...walk(path.join(repoDir, 'scripts'), []), ...walk(path.join(repoDir, 'skills'), [])];
+  assert.ok(files.length > 0, 'the walk found code files');
+  for (const p of files) {
+    const offenders = fs.readFileSync(p, 'utf8').split('\n')
+      .map((line, i) => ({ line, i }))
+      .filter(({ line }) => !line.trim().startsWith('//') && re.test(line))
+      .map(({ i }) => `${p}:${i + 1}`);
+    assert.deepStrictEqual(offenders, [], `deleteCold:true hardcoded in code (the destructive override belongs to the USER config alone): ${offenders.join(', ')}`);
+  }
 });
 
 // ---------------------------------------------------------------------------

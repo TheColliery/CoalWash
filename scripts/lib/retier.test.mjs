@@ -561,3 +561,22 @@ test('claims: extractClaims derives version + status subjects deterministically'
   const one = reconcileClaims([{ label: 'main', indexPath: '/m/MEMORY.md', indexText: 'X v1.0.0 then X v2.0.0', topics: [] }]);
   assert.deepStrictEqual(one, []);
 });
+
+test('#57 write-side containment on the RE-TIER archive hop: a slug dir symlinked outside the archive root is refused — topic KEPT in the live tree, escape reported, nothing written through the link', () => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = seedMainStore(home, proj);
+    const archiveDir = path.join(home, 'archive');
+    const outside = path.join(home, 'outside-target');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.mkdirSync(archiveDir, { recursive: true });
+    // junction = the unprivileged Windows shim; POSIX ignores the type arg.
+    fs.symlinkSync(outside, path.join(archiveDir, ccProjectSlug(proj)), 'junction');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) });
+    assert.strictEqual(res.ok, true, res.error || res.reason); // hop-1 index demotion still lands
+    assert.ok(fs.existsSync(path.join(dir, 'zeta-old.md')), 'the demote candidate stays in the live tree (fail-closed)');
+    assert.ok(res.kept.some((k) => /escapes the archive root/.test(k.reason)), `escape reported via kept (got ${JSON.stringify(res.kept)})`);
+    assert.deepStrictEqual(fs.readdirSync(outside), [], 'nothing written through the link');
+    assert.ok(runRetierReport(res).includes('escapes the archive root'), 'the report surfaces the KEPT line');
+  } finally { clean(home, proj); }
+});

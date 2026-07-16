@@ -60,5 +60,8 @@ export function buildReceipt(r) {
     : r.gatePass
       ? 'fidelity gate: PASS (0 facts lost — links/dates/versions/frontmatter all preserved)'
       : `fidelity gate: FAIL — ${r.gateDrops || '?'} drop(s); the apply is BLOCKED until every drop is restored`);
+  // wikilink-orphan advisory (apply.mjs deadLinkLine — one line, never a
+  // block): present only when a deleted topic is still referenced.
+  if (r.deadLinkLine) lines.push(r.deadLinkLine);
   return lines.join('\n');
 }

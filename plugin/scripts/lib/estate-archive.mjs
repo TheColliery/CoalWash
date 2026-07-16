@@ -61,7 +61,7 @@ import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir } from './config-load.mjs';
-import { ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
+import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate } from './class-b.mjs';
 import { acquireLock, globalLockPath } from './apply.mjs';
 
 export const ESTATE_ARCHIVE_DIRNAME = 'estate-archive';
@@ -109,18 +109,36 @@ export function resolveArchiveDir(estate, home = os.homedir()) {
   return path.join(claudeBaseDir(home), 'coal', 'coalwash', ESTATE_ARCHIVE_DIRNAME);
 }
 
-// The session id a CoalHearth in-progress journal names for THIS project, or
-// null. Fail-silent on absent/corrupt (no CoalHearth installed = no guard
-// needed); only an explicit status:'in_progress' with a string sessionId
-// attributes — anything less falls back to the mtime guard, which already
-// covers any genuinely live session (its jsonl mtime is minutes old).
-export function chActiveSessionId(projectRoot) {
+// CoalHearth in-progress journal signals for THIS project (MED-1 root-cause
+// fix). CH's production writer (CoalHearth lib/state-snapshot.js
+// buildStateSnapshot) persists { status:'in_progress', checklist,
+// modifiedFiles, inFlightAgents, activePlan } — NO sessionId field, ever
+// (CH's own resume-engine reads `data.sessionId || 'unknown'`:
+// expected-absent). The old guard here required `typeof j.sessionId ===
+// 'string'`, so it returned null on every real CH journal = dead in the
+// field. Read only what CH ACTUALLY writes:
+//   - status === 'in_progress' (rewritten on every PostToolUse)
+//   - the journal file's OWN mtime — an independent liveness signal in the
+//     PROJECT tree (the ~/.claude transcript tree's mtimes can lie after a
+//     sync/restore; this file lives beside the work itself)
+//   - sessionId IF a future CH version ever adds it (an ADDITIONAL match,
+//     never the requirement)
+// Fail-silent on absent/corrupt (no CoalHearth installed = no guard needed);
+// classifySessions applies the banding policy on these signals.
+export function chJournalGuard(projectRoot) {
+  const none = { inProgress: false, mtimeMs: null, sessionId: null };
   try {
     const p = path.join(projectRoot, '.claude', 'coalhearth', 'session_handoff.json');
     const j = JSON.parse(fs.readFileSync(p, 'utf8'));
-    if (j && j.status === 'in_progress' && typeof j.sessionId === 'string' && j.sessionId) return j.sessionId;
-  } catch { /* absent/corrupt journal = no CH guard */ }
-  return null;
+    if (!j || j.status !== 'in_progress') return none;
+    let mtimeMs = null;
+    try { mtimeMs = fs.statSync(p).mtimeMs; } catch { /* unreadable stat = uncertain -> caller protects */ }
+    return {
+      inProgress: true,
+      mtimeMs: Number.isFinite(mtimeMs) ? mtimeMs : null,
+      sessionId: typeof j.sessionId === 'string' && j.sessionId ? j.sessionId : null,
+    };
+  } catch { return none; }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,12 +218,27 @@ export function listSessions({ projectRoot = process.cwd(), home = os.homedir() 
 export function classifySessions({ projectRoot = process.cwd(), home = os.homedir(), now = Date.now(), estate, currentSessionId = null } = {}) {
   const cfg = resolveEstateCfg(estate);
   const listed = listSessions({ projectRoot, home });
-  const chSession = chActiveSessionId(projectRoot);
   const compressMs = cfg.compressAfterDays * DAY_MS;
   const purgeMs = cfg.purgeAfterDays * DAY_MS;
+  // CH binding without an id: session_handoff.json is ONE file per project,
+  // rewritten by the CURRENT session's every tool call — so a FRESH
+  // in-progress journal was written by the most recently ACTIVE session = the
+  // unit(s) carrying the newest transcript mtime. Protect those (fail toward
+  // protecting; mtime ties protect every tied unit). A journal older than the
+  // compress window makes no live claim and blocks nothing (a crashed
+  // months-old handoff must not freeze estate archiving forever); a journal
+  // whose own mtime cannot be read counts as fresh (uncertain = protect).
+  // NOT protect-everything: the whole-project block would make ULTRA a
+  // permanent no-op on any CH-installed project (the current session is
+  // always writing a fresh journal while the run happens).
+  const ch = chJournalGuard(projectRoot);
+  const chFresh = ch.inProgress && (ch.mtimeMs === null || now - ch.mtimeMs < compressMs);
+  const newestMtimeMs = listed.sessions.length ? Math.max(...listed.sessions.map((s) => s.newestMtimeMs)) : -Infinity;
   for (const s of listed.sessions) {
     const age = now - s.newestMtimeMs;
-    if (s.id === currentSessionId || s.id === chSession || !Number.isFinite(age) || age < compressMs) s.band = 'active';
+    const chProtected = (ch.sessionId !== null && s.id === ch.sessionId)
+      || (chFresh && s.newestMtimeMs === newestMtimeMs);
+    if (s.id === currentSessionId || chProtected || !Number.isFinite(age) || age < compressMs) s.band = 'active';
     else if (cfg.purgeAfterDays !== 0 && age >= purgeMs) s.band = 'cold';
     else s.band = 'warm';
   }
@@ -330,6 +363,17 @@ function appendDeathCert(archiveDir, slug, line) {
 // opts.gzip is injectable for tests (default zlib.gzipSync).
 export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync } = {}) {
   const destBase = path.join(archiveDir, slug);
+  // Write-side containment (loss class #57's git sibling, GHSA-2hvf-7c8p-28fx:
+  // the SOURCE enumeration is realpath-contained, but the DESTINATION
+  // derivation was not). Resolve the archive ROOT physically ONCE (creating it
+  // if absent — the root itself is resolved config, named on the bill before
+  // consent); every derived dest below must land INSIDE it or the session is
+  // refused BEFORE any mkdir/write. Fail-closed: skip + report, never write
+  // outside — a `..`-carrying rel and a symlinked archive subdir both surface
+  // at their real location via physicalForCreate.
+  let rootPhys = null;
+  try { fs.mkdirSync(archiveDir, { recursive: true }); rootPhys = physicalOrNull(archiveDir); } catch { /* rootPhys stays null */ }
+  if (!rootPhys) return { ok: false, reason: 'archive root unresolvable — session skipped (fail-closed)' };
   const written = [];
   const cleanupPartial = () => { for (const w of written) { try { fs.rmSync(w, { force: true }); } catch {} } };
   let transcriptBuf = null;
@@ -342,6 +386,10 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     } catch (e) { cleanupPartial(); return { ok: false, reason: `read failed: ${f.rel}: ${e.message}` }; }
     if (f.rel === `${sess.id}.jsonl`) transcriptBuf = buf;
     const dest = path.join(destBase, `${f.rel}.gz`);
+    if (!containedIn(physicalForCreate(dest), [rootPhys])) {
+      cleanupPartial();
+      return { ok: false, reason: `archive destination escapes the archive root: ${f.rel} — session skipped (fail-closed), originals kept` };
+    }
     try {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, gzip(buf));

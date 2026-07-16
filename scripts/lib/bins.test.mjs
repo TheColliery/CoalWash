@@ -191,7 +191,10 @@ test('0i: recordBinItem records the item\'s byte weight at birth', () => {
 test('0i: a bin over its store-proportional budget is density-thinned from the OLDEST until under — young keep-all items included ("before items even age"), death-certified', () => {
   const proj = sandbox();
   try {
-    const now = Date.now();
+    // Pinned mid-week (~87h past the weekly epoch): wall-clock here flakes for
+    // ~4h after every weekly boundary — weekOf() regroups the 1-4h-old items
+    // across it, shifting WHICH two evict (counts hold, identities don't).
+    const now = 1750000000000;
     // Four young items (all inside the 48h keep-all tier), 100 bytes each.
     const ids = [4, 3, 2, 1].map((h) => recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(100), now: now - h * 3600000 }));
     // storeBytes 100 -> budget 200 (2x): 400 bytes must thin to <= 200 ->

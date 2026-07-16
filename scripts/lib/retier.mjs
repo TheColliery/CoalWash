@@ -41,7 +41,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
-import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn } from './class-b.mjs';
+import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate } from './class-b.mjs';
 import { tokensEst } from './caliper.mjs';
 import { gateFiles, checkFidelity } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned } from './apply.mjs';
@@ -581,6 +581,12 @@ export function runRetier({
   const rmGz = () => { for (const g of gzWritten) { try { fs.rmSync(g, { force: true }); } catch {} } };
   try {
     const archiveDir = resolveArchiveDir(estate, home);
+    // Write-side containment root (the SAME guard as archiveSession — loss
+    // class #57 / GHSA-2hvf-7c8p-28fx): resolve the archive root physically
+    // ONCE; every hop-2 dest below must land inside it. Unresolvable root =
+    // null -> every dest check fails -> topics are KEPT (fail-closed).
+    let archiveRootPhys = null;
+    try { fs.mkdirSync(archiveDir, { recursive: true }); archiveRootPhys = physicalOrNull(archiveDir); } catch { /* stays null */ }
     const slug = ccProjectSlug(projectRoot);
     const indexEnabled = !estate || typeof estate !== 'object' || estate.indexEnabled !== false;
     // pre-pass anchors over the WHOLE merged tree (all stores, index + topics)
@@ -649,6 +655,12 @@ export function runRetier({
         assertTreatmentAllowed('class-b-topic', 'demote'); // the table belt at the action site
         const pseudoId = `retier-${now}-${seq++}`;
         const dest = path.join(archiveDir, slug, `${pseudoId}.${t.basename}.gz`);
+        // #57 write-side containment: refused BEFORE any mkdir/write — the
+        // topic stays in the live tree (fail-closed, reported via `kept`).
+        if (!archiveRootPhys || !containedIn(physicalForCreate(dest), [archiveRootPhys])) {
+          kept.push({ path: t.path, reason: 'archive destination escapes the archive root — topic kept in the live tree (fail-closed)' });
+          continue;
+        }
         const buf = Buffer.from(t.text, 'utf8');
         // copy-verify (the estate protocol): write .gz -> gunzip back -> byte-compare.
         // A failed verify keeps the original in place (that topic is skipped).

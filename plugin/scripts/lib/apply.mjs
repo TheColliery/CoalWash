@@ -76,6 +76,13 @@ import { sweepFatBin, sweepStoreOld, recordBinItem, FAT_BIN_NAME, STORE_OLD_NAME
 // beyond one small state read). caliper imports only config-load/jsonc, so
 // this adds no module cycle.
 import { loadState } from './caliper.mjs';
+// Wikilink-orphan advisory (the git filter-branch cross-reference lesson):
+// ONE reference-detection implementation, shared with RE-TIER — never
+// duplicated. NOTE the same deliberate module-cycle shape as keeps.mjs/
+// bins.mjs above (retier.mjs imports applyPlan from THIS file): both sides
+// bind function declarations used only at CALL time, so ESM resolves the
+// cycle safely — identical reasoning, identical safety.
+import { unreferencedTopics } from './retier.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
@@ -114,8 +121,18 @@ function fsyncDirBestEffort(dir) {
   } catch { /* best-effort */ }
 }
 // Atomic replace: write sibling .tmp -> fsync -> rename over target.
+// #57 FILESYSTEM-SEMANTICS-ASSUMPTION (MASTER-LOSS-TAXONOMY): rename is atomic
+// ONLY within one directory on one filesystem — cross-device it throws EXDEV
+// (the Claude Code #32533 class). tmp derives from target, so same-dir holds
+// by construction; the assert keeps the invariant EXPLICIT against a future
+// edit pointing tmp at os.tmpdir(). An EXDEV (or any rename failure) surfaces
+// to applyPlan's step catch -> whole-run rollback, which also sweeps the
+// `.coalwash-tmp` sibling — fail-closed, target untouched, no stranded tmp.
 function atomicWrite(target, content) {
   const tmp = target + '.coalwash-tmp';
+  if (path.dirname(tmp) !== path.dirname(target)) {
+    throw new Error(`atomicWrite invariant: tmp must be a same-directory sibling of ${target}`);
+  }
   writeDurable(tmp, content);
   fs.renameSync(tmp, target);
   fsyncDirBestEffort(path.dirname(target));
@@ -130,6 +147,63 @@ function atomicWrite(target, content) {
 function removedLines(origText, newText) {
   const next = new Set(String(newText).split(/\r?\n/));
   return String(origText).split(/\r?\n/).filter((l) => l.trim() && !next.has(l));
+}
+
+// ---------------------------------------------------------------------------
+// wikilink-orphan advisory (post-apply, NEVER a block) — the git
+// filter-branch cross-reference lesson: RE-TIER's unreferencedTopics() keeps
+// a still-referenced topic in the tree, but the ordinary Quick/Full plan path
+// had no equivalent — a plan could delete a topic some SURVIVING file still
+// points at ([[wikilink]] / name mention) with no signal. A deliberate delete
+// is legitimate, so this only earns ONE advisory line on the receipt.
+// ---------------------------------------------------------------------------
+const DEADLINK_FILE_CAP = 2000; // defensive walk bound; hitting it only under-reports (advisory-safe)
+
+// Surviving .md files under the plan's own roots. The tx dir subtree is
+// excluded — its snapshots/bins CONTAIN the deleted bytes and would mark
+// every delete "still referenced". Bounded, fail-silent per entry.
+function collectMdFiles(root, txPhys, out) {
+  if (out.length >= DEADLINK_FILE_CAP) return;
+  let st = null;
+  try { st = fs.statSync(root); } catch { return; }
+  if (st.isFile()) { if (/\.md$/i.test(root)) out.push(root); return; }
+  if (!st.isDirectory()) return;
+  if (txPhys && physicalOrNull(root) === txPhys) return; // never read our own snapshots/bins
+  let names;
+  try { names = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
+  for (const d of names) {
+    if (out.length >= DEADLINK_FILE_CAP) return;
+    const p = path.join(root, d.name);
+    if (d.isDirectory()) collectMdFiles(p, txPhys, out);
+    else if (d.isFile() && /\.md$/i.test(d.name)) out.push(p);
+  }
+}
+
+// Basenames of deleted .md topics that surviving files still reference.
+// Reuses RE-TIER's reference test VERBATIM: a deleted topic modeled with
+// EMPTY own-text is "unreferenced" iff no survivor mentions its basename or
+// stem; everything NOT unreferenced is still pointed at -> the advisory set.
+function deadLinkScan(actionable, physRoots, txDir) {
+  const deleted = actionable.filter((a) => a.type === 'delete' && /\.md$/i.test(a.phys));
+  if (!deleted.length) return [];
+  const txPhys = physicalOrNull(txDir);
+  const files = [];
+  for (const root of physRoots) collectMdFiles(root, txPhys, files);
+  if (!files.length) return [];
+  const surviving = files
+    .map((p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } })
+    .join('\n');
+  const topics = deleted.map((a) => ({ path: a.phys, basename: path.basename(a.phys), text: '', mtimeMs: 0 }));
+  const unref = new Set(unreferencedTopics({ topics }, surviving).map((t) => t.path));
+  return topics.filter((t) => !unref.has(t.path)).map((t) => t.basename);
+}
+
+// The ONE advisory line (program-built; a caller places it on the receipt
+// verbatim). null when there is nothing to say — silence is the norm.
+export function deadLinkLine(deadLinks) {
+  if (!Array.isArray(deadLinks) || !deadLinks.length) return null;
+  const head = deadLinks.slice(0, 5).join(', ');
+  return `advisory: ${deadLinks.length} deleted topic(s) still referenced by surviving files (possible dead [[link]]s): ${head}${deadLinks.length > 5 ? ', …' : ''} — a deliberate delete is fine; recovery door: cli.mjs restore <id>`;
 }
 
 function physicalOrNull(p) {
@@ -193,6 +267,14 @@ export function isPinned(file) {
 // ---------------------------------------------------------------------------
 // lock — atomic-create + session-id + stale-timeout + defer-on-doubt
 // ---------------------------------------------------------------------------
+// NAMED ASSUMPTION (#57 FILESYSTEM-SEMANTICS): O_EXCL ('wx') exclusive-create
+// is atomic on a LOCAL filesystem; a network/cloud-synced mount (NFS, sync
+// clients) may break that exclusivity — the SVN BDB-on-NFS lesson. The cheap
+// conservative belt: EVERY acquire (fresh and stale-steal alike) re-reads the
+// lock after writing and must find its OWN token — a foreign token means the
+// "win" was a lost race a broken O_EXCL let through -> defer (fail-closed;
+// the stale-steal path already did this, the fresh path now matches). No
+// mount-detection is attempted (over-harden).
 // A per-acquire owner TOKEN so the release and the stale-takeover can prove
 // ownership (never delete a lock another run now holds). hrtime.bigint() is a
 // monotonic counter (not wall-clock) — distinct on every call, so two acquires
@@ -214,6 +296,9 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
     ensureSelfIgnore(path.dirname(lockPath));
     const fd = fs.openSync(lockPath, 'wx'); // atomic create: exactly one fresh acquirer wins
     try { fs.writeSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    // compare-after-write (the header's named-assumption belt): a foreign
+    // token on re-read = O_EXCL did not actually exclude us -> defer.
+    if (readLockToken(lockPath) !== token) return { acquired: false, reason: 'exclusive-create acquire lost a race (non-local filesystem?) — deferring' };
     return { acquired: true, release: releaseIfOwner };
   } catch (e) {
     if (e && e.code !== 'EEXIST') return { acquired: false, reason: `lock error: ${e.message}` };
@@ -609,7 +694,13 @@ export function applyPlan(plan, opts = {}) {
         recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
       }
 
-      return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged };
+      // ---- wikilink-orphan advisory (post-commit, advisory ONLY — see the
+      // helper block above). Fail-silent: an advisory failure never
+      // un-commits the run; the fields just stay empty.
+      let deadLinks = [];
+      try { deadLinks = deadLinkScan(actionable, physRoots, txDir); } catch { /* advisory only */ }
+
+      return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks) };
     } finally {
       lock.release();
       if (globalLock) globalLock.release();
