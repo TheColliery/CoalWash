@@ -497,6 +497,32 @@ test('lock: the global CoalWash lock held elsewhere -> deferred, nothing touched
   } finally { clean(home, proj); }
 });
 
+test('platform gate (armor #2): a non-Claude-Code home no-ops estateUltraScan + runEstate (conservative flag, nothing scanned); creating ~/.claude flips it back to scanning — keyed on detectPlatform, not a hardcode', () => {
+  const { home, proj } = sandbox(); // sandbox() does NOT create ~/.claude
+  const now = Date.now();
+  try {
+    // non-CC: detectPlatform === 'unknown' → explicit conservative no-op.
+    const scan = estateUltraScan({ projectRoot: proj, home, now, estate: estateCfg() });
+    assert.strictEqual(scan.platform, 'unknown');
+    assert.ok(scan.flags.some((f) => f.includes('never auto-delete')), 'the verbatim conservative flag is surfaced');
+    assert.strictEqual(scan.sessions, 0, 'no CC layout assumed — nothing scanned');
+    const run = runEstate({ projectRoot: proj, home, now, estate: estateCfg() });
+    assert.strictEqual(run.ok, true, 'a no-op is not an error');
+    assert.strictEqual(run.platform, 'unknown');
+    assert.strictEqual(run.archived.length, 0, 'nothing archived on a non-CC home');
+
+    // flip: create ~/.claude + a WARM session → the gate now keys CC and scans/archives.
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const { jsonl } = seedSession(home, proj, 'flip-sess', 30);
+    const scan2 = estateUltraScan({ projectRoot: proj, home, now, estate: estateCfg() });
+    assert.notStrictEqual(scan2.platform, 'unknown', 'a CC home is no longer gated');
+    assert.ok(scan2.warm >= 1, 'the WARM session is now scanned');
+    const run2 = runEstate({ projectRoot: proj, home, now, estate: estateCfg() });
+    assert.ok(run2.archived.length >= 1, 'CC home: the session is archived');
+    assert.strictEqual(fs.existsSync(jsonl), false, 'archived + deleted on the CC path');
+  } finally { clean(home, proj); }
+});
+
 test('run-gate: no hook ever wires the estate mutators (0h-GUARD sibling — grep hooks/ must stay clean)', () => {
   const hooksDir = path.join(repoDir, 'hooks');
   for (const f of fs.readdirSync(hooksDir)) {

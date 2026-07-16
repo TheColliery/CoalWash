@@ -41,7 +41,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
-import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate } from './class-b.mjs';
+import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
 import { tokensEst } from './caliper.mjs';
 import { gateFiles, checkFidelity } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned } from './apply.mjs';
@@ -469,6 +469,14 @@ function planStore(store, env, allTextConcat) {
 // the #54 anchor-diff advisory per over-arm index. No lock, no writes.
 export function retierScan({ projectRoot = process.cwd(), home = os.homedir(), retier } = {}) {
   const env = envelopeFor(retier);
+  // Platform gate (armor #2, one-flock with discoverClassB): a non-Claude-Code
+  // home has no CC memory-store layout — conservative no-op, never a
+  // CC-layout-assumed scan. NAMED divergence: retierScan's `flags` field is the
+  // #55 contradiction array (retierScanLines iterates it as claim objects), so
+  // the conservative note rides `verdict` here, not `flags`.
+  if (detectPlatform(home) !== 'claude-code') {
+    return { platform: 'unknown', env, stores: [], flags: [], overArm: 0, verdict: `no action — ${UNKNOWN_PLATFORM_FLAG}` };
+  }
   const stores = collectStores({ projectRoot, home });
   const allTextConcat = stores.map((s) => [s.indexText, ...s.topics.map((t) => t.text)].join('\n')).join('\n');
   const out = [];
@@ -559,14 +567,21 @@ export function rollbackFromSnapshot(snapshotDir, createdPaths = []) {
 // (the archive dig-index is a cross-project file — runEstate's own reason);
 // lock held elsewhere -> { deferred: true }, nothing touched. applyPlan
 // underneath adds the per-project lock + snapshot + whole-run rollback +
-// external-writer guard + the fidelity interlock. `tamperForTests` = a test
-// seam called at 'plan' / 'pre-apply' / 'post-apply' (hermetic fault
-// injection; never wired outside tests).
+// external-writer guard + the fidelity interlock. Zero production test-hooks:
+// gate liveness is proven purely test-side (exported-function real violations +
+// the blessed `gzip` benign-injectable) — no fault-injection seam ships.
 export function runRetier({
   projectRoot = process.cwd(), home = os.homedir(), retier, estate,
-  now = Date.now(), sessionId, gzip = zlib.gzipSync, tamperForTests = null,
+  now = Date.now(), sessionId, gzip = zlib.gzipSync,
 } = {}) {
   const env = envelopeFor(retier);
+  // Platform gate (armor #2): a non-Claude-Code home has no CC memory-store
+  // layout to redistribute — conservative no-op BEFORE the lock, nothing
+  // touched (mirrors discoverClassB; `refused` = RE-TIER's own no-action shape,
+  // the same outcome as the dead-zone refusal). The verbatim flag rides reason.
+  if (detectPlatform(home) !== 'claude-code') {
+    return { ok: false, refused: true, platform: 'unknown', reason: `no action — ${UNKNOWN_PLATFORM_FLAG}`, env };
+  }
   const stores = collectStores({ projectRoot, home });
   const allTextConcat = stores.map((s) => [s.indexText, ...s.topics.map((t) => t.text)].join('\n')).join('\n');
   const plans = stores.map((st) => ({ st, p: planStore(st, env, allTextConcat) }));
@@ -592,8 +607,6 @@ export function runRetier({
     // pre-pass anchors over the WHOLE merged tree (all stores, index + topics)
     const preTexts = stores.flatMap((s) => [s.indexText, ...s.topics.map((t) => t.text)]);
     const anchors = topAnchors(preTexts, TOP_ANCHOR_N);
-
-    if (typeof tamperForTests === 'function') tamperForTests('plan', { plans: over });
 
     const actions = [];
     const approvedDrops = [];
@@ -696,16 +709,12 @@ export function runRetier({
       return { ok: false, refused: true, reason: 'over-arm but nothing demotable — the gated wash (condense-via-gate, human-adjudicated) is the next lever; RE-TIER never auto-condenses', env, kept };
     }
 
-    if (typeof tamperForTests === 'function') tamperForTests('pre-apply', { actions });
-
     // ONE transaction across every store: snapshot -> writes -> deletes LAST
     // -> whole-run rollback on any failure. Memory-store paths are project-
     // scope (never scope:'global'), so applyPlan's global-lock branch cannot
     // re-acquire the lock this function already holds.
     const r = applyPlan({ projectRoot, roots, actions, sessionId, origin: 'wizard-cut', approvedDrops }, { home, now });
     if (!r.ok) { rmGz(); return { ...r, env, kept }; }
-
-    if (typeof tamperForTests === 'function') tamperForTests('post-apply', { actions });
 
     // THE CLOSING CHECK — top-anchor survival: the N most-referenced pre-pass
     // anchors must still resolve somewhere in the post-pass tree (hot index,

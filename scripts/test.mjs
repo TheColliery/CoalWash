@@ -35,6 +35,7 @@ const TESTS = [
   'scripts/lib/estate.test.mjs',
   'scripts/lib/estate-archive.test.mjs',
   'scripts/lib/retier.test.mjs',
+  'scripts/lib/gate-liveness.test.mjs',
   'scripts/build-plugin.test.mjs',
 ];
 

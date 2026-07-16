@@ -13,9 +13,9 @@ import { fileURLToPath } from 'node:url';
 import {
   OVERFLOW_BASENAME, resolveRetierCfg, envelopeFor, envelopeBand,
   RETIER_TREATMENTS, classifyRetier, assertTreatmentAllowed,
-  collectStores, planIndexDemotion, unreferencedTopics,
+  planIndexDemotion, unreferencedTopics,
   extractClaims, reconcileClaims, topAnchors, probeAnchors,
-  moveVerify, retierScan, retierScanLines,
+  moveVerify, rollbackFromSnapshot, retierScan, retierScanLines,
   runRetier, runRetierReport,
 } from './retier.mjs';
 import { tokensEst } from './caliper.mjs';
@@ -387,13 +387,17 @@ test('combination: mid-pass failure (external writer during apply) -> WHOLE-RUN 
     const indexOrig = fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8');
     const zetaPath = path.join(dir, 'zeta-old.md');
     const estate = estateCfg(home);
-    const res = runRetier({
-      projectRoot: proj, home, retier: R, estate, now,
-      tamperForTests: (phase) => {
-        // simulate a foreign writer landing between gates and the delete step
-        if (phase === 'pre-apply') fs.appendFileSync(zetaPath, 'FOREIGN-WRITER\n');
-      },
-    });
+    // A foreign writer lands mid-run, ridden into place by the BLESSED `gzip`
+    // benign-injectable (it fires in the gz-write loop, BEFORE applyPlan's delete
+    // step — the same window a co-writer / cloud-sync hits). No production seam:
+    // the archive still holds the pre-foreign bytes (buf is captured in memory);
+    // only the on-disk topic changes, tripping applyPlan's external-writer guard.
+    let foreign = false;
+    const gzipForeignWriter = (buf) => {
+      if (!foreign) { fs.appendFileSync(zetaPath, 'FOREIGN-WRITER\n'); foreign = true; }
+      return zlib.gzipSync(buf);
+    };
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate, now, gzip: gzipForeignWriter });
     assert.strictEqual(res.ok, false);
     assert.strictEqual(res.rolledBack, true, `whole-run rollback (got: ${res.error})`);
     assert.match(res.error || '', /external writer/);
@@ -410,51 +414,34 @@ test('combination: mid-pass failure (external writer during apply) -> WHOLE-RUN 
 // 4. GATE WIRING — fidelity gate, top-anchor probe + rollback, #55 reconcile
 // ---------------------------------------------------------------------------
 
-test('gate wiring: an engineered structured-token drop (a moved line vanishing from the plan) is BLOCKED by the union fidelity gate, nothing mutated', () => {
+// MOVE-VERIFY's block on a real lossy plan + the top-anchor probe's miss
+// detection are proven directly on the exported functions (moveVerify /
+// probeAnchors — see "helpers + rails" below). The two former runRetier
+// fault-injection tests were RETIRED with the production `tamperForTests` seam
+// (a corruption hook must not ship in an engine that moves real bytes), and
+// their faults can't be produced with real data anyway: demotion moves whole
+// lines verbatim by construction, and the strand-guard protects sole-home
+// anchors — only a bug (or a seam) could corrupt indexNew / lose an anchor
+// post-apply. What the post-apply test uniquely exercised — the rollback
+// wrapper — is unit-tested here (external-writer rollback stays covered by the
+// gzip-injected test above):
+test('gate wiring: rollbackFromSnapshot restores every manifest original byte-exact + removes this run\'s created files (the probe-miss undo path)', () => {
   const { home, proj } = sandbox();
   try {
-    const dir = seedMainStore(home, proj);
-    const indexOrig = fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8');
-    const res = runRetier({
-      projectRoot: proj, home, retier: R, estate: estateCfg(home),
-      tamperForTests: (phase, ctx) => {
-        if (phase !== 'plan') return;
-        // drop one demoted line from the plan entirely: its unique [[uniq-N]]
-        // + `key-N` tokens then survive NOWHERE -> a real structured loss
-        ctx.plans[0].p.hop1.movedLines.pop();
-      },
-    });
-    assert.strictEqual(res.ok, false);
-    assert.match(res.error || '', /move-verify failed/, 'the gate names the block');
-    assert.match(res.error || '', /union gate drops|moved line/);
-    assert.strictEqual(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), indexOrig, 'nothing mutated (fail-closed pre-apply)');
-    assert.ok(!fs.existsSync(path.join(dir, OVERFLOW_BASENAME)), 'no overflow written');
-    assert.ok(fs.existsSync(path.join(dir, 'zeta-old.md')), 'no topic deleted');
-  } finally { clean(home, proj); }
-});
-
-test('gate wiring: top-anchor survival probe fails on an engineered post-apply anchor loss -> the run ROLLS BACK byte-identical', () => {
-  const { home, proj } = sandbox();
-  try {
-    const dir = seedMainStore(home, proj);
-    const indexOrig = fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8');
-    const res = runRetier({
-      projectRoot: proj, home, retier: R, estate: estateCfg(home),
-      tamperForTests: (phase) => {
-        if (phase !== 'post-apply') return;
-        // vandalize the committed tree: the most-referenced anchor
-        // ([[flock-law]], on ~every index line) now resolves NOWHERE
-        fs.writeFileSync(path.join(dir, 'MEMORY.md'), '# VANDALIZED\n', 'utf8');
-        fs.writeFileSync(path.join(dir, OVERFLOW_BASENAME), 'VANDALIZED\n', 'utf8');
-      },
-    });
-    assert.strictEqual(res.ok, false);
-    assert.ok(Array.isArray(res.anchorMisses) && res.anchorMisses.length > 0, 'probe reports the misses');
-    assert.ok(res.anchorMisses.some((a) => a.token === 'flock-law'), 'the shared top anchor is among the misses');
-    assert.strictEqual(res.rolledBack, true, res.error);
-    assert.strictEqual(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), indexOrig, 'index restored byte-identical from the verified snapshot');
-    assert.ok(!fs.existsSync(path.join(dir, OVERFLOW_BASENAME)), 'created overflow removed');
-    assert.ok(fs.existsSync(path.join(dir, 'zeta-old.md')), 'deleted topic restored');
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir, { recursive: true });
+    const orig1 = path.join(proj, 'a.md');
+    write(orig1, 'PRISTINE-A');
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'PRISTINE-A'); // the verified backup
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: orig1 }]));
+    const created = path.join(proj, 'created-overflow.md');
+    write(created, 'an overflow this run created');
+    fs.writeFileSync(orig1, 'VANDALIZED-AFTER-COMMIT'); // the committed tree lost the anchor
+    const failed = rollbackFromSnapshot(snapDir, [created]);
+    assert.strictEqual(failed, 0, 'clean rollback (0 restore failures)');
+    assert.strictEqual(fs.readFileSync(orig1, 'utf8'), 'PRISTINE-A', 'original restored byte-exact');
+    assert.strictEqual(fs.existsSync(created), false, 'this run\'s created file removed');
+    assert.strictEqual(rollbackFromSnapshot(path.join(proj, 'no-such-snap')), -1, 'an unreadable manifest -> -1 (fail-loud sentinel)');
   } finally { clean(home, proj); }
 });
 
@@ -527,12 +514,35 @@ test('helpers: moveVerify passes a verbatim move and fails a lossy one; unrefere
   assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), ['orphan-zzz.md']);
 });
 
+test('platform gate (armor #2): a non-Claude-Code home → retierScan refuses + runRetier no-ops (conservative flag); with ~/.claude the gate keys CC — detectPlatform, not a hardcode', () => {
+  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-npproj-')));
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-nphome-'))); // NO ~/.claude
+  try {
+    const scan = retierScan({ projectRoot: proj, home, retier: R });
+    assert.strictEqual(scan.platform, 'unknown');
+    assert.match(scan.verdict, /never auto-delete/, 'the verbatim conservative flag rides the verdict');
+    assert.deepStrictEqual(scan.stores, [], 'no CC memory layout scanned');
+    const run = runRetier({ projectRoot: proj, home, retier: R });
+    assert.strictEqual(run.refused, true, 'a no-op is RE-TIER\'s own refusal shape, nothing touched');
+    assert.strictEqual(run.platform, 'unknown');
+
+    // flip: ~/.claude present → the gate keys CC (an over-arm store is scanned).
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    write(path.join(memDir(home, proj), 'MEMORY.md'), bigIndex());
+    const scan2 = retierScan({ projectRoot: proj, home, retier: R });
+    assert.notStrictEqual(scan2.platform, 'unknown', 'a CC home is no longer gated');
+    assert.strictEqual(scan2.overArm, 1, 'the over-arm store is scanned on the CC path');
+  } finally { clean(home, proj); }
+});
+
 test('rail: RE-TIER is wizard-only — no hook wires it (grep hooks/ for retier = 0)', () => {
   const hooksDir = path.join(repoDir, 'hooks');
-  for (const f of fs.readdirSync(hooksDir)) {
-    const p = path.join(hooksDir, f);
-    if (!fs.statSync(p).isFile()) continue;
-    assert.ok(!fs.readFileSync(p, 'utf8').toLowerCase().includes('retier'), `hooks/${f} must not reference retier (run-gate law)`);
+  // Single directory read carries the file-type (no separate statSync — closes
+  // the check-then-use TOCTOU CodeQL js/file-system-race flagged).
+  for (const d of fs.readdirSync(hooksDir, { withFileTypes: true })) {
+    if (!d.isFile()) continue;
+    const content = fs.readFileSync(path.join(hooksDir, d.name), 'utf8').toLowerCase();
+    assert.ok(!content.includes('retier'), `hooks/${d.name} must not reference retier (run-gate law)`);
   }
 });
 

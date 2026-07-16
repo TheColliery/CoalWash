@@ -61,7 +61,7 @@ import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir } from './config-load.mjs';
-import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate } from './class-b.mjs';
+import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
 import { acquireLock, globalLockPath } from './apply.mjs';
 
 export const ESTATE_ARCHIVE_DIRNAME = 'estate-archive';
@@ -493,6 +493,17 @@ function pruneEmptyDirs(dir, base, survivors) {
 
 // Non-mutating pre-consent scan for the wizard bill.
 export function estateUltraScan({ projectRoot = process.cwd(), home = os.homedir(), now = Date.now(), estate, currentSessionId = null } = {}) {
+  // Platform gate (armor #2, one-flock with discoverClassB): a non-Claude-Code
+  // home has no CC projects/<slug>/ session layout — conservative no-op, NEVER
+  // a CC-layout-assumed scan. Mirrors class-b.mjs's fallback flag verbatim.
+  if (detectPlatform(home) !== 'claude-code') {
+    return {
+      platform: 'unknown', flags: [UNKNOWN_PLATFORM_FLAG],
+      slug: null, archiveDir: resolveArchiveDir(estate, home), cfg: resolveEstateCfg(estate),
+      sessions: 0, active: 0, warm: 0, cold: 0,
+      warmBytes: 0, coldBytes: 0, totalBytes: 0, estAfterBytes: 0,
+    };
+  }
   const c = classifySessions({ projectRoot, home, now, estate, currentSessionId });
   const by = { active: [], warm: [], cold: [] };
   for (const s of c.sessions) by[s.band].push(s);
@@ -531,6 +542,16 @@ export function ultraBillLine(scan) {
 // index is a cross-project shared file); lock held elsewhere -> deferred,
 // nothing touched (`deferred: true`, applyPlan's own contract).
 export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), now = Date.now(), estate, currentSessionId = null, gzip = zlib.gzipSync } = {}) {
+  // Platform gate (armor #2): a non-Claude-Code home has no CC session estate to
+  // touch — conservative no-op BEFORE the lock, nothing mutated (mirrors
+  // discoverClassB / estateUltraScan). ok:true = "correctly did nothing".
+  if (detectPlatform(home) !== 'claude-code') {
+    return {
+      ok: true, platform: 'unknown', flags: [UNKNOWN_PLATFORM_FLAG],
+      slug: null, archiveDir: resolveArchiveDir(estate, home), cfg: resolveEstateCfg(estate),
+      archived: [], failed: [], coldListed: [], activeSkipped: 0, bytesFreed: 0, indexRows: 0,
+    };
+  }
   const lock = acquireLock(globalLockPath(home), { sessionId: currentSessionId || String(process.pid), now });
   if (!lock.acquired) return { ok: false, deferred: true, error: lock.reason };
   try {

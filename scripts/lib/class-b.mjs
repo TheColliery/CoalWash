@@ -38,6 +38,12 @@ import { claudeBaseDir } from './config-load.mjs';
 const IMPORT_DEPTH_MAX = 5; // CC @import recursion cap (docs: max 5 hops)
 const RULES_FILE_CAP = 500; // defensive cap on a runaway rules tree
 
+// The conservative fallback flag for a non-Claude-Code platform. ONE source of
+// truth so the estate/retier entry gates (estate-archive.mjs · retier.mjs)
+// mirror discoverClassB's OWN fallback line VERBATIM — one-flock: the discovery
+// gate and the estate/retier gates can never drift apart on the wording.
+export const UNKNOWN_PLATFORM_FLAG = 'unknown platform: conservative — no auto-discovery; verify class-B scope manually; never auto-delete';
+
 // ---------------------------------------------------------------------------
 // path helpers
 // ---------------------------------------------------------------------------
@@ -142,7 +148,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     return {
       platform: plat,
       entries: [],
-      flags: ['unknown platform: conservative — no auto-discovery; verify class-B scope manually; never auto-delete'],
+      flags: [UNKNOWN_PLATFORM_FLAG],
     };
   }
 
