@@ -397,7 +397,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       const back = zlib.gunzipSync(fs.readFileSync(dest));
       if (!back.equals(buf)) { cleanupPartial(); return { ok: false, reason: `verify mismatch: ${f.rel} — original kept` }; }
     } catch (e) { cleanupPartial(); return { ok: false, reason: `archive failed: ${f.rel}: ${e.message} — original kept` }; }
-    originals.push({ path: f.path, rel: f.rel });
+    originals.push({ path: f.path, rel: f.rel, gz: dest });
   }
 
   // External-writer guard over the WHOLE listing->delete window (applyPlan's
@@ -416,6 +416,28 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     if (!st || st.size !== f.bytes || st.mtimeMs !== f.mtimeMs) {
       cleanupPartial();
       return { ok: false, reason: `changed during run: ${f.rel} — session skipped, originals kept` };
+    }
+  }
+
+  // ARCHIVE RE-VERIFY AT THE DELETE BOUNDARY (loss class #57 sibling — the
+  // archive-side TOCTOU the per-file write-verify above does NOT cover): the
+  // .gz was verified when it was WRITTEN, but the wide write->delete window
+  // (the rest of the file loop + the originals re-stat) is exactly where a
+  // co-writer on a cross-volume / cloud-synced archiveDir (a config-supported
+  // destination) can remove or re-sync-clobber a .gz. This is the ONE handle
+  // for a WARM/COLD session (ULTRA keeps no snapshot), so a clobbered .gz +
+  // the delete below = silent byte loss with no recovery door. Re-read + gunzip
+  // + byte-compare each archive against a FRESH read of its still-present
+  // original (step-2 proved the original is byte-unchanged) — the SAME
+  // verify-the-recovery-copy-immediately-before-destroying discipline
+  // applyPlan's verifySnapshot applies to its snapshot. Any miss = fail-closed:
+  // drop the partial archive, keep every original.
+  for (const o of originals) {
+    let ok = false;
+    try { ok = zlib.gunzipSync(fs.readFileSync(o.gz)).equals(fs.readFileSync(o.path)); } catch { ok = false; }
+    if (!ok) {
+      cleanupPartial();
+      return { ok: false, reason: `archive no longer verifies before delete: ${o.rel} (removed/corrupted since it was written — a co-writer on the archive volume?) — session skipped, originals kept` };
     }
   }
 

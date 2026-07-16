@@ -294,6 +294,43 @@ test('external-writer guard: an original that changes between listing and delete
   } finally { clean(home, proj); }
 });
 
+// The ARCHIVE-side sibling of the external-writer guard above (originals side):
+// a co-writer on a cross-volume / cloud-synced archiveDir clobbers an
+// already-written+verified .gz in the wide write->delete window. ULTRA keeps
+// NO snapshot, so the .gz is the SOLE handle — deleting the original with the
+// .gz gone = silent byte loss. The delete-boundary re-verify must catch it.
+test('archive-clobber TOCTOU (co-writer removes a verified .gz before the delete): the delete-boundary re-verify aborts — every original kept, no byte loss', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30); // 3 files: jsonl + meta + tool overflow
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const sess = c.sessions.find((s) => s.id === 'sess-warm');
+    const archiveDir = path.join(home, 'arch');
+    const slugDir = path.join(archiveDir, ccProjectSlug(proj));
+    // A faithful stand-in for a sync client removing an already-verified .gz
+    // between our synchronous fs calls: on the 2nd gzip, delete the .gz the
+    // 1st file already wrote+verified. (In prod the co-writer acts at the OS
+    // level in the same window; the seam makes the race deterministic.)
+    let calls = 0;
+    const clobberGzip = (buf) => {
+      if (++calls === 2) {
+        const gz = fs.readdirSync(slugDir, { recursive: true }).map(String).find((n) => n.endsWith('.gz'));
+        if (gz) fs.rmSync(path.join(slugDir, gz), { force: true });
+      }
+      return zlib.gzipSync(buf);
+    };
+    const r = archiveSession(sess, { slug: c.slug, archiveDir, gzip: clobberGzip });
+    assert.strictEqual(r.ok, false, 'aborts — the sole handle is gone, must not delete');
+    assert.ok(/no longer verifies before delete/.test(r.reason), r.reason);
+    for (const p of Object.values(files)) assert.ok(fs.existsSync(p), `original kept: ${p}`);
+    // fail-closed cleanup: the surviving partial archive is swept too (nothing
+    // half-written masquerades as a complete archive on a later restore).
+    const leftovers = fs.existsSync(slugDir)
+      ? fs.readdirSync(slugDir, { recursive: true }).map(String).filter((n) => n.endsWith('.gz')) : [];
+    assert.deepStrictEqual(leftovers, [], 'partial archive cleaned up on abort');
+  } finally { clean(home, proj); }
+});
+
 test('#56 loss class (delete_scope == verified_set): a file in <sid>/ NOT in the enumerated set SURVIVES the archive delete; the container is kept + the survivor surfaces in unpruned — never a whole-tree rm -rf', () => {
   const { home, proj } = sandbox();
   try {
