@@ -3,7 +3,11 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { neutralScan, estimateBill, billLine, PARTITION_FILES, PARTITION_KB, MINUTES_PER_PARTITION, TOKEN_RATE_PER_KB } from './wizard.mjs';
+import {
+  neutralScan, estimateBill, billLine, PARTITION_FILES, PARTITION_KB, MINUTES_PER_PARTITION, TOKEN_RATE_PER_KB,
+  wizardContract, wizardHandshake, manualTierCounts, handoffVerdict, HANDOFF_KNEE_TOK, HANDOFF_FLOOR_FILES,
+} from './wizard.mjs';
+import { ccProjectSlug } from './class-b.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR;
 
@@ -117,4 +121,128 @@ test('billLine: malformed input never throws', () => {
   assert.doesNotThrow(() => billLine());
   assert.doesNotThrow(() => billLine({}));
   assert.doesNotThrow(() => billLine(null));
+});
+
+// ---------------------------------------------------------------------------
+// wizardHandshake — the background clone's fail-closed FIRST act (locked spec
+// step 2): matched contract proceeds; ANY mismatch/missing field refuses,
+// touching nothing.
+// ---------------------------------------------------------------------------
+
+// A deterministic project root for findProjectRoot: the marker file makes the
+// walk stop AT the sandbox dir, never at some real .git above os.tmpdir().
+function markedProj(proj) {
+  fs.writeFileSync(path.join(proj, '.coalwash.json'), '{}', 'utf8');
+  return proj;
+}
+
+test('wizardHandshake: a matched contract (same projectRoot/slug/config) proceeds — ok:true, refuse:false', () => {
+  const { home, proj } = sandbox();
+  try {
+    markedProj(proj);
+    const contract = wizardContract({ projectRoot: proj, home });
+    const r = wizardHandshake({ contract, cwd: proj, home });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.refuse, false);
+    assert.deepStrictEqual(r.mismatches, []);
+  } finally { clean(home, proj); }
+});
+
+test('wizardHandshake: a clone landing in a DIFFERENT project refuses fail-closed (projectRoot + slug named)', () => {
+  const { home, proj } = sandbox();
+  const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cww-proj2-')));
+  try {
+    markedProj(proj); markedProj(proj2);
+    const contract = wizardContract({ projectRoot: proj, home });
+    const r = wizardHandshake({ contract, cwd: proj2, home });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.refuse, true);
+    assert.ok(r.mismatches.includes('projectRoot'));
+    assert.ok(r.mismatches.includes('slug'));
+  } finally { clean(home, proj, proj2); }
+});
+
+test('wizardHandshake: a config edit between spawn and clone start flips the fingerprint -> refuse', () => {
+  const { home, proj } = sandbox();
+  try {
+    markedProj(proj);
+    const contract = wizardContract({ projectRoot: proj, home });
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), '{"language":"th"}', 'utf8'); // drift after spawn
+    const r = wizardHandshake({ contract, cwd: proj, home });
+    assert.strictEqual(r.refuse, true);
+    assert.deepStrictEqual(r.mismatches, ['configFingerprint']);
+  } finally { clean(home, proj); }
+});
+
+test('wizardHandshake: a corrupted/missing contract field refuses; a missing contract refuses — never throws', () => {
+  const { home, proj } = sandbox();
+  try {
+    markedProj(proj);
+    const good = wizardContract({ projectRoot: proj, home });
+    const badSlug = wizardHandshake({ contract: { ...good, slug: 'not-the-store' }, cwd: proj, home });
+    assert.strictEqual(badSlug.refuse, true);
+    assert.deepStrictEqual(badSlug.mismatches, ['slug']);
+    for (const c of [undefined, null, 'a-string', {}]) {
+      const r = wizardHandshake({ contract: c, cwd: proj, home });
+      assert.strictEqual(r.refuse, true, `contract ${JSON.stringify(c)} must refuse`);
+    }
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// handoffVerdict — the CoalFace hand-off gate (size AND count, single-file
+// short-circuit; fail direction = fewer workers).
+// ---------------------------------------------------------------------------
+
+test('handoffVerdict: ONE huge file is always single-worker (a file cannot be partitioned)', () => {
+  assert.strictEqual(handoffVerdict({ manualTierTok: 500000, fileCount: 1 }), 'single-worker');
+  assert.strictEqual(handoffVerdict({ manualTierTok: 500000, fileCount: 0 }), 'single-worker');
+});
+
+test('handoffVerdict: many tiny files with a small total stay single-worker (size gate unmet)', () => {
+  assert.strictEqual(handoffVerdict({ manualTierTok: 8000, fileCount: 30 }), 'single-worker');
+});
+
+test('handoffVerdict: big AND partitionable offers CoalFace — and only when BOTH gates hold', () => {
+  assert.strictEqual(handoffVerdict({ manualTierTok: 120000, fileCount: 12 }), 'offer-coalface');
+  assert.strictEqual(handoffVerdict({ manualTierTok: HANDOFF_KNEE_TOK + 1, fileCount: HANDOFF_FLOOR_FILES }), 'offer-coalface');
+  assert.strictEqual(handoffVerdict({ manualTierTok: HANDOFF_KNEE_TOK, fileCount: 12 }), 'single-worker', 'at the knee (not past it) = still single');
+  assert.strictEqual(handoffVerdict({ manualTierTok: 120000, fileCount: HANDOFF_FLOOR_FILES - 1 }), 'single-worker', 'below the file floor = not partitionable');
+});
+
+test('handoffVerdict: malformed input degrades to single-worker (fail toward fewer workers), never throws', () => {
+  for (const input of [undefined, {}, { manualTierTok: 'x', fileCount: 'y' }, null]) {
+    assert.strictEqual(handoffVerdict(input), 'single-worker');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// manualTierCounts — (3)'s scope: topic files only, across main + role
+// stores; the index slot and non-topic strays never counted.
+// ---------------------------------------------------------------------------
+
+test('manualTierCounts: counts topic files across main + agent-memory stores; excludes MEMORY.md and governance strays', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mainDir = path.join(home, '.claude', 'projects', ccProjectSlug(proj), 'memory');
+    fs.mkdirSync(mainDir, { recursive: true });
+    fs.writeFileSync(path.join(mainDir, 'MEMORY.md'), '# index\n- [a](a.md)\n', 'utf8');
+    fs.writeFileSync(path.join(mainDir, 'a.md'), 'topic a — some accreted prose\n', 'utf8');
+    fs.writeFileSync(path.join(mainDir, 'b.md'), 'topic b — more prose\n', 'utf8');
+    fs.writeFileSync(path.join(mainDir, 'CLAUDE.md'), 'governance stray — never (3) scope\n', 'utf8');
+    const roleDir = path.join(proj, '.claude', 'agent-memory', 'coder');
+    fs.mkdirSync(roleDir, { recursive: true });
+    fs.writeFileSync(path.join(roleDir, 'MEMORY.md'), '# coder index\n', 'utf8');
+    fs.writeFileSync(path.join(roleDir, 'craft.md'), 'role topic prose\n', 'utf8');
+    const m = manualTierCounts({ projectRoot: proj, home });
+    assert.strictEqual(m.files, 3, 'a.md + b.md + craft.md — never the two MEMORY.md indexes, never the CLAUDE.md stray');
+    assert.ok(m.totalBytes > 0 && m.tokensEst > 0);
+  } finally { clean(home, proj); }
+});
+
+test('manualTierCounts: no stores at all -> zeros, never throws', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.deepStrictEqual(manualTierCounts({ projectRoot: proj, home }), { files: 0, totalBytes: 0, tokensEst: 0 });
+  } finally { clean(home, proj); }
 });

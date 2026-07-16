@@ -1,8 +1,13 @@
 // retier.mjs — RE-TIER: the wizard's FOURTH choice (blueprint §19.3).
 //
-// RE-TIER = merge-all class-B memory stores -> redistribute by an ENVELOPE ->
-// overflow cascades DOWN the tier ladder (hot index -> topic file -> estate
-// archive). TWO mechanisms meet at one point, and the combination is its own
+// RE-TIER = keep every class-B memory INDEX inside an ENVELOPE — each store
+// measured separately (main memory/ + each agent-memory/<role>/). The index
+// is a NAMED SLOT: MEMORY.md stays ONE file forever (a split/renumbered index
+// silently stops auto-loading — the auto-load layer is never "redistributed").
+// Envelope pressure resolves ONLY through the one-way overflow VALVE: demote
+// DOWN the tier ladder (hot index line -> topic file -> estate archive),
+// lossless, pointer kept; the user moving a line back up = re-promotion.
+// TWO mechanisms meet at one point, and the combination is its own
 // damage surface (the quota-driven-loss class), so the powers are SEPARATED:
 //
 //   Mechanism 1 — the ENVELOPE (config `retier`): a +/- BAND around
@@ -29,7 +34,7 @@
 // binding envelope (the user's minimax derivation: the min-of-max context the
 // always-loaded slice rides in; CC's own revealed constants bracket 1-3%).
 // Derived: armAt = target x (1 + armPct/100) ~ 4,950 · disarmAt = target x
-// (1 - disarmPct/100) ~ 3,712 · fill ceiling on redistribute = target x
+// (1 - disarmPct/100) ~ 3,712 · fill ceiling on the demote pass = target x
 // (1 - headroomPct/100) — the over-provisioning analog: never fill TO target.
 // Token measure = the existing char-heuristic (caliper tokensEst), ~est.
 //
@@ -83,7 +88,7 @@ export function envelopeFor(retier) {
 
 // The watermark pair. The DEAD ZONE [disarmAt..armAt) is the hysteresis
 // itself: a store washed down into it does NOT re-trigger (no-flap) — only
-// crossing armAt again arms; redistribute fills to fillCeiling (< disarmAt at
+// crossing armAt again arms; the demote pass lands at fillCeiling (< disarmAt at
 // factory), so a completed pass always lands disarmed.
 export function envelopeBand(tokens, env) {
   const t = Number.isFinite(tokens) ? tokens : 0;
@@ -576,7 +581,7 @@ export function runRetier({
 } = {}) {
   const env = envelopeFor(retier);
   // Platform gate (armor #2): a non-Claude-Code home has no CC memory-store
-  // layout to redistribute — conservative no-op BEFORE the lock, nothing
+  // layout to re-tier — conservative no-op BEFORE the lock, nothing
   // touched (mirrors discoverClassB; `refused` = RE-TIER's own no-action shape,
   // the same outcome as the dead-zone refusal). The verbatim flag rides reason.
   if (detectPlatform(home) !== 'claude-code') {
@@ -776,7 +781,7 @@ export function runRetierReport(res) {
   const lines = [];
   const moved = res.stores.reduce((n, s) => n + s.movedLines, 0);
   const arch = res.stores.reduce((n, s) => n + s.topicsArchived, 0);
-  lines.push(`[CoalWash] RE-TIER — ${res.stores.length} store(s) redistributed: ${moved} index line(s) demoted (lossless) + ${arch} unreferenced topic(s) archived byte-exact · nothing summarized, nothing deleted`);
+  lines.push(`[CoalWash] RE-TIER — ${res.stores.length} store(s) re-tiered: ${moved} index line(s) demoted (lossless) + ${arch} unreferenced topic(s) archived byte-exact · nothing summarized, nothing deleted`);
   for (const s of res.stores) {
     lines.push(`  ${s.label}: index ~${s.indexTokensBefore} -> ~${s.indexTokensAfter} tok${s.shortfall ? ' (still over fill — the gated wash is the next lever)' : ''} · ${s.topicsArchived} topic(s) -> archive`);
   }

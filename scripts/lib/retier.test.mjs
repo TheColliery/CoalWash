@@ -127,7 +127,7 @@ test('envelope: hysteresis no-flap — a store washed into the dead zone (betwee
   } finally { clean(home, proj); }
 });
 
-test('envelope: redistribute fills only to target - headroom (post <= fillCeiling, and not everything demotable is moved)', () => {
+test('envelope: the demote pass fills only to target - headroom (post <= fillCeiling, and not everything demotable is moved)', () => {
   const env = envelopeFor(R);
   const index = bigIndex();
   const p = planIndexDemotion(index, env);

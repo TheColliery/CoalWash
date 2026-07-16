@@ -2,7 +2,9 @@
 // interactive flow calls (the step-by-step prose/UX — "เข้าหน้า wizard
 // แล้ว", the ทำ/later-free เริ่ม/ยกเลิก buttons, the exact SKILL.md
 // procedure — is agent-orchestrated content, not this module's job; this
-// ships the two DETERMINISTIC pieces underneath it):
+// ships the DETERMINISTIC pieces underneath it — entry scan, bill, and the
+// 2026-07-16 locked-spec glue: background-clone handshake, manual-tier
+// counts, CoalFace hand-off predicate):
 //   (1) neutral entry (MEMORY.md "WIZARD ENTRY != BMI"): the wizard does NOT
 //       arrive via the gauge and knows NO numbers at entry — openable on any
 //       store at any level (incl. LEAN, for muscle-only work). `neutralScan`
@@ -29,8 +31,14 @@
 // method.md §2's own already-shipped partition threshold ("~150 files or
 // ~500KB... one measured outsider pass"), reused here as the natural billing
 // unit rather than inventing a second one.
-import { measureEntries } from './caliper.mjs';
-import { discoverClassB } from './class-b.mjs';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { measureEntries, tokensEst } from './caliper.mjs';
+import { ccProjectSlug, discoverClassB } from './class-b.mjs';
+import { findProjectRoot, loadMergedConfig } from './config-load.mjs';
+import { classifyRetier, collectStores } from './retier.mjs';
 
 export const PARTITION_FILES = 150;
 export const PARTITION_KB = 500;
@@ -86,6 +94,82 @@ export function estimateBill(opts) {
     tokensEst: band(baseTokens),
     heavy,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Background-clone handshake + choice-4 glue (the locked wizard spec,
+// 2026-07-16). All read-only/pure — the step flow stays agent-orchestrated;
+// nothing here mutates a store.
+// ---------------------------------------------------------------------------
+
+// Main-side: the spawn contract a background clone must re-derive and match.
+// Fingerprint = sha-256 (16 hex) of the MERGED config cascade (global +
+// project) — same machine + same store => same fingerprint; any config
+// divergence (or a config edit between spawn and clone start) flips it.
+export function wizardContract({ projectRoot, home = os.homedir() } = {}) {
+  const root = fs.realpathSync(path.resolve(projectRoot));
+  const cfg = loadMergedConfig({ cwd: root, home });
+  return {
+    projectRoot: root,
+    slug: ccProjectSlug(root),
+    configFingerprint: createHash('sha256').update(JSON.stringify(cfg)).digest('hex').slice(0, 16),
+  };
+}
+
+// Clone-side FIRST act (before ANY read of the store): re-derive its own
+// {projectRoot, slug, config fingerprint} from the inherited cwd/home and
+// compare field-by-field against the contract main passed. ANY mismatch,
+// missing field, or unresolvable path => refuse (fail-closed) — the clone
+// returns touching NOTHING. The engine lock (.coalwash.lock) and the
+// external-writer guard stay the nets BEHIND this front-door check.
+export function wizardHandshake({ contract, cwd = process.cwd(), home = os.homedir() } = {}) {
+  try {
+    if (!contract || typeof contract !== 'object') return { ok: false, refuse: true, mismatches: ['contract-missing'] };
+    const own = wizardContract({ projectRoot: findProjectRoot(cwd, home), home });
+    const mismatches = ['projectRoot', 'slug', 'configFingerprint'].filter((k) => !contract[k] || contract[k] !== own[k]);
+    return mismatches.length ? { ok: false, refuse: true, mismatches } : { ok: true, refuse: false, mismatches: [] };
+  } catch {
+    return { ok: false, refuse: true, mismatches: ['unresolvable'] }; // fail-closed
+  }
+}
+
+// Choice-4 (3) inputs: the MANUAL tier = genuine memory TOPIC files (incl.
+// the retier-overflow file) across every store — main + each agent-memory
+// role. The index slot ((2)'s jurisdiction) and class-A ((1)'s bytes) are not
+// (3)'s scope so they are not counted; files classifyRetier refuses
+// (governance/machine-parsed/vendor/unknown strays inside a store dir) are
+// excluded exactly the way (3) itself must skip them.
+export function manualTierCounts({ projectRoot = process.cwd(), home = os.homedir() } = {}) {
+  const stores = collectStores({ projectRoot, home });
+  let files = 0;
+  let totalBytes = 0;
+  let tok = 0;
+  for (const st of stores) {
+    for (const t of st.topics) {
+      if (classifyRetier({ path: t.path }) !== 'class-b-topic') continue;
+      files += 1;
+      totalBytes += t.bytes;
+      tok += tokensEst(t.text);
+    }
+  }
+  return { files, totalBytes, tokensEst: tok };
+}
+
+// The CoalFace hand-off gate (a PROSE rail in SKILL.md — this is only its
+// deterministic predicate): fan-out is offered ONLY when the (3) workload is
+// BOTH past the single-worker degradation knee AND partitionable (enough
+// distinct files — CoalFace's own autoFanoutFloor sense). A single file can
+// never be partitioned => 1 worker at ANY size (advise demote-first instead).
+// 'offer-coalface' = OFFER ONCE, declinable; never auto-convene, never spawn
+// extra workers inside CoalWash (fan-out belongs to the sibling /coalface).
+export const HANDOFF_KNEE_TOK = 50000; // low edge of the ~50-60k degradation band — a REASONED placeholder like the rates above; offer-early is the safe direction (the offer is declinable)
+export const HANDOFF_FLOOR_FILES = 4; // CoalFace's autoFanoutFloor factory default — its fan-out sense, not a new knob
+export function handoffVerdict(opts) {
+  const { manualTierTok, fileCount, kneeTok = HANDOFF_KNEE_TOK, floorFiles = HANDOFF_FLOOR_FILES } = opts || {};
+  const tok = Number.isFinite(manualTierTok) ? manualTierTok : 0;
+  const n = Number.isFinite(fileCount) ? fileCount : 0;
+  if (n <= 1) return 'single-worker'; // a file cannot be partitioned
+  return tok > kneeTok && n >= floorFiles ? 'offer-coalface' : 'single-worker';
 }
 
 // The bill line — plain text, program-side template (matching ask.mjs's own

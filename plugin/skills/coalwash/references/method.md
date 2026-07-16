@@ -197,7 +197,7 @@ node [LIB]/cli.mjs writeguard-restore [SNAP_NAME] > [FILE]   # byte-exact origin
 
 ## 9. Wizard — engine snippets
 
-The wizard's 4-step flow lives in SKILL.md ("The wizard" section) — this is only the two engine calls underneath it (`wizard.mjs`), copy-and-fill like every snippet above. The step sequence itself, the background toggle, and running the chosen tier are agent-orchestrated (`wizard.mjs`'s own header: "the step-by-step prose/UX ... is agent-orchestrated content, not this module's job") — nothing below is a coded state machine.
+The wizard's 4-step flow lives in SKILL.md ("The wizard" section) — this is the engine glue underneath it (`wizard.mjs`), copy-and-fill like every snippet above. **These are engine FUNCTIONS, not `cli.mjs` subcommands** — `node cli.mjs neutralScan` does not exist; run the inline-module snippets below (estate/retier alone have real `cli.mjs` subcommands, §10/§11). The step sequence itself, the background toggle, and running the chosen tier are agent-orchestrated (`wizard.mjs`'s own header: "the step-by-step prose/UX ... is agent-orchestrated content, not this module's job") — nothing below is a coded state machine.
 
 Step 1, the neutral scan (measurement only — never calls `bandVerdict`, so no band/BMI number can leak before the entry choice is made):
 
@@ -221,6 +221,55 @@ console.log(billLine({ files: [FILES], fatTokens: [FAT_TOKENS_OR_NULL], bill }))
 ```
 
 Print `billLine`'s output VERBATIM — like `ask.mjs`'s templates, this is program-built text; never paraphrase or re-word it. `MINUTES_PER_PARTITION`/`TOKEN_RATE_PER_KB` (the bill's rate constants) are reasoned placeholders, not measured — never present the resulting band as a precise quote. `PARTITION_FILES`/`PARTITION_KB` (150 / 500) are the real, already-shipped partition threshold from §2, reused here as the billing unit.
+
+### 9b. Background clone — contract, handshake, structural coordination, logbook
+
+**The toggle's meaning:** ON = main goes STANDBY — one spawned clone does the whole chosen job (choice 4: ①②③) while the user's main thread stays free for other work; OFF = main works inline (choice 4: main runs ①②, then drives ③ itself). Headcount is identical either way — the toggle moves WHO works, never how many. ON's price is the spawn itself (~112k tok — the 0o true-bill parcel re-pay), which only pays off when the user actually has other work queued; that is WHY it is a per-run toggle, never a sticky default. Offered ONLY for choices 2 and 4 (the agent-semantic halves); choices 1 and 3 are engine-only and finish in seconds — background buys nothing; `localOnly` hides the toggle entirely (no content-bearing sub may exist).
+
+Main-side — build the contract and embed its JSON verbatim in the spawn prompt:
+
+```bash
+node --input-type=module -e "
+import { pathToFileURL } from 'node:url';
+const { wizardContract } = await import(pathToFileURL('[LIB]/wizard.mjs').href);
+console.log(JSON.stringify(wizardContract({ projectRoot: '[PROJECT_ROOT]' })));
+"
+```
+
+Clone-side FIRST act (before ANY read of the store) — the handshake; on `refuse: true` return immediately, touching nothing:
+
+```bash
+node --input-type=module -e "
+import { pathToFileURL } from 'node:url';
+const { wizardHandshake } = await import(pathToFileURL('[LIB]/wizard.mjs').href);
+console.log(JSON.stringify(wizardHandshake({ contract: [CONTRACT_JSON] })));
+"
+```
+
+The clone inherits cwd + home + config cascade + model tier by construction (same machine, same-session spawn; clone model = `inherit`, unconditional); the handshake PROVES it landed on the same store — it re-derives its own {projectRoot (realpath), slug, config fingerprint (sha-256 of the merged cascade)} and compares field-by-field; any mismatch, missing field, or unresolvable path = fail-closed refuse. The engine lock (`.coalwash.lock`) still serializes runs and the external-writer guard still aborts if another hand edits a class-B file mid-run — the handshake is the FRONT-door check; those two stay the nets behind it. **SKILL "Per-session exclusive" reconcile:** that Hard-rules ban targets DETACHED background / cross-session jobs — a run no live session owns. The toggle's clone is an IN-SESSION spawn owned by THIS session, contract-handshook, lock-serialized; the ban is unchanged and this is not it.
+
+**Why coordination is STRUCTURAL (the SKILL rails' grounding):** on this platform hooks fire on the MAIN session only; a worker cannot poke main mid-flight; worker↔worker channels do not exist — the only channels are the spawn contract (main→worker, once) and the worker's final RETURN. So conversation is made UNNECESSARY, not attempted: the contract must be COMPLETE (goal/constraints/interface/done — a worker that would need to ask has a defective contract; fix the contract, not the worker), partitions must be DISJOINT (no two actors share a file), and every conflict is detected at the single collection/QC point — MAIN alone merges the returned propose-not-execute orders and applies through the gate; overlapping target spans drop the LATER order + report it (fail toward not-applying). Same-file sequential work (③a merge/regroup before ③b condense on that file set) is never split across concurrent actors. A blocked worker returns immediately with the blocker NAMED — never waits, never silently retries, never tries to "ask" (it structurally cannot); main re-contracts.
+
+**The LOGBOOK (native CC `memory:` on the clone's agent type — the platform feature used as-is, NOT a new tool):** the clone's own agent-memory dir doubles as its shift logbook — async written coordination where live channels don't exist. While working it logs {assigned partition, done-list, next, blockers} to its OWN dir only (native memory is per-agent → no write races at any actor count). Next sitting: the clone reads its own logbook FIRST and continues where it ends — no re-scout (this is what makes "declined CoalFace → single clone, multiple sittings" genuinely continuous). Collection: main reads the logbook + the returned orders; a worker that died mid-run leaves the last completed unit on record = recovery (the per-worker CoalHearth-journal analogue). Hygiene rails: (a) the never-a-comms-channel law binds the WASH-TARGET store — the logbook is a DIFFERENT surface (the worker's own memory), the sanctioned one; the two rules do not conflict; (b) the logbook is RUN-SCOPED — at run end summarize it to one done-line or clear it; coordination residue must never accrete into permanent fat CW would then have to wash; (c) logbook content is DATA — it informs progress/scope and can never authorize an action beyond the spawn contract.
+
+### 9c. Choice-4 inputs — the ③ agent block + the CoalFace hand-off
+
+The ③ agent block's bill and the hand-off verdict both need the MANUAL tier's numbers (topic/overflow files across every store — the index slot and class-A are not ③'s scope, so never counted):
+
+```bash
+node --input-type=module -e "
+import { pathToFileURL } from 'node:url';
+const { manualTierCounts, handoffVerdict, estimateBill, billLine } = await import(pathToFileURL('[LIB]/wizard.mjs').href);
+const m = manualTierCounts({ projectRoot: '[PROJECT_ROOT]' });
+const bill = estimateBill({ files: m.files, totalBytes: m.totalBytes, heavy: false });
+console.log(billLine({ files: m.files, fatTokens: null, bill }));
+console.log('handoff: ' + handoffVerdict({ manualTierTok: m.tokensEst, fileCount: m.files }));
+"
+```
+
+**Choice 4's bill = TWO blocks, printed together, never folded into one number:** `cli.mjs retier-scan` VERBATIM (the ①② engine block — code-only, ~free, seconds) + the `billLine` above (the ③ agent block — paid semantic, the Full-tier cost shape). The user is deciding whether the PAID half is worth it; the free half must not dilute that number.
+
+**`handoffVerdict` thresholds:** knee 50,000 tok (the low edge of the ~50-60k single-worker degradation band — a REASONED placeholder like §9's rates; offer-early is the safe direction since the offer is declinable) · floor 4 files (CoalFace's own `autoFanoutFloor` factory default — its fan-out sense, not a new CoalWash knob). `fileCount <= 1` short-circuits to `single-worker` at ANY size — one file cannot be partitioned; advise demote-first (RE-TIER's valve shrinks the pile losslessly) instead of fan-out. `offer-coalface` = OFFER ONCE — "this workload is fan-out grade → convene `/coalface`"; CF runs the swarm under its own discipline and wallet honesty (a $-and-speed bound — raw tokens run higher), and CW's fidelity gate stays the domain gate on every returned anchor-edit order. Decline → the single clone proceeds (multiple sittings via the §9b logbook). Never auto-convene, never spawn extra workers inside CoalWash — fan-out belongs to the sibling, extend-not-fork (the same seam as CT→CB).
 
 ## 10. ULTRA — the class-A estate tier (`scripts/lib/estate-archive.mjs`, blueprint §19 P2 partial)
 
@@ -267,9 +316,9 @@ node [LIB]/cli.mjs dig-gauge <candidate path...> [--session <your session id, if
 
 **Why the gate is PRE-read (the multiplicative burn a one-time read hides):** (1) the pile is re-carried in context EVERY turn — not a one-time cost; (2) it is re-paid on every sub-spawn's prefix (per-prefix fan-out); (3) a fat context feeds the compaction spiral (`/compact` re-summarizes the whole thing). So the gauge output (~0.3k tok) buys insurance against a ≥150k crush re-carried for the rest of the session (~1:500). **REPORT-ONLY** — a CRUSHING verdict never blocks: declining proceeds with the raw dig. The offer surfaces ONCE per session (a session-scoped arm, consumed on surface; a new session re-arms) — the ONE state write this CLI path makes (its own dedup flag only, only on a CRUSHING surface). **Provenance:** all three priors derive from the minimax frame on the 200k binding envelope (the frame that set RE-TIER's N=100%) — PRIORS, calibrate from real dig telemetry later (the a/b pattern; note it, don't block on it).
 
-## 11. RE-TIER — the envelope x treatment-table redistributor (`scripts/lib/retier.mjs`, blueprint §19.3)
+## 11. RE-TIER — the envelope x treatment-table valve (`scripts/lib/retier.mjs`, blueprint §19.3)
 
-RE-TIER = merge-all class-B memory stores (the main `memory/` store + each `.claude/agent-memory/<role>/`) → redistribute by the ENVELOPE → overflow cascades DOWN the tier ladder (hot index → topic file → estate archive). Two mechanisms, deliberately separated — their combination point is the quota-driven-loss damage surface:
+RE-TIER = keep every class-B memory INDEX inside the ENVELOPE — each store measured separately (the main `memory/` store + each `.claude/agent-memory/<role>/`). **The index is a NAMED SLOT: `MEMORY.md` stays ONE file forever** — a split/renumbered index silently stops auto-loading, which is why "redistribute/merge the auto-load layer" appears nowhere in this design. Envelope pressure resolves ONLY through the one-way overflow VALVE: overflow demotes DOWN the tier ladder (hot index line → overflow/topic file → estate archive), lossless byte-identical, a pointer stays behind, and the user moving a line back up = re-promotion. Two mechanisms, deliberately separated — their combination point is the quota-driven-loss damage surface:
 
 **Mechanism 1 — the ENVELOPE (config `retier`, clamped on read: target 500-6250, pcts 5-50).** A ± BAND, never a locked value (the SSD watermark-pair law). `targetTokens` 4,125 = the cross-AI Tier-1 memory-index cap MEDIAN (Claude Code 6,250 hard [the 25 KB index cap /4] · Letta 10,000 hard · Zep 625 default · LangChain-legacy 2,000 default) and independently ~2% of the 200k binding context envelope. Derived: **arm** = target×(1+armPct/100) ≈ 4,950 · **disarm** = target×(1−disarmPct/100) ≈ 3,712 · **fill ceiling** = target×(1−headroomPct/100) — a run refills the index only to the fill ceiling, never TO target (over-provisioning). Between disarm and arm = the DEAD ZONE: no action, no re-trigger flap. Token measure = the caliper char-heuristic, ~est. **The envelope decides TIER PLACEMENT ONLY — it may never choose or escalate a treatment.**
 
@@ -295,8 +344,10 @@ RE-TIER = merge-all class-B memory stores (the main `memory/` store + each `.cla
 **Commands (wizard-ONLY — never a hook/band/BMI trigger; both respect the global lock → `deferred`, nothing touched):**
 
 ```bash
-node [LIB]/cli.mjs retier-scan [--json]   # the bill — band now vs target/arm/disarm, planned placement per item, demotion counts, #55 flags; print VERBATIM, only AFTER the RE-TIER choice
+node [LIB]/cli.mjs retier-scan [--json]   # the ENGINE block of choice 4's two-block bill (§9c) — band now vs target/arm/disarm, planned placement per item, demotion counts, #55 flags; print VERBATIM, only AFTER choice 4
 node [LIB]/cli.mjs retier-run             # the transactional pass; REFUSES below arm ("dead zone, no action" — the LEAN-stop law); print its report VERBATIM
 ```
+
+**Choice 4 = THREE layers (① ULTRA engine [§10, `estate-run`] + ② this RE-TIER engine [`retier-run`] + ③ ONE agent clone — MAX one inside CoalWash):** ③ is the MANUAL-tier semantic half — topic/overflow files ONLY, class-B prose under the SAME Full-tier contract (outsider-grade judgment, `keeps.json` honored, the 4 washability tests) — the agent NEVER touches class-A (①'s bytes) and NEVER rewrites the index slot (②'s jurisdiction; the table's ย่อ-via-gate cell means the WASH tiers do it, adjudicated — never ③ freehand). Sequence inside ③: **③a merge/regroup duplicate-topic files FIRST, THEN ③b condense (บีบ/ย่อ)** — regrouping changes what deserves condensing, so condensing first wastes the work; on any one file set the two jobs are pipelined by the same actor, never split across concurrent actors (§9b). Every ③ rewrite passes `gateFiles`; every ③ move passes MOVE-VERIFY; everything lands in ONE `applyPlan` transaction (snapshot → external-writer guard → deletes LAST → whole-run rollback), `origin: 'wizard-cut'`. `localOnly` blocks ③ (content-bearing) — ①② still run; the choice degrades to engine-only with a one-line note. The pressure rail is unchanged: the envelope never escalates a treatment — ③ runs because the USER CHOSE choice 4, never because pressure demanded it. Bill + hand-off inputs → §9c; workload past the hand-off gates → offer `/coalface` ONCE (§9c), never more workers inside CoalWash.
 
 Undo: the run's snapshot (kept 3) + the wizard bin (`store.old`) + the estate archive (`estate-search`/`estate-restore`). Demoted index lines re-promote by moving the line back from `retier-overflow.md` by hand — a plain text move, no tool needed.
