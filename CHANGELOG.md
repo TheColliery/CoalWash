@@ -2,6 +2,21 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.2.0-rc.1] - 2026-07-16
+
+**MINOR** — three new class-A / class-B memory systems. The version leaves the 0.1.0 rc cycle (new capability = MINOR); it stays `-rc` because the new code is internally wear-hardened but field-unproven — a forward move to the 0.2 line, never a beta regression.
+
+### Added
+- **RE-TIER (wizard 4th door)** — merge every class-B store → redistribute by a ± envelope; overflow DEMOTES down the ladder (index line → `retier-overflow.md` → estate archive), lossless byte-identical, and NEVER summarizes or deletes under pressure (ทิ้ง/discard exists in no treatment-table cell). Two mechanisms separated by construction: the envelope (config `retier`, target 4125 tok = the cross-AI Tier-1 always-loaded median AND ~2% of the 200k binding envelope; an arm/disarm/headroom band, no flap) decides TIER PLACEMENT only; a CODE treatment table (governance/machine-parsed/unknown = skip-only, case-insensitive name identity) owns TREATMENTS. Gates reused: `applyPlan` tx (snapshot/rollback) + MOVE-VERIFY + #54 anchor-diff + #55 report-only cross-store reconcile + an N=20 top-anchor survival probe. Wizard-only; `retier-run` refuses under the arm line ("dead zone, no action"). CLI `retier-scan`/`retier-run`.
+- **dig-gauge (ULTRA trigger #2)** — a pre-READ tollgate (`cli.mjs dig-gauge <paths>`): pure `fs.stat`, zero content into context, fired between a search's hit-list and the first Read. CRUSHING when a single candidate is >= 100k tok, or the pile >= 150k tok, or >= 8 files (config `estate.digCrush`, clamped priors from the 200k-envelope minimax) -> offer ULTRA once, never blocks (declining proceeds to the raw dig). Pre-read because context-token burn is multiplicative: re-carry every turn, per-prefix fan-out, compaction spiral.
+- **Class-A / class-B fidelity-note split** — SKILL note 1 (structured-token fidelity) is now scoped CLASS-B only; a new note 3 states the class-A byte-identity contract (never semantic-edit a transcript; copy-verify-then-delete; the one seam where the class-B gate re-enters = RE-TIER's hot-index rewrite).
+- **Loss class #56 (VERIFY-SCOPE / DELETE-SCOPE MISMATCH)** added to the master taxonomy — found + closed by the wear campaign.
+
+### Fixed (wear campaign, 2 rounds, loop-until-dry)
+- estate over-delete (#56, HIGH): `estate-archive.mjs` used `rm -rf <sid>/` gated only on enumerated-deletes-succeeded; now `pruneEmptyDirs` rmdir-if-empty (delete_scope == verified_set), un-enumerated survivors kept + surfaced.
+- `classifyRetier` check-ordering so a governance/program `.md` sitting in a memory dir is skip-only, never demoted off the live tree — case-insensitive (Windows/macOS ship platforms) incl. cross-agent `gemini.md`.
+- survival-probe false-pass under `indexEnabled:false` (a sole-home top-anchor is kept in the live tree) · pin no longer vetoes the whole multi-store plan (filtered pre-plan) · `dig-gauge intOr` re-clamps the schema bounds. Suite 490 -> 530.
+
 ## [0.1.0-rc.3] - 2026-07-12
 
 The well-behaved-OS-citizen relocation (series law: one namespace, no scatter). CoalWash's per-session state stops littering `~/.claude/`'s root as a scattered dotfile and moves into a namespaced, memory-anchored home — with a transparent one-time migration that deletes the old files. rc-line, PATCH-class: a defect fix (the OS-scatter mess), no new capability, migration is transparent (nothing a user relied on breaks). rc → stable resumes after this proves in the field with no further code change.
