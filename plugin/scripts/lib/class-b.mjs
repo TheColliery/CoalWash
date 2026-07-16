@@ -87,6 +87,50 @@ export function physicalForCreate(p) {
   }
 }
 
+// #57(d) CLOUD-PLACEHOLDER READ POISON (MASTER-LOSS-TAXONOMY.md #57 4th member):
+// a OneDrive Files-On-Demand / iCloud-optimized placeholder returns SHORT/stub
+// bytes on a plain read() with NO throw and the SAME wrong bytes on every
+// re-read — so the R1 external-writer guard (which proves a file did not CHANGE
+// between two reads) is structurally BLIND (zero drift = self-consistent
+// nonsense), and a copy-verify-then-delete or a prose rewrite trusts the stub:
+// the WARM gzip round-trip matches (both sides the same stub) and deletes the
+// real original, or a rewrite writes a truncated body that clobbers the
+// not-yet-hydrated content when it syncs UP. Sniff the dehydrated signal from
+// METADATA ONLY (never a content read — the read is exactly what a placeholder
+// poisons): a REGULAR file whose logical size > 0 but which has ZERO
+// physically-allocated blocks (`blocks === 0`) is not hydrated (macOS iCloud /
+// Linux network-mount placeholders).
+//
+// ⚠ PLATFORM CALIBRATION (verified empirically 2026-07-16, the hardware-never-
+// matches-paper gap): Node reports `Stats.blocks === 0` for EVERY regular file
+// on win32 (blocks is not POSIX-meaningful there) — so the blocks signal would
+// false-CRUSH every Windows file and break every wash. A TRUE Windows OneDrive
+// Files-On-Demand placeholder is a reparse point carrying
+// FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, which Node's `fs` does NOT expose. So on
+// win32 this metadata sniff is a DOCUMENTED best-effort NO-OP (returns false):
+// the R1 external-writer guard + the copy-verify byte-compare remain the nets,
+// and the Windows placeholder is a NAMED residual (honest ceiling), upgrade
+// path = a native/PowerShell reparse-attribute read swapped in at the two
+// injectable call sites (estate archiveSession `isPlaceholder`, applyPlan
+// `opts.isPlaceholder`). The signal is CORRECT on POSIX where blocks is real.
+//
+// POSITIVE-SIGNAL ONLY (fail toward NORMAL, never flag-everything): an
+// unreadable stat, an absent/NaN `blocks`, a non-file, or win32 = NOT flagged —
+// the guard fires ONLY on a PROVEN stub, so a caller skips+reports rather than
+// archives/rewrites it. `statSync`/`platform` are injectable — a real
+// placeholder cannot be created inside a hermetic sandbox, so tests feed a
+// synthetic stat + the platform they want to exercise.
+export function isCloudPlaceholder(p, { statSync = fs.lstatSync, platform = process.platform } = {}) {
+  if (platform === 'win32') return false; // blocks unreliable on win32 (see the calibration note above)
+  try {
+    const st = statSync(p);
+    if (!st || typeof st.isFile !== 'function' || !st.isFile()) return false;
+    const size = Number(st.size);
+    const blocks = Number(st.blocks);
+    return Number.isFinite(size) && size > 0 && Number.isFinite(blocks) && blocks === 0;
+  } catch { return false; }
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code adapter
 // ---------------------------------------------------------------------------
@@ -149,6 +193,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       platform: plat,
       entries: [],
       flags: [UNKNOWN_PLATFORM_FLAG],
+      roleMemories: [],
     };
   }
 
@@ -329,5 +374,60 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     }
   }
 
-  return { platform: plat, entries, flags };
+  return { platform: plat, entries, flags, roleMemories: discoverRoleMemories({ projectRoot, home }) };
+}
+
+// #22 ROLE-MEMORY DISCOVERY (promoted from retier.mjs's collectStores into the
+// central discovery layer so gauge/wash/stats SEE per-role stores too): native
+// subagent role-memories at <project>/.claude/agent-memory/<role>/ — a MEMORY.md
+// index + sibling *.md topic files. Returned as a SEPARATE `roleMemories` field
+// on discoverClassB (per-store), NEVER folded into `entries`.
+//
+// NESTED-HABITAT (the reason for the separate field, series law): a role store
+// loads into a SUB when that role spawns — NOT into the MAIN every session. So
+// it must be its OWN tier, never blended into the main's always-loaded
+// footprint. Keeping it out of `entries` makes the main gauge (measureEntries ->
+// BMI/floor/force/break-even, all off `entries`) BYTE-IDENTICAL with or without
+// role dirs — a cap/verdict the ROOM acts on is computed on room-owned only,
+// never on a habitat the room cannot act on (the CoalTipple-false-FULL lesson).
+// This also unlocks the docketed #55 cross-store detector (per-store measures
+// are its input) — but that detector is NOT built here; this is discovery+report
+// only. The roster is stable (a new role dir is found by construction — a
+// mirror, never a hardcoded list; the 0l capture-all discipline).
+//
+// Each store: { store: 'agent:<role>', dir, index: {path,bytes}|null,
+// memories: [{path,bytes}], bytes, files }. Every path realpath-and-contained
+// (fail-closed), symlink dirs never followed (Dirent own-type). CC-only (an
+// unknown platform gets [] — the agent-memory layout is a native-subagent
+// feature, conservative elsewhere, mirroring discoverClassB's own gate).
+export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.homedir() } = {}) {
+  const projPhys = physicalOrNull(projectRoot);
+  if (!projPhys) return [];
+  const roots = [physicalOrNull(home), projPhys].filter(Boolean);
+  const agentBase = path.join(projPhys, '.claude', 'agent-memory');
+  let roles = [];
+  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { return []; } // no agent-memory dir = no role stores
+  const out = [];
+  for (const role of roles) {
+    const dirPhys = physicalOrNull(path.join(agentBase, role));
+    if (!dirPhys || !containedIn(dirPhys, roots)) continue; // fail-closed (a role dir symlinked outside is skipped)
+    let names = [];
+    try { names = fs.readdirSync(dirPhys, { withFileTypes: true }); } catch { continue; }
+    let index = null;
+    const memories = [];
+    let bytes = 0;
+    for (const d of names) {
+      if (!d.isFile() || !d.name.endsWith('.md')) continue; // a symlink Dirent reports its own type — never followed
+      const phys = physicalOrNull(path.join(dirPhys, d.name));
+      if (!phys || !containedIn(phys, roots)) continue;
+      const b = statBytes(phys);
+      if (b == null) continue;
+      bytes += b;
+      if (d.name === 'MEMORY.md') index = { path: phys, bytes: b };
+      else memories.push({ path: phys, bytes: b });
+    }
+    if (!index && !memories.length) continue; // an empty dir is not a store
+    out.push({ store: `agent:${role}`, dir: dirPhys, index, memories, bytes, files: (index ? 1 : 0) + memories.length });
+  }
+  return out;
 }

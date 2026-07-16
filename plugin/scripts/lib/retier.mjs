@@ -714,6 +714,17 @@ export function runRetier({
       return { ok: false, refused: true, reason: 'over-arm but nothing demotable — the gated wash (condense-via-gate, human-adjudicated) is the next lever; RE-TIER never auto-condenses', env, kept };
     }
 
+    // NAMED DIVERGENCE (one-flock: RE-TIER carries NO estate.runBudget, unlike
+    // the ULTRA session loop): the estate loop is per-session INDEPENDENT tx, so
+    // it can stop at a unit boundary and continue next run (the unbounded axis =
+    // hundreds of accreted CC sessions). RE-TIER is the opposite shape — ONE
+    // atomic tx across every store (snapshot -> writes -> deletes LAST ->
+    // whole-run rollback), so a mid-way budget stop would violate its own
+    // atomicity; and its work is naturally bounded (the wizard-gated store roster
+    // + each store's user-authored topic count, not an accreting vendor pile). A
+    // runBudget here would be a knob for a bounded axis = over-harden. If a store
+    // ever grew pathologically large, the fix is partition-the-outsider (§9b),
+    // not a partial atomic tx.
     // ONE transaction across every store: snapshot -> writes -> deletes LAST
     // -> whole-run rollback on any failure. Memory-store paths are project-
     // scope (never scope:'global'), so applyPlan's global-lock branch cannot

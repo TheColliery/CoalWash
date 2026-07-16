@@ -11,13 +11,16 @@
 // The economics: the READ is the only expensive step (~X tok pulled in, then
 // RE-CARRIED every turn + re-paid on every sub-spawn's prefix — the
 // multiplicative burn a one-time read hides); the gauge is ~free insurance
-// (~0.3k tok of output vs the >=150k crush it can prevent = ~1:500).
+// (~0.3k tok of output vs the >=58k crush it can prevent = ~1:200).
 //
 // DETERMINISTIC, agent-triggers-not-improvises (the 0s law): the three
 // thresholds are CODE, not judgment — all config-clamped priors under
-// `digCrush` (config-schema.mjs), derived from the minimax frame on the 200k
-// binding envelope (the same frame that set RE-TIER's N=100%). Shares are
-// PRIORS → calibrate from real dig telemetry later (the a/b pattern).
+// `digCrush` (config-schema.mjs), KNEE-GROUNDED (not %-of-window): the byte/4
+// ~est UNDER-counts a real Read ~1.7x (CC #20223 line-number overhead) and
+// long-context degradation has an ABSOLUTE knee ~32-100k tok (NoLiMa/Chroma) a
+// 1M-window model does NOT move — and CT can delegate a dig to a 200k worker,
+// so gate for the SMALLEST fleet window, not a %-of-this-window. Shares are
+// PRIORS → a/b-calibrate from real dig telemetry later (the a/b pattern).
 //
 // This module is a PURE read of METADATA: fs.statSync only, no content read,
 // no state, no config load (thresholds are injected). The CLI (cli.mjs) is the
@@ -39,11 +42,12 @@ function intOr(v, def, min, max) {
 }
 
 // Measure candidate paths and return a verdict. CRUSHING if ANY one holds:
-//   1. single — a single candidate's ~est tok >= singleFileTok (unreadable in
-//      one pass, >=50% of a 200k worker window);
-//   2. pile   — Σ(bytes of all candidates) as ~est tok >= pileTok (>=75% of one
-//      clean worker load after overhead);
-//   3. count  — candidate COUNT >= fileCount (dispersion; 2x a bandwidth wave).
+//   1. single — a single candidate's ~est tok >= singleFileTok (~35k bytes/4 =
+//      ~60k real tok after the ~1.7x undercount = into the ABSOLUTE ~32-100k
+//      degradation knee, unreadable in one clean pass);
+//   2. pile   — Σ(bytes of all candidates) as ~est tok >= pileTok (a dig pile
+//      at/over the knee band);
+//   3. count  — candidate COUNT >= fileCount (dispersion).
 // `paths` = the concrete hit-list a search already found; a path that cannot be
 // stat'd or is not a regular file is SKIPPED (recorded, never fatal) — a dir or
 // an unexpanded glob is not a candidate. `thresholds` = the clamped `digCrush`
@@ -51,9 +55,9 @@ function intOr(v, def, min, max) {
 // direct caller (a test) may pass a partial object.
 export function digGauge(paths, thresholds) {
   const th = thresholds || {};
-  const singleFileTok = intOr(th.singleFileTok, 100000, 20000, 200000);
-  const pileTok = intOr(th.pileTok, 150000, 40000, 200000);
-  const fileCount = intOr(th.fileCount, 8, 3, 50);
+  const singleFileTok = intOr(th.singleFileTok, 35000, 20000, 200000);
+  const pileTok = intOr(th.pileTok, 58000, 40000, 200000);
+  const fileCount = intOr(th.fileCount, 6, 3, 50);
 
   const files = [];
   const skipped = [];
@@ -67,6 +71,10 @@ export function digGauge(paths, thresholds) {
     let st;
     try { st = fs.statSync(p); } catch { skipped.push(p); continue; } // metadata only — the file is never OPENED
     if (!st.isFile()) { skipped.push(p); continue; } // dir / special / missing — a search returns files
+    // ponytail: tok = bytes/4 (tokensEstFromBytes) assumes ~ASCII; Thai text is
+    // multi-byte UTF-8 AND ~1.0-1.5 char/tok, so this byte-gauge can UNDER-count
+    // a Thai-heavy dig (unverified — a/b-calibrate against a real Thai transcript
+    // later, same telemetry pass as the threshold priors).
     files.push({ path: p, bytes: st.size, tok: tokensEstFromBytes(st.size) });
   }
 

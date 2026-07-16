@@ -150,11 +150,16 @@ export function seatbeltAdvisory(opts) {
 // The FULL(externalize) advisory — pure information, never an ask (a wash
 // cannot help ~all-muscle over capacity; the growable-full invariant forbids
 // steering the user into washing legitimate muscle). Fixed-template for the
-// same program-side-text reason as the asks above.
+// same program-side-text reason as the asks above. #21 EXTERNALIZE-TEMPLATE:
+// externalize is pure INFORMATION (a wash cannot shrink muscle), so CoalWash
+// never auto-moves it — the template names the hand-move steps (cluster ->
+// destination -> pointer), the USER/agent relocates by hand, and the write-path
+// AIRBAG (0p) snapshots that hand-move. Precedent = the CoalPortal record
+// (memory -> a durable file, a pointer left behind).
 export function externalizeAdvisory(opts) {
   const { hardCeilingTokens } = opts || {};
   const cap = Number.isFinite(hardCeilingTokens) ? hardCeilingTokens : '?';
-  return `[CoalWash] memory gauge: FULL (externalize) — this store has ~no reclaimable fat (muscle, not bloat) but exceeds the machine's working-capacity ceiling (~${cap} tok, a rough placeholder). SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. CoalWash cannot help further by washing — externalize/split older content out of the always-loaded set, or consciously raise fullPercent (the "bigger SSD" choice).`;
+  return `[CoalWash] memory gauge: FULL (externalize) — this store has ~no reclaimable fat (muscle, not bloat) but exceeds the machine's working-capacity ceiling (~${cap} tok, a rough placeholder). SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. A wash cannot shrink muscle — the only move is to EXTERNALIZE (relocate muscle OUT of the always-loaded set). CoalWash NEVER auto-moves it (externalize is pure information; the write-path airbag snapshots your hand-move). The template: (1) CLUSTER the muscle by topic (largest cohesive block first); (2) pick a DESTINATION per cluster — a project doc / blueprint / design file that loads on demand, not every session; (3) MOVE it there by hand, leaving a one-line POINTER behind in the always-loaded file (title + where it went) so recall still reaches it. Precedent: the CoalPortal record moved from memory to a durable file with a pointer left behind. Or consciously raise fullPercent (the "bigger SSD" choice) to carry the muscle as-is.`;
 }
 
 // The dig-gauge ULTRA offer (ULTRA trigger #2, dig-gauge.mjs) — fired on a

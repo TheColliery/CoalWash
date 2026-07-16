@@ -3,7 +3,8 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ccProjectSlug, ccMemoryDir, parseImports, discoverClassB, detectPlatform, containedIn, physicalOrNull, physicalForCreate } from './class-b.mjs';
+import { ccProjectSlug, ccMemoryDir, parseImports, discoverClassB, discoverRoleMemories, detectPlatform, containedIn, physicalOrNull, physicalForCreate, isCloudPlaceholder } from './class-b.mjs';
+import { measureEntries } from './caliper.mjs';
 
 // Hermetic: the real machine's CLAUDE_CONFIG_DIR must never leak into
 // sandbox-home resolution (node --test runs each file in its own process).
@@ -365,4 +366,89 @@ test('physicalForCreate (#57 write-side twin of physicalOrNull): resolves the de
     assert.strictEqual(viaLink, path.join(outside, 'new.gz'), 'symlink resolved to the real location');
     assert.strictEqual(containedIn(viaLink, [root]), false, 'the linked-out dest fails containment against root');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// #57(d) cloud-placeholder read poison — the dehydrated-stub metadata sniff
+// (positive-signal only; a real placeholder cannot be created in a sandbox, so
+// the stat is injected — blocks:0 + size>0 is the dehydrated signal).
+// ---------------------------------------------------------------------------
+
+test('isCloudPlaceholder (POSIX): blocks:0 & size>0 = placeholder; any allocated block or size 0 or non-file or unreadable = NOT (fail toward normal)', () => {
+  const file = (over) => ({ isFile: () => true, size: 100, blocks: 8, ...over });
+  // platform pinned to a POSIX value where Stats.blocks is meaningful
+  const st = (v) => ({ statSync: () => v, platform: 'linux' });
+  // the dehydrated signal — the ONLY true case
+  assert.strictEqual(isCloudPlaceholder('x', st(file({ blocks: 0 }))), true, 'size>0 + blocks 0 = dehydrated placeholder');
+  // hydrated / normal files
+  assert.strictEqual(isCloudPlaceholder('x', st(file({ blocks: 8 }))), false, 'allocated blocks = real file');
+  assert.strictEqual(isCloudPlaceholder('x', st(file({ blocks: 1 }))), false, 'even one block = not a placeholder');
+  // empty file: size 0 is legitimately blocks 0 — never a placeholder
+  assert.strictEqual(isCloudPlaceholder('x', st(file({ size: 0, blocks: 0 }))), false, 'an empty file (size 0) is not a placeholder');
+  // a directory / non-file
+  assert.strictEqual(isCloudPlaceholder('x', st(file({ isFile: () => false, blocks: 0 }))), false, 'a non-file is never a placeholder');
+  // blocks absent / NaN on some platform -> cannot prove -> NOT flagged (fail toward normal)
+  assert.strictEqual(isCloudPlaceholder('x', st(file({ blocks: undefined }))), false, 'absent blocks = cannot prove = not flagged (skill stays usable)');
+  // unreadable stat (throws) -> false, never throws
+  assert.strictEqual(isCloudPlaceholder('x', { statSync: () => { throw new Error('ENOENT'); }, platform: 'linux' }), false, 'an unreadable stat is swallowed -> false');
+});
+
+test('isCloudPlaceholder (win32): the blocks signal is DISABLED — Node reports blocks:0 for every regular file on win32, so flagging on it would false-CRUSH every file; the guard is a documented no-op there (upgrade path = a native reparse-attribute read)', () => {
+  const dehydrated = { statSync: () => ({ isFile: () => true, size: 100, blocks: 0 }), platform: 'win32' };
+  assert.strictEqual(isCloudPlaceholder('x', dehydrated), false, 'win32 never flags on blocks — that is the calibration fix, not a miss');
+});
+
+// ---------------------------------------------------------------------------
+// #22 role-memory discovery — per-store, separate from entries, nested-habitat
+// (a role store loads into a SUB, never the main parcel -> never inflates the
+// main's always-loaded footprint).
+// ---------------------------------------------------------------------------
+
+test('#22 role-memory discovery: agent-memory/<role>/ stores are found PER-STORE in roleMemories, kept OUT of entries; the main always-loaded footprint is byte-identical with or without the role dirs', () => {
+  const { home, proj } = sandbox();
+  try {
+    // main store (entries) — governance + memory index
+    write(path.join(home, '.claude', 'CLAUDE.md'), 'global rules');
+    write(path.join(proj, 'CLAUDE.md'), 'project rules');
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# main index');
+    write(path.join(mem, 'lesson.md'), 'a main recall lesson');
+
+    // baseline BEFORE any role dir exists
+    const before = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.deepStrictEqual(before.roleMemories, [], 'no role dirs yet');
+
+    // add two role stores
+    write(path.join(proj, '.claude', 'agent-memory', 'coder', 'MEMORY.md'), '# coder index');
+    write(path.join(proj, '.claude', 'agent-memory', 'coder', 'craft.md'), 'a coder lesson');
+    write(path.join(proj, '.claude', 'agent-memory', 'reviewer', 'MEMORY.md'), '# reviewer index');
+
+    const after = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+
+    // all three stores are discovered: main (entries) + 2 role stores (roleMemories)
+    assert.strictEqual(after.roleMemories.length, 2, 'both role stores discovered');
+    assert.deepStrictEqual(after.roleMemories.map((r) => r.store).sort(), ['agent:coder', 'agent:reviewer']);
+    const coder = after.roleMemories.find((r) => r.store === 'agent:coder');
+    assert.ok(coder.index && /coder\b/.test(coder.index.path), 'per-store: the MEMORY.md index is reported');
+    assert.strictEqual(coder.memories.length, 1, 'per-store: the sibling topic file is reported');
+    assert.strictEqual(coder.files, 2);
+    assert.ok(coder.bytes > 0);
+
+    // NESTED-HABITAT invariant: role stores never touch entries, so the main
+    // always-loaded footprint is BYTE-IDENTICAL with or without them.
+    assert.strictEqual(after.entries.some((e) => e.path.includes('agent-memory')), false, 'role memories are a separate tier, never in entries');
+    assert.deepStrictEqual(measureEntries(after.entries).alwaysLoaded, measureEntries(before.entries).alwaysLoaded, 'the main always-loaded footprint excludes the role stores (no BMI/floor inflation)');
+  } finally { clean(home, proj); }
+});
+
+test('#22 role-memory discovery: standalone helper is fail-closed (a role dir symlinked outside the trees is skipped) and CC-gated (unknown platform -> [] via discoverClassB)', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, '.claude', 'agent-memory', 'coder', 'MEMORY.md'), '# coder');
+    const direct = discoverRoleMemories({ projectRoot: proj, home });
+    assert.strictEqual(direct.length, 1, 'the helper finds the role store directly');
+    // unknown platform routes through discoverClassB's conservative gate
+    const unknown = discoverClassB({ projectRoot: proj, home, platform: 'goose' });
+    assert.deepStrictEqual(unknown.roleMemories, [], 'an unknown platform gets no role discovery (conservative)');
+  } finally { clean(home, proj); }
 });

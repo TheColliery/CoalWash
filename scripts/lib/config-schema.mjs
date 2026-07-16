@@ -67,13 +67,22 @@ export const CONFIG_SCHEMA = [
   // digCrush = ULTRA trigger #2 (dig-gauge.mjs) — the PRE-READ tollgate's
   // thresholds, NESTED in estate (same estate/ULTRA family; clampedRead's
   // object path recurses so each sub-key clamps INDEPENDENTLY + a partial
-  // config fills the absent sub-keys — the trust-boundary fill). All three are
-  // config-clamped PRIORS from the minimax frame on the 200k binding envelope
-  // (the frame that set RE-TIER's N): singleFileTok ~100k = >=50% of a 200k
-  // worker window (unreadable in one pass) · pileTok ~150k = >=75% of one clean
-  // worker load after overhead · fileCount 8 = 2x the default bandwidth wave
-  // width. Shares are priors → calibrate from real dig telemetry (the a/b
-  // pattern; note it, don't block on it).
+  // config fills the absent sub-keys — the trust-boundary fill). KNEE-GROUNDED
+  // priors (NOT %-of-window): the byte/4 ~est UNDER-counts a real Read ~1.7x
+  // (CC #20223 line-number overhead), and long-context degradation has an
+  // ABSOLUTE knee ~32-100k tok (NoLiMa/Chroma) a 1M-window model does NOT move
+  // — and CT can delegate a dig to a 200k worker, so gate for the SMALLEST
+  // fleet window: singleFileTok 35000 (~60k real tok after the 1.7x = into the
+  // knee, unreadable in one clean pass) · pileTok 58000 (a dig pile at/over the
+  // knee band) · fileCount 6 (dispersion). Still priors → a/b-calibrate from
+  // real dig telemetry later (note it, don't block on it).
+  // runBudget = the per-run work-limit on the ULTRA session loop (the UNBOUNDED
+  // axis — CC accretes hundreds of old sessions). The loop stops at a COMPLETED
+  // session-unit boundary once EITHER limit is reached (never mid-unit — units
+  // are independent copy-verify-delete tx, so a stop leaves zero partial) and
+  // reports N/M; a second run continues the rest. SQLite incremental_vacuum /
+  // SSD bounded-burst GC. (RE-TIER is ONE atomic tx, no incremental loop — it
+  // needs no runBudget; the named divergence lives in retier.mjs's runRetier.)
   { key: 'estate', type: 'object', fields: {
     compressAfterDays: { type: 'int', min: 1, max: 3650, def: 14 },
     purgeAfterDays: { type: 'int', min: 0, max: 36500, def: 180 },
@@ -81,11 +90,15 @@ export const CONFIG_SCHEMA = [
     archiveDir: { type: 'string', def: '' },
     indexEnabled: { type: 'bool', def: true },
     digCrush: { type: 'object', fields: {
-      singleFileTok: { type: 'int', min: 20000, max: 200000, def: 100000 },
-      pileTok: { type: 'int', min: 40000, max: 200000, def: 150000 },
-      fileCount: { type: 'int', min: 3, max: 50, def: 8 },
-    }, def: { singleFileTok: 100000, pileTok: 150000, fileCount: 8 } },
-  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, digCrush: { singleFileTok: 100000, pileTok: 150000, fileCount: 8 } }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/; indexEnabled = write dig-index rows; digCrush = the dig-gauge PRE-READ crush thresholds (singleFileTok 20000-200000 / pileTok 40000-200000 / fileCount 3-50 — CRUSHING if any one holds) (default: {14, 180, false, "", true, {100000, 150000, 8}})' },
+      singleFileTok: { type: 'int', min: 20000, max: 200000, def: 35000 },
+      pileTok: { type: 'int', min: 40000, max: 200000, def: 58000 },
+      fileCount: { type: 'int', min: 3, max: 50, def: 6 },
+    }, def: { singleFileTok: 35000, pileTok: 58000, fileCount: 6 } },
+    runBudget: { type: 'object', fields: {
+      maxSessionsPerRun: { type: 'int', min: 1, max: 100000, def: 25 },
+      maxBytesPerRun: { type: 'int', min: 1048576, max: 1099511627776, def: 524288000 },
+    }, def: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } },
+  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, digCrush: { singleFileTok: 35000, pileTok: 58000, fileCount: 6 }, runBudget: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/; indexEnabled = write dig-index rows; digCrush = the dig-gauge PRE-READ crush thresholds (singleFileTok 20000-200000 / pileTok 40000-200000 / fileCount 3-50 — CRUSHING if any one holds); runBudget = the per-run ULTRA work-limit (maxSessionsPerRun 1-100000 / maxBytesPerRun 1MiB-1TiB — the session loop stops at a unit boundary once either is reached, run again for the rest) (default: {14, 180, false, "", true, {35000, 58000, 6}, {25, 524288000}})' },
 ];
 
 // 0m tombstone — "FORCE IS A DICTATOR, NO OFF SWITCH" (USER 2026-07-11:

@@ -83,12 +83,17 @@
   //   `cli.mjs estate-search <query>`; local file, never pushed anywhere).
   // digCrush: ULTRA trigger #2 — the dig-gauge PRE-READ tollgate. An agent runs
   //   `cli.mjs dig-gauge <candidates>` BEFORE a raw transcript dig (report-only,
-  //   never blocks). CRUSHING if ANY one holds: one candidate >= singleFileTok
-  //   ~est tok (~100k = >=50% of a 200k worker window; clamp 20000-200000) · the
-  //   pile sum >= pileTok (~150k = >=75% of one clean worker load; 40000-200000)
-  //   · candidate count >= fileCount (8 = 2x the default wave width; 3-50).
-  //   Priors from the 200k-envelope minimax — calibrate from real dig telemetry.
-  "estate": { "compressAfterDays": 14, "purgeAfterDays": 180, "deleteCold": false, "archiveDir": "", "indexEnabled": true, "digCrush": { "singleFileTok": 100000, "pileTok": 150000, "fileCount": 8 } },
+  //   never blocks). KNEE-GROUNDED priors (not %-of-window): the byte/4 ~est
+  //   under-counts a real Read ~1.7x (CC #20223), and long-context degradation
+  //   has an ABSOLUTE knee ~32-100k tok (NoLiMa/Chroma). CRUSHING if ANY holds:
+  //   one candidate >= singleFileTok (~35k bytes/4 = ~60k real tok, into the
+  //   knee; clamp 20000-200000) · pile sum >= pileTok (58000; 40000-200000) ·
+  //   candidate count >= fileCount (6; 3-50). Still priors — a/b-calibrate later.
+  // runBudget: the per-run ULTRA work-limit on the unbounded session loop —
+  //   maxSessionsPerRun (25; 1-100000) · maxBytesPerRun (500 MB; 1MiB-1TiB). The
+  //   loop stops at a completed session-unit boundary once either is reached
+  //   (zero partial), reports N/M; run again for the rest.
+  "estate": { "compressAfterDays": 14, "purgeAfterDays": 180, "deleteCold": false, "archiveDir": "", "indexEnabled": true, "digCrush": { "singleFileTok": 35000, "pileTok": 58000, "fileCount": 6 }, "runBudget": { "maxSessionsPerRun": 25, "maxBytesPerRun": 524288000 } },
 
   // RE-TIER envelope (the wizard's FOURTH choice; wizard-only, never a
   // hook/band/BMI trigger). A +/- BAND around targetTokens, never a locked

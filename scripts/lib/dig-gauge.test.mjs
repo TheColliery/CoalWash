@@ -16,7 +16,7 @@ import { clampedRead } from './config-schema.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(here, 'cli.mjs');
-const TH = { singleFileTok: 100000, pileTok: 150000, fileCount: 8 }; // the factory priors
+const TH = { singleFileTok: 35000, pileTok: 58000, fileCount: 6 }; // the factory priors (knee-grounded recalibration)
 
 // Write `n` files of exact byte sizes into a fresh tmp dir; return their paths.
 // Buffer.alloc(size) → `size` zero bytes → statSync.size === size (the ~est tok
@@ -39,32 +39,32 @@ function rm(dir) { fs.rmSync(dir, { recursive: true, force: true }); }
 // ---------------------------------------------------------------------------
 
 test('rule 1 (single) fires alone: one huge file, pile+count both under', () => {
-  const { dir, paths } = fixtures([480000]); // 120000 tok >= 100000; only 1 file; total 120000 < 150000
+  const { dir, paths } = fixtures([160000]); // 40000 tok >= 35000; only 1 file; total 40000 < 58000
   try {
     const v = digGauge(paths, TH);
     assert.strictEqual(v.band, 'CRUSHING');
     assert.deepStrictEqual(v.tripped, ['single'], 'ONLY the single-file rule');
-    assert.strictEqual(v.largestTok, 120000);
+    assert.strictEqual(v.largestTok, 40000);
   } finally { rm(dir); }
 });
 
 test('rule 2 (pile) fires alone: mid files summing over pileTok, none huge, count under', () => {
-  const { dir, paths } = fixtures([160000, 160000, 160000, 160000]); // 40000 tok each; total 160000 tok >= 150000; 4 files
+  const { dir, paths } = fixtures([120000, 120000]); // 30000 tok each (< 35000 single); total 60000 tok >= 58000; 2 files
   try {
     const v = digGauge(paths, TH);
     assert.strictEqual(v.band, 'CRUSHING');
     assert.deepStrictEqual(v.tripped, ['pile'], 'ONLY the pile rule');
-    assert.strictEqual(v.totalTok, 160000);
+    assert.strictEqual(v.totalTok, 60000);
   } finally { rm(dir); }
 });
 
-test('rule 3 (count) fires alone: 8 tiny files, pile+single both under', () => {
-  const { dir, paths } = fixtures(Array(8).fill(100)); // 25 tok each; total 200 tok; 8 files >= 8
+test('rule 3 (count) fires alone: 6 tiny files, pile+single both under', () => {
+  const { dir, paths } = fixtures(Array(6).fill(100)); // 25 tok each; total 150 tok; 6 files >= 6
   try {
     const v = digGauge(paths, TH);
     assert.strictEqual(v.band, 'CRUSHING');
     assert.deepStrictEqual(v.tripped, ['count'], 'ONLY the count/dispersion rule');
-    assert.strictEqual(v.files, 8);
+    assert.strictEqual(v.files, 6);
   } finally { rm(dir); }
 });
 
@@ -83,31 +83,31 @@ test('CLEAR: a pile under all three thresholds', () => {
 // ---------------------------------------------------------------------------
 
 test('boundary single: tok exactly == singleFileTok is CRUSHING; one under is CLEAR', () => {
-  let f = fixtures([400000]); // 100000 tok == 100000
+  let f = fixtures([140000]); // 35000 tok == 35000
   try { assert.strictEqual(digGauge(f.paths, TH).band, 'CRUSHING', '>= not >'); } finally { rm(f.dir); }
-  f = fixtures([399996]); // 99999 tok < 100000
+  f = fixtures([139996]); // 34999 tok < 35000
   try { assert.strictEqual(digGauge(f.paths, TH).band, 'CLEAR'); } finally { rm(f.dir); }
 });
 
 test('boundary pile: sum tok exactly == pileTok is CRUSHING; one under is CLEAR', () => {
-  let f = fixtures([150000, 150000, 150000, 150000]); // total 600000 B == 150000 tok; each 37500 < single; 4 < 8
+  let f = fixtures([116000, 116000]); // total 232000 B == 58000 tok; each 29000 < single 35000; 2 < 6
   try {
     const v = digGauge(f.paths, TH);
     assert.strictEqual(v.band, 'CRUSHING');
     assert.deepStrictEqual(v.tripped, ['pile']);
   } finally { rm(f.dir); }
-  f = fixtures([150000, 150000, 150000, 149996]); // total 599996 B == 149999 tok
+  f = fixtures([116000, 115996]); // total 231996 B == 57999 tok
   try { assert.strictEqual(digGauge(f.paths, TH).band, 'CLEAR'); } finally { rm(f.dir); }
 });
 
 test('boundary count: exactly fileCount files is CRUSHING; one under is CLEAR', () => {
-  let f = fixtures(Array(8).fill(100)); // count 8 == 8
+  let f = fixtures(Array(6).fill(100)); // count 6 == 6
   try {
     const v = digGauge(f.paths, TH);
     assert.strictEqual(v.band, 'CRUSHING');
     assert.deepStrictEqual(v.tripped, ['count']);
   } finally { rm(f.dir); }
-  f = fixtures(Array(7).fill(100)); // count 7 < 8
+  f = fixtures(Array(5).fill(100)); // count 5 < 6
   try { assert.strictEqual(digGauge(f.paths, TH).band, 'CLEAR'); } finally { rm(f.dir); }
 });
 
@@ -117,7 +117,7 @@ test('boundary count: exactly fileCount files is CRUSHING; one under is CLEAR', 
 // ---------------------------------------------------------------------------
 
 test('zero-content proof: digGauge opens ZERO file content (statSync only) yet returns the correct verdict', () => {
-  const { dir, paths } = fixtures([480000, 100, 100]); // a huge file + two tiny → CRUSHING via single
+  const { dir, paths } = fixtures([160000, 100, 100]); // a big file + two tiny → CRUSHING via single
   const real = fs.readFileSync;
   try {
     let contentReads = 0;
@@ -125,7 +125,7 @@ test('zero-content proof: digGauge opens ZERO file content (statSync only) yet r
     const v = digGauge(paths, TH);
     assert.strictEqual(contentReads, 0, 'the gauge NEVER opens content — stat is metadata only, no bytes enter context');
     assert.strictEqual(v.band, 'CRUSHING', 'and it still verdicts correctly from stats alone');
-    assert.strictEqual(v.largestTok, 120000);
+    assert.strictEqual(v.largestTok, 40000);
     assert.strictEqual(v.files, 3);
   } finally { fs.readFileSync = real; rm(dir); }
 });
@@ -167,7 +167,7 @@ test('4. once-per-session arm: first CRUSHING surfaces the offer, a 2nd same-ses
   const { home, proj } = sandbox();
   try {
     const big = path.join(proj, 'big.jsonl');
-    fs.writeFileSync(big, Buffer.alloc(500000)); // 125000 tok >= 100000 → CRUSHING (single)
+    fs.writeFileSync(big, Buffer.alloc(500000)); // 125000 tok >= 35000 → CRUSHING (single)
 
     const r1 = run(proj, home, ['dig-gauge', big, '--session', 's1']);
     assert.strictEqual(r1.status, 0, r1.stderr);
@@ -226,12 +226,12 @@ test('a CLEAR dig via the CLI is fully READ-ONLY: prints the reading, offers not
 // ---------------------------------------------------------------------------
 
 test('6. digCrush clamps: out-of-range sub-key → its default; a partial block fills the rest; a malformed estate → all defaults', () => {
-  const DEF = { singleFileTok: 100000, pileTok: 150000, fileCount: 8 };
+  const DEF = { singleFileTok: 35000, pileTok: 58000, fileCount: 6 }; // the knee-grounded recalibration — pinned here
   // an out-of-range sub-key degrades ALONE to its default; absent sub-keys fill.
   assert.deepStrictEqual(clampedRead({ estate: { digCrush: { singleFileTok: 5 } } }, 'estate').digCrush, DEF, 'singleFileTok 5 < 20000 → default; rest fill');
   assert.deepStrictEqual(clampedRead({ estate: { digCrush: { fileCount: 999 } } }, 'estate').digCrush, DEF, 'fileCount 999 > 50 → default; rest fill');
   // a valid partial customization is KEPT, the rest fill (per-sub-key, not all-or-nothing).
-  assert.deepStrictEqual(clampedRead({ estate: { digCrush: { singleFileTok: 50000 } } }, 'estate').digCrush, { singleFileTok: 50000, pileTok: 150000, fileCount: 8 });
+  assert.deepStrictEqual(clampedRead({ estate: { digCrush: { singleFileTok: 50000 } } }, 'estate').digCrush, { singleFileTok: 50000, pileTok: 58000, fileCount: 6 });
   // a fully malformed estate (or absent) → the whole default block, digCrush included.
   assert.deepStrictEqual(clampedRead({ estate: 'nope' }, 'estate').digCrush, DEF);
   assert.deepStrictEqual(clampedRead({}, 'estate').digCrush, DEF);
@@ -249,11 +249,11 @@ test('7. intOr trust-boundary re-clamp: out-of-range thresholds fall back to the
     // 0 / negative / below-min would each FALSE-CRUSH (fileCount 1 -> n>=1 always; singleFileTok 0 -> any file trips)
     const v = digGauge(paths, { singleFileTok: 0, pileTok: -5, fileCount: 1 });
     assert.strictEqual(v.band, 'CLEAR', 'out-of-range thresholds fell back to defaults — no false-CRUSH');
-    assert.deepStrictEqual(v.thresholds, { singleFileTok: 100000, pileTok: 150000, fileCount: 8 }, 'the factory priors are re-enforced');
+    assert.deepStrictEqual(v.thresholds, { singleFileTok: 35000, pileTok: 58000, fileCount: 6 }, 'the factory priors are re-enforced');
     // above-max also degrades to the default
     assert.deepStrictEqual(
       digGauge(paths, { singleFileTok: 999999999, pileTok: 999999999, fileCount: 999 }).thresholds,
-      { singleFileTok: 100000, pileTok: 150000, fileCount: 8 },
+      { singleFileTok: 35000, pileTok: 58000, fileCount: 6 },
     );
     // a VALID in-range custom threshold is still honored
     const v3 = digGauge(paths, { singleFileTok: 20000, pileTok: 40000, fileCount: 5 });

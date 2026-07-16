@@ -642,6 +642,29 @@ test('R4: NUL-bearing and unparseable-frontmatter targets are FLAGGED, never rew
   } finally { clean(proj); }
 });
 
+test('#57(d) cloud-placeholder read poison (rewrite): a rewrite target that reads as a dehydrated stub is FLAGGED, never rewritten; the run continues on the rest', () => {
+  const { proj, store } = sandbox();
+  try {
+    const fstub = path.join(store, 'placeholder.md');
+    const fok = path.join(store, 'clean.md');
+    write(fstub, 'the REAL hydrated content a plain read would never see for a dehydrated placeholder');
+    write(fok, 'clean content');
+    const stubPhys = fs.realpathSync(fstub);
+    // Inject the placeholder predicate (a real Files-On-Demand stub cannot exist
+    // in a sandbox): fstub reads as a dehydrated placeholder.
+    const isPlaceholder = (p) => p === stubPhys;
+    const r = applyPlan(planFor(proj, store, [
+      { type: 'rewrite', path: fstub, content: 'a TRUNCATED body derived from the stub — must NEVER land' },
+      { type: 'rewrite', path: fok, content: 'clean rewritten' },
+    ]), { isPlaceholder });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1, 'only the non-placeholder file was applied');
+    assert.ok(r.flagged.some((x) => x.path === stubPhys && /cloud placeholder/.test(x.reason) && /#57d/.test(x.reason)), 'the placeholder rewrite is flagged, not applied');
+    assert.match(fs.readFileSync(fstub, 'utf8'), /REAL hydrated content/, 'the placeholder file is byte-untouched (real bytes preserved)');
+    assert.strictEqual(fs.readFileSync(fok, 'utf8'), 'clean rewritten', 'the run continued on the rest');
+  } finally { clean(proj); }
+});
+
 // ---------------------------------------------------------------------------
 // R5 — artifact schema-version: newer journal is untouchable (XP/Vista)
 // ---------------------------------------------------------------------------

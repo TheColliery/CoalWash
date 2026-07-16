@@ -61,8 +61,14 @@ import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir } from './config-load.mjs';
-import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
+import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
 import { acquireLock, globalLockPath } from './apply.mjs';
+// #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
+// death-log (destroyed cuts). Function-declaration imports used only at CALL
+// time (collectTombstones), so the existing apply<->retier<->estate cycle stays
+// safe. Advisory-only — this NEVER blocks a dig/restore.
+import { loadKeeps, loadGlobalKeeps } from './keeps.mjs';
+import { readDeathLog, FAT_BIN_NAME, STORE_OLD_NAME } from './bins.mjs';
 
 export const ESTATE_ARCHIVE_DIRNAME = 'estate-archive';
 export const ESTATE_INDEX_NAME = 'index.jsonl';
@@ -88,12 +94,20 @@ export function resolveEstateCfg(estate) {
   const compressAfterDays = Number.isFinite(e.compressAfterDays) ? e.compressAfterDays : 14;
   let purgeAfterDays = Number.isFinite(e.purgeAfterDays) ? e.purgeAfterDays : 180;
   if (purgeAfterDays !== 0 && purgeAfterDays < compressAfterDays) purgeAfterDays = compressAfterDays;
+  // runBudget: the per-run work-limit on the ULTRA session loop (the UNBOUNDED
+  // axis — CC accretes hundreds of old sessions). clampedRead already bounds
+  // these; this re-derives defensively (a raw estate handed straight in) with
+  // the same defaults, floor >= 1 (a zero/negative would defer everything).
+  const rb = e.runBudget && typeof e.runBudget === 'object' ? e.runBudget : {};
+  const maxSessionsPerRun = Number.isFinite(rb.maxSessionsPerRun) && rb.maxSessionsPerRun >= 1 ? Math.floor(rb.maxSessionsPerRun) : 25;
+  const maxBytesPerRun = Number.isFinite(rb.maxBytesPerRun) && rb.maxBytesPerRun >= 1 ? Math.floor(rb.maxBytesPerRun) : 524288000;
   return {
     compressAfterDays,
     purgeAfterDays,
     deleteCold: e.deleteCold === true,
     archiveDir: typeof e.archiveDir === 'string' ? e.archiveDir : '',
     indexEnabled: e.indexEnabled !== false,
+    runBudget: { maxSessionsPerRun, maxBytesPerRun },
   };
 }
 
@@ -249,15 +263,23 @@ export function classifySessions({ projectRoot = process.cwd(), home = os.homedi
 // the dig-index (goal 1: help agents deliberately dig old history)
 // ---------------------------------------------------------------------------
 
-// Plain text of a transcript line's message content, or null. Handles the two
-// trivially-extractable CC shapes (string content · array of text parts);
-// anything else is skipped, never guessed.
+// The searchable ANSWER text of a transcript line's message content, or null.
+// DIG-INDEX RECORD-WEIGHTING (item 6 — search quality, NOT treatment): the
+// index is built from `text`/answer content-parts ONLY. A `thinking` (or
+// `redacted_thinking`) part is transient reasoning = SEARCH NOISE, so it is
+// DE-WEIGHTED TO ZERO here (never contributes to firstUserLine or topEntities).
+// The decision reads each part's OWN `type` STAMP — never a guess by shape:
+// only a part stamped `type:'text'` with a string `text` is kept, so a thinking
+// part (which carries `thinking`, not `text`) is excluded both by the type
+// filter AND by construction. A plain-string content is a final answer (kept).
+// This split is INDEX/SEARCH ONLY — treatment stays whole-file byte-identity
+// (§10); a record is never cut, only under-weighted in the searchable index.
 function messageText(obj) {
   const c = obj && obj.message && obj.message.content;
-  if (typeof c === 'string') return c;
+  if (typeof c === 'string') return c; // a plain-string message = final answer text
   if (Array.isArray(c)) {
     const parts = c.filter((p) => p && p.type === 'text' && typeof p.text === 'string').map((p) => p.text);
-    return parts.length ? parts.join(' ') : null;
+    return parts.length ? parts.join(' ') : null; // thinking parts fall out here — zero weight
   }
   return null;
 }
@@ -361,7 +383,7 @@ function appendDeathCert(archiveDir, slug, line) {
 // delete and append can only under-index — estate-restore scans the archive
 // dir itself, not the index, so recovery never depends on the row).
 // opts.gzip is injectable for tests (default zlib.gzipSync).
-export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync } = {}) {
+export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder } = {}) {
   const destBase = path.join(archiveDir, slug);
   // Write-side containment (loss class #57's git sibling, GHSA-2hvf-7c8p-28fx:
   // the SOURCE enumeration is realpath-contained, but the DESTINATION
@@ -380,6 +402,16 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   const originals = [];
 
   for (const f of sess.files) {
+    // #57(d) cloud-placeholder read poison: sniff the dehydrated stub from
+    // METADATA before the read below trusts it as ground truth. A placeholder
+    // read returns a self-consistent stub, so the gzip round-trip would "verify"
+    // and the delete-LAST step would destroy the real (cloud-side) original.
+    // Fail-closed: skip the whole session, keep every original (never delete a
+    // file we cannot truly read).
+    if (isPlaceholder(f.path)) {
+      cleanupPartial();
+      return { ok: false, reason: `cloud placeholder (dehydrated — 0 blocks, size>0): ${f.rel} — a plain read returns a stub, archive+delete refused (fail-closed), originals kept (#57d)` };
+    }
     let buf;
     try {
       buf = fs.readFileSync(f.path);
@@ -549,7 +581,7 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
     return {
       ok: true, platform: 'unknown', flags: [UNKNOWN_PLATFORM_FLAG],
       slug: null, archiveDir: resolveArchiveDir(estate, home), cfg: resolveEstateCfg(estate),
-      archived: [], failed: [], coldListed: [], activeSkipped: 0, bytesFreed: 0, indexRows: 0,
+      archived: [], failed: [], coldListed: [], activeSkipped: 0, bytesFreed: 0, indexRows: 0, budgetDeferred: 0, budgetReached: false,
     };
   }
   const lock = acquireLock(globalLockPath(home), { sessionId: currentSessionId || String(process.pid), now });
@@ -560,12 +592,24 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
     const res = {
       ok: true, slug: c.slug, archiveDir, cfg: c.cfg,
       archived: [], failed: [], coldListed: [], activeSkipped: 0,
-      bytesFreed: 0, indexRows: 0,
+      bytesFreed: 0, indexRows: 0, budgetDeferred: 0, budgetReached: false,
     };
+    const budget = c.cfg.runBudget;
     for (const sess of c.sessions) {
       if (sess.band === 'active') { res.activeSkipped++; continue; }
       if (sess.band === 'cold' && !c.cfg.deleteCold) {
         res.coldListed.push({ id: sess.id, bytes: sess.bytes, ageDays: Math.round((now - sess.newestMtimeMs) / DAY_MS) });
+        continue;
+      }
+      // runBudget STOP (the unbounded-axis work-limit): this unit is archive-
+      // eligible (warm, or cold+deleteCold). If EITHER limit is already reached,
+      // STOP at this completed-unit boundary — never mid-unit (each
+      // archiveSession is an independent copy-verify-delete tx, so stopping
+      // between them leaves ZERO partial). Count the remainder as budget-deferred
+      // + report N/M; a second run continues where this one stopped. (Cold-listed
+      // + active are cheap report/skip — they still run, never budget-gated.)
+      if (res.archived.length >= budget.maxSessionsPerRun || res.bytesFreed >= budget.maxBytesPerRun) {
+        res.budgetDeferred++;
         continue;
       }
       const cold = sess.band === 'cold';
@@ -576,6 +620,7 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned });
       res.bytesFreed += r.bytes;
     }
+    res.budgetReached = res.budgetDeferred > 0;
     return res;
   } finally { lock.release(); }
 }
@@ -586,6 +631,10 @@ export function runEstateReport(res) {
   const lines = [];
   lines.push(`[CoalWash] ULTRA estate — ${res.archived.length} session(s) archived (${mb(res.bytesFreed)} freed from the live tree), ${res.activeSkipped} active skipped`);
   lines.push(`  archive: ${res.archiveDir} (${res.indexRows} index row(s) appended · restore: cli.mjs estate-restore <sessionId>)`);
+  if (res.budgetReached) {
+    const total = res.archived.length + res.budgetDeferred;
+    lines.push(`  BUDGET: archived ${res.archived.length}/${total} eligible session(s) this run — per-run work-limit reached; ${res.budgetDeferred} deferred, run ULTRA again for the rest (zero partial — each unit is its own copy-verify-delete tx)`);
+  }
   for (const f of res.failed) lines.push(`  KEPT ${f.id}: ${f.reason}`);
   // #56: a session whose <sid>/ still held un-enumerated files was archived +
   // its container LEFT in place (never rm -rf'd) — surface the survivors.
@@ -603,9 +652,56 @@ export function runEstateReport(res) {
 // estate-search + estate-restore (the dig doors)
 // ---------------------------------------------------------------------------
 
+// #58 DELETION-UNAWARE TIME-TRAVEL RESTORE (MASTER-LOSS-TAXONOMY.md #58): a
+// dig/restore reads a FROZEN pre-deletion copy and could present it as current
+// fact, silently un-deleting what a gate-approved wash deliberately removed.
+// Cross-check recovered content against the TOMBSTONE REGISTRY of adjudicated/
+// cut things: keeps.json ANCHORS (project + global — the verbatim spans a
+// review pinned/adjudicated) plus the bins' DEATH-LOG (destroyed cuts — a
+// pointer, no content to match). ADVISORY ONLY — the signal LABELS a result,
+// never blocks it (recovery still works, it's just qualified). Fail-silent: an
+// unreadable ledger just yields fewer anchors. NOTE the honest framing: a
+// keeps.json anchor proves the span was ADJUDICATED, not necessarily deleted —
+// the signal says "verify against the CURRENT store", the safe qualification.
+export function collectTombstones({ projectRoot = process.cwd(), home = os.homedir() } = {}) {
+  const anchors = [];
+  const addKeep = (k) => {
+    // ONLY a verbatim `anchor` is content-matchable — a bare `target` is a
+    // path/line reference, not prose that appears in a transcript (matching it
+    // would false-fire on path fragments).
+    const text = k && typeof k.anchor === 'string' && k.anchor.trim() ? k.anchor.trim() : null;
+    if (!text) return;
+    anchors.push({ text, textLc: text.toLowerCase(), target: (k && k.target) || null, date: (k && k.date) || null });
+  };
+  try { for (const k of loadKeeps(projectRoot)) addKeep(k); } catch { /* no project keeps */ }
+  try { for (const k of loadGlobalKeeps(home)) addKeep(k); } catch { /* no global keeps */ }
+  let hasDeathLog = false;
+  try { hasDeathLog = !!(String(readDeathLog(projectRoot, FAT_BIN_NAME) || '').trim() || String(readDeathLog(projectRoot, STORE_OLD_NAME) || '').trim()); } catch { /* no bins */ }
+  return { anchors, hasDeathLog };
+}
+
+// Which tombstone anchors appear (case-insensitive substring) in `text`. Empty
+// registry / text -> []. The caller attaches this as an advisory `laterRemoved`
+// note, never a block. Long anchors are truncated for one-line display.
+function matchTombstones(text, tombstones) {
+  const anchors = tombstones && Array.isArray(tombstones.anchors) ? tombstones.anchors : [];
+  const hay = String(text || '').toLowerCase();
+  if (!anchors.length || !hay) return [];
+  const hits = [];
+  for (const a of anchors) {
+    if (a.textLc && hay.includes(a.textLc)) {
+      hits.push({ anchor: a.text.length > 80 ? `${a.text.slice(0, 77)}...` : a.text, target: a.target, date: a.date });
+    }
+  }
+  return hits;
+}
+
 // Case-insensitive substring match over sessionId / projectSlug /
-// firstUserLine / topEntities. Reads the index only — never a transcript.
-export function searchIndex(query, { archiveDir } = {}) {
+// firstUserLine / topEntities. Reads the index only — never a transcript. When
+// `tombstones` is provided (#58), a matching row is ANNOTATED with a
+// `laterRemoved` advisory (the recovered wording overlaps an adjudicated/cut
+// tombstone) — never dropped, never blocked.
+export function searchIndex(query, { archiveDir, tombstones } = {}) {
   const q = String(query || '').toLowerCase();
   if (!q) return [];
   let text;
@@ -617,16 +713,32 @@ export function searchIndex(query, { archiveDir } = {}) {
     try { row = JSON.parse(line); } catch { continue; }
     const hay = [row.sessionId, row.projectSlug, row.firstUserLine, ...(Array.isArray(row.topEntities) ? row.topEntities : [])]
       .filter((v) => typeof v === 'string').join(' ').toLowerCase();
-    if (hay.includes(q)) out.push(row);
+    if (hay.includes(q)) {
+      const laterRemoved = matchTombstones(hay, tombstones); // #58 advisory
+      if (laterRemoved.length) row.laterRemoved = laterRemoved;
+      out.push(row);
+    }
   }
   return out;
 }
 
-export function searchLines(rows) {
+export function searchLines(rows, { hasDeathLog = false } = {}) {
   if (!rows.length) return '[CoalWash] estate-search: no match in the archive index.';
-  return rows.map((r) =>
-    `${r.sessionId}  ${r.projectSlug || '?'}  ${r.startISO || '?'}..${r.endISO || '?'}  ${mb(r.bytes)}  ${r.msgCount ?? '?'} msg${r.cold ? '  [cold-deleted]' : ''}\n    ${String(r.firstUserLine || '').slice(0, 160) || '(no first user line)'}`,
-  ).join('\n');
+  return rows.map((r) => {
+    let line = `${r.sessionId}  ${r.projectSlug || '?'}  ${r.startISO || '?'}..${r.endISO || '?'}  ${mb(r.bytes)}  ${r.msgCount ?? '?'} msg${r.cold ? '  [cold-deleted]' : ''}\n    ${String(r.firstUserLine || '').slice(0, 160) || '(no first user line)'}`;
+    if (Array.isArray(r.laterRemoved) && r.laterRemoved.length) line += `\n    ${tombstoneSignal(r.laterRemoved, hasDeathLog)}`;
+    return line;
+  }).join('\n');
+}
+
+// The #58 per-result advisory line (program-built — the fixed-template
+// discipline). Names the adjudicated anchor(s) + the registry to check; frames
+// it as "verify against the CURRENT store", never a bare "was removed".
+function tombstoneSignal(hits, hasDeathLog) {
+  const named = hits.slice(0, 2).map((h) => `"${h.anchor}"${h.date ? ` (${h.date})` : ''}`).join('; ');
+  const more = hits.length > 2 ? ` +${hits.length - 2} more` : '';
+  const deathNote = hasDeathLog ? ' + destroyed records in the bin death-log' : '';
+  return `⚠ later-removed? this recovered wording matches a gate-adjudicated keep${hits.length > 1 ? 's' : ''}: ${named}${more} — the live store may have since removed/changed it; VERIFY against the current store before treating this archived copy as current fact (see keeps.json${deathNote}).`;
 }
 
 // Bare-name allowlist — bins.mjs's F1 rule verbatim: a session id is a flat
@@ -641,7 +753,7 @@ function isBareId(id) {
 // CC's live tree unless an explicit --to points there (the default tmpdir
 // guarantees it). Scans the archive dir itself (not the index), so a session
 // archived without an index row still restores.
-export function restoreSession(sessionId, { archiveDir, to = null } = {}) {
+export function restoreSession(sessionId, { archiveDir, to = null, tombstones } = {}) {
   if (!isBareId(sessionId)) return { ok: false, error: `not a bare session id: '${sessionId}'` };
   let slugs;
   try { slugs = fs.readdirSync(archiveDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch {
@@ -679,6 +791,12 @@ export function restoreSession(sessionId, { archiveDir, to = null } = {}) {
   } catch (e) { return { ok: false, error: `cannot create restore target: ${e.message}` }; }
 
   const files = [];
+  // #58: scan the FULL recovered content against the tombstone registry (only
+  // when a registry was passed — the CLI builds it; direct callers opt in). The
+  // dig-index search is a compact-row best-effort; restore pulls real bytes, so
+  // the anchor match here is thorough. One-shot recovery path, never a hot loop.
+  const wantTombstoneScan = tombstones && Array.isArray(tombstones.anchors) && tombstones.anchors.length;
+  let combinedText = '';
   for (const s of sources) {
     try {
       const buf = zlib.gunzipSync(fs.readFileSync(s.gzPath));
@@ -686,7 +804,9 @@ export function restoreSession(sessionId, { archiveDir, to = null } = {}) {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, buf);
       files.push({ rel: s.rel, bytes: buf.length });
+      if (wantTombstoneScan) combinedText += `${buf.toString('utf8')}\n`;
     } catch (e) { return { ok: false, error: `restore failed on ${s.rel}: ${e.message}`, dir, files }; }
   }
-  return { ok: true, dir, files };
+  const laterRemoved = wantTombstoneScan ? matchTombstones(combinedText, tombstones) : [];
+  return { ok: true, dir, files, ...(laterRemoved.length ? { laterRemoved } : {}) };
 }

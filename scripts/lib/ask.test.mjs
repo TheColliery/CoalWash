@@ -105,6 +105,18 @@ test('externalizeAdvisory: a missing hardCeilingTokens degrades to a "?" placeho
   assert.ok(externalizeAdvisory({}).includes('~? tok'));
 });
 
+test('#21 externalize-template: the muscle-only/wall-hit advisory renders the hand-move template shape (cluster -> destination -> pointer), states CoalWash NEVER auto-moves, and cites the CoalPortal precedent', () => {
+  const r = externalizeAdvisory({ hardCeilingTokens: 190000 });
+  assert.match(r, /NEVER auto-move/, 'CoalWash never auto-moves external content (externalize is pure information)');
+  assert.match(r, /CLUSTER/, 'step 1: cluster the muscle by topic');
+  assert.match(r, /DESTINATION/, 'step 2: propose a destination doc/blueprint/design file');
+  assert.match(r, /POINTER/, 'step 3: leave a pointer behind so recall still reaches it');
+  assert.match(r, /by hand/, 'the user/agent moves it by hand');
+  assert.match(r, /CoalPortal/, 'cites the memory->durable-file precedent');
+  assert.match(r, /airbag/, 'the write-path airbag snapshots the hand-move');
+  assert.ok(!r.includes('question tool'), 'still pure information, never an ask');
+});
+
 // ---------------------------------------------------------------------------
 // obeseAutoQuick (queue 0d, "OBESE AUTO-QUICK, NO ASK")
 // ---------------------------------------------------------------------------

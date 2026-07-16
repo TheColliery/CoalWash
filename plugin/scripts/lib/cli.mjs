@@ -85,7 +85,7 @@ import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { estateReport } from './estate.mjs';
 import {
   estateUltraScan, ultraBillLine, runEstate, runEstateReport,
-  searchIndex, searchLines, restoreSession, resolveArchiveDir,
+  searchIndex, searchLines, restoreSession, resolveArchiveDir, collectTombstones,
 } from './estate-archive.mjs';
 import { retierScan, retierScanLines, runRetier, runRetierReport } from './retier.mjs';
 
@@ -277,8 +277,12 @@ function main() {
     const query = args.slice(1).filter((a) => !a.startsWith('--')).join(' ');
     if (!query) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const { home, estate } = estateOpts(args);
-      console.log(searchLines(searchIndex(query, { archiveDir: resolveArchiveDir(estate, home) })));
+      const { projectRoot, home, estate } = estateOpts(args);
+      // #58 tombstone cross-check: a matching row is ANNOTATED (later-removed?),
+      // never dropped — the search still returns everything it found.
+      const tombstones = collectTombstones({ projectRoot, home });
+      const rows = searchIndex(query, { archiveDir: resolveArchiveDir(estate, home), tombstones });
+      console.log(searchLines(rows, { hasDeathLog: tombstones.hasDeathLog }));
     } catch (e) {
       console.error(`estate-search failed: ${e.message}`);
       process.exitCode = 1;
@@ -317,11 +321,18 @@ function main() {
     const sessionId = args[1];
     if (!sessionId || sessionId.startsWith('--')) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const { home, estate } = estateOpts(args);
-      const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: argAfter(args, '--to') });
+      const { projectRoot, home, estate } = estateOpts(args);
+      const tombstones = collectTombstones({ projectRoot, home });
+      const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: argAfter(args, '--to'), tombstones });
       if (!r.ok) { console.error(`estate-restore: ${r.error}`); process.exitCode = 1; return; }
       console.log(`[CoalWash] restored ${r.files.length} file(s) of session ${sessionId} to ${r.dir} — byte-exact originals; nothing written into the live CC tree${argAfter(args, '--to') ? ' beyond your --to choice' : ''}`);
       for (const f of r.files) console.log(`  ${f.rel} (${f.bytes} bytes)`);
+      // #58 deletion-unaware time-travel restore: label recovered content that
+      // overlaps an adjudicated/cut tombstone — advisory, the restore stands.
+      if (Array.isArray(r.laterRemoved) && r.laterRemoved.length) {
+        const named = r.laterRemoved.slice(0, 2).map((h) => `"${h.anchor}"${h.date ? ` (${h.date})` : ''}`).join('; ');
+        console.log(`  ⚠ later-removed? this recovered session matches ${r.laterRemoved.length} gate-adjudicated keep(s): ${named} — VERIFY against the CURRENT live store before treating it as current fact; it may have been deliberately removed/changed (keeps.json${tombstones.hasDeathLog ? ' + the bin death-log' : ''}).`);
+      }
     } catch (e) {
       console.error(`estate-restore failed: ${e.message}`);
       process.exitCode = 1;

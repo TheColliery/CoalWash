@@ -16,10 +16,11 @@ import {
   resolveEstateCfg, resolveArchiveDir, chJournalGuard, listSessions,
   classifySessions, buildIndexRow, archiveSession, estateUltraScan,
   ultraBillLine, runEstate, runEstateReport, searchIndex, searchLines,
-  restoreSession, ESTATE_INDEX_NAME,
+  restoreSession, ESTATE_INDEX_NAME, appendIndexRow, collectTombstones,
 } from './estate-archive.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 import { acquireLock, globalLockPath } from './apply.mjs';
+import { recordKeep } from './keeps.mjs';
 import { CONFIG_SCHEMA, clampedRead, validateConfig } from './config-schema.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR;
@@ -245,6 +246,55 @@ test('archive success: originals gone, every .gz decompresses byte-exact, index 
   } finally { clean(home, proj); }
 });
 
+test('runBudget (maxSessionsPerRun): the ULTRA loop stops at a completed-unit boundary once the budget is reached — N archived, the rest budget-deferred, receipt names N/M, a SECOND run continues; every archived unit is whole (zero partial), every deferred original is untouched', () => {
+  const { home, proj } = sandbox();
+  try {
+    const ids = ['w1', 'w2', 'w3', 'w4', 'w5'];
+    const seeded = Object.fromEntries(ids.map((id) => [id, seedSession(home, proj, id, 30)]));
+    const cfg = estateCfg({ runBudget: { maxSessionsPerRun: 2, maxBytesPerRun: 524288000 } });
+
+    // run 1: budget 2 -> exactly 2 archived, 3 deferred, budgetReached
+    const r1 = runEstate({ projectRoot: proj, home, estate: cfg });
+    assert.strictEqual(r1.ok, true);
+    assert.strictEqual(r1.archived.length, 2, 'stopped at 2 (the budget) — never mid-unit');
+    assert.strictEqual(r1.budgetDeferred, 3, 'the remaining 3 eligible units are deferred, not touched');
+    assert.strictEqual(r1.budgetReached, true);
+    assert.match(runEstateReport(r1), /archived 2\/5 eligible/, 'the receipt names N/M honestly');
+    // the 2 archived units are WHOLE (originals gone, .gz round-trips); the 3
+    // deferred units are byte-untouched (zero partial anywhere).
+    const archivedIds = new Set(r1.archived.map((a) => a.id));
+    let touched = 0;
+    for (const id of ids) {
+      const present = fs.existsSync(seeded[id].jsonl);
+      if (archivedIds.has(id)) { assert.ok(!present, `archived ${id} original gone`); touched++; }
+      else assert.ok(present, `deferred ${id} original untouched`);
+    }
+    assert.strictEqual(touched, 2, 'exactly the budgeted count was archived');
+
+    // run 2 continues where run 1 stopped (the 3 survivors) -> 2 more archived
+    const r2 = runEstate({ projectRoot: proj, home, estate: cfg });
+    assert.strictEqual(r2.archived.length, 2, 'the second run picks up the remainder');
+    assert.strictEqual(r2.budgetDeferred, 1);
+    // run 3 finishes the last one, no budget hit
+    const r3 = runEstate({ projectRoot: proj, home, estate: cfg });
+    assert.strictEqual(r3.archived.length, 1);
+    assert.strictEqual(r3.budgetReached, false, 'the tail run is under budget');
+    for (const id of ids) assert.ok(!fs.existsSync(seeded[id].jsonl), `all 5 eventually archived: ${id}`);
+  } finally { clean(home, proj); }
+});
+
+test('runBudget (maxBytesPerRun): a byte ceiling also stops at a unit boundary — the first eligible unit archives (0 < budget), the rest defer once bytesFreed crosses it', () => {
+  const { home, proj } = sandbox();
+  try {
+    for (const id of ['b1', 'b2', 'b3']) seedSession(home, proj, id, 30);
+    // 1-byte budget: before unit 1, bytesFreed 0 < 1 -> archive; after, bytesFreed > 1 -> defer the rest.
+    const r = runEstate({ projectRoot: proj, home, estate: estateCfg({ runBudget: { maxSessionsPerRun: 100000, maxBytesPerRun: 1 } }) });
+    assert.strictEqual(r.archived.length, 1, 'exactly one unit before the byte budget bites');
+    assert.strictEqual(r.budgetDeferred, 2);
+    assert.strictEqual(r.budgetReached, true);
+  } finally { clean(home, proj); }
+});
+
 test('corrupted archive (verify mismatch): originals KEPT, partial .gz removed, failure reported — never a delete on a failed verify', () => {
   const { home, proj } = sandbox();
   try {
@@ -291,6 +341,26 @@ test('external-writer guard: an original that changes between listing and delete
     assert.strictEqual(r.ok, false);
     assert.ok(r.reason.includes('changed during run'));
     assert.ok(fs.existsSync(files.jsonl), 'original kept');
+  } finally { clean(home, proj); }
+});
+
+test('#57(d) cloud-placeholder read poison (WARM): a session whose source is a dehydrated stub is SKIPPED (fail-closed), originals kept, nothing archived — never a copy-verify-delete on bytes we cannot truly read', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const sess = c.sessions.find((s) => s.id === 'sess-warm');
+    const archiveDir = path.join(home, 'arch');
+    // Inject the placeholder predicate (a real cloud placeholder cannot exist in
+    // a sandbox): the jsonl reads as a dehydrated stub.
+    const isPlaceholder = (p) => p === files.jsonl;
+    const r = archiveSession(sess, { slug: c.slug, archiveDir, gzip: zlib.gzipSync, isPlaceholder });
+    assert.strictEqual(r.ok, false, 'a placeholder source refuses the whole session');
+    assert.ok(/cloud placeholder/.test(r.reason) && /#57d/.test(r.reason), r.reason);
+    for (const p of Object.values(files)) assert.ok(fs.existsSync(p), `original kept: ${p}`);
+    const slugDir = path.join(archiveDir, ccProjectSlug(proj));
+    const anyGz = fs.existsSync(slugDir) ? fs.readdirSync(slugDir, { recursive: true }).map(String).filter((n) => n.endsWith('.gz')) : [];
+    assert.deepStrictEqual(anyGz, [], 'nothing archived — no partial .gz left behind');
   } finally { clean(home, proj); }
 });
 
@@ -639,4 +709,64 @@ test('buildIndexRow is deterministic and null-safe: same buffer -> same row; an 
   assert.strictEqual(junk.firstUserLine, null);
   assert.strictEqual(junk.startISO, null);
   assert.deepStrictEqual(junk.topEntities, []);
+});
+
+test('#6 dig-index record-weighting: topEntities + firstUserLine are built from text/answer content ONLY — a thinking-part entity is DE-WEIGHTED TO ZERO (search noise), a text-part entity is kept (index/search quality; treatment stays whole-file byte-identity)', () => {
+  const buf = Buffer.from(transcript([
+    { type: 'user', timestamp: '2026-05-01T10:00:00Z', message: { role: 'user', content: 'Please help with ProjectAlpha' } },
+    { type: 'assistant', timestamp: '2026-05-01T10:01:00Z', message: { role: 'assistant', content: [
+      { type: 'thinking', thinking: 'weighing ThinkingSecret versus DeepReasoning before I answer' },
+      { type: 'text', text: 'Working on ProjectAlpha with the AnswerToken approach now.' },
+    ] } },
+  ]), 'utf8');
+  const row = buildIndexRow({ sessionId: 's', projectSlug: 'slug', transcriptBuf: buf, totalBytes: buf.length, now: 0 });
+  assert.ok(row.topEntities.includes('ProjectAlpha') && row.topEntities.includes('AnswerToken'), 'text/answer entities ARE indexed');
+  assert.ok(!row.topEntities.includes('ThinkingSecret') && !row.topEntities.includes('DeepReasoning'), 'thinking-part entities are de-weighted to ZERO — never indexed (search noise)');
+  assert.ok(row.firstUserLine.includes('ProjectAlpha'), 'firstUserLine is the user text');
+  assert.ok(!row.firstUserLine.includes('ThinkingSecret'), 'no thinking leaks into the searchable first line');
+});
+
+test('#58 deletion-unaware restore (search): a dug-up row whose wording matches a gate-adjudicated keep anchor is ANNOTATED laterRemoved (advisory, STILL returned); an un-cut row is clean; the search never blocks', () => {
+  const { home, proj } = sandbox();
+  try {
+    const archiveDir = path.join(home, 'arch');
+    appendIndexRow(archiveDir, { sessionId: 'hit', projectSlug: 'p', firstUserLine: 'Investigate the SECRETLEGACYTOKEN rollback behavior', topEntities: ['SECRETLEGACYTOKEN'], bytes: 10, msgCount: 2 });
+    appendIndexRow(archiveDir, { sessionId: 'clean', projectSlug: 'p', firstUserLine: 'Unrelated session about the login flow', topEntities: ['LoginFlow'], bytes: 10, msgCount: 2 });
+    // the user later DELETED that fact — recorded as an adjudicated keep carrying the verbatim anchor
+    recordKeep(proj, { target: 'MEMORY.md#legacy', anchor: 'SECRETLEGACYTOKEN', reason: 'removed', date: '2026-07-16' });
+    const tombstones = collectTombstones({ projectRoot: proj, home });
+    assert.ok(tombstones.anchors.some((a) => a.text === 'SECRETLEGACYTOKEN'), 'the keep anchor is in the registry');
+
+    const hits = searchIndex('SECRETLEGACYTOKEN', { archiveDir, tombstones });
+    assert.strictEqual(hits.length, 1, 'the search RETURNS the row — recovery is never blocked');
+    assert.ok(Array.isArray(hits[0].laterRemoved) && hits[0].laterRemoved[0].anchor === 'SECRETLEGACYTOKEN', 'the row is annotated with the tombstone match');
+    assert.match(searchLines(hits, { hasDeathLog: tombstones.hasDeathLog }), /later-removed\?.*SECRETLEGACYTOKEN/, 'the rendered line carries the advisory');
+
+    const cleanRows = searchIndex('login', { archiveDir, tombstones });
+    assert.strictEqual(cleanRows.length, 1);
+    assert.strictEqual(cleanRows[0].laterRemoved, undefined, 'an un-cut fact is clean — no signal');
+  } finally { clean(home, proj); }
+});
+
+test('#58 (restore): recovering a session whose FULL content holds pre-cut wording surfaces laterRemoved; recovery still succeeds; without a registry the restore is unannotated (backward-compatible)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const content = transcript([
+      { type: 'user', timestamp: '2026-05-01T10:00:00Z', message: { role: 'user', content: 'do the thing' } },
+      { type: 'assistant', timestamp: '2026-05-01T10:01:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'the SECRETLEGACYTOKEN was set to abc123 in that run' }] } },
+    ]);
+    seedSession(home, proj, 'sess-warm', 30, { content });
+    const run = runEstate({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(run.archived.length, 1);
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'SECRETLEGACYTOKEN', date: '2026-07-16' });
+    const tombstones = collectTombstones({ projectRoot: proj, home });
+
+    const r = restoreSession('sess-warm', { archiveDir: run.archiveDir, to: path.join(home, 'restore-out'), tombstones });
+    assert.strictEqual(r.ok, true, 'recovery succeeds byte-exact');
+    assert.ok(Array.isArray(r.laterRemoved) && r.laterRemoved[0].anchor === 'SECRETLEGACYTOKEN', 'the restore is flagged laterRemoved');
+
+    const r2 = restoreSession('sess-warm', { archiveDir: run.archiveDir, to: path.join(home, 'restore-out2') });
+    assert.strictEqual(r2.ok, true);
+    assert.strictEqual(r2.laterRemoved, undefined, 'without a registry the restore is unannotated (unchanged behavior)');
+  } finally { clean(home, proj); }
 });

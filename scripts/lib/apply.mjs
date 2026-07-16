@@ -55,6 +55,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { checkFidelity } from './fidelity-gate.mjs';
 import { claudeBaseDir } from './config-load.mjs';
+// #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
+// WARM path (one helper, called at both trust points — not a second copy). A
+// pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
+// (security-audit locality), but this stub-sniff is imported to stay single-source.
+import { isCloudPlaceholder } from './class-b.mjs';
 // NOTE a deliberate module cycle: keeps.mjs imports txDirFor/ensureSelfIgnore
 // from THIS file. Both sides bind function declarations used only at CALL
 // time, so ESM resolves the cycle safely regardless of entry order. bins.mjs
@@ -412,9 +417,19 @@ export function applyPlan(plan, opts = {}) {
     // rewrite target that sniffs binary/unparseable is FLAGGED and excluded
     // (never rewritten — the e2defrag lesson); the run continues on the rest.
     const flagged = [];
+    const isPlaceholder = opts.isPlaceholder || isCloudPlaceholder; // injectable for tests
     let actionable = []; // let: the KEEPS-GATE below may exclude entries (per-file failure, the sniff pattern)
     for (const a of resolved) {
       if (a.type === 'create') { actionable.push(a); continue; }
+      // #57(d) cloud-placeholder read poison: sniff the dehydrated stub from
+      // METADATA BEFORE the staging read trusts its bytes. A rewrite over a
+      // placeholder writes a truncated body that clobbers the real content when
+      // the file hydrates + syncs up — fail-closed (flag + skip, file untouched),
+      // the estate WARM path's sibling guard (never a content read).
+      if (a.type === 'rewrite' && isPlaceholder(a.phys)) {
+        flagged.push({ path: a.phys, reason: 'cloud placeholder (dehydrated — 0 blocks, size>0): a plain read returns a stub, rewriting would clobber the real content on hydration — flagged, not rewritten (#57d)' });
+        continue;
+      }
       let origBuf;
       try { origBuf = fs.readFileSync(a.phys); } catch { return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed)` }; }
       if (a.type === 'rewrite') {
