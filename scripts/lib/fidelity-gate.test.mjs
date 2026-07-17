@@ -331,6 +331,48 @@ test('an unrelated surviving number does not masquerade as a rounding (agreement
 });
 
 // ---------------------------------------------------------------------------
+// H2 — sign capture (a sign flip is a genuine drop, not a silent pass)
+// ---------------------------------------------------------------------------
+
+test('H2: a sign FLIP is a drop — "-43%" -> "43%" fails (the sign is part of the token)', () => {
+  const r = checkFidelity('Compaction moved -43% overall.', 'Compaction moved 43% overall.');
+  assert.strictEqual(r.pass, false, 'a dropped negative sign must fail the gate');
+  assert.deepStrictEqual(r.drops, [{ type: 'number-drop', value: '-43%' }]);
+});
+
+test('H2: a negative comma-grouped count losing its sign fails ("-44,192" -> "44,192")', () => {
+  const r = checkFidelity('Net change was -44,192 tokens.', 'Net change was 44,192 tokens.');
+  assert.strictEqual(r.pass, false);
+  assert.deepStrictEqual(r.drops, [{ type: 'number-drop', value: '-44192' }]);
+});
+
+test('H2: a genuine negative that SURVIVES is not a drop (no false positive on a kept sign)', () => {
+  assert.strictEqual(checkFidelity('delta -3.8 today', 'the delta was -3.8 today').pass, true);
+});
+
+test('H2: an inter-digit hyphen is a RANGE separator, never a sign ("15-20" reflow, no fabricated -20 drop)', () => {
+  assert.strictEqual(checkFidelity('ran 15-20 cases', 'ran 15 to 20 cases').pass, true);
+});
+
+// ---------------------------------------------------------------------------
+// MED — Trojan-Source bidi / zero-width tripwire (introduced-only)
+// ---------------------------------------------------------------------------
+
+test('MED: an INTRODUCED RLO bidi override (Trojan-Source) fails the gate', () => {
+  const RLO = String.fromCharCode(0x202e);
+  const r = checkFidelity('transfer to alice', 'transfer ' + RLO + 'to alice');
+  assert.strictEqual(r.pass, false, 'a hidden bidi override must fail');
+  assert.ok(r.drops.some((d) => d.type === 'bidi-control-introduced' && /RLO/.test(d.value)), JSON.stringify(r.drops));
+});
+
+test('MED: introduced ZWJ and a MID-STRING BOM both fail; an inherited one is not punished', () => {
+  const ZWJ = String.fromCharCode(0x200d), BOM = String.fromCharCode(0xfeff);
+  assert.strictEqual(checkFidelity('clean', 'cl' + ZWJ + 'ean').pass, false, 'introduced ZWJ fails');
+  assert.strictEqual(checkFidelity('clean', 'cl' + BOM + 'ean').pass, false, 'introduced mid-string BOM fails');
+  assert.strictEqual(checkFidelity('cl' + ZWJ + 'ean was here', 'cl' + ZWJ + 'ean is here').pass, true, 'inherited ZWJ (present in BOTH) is not a NEW corruption');
+});
+
+// ---------------------------------------------------------------------------
 // evidence-anchor (class 10)
 // ---------------------------------------------------------------------------
 

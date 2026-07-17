@@ -62,7 +62,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
-import { acquireLock, globalLockPath } from './apply.mjs';
+import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort } from './apply.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
 // death-log (destroyed cuts). Function-declaration imports used only at CALL
 // time (collectTombstones), so the existing apply<->retier<->estate cycle stays
@@ -424,7 +424,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     }
     try {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, gzip(buf));
+      writeDurable(dest, gzip(buf)); // H4: fsync the .gz CONTENT (this tier keeps no snapshot)
       written.push(dest);
       const back = zlib.gunzipSync(fs.readFileSync(dest));
       if (!back.equals(buf)) { cleanupPartial(); return { ok: false, reason: `verify mismatch: ${f.rel} — original kept` }; }
@@ -473,7 +473,14 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     }
   }
 
-  // Deletes LAST. Every byte is now verified recoverable from the archive.
+  // H4 DURABILITY: fsync every archived .gz's DIRECTORY ENTRY before deleting the
+  // originals — a power-loss in the write->unlink window must not lose the SOLE
+  // copy (this tier keeps no snapshot). The .gz content is already fsync'd by
+  // writeDurable at write time; this makes its filename->inode mapping durable
+  // too (best-effort — a Windows dir fd throws and is swallowed, honest ceiling).
+  for (const d of new Set(originals.map((o) => path.dirname(o.gz)))) fsyncDirBestEffort(d);
+
+  // Deletes LAST. Every byte is now verified recoverable from the durable archive.
   let deleted = 0;
   const deleteFailed = [];
   for (const o of originals) {
@@ -802,7 +809,8 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones } 
       const buf = zlib.gunzipSync(fs.readFileSync(s.gzPath));
       const dest = path.join(dir, s.rel);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, buf);
+      writeDurable(dest, buf); // MED: recovery write matches the forward path's durability (this tier keeps no snapshot)
+      fsyncDirBestEffort(path.dirname(dest));
       files.push({ rel: s.rel, bytes: buf.length });
       if (wantTombstoneScan) combinedText += `${buf.toString('utf8')}\n`;
     } catch (e) { return { ok: false, error: `restore failed on ${s.rel}: ${e.message}`, dir, files }; }

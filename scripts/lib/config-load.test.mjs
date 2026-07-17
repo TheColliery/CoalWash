@@ -135,3 +135,43 @@ test('monotonic: a project cannot make updateMode LOUDER (off -> auto blocked); 
     assert.strictEqual(loadMergedConfig({ cwd: s2.proj, home: s2.home }).updateMode, 'off', 'quieter is always allowed');
   } finally { clean(s2.home, s2.proj); }
 });
+
+// --- H5: the safe-merge compare must be case-INSENSITIVE (the schema is) ---
+test('H5: a case-variant project value cannot re-enable a globally-off skill (AUTO/Off case-fold)', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj, { coalwashMode: 'off' }, { coalwashMode: 'AUTO' }); // uppercase bypass attempt
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).coalwashMode, 'off', 'AUTO must not out-rank a global off');
+  } finally { clean(home, proj); }
+});
+
+test('H5: a cloned project cannot DISABLE the user global writeGuard airbag (any case); strengthening is allowed', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj, { writeGuard: 'on' }, { writeGuard: 'Off' });
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).writeGuard, 'on', 'project may not weaken the airbag');
+  } finally { clean(home, proj); }
+  const s2 = sandbox();
+  try {
+    writeCfgs(s2.home, s2.proj, { writeGuard: 'off' }, { writeGuard: 'on' }); // the SAFE direction stays open
+    assert.strictEqual(loadMergedConfig({ cwd: s2.proj, home: s2.home }).writeGuard, 'on', 'project may make it STRONGER');
+  } finally { clean(s2.home, s2.proj); }
+});
+
+// --- H6: a UTF-16 config (what PowerShell `>` writes) must still parse ---
+test('H6: a UTF-16LE global config kill switch is honored, not mojibake-dropped to defaults', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const cfg = path.join(home, '.claude', '.coalwash.json');
+    const body = '{ "coalwashMode": "off" }';
+    // UTF-16LE WITH BOM (Windows PowerShell `>` / Out-File default): the leading
+    // U+FEFF encodes to the FF FE BOM bytes.
+    fs.writeFileSync(cfg, Buffer.from(String.fromCharCode(0xfeff) + body, 'utf16le'));
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).coalwashMode, 'off', 'UTF-16LE BOM decoded, kill switch honored');
+    // BOM-less UTF-16LE recovers via the NUL-byte signature (the ambiguous-decode
+    // fail-toward-readable clause).
+    fs.writeFileSync(cfg, Buffer.from(body, 'utf16le'));
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).coalwashMode, 'off', 'BOM-less UTF-16LE recovers via the NUL fallback');
+  } finally { clean(home, proj); }
+});

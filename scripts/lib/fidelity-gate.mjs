@@ -67,6 +67,15 @@ function canonDate(d) {
 // edit-tool control-escape hazard).
 const SARA_AM_DECOMPOSED = String.fromCharCode(0x0e4d, 0x0e32); // NIKHAHIT + SARA AA (the broken split of U+0E33)
 const ZWSP = String.fromCharCode(0x200b); // zero-width space
+// Trojan-Source bidi overrides + zero-width joiner (CVE-2021-42574 class): an
+// INVISIBLE char a rewrite introduces can reorder/hide the DISPLAYED text so a
+// memory file reads one way but MEANS another. Built from char codes (never raw
+// literals — the invisible-char-in-source hazard); the encoding-theme sibling of
+// the sara-am/BOM/ZWSP tripwires (shared with CoalLedger/CoalMine).
+const BIDI_ZW_CTRL = [
+  [0x202a, 'LRE'], [0x202b, 'RLE'], [0x202c, 'PDF'], [0x202d, 'LRO'], [0x202e, 'RLO'],
+  [0x2066, 'LRI'], [0x2067, 'RLI'], [0x2068, 'FSI'], [0x2069, 'PDI'], [0x200d, 'ZWJ'],
+].map(([cp, name]) => [String.fromCharCode(cp), name, `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`]);
 
 // Backtick inline-code spans (`...`) — a dropped identifier/command/flag is a
 // dropped fact the prose regexes above never see (a Full/semantic merge this
@@ -94,11 +103,21 @@ const STRAIGHT_QUOTE_RE = /"([^"\n]+)"/g;
 // a position wins): the k-shorthand and percent forms are tried before the
 // bare decimal/integer forms so "43%"/"~150k" register as themselves rather
 // than fragmenting into a bare number.
-const MAGNITUDE_RE = /\b\d+(?:\.\d+)?[kK]\b/g; // "150k", "1.5k" — a leading ~ (if any) is prose, not part of the tracked value
-const PERCENT_RE = /\b\d+(?:\.\d+)?%/g; // "5%", "43.5%" — single digits OK, % disambiguates
-const RATIO_RE = /\b\d+\/\d+\b/g; // "4/5", "22/12" — single digits OK, / disambiguates
-const DECIMAL_RE = /\b\d+\.\d+\b/g; // "3.8", "0.92" — the decimal point disambiguates
-const INTEGER_RE = /\b\d{2,}\b/g; // bare integers: 2+ digits only (the noisy single-digit case excluded)
+// H2 — SIGN CAPTURE: an optional leading polarity is captured INTO the token so
+// "-43%" and "43%" (or "-44,192" and "44,192") are DISTINCT tokens and a
+// sign-inverted rewrite is a genuine drop, not a silent pass. The lookbehind
+// keeps it a GENUINE sign: a '-'/'+' counts only when NOT preceded by a word
+// char, a digit, or '.', so an inter-word/inter-digit hyphen ("3-sub", a
+// "15-20" range) stays a separator — bare-number matching is byte-identical to
+// before (a negative token is 'unknown' to parseNumToken, so it falls to the
+// plain number-drop path, the safe over-flag direction; negative
+// precision-laundering is not sub-classified — a rare case, still a hard drop).
+const SIGN = '(?:(?<![\\w.])[-+])?';
+const MAGNITUDE_RE = new RegExp(`${SIGN}\\b\\d+(?:\\.\\d+)?[kK]\\b`, 'g'); // "150k", "-1.5k" — a leading ~ (if any) is prose, not part of the tracked value
+const PERCENT_RE = new RegExp(`${SIGN}\\b\\d+(?:\\.\\d+)?%`, 'g'); // "5%", "-43.5%" — single digits OK, % disambiguates
+const RATIO_RE = new RegExp(`${SIGN}\\b\\d+/\\d+\\b`, 'g'); // "4/5", "22/12" — single digits OK, / disambiguates
+const DECIMAL_RE = new RegExp(`${SIGN}\\b\\d+\\.\\d+\\b`, 'g'); // "3.8", "-0.92" — the decimal point disambiguates
+const INTEGER_RE = new RegExp(`${SIGN}\\b\\d{2,}\\b`, 'g'); // bare integers: 2+ digits only (the noisy single-digit case excluded)
 // Comma-grouped counts ("44,192", "1,234.5", optionally "%"-suffixed) — the
 // house style for large exact numbers. Without this form the generic scan
 // FRAGMENTS "44,192" into 44 + 192, so a rounded rewrite ("44k") slips the
@@ -106,7 +125,7 @@ const INTEGER_RE = /\b\d{2,}\b/g; // bare integers: 2+ digits only (the noisy si
 // loss shape). Tried FIRST so the grouped token is claimed whole; keyed
 // COMMA-LESS ("44192") so a 44,192 <-> 44192 regroup of the SAME value is not
 // a drop (same precedent as the date canonicalization above).
-const COMMA_NUM_RE = /\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b%?/g;
+const COMMA_NUM_RE = new RegExp(`${SIGN}\\b\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?\\b%?`, 'g'); // "-44,192" keeps its sign (stripped comma-less to "-44192")
 
 function matchSet(text, re, group = 0) {
   const out = new Set();
@@ -291,6 +310,27 @@ export function inventory(text) {
   };
 }
 
+// The structured-token "drop keys" of a text — the `${type}:${value}` set the
+// gate WOULD emit if this whole text vanished. Used by apply.mjs's delete/merge
+// gate (H3: a delete drops the removed file's tokens too) and by RE-TIER to
+// pre-approve a demoted topic's tokens (it archives them externally, so the
+// drop is honest and its archive+probe owns recovery). Numbers key as plain
+// 'number-drop' (a vanished file has no rounded survivor).
+export function inventoryDropKeys(text) {
+  const inv = inventory(text);
+  const keys = new Set();
+  const add = (set, type) => { for (const v of set) keys.add(`${type}:${v}`); };
+  add(inv.wikilinks, 'wikilink-drop');
+  add(inv.dates, 'date-drop');
+  add(inv.versions, 'version-drop');
+  add(inv.links, 'link-drop');
+  add(inv.frontmatter, 'frontmatter-key-drop');
+  add(inv.codespans, 'codespan-drop');
+  add(inv.quotes, 'quote-drop');
+  add(inv.numbers, 'number-drop');
+  return keys;
+}
+
 function diffDrops(origSet, newSet, type) {
   const drops = [];
   for (const v of origSet) if (!newSet.has(v)) drops.push({ type, value: v });
@@ -350,6 +390,15 @@ export function checkFidelity(origText, newText) {
 
   if (next.charCodeAt(0) === 0xfeff && orig.charCodeAt(0) !== 0xfeff) drops.push({ type: 'bom-introduced', value: 'U+FEFF at file start' });
   if (next.includes(ZWSP) && !orig.includes(ZWSP)) drops.push({ type: 'zwsp-introduced', value: 'U+200B zero-width space' });
+  // Trojan-Source bidi overrides + ZWJ (introduced only — blocks NEW corruption,
+  // never punishes inherited state, matching the sara-am tripwire above).
+  for (const [ch, name, u] of BIDI_ZW_CTRL) {
+    if (next.includes(ch) && !orig.includes(ch)) drops.push({ type: 'bidi-control-introduced', value: `${u} ${name} (Trojan-Source bidi/zero-width) introduced` });
+  }
+  // Position-0 BOM is the file-start check above; a MID-STRING U+FEFF (zero-width
+  // no-break space) is an invisible smuggle that check misses.
+  const midBom = String.fromCharCode(0xfeff);
+  if (next.slice(1).includes(midBom) && !orig.slice(1).includes(midBom)) drops.push({ type: 'bom-introduced', value: 'U+FEFF mid-string (zero-width no-break space)' });
 
   return {
     pass: drops.length === 0,

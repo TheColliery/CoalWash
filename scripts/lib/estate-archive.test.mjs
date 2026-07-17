@@ -344,6 +344,29 @@ test('external-writer guard: an original that changes between listing and delete
   } finally { clean(home, proj); }
 });
 
+test('H4 durability: archiveSession fsyncs every .gz (writeDurable) BEFORE deleting the sole-copy originals', () => {
+  const { home, proj } = sandbox();
+  const realFsync = fs.fsyncSync;
+  let fsyncCount = 0;
+  fs.fsyncSync = (...a) => { fsyncCount++; return realFsync.apply(fs, a); };
+  try {
+    const files = seedSession(home, proj, 'sess-warm', 30);
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const sess = c.sessions.find((s) => s.id === 'sess-warm');
+    const archiveDir = path.join(home, 'arch');
+    const r = archiveSession(sess, { slug: c.slug, archiveDir, gzip: zlib.gzipSync });
+    assert.strictEqual(r.ok, true, r.reason);
+    const slugDir = path.join(archiveDir, ccProjectSlug(proj));
+    const gz = fs.readdirSync(slugDir, { recursive: true }).map(String).filter((n) => n.endsWith('.gz'));
+    assert.ok(gz.length >= 2, `.gz files written (${gz.length})`);
+    // each .gz is fsync'd by writeDurable — file fsyncs dominate the count, so
+    // >= gz.length holds only when the durable write is in place (the dir fsyncs
+    // alone are fewer than the file count, and are a Windows no-op).
+    assert.ok(fsyncCount >= gz.length, `every .gz fsync'd before delete (fsyncs ${fsyncCount} >= .gz ${gz.length})`);
+    assert.strictEqual(fs.existsSync(files.jsonl), false, 'original deleted only after the durable archive');
+  } finally { fs.fsyncSync = realFsync; clean(home, proj); }
+});
+
 test('#57(d) cloud-placeholder read poison (WARM): a session whose source is a dehydrated stub is SKIPPED (fail-closed), originals kept, nothing archived — never a copy-verify-delete on bytes we cannot truly read', () => {
   const { home, proj } = sandbox();
   try {

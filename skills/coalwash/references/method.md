@@ -20,7 +20,7 @@ Read the JSON; report ONE terse gauge line (band · always-loaded ~tok/session "
 
 ## 0b. Parcel audit (L2) — the drift canary + unknown-platform discovery (0l)
 
-**THE INVARIANT:** CW keeps NO list of its own — its list is a MIRROR of the real load list, whoever writes to it ("load ไหนเข้าบริษัท load นั้นเข้า CW ด้วย"). A hand-kept list rots; a mirror cannot rot because it does not remember — it reflects. The parcel does not distinguish WHO wired a surface: company-added and user-wired enter identically; being delivered IS the membership test. The order is LAW: capture-all (BMI counts the whole parcel) → THEN filter the untouchables out of knife jurisdiction — never invert.
+**THE INVARIANT:** CW keeps NO list of its own — its list is a MIRROR of the real load list, whoever writes to it ("whatever load the company takes in, CoalWash takes in too"). A hand-kept list rots; a mirror cannot rot because it does not remember — it reflects. The parcel does not distinguish WHO wired a surface: company-added and user-wired enter identically; being delivered IS the membership test. The order is LAW: capture-all (BMI counts the whole parcel) → THEN filter the untouchables out of knife jurisdiction — never invert.
 
 | Layer | What | Cost | Cadence |
 |---|---|---|---|
@@ -310,10 +310,10 @@ A session dir holds mixed members; the SKILL contract classifies each by a STRUC
 
 | Question (the STAMP, not the content) | Type | Lane |
 |---|---|---|
-| a per-SESSION conversation record (`<sid>.jsonl`, the `<sid>/` overflow dir) | class-A vendor transcript | บีบ / compress-archivable (ULTRA's bands) |
-| machine-STATE another tool reads (config / lock / journal / index / a `.json` sidecar) | machine-parsed | ข้าม / skip (a 4-test excludee) |
+| a per-SESSION conversation record (`<sid>.jsonl`, the `<sid>/` overflow dir) | class-A vendor transcript | compress-archivable (ULTRA's bands) |
+| machine-STATE another tool reads (config / lock / journal / index / a `.json` sidecar) | machine-parsed | skip (a 4-test excludee) |
 | user-ACCRETED prose (passes all 4 wash tests) | class-B | the class-B wash side (§§0-8), NEVER ULTRA |
-| can't-tell / a NOVEL shape | unknown | ข้าม + **REPORT** (never guess) |
+| can't-tell / a NOVEL shape | unknown | skip + **REPORT** (never guess) |
 
 CC session-dir stamps (verified vs live `~/.claude/projects/<slug>/` 2026-07-16): `<sid>.jsonl` = the transcript (compress) · `<sid>/tool-results/`, `<sid>/subagents/` = overflow that rides the unit · a flat `<sid>.meta.json` sidecar = machine-state (skip) · the `memory/` dir = class-B (the wash side, not ULTRA).
 
@@ -349,16 +349,16 @@ RE-TIER = keep every class-B memory INDEX inside the ENVELOPE — each store mea
 
 | Type | Allowed in RE-TIER | Note |
 |---|---|---|
-| class-b-index (MEMORY.md — main + agent stores) | ข้าม · ย่อ-via-gate | ย่อ = the EXISTING wash tiers only (adjudicated); RE-TIER itself never condenses |
-| class-b-topic (memory topic files) | ข้าม · บีบ(demote) · ย่อ-via-gate | บีบ = a LOSSLESS move down one tier, byte-identical |
-| governance (CLAUDE.md/AGENTS.md/rules) | ข้าม only | the wash owns governance's semantic work |
-| machine-parsed (configs/state/locks/journals/skills) | ข้าม always | the 4-test excludees |
+| class-b-index (MEMORY.md — main + agent stores) | skip · shrink-via-gate | shrink = the EXISTING wash tiers only (adjudicated); RE-TIER itself never condenses |
+| class-b-topic (memory topic files) | skip · compress(demote) · shrink-via-gate | compress = a LOSSLESS move down one tier, byte-identical |
+| governance (CLAUDE.md/AGENTS.md/rules) | skip only | the wash owns governance's semantic work |
+| machine-parsed (configs/state/locks/journals/skills) | skip always | the 4-test excludees |
 | vendor-artifact (transcripts/tool-results) | ULTRA's own bands | delegation to §10's machinery, never a RE-TIER move |
-| unknown (ambiguous path/shape) | ข้าม always | fail-closed |
+| unknown (ambiguous path/shape) | skip always | fail-closed |
 
-**ทิ้ง (delete) appears in NO cell** — deletion stays ULTRA-COLD's gated path + the wash's adjudicated plan. RE-TIER moves and demotes; it never deletes content.
+**discard (delete) appears in NO cell** — deletion stays ULTRA-COLD's gated path + the wash's adjudicated plan. RE-TIER moves and demotes; it never deletes content.
 
-**THE CORE RAIL (separation of powers):** envelope pressure (index over arm) resolves ONLY by DEMOTION down the ladder — index LINES (largest-first, a deterministic value-neutral rule; the index keeps a pointer line to `retier-overflow.md` so every demoted line stays reachable by normal recall) and UNREFERENCED topic files (basename/stem mentioned nowhere else; oldest first) to the estate archive (gzip copy-verify-then-delete, dig-index row, `estate-restore` round-trips byte-exact). Pressure NEVER escalates a treatment. Candidates exhausted while still over fill = reported shortfall — the gated wash (ย่อ, human-adjudicated) is the next lever, never an auto-condense.
+**THE CORE RAIL (separation of powers):** envelope pressure (index over arm) resolves ONLY by DEMOTION down the ladder — index LINES (largest-first, a deterministic value-neutral rule; the index keeps a pointer line to `retier-overflow.md` so every demoted line stays reachable by normal recall) and UNREFERENCED topic files (basename/stem mentioned nowhere else; oldest first) to the estate archive (gzip copy-verify-then-delete, dig-index row, `estate-restore` round-trips byte-exact). Pressure NEVER escalates a treatment. Candidates exhausted while still over fill = reported shortfall — the gated wash (shrink, human-adjudicated) is the next lever, never an auto-condense.
 
 **DEMOTE CANDIDATES ARE FAIL-CLOSED (the treatment table, enforced not hardcoded):** a topic file is a demotion candidate ONLY when `classifyRetier` returns `class-b-topic` **AND** it is not `pinned`. `classifyRetier` keys on NAME/PATH IDENTITY, not directory location — a governance/program file (CLAUDE.md/AGENTS.md/rules · SKILL.md and anything under skills/commands/hooks) that ends up INSIDE a store dir stays governance/machine-parsed = skip-only, never demoted (the memory-dir shape no longer masks it). A `pinned: true` file protects itself WITHOUT vetoing the rest of the multi-store plan (it is filtered before `applyPlan`, whose pin guard would otherwise abort the whole run). And under `estate.indexEnabled: false`, a topic that is the SOLE live home of a top-anchor is KEPT in the tree — demoting it with no persisted dig row would leave the anchor search-unreachable (fail toward reachability).
 
@@ -371,6 +371,6 @@ node [LIB]/cli.mjs retier-scan [--json]   # the ENGINE block of choice 4's two-b
 node [LIB]/cli.mjs retier-run             # the transactional pass; REFUSES below arm ("dead zone, no action" — the LEAN-stop law); print its report VERBATIM
 ```
 
-**Choice 4 = THREE layers (① ULTRA engine [§10, `estate-run`] + ② this RE-TIER engine [`retier-run`] + ③ ONE agent clone — MAX one inside CoalWash):** ③ is the MANUAL-tier semantic half — topic/overflow files ONLY, class-B prose under the SAME Full-tier contract (outsider-grade judgment, `keeps.json` honored, the 4 washability tests) — the agent NEVER touches class-A (①'s bytes) and NEVER rewrites the index slot (②'s jurisdiction; the table's ย่อ-via-gate cell means the WASH tiers do it, adjudicated — never ③ freehand). Sequence inside ③: **③a merge/regroup duplicate-topic files FIRST, THEN ③b condense (บีบ/ย่อ)** — regrouping changes what deserves condensing, so condensing first wastes the work; on any one file set the two jobs are pipelined by the same actor, never split across concurrent actors (§9b). Every ③ rewrite passes `gateFiles`; every ③ move passes MOVE-VERIFY; everything lands in ONE `applyPlan` transaction (snapshot → external-writer guard → deletes LAST → whole-run rollback), `origin: 'wizard-cut'`. `localOnly` blocks ③ (content-bearing) — ①② still run; the choice degrades to engine-only with a one-line note. The pressure rail is unchanged: the envelope never escalates a treatment — ③ runs because the USER CHOSE choice 4, never because pressure demanded it. Bill + hand-off inputs → §9c; workload past the hand-off gates → offer `/coalface` ONCE (§9c), never more workers inside CoalWash.
+**Choice 4 = THREE layers (① ULTRA engine [§10, `estate-run`] + ② this RE-TIER engine [`retier-run`] + ③ ONE agent clone — MAX one inside CoalWash):** ③ is the MANUAL-tier semantic half — topic/overflow files ONLY, class-B prose under the SAME Full-tier contract (outsider-grade judgment, `keeps.json` honored, the 4 washability tests) — the agent NEVER touches class-A (①'s bytes) and NEVER rewrites the index slot (②'s jurisdiction; the table's shrink-via-gate cell means the WASH tiers do it, adjudicated — never ③ freehand). Sequence inside ③: **③a merge/regroup duplicate-topic files FIRST, THEN ③b condense (compress/shrink)** — regrouping changes what deserves condensing, so condensing first wastes the work; on any one file set the two jobs are pipelined by the same actor, never split across concurrent actors (§9b). Every ③ rewrite passes `gateFiles`; every ③ move passes MOVE-VERIFY; everything lands in ONE `applyPlan` transaction (snapshot → external-writer guard → deletes LAST → whole-run rollback), `origin: 'wizard-cut'`. `localOnly` blocks ③ (content-bearing) — ①② still run; the choice degrades to engine-only with a one-line note. The pressure rail is unchanged: the envelope never escalates a treatment — ③ runs because the USER CHOSE choice 4, never because pressure demanded it. Bill + hand-off inputs → §9c; workload past the hand-off gates → offer `/coalface` ONCE (§9c), never more workers inside CoalWash.
 
 Undo: the run's snapshot (kept 3) + the wizard bin (`store.old`) + the estate archive (`estate-search`/`estate-restore`). Demoted index lines re-promote by moving the line back from `retier-overflow.md` by hand — a plain text move, no tool needed.

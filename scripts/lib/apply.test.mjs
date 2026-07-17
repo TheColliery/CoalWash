@@ -8,6 +8,7 @@ import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDi
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './bins.mjs';
 import { HORIZON_MS } from './retention.mjs';
+import { ccMemoryDir } from './class-b.mjs';
 
 function sandbox() {
   const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj-')));
@@ -256,6 +257,84 @@ test('recoverDangling REFUSES an out-of-root target from a poisoned journal (emp
   } finally { clean(proj); }
 });
 
+test('recoverDangling REFUSES a poisoned journal whose OWN roots point outside the project (C1: circular-anchor close)', () => {
+  const { proj } = sandbox();
+  try {
+    // THE CIRCULAR ATTACK the old jroots-only check missed: the journal declares
+    // its own roots to be the OUTSIDE dir, so containedIn(victim, jroots) passed.
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-victim2-')));
+    const victim = path.join(outside, 'victim.md');
+    write(victim, 'ORIGINAL VICTIM CONTENT');
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-777');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'ATTACKER PAYLOAD');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: victim }]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '777');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [outside], // attacker-declared roots
+      steps: [{ i: 0, type: 'rewrite', path: victim, status: 'done' }],
+    }));
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'partial', 'the out-of-project target is refused by the TRUSTED gate');
+    assert.ok(r.refusedOutOfRoot >= 1);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'ORIGINAL VICTIM CONTENT', 'the outside file must be UNTOUCHED');
+    clean(outside);
+  } finally { clean(proj); }
+});
+
+test('recoverDangling still restores a LEGITIMATE global memory store (~/.claude/projects/<slug>/memory) — do not over-block', () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const gstore = ccMemoryDir(proj, home); // the REAL global memory store CoalWash washes
+    fs.mkdirSync(gstore, { recursive: true });
+    const gfile = path.join(gstore, 'MEMORY.md');
+    write(gfile, 'HALF-APPLIED GARBAGE'); // the crashed (rewritten) state
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-555');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'the pristine global original');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: gfile }]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '555');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [gstore],
+      steps: [{ i: 0, type: 'rewrite', path: gfile, status: 'done' }],
+    }));
+    const r = recoverDangling(proj, { home }); // ccMemoryDir(proj, home) is a trusted root
+    assert.strictEqual(r.recovered, 'rolled-back', 'a genuine memory-store recovery is NOT blocked');
+    assert.strictEqual(fs.readFileSync(gfile, 'utf8'), 'the pristine global original', 'memory-store recovery restores byte-exact');
+  } finally { clean(proj, home); }
+});
+
+test('recoverDangling REFUSES a ~/.claude file OUTSIDE CoalWash\'s memory store (settings.json escalation close)', () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home2-')));
+  try {
+    // Inside ~/.claude but OUTSIDE the memory store: a poisoned journal that
+    // declares the WHOLE ~/.claude as its roots must not restore attacker bytes
+    // over the user's global CC settings (= hook/permission injection).
+    const claudeDir = path.join(home, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const victim = path.join(claudeDir, 'settings.json');
+    write(victim, '{"real":"user settings"}');
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-888');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), '{"hooks":{"evil":"payload"}}');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: victim }]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '888');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [claudeDir], // attacker claims the whole ~/.claude
+      steps: [{ i: 0, type: 'rewrite', path: victim, status: 'done' }],
+    }));
+    const r = recoverDangling(proj, { home });
+    assert.strictEqual(r.recovered, 'partial', 'a ~/.claude non-store target is refused, not replayed');
+    assert.ok(r.refusedOutOfRoot >= 1);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), '{"real":"user settings"}', 'global CC settings must be UNTOUCHED');
+  } finally { clean(proj, home); }
+});
+
 test('recoverDangling refuses a journal with NO recorded roots (unverifiable = left for a human)', () => {
   const { proj, store } = sandbox();
   try {
@@ -303,6 +382,52 @@ test('fidelity interlock in applyPlan: an UNAPPROVED rewrite drop aborts before 
     const ok = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'See the record.' }], { approvedDrops: ['wikilink-drop:keep-this'] }));
     assert.strictEqual(ok.ok, true, ok.error);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), 'See the record.');
+  } finally { clean(proj); }
+});
+
+test('H3: a merge (delete-src carrying tokens + rewrite-dst WITHOUT them) is BLOCKED by the delete-gate', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md'); const B = path.join(store, 'b.md');
+    write(A, 'See [[keep-me]] and 42 issues.'); write(B, 'Base B.');
+    // the rewrite of B drops A's link + number — the silent loss the rewrite gate never sees
+    const bad = applyPlan(planFor(proj, store, [
+      { type: 'delete', path: A },
+      { type: 'rewrite', path: B, content: 'Base B, merged (tokens gone).' },
+    ]));
+    assert.strictEqual(bad.ok, false, 'a merge that drops the deleted file\'s tokens must be blocked');
+    assert.match(bad.error, /keep-me|42/);
+    assert.strictEqual(fs.existsSync(A), true, 'nothing mutated on the abort');
+    assert.strictEqual(fs.readFileSync(B, 'utf8'), 'Base B.');
+  } finally { clean(proj); }
+});
+
+test('H3: the SAME merge PASSES when the destination KEEPS the deleted file\'s tokens (survives in the tx)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md'); const B = path.join(store, 'b.md');
+    write(A, 'See [[keep-me]] and 42 issues.'); write(B, 'Base B.');
+    const ok = applyPlan(planFor(proj, store, [
+      { type: 'delete', path: A },
+      { type: 'rewrite', path: B, content: 'Base B, merged. See [[keep-me]] and 42 issues.' },
+    ]));
+    assert.strictEqual(ok.ok, true, ok.error);
+    assert.strictEqual(fs.existsSync(A), false, 'A merged away, its tokens live on in B');
+  } finally { clean(proj); }
+});
+
+test('H3: a plain delete of a token-bearing file passes ONLY with an explicit approvedDrops (caller declares external safety)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    write(A, 'Archived topic with [[anchor]] and 99 count.');
+    // no approval -> blocked (its tokens survive nowhere in the tx)
+    const bad = applyPlan(planFor(proj, store, [{ type: 'delete', path: A }]));
+    assert.strictEqual(bad.ok, false, 'an un-approved token-bearing delete is blocked');
+    // approved -> allowed (RE-TIER/fold-merge declare the drop; their archive/twin owns recovery)
+    const ok = applyPlan(planFor(proj, store, [{ type: 'delete', path: A }], { approvedDrops: ['wikilink-drop:anchor', 'number-drop:99'] }));
+    assert.strictEqual(ok.ok, true, ok.error);
+    assert.strictEqual(fs.existsSync(A), false);
   } finally { clean(proj); }
 });
 

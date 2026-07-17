@@ -53,13 +53,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { checkFidelity } from './fidelity-gate.mjs';
+import { checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { claudeBaseDir } from './config-load.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
 // (security-audit locality), but this stub-sniff is imported to stay single-source.
-import { isCloudPlaceholder } from './class-b.mjs';
+import { isCloudPlaceholder, ccMemoryDir } from './class-b.mjs';
 // NOTE a deliberate module cycle: keeps.mjs imports txDirFor/ensureSelfIgnore
 // from THIS file. Both sides bind function declarations used only at CALL
 // time, so ESM resolves the cycle safely regardless of entry order. bins.mjs
@@ -108,7 +108,12 @@ export function globalLockPath(home = os.homedir()) {
 // ---------------------------------------------------------------------------
 // small durable-write helpers
 // ---------------------------------------------------------------------------
-function writeDurable(p, data) {
+// Exported so estate-archive.mjs reuses the SAME durability primitive (H4 —
+// flock-canonical strength, not a second copy). NOTE the module cycle it forms
+// (estate-archive -> apply -> retier -> estate-archive): both are function
+// DECLARATIONS bound at CALL time, so ESM resolves it safely — identical
+// reasoning to the keeps/bins/retier cycles documented in the header.
+export function writeDurable(p, data) {
   const fd = fs.openSync(p, 'w');
   try {
     fs.writeSync(fd, data);
@@ -117,7 +122,7 @@ function writeDurable(p, data) {
     fs.closeSync(fd);
   }
 }
-function fsyncDirBestEffort(dir) {
+export function fsyncDirBestEffort(dir) {
   // POSIX: makes the rename itself durable. Windows: opening a dir fd throws —
   // best-effort by design (honest ceiling, documented above).
   try {
@@ -532,6 +537,24 @@ export function applyPlan(plan, opts = {}) {
         if (!approvedDrops.has(`${d.type}:${d.value}`)) unapproved.push(`${a.phys} — ${d.type}: ${d.value}${d.survivor ? ` (survives only as ${d.survivor})` : ''}`);
       }
     }
+    // H3: a DELETE (or a merge = delete-src + rewrite-dst) also drops the removed
+    // file's structured tokens — the rewrite loop above never sees them, so a
+    // merge could silently drop a link/number a rewrite would block. Account for
+    // them at the SAME boundary: a deleted token is OK iff it SURVIVES in the
+    // transaction's post-edit content (a same-tx merge kept it) OR is named in
+    // approvedDrops (the caller declared the drop — its own external safety, e.g.
+    // RE-TIER's archive+probe or a fold-merge's untouched twin, owns recovery).
+    // Otherwise it is exactly the silent structured-token loss the gate claims to
+    // block. (Snapshot/bins still back recovery; this closes the GATE hole.)
+    const postEditKeys = inventoryDropKeys(actionable.filter((a) => a.type !== 'delete').map((a) => a.content).join('\n'));
+    for (const a of actionable) {
+      if (a.type !== 'delete') continue;
+      const del = typeof a.expectedOrig === 'string' ? a.expectedOrig : a.origBuf.toString('utf8');
+      for (const key of inventoryDropKeys(del)) {
+        if (postEditKeys.has(key) || approvedDrops.has(key)) continue;
+        unapproved.push(`${a.phys} (delete) — ${key.replace(':', ': ')}`);
+      }
+    }
     if (unapproved.length) {
       return { ok: false, error: `fidelity: unapproved fact drop(s) — apply blocked (approve them explicitly or fix the rewrite): ${unapproved.join(' | ')}` };
     }
@@ -776,6 +799,7 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 // Returns { recovered: 'rolled-back'|'no-mutation'|'cleaned'|'none', restored? }.
 export function recoverDangling(projectRoot, opts = {}) {
   try {
+    const home = opts.home || os.homedir();
     const txDir = opts.txDir || txDirFor(projectRoot);
     const journalPath = path.join(txDir, JOURNAL_NAME);
     if (!fs.existsSync(journalPath)) return { recovered: 'none' };
@@ -806,12 +830,33 @@ export function recoverDangling(projectRoot, opts = {}) {
     }
     // CONTAINMENT (the journal is UNTRUSTED — a poisoned .claude/coalwash/journal.json
     // shipped inside a repo must not aim a restore/delete at an arbitrary absolute
-    // path). Re-validate every target against the roots the transaction RECORDED,
-    // realpath-and-contain both sides, fail-closed. A journal without recorded roots
-    // (pre-v-this or tampered) can't be validated -> refuse, leave for a human.
+    // path). A journal without recorded roots (pre-v-this or tampered) can't be
+    // validated -> refuse, leave for a human.
     const jroots = Array.isArray(journal.roots) ? journal.roots.map((r) => physicalOrNull(r)).filter(Boolean) : [];
     if (!jroots.length) {
       return { recovered: 'none', error: 'journal has no verifiable roots — refusing to replay (left for inspection)' };
+    }
+    // THE TRUSTED OUTER GATE (C1/H1): journal.roots is attacker-controlled, so
+    // anchoring containment on jroots ALONE is CIRCULAR — a poisoned journal
+    // supplies both the target AND the roots that "contain" it, and the check
+    // always passes. Gate every restore/delete on CALLER-TRUSTED roots the
+    // journal cannot widen. The PRECISE legit set (NOT the whole ~/.claude — that
+    // would still let a poisoned journal target ~/.claude/settings.json =
+    // hook/permission injection):
+    //   - projectRoot            — every project-scope store (project MEMORY.md,
+    //                              .claude/agent-memory/<role>/, CW's own tx dir);
+    //   - ccMemoryDir(...)       — the ONLY global-physical store CoalWash washes
+    //                              today: ~/.claude/projects/<slug>/memory (the
+    //                              'main' store in runRetier's collectStores — the
+    //                              sole applyPlan caller in the engine).
+    // ponytail: when the PENDING global-GOVERNANCE wash driver ships (washes the
+    // global CLAUDE.md closure + ~/.claude/rules — MEMORY "Global lock/keeps
+    // DRIVER"), add those SPECIFIC roots here, never claudeBaseDir wholesale.
+    // jroots stays a SECONDARY narrowing; the trusted gate is the one a tamperer
+    // cannot move. Fail-closed if neither trusted root resolves.
+    const trustedRoots = [physicalOrNull(projectRoot), physicalOrNull(ccMemoryDir(projectRoot, home))].filter(Boolean);
+    if (!trustedRoots.length) {
+      return { recovered: 'none', error: 'no trusted root resolves — refusing to replay (fail-closed)' };
     }
     const snapPhys = physicalOrNull(snapDir);
     const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
@@ -820,8 +865,10 @@ export function recoverDangling(projectRoot, opts = {}) {
     for (const m of manifest) {
       const src = path.join(snapDir, m.snap);
       const origPhys = physicalOrNull(m.original);
-      // src must sit inside the snapshot dir; target must sit inside a recorded root.
-      if (!inSnap(src) || !origPhys || !containedIn(origPhys, jroots)) { refused++; continue; }
+      // src must sit inside the snapshot dir; target must sit inside a
+      // CALLER-TRUSTED root (the outer gate a poisoned journal can't widen) AND
+      // the journal's own declared roots (secondary narrowing).
+      if (!inSnap(src) || !origPhys || !containedIn(origPhys, trustedRoots) || !containedIn(origPhys, jroots)) { refused++; continue; }
       try { fs.copyFileSync(src, m.original); restored++; } catch { failed++; /* restore the rest */ }
     }
     // creates the interrupted run added are removed — REGARDLESS of the journal's
@@ -833,7 +880,7 @@ export function recoverDangling(projectRoot, opts = {}) {
       if (step.type === 'create') {
         if (!fs.existsSync(step.path)) continue; // never written (or already gone) = nothing to undo
         const p = physicalOrNull(step.path);
-        if (!p || !containedIn(p, jroots)) { refused++; continue; } // exists but out-of-root = refuse
+        if (!p || !containedIn(p, trustedRoots) || !containedIn(p, jroots)) { refused++; continue; } // exists but out-of-(trusted∩journal)-root = refuse
         try { fs.rmSync(step.path, { force: true }); } catch {}
       }
     }

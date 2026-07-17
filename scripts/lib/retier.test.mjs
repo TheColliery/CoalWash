@@ -437,11 +437,42 @@ test('gate wiring: rollbackFromSnapshot restores every manifest original byte-ex
     const created = path.join(proj, 'created-overflow.md');
     write(created, 'an overflow this run created');
     fs.writeFileSync(orig1, 'VANDALIZED-AFTER-COMMIT'); // the committed tree lost the anchor
-    const failed = rollbackFromSnapshot(snapDir, [created]);
+    const failed = rollbackFromSnapshot(snapDir, [created], [proj]); // trusted roots = the project store tree
     assert.strictEqual(failed, 0, 'clean rollback (0 restore failures)');
     assert.strictEqual(fs.readFileSync(orig1, 'utf8'), 'PRISTINE-A', 'original restored byte-exact');
     assert.strictEqual(fs.existsSync(created), false, 'this run\'s created file removed');
-    assert.strictEqual(rollbackFromSnapshot(path.join(proj, 'no-such-snap')), -1, 'an unreadable manifest -> -1 (fail-loud sentinel)');
+    assert.strictEqual(rollbackFromSnapshot(path.join(proj, 'no-such-snap'), [], [proj]), -1, 'an unreadable manifest -> -1 (fail-loud sentinel)');
+  } finally { clean(home, proj); }
+});
+
+test('H1: rollbackFromSnapshot REFUSES a manifest original OUTSIDE the trusted roots (poisoned-manifest close)', () => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-victim-')));
+  try {
+    const victim = path.join(outside, 'victim.md');
+    write(victim, 'PRISTINE-OUTSIDE');
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'ATTACKER PAYLOAD');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: victim }]));
+    const failed = rollbackFromSnapshot(snapDir, [], [proj]); // trusted roots = the project store tree only
+    assert.ok(failed >= 1, 'an out-of-root target is counted as a refusal, never silently written');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'PRISTINE-OUTSIDE', 'the outside file must be UNTOUCHED');
+  } finally { clean(home, proj, outside); }
+});
+
+test('H1: rollbackFromSnapshot restores a DELETED original (non-existent target) via parent-resolved containment (do not over-block)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const store = path.join(proj, 'memory'); fs.mkdirSync(store, { recursive: true });
+    const snapDir = path.join(proj, 'snap2'); fs.mkdirSync(snapDir, { recursive: true });
+    const gone = path.join(store, 'demoted-topic.md'); // a committed DELETE being undone — the file is GONE
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'PRISTINE-TOPIC');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: gone }]));
+    assert.strictEqual(fs.existsSync(gone), false, 'precondition: the restore target does not exist yet');
+    const failed = rollbackFromSnapshot(snapDir, [], [proj]);
+    assert.strictEqual(failed, 0, 'a deleted original still restores (its parent resolves inside the trusted root)');
+    assert.strictEqual(fs.readFileSync(gone, 'utf8'), 'PRISTINE-TOPIC');
   } finally { clean(home, proj); }
 });
 

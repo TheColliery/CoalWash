@@ -66,7 +66,7 @@ One standing gauge sits at the chokepoint — memory loads every session, so a s
 |---|---|
 | LEAN | Silent — a run would be a no-op, so none is offered |
 | OBESE | Ceiling armed but not yet economical: the Stop hook directs the configured exercise (`exercisePerBand.obese`, `quick` by default), the session agent runs it under standing config — no user ask, a one-line result when something's cut, silent otherwise. **Never asks, however long it persists or recurs** — the wizard door lives at FULL only |
-| FULL | Economic cut-point or capacity wall: hook directs the same free mechanical pass, agent runs it, numbers always shown — no user ask; reaches what OBESE couldn't, sweeps it anyway. Every cut snapshot-backed, revertible. Still over after that pass ran this episode → **one ทำ/later ask** opens the wizard for semantic judgment — the system's sole ask site, re-asked only once fat grows past the last-flagged level. Firing on the wall with ~no fat found means externalize/split, not another wash |
+| FULL | Economic cut-point or capacity wall: hook directs the same free mechanical pass, agent runs it, numbers always shown — no user ask; reaches what OBESE couldn't, sweeps it anyway. Every cut snapshot-backed, revertible. Still over after that pass ran this episode → **one run/later ask** opens the wizard for semantic judgment — the system's sole ask site, re-asked only once fat grows past the last-flagged level. Firing on the wall with ~no fat found means externalize/split, not another wash |
 
 | Mechanism | Detail |
 |---|---|

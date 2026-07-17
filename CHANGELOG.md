@@ -2,6 +2,24 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.2.0-rc.4] - 2026-07-17
+
+Security + fidelity hardening from a nasa-L3 CoalBoard audit + a CoalMine Heavy scan (each finding reproduced before fixing, hermetic test + gate-liveness per fix).
+
+### Security
+- **[CRITICAL] Poisoned-journal arbitrary file overwrite/delete (C1 + H1).** `recoverDangling` (apply.mjs) and `rollbackFromSnapshot` (retier.mjs) anchored their containment on the untrusted on-disk journal/manifest's OWN `roots` — circular: a malicious repo's journal supplied both the target and the "containing" roots, so the check always passed. Every restore/delete target now must sit inside a caller-TRUSTED root (`projectRoot ∪ ccMemoryDir`) that a poisoned journal cannot widen — closing the arbitrary-path escape AND its narrower `~/.claude` reach (a `settings.json` overwrite = hook/permission injection).
+- **Fidelity gate is now sign-aware (H2).** The structured-number inventory dropped a leading `-`/`+`, so a sign-inverted fact (`-43%` ↔ `43%`, `-44,192` ↔ `44,192`) passed the "zero structured-token loss" gate. Polarity is now part of the token key.
+- **Config kill-switch hardened (H5 + H6).** The safe-merge compare is case-folded (`"AUTO"`/`"Off"` can no longer re-enable a globally-`off` skill) and `writeGuard` joins the safe set; `readJsonc` now BOM-sniffs UTF-16 (a PowerShell-written UTF-16LE `.coalwash.json` no longer mojibakes a kill switch back to defaults).
+- **Encoding tripwire now catches Trojan-Source bidi** — RLO/LRO/PDF/isolates + ZWJ + mid-string BOM (introduced-only).
+
+### Added
+- **Delete/merge fidelity union-gate (H3).** The mutation-boundary interlock ran on rewrites only; a delete (or merge = delete-src + rewrite-dst) silently dropped the removed file's structured tokens. A deleted file's tokens must now survive in the transaction or be in `approvedDrops`, else the apply blocks.
+- **Durable ULTRA estate archive (H4).** The snapshot-less estate tier wrote its `.gz` non-durably then deleted the sole original; the `.gz` content + directory entry are now fsync'd before the delete (and estate-restore matches).
+
+### Changed
+- **SKILL.md + references/method.md translated to English** — the agent reads them at runtime and is English-native; the type-treatment operators are now discard/compress/shrink/skip (rail-preserving 1:1; the code already used English enum values).
+- Docs: rc.3 state paths corrected (PRIVACY, stats), stale "P2 not built yet" line fixed, remaining Thai → English in public English surfaces.
+
 ## [0.2.0-rc.3] - 2026-07-16
 
 Estate-hardening batch on the 0.2.0 line — the class-A ULTRA/RE-TIER machinery gains two incident-mined loss-class guards (#57d, #58), a bounded per-run work-limit, a knee-grounded dig-gauge recalibration, and role-memory discovery. Still `-rc` (internally hardened, field-unproven). Every item ships with hermetic tests (564 → 576).

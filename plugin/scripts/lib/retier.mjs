@@ -48,7 +48,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
 import { tokensEst } from './caliper.mjs';
-import { gateFiles, checkFidelity } from './fidelity-gate.mjs';
+import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
@@ -556,14 +556,33 @@ export function moveVerify({ origIndex, indexNew, overflowText, movedLines }) {
 // Restore applyPlan's own verified snapshot after a post-commit probe miss:
 // copy every manifest entry back, remove this run's created files. Returns
 // the count of restore FAILURES (0 = clean), -1 when the manifest is unreadable.
-export function rollbackFromSnapshot(snapshotDir, createdPaths = []) {
+//
+// H1 CONTAINMENT: the manifest is on-disk data — a poisoned manifest.json must
+// not aim a copy/rm at an arbitrary absolute path (the recoverDangling class,
+// one notch weaker because the caller always passes a fresh snapshot today, but
+// this is an EXPORTED shared function). Every source stays inside snapshotDir;
+// every restore/delete TARGET stays inside the CALLER-TRUSTED roots. A restore
+// target may not exist yet (a committed delete being undone), so it resolves
+// through physicalForCreate (deepest-existing-ancestor realpath + tail —
+// symlink-safe). trustedRoots empty => every target refused (fail-closed, the
+// safe direction: a failed rollback beats a write outside the stores).
+export function rollbackFromSnapshot(snapshotDir, createdPaths = [], trustedRoots = []) {
   let manifest;
   try { manifest = JSON.parse(fs.readFileSync(path.join(snapshotDir, 'manifest.json'), 'utf8')); } catch { return -1; }
+  const snapPhys = physicalOrNull(snapshotDir);
+  const roots = (Array.isArray(trustedRoots) ? trustedRoots : []).map((r) => physicalOrNull(r)).filter(Boolean);
   let failed = 0;
   for (const m of manifest) {
-    try { fs.copyFileSync(path.join(snapshotDir, m.snap), m.original); } catch { failed++; }
+    const src = path.join(snapshotDir, m.snap);
+    const srcPhys = physicalOrNull(src);
+    const dstPhys = physicalForCreate(m.original);
+    if (!snapPhys || !srcPhys || !containedIn(srcPhys, [snapPhys]) || !dstPhys || !containedIn(dstPhys, roots)) { failed++; continue; }
+    try { fs.copyFileSync(src, m.original); } catch { failed++; }
   }
-  for (const p of createdPaths) { try { fs.rmSync(p, { force: true }); } catch {} }
+  for (const p of createdPaths) {
+    const pp = physicalForCreate(p);
+    if (pp && containedIn(pp, roots)) { try { fs.rmSync(p, { force: true }); } catch {} } // never rm outside a trusted root
+  }
   return failed;
 }
 
@@ -706,6 +725,12 @@ export function runRetier({
           topEntities: [...new Set([t.basename, t.basename.replace(/\.md$/i, ''), st.label, ...topAnchors([t.text], 10).map((a) => a.token)])],
           archivedAt: new Date(now).toISOString(), retier: true,
         });
+        // H3 delete-gate: the topic's structured tokens leave the LIVE tree (they
+        // move to the byte-exact estate archive, guarded by the copy-verify above
+        // + the top-anchor survival probe below). Declare that drop honestly so
+        // applyPlan's delete-gate passes — RE-TIER's archive/probe is the
+        // external safety, not applyPlan's fidelity gate.
+        for (const key of inventoryDropKeys(t.text)) approvedDrops.push(key);
         actions.push({ type: 'delete', path: t.path, expectedOrig: t.text });
       }
     }
@@ -748,7 +773,10 @@ export function runRetier({
     ];
     const misses = probeAnchors(anchors, postTexts);
     if (misses.length) {
-      const failed = rollbackFromSnapshot(r.snapshotDir, createdPaths);
+      // `roots` = the resolved over-store dirs (already realpath-contained); the
+      // snapshot's originals + this run's created overflow files all live inside
+      // them, so they pass the H1 containment while a tampered manifest can't.
+      const failed = rollbackFromSnapshot(r.snapshotDir, createdPaths, roots);
       rmGz();
       return {
         ok: false,
