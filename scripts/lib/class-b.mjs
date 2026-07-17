@@ -101,18 +101,25 @@ export function physicalForCreate(p) {
 // physically-allocated blocks (`blocks === 0`) is not hydrated (macOS iCloud /
 // Linux network-mount placeholders).
 //
-// ⚠ PLATFORM CALIBRATION (verified empirically 2026-07-16, the hardware-never-
-// matches-paper gap): Node reports `Stats.blocks === 0` for EVERY regular file
-// on win32 (blocks is not POSIX-meaningful there) — so the blocks signal would
-// false-CRUSH every Windows file and break every wash. A TRUE Windows OneDrive
-// Files-On-Demand placeholder is a reparse point carrying
-// FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, which Node's `fs` does NOT expose. So on
-// win32 this metadata sniff is a DOCUMENTED best-effort NO-OP (returns false):
-// the R1 external-writer guard + the copy-verify byte-compare remain the nets,
-// and the Windows placeholder is a NAMED residual (honest ceiling), upgrade
-// path = a native/PowerShell reparse-attribute read swapped in at the two
-// injectable call sites (estate archiveSession `isPlaceholder`, applyPlan
-// `opts.isPlaceholder`). The signal is CORRECT on POSIX where blocks is real.
+// ⚠ PLATFORM CALIBRATION — win32 is a NAMED RESIDUAL, detected via the reparse
+// attribute, NOT via blocks (rationale corrected 2026-07-16 from field data, #8).
+// The earlier note claimed Node reports `blocks === 0` for EVERY win32 file — that
+// premise is DISPROVEN: on current libuv `blocks` is LIVE on win32, allocation-
+// proportional (8192 B -> 16, 1 MiB -> 2048), `blocks === 0` only for the sub-512 B
+// MFT-resident class (measured on two NTFS boxes, Node v24.11/24.17, #8; the old
+// "always 0" was version drift from old libuv docs). The blocks sniff STILL stays a
+// NO-OP on win32, now for the correct FIDELITY-FIRST reason: a legitimate NTFS
+// SPARSE file shares the exact `size>0 / blocks===0` fingerprint of a dehydrated
+// stub, and the signal that actually distinguishes them — the reparse attribute
+// FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS — is NOT exposed by Node's `fs`. #8's live-
+// fire proved the predicate only against a SYNTHETIC `fsutil sparse` file, never a
+// REAL OneDrive/iCloud reparse stub (that cell stays unmeasured) — so a blocks-only
+// sniff here would over-refuse real sparse files while being unproven against real
+// stubs. The real fix is a native/PowerShell reparse-attribute read swapped in at
+// the two injectable call sites (estate archiveSession `isPlaceholder`, applyPlan
+// `opts.isPlaceholder`); until then win32 returns false and the R1 external-writer
+// guard + copy-verify byte-compare remain the nets. The signal is CORRECT on POSIX
+// where blocks is real.
 //
 // POSITIVE-SIGNAL ONLY (fail toward NORMAL, never flag-everything): an
 // unreadable stat, an absent/NaN `blocks`, a non-file, or win32 = NOT flagged —
@@ -121,7 +128,7 @@ export function physicalForCreate(p) {
 // placeholder cannot be created inside a hermetic sandbox, so tests feed a
 // synthetic stat + the platform they want to exercise.
 export function isCloudPlaceholder(p, { statSync = fs.lstatSync, platform = process.platform } = {}) {
-  if (platform === 'win32') return false; // blocks unreliable on win32 (see the calibration note above)
+  if (platform === 'win32') return false; // win32 NAMED residual — reparse-attribute upgrade path, not blocks (see calibration note, #8)
   try {
     const st = statSync(p);
     if (!st || typeof st.isFile !== 'function' || !st.isFile()) return false;

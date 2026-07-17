@@ -393,9 +393,9 @@ test('isCloudPlaceholder (POSIX): blocks:0 & size>0 = placeholder; any allocated
   assert.strictEqual(isCloudPlaceholder('x', { statSync: () => { throw new Error('ENOENT'); }, platform: 'linux' }), false, 'an unreadable stat is swallowed -> false');
 });
 
-test('isCloudPlaceholder (win32): the blocks signal is DISABLED — Node reports blocks:0 for every regular file on win32, so flagging on it would false-CRUSH every file; the guard is a documented no-op there (upgrade path = a native reparse-attribute read)', () => {
+test('isCloudPlaceholder (win32): NAMED RESIDUAL — the blocks sniff stays a no-op there (a legit NTFS sparse file shares the size>0/blocks===0 stub fingerprint, and the reparse attribute that distinguishes them is unexposed by Node fs); blocks is LIVE on current win32 (#8) but the no-op stands per fidelity-first (upgrade path = a native reparse-attribute read)', () => {
   const dehydrated = { statSync: () => ({ isFile: () => true, size: 100, blocks: 0 }), platform: 'win32' };
-  assert.strictEqual(isCloudPlaceholder('x', dehydrated), false, 'win32 never flags on blocks — that is the calibration fix, not a miss');
+  assert.strictEqual(isCloudPlaceholder('x', dehydrated), false, 'win32 never flags on blocks — fidelity-first no-op (sparse-fingerprint collision), not a miss');
 });
 
 // ---------------------------------------------------------------------------
