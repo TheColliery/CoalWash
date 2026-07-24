@@ -321,7 +321,10 @@ export function unreferencedTopics(store, allTextConcat) {
 // #55 reconcile — report-only cross-store claim contradictions
 // ---------------------------------------------------------------------------
 
-const CLAIM_VERSION_RE = /([A-Za-z][A-Za-z0-9_.-]{1,40})\s+(?:is\s+|=\s*|at\s+)?(v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/g;
+// Version group is the GREEDY whole run (`(?:\.\d+)+`, 3+ parts) so a claim on
+// `1.2.3.4` captures `1.2.3.4`, not the fragment `1.2.3` (same collapse class as
+// the fidelity-gate / retier top-anchor version regexes — one-flock).
+const CLAIM_VERSION_RE = /([A-Za-z][A-Za-z0-9_.-]{1,40})\s+(?:is\s+|=\s*|at\s+)?(v?\d+\.\d+(?:\.\d+)+(?:-[0-9A-Za-z.-]+)?)\b/g;
 const CLAIM_STATUS_RE = /\b(LIVE|wired|validated|regressed|closed)\b/gi;
 // Common-word subjects are noise, not entities ("given the v1.2.1" must not
 // key a claim on "the") — measured live on the real store, 2026-07-16.
@@ -405,31 +408,107 @@ export function reconcileClaims(stores) {
 // Counting variants of fidelity-gate.mjs's wikilink/version/codespan shapes
 // (the gate's inventory() is set-based; "most-referenced" needs counts).
 const TA_WIKILINK_RE = /\[\[([^[\]|]+)/g;
-const TA_VERSION_RE = /\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?\b/g;
+// KNOWN LIMITATION, deliberately unfixed (SAFE-direction over-refuse only): a
+// wikilink whose inner text spans a newline (`[[multi\nline anchor]]` — the
+// `[^[\]|]+` class above matches `\n` too) yields an anchor token containing
+// `\n`. That token can never satisfy resolvesWholeLine (a post-pass line
+// never contains `\n`) nor the whitespace-word membership in anchorSetOf, so
+// a sole-home topic holding such an anchor always reports a MISS -> a whole-
+// run rollback even though the bytes are untouched. This is availability
+// over-refuse (byte-exact-safe, never a silent strand), and a multi-line
+// wikilink target is vanishingly rare in practice — left as a documented
+// limitation rather than special-cased.
+// A version token is its WHOLE dotted-numeric run (greedy): 3+ parts, so
+// `1.2.3.4` extracts as `1.2.3.4` — NOT `1.2.3` (which would falsely "survive"
+// inside any surviving 4-part version, silently stranding a sole-home `1.2.3`).
+// `(?:\.\d+)+` consumes every trailing `.N`, so the anchor and the survival side
+// (both via anchorFormsOf) agree on the same whole-run token.
+const TA_VERSION_RE = /\bv?\d+\.\d+(?:\.\d+)+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?\b/g;
 const TA_CODESPAN_RE = /`([^`\n]+)`/g;
+
+// The extraction primitive behind topAnchors: every structured anchor FORM in a
+// text — wikilink inner `[[x]]`, version `vX.Y.Z`, codespan inner `` `x` `` — in
+// document order, WITH duplicates (topAnchors counts them; the survival-membership
+// callers dedup into a Set). Factored out so RESOLUTION re-extracts a surviving
+// text with the SAME notion of a token that produced the anchor — consistency by
+// construction, which ends the occursAsToken separator whack-a-mole (fix #5).
+function anchorFormsOf(text) {
+  const s = String(text);
+  const forms = [];
+  for (const [re, group] of [[TA_WIKILINK_RE, 1], [TA_VERSION_RE, 0], [TA_CODESPAN_RE, 1]]) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(s)) !== null) { const t = m[group].trim(); if (t) forms.push(t); }
+  }
+  return forms;
+}
 
 export function topAnchors(texts, n = TOP_ANCHOR_N) {
   const counts = new Map();
-  const bump = (tok) => { const t = tok.trim(); if (t) counts.set(t, (counts.get(t) || 0) + 1); };
-  for (const text of texts) {
-    const s = String(text);
-    for (const [re, group] of [[TA_WIKILINK_RE, 1], [TA_VERSION_RE, 0], [TA_CODESPAN_RE, 1]]) {
-      re.lastIndex = 0;
-      let m;
-      while ((m = re.exec(s)) !== null) bump(m[group]);
-    }
-  }
+  for (const text of texts) for (const t of anchorFormsOf(text)) counts.set(t, (counts.get(t) || 0) + 1);
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .slice(0, n)
     .map(([token, count]) => ({ token, count }));
 }
 
-// An anchor "resolves" when its token text still appears SOMEWHERE in the
-// post-pass tree (hot index, topic files incl. overflow, or the archive
-// dig-index rows). Returns the misses ([] = pass).
+// The FULL anchor set of a text, for survival membership. RESOLUTION MECHANISM
+// (fix #5 — retires the four hand-rolled `occursAsToken` boundary matchers; each
+// prior fix widened/narrowed a char-class and left the NEXT separator open —
+// `-` then astral then \p{Cf} then the regex-size throw). An anchor "survives"
+// in a text iff RE-EXTRACTING that text yields it, from two sources both aligned
+// with how anchors are BORN (topAnchors):
+//   1. the structured FORMS (anchorFormsOf) — a surviving `[[api]]` / codespan /
+//      `vX.Y.Z` resolves the anchor it produced; TA_VERSION_RE's ASCII word-boundary pulls
+//      `v9.9.9` whole out of Thai-glued `รุ่นv9.9.9กลาง` (closes the ex-DOCKET 1B).
+//   2. whitespace-delimited WORDS — a genuine standalone `api` (own line or
+//      space-flanked) resolves. A compound identifier (`api-key`, `api.method`,
+//      `api:port`, `api/v2`, `#api`, `(api)`, `api|x`) is ONE whitespace word, so
+//      a bare anchor is NEVER a member of it — the false-resolve that silently
+//      stranded sole-home anchors dies by construction, no separator left to chase.
+// A ZWJ/astral/`_`-glued blob is likewise one whitespace word (nothing to split
+// on), so those decoys reject with zero per-code-point boundary logic. No pattern
+// is ever compiled from a token, so a giant single-line token can never exceed
+// V8's regex-size cap (the fix-#4 throw source is gone by construction).
+function anchorSetOf(text) {
+  const s = String(text);
+  const set = new Set(anchorFormsOf(s));
+  // Split on ASCII whitespace ONLY, never JS `\s`: `\s` also matches NBSP and
+  // ~25 other Unicode spaces, so a compound glued by NBSP (`apiz key`)
+  // would split into a bare `apiz` — manufacturing a false bare-anchor that
+  // silently strands a sole-home codespan/word anchor. A Unicode-space-glued
+  // compound stays ONE token, so the survival test errs toward KEEP (the SAFE
+  // direction); a genuine ASCII-space `apiz key` still splits and resolves.
+  for (const w of s.split(/[ \t\r\n\f\v]+/)) if (w) set.add(w);
+  return set;
+}
+
+// A WHITESPACE-BEARING token (a multi-word codespan `` `claude project purge` ``
+// or a spaced wikilink `[[my spaced anchor]]`) can NEVER be a member of
+// anchorSetOf's whitespace-split WORD set, and an archived topic's dig row stores
+// such a token as a bare entity LINE (no codespan/wikilink syntax left for
+// anchorFormsOf to re-extract). It resolves iff it survives as its GENUINE stored
+// form: as a codespan/wikilink (already covered by anchorSetOf via anchorFormsOf)
+// OR as a WHOLE surviving line equal to it — the dig-row entity-line shape that
+// searchIndex finds. A whole-LINE match (never a substring) keeps the strand dead:
+// the words scattered in prose, or the token buried inside a longer line, never
+// resolve it — symmetric with the dig row / searchIndex, no more permissive. The
+// single-token path (word-split ∪ forms) is UNCHANGED, so every version-prefix /
+// compound / NBSP / astral / ZWJ strand stays dead by construction.
+function resolvesWholeLine(token, postTexts) {
+  for (const t of postTexts) for (const line of String(t).split('\n')) if (line.trim() === token) return true;
+  return false;
+}
+
+// An anchor "resolves" when re-extracting the post-pass text yields its token
+// (hot index, topic files incl. overflow, or the archive dig-index rows).
+// Returns the misses ([] = pass). One set per text (not per anchor).
 export function probeAnchors(anchors, postTexts) {
-  return anchors.filter((a) => !postTexts.some((t) => String(t).includes(a.token)));
+  const sets = postTexts.map(anchorSetOf);
+  const bearsWhitespace = (tok) => /[ \t\r\n\f\v]/.test(tok);
+  return anchors.filter((a) =>
+    !sets.some((set) => set.has(a.token))
+    && !(bearsWhitespace(a.token) && resolvesWholeLine(a.token, postTexts)));
 }
 
 // ---------------------------------------------------------------------------
@@ -656,11 +735,13 @@ export function runRetier({
       const survivingText = stores
         .flatMap((s) => [s.indexText, ...s.topics.filter((t) => !demoteSet.has(t.path)).map((t) => t.text)])
         .join('\n');
-      const survives = new Set(anchors.map((a) => a.token).filter((tok) => survivingText.includes(tok)));
+      const survivingSet = anchorSetOf(survivingText);
+      const survives = new Set(anchors.map((a) => a.token).filter((tok) => survivingSet.has(tok)));
       for (const { p } of over) {
         for (const t of p.hop2) {
           if (strandedKeep.has(t.path)) continue;
-          if (anchors.some((a) => t.text.includes(a.token) && !survives.has(a.token))) {
+          const topicSet = anchorSetOf(t.text);
+          if (anchors.some((a) => topicSet.has(a.token) && !survives.has(a.token))) {
             strandedKeep.add(t.path);
             kept.push({ path: t.path, reason: 'kept in the live tree: sole home of a top-anchor with indexEnabled off (demoting would be search-unreachable)' });
           }
@@ -718,11 +799,19 @@ export function runRetier({
         // occurrences are concentrated inside an archived topic must still
         // RESOLVE post-pass via this row (else the survival probe would fail
         // every legitimate demotion of such a topic — a self-inflicted DoS).
+        // COUNT = TOP_ANCHOR_N, not 10 (finding B): the closing probe demands the
+        // top-N tree anchors survive, so the dig row must CARRY every one it could
+        // be the sole home of. A tree-top-N sole-home anchor is always within the
+        // topic's OWN top-N (a topic with N louder anchors would push it out of the
+        // tree top-N too), so top-N here provably covers every demanded anchor; a
+        // cap of 10 stranded a topic that sole-homes >10 of the top-20 (anchors
+        // 11-20 had no carrier → spurious self-rollback). Keeps recovery honest:
+        // the dig row / searchIndex genuinely find what the probe demands.
         digRows.push({
           sessionId: pseudoId, projectSlug: slug, startISO: null, endISO: null,
           bytes: buf.length, msgCount: null,
           firstUserLine: `RE-TIER demoted topic: ${st.label}/${t.basename}`,
-          topEntities: [...new Set([t.basename, t.basename.replace(/\.md$/i, ''), st.label, ...topAnchors([t.text], 10).map((a) => a.token)])],
+          topEntities: [...new Set([t.basename, t.basename.replace(/\.md$/i, ''), st.label, ...topAnchors([t.text], TOP_ANCHOR_N).map((a) => a.token)])],
           archivedAt: new Date(now).toISOString(), retier: true,
         });
         // H3 delete-gate: the topic's structured tokens leave the LIVE tree (they
@@ -754,7 +843,10 @@ export function runRetier({
     // -> whole-run rollback on any failure. Memory-store paths are project-
     // scope (never scope:'global'), so applyPlan's global-lock branch cannot
     // re-acquire the lock this function already holds.
-    const r = applyPlan({ projectRoot, roots, actions, sessionId, origin: 'wizard-cut', approvedDrops }, { home, now });
+    // projectRoot rides opts (the CALLER-TRUSTED anchor applyPlan uses for
+    // containment) — runRetier's projectRoot is itself cwd-derived (cli.mjs passes
+    // findProjectRoot(cwd)); the plan field is ignored by applyPlan.
+    const r = applyPlan({ projectRoot, roots, actions, sessionId, origin: 'wizard-cut', approvedDrops }, { home, now, projectRoot });
     if (!r.ok) { rmGz(); return { ...r, env, kept }; }
 
     // THE CLOSING CHECK — top-anchor survival: the N most-referenced pre-pass
@@ -771,7 +863,25 @@ export function runRetier({
       // already kept its topic live, so the anchor resolves in the tree instead.
       ...(indexEnabled ? digRows.map((row) => [row.firstUserLine, ...(row.topEntities || [])].join('\n')) : []),
     ];
-    const misses = probeAnchors(anchors, postTexts);
+    // INV-3 safety net: a probe that CANNOT RUN must fail exactly like a
+    // probe that ran and found a miss (never commit-then-throw). The
+    // set-membership resolution (anchorSetOf) compiles NO pattern from a
+    // token, so the fix-#4 throw source (a regex built from a >=32768-char
+    // token) is gone by construction; this catch stays defense in depth
+    // against any OTHER error surfacing here, same rollback, no thrown
+    // exception escaping a "committed" run.
+    let misses;
+    try {
+      misses = probeAnchors(anchors, postTexts);
+    } catch (e) {
+      const failed = rollbackFromSnapshot(r.snapshotDir, createdPaths, roots);
+      rmGz();
+      return {
+        ok: false,
+        rolledBack: failed === 0 ? true : 'partial',
+        error: `top-anchor survival probe THREW (${e.message}) — run rolled back${failed ? ` (${failed} restore failure(s) — check snapshot ${r.snapshotDir})` : ''}`,
+      };
+    }
     if (misses.length) {
       // `roots` = the resolved over-store dirs (already realpath-contained); the
       // snapshot's originals + this run's created overflow files all live inside

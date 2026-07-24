@@ -19,6 +19,9 @@ function write(p, content) { fs.mkdirSync(path.dirname(p), { recursive: true });
 function planFor(proj, store, actions, extra = {}) {
   return { projectRoot: proj, roots: [store], actions, sessionId: 't-session', ...extra };
 }
+// applyPlan anchors containment on the CALLER-trusted projectRoot (opts.projectRoot),
+// never the plan's own (untrusted) projectRoot — pass the sandbox proj as that root.
+const apply = (plan, opts = {}) => applyPlan(plan, { projectRoot: plan && plan.projectRoot, ...opts });
 
 const ORIGINAL = '[[Foo]] anchor link.\nVersion v1.2.3 shipped.\nCount 44192 requests.\n';
 
@@ -53,7 +56,7 @@ test('clean lineage: 0 candidates when the live file still carries every anchor 
     write(f, ORIGINAL);
     // Content-preserving rewrite (adds a line, drops nothing) — snapshots the
     // pristine ORIGINAL as f0, no approvedDrops needed (nothing dropped).
-    const r1 = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: ORIGINAL + 'Extra note.\n' }]), { now: 1000 });
+    const r1 = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: ORIGINAL + 'Extra note.\n' }]), { now: 1000 });
     assert.strictEqual(r1.ok, true, r1.error);
 
     const report = anchorDiff(f, { projectRoot: proj });
@@ -68,7 +71,7 @@ test('planted cumulative loss: a token dropped OUT-OF-BAND (never through applyP
   try {
     const f = path.join(store, 'notes.md');
     write(f, ORIGINAL);
-    const r1 = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: ORIGINAL + 'Extra note.\n' }]), { now: 1000 });
+    const r1 = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: ORIGINAL + 'Extra note.\n' }]), { now: 1000 });
     assert.strictEqual(r1.ok, true, r1.error);
 
     // Simulate a hand-edit / ad hoc LLM pass that bypasses CoalWash entirely —
@@ -88,14 +91,14 @@ test('approved-drop excluded: a token CW itself cut (and recorded to a bin) is n
   try {
     const f = path.join(store, 'notes.md');
     write(f, ORIGINAL);
-    const r1 = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: ORIGINAL + 'Extra note.\n' }]), { now: 1000 });
+    const r1 = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: ORIGINAL + 'Extra note.\n' }]), { now: 1000 });
     assert.strictEqual(r1.ok, true, r1.error);
 
     // A SECOND, legitimate CoalWash-driven cut: removes the version line,
     // approved via approvedDrops (exactly as a real Quick/wizard cut would) —
     // this records the removed line into the fat bin.
     const afterCut = '[[Foo]] anchor link.\nCount 44192 requests.\nExtra note.\n';
-    const r2 = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: afterCut }], { approvedDrops: ['version-drop:v1.2.3'] }), { now: 2000 });
+    const r2 = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: afterCut }], { approvedDrops: ['version-drop:v1.2.3'] }), { now: 2000 });
     assert.strictEqual(r2.ok, true, r2.error);
 
     // THEN an out-of-band edit (never through applyPlan) also drops the number line.
@@ -123,7 +126,7 @@ test('no-snapshot no-op: null when the file has no verified snapshot yet, and wh
     // existing is not itself enough — the report is per-file, keyed by manifest.
     const other = path.join(store, 'other.md');
     write(other, 'x');
-    applyPlan(planFor(proj, store, [{ type: 'rewrite', path: other, content: 'xx' }]), { now: 1000 });
+    apply(planFor(proj, store, [{ type: 'rewrite', path: other, content: 'xx' }]), { now: 1000 });
     assert.strictEqual(anchorDiff(untouched, { projectRoot: proj }), null, 'a tx dir exists, but never named THIS file');
 
     const strayFile = path.join(outside, 'stray.md');

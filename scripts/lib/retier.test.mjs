@@ -603,6 +603,275 @@ test('claims: extractClaims derives version + status subjects deterministically'
   assert.deepStrictEqual(one, []);
 });
 
+// ---------------------------------------------------------------------------
+// BREAK 3 — anchor survival must use a TOKEN-BOUNDARY match, not substring
+// .includes() (blind-IC: a surviving decoy "rapid" (r-api-d) falsely resolved
+// the top-anchor [[api]], stranding its sole-home orphan with 0 anchorMisses).
+// ---------------------------------------------------------------------------
+
+test('BREAK-3: probeAnchors resolves an anchor only AS A TOKEN, never as a substring of unrelated prose', () => {
+  const anchors = [{ token: 'api', count: 15 }];
+  // the substring decoy "rapid" (r-api-d) must NOT resolve "api" — the old
+  // .includes() returned [] here (a FALSE pass); the fix reports the miss.
+  assert.deepStrictEqual(probeAnchors(anchors, ['a surviving decoy: rapid deployment notes']), [{ token: 'api', count: 15 }]);
+  // a real [[api]] wikilink, a `api` codespan, and a bare dig-row entity line DO resolve it
+  assert.deepStrictEqual(probeAnchors(anchors, ['see [[api]] here']), []);
+  assert.deepStrictEqual(probeAnchors(anchors, ['use the `api` helper']), []);
+  assert.deepStrictEqual(probeAnchors(anchors, ['topEntities:\napi\nother']), []);
+  // a non-word-edged token (a flag) still boundary-matches against a backtick, but not inside a larger word
+  assert.deepStrictEqual(probeAnchors([{ token: '--dry-run', count: 3 }], ['run `--dry-run` first']), []);
+  assert.deepStrictEqual(probeAnchors([{ token: '--dry-run', count: 3 }], ['no x--dry-runner here']), [{ token: '--dry-run', count: 3 }]);
+});
+
+test('BREAK-3b Unicode: occursAsToken/probeAnchors use a UNICODE-AWARE boundary — Thai/Cyrillic/accented-Latin decoys correctly REJECT (embedded, not standalone), the fuller ASCII matrix still correctly rejects too, and every genuine form still resolves', () => {
+  // Direction 1 (Unicode decoys — the actual fix): a token whose flanking
+  // characters are non-ASCII letters is a substring of ONE continuous word in
+  // that script, exactly like ASCII "rapid" contains "api" — must NOT resolve.
+  const thai = probeAnchors([{ token: 'api', count: 9 }], ['ข้อมูลนapiลสำคัญ']);
+  assert.deepStrictEqual(thai, [{ token: 'api', count: 9 }], 'Thai-flanked "นapiล" must not false-resolve "api"');
+  const cyrillic = probeAnchors([{ token: 'api', count: 9 }], ['text дapiд more']);
+  assert.deepStrictEqual(cyrillic, [{ token: 'api', count: 9 }], 'Cyrillic-flanked decoy must not false-resolve');
+  const accented = probeAnchors([{ token: 'api', count: 9 }], ['caféapié menu']);
+  assert.deepStrictEqual(accented, [{ token: 'api', count: 9 }], 'accented-Latin-flanked decoy must not false-resolve');
+
+  // Direction 2 (fuller ASCII matrix — must still correctly REJECT, no regression):
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['see [[apiv2]] for details']), [{ token: 'api', count: 1 }], 'a substring of a longer anchor never resolves the shorter one');
+  assert.deepStrictEqual(probeAnchors([{ token: 'key-1', count: 1 }], ['only [[key-11]] survives']), [{ token: 'key-1', count: 1 }], 'key-1 is a prefix of key-11, not a standalone occurrence');
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['prefix xapi here']), [{ token: 'api', count: 1 }], 'ASCII-glued on the left ("xapi") never resolves');
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['apix suffix here']), [{ token: 'api', count: 1 }], 'ASCII-glued on the right ("apix") never resolves');
+
+  // Direction 3 (genuine forms — must still resolve, 0 availability regression):
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['the [[api]] anchor lives here']), []);
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['call `api` now']), []);
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['the api works']), []);
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['RE-TIER demoted\napi\nlabel']), []);
+  assert.deepStrictEqual(probeAnchors([{ token: 'v9.9.9', count: 1 }], ['shipped v9.9.9 today']), []);
+  assert.deepStrictEqual(probeAnchors([{ token: '--dry-run', count: 1 }], ['run `--dry-run` first']), []);
+  assert.deepStrictEqual(probeAnchors([{ token: '--dry-run', count: 1 }], ['use --dry-run here']), []);
+});
+
+test('BREAK-3b Unicode end-to-end (index OFF): the strand-guard is not fooled by a Thai-flanked decoy — the sole-home orphan is KEPT LIVE, not silently archived+deleted (pre-fix: the ASCII-only boundary check treated Thai as a delimiter, so "นapiล" false-resolved [[api]] and the guard let the orphan demote)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex()); // over-arm so a run fires
+    // the orphan: UNREFERENCED, the ONLY home of [[api]] (repeated -> a top anchor)
+    write(path.join(dir, 'orphan.md'), '# orphan\n\n' + Array(25).fill('- [[api]] the sole home of this anchor').join('\n') + '\n');
+    // a REFERENCED survivor holding a Thai-flanked decoy ("นapiล", api's 3
+    // Latin letters embedded inside ONE Thai word) but NOT a genuine [[api]].
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA — referenced by the index. ข้อมูลนapiลสำคัญ prose.\n');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: false }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(fs.existsSync(path.join(dir, 'orphan.md')), 'the sole-home orphan is KEPT LIVE — the Thai decoy no longer resolves [[api]]');
+    assert.ok(fs.readFileSync(path.join(dir, 'orphan.md'), 'utf8').includes('[[api]]'), '[[api]] stays reachable in the live tree');
+    assert.ok(res.kept.some((k) => k.path.endsWith('orphan.md')), 'the keep is recorded');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// BREAK-3h — fix #6: multi-word AVAILABILITY + finding-B dig-row cap.
+// fix #5 made survival = anchorFormsOf ∪ whitespace-WORD-split, which correctly
+// kills the substring strands. But a WHITESPACE-BEARING token (a multi-word
+// codespan `` `claude project purge` `` / a spaced wikilink [[my spaced anchor]])
+// can never be a word-split member, and an archived topic's dig row stores it as a
+// bare entity LINE (no codespan syntax for anchorFormsOf to re-extract) — so the
+// probe FALSELY missed it and rolled the whole run back, though searchIndex finds
+// it by substring. Fix: a whitespace-bearing token ALSO resolves against a WHOLE
+// surviving line equal to it (the dig-row / searchIndex shape), never a substring.
+// Finding B: the dig row carried only topAnchors(topic, 10) while the probe demands
+// the top-20 survive, so a topic sole-homing >10 of the top-20 self-rolled-back;
+// the dig row now carries topAnchors(topic, TOP_ANCHOR_N).
+// These SUPERSEDE the former BREAK-3b/3c/3d/3e/3f "index ON burial → rollback"
+// tests: post-fix a tree-top-N sole-home anchor is ALWAYS within its (now top-N)
+// dig row, so burial-below-10 no longer strands it — that WAS the finding-B bug.
+// The decoy → miss coverage those tests carried is fully retained by the BREAK-3x
+// probe-UNIT tests + the index-OFF keep-live end-to-end tests (both unchanged).
+// ---------------------------------------------------------------------------
+
+test('BREAK-3h fix-A unit: a whitespace-bearing token resolves against a WHOLE dig-row line (never a substring) — a multi-word codespan / spaced wikilink survives via its entity line or a kept codespan/wikilink, but the same token scattered in prose or buried in a longer line still MISSES (strand-safe); single-word strands are untouched', () => {
+  // resolves via the dig-row entity-line shape (one entity per line)
+  const dig = ['RE-TIER demoted topic: main/graveyard.md', 'graveyard.md', 'graveyard', 'main', 'claude project purge'].join('\n');
+  assert.deepStrictEqual(probeAnchors([{ token: 'claude project purge', count: 30 }], [dig]), []);
+  assert.deepStrictEqual(probeAnchors([{ token: 'my spaced anchor', count: 9 }], ['main\nmy spaced anchor\nx']), []);
+  // resolves via a genuine surviving codespan / wikilink form in a kept file
+  assert.deepStrictEqual(probeAnchors([{ token: 'claude project purge', count: 3 }], ['run `claude project purge` to clean']), []);
+  assert.deepStrictEqual(probeAnchors([{ token: 'my spaced anchor', count: 3 }], ['see [[my spaced anchor]] here']), []);
+  // STRAND-SAFE: the same multi-word token scattered in prose, or split across
+  // lines, never resolves (whole-LINE equality, not a substring)
+  assert.deepStrictEqual(probeAnchors([{ token: 'claude project purge', count: 3 }], ['run claude project purge now to reclaim']), [{ token: 'claude project purge', count: 3 }]);
+  assert.deepStrictEqual(probeAnchors([{ token: 'claude project purge', count: 3 }], ['claude\nproject\npurge']), [{ token: 'claude project purge', count: 3 }]);
+  // single-word strands never enter the multi-word path — they stay dead
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 9 }], ['use api-key here']), [{ token: 'api', count: 9 }]);
+  assert.deepStrictEqual(probeAnchors([{ token: '1.2.3', count: 3 }], ['ver 1.2.3.4']), [{ token: '1.2.3', count: 3 }]);
+});
+
+test('BREAK-3h fix-A end-to-end (index ON, the DEFAULT): a MULTI-WORD codespan `claude project purge` whose sole home is an archived topic RESOLVES via its dig-row entity line — the run PROCEEDS + archives the topic + the codespan is search-reachable in the dig index (pre-fix: the whitespace split could not see the whole token in the dig row → spurious whole-run rollback, no relief)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex()); // over-arm, references alpha only
+    // the orphan: UNREFERENCED, the sole home of the multi-word codespan (a top anchor)
+    write(path.join(dir, 'orphan.md'), '# orphan\n\n' + Array(30).fill('- run `claude project purge` to reclaim space').join('\n') + '\n');
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index.\n');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: true }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(!fs.existsSync(path.join(dir, 'orphan.md')), 'the topic archives for real (the multi-word codespan resolves via the dig row, no false rollback)');
+    const idxText = fs.readFileSync(path.join(estateCfg(home).archiveDir, ESTATE_INDEX_NAME), 'utf8');
+    assert.ok(idxText.includes('claude project purge'), 'the multi-word codespan is persisted in the dig index (searchIndex-reachable)');
+  } finally { clean(home, proj); }
+});
+
+test('BREAK-3h fix-A end-to-end (index ON): a SPACED WIKILINK [[my spaced anchor]] whose sole home is an archived topic likewise RESOLVES via its dig-row entity line — the run PROCEEDS + archives + is search-reachable', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex());
+    write(path.join(dir, 'orphan.md'), '# orphan\n\n' + Array(30).fill('- see [[my spaced anchor]] for the note').join('\n') + '\n');
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index.\n');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: true }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(!fs.existsSync(path.join(dir, 'orphan.md')), 'the topic archives for real');
+    const idxText = fs.readFileSync(path.join(estateCfg(home).archiveDir, ESTATE_INDEX_NAME), 'utf8');
+    assert.ok(idxText.includes('my spaced anchor'), 'the spaced wikilink is persisted in the dig index');
+  } finally { clean(home, proj); }
+});
+
+test('BREAK-3h finding-B: a topic that is the SOLE HOME of >10 of the top-20 anchors is fully carried by the enlarged (top-N) dig row → the run PROCEEDS with every anchor search-reachable (pre-fix: the dig row capped at 10 → anchors 11-20 had no carrier → the closing probe self-rolled-back a legitimate demotion)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex()); // over-arm, references alpha only
+    // orphan sole-homes 15 distinct top anchors (each repeated) — >10 of the top-20
+    let orphan = '# orphan\n\n';
+    for (let i = 0; i < 15; i++) orphan += Array(6 - (i % 3)).fill(`- [[sole-${i}]] a sole-home anchor number ${i}`).join('\n') + '\n';
+    write(path.join(dir, 'orphan.md'), orphan);
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index.\n');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: true }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(!fs.existsSync(path.join(dir, 'orphan.md')), 'the topic archives for real (no self-rollback)');
+    const idxText = fs.readFileSync(path.join(estateCfg(home).archiveDir, ESTATE_INDEX_NAME), 'utf8');
+    const carried = Array.from({ length: 15 }, (_, i) => `sole-${i}`).filter((t) => idxText.includes(t)).length;
+    assert.strictEqual(carried, 15, `all 15 sole-home anchors carried by the enlarged dig row (got ${carried}) — the cap-10 dig row would strand 5`);
+  } finally { clean(home, proj); }
+});
+
+test('BREAK-3h genuine miss (index ON): a probe anchor surviving in NEITHER a kept file NOR any dig row (split across two archived topics, below top-N in EACH) → the closing probe MISSES → whole-run rollback byte-exact (the "genuinely does not survive → rollback" safe direction still fires post-fix, incl. for a MULTI-WORD token)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex()); // over-arm, references alpha only
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index.\n');
+    // topic-a: 20 co-anchors (count 2 each) + [[split anchor]] x2 -> split is A-rank 21 (below top-20)
+    let a = '# topicA\n\n';
+    for (let i = 0; i < 20; i++) a += `- [[a${i}]] co-anchor\n- [[a${i}]] again\n`;
+    a += '- [[split anchor]] here\n- [[split anchor]] again\n';
+    write(path.join(dir, 'topic-a.md'), a);
+    // topic-b: 20 co-anchors (count 2 each) + [[split anchor]] x1 -> split is B-rank 21 (below top-20)
+    let b = '# topicB\n\n';
+    for (let i = 0; i < 20; i++) b += `- [[b${i}]] co-anchor\n- [[b${i}]] again\n`;
+    b += '- [[split anchor]] once\n';
+    write(path.join(dir, 'topic-b.md'), b);
+    const aOrig = fs.readFileSync(path.join(dir, 'topic-a.md'), 'utf8');
+    const bOrig = fs.readFileSync(path.join(dir, 'topic-b.md'), 'utf8');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: true }), now });
+    assert.strictEqual(res.ok, false, 'a genuinely-unreachable anchor must FAIL the run, never silently succeed');
+    assert.ok(res.rolledBack, runRetierReport(res));
+    assert.ok(Array.isArray(res.anchorMisses) && res.anchorMisses.some((m) => m.token === 'split anchor'), `the real miss is the multi-word "split anchor" (got ${JSON.stringify((res.anchorMisses || []).map((m) => m.token))})`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'topic-a.md'), 'utf8'), aOrig, 'rollback restores topic-a byte-exact');
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'topic-b.md'), 'utf8'), bOrig, 'rollback restores topic-b byte-exact');
+  } finally { clean(home, proj); }
+});
+
+test('BREAK-3 end-to-end: index OFF, an orphan is the SOLE home of top-anchor [[api]] while a surviving topic holds the decoy word "rapid" — the orphan is KEPT LIVE, not stranded (pre-fix: archived+deleted, empty anchorMisses, no rollback)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex()); // over-arm so a run fires
+    // the orphan: UNREFERENCED, the ONLY home of [[api]] (repeated -> a top anchor)
+    write(path.join(dir, 'orphan.md'), '# orphan\n\n' + Array(25).fill('- [[api]] the sole home of this anchor').join('\n') + '\n');
+    // a REFERENCED (via bigIndex's first bullet) survivor holding the decoy word "rapid" (r-api-d) but NOT [[api]]
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA — rapid rapid rapid deployment prose, referenced by the index.\n');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: false }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(fs.existsSync(path.join(dir, 'orphan.md')), 'the sole-home orphan is KEPT LIVE — the "rapid" decoy no longer resolves [[api]]');
+    assert.ok(fs.readFileSync(path.join(dir, 'orphan.md'), 'utf8').includes('[[api]]'), '[[api]] stays reachable in the live tree');
+    assert.ok(res.kept.some((k) => k.path.endsWith('orphan.md')), 'the keep is recorded');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// BREAK-3c astral — occursAsToken's THIRD fix: the boundary test moved from a
+// manual s[i-1]/s[i+len] CODE-UNIT read (misreads a surrogate-pair half as a
+// boundary) to a `u`-flag regex LOOKAROUND (CODE-POINT correct by construction).
+// ---------------------------------------------------------------------------
+
+test('BREAK-3c astral: occursAsToken/probeAnchors correctly REJECT an anchor embedded inside an ASTRAL (non-BMP, surrogate-pair) flanking letter or number — the code-unit s[i-1]/s[i+len] read misclassified a lone surrogate as a boundary', () => {
+  // Mathematical Bold "rapid" styling: the r/d flanks are astral \p{L}
+  // (U+1D42B/U+1D41D) — a surrogate PAIR in the JS string. The pre-fix
+  // manual index read only saw HALF the pair (a lone surrogate, category
+  // Cs), which fails the alnum test and misreads a real letter as a
+  // boundary -> "api" false-resolved inside "\u{1D42B}api\u{1D41D}".
+  const mathBold = probeAnchors([{ token: 'api', count: 9 }], ['styled \u{1D42B}api\u{1D41D} text']);
+  assert.deepStrictEqual(mathBold, [{ token: 'api', count: 9 }], 'Mathematical-Bold-flanked "\u{1D42B}api\u{1D41D}" must not false-resolve "api"');
+  // CJK Extension-B: an astral \p{L} letter (U+20000), the same class of bug.
+  const cjkExtB = probeAnchors([{ token: 'api', count: 9 }], ['\u{20000}api\u{20000}']);
+  assert.deepStrictEqual(cjkExtB, [{ token: 'api', count: 9 }], 'CJK-Ext-B astral-letter-flanked decoy must not false-resolve');
+  // Mathematical Bold DIGIT (U+1D7CE): an astral \p{N} number, same bug family.
+  const mathBoldDigit = probeAnchors([{ token: 'api', count: 9 }], ['\u{1D7CE}api\u{1D7CE}']);
+  assert.deepStrictEqual(mathBoldDigit, [{ token: 'api', count: 9 }], 'astral-digit-flanked decoy must not false-resolve');
+  // regression: the BMP Fullwidth form must still reject too (no BMP regression)
+  const fullwidth = probeAnchors([{ token: 'api', count: 9 }], ['ｒapiｄ']); // ｒapiｄ
+  assert.deepStrictEqual(fullwidth, [{ token: 'api', count: 9 }], 'BMP fullwidth-flanked decoy must still reject (no regression)');
+  // an emoji-GLUED occurrence (no whitespace) is one word to the tokenizer, so it
+  // rejects; fix #5 resolves a bare word only as a genuine whitespace-delimited
+  // token or a structured form, never glued to another glyph (safe direction; the
+  // topic is kept-live / rolled-back, never stranded).
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 9 }], ['\u{1F3AF}api\u{1F3AF}']), [{ token: 'api', count: 9 }], 'emoji-glued "api" is not a standalone token; rejects (was resolve under the retired boundary model)');
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 9 }], ['\u{1F3AF} api \u{1F3AF}']), [], 'a space-flanked api still resolves regardless of adjacent emoji (no availability regression)');
+});
+
+test('BREAK-3c connector: occursAsToken/probeAnchors correctly REJECT an anchor embedded via `_` connector punctuation (\\p{Pc}), and the escaper does not crash/misfire on a hyphenated token', () => {
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['see foo_api_bar here']), [{ token: 'api', count: 1 }], 'underscore-glued "foo_api_bar" must not false-resolve');
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['foo bar api baz']), [], 'space-flanked "api" between underscore-words still resolves genuinely');
+  // the escaper must not choke on (or mis-treat) a token that itself carries
+  // regex-special characters, incl. a hyphen (the '-' outside a character
+  // class is never special, and '\-' is an INVALID escape under the `u` flag
+  // — escaping it would throw on every hyphenated anchor, e.g. --dry-run).
+  assert.deepStrictEqual(probeAnchors([{ token: 'v1.2.3', count: 1 }], ['see v1x2x3 here']), [{ token: 'v1.2.3', count: 1 }], 'the literal dot in a version token must not act as a regex wildcard');
+  assert.deepStrictEqual(probeAnchors([{ token: 'v1.2.3', count: 1 }], ['see v1.2.3 here']), [], 'the exact version token still resolves');
+  assert.deepStrictEqual(probeAnchors([{ token: '--dry-run', count: 1 }], ['run `--dry-run` first']), [], 'a hyphenated flag token resolves without throwing');
+});
+
+test('BREAK-3c end-to-end (index OFF): an astral-flanked decoy no longer strands a sole-home top-anchor — the orphan is KEPT LIVE (pre-fix: the code-unit boundary read misclassified the surrogate half, "api" false-resolved, and the orphan silently archived+deleted with an EMPTY anchorMisses)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex()); // over-arm so a run fires
+    // the orphan: UNREFERENCED, the ONLY home of top-anchor [[api]]
+    write(path.join(dir, 'orphan.md'), '# orphan\n\n' + Array(25).fill('- [[api]] the sole home of this anchor').join('\n') + '\n');
+    // a REFERENCED survivor holding ONLY the astral-flanked decoy (Mathematical
+    // Bold "rapid"), no genuine [[api]] / `api`.
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA — referenced by the index. styled \u{1D42B}api\u{1D41D} deployment prose.\n');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: false }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(fs.existsSync(path.join(dir, 'orphan.md')), 'the sole-home orphan is KEPT LIVE — the astral decoy no longer resolves [[api]]');
+    assert.ok(fs.readFileSync(path.join(dir, 'orphan.md'), 'utf8').includes('[[api]]'), '[[api]] stays reachable in the live tree');
+    assert.ok(res.kept.some((k) => k.path.endsWith('orphan.md')), 'the keep is recorded');
+  } finally { clean(home, proj); }
+});
+
+// BREAK-3c index-ON "burial → rollback" SUPERSEDED by finding B (see BREAK-3h):
+// post-fix a tree-top-N sole-home anchor is always carried by its top-N dig row,
+// so burial-below-10 no longer strands it. The astral-decoy → miss coverage is
+// retained by the BREAK-3c probe-UNIT test + the BREAK-3c index-OFF keep-live test.
+
 test('#57 write-side containment on the RE-TIER archive hop: a slug dir symlinked outside the archive root is refused — topic KEPT in the live tree, escape reported, nothing written through the link', () => {
   const { home, proj } = sandbox();
   try {
@@ -619,5 +888,223 @@ test('#57 write-side containment on the RE-TIER archive hop: a slug dir symlinke
     assert.ok(res.kept.some((k) => /escapes the archive root/.test(k.reason)), `escape reported via kept (got ${JSON.stringify(res.kept)})`);
     assert.deepStrictEqual(fs.readdirSync(outside), [], 'nothing written through the link');
     assert.ok(runRetierReport(res).includes('escapes the archive root'), 'the report surfaces the KEPT line');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// BREAK-3d — occursAsToken's FOURTH fix: the `u`-flag lookaround (BREAK-3c)
+// was itself BUILT FROM TOKEN CONTENT, which opened two new holes traced to
+// that one root cause — (1A) the boundary class omitted \p{Cf}, so a ZWJ/
+// ZWNJ/soft-hyphen-glued blob false-resolved a token as standalone; (3) a
+// >=32768-char token made `new RegExp(token-source)` exceed V8's regex-size
+// cap and THROW post-commit, with no catch, i.e. a committed mutation
+// reported to the caller as a thrown failure instead of a rollback. The
+// fix never compiles a pattern from the token (indexOf + a FIXED tiny
+// per-code-point regex). 1B (a Thai-glued anchor like `รุ่นv9.9.9กลาง`) is now CLOSED by fix #5 (see
+// BREAK-3e): resolution re-extracts with topAnchors' own forms, and
+// TA_VERSION_RE's ASCII word-boundary pulls `v9.9.9` whole out of the Thai glue,
+// so the version form resolves. occursAsToken and its DOCKET are retired.
+// ---------------------------------------------------------------------------
+
+test('BREAK-3d (1A) format-char (\\p{Cf}) flanks correctly REJECT — the THIRD fix\'s boundary class omitted \\p{Cf} (ZWJ/ZWNJ/soft hyphen), so a joiner-glued blob false-resolved a token as standalone; the THIRD fix\'s own astral bar still holds under the new indexOf mechanism', () => {
+  const ZWJ = '‍', ZWNJ = '‌', SHY = '­';
+  assert.deepStrictEqual(probeAnchors([{ token: 'widget', count: 9 }], [`pre${ZWJ}widget${ZWJ}post`]), [{ token: 'widget', count: 9 }], 'ZWJ-glued "widget" must not false-resolve');
+  assert.deepStrictEqual(probeAnchors([{ token: 'widget', count: 9 }], [`pre${ZWNJ}widget${ZWNJ}post`]), [{ token: 'widget', count: 9 }], 'ZWNJ-glued "widget" must not false-resolve');
+  assert.deepStrictEqual(probeAnchors([{ token: 'widget', count: 9 }], [`pre${SHY}widget${SHY}post`]), [{ token: 'widget', count: 9 }], 'soft-hyphen-glued "widget" must not false-resolve');
+  assert.deepStrictEqual(probeAnchors([{ token: 'widget', count: 9 }], ['see widget here']), [], 'a genuinely space-flanked occurrence still resolves (no availability regression)');
+  // regression pin: the THIRD fix's astral protection must still hold under the new indexOf mechanism
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 9 }], ['styled \u{1D42B}api\u{1D41D} text']), [{ token: 'api', count: 9 }], 'astral-flanked decoy still rejects (no regression from the indexOf rewrite)');
+});
+
+test('BREAK-3d (3) a >=32768-char token no longer THROWS (the retired token-built RegExp exceeded V8\'s regex-size cap) — probeAnchors resolves cleanly either direction, never a thrown exception', () => {
+  const giant = 'a'.repeat(40000);
+  assert.doesNotThrow(() => probeAnchors([{ token: giant, count: 1 }], [`x ${giant} y`]));
+  assert.deepStrictEqual(probeAnchors([{ token: giant, count: 1 }], [`x ${giant} y`]), [], 'a space-flanked giant token resolves');
+  assert.doesNotThrow(() => probeAnchors([{ token: giant, count: 1 }], ['no match here']));
+  assert.deepStrictEqual(probeAnchors([{ token: giant, count: 1 }], ['no match here']), [{ token: giant, count: 1 }], 'an absent giant token reports a clean miss, never a throw');
+});
+
+test('BREAK-3d (1A) end-to-end (index OFF): a ZWJ-glued decoy no longer strands a sole-home top-anchor via the strand-guard\'s own occursAsToken calls — the orphan is KEPT LIVE (pre-fix: the boundary class omitted \\p{Cf}, so the ZWJ decoy false-resolved [[api]], and the orphan silently archived+deleted with an EMPTY anchorMisses)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  const ZWJ = '‍';
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex()); // over-arm so a run fires
+    // the orphan: UNREFERENCED, the ONLY home of top-anchor [[api]]
+    write(path.join(dir, 'orphan.md'), '# orphan\n\n' + Array(25).fill('- [[api]] the sole home of this anchor').join('\n') + '\n');
+    // a REFERENCED survivor holding ONLY a ZWJ-glued decoy, no genuine [[api]] / `api`.
+    write(path.join(dir, 'alpha-topic.md'), `ALPHA — referenced by the index. pre${ZWJ}api${ZWJ}post joined blob.\n`);
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: false }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(fs.existsSync(path.join(dir, 'orphan.md')), 'the sole-home orphan is KEPT LIVE — the ZWJ decoy no longer resolves [[api]]');
+    assert.ok(fs.readFileSync(path.join(dir, 'orphan.md'), 'utf8').includes('[[api]]'), '[[api]] stays reachable in the live tree');
+    assert.ok(res.kept.some((k) => k.path.endsWith('orphan.md')), 'the keep is recorded');
+  } finally { clean(home, proj); }
+});
+
+// BREAK-3d (1A) index-ON "burial → rollback" SUPERSEDED by finding B (see
+// BREAK-3h). The ZWJ/\p{Cf}-decoy → miss coverage is retained by the BREAK-3d (1A)
+// probe-UNIT test + the BREAK-3d (1A) index-OFF keep-live test.
+
+test('BREAK-3d (3) end-to-end: a >=32768-char single-line codespan anchor no longer makes the post-commit probe THROW — the run completes cleanly (ok:true) instead of committing the demotion and then throwing with no rollback (pre-fix: runRetier had try/finally with NO catch around the probe, so the throw escaped past the lock release with MEMORY.md already mutated on disk)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    const bullets = [];
+    for (let i = 1; i <= 16; i++) bullets.push(`- [[note-${i}]] this is memory bullet number ${i} with enough prose to carry weight across the demotion envelope and push the index token count comfortably over the arm line ~~ padding padding padding`);
+    write(path.join(dir, 'MEMORY.md'), `# Memory index\n\nSee blob.md for the big dump.\n\n${bullets.join('\n')}\n`);
+    const giant = '`' + 'a'.repeat(40000) + '`'; // over V8's old regex-size cap once escaped into a token-built RegExp source
+    write(path.join(dir, 'blob.md'), `# blob\n\n${giant}\n`);
+    const indexOrig = fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), now });
+    // the fixed occursAsToken never compiles a regex from the token, so this
+    // cannot throw; the run must resolve cleanly (ok:true) rather than a
+    // committed-then-thrown state (index already mutated while the caller is told "failed").
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.notStrictEqual(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), indexOrig, 'the over-arm index actually demoted (the run did real work, not a no-op)');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// BREAK-3e — fix #5: the RESOLUTION MECHANISM is replaced, ending the
+// occursAsToken separator whack-a-mole (`-` then astral then \p{Cf} then the
+// regex-size throw — four fixes, each patching one boundary and leaving the
+// next open). Resolution now RE-EXTRACTS the surviving text with the SAME
+// tokenizer that produced the anchor (topAnchors' anchorFormsOf) + whitespace
+// words, then tests SET-MEMBERSHIP. A compound identifier is ONE whitespace
+// word, so a bare anchor is never a member of it — the false-resolve that
+// stranded sole-home anchors dies by construction, no separator left to chase.
+// ---------------------------------------------------------------------------
+
+test('BREAK-3e: a bare anchor never resolves inside a COMPOUND identifier (every separator at once: - . : / , ; ] ( ) | # !) — the false-resolve that silently stranded sole-home anchors is closed by construction, not by adding one more boundary char', () => {
+  const A = [{ token: 'api', count: 9 }];
+  for (const c of ['api-key', 'api-server', 'api.method', 'api:port', 'api/v2', 'api,foo', 'api;x', 'api]bar', '(api)', 'api|x', 'v2-api', 'my.api', 'svc/api', '#api', 'api!'])
+    assert.deepStrictEqual(probeAnchors(A, [c]), A, '"api" must NOT resolve inside the compound ' + JSON.stringify(c));
+  for (const c of ['api_key', 'foo_api', 'api_v2', 'apis', 'xapi', 'rapid'])
+    assert.deepStrictEqual(probeAnchors(A, [c]), A, 'connector/letter-glued ' + JSON.stringify(c) + ' still rejects');
+  // genuine forms still resolve (0 availability regression)
+  assert.deepStrictEqual(probeAnchors(A, ['see [[api]] here']), []);
+  assert.deepStrictEqual(probeAnchors(A, ['call `api` now']), []);
+  assert.deepStrictEqual(probeAnchors(A, ['the api works']), []);
+  assert.deepStrictEqual(probeAnchors(A, ['RE-TIER demoted\napi\nlabel']), []);
+});
+
+test('BREAK-3e 1B CLOSED: v9.9.9 now RESOLVES inside Thai-glued "รุ่นv9.9.9กลาง" — TA_VERSION_RE ASCII word-boundary extracts the self-delimiting version form whole (the ex-DOCKET(ic-1B) safe-direction false-fail, fixed as a free bonus of the mechanism swap)', () => {
+  assert.deepStrictEqual(probeAnchors([{ token: 'v9.9.9', count: 3 }], ['รุ่นv9.9.9กลาง']), [], 'v9.9.9 resolves out of the Thai glue (1B closed)');
+  assert.deepStrictEqual(probeAnchors([{ token: 'v9.9.9', count: 3 }], ['shipped v9.9.9 today']), [], 'and still resolves space-flanked');
+  // a BARE Latin word glued in Thai must STILL reject: no digits/self-delimiting
+  // structure -> not a version form, and one whitespace word (the same shape the
+  // astral/ZWJ decoys reject). Only the self-delimiting version crosses the glue.
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 3 }], ['ข้อมูลนapiลสำคัญ']), [{ token: 'api', count: 3 }], 'a bare word glued in Thai still rejects');
+});
+
+test('BREAK-3e end-to-end (index OFF): a sole-home [[api]] whose ONLY surviving mention is the COMPOUND "api-key" is NOT reported survived — the orphan is KEPT LIVE, not silently archived+deleted (the exact h4/h6 strand: pre-fix occursAsToken treated "-" as a boundary, so "api" false-resolved inside "api-key")', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex()); // over-arm so a run fires; references alpha, not orphan
+    // the orphan: UNREFERENCED, the ONLY genuine home of top-anchor [[api]]
+    write(path.join(dir, 'orphan.md'), '# orphan\n\n' + Array(25).fill('- [[api]] the sole home of this anchor').join('\n') + '\n');
+    // a REFERENCED survivor mentioning ONLY the compound "api-key", no genuine [[api]] / `api`
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index. Set the api-key in config before deploy.\n');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: false }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(fs.existsSync(path.join(dir, 'orphan.md')), 'the sole-home orphan is KEPT LIVE — "api-key" no longer resolves [[api]]');
+    assert.ok(fs.readFileSync(path.join(dir, 'orphan.md'), 'utf8').includes('[[api]]'), '[[api]] stays reachable in the live tree');
+    assert.ok(res.kept.some((k) => k.path.endsWith('orphan.md')), 'the keep is recorded');
+  } finally { clean(home, proj); }
+});
+
+// BREAK-3e index-ON "burial → rollback" SUPERSEDED by finding B (see BREAK-3h).
+// The compound ("api-key") → miss coverage is retained by the BREAK-3e probe-UNIT
+// test + the BREAK-3e index-OFF keep-live test.
+
+// ---------------------------------------------------------------------------
+// BREAK-3f — Vector 1 (version-superversion): TA_VERSION_RE was 3-part-EXACT
+// (\d+\.\d+\.\d+), so it matched `1.2.3` INSIDE a surviving 4-part `1.2.3.4`
+// (the trailing \b succeeds at the dot before the 4th group). A version anchor
+// `1.2.3` then falsely "survived" wherever any DIFFERENT 4-part version lived —
+// silently stranding a sole-home version. The fix: extract the WHOLE dotted-
+// numeric run greedily (\d+\.\d+(?:\.\d+)+), so `1.2.3.4` extracts as one whole
+// token and `1.2.3` is a member only of a genuine whole `1.2.3`. Birth
+// (topAnchors) and survival (anchorSetOf) share the regex, so they agree.
+// ---------------------------------------------------------------------------
+
+test('BREAK-3f Vector 1 version-superversion: a 3-part version anchor never resolves inside a surviving 4+-part version (whole-run greedy extraction), the whole version still resolves, and topAnchors still borns a standalone 3-part version (no birth-side regression)', () => {
+  // superversion masks: 1.2.3 must MISS -> the strand is caught (keep/rollback)
+  assert.deepStrictEqual(probeAnchors([{ token: '1.2.3', count: 3 }], ['Release 1.2.3.4 shipped']), [{ token: '1.2.3', count: 3 }], '1.2.3 must NOT resolve inside 1.2.3.4');
+  assert.deepStrictEqual(probeAnchors([{ token: '1.2.3', count: 3 }], ['a 1.2.3.4 b']), [{ token: '1.2.3', count: 3 }]);
+  // the real shape on this machine: a Windows build number 10.0.26200.x
+  assert.deepStrictEqual(probeAnchors([{ token: '10.0.26200', count: 2 }], ['build 10.0.26200.1 today']), [{ token: '10.0.26200', count: 2 }], 'a shorter version never resolves inside the 4-part build number');
+  // a WHOLE surviving version still resolves (0 availability regression)
+  assert.deepStrictEqual(probeAnchors([{ token: '1.2.3', count: 3 }], ['foo 1.2.3 today']), [], '1.2.3 resolves against a whole surviving 1.2.3');
+  assert.deepStrictEqual(probeAnchors([{ token: '10.0.26200.1', count: 2 }], ['build 10.0.26200.1 today']), [], 'the whole 4-part version resolves against itself');
+  // 1.2.30 is a different token (greedy \d+ already consumed the 30)
+  assert.deepStrictEqual(probeAnchors([{ token: '1.2.3', count: 1 }], ['x 1.2.30 y']), [{ token: '1.2.3', count: 1 }], '1.2.3 does not resolve inside 1.2.30');
+  // topAnchors still BORNs a standalone 3-part version (birth side unchanged)
+  const born = topAnchors(['shipped 1.2.3 and 1.2.3 again in the notes'], 5).map((a) => a.token);
+  assert.ok(born.includes('1.2.3'), 'a standalone 3-part version is still extracted as an anchor');
+  // restart position: two versions on one line each extract WHOLE — no 2.3.4/3.4 fragment
+  const twoV = topAnchors(['a 1.2.3.4 b and 5.6.7 too'], 10).map((a) => a.token).sort();
+  assert.deepStrictEqual(twoV, ['1.2.3.4', '5.6.7'], 'greedy run consumes the whole 4-part; the next match starts after it (no 2.3.4 fragment)');
+});
+
+test('BREAK-3f Vector 1 end-to-end (index OFF): a sole-home version anchor 1.2.3 whose only surviving mention is the SUPERVERSION 1.2.3.4 is NOT reported survived — the orphan is KEPT LIVE, not silently archived+deleted (pre-fix 1.2.3 matched inside 1.2.3.4 and the strand-guard let the orphan demote)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex()); // references alpha, not orphan; over-arm
+    write(path.join(dir, 'orphan.md'), '# orphan\n\n' + Array(25).fill('- shipped 1.2.3 in production, the sole record').join('\n') + '\n');
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index. Release 1.2.3.4 shipped notes here.\n');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: false }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(fs.existsSync(path.join(dir, 'orphan.md')), 'the sole-home orphan is KEPT LIVE — 1.2.3.4 no longer resolves 1.2.3');
+    assert.ok(fs.readFileSync(path.join(dir, 'orphan.md'), 'utf8').includes('1.2.3'), '1.2.3 stays reachable in the live tree');
+    assert.ok(res.kept.some((k) => k.path.endsWith('orphan.md')), 'the keep is recorded');
+  } finally { clean(home, proj); }
+});
+
+// BREAK-3f Vector 1 index-ON "burial → rollback" SUPERSEDED by finding B (see
+// BREAK-3h). The superversion (1.2.3 ⊄ 1.2.3.4) → miss coverage is retained by the
+// BREAK-3f probe-UNIT test + the BREAK-3f Vector 1 index-OFF keep-live test.
+
+// ---------------------------------------------------------------------------
+// BREAK-3g — Vector 2 (Unicode-space glue): anchorSetOf split on JS `\s`, which
+// matches NBSP (U+00A0) and ~25 other Unicode spaces. A compound glued by NBSP
+// (`apiz key`) split into a bare `apiz`, so a codespan/word anchor whose sole
+// home is archived falsely "survived". The fix: split on ASCII whitespace ONLY
+// ([ \t\r\n\f\v]+), so a Unicode-space-glued compound stays ONE token (errs
+// toward KEEP, the safe direction); a genuine ASCII space still splits.
+// ---------------------------------------------------------------------------
+
+test('BREAK-3g Vector 2 Unicode-space glue: anchorSetOf splits on ASCII whitespace only — a compound glued by NBSP (U+00A0) or the ideographic space (U+3000) stays ONE token and never manufactures a bare anchor; a genuine ASCII space still splits and resolves', () => {
+  const NBSP = String.fromCharCode(0x00a0);
+  const IDSP = String.fromCharCode(0x3000);
+  assert.deepStrictEqual(probeAnchors([{ token: 'apiz', count: 3 }], ['see apiz' + NBSP + 'key here']), [{ token: 'apiz', count: 3 }], 'apiz must NOT resolve inside an NBSP-glued "apiz key"');
+  assert.deepStrictEqual(probeAnchors([{ token: 'apiz', count: 3 }], ['see apiz' + IDSP + 'key here']), [{ token: 'apiz', count: 3 }], 'apiz must NOT resolve inside an ideographic-space-glued compound');
+  assert.deepStrictEqual(probeAnchors([{ token: 'apiz', count: 3 }], ['see apiz key here']), [], 'a genuine ASCII-space "apiz key" still splits -> apiz resolves');
+  // real ASCII whitespace (newline, tab) still splits words (no availability regression)
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['topEntities:\napi\nother']), [], 'LF-flanked api still resolves');
+  assert.deepStrictEqual(probeAnchors([{ token: 'api', count: 1 }], ['col1\tapi\tcol3']), [], 'tab-flanked api still resolves');
+});
+
+test('BREAK-3g Vector 2 end-to-end (index OFF): a sole-home codespan anchor `apiz` whose only surviving mention is an NBSP-glued `apiz key` is NOT reported survived — the orphan is KEPT LIVE (pre-fix the `\\s` split cut the NBSP, manufacturing a bare apiz that false-resolved the anchor)', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    const NBSP = String.fromCharCode(0x00a0);
+    write(path.join(dir, 'MEMORY.md'), bigIndex());
+    write(path.join(dir, 'orphan.md'), '# orphan\n\n' + Array(25).fill('- the `apiz` endpoint documented only here').join('\n') + '\n');
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index. Config apiz' + NBSP + 'key section notes.\n');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: false }), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(fs.existsSync(path.join(dir, 'orphan.md')), 'the sole-home orphan is KEPT LIVE — the NBSP-glued compound no longer resolves `apiz`');
+    assert.ok(fs.readFileSync(path.join(dir, 'orphan.md'), 'utf8').includes('`apiz`'), '`apiz` stays reachable in the live tree');
+    assert.ok(res.kept.some((k) => k.path.endsWith('orphan.md')), 'the keep is recorded');
   } finally { clean(home, proj); }
 });

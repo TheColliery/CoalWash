@@ -67,6 +67,24 @@ test('a dropped version string fails (with and without the v prefix, incl. pre-r
   assert.deepStrictEqual(r2.drops, [{ type: 'version-drop', value: '0.1.0-beta.2' }]);
 });
 
+test('version-superversion: a dropped standalone version is CAUGHT even when its 4-part superstring survives — the greedy whole-run regex keeps them distinct in the set-based inventory (pre-fix the 3-part-exact regex extracted `1.2.3` from `1.2.3.4`, collapsing both to one set entry, so a genuine `1.2.3` drop was SILENTLY PASSED through the deterministic floor)', () => {
+  // plain: drop the standalone 1.2.3, keep 1.2.3.4 elsewhere -> the drop must be caught
+  const plain = checkFidelity('shipped 1.2.3 and later 1.2.3.4 too', 'shipped and later 1.2.3.4 too');
+  assert.strictEqual(plain.pass, false, 'the standalone 1.2.3 drop must fail the gate');
+  assert.deepStrictEqual(plain.drops, [{ type: 'version-drop', value: '1.2.3' }]);
+  // v-prefixed: V_SHORT_VERSION_RE must NOT re-manufacture the truncated v1.2.3 from the surviving v1.2.3.4
+  const vpref = checkFidelity('shipped v1.2.3 and later v1.2.3.4 too', 'shipped and later v1.2.3.4 too');
+  assert.strictEqual(vpref.pass, false, 'the standalone v1.2.3 drop must fail the gate');
+  assert.deepStrictEqual(vpref.drops, [{ type: 'version-drop', value: 'v1.2.3' }]);
+  // the whole superversion is inventoried as itself, never the shorter fragment
+  const inv = inventory('build 1.2.3.4 and v10.0.26200.1 here');
+  assert.ok(inv.versions.has('1.2.3.4') && !inv.versions.has('1.2.3'), '1.2.3.4 inventoried whole, no 1.2.3 fragment');
+  assert.ok(inv.versions.has('v10.0.26200.1') && !inv.versions.has('v10.0.26200'), 'v10.0.26200.1 whole, no v10.0.26200 fragment');
+  // no regression: v-prefixed 2-part (V_SHORT's own purpose) still caught; a no-drop wash still passes
+  assert.ok(inventory('pin v1.2 here').versions.has('v1.2'), 'a v-prefixed 2-part version is still inventoried');
+  assert.strictEqual(checkFidelity('keep 1.2.3 and 1.2.3.4', 'keep 1.2.3 and 1.2.3.4').pass, true, 'a no-drop wash still passes');
+});
+
 test('a dropped frontmatter key fails; value edits alone do not (the semantic layer owns values)', () => {
   const noKey = ORIG.replace('topic: routing\n', '');
   assert.deepStrictEqual(checkFidelity(ORIG, noKey).drops, [{ type: 'frontmatter-key-drop', value: 'topic' }]);
@@ -173,6 +191,39 @@ test('frontmatterKeys: absent or unterminated frontmatter yields no keys (CRLF t
   assert.strictEqual(frontmatterKeys('---\nkey: value\nno closing fence').size, 0);
   const crlf = '---\r\npinned: true\r\ntopic: x\r\n---\r\nbody';
   assert.deepStrictEqual([...frontmatterKeys(crlf)].sort(), ['pinned', 'topic']);
+});
+
+test('frontmatterKeys: a non-[A-Za-z0-9_-] top-level key (dotted/$/path/unicode) IS caught as a drop — the silent-miss this fix closes', () => {
+  const orig = ['---', 'coalwash.updateMode: auto', 'title: x', '---', 'body'].join('\n');
+  const dropped = ['---', 'title: x', '---', 'body'].join('\n');
+  const r = checkFidelity(orig, dropped);
+  assert.strictEqual(r.pass, false);
+  assert.deepStrictEqual(r.drops, [{ type: 'frontmatter-key-drop', value: 'coalwash.updateMode' }]);
+  const shapes = frontmatterKeys(['---', '$ref: a', 'a.b.c: b', '/path/key: c', '---', 'body'].join('\n'));
+  assert.deepStrictEqual([...shapes].sort(), ['$ref', '/path/key', 'a.b.c']);
+  // no regression on the plain word-shaped keys the old regex already caught
+  const plain = ['---', 'title: a', 'version-transition: b', 'my_key: c', 'name: d', 'description: e', 'metadata: f', 'type: g', '---', 'body'].join('\n');
+  assert.deepStrictEqual([...frontmatterKeys(plain)].sort(), ['description', 'metadata', 'my_key', 'name', 'title', 'type', 'version-transition']);
+});
+
+test('frontmatterKeys: an embedded-colon key (a:b) is distinct from bare a — dropping a:b while a survives is now CAUGHT (was a silent miss: the old [^:]*? capture stopped at the first colon and collapsed a:b/a:c/bare-a all down to "a")', () => {
+  const orig = ['---', 'a:b: 1', 'a:c: 2', 'coalwash.a:x: 3', 'a: 4', 'title: 5', 'desc: see http://x.com', '---', 'body'].join('\n');
+  assert.deepStrictEqual([...frontmatterKeys(orig)].sort(), ['a', 'a:b', 'a:c', 'coalwash.a:x', 'desc', 'title']);
+  const dropped = ['---', 'a: 4', 'title: 5', 'desc: see http://x.com', '---', 'body'].join('\n');
+  const r = checkFidelity(orig, dropped);
+  assert.strictEqual(r.pass, false);
+  assert.deepStrictEqual(r.drops, [
+    { type: 'frontmatter-key-drop', value: 'a:b' },
+    { type: 'frontmatter-key-drop', value: 'a:c' },
+    { type: 'frontmatter-key-drop', value: 'coalwash.a:x' },
+  ]);
+});
+
+test('frontmatterKeys: an indented/nested key stays excluded (top-level-only, by design); a body-prose colon after the closing fence is never a phantom key', () => {
+  const withNested = ['---', 'title: x', '  nested: y', '---', 'Note: see below'].join('\n');
+  assert.deepStrictEqual([...frontmatterKeys(withNested)], ['title']);
+  const next = ['---', 'title: x', '---', 'Note: see below, trimmed'].join('\n');
+  assert.strictEqual(checkFidelity(withNested, next).pass, true, 'dropping a never-tracked nested key + editing body prose must not fail the gate');
 });
 
 // ---------------------------------------------------------------------------
@@ -417,4 +468,39 @@ test('inventory exposes codespans/quotes/numbers alongside the original 5 catego
   assert.deepStrictEqual([...inv.quotes], ['quote this']);
   assert.ok(inv.numbers.has('22'));
   assert.ok(inv.numbers.has('5%'));
+});
+
+// ---------------------------------------------------------------------------
+// BREAK 1 — fence-awareness (fenced code blocks) + v-prefixed short versions
+// (blind-IC: the IDENTICAL token FAILED inline but PASSED inside a ```fence```).
+// ---------------------------------------------------------------------------
+
+test('BREAK-1: a command/flag altered INSIDE a ```fenced``` block fails (the inline gate was blind to it)', () => {
+  const orig = ['Deploy steps:', '```bash', 'deploy --env=prod --dry-run', 'rollback --to v1.0.0', '```'].join('\n');
+  const next = orig.replace('deploy --env=prod --dry-run', 'deploy --env=prod'); // dropped --dry-run INSIDE the fence
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false, 'a changed fenced command line must fail the gate');
+  assert.ok(r.drops.some((d) => d.type === 'fenced-line-drop' && /--dry-run/.test(d.value)), JSON.stringify(r.drops));
+  // DECISIVE parity: the IDENTICAL token inline already failed — fence parity restored
+  assert.strictEqual(checkFidelity('Run `deploy --env=prod --dry-run` now.', 'Run `deploy --env=prod` now.').pass, false);
+});
+
+test('BREAK-1 no-FP: a fenced block preserved through a whitespace reindent / reorder still PASSES; an inline codespan drop is still caught', () => {
+  const orig = ['```', '  git checkout --force main', '```'].join('\n');
+  const reindented = ['```', 'git checkout --force main', '```'].join('\n'); // leading whitespace collapsed only
+  assert.strictEqual(checkFidelity(orig, reindented).pass, true, 'a whitespace-only reflow inside a fence is not a drop');
+  const a = ['```', 'line one', 'line two', '```'].join('\n');
+  const b = ['```', 'line two', 'line one', '```'].join('\n');
+  assert.strictEqual(checkFidelity(a, b).pass, true, 'reordering fenced content lines is not a drop (set semantics)');
+  assert.deepStrictEqual(checkFidelity('call `foo` here', 'call the helper here').drops, [{ type: 'codespan-drop', value: 'foo' }]);
+});
+
+test('BREAK-1 LOW: a dropped v-prefixed 2-part version (v1.2) is caught (it escaped both VERSION_RE and the number class)', () => {
+  const r = checkFidelity('Requires runtime v1.2 for the plugin.', 'Requires the runtime for the plugin.');
+  assert.strictEqual(r.pass, false, 'a dropped v1.2 must fail');
+  assert.deepStrictEqual(r.drops, [{ type: 'version-drop', value: 'v1.2' }]);
+  // no-FP: a bare decimal stays a NUMBER, never misfiled as a version (the `v` is required)
+  assert.deepStrictEqual(checkFidelity('waited 1.2 seconds', 'waited a moment').drops, [{ type: 'number-drop', value: '1.2' }]);
+  // a 3-part version is unaffected (regression guard)
+  assert.deepStrictEqual(checkFidelity('shipped v1.2.3 today', 'shipped today').drops, [{ type: 'version-drop', value: 'v1.2.3' }]);
 });

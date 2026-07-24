@@ -54,7 +54,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
-import { claudeBaseDir } from './config-load.mjs';
+// findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
+// derive projectRoot from cwd through it, never from untrusted plan/journal data).
+import { claudeBaseDir, findProjectRoot } from './config-load.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -351,7 +353,10 @@ export function ensureSelfIgnore(dir) {
 }
 
 // plan = {
-//   projectRoot: abs path (transaction dir + lock live under it),
+//   projectRoot: IGNORED — the transaction dir + lock + the containment trust
+//     anchor come from the CALLER (opts.projectRoot, else findProjectRoot(cwd)),
+//     NEVER this field (untrusted plan data; see the derivation in applyPlan). A
+//     caller may still set it for documentation, but the engine does not read it.
 //   roots: [abs...]            — the declared class-B roots writes may touch,
 //   actions: [{ type: 'rewrite'|'create'|'delete', path, content?, expectedOrig?, scope? }],
 //     expectedOrig (optional, rewrite/delete): the content the caller SCANNED
@@ -379,6 +384,12 @@ export function ensureSelfIgnore(dir) {
 // adjudicated plan (the insider-adjudication step) — same trust boundary as
 // `approvedDrops` below. There is no `deletesApproved` field to set; UNDO
 // (snapshot + whole-run rollback) is the safety net instead of pre-approval.
+// opts.projectRoot — the CALLER-TRUSTED project root (the containment anchor +
+//   tx-dir/bins/state home). A trusted caller (cli.mjs, runRetier) passes its
+//   cwd-derived findProjectRoot value here; when absent, applyPlan derives it from
+//   opts.cwd || process.cwd(). This is the ONE channel that can widen containment,
+//   so it must never be sourced from the (untrusted) plan.
+// opts.cwd (def process.cwd()) — only feeds the findProjectRoot fallback above.
 // opts.home (def os.homedir()) — where globalLockPath resolves; override for
 // hermetic tests, exactly like opts.txDir/opts.now/opts.keepSnapshots.
 // Returns { ok, deferred?, error?, applied?, snapshotDir?, rolledBack?, flagged? }.
@@ -388,8 +399,40 @@ export function applyPlan(plan, opts = {}) {
   try {
     // ---- validate shape (fail loud, nothing touched) ----
     if (!plan || typeof plan !== 'object') return { ok: false, error: 'plan must be an object' };
-    const { projectRoot, roots, actions } = plan;
-    if (!projectRoot || !Array.isArray(roots) || !roots.length) return { ok: false, error: 'plan needs projectRoot and non-empty roots[]' };
+    const { roots, actions } = plan;
+    // THE TRUST ANCHOR is the CALLER's projectRoot, NEVER plan.projectRoot. The
+    // plan is untrusted (method.md §4 runs `applyPlan(JSON.parse(PLAN.json))`),
+    // so a forged plan's projectRoot is attacker-chosen — anchoring containment on
+    // it is circular ONE LEVEL UP: the plan supplies BOTH the victim path AND the
+    // "projectRoot" that would contain it, so the check always passes (the live
+    // A1/A2 escape). Source it exactly as recoverDangling/cli.mjs do — the trusted
+    // caller root via opts.projectRoot, or, absent that, findProjectRoot(cwd): the
+    // agent's REAL working dir, which a forged PLAN.json cannot move. plan.projectRoot
+    // is IGNORED; a forged one is then caught below because its declared roots will
+    // not sit inside the real trusted set (the fail-closed the containment gate gives).
+    const projectRoot = opts.projectRoot || findProjectRoot(opts.cwd || process.cwd(), home);
+    // SECURITY — DERIVED-ANCHOR HOME-SWALLOW GUARD (untrusted-plan path only). When
+    // the anchor is DERIVED (no trusted opts.projectRoot), findProjectRoot can collapse
+    // it to home: cwd=home with no marker (returns home), OR a non-git cwd under a home
+    // that itself carries ~/.git (versioned dotfiles) — the walk climbs past the
+    // unmarked project to the ~/.git marker and returns home. A home-level anchor puts
+    // ~ ITSELF into trustedRoots below, so the containment gate faithfully authorizes a
+    // forged roots:[home] to delete ~/.ssh AND inject a hook into ~/.claude/settings.json
+    // => code execution next session. Refuse fail-closed when the DERIVED anchor SWALLOWS
+    // home (is home, or an ancestor of home) — realpath BOTH sides, the room's own
+    // containedIn (home inside anchor === anchor contains home). A trusted opts.projectRoot
+    // is the caller's own anchor and stays UNCHECKED (runRetier/cli.mjs). A derived anchor
+    // BELOW home (a real project dir, git or not) stays ALLOWED — a forged roots:[home]
+    // then escapes it and the gate refuses as before, blast bounded to the project +
+    // snapshot-backed; non-git users keep working (no-external-assumption).
+    if (!opts.projectRoot) {
+      const anchorPhys = physicalOrNull(projectRoot);
+      const homePhys = physicalOrNull(home);
+      if (!anchorPhys || !homePhys || containedIn(homePhys, [anchorPhys])) {
+        return { ok: false, error: `containment: the derived project anchor (${anchorPhys || projectRoot}) is the home directory or an ancestor of it — refusing fail-closed (a home-level anchor would authorize writes anywhere under ~, e.g. ~/.ssh or ~/.claude/settings.json); run from the actual project dir, or pass a trusted opts.projectRoot` };
+      }
+    }
+    if (!Array.isArray(roots) || !roots.length) return { ok: false, error: 'plan needs non-empty roots[]' };
     if (!Array.isArray(actions) || !actions.length) return { ok: false, error: 'plan needs non-empty actions[]' };
     for (const a of actions) {
       if (!a || !['rewrite', 'create', 'delete'].includes(a.type)) return { ok: false, error: `unknown action type: ${a && a.type}` };
@@ -401,6 +444,26 @@ export function applyPlan(plan, opts = {}) {
     // ---- containment: realpath-and-contain BOTH sides, fail-closed ----
     const physRoots = roots.map((r) => physicalOrNull(r)).filter(Boolean);
     if (physRoots.length !== roots.length) return { ok: false, error: 'containment: a declared root does not resolve (fail-closed)' };
+    // THE TRUSTED OUTER GATE (parity with recoverDangling's C1/H1 close below):
+    // plan.roots is part of the SAME plan as the actions, so anchoring containment
+    // on plan.roots ALONE is CIRCULAR — a forged/injected plan supplies BOTH the
+    // target AND the roots that "contain" it, and the check always passes. Anchor
+    // on the CALLER-TRUSTED roots a plan cannot widen: the `projectRoot` resolved
+    // ABOVE (opts.projectRoot or findProjectRoot(cwd) — NEVER plan.projectRoot, which
+    // would re-open the circularity one level up) + the ONLY global-physical store
+    // CoalWash washes today, ccMemoryDir — the SAME set recoverDangling uses, so the
+    // two paths stay symmetric. plan.roots stays a
+    // SECONDARY narrowing: a plan may restrict to a SUBSET of the trusted roots,
+    // never widen beyond them; a declared root outside the trusted set fails
+    // closed. ponytail: when the PENDING global-GOVERNANCE wash driver ships
+    // (MEMORY "Global lock/keeps DRIVER"), add those SPECIFIC roots here too,
+    // exactly as recoverDangling's trustedRoots note says — never claudeBaseDir
+    // wholesale (that would let a poisoned plan target ~/.claude/settings.json).
+    const trustedRoots = [physicalOrNull(projectRoot), physicalOrNull(ccMemoryDir(projectRoot, home))].filter(Boolean);
+    if (!trustedRoots.length) return { ok: false, error: 'containment: no trusted root resolves (fail-closed)' };
+    for (const r of physRoots) {
+      if (!containedIn(r, trustedRoots)) return { ok: false, error: `containment: declared root ${r} escapes the caller-trusted roots (projectRoot + global class-B) — fail-closed refuse` };
+    }
     const resolved = [];
     for (const a of actions) {
       let phys;
@@ -656,8 +719,15 @@ export function applyPlan(plan, opts = {}) {
         for (const m of manifest) {
           try { fs.copyFileSync(path.join(snapDir, m.snap), m.original); } catch { failed++; /* keep restoring the rest */ }
         }
-        for (const p of createdPaths) { try { fs.rmSync(p, { force: true }); } catch {} }
-        for (const a of actionable) { try { fs.rmSync(a.phys + '.coalwash-tmp', { force: true }); } catch {} }
+        // A created file (or a stranded .coalwash-tmp sibling) the rollback CANNOT
+        // remove LINGERS in the store = a mixed state, exactly like a failed
+        // snapshot restore — count it (EPERM/EBUSY: AV or cloud-sync holding a
+        // no-FILE_SHARE_DELETE handle, the win32 hazard) so the status below is
+        // honestly rollback-failed, never a clean rolledBack:true over a lingering
+        // file. force:true never throws on a missing target, so a throw here means
+        // a real removal failure; the existsSync belt counts it ONLY if it lingers.
+        for (const p of createdPaths) { try { fs.rmSync(p, { force: true }); } catch { if (fs.existsSync(p)) failed++; } }
+        for (const a of actionable) { const tmp = a.phys + '.coalwash-tmp'; try { fs.rmSync(tmp, { force: true }); } catch { if (fs.existsSync(tmp)) failed++; } }
         // A PARTIAL rollback must NOT be marked terminal-clean, or a cold-start
         // recoverDangling would clear the journal over a mixed on-disk state.
         journal.status = failed ? 'rollback-failed' : 'rolled-back';
@@ -702,7 +772,7 @@ export function applyPlan(plan, opts = {}) {
         }
       } catch (e) {
         const failed = rollback();
-        if (failed) return { ok: false, rolledBack: 'partial', restoreFailures: failed, error: `apply failed AND ${failed} original(s) could not be restored — memory may be mixed; snapshot kept at ${snapDir}: ${e.message}` };
+        if (failed) return { ok: false, rolledBack: 'partial', restoreFailures: failed, error: `apply failed AND rollback left ${failed} item(s) in a mixed state (an original that could not be restored, a created file that could not be removed, or a stranded tmp) — memory may be mixed; snapshot kept at ${snapDir}: ${e.message}` };
         return { ok: false, rolledBack: true, error: `apply failed at a step — snapshot restored: ${e.message}` };
       }
 

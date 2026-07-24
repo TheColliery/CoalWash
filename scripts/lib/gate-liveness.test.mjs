@@ -57,6 +57,9 @@ function applySandbox() {
 function planFor(proj, store, actions, extra = {}) {
   return { projectRoot: proj, roots: [store], actions, sessionId: 'gl-session', ...extra };
 }
+// applyPlan anchors containment on the CALLER-trusted projectRoot (opts.projectRoot),
+// never the plan's own (untrusted) projectRoot — pass the sandbox proj as that root.
+const apply = (plan, opts = {}) => applyPlan(plan, { projectRoot: plan && plan.projectRoot, ...opts });
 
 // estate/retier sandbox: a CC-shaped home (so detectPlatform === 'claude-code')
 // + a project.
@@ -87,13 +90,13 @@ test('GATE-LIVENESS 1 — fidelity gate is load-bearing: an un-approved [[wikili
     const lossy = 'keep [[alpha]] here'; // drops [[beta]]
 
     // FIRES: un-approved drop → blocked, file untouched (dead-gate sentinel).
-    const blocked = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: lossy }]));
+    const blocked = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: lossy }]));
     assert.strictEqual(blocked.ok, false, 'DEAD GATE: fidelity did not block an un-approved [[beta]] drop');
     assert.match(blocked.error, /fidelity/);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), 'keep [[alpha]] and [[beta]] here', 'file untouched while blocked');
 
     // MUTANT: lift the gate's veto for exactly that drop → the loss lands.
-    const passed = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: lossy }], { approvedDrops: ['wikilink-drop:beta'] }));
+    const passed = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: lossy }], { approvedDrops: ['wikilink-drop:beta'] }));
     assert.strictEqual(passed.ok, true, passed.error);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), lossy, 'veto lifted → the [[beta]] drop is a REAL loss (gate was load-bearing)');
   } finally { clean(proj); }
@@ -152,7 +155,7 @@ test('GATE-LIVENESS 3a — verifySnapshot is load-bearing: a corrupt snapshot co
     // FIRES: the snapshot copy is corrupt → verifySnapshot fails → abort before mutation.
     const restore = patch(fs, 'copyFileSync', impl);
     let r;
-    try { r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'original updated' }])); } finally { restore(); }
+    try { r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'original updated' }])); } finally { restore(); }
     assert.strictEqual(r.ok, false, 'DEAD GATE: a corrupt snapshot was not caught');
     assert.match(r.error, /snapshot verify failed/);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), 'original', 'file untouched — verify aborts before the completion marker + any write');
@@ -162,7 +165,7 @@ test('GATE-LIVENESS 3a — verifySnapshot is load-bearing: a corrupt snapshot co
     const restoreCopy = patch(fs, 'copyFileSync', impl);
     const restoreCmp = patch(Buffer, 'compare', () => 0);
     let r2;
-    try { r2 = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'original updated' }])); } finally { restoreCmp(); restoreCopy(); }
+    try { r2 = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'original updated' }])); } finally { restoreCmp(); restoreCopy(); }
     assert.strictEqual(r2.ok, true, r2.error);
     assert.ok(!/snapshot verify failed/.test(r2.error || ''), 'verifySnapshot was the gate — neutralized, no verify abort');
     assert.strictEqual(fs.readFileSync(path.join(r2.snapshotDir, 'f0'), 'utf8'), 'CORRUPT-SNAPSHOT', 'a corrupt (unrestorable) backup was trusted = the loss verifySnapshot prevents');
@@ -247,7 +250,7 @@ test('GATE-LIVENESS 5 — containment is load-bearing: a create escaping the dec
   const escaped = path.join(proj, 'ESCAPED.md'); // outside roots = [store] (store = proj/memory)
   try {
     // FIRES: containment refuses the escape, nothing written outside.
-    const r = applyPlan(planFor(proj, store, [{ type: 'create', path: escaped, content: 'x' }]));
+    const r = apply(planFor(proj, store, [{ type: 'create', path: escaped, content: 'x' }]));
     assert.strictEqual(r.ok, false, 'DEAD GATE: a path outside the declared roots was not refused');
     assert.match(r.error, /containment|escapes/);
     assert.strictEqual(fs.existsSync(escaped), false, 'nothing written outside the roots');
@@ -258,7 +261,7 @@ test('GATE-LIVENESS 5 — containment is load-bearing: a create escaping the dec
     // containment check.)
     const restore = patch(path, 'relative', () => 'inside');
     let r2;
-    try { r2 = applyPlan(planFor(proj, store, [{ type: 'create', path: escaped, content: 'ESCAPED-WRITE' }])); } finally { restore(); }
+    try { r2 = apply(planFor(proj, store, [{ type: 'create', path: escaped, content: 'ESCAPED-WRITE' }])); } finally { restore(); }
     assert.strictEqual(r2.ok, true, r2.error);
     assert.strictEqual(fs.readFileSync(escaped, 'utf8'), 'ESCAPED-WRITE', 'containment neutralized → an out-of-roots write landed (load-bearing)');
   } finally { clean(proj); }
@@ -309,7 +312,7 @@ test('GATE-LIVENESS 7 — the external-writer guard is load-bearing: a target ch
 
     // FIRES: disk != the gated baseline → abort, foreign bytes preserved.
     write(f, foreign);
-    const r = applyPlan(planFor(proj, store, [action]));
+    const r = apply(planFor(proj, store, [action]));
     assert.strictEqual(r.ok, false, 'DEAD GATE: a foreign mid-run change was not detected');
     assert.match(r.error, /external writer/);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), foreign, 'foreign bytes preserved; the stale rewrite was rejected');
@@ -319,7 +322,7 @@ test('GATE-LIVENESS 7 — the external-writer guard is load-bearing: a target ch
     write(f, foreign);
     const restore = patch(Buffer, 'compare', () => 0);
     let r2;
-    try { r2 = applyPlan(planFor(proj, store, [action])); } finally { restore(); }
+    try { r2 = apply(planFor(proj, store, [action])); } finally { restore(); }
     assert.strictEqual(r2.ok, true, r2.error);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), 'hello world plus', 'guard neutralized → the foreign change was clobbered = the loss it prevents');
   } finally { clean(proj); }

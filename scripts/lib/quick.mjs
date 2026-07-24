@@ -1,23 +1,48 @@
 // quick.mjs — beta.12 item 7 (queue item 0b, "QUICK-CEILING EXPANSION"): the
 // FIRST two Quick-tier ops promoted from agent-executed procedure
 // (method.md §1, which has always been hand-run, never coded) into
-// deterministic CODE. Both are LAB-GRADUATED — named, real defects the wear
-// campaign found, not speculative ceiling-chasing:
-//   (1) sweepResidue    — r1 #11's residue, hit again at r3 ("## Commits"
-//       heading left behind after its content was cut). Scope-limited to
-//       "our own knife's residue": a heading MATCHED between orig and new by
-//       (level,title) that had content in orig and has NONE in new. Never
-//       touches a heading that was ALREADY empty before this edit (that is
-//       queue item 0b's named non-graduate: a deliberate placeholder =
-//       intent = meaning, flagEmptyHeadings' job, never an auto-cut).
-//   (2) stripEmptyTables — r1 #11 again ("nothing survives because nothing
-//       exists"): a GFM table reduced to header+separator+ZERO data rows is
-//       UNCONDITIONALLY safe to remove (no orig needed — an empty table
-//       conveys no content under any history, unlike an empty heading which
-//       might be a deliberate section placeholder).
+// deterministic CODE. Both are LAB-GRADUATED at birth — named, real defects
+// the wear campaign found, not speculative ceiling-chasing — and BOTH have
+// since been RETIRED as text-mutators, safety-over-yield (see (1)/(2)):
+//   (1) sweepResidue    — RETIRED as a text-mutator (IC-PIN wave-6, a blind
+//       re-IC over wave-5). r1 #11's residue insight ("## Commits" left
+//       behind after its content was cut) was right that the EMPTIED BODY is
+//       our own knife's residue, but wrong that the HEADING LINE is too -- a
+//       title is always content (often a full instruction, e.g. "## Do not
+//       delete the audit log without sign-off"), exactly like queue 0b's own
+//       already-shipped rule for a PRE-EXISTING empty heading ("placeholder =
+//       intent = meaning"). Wave-6 makes the two cases CONSISTENT: neither a
+//       pre-existing-empty heading NOR one emptied by this run is ever
+//       auto-cut. Kept as a pipeline-shaped (origText, newText) no-op --
+//       unchanged signature, so an existing call site needs no reshaping --
+//       because flagEmptyHeadings already flags every empty-bodied heading it
+//       finds in a single snapshot, catching the just-emptied case for free
+//       once this function stops removing it.
+//   (2) stripEmptyTables — RETIRED as a text-mutator (USER decision
+//       2026-07-24, safety-over-yield). Born from r1 #11 ("nothing survives
+//       because nothing exists"), its provable-residue/identity mechanism
+//       went through SIX consecutive blind-IC waves -- content-header (the
+//       origText provenance check) -> key-collision (a lossy joined-cells
+//       key colliding two different headers) -> verbatim-key (anchoring to
+//       the header's exact line bytes instead) -> uniqueness (a same-document
+//       newText uniqueness gate) -> lazy-continuation-consumption -- each fix
+//       closing ONE mechanism only for a new one to appear. No auto-cut = no
+//       false-cut = the whole residue-distinction class becomes unreachable,
+//       the same call (1)'s retirement made. Kept as a pipeline-shaped
+//       (origText, newText) no-op -- unchanged signature, origText now
+//       unused, so an existing call site needs no reshaping -- because
+//       flagEmptyTables already flags every header+separator+zero-body-row
+//       table it finds in a single snapshot, source-authored or emptied this
+//       run alike, catching every case for free once this function stops
+//       removing any of them; a human/semantic tier (the wizard) adjudicates
+//       what it surfaces.
 //   (3) flagEmptyHeadings — the GENERAL case (no orig-vs-new residue scope):
 //       a bare empty heading found in a SINGLE snapshot is FLAGGED only,
-//       never auto-cut (queue item 0b's named non-graduate).
+//       never auto-cut (queue item 0b's named non-graduate; since wave-6 this
+//       is the only place a just-emptied heading's title gets surfaced).
+//   (4) flagEmptyTables  — the table's counterpart to (3), added wave-6: a
+//       header+separator+ZERO-body-row table found in a SINGLE snapshot is
+//       FLAGGED only, never auto-cut.
 //
 // MECHANICAL-SHARE MEASUREMENT (queue 0b's precondition — "measure the
 // mechanical share first from existing receipts... decide by number, not
@@ -42,13 +67,57 @@
 // A markdown ATX heading line: 1-6 #'s, a space, the title, an optional
 // trailing closing-hash run stripped (CommonMark allows `## Title ##`).
 const HEADING_RE = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/;
-// A GFM table row: at least one pipe, non-empty on the line (a bare `|` alone
-// still counts — a 1-column table is valid GFM).
-const TABLE_ROW_RE = /^[ \t]*\|.*\|?[ \t]*$|^[ \t]*\S.*\|.*$/;
-// The separator row: pipes/colons/dashes/whitespace ONLY, each cell >= 1 dash
-// (CommonMark's own minimum) — this is what distinguishes "header+separator"
-// from two ordinary consecutive data rows.
-const TABLE_SEP_RE = /^[ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)*[ \t]*:?-+:?[ \t]*\|?[ \t]*$/;
+
+// Minimal GFM table recognition (LOGIC ported from CoalLedger md-ast.mjs
+// splitRow/parseDelimiterRow — CW is zero-dep, so port the logic, never import
+// cross-repo). The old loose TABLE_ROW_RE/TABLE_SEP_RE matched ANY pipe-bearing
+// line + ANY bare `---`, so a setext heading "X | Y" over a `---` underline (or
+// prose "A | B" over a thematic break) was destroyed as a phantom empty table.
+// Split a table row into cells, honoring backslash-escaped pipes; a leading/
+// trailing pipe delimits, it does not add a cell. Returns { cells, hadPipe }.
+function splitCells(line) {
+  const cells = [];
+  let cur = '';
+  let hadPipe = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '\\' && i + 1 < line.length) { cur += c + line[i + 1]; i++; continue; }
+    if (c === '|') { hadPipe = true; cells.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  cells.push(cur);
+  const t = line.trim();
+  if (cells.length && cells[0].trim() === '' && t.startsWith('|')) cells.shift();
+  if (cells.length && cells[cells.length - 1].trim() === '' && t.endsWith('|') && !t.endsWith('\\|')) cells.pop();
+  return { cells: cells.map((c) => c.trim()), hadPipe };
+}
+const DELIM_CELL_RE = /^:?-+:?$/;
+// A REAL GFM delimiter row: it HAS pipes (the task's rule; matches CoalLedger's
+// `if (!hadPipe) return null`) and EVERY cell is `:?-+:?`. Returns the column
+// count, or 0 when the line is not a delimiter row — so a bare `---` (no pipe)
+// under a pipe-bearing line is a thematic break / setext underline, never a
+// separator.
+function delimiterCellCount(line) {
+  const { cells, hadPipe } = splitCells(line);
+  if (!hadPipe || !cells.length) return 0;
+  return cells.every((c) => DELIM_CELL_RE.test(c)) ? cells.length : 0;
+}
+
+// CommonMark indented-code threshold (§4.4): a line starting with >=4 spaces
+// or a tab is literal code, never GFM table syntax. A header/delimiter shape
+// living there is not PROVABLY an empty table -> the broom's own "cut only
+// provable garbage" rule says leave it. A 2-space-indented pipe shape is
+// still real (loose-list-adjacent) prose and stays cuttable -- only the
+// >=4-space/tab code threshold is skipped.
+const INDENTED_CODE_RE = /^(?: {4,}|\t)/;
+
+// IC-PIN wave-5 FIX 2: a table's delimiter row must sit at the SAME leading
+// indentation as its header. INDENTED_CODE_RE on the header alone is not
+// enough -- a header at column 0 paired with a >=4-space/tab-indented
+// delimiter (or any indent MISMATCH between the two, even under the code
+// threshold) is not a provable GFM table pair.
+const LEADING_WS_RE = /^[ \t]*/;
+const leadingWs = (line) => LEADING_WS_RE.exec(line)[0];
 
 function parseHeadings(text) {
   const lines = String(text).split(/\r?\n/);
@@ -71,63 +140,70 @@ function headingBody(lines, heads, idx) {
   return lines.slice(h.line + 1, endLine).join('\n').trim();
 }
 
-// (1) sweepResidue: a heading matched by (level,title) between origText and
-// newText that HAD a body in orig and has NONE in new is our own knife's
-// residue — remove the heading line (its body is already empty, nothing
-// else to delete) plus one following blank line (avoids a double-blank
-// scar). A heading absent from orig (a brand-new heading in newText) is
-// never touched — only a MATCHED, newly-emptied heading qualifies.
+// (1) sweepResidue: RETIRED as a text-mutator (IC-PIN wave-6). A heading
+// TITLE is always content -- deleting it (as this function used to do for a
+// heading matched between origText/newText that had a body in orig and none
+// in new) can destroy a load-bearing instruction whose "body" just happens
+// to be empty right now. This makes the just-emptied case consistent with
+// the pre-existing-empty-heading case (queue 0b: "placeholder = intent =
+// meaning") -- both are preserved, never auto-cut. Kept as a named
+// (origText, newText) pass-through -- unchanged signature, so an existing
+// call site needs no reshaping -- because flagEmptyHeadings (below) already
+// flags every empty-bodied heading it finds in a single snapshot, catching
+// the just-emptied case for free once this function stops removing it.
 export function sweepResidue(origText, newText) {
-  const orig = parseHeadings(String(origText));
-  const next = parseHeadings(String(newText));
-  const toRemove = new Set();
-  for (let i = 0; i < next.heads.length; i++) {
-    const h = next.heads[i];
-    const origIdx = orig.heads.findIndex((oh) => oh.title === h.title && oh.level === h.level);
-    if (origIdx === -1) continue; // not present before this edit -> not our residue
-    const origBody = headingBody(orig.lines, orig.heads, origIdx);
-    if (!origBody) continue; // already empty before this edit -> flagEmptyHeadings' job, never auto-cut here
-    const newBody = headingBody(next.lines, next.heads, i);
-    if (!newBody) toRemove.add(h.line);
-  }
-  if (!toRemove.size) return String(newText);
-  const out = [];
-  for (let i = 0; i < next.lines.length; i++) {
-    if (toRemove.has(i)) {
-      if (i + 1 < next.lines.length && next.lines[i + 1].trim() === '') i++;
-      continue;
-    }
-    out.push(next.lines[i]);
-  }
-  return out.join('\n');
+  return String(newText);
 }
 
-// (2) stripEmptyTables: a table block (header row + separator row) with ZERO
-// following data rows is removed whole — unconditional, no orig needed
-// ("nothing survives because nothing exists" — an empty table conveys no
-// content under any history, unlike an empty heading).
-export function stripEmptyTables(text) {
-  const lines = String(text).split(/\r?\n/);
-  const toRemove = new Set();
-  for (let i = 0; i < lines.length - 1; i++) {
-    if (toRemove.has(i)) continue;
-    if (!TABLE_ROW_RE.test(lines[i]) || TABLE_SEP_RE.test(lines[i])) continue; // header itself must not ALSO look like a bare separator
-    if (!TABLE_SEP_RE.test(lines[i + 1])) continue;
-    const hasDataRow = i + 2 < lines.length && TABLE_ROW_RE.test(lines[i + 2]) && !TABLE_SEP_RE.test(lines[i + 2]);
-    if (hasDataRow) continue;
-    toRemove.add(i);
-    toRemove.add(i + 1);
+// Shared GFM table-candidate walk: scans `lines` and, for each STRUCTURALLY
+// VALID header+delimiter pair, calls onTable(headerLineIdx, headerCells,
+// bodyRowCount) then skips past the whole consumed block (header +
+// delimiter + every contiguous non-blank line after it, GFM's lazy body-row
+// rule) so a real data row is never re-offered as a fresh candidate header
+// (adjacent dash-shaped rows are lazy continuation body rows of the SAME
+// table, not a second table). Used by flagEmptyTables below -- the sole
+// remaining caller since stripEmptyTables's own cut mechanism (and its
+// scanTables provenance helper) was retired 2026-07-24 -- one definition of
+// "what is a table".
+function forEachTableCandidate(lines, onTable) {
+  let i = 0;
+  while (i < lines.length - 1) {
+    const header = lines[i];
+    if (!header.includes('|')) { i++; continue; } // no pipe -> a setext/thematic/prose line, never a table header
+    if (INDENTED_CODE_RE.test(header)) { i++; continue; } // >=4-space/tab indent -> CommonMark literal code, not provably a table
+    const delimLine = lines[i + 1];
+    // IC-PIN wave-5 FIX 2: the delimiter must share the header's own
+    // (non-code) indent -- a >=4-space/tab-indented delimiter, or one whose
+    // indent differs from the header's, is not a provable GFM table pair
+    // even when the header alone looks table-shaped.
+    if (INDENTED_CODE_RE.test(delimLine) || leadingWs(delimLine) !== leadingWs(header)) { i++; continue; }
+    const sepCount = delimiterCellCount(delimLine);
+    if (!sepCount) { i++; continue; } // line i+1 is not a real GFM delimiter row
+    if (delimiterCellCount(header)) { i++; continue; } // the header must not itself be a delimiter (two separators in a row)
+    const { cells: headerCells } = splitCells(header);
+    if (headerCells.length !== sepCount) { i++; continue; } // COLUMN-COUNT MISMATCH -> a `---` under pipe-prose, not a table
+    let j = i + 2;
+    while (j < lines.length && lines[j].trim() !== '') j++;
+    onTable(i, headerCells, j - (i + 2));
+    i = j; // skip past the whole consumed block, empty or not
   }
-  if (!toRemove.size) return String(text);
-  const out = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (toRemove.has(i)) {
-      if (!toRemove.has(i - 1) && i + 1 < lines.length && lines[i + 1].trim() === '' && !toRemove.has(i + 1)) { /* leave the single trailing blank as-is */ }
-      continue;
-    }
-    out.push(lines[i]);
-  }
-  return out.join('\n');
+}
+
+// (2) stripEmptyTables: RETIRED as a text-mutator (USER decision 2026-07-24,
+// safety-over-yield). Its provable-residue/identity mechanism went through
+// SIX consecutive blind-IC waves -- content-header -> key-collision ->
+// verbatim-key -> uniqueness -> lazy-continuation-consumption -- each fix
+// closing ONE mechanism only for a new one to appear (see the top-of-file
+// note (2) for the full chain). No auto-cut = no false-cut = the whole
+// residue-distinction class becomes unreachable, the same call (1)'s
+// retirement made. Kept as a named (origText, newText) pass-through --
+// unchanged signature, origText now unused, so an existing call site needs
+// no reshaping -- because flagEmptyTables (below) already flags every
+// header+separator+zero-body-row table it finds in a single snapshot,
+// source-authored or emptied this run alike, catching every case for free
+// once this function stops removing any of them.
+export function stripEmptyTables(origText, newText) {
+  return String(newText);
 }
 
 // (3) flagEmptyHeadings: the GENERAL case, no orig-vs-new scope — a bare
@@ -140,5 +216,22 @@ export function flagEmptyHeadings(text) {
   for (let i = 0; i < heads.length; i++) {
     if (!headingBody(lines, heads, i)) out.push({ line: heads[i].line, level: heads[i].level, title: heads[i].title });
   }
+  return out;
+}
+
+// (4) flagEmptyTables: the table's counterpart to flagEmptyHeadings -- the
+// GENERAL case, no orig-vs-new scope. A header+separator table with ZERO
+// body rows found in ONE snapshot is FLAGGED only, never auto-cut (a
+// header-only table might be deliberate callout/schema content, the same
+// "intent = meaning" reasoning as a placeholder heading). Since
+// stripEmptyTables's cut mechanism was retired (2026-07-24), this is the
+// ONLY surface an empty table -- source-authored or emptied this run alike
+// -- is ever reported through. Returns [{line, header}].
+export function flagEmptyTables(text) {
+  const lines = String(text).split(/\r?\n/);
+  const out = [];
+  forEachTableCandidate(lines, (line, headerCells, bodyRows) => {
+    if (bodyRows === 0) out.push({ line, header: headerCells.join(' | ') });
+  });
   return out;
 }

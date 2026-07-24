@@ -29,3 +29,10 @@ Thumbs.db
 .env
 .env.*
 *.tmp
+
+# IC lab prototypes — ungraduated, never ship (blueprint §19.6 gate)
+scripts/lib/explode.mjs
+scripts/lib/explode.test.mjs
+scripts/lib/detonate.mjs
+scripts/lib/detonate.test.mjs
+work/

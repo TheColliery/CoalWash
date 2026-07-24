@@ -6,7 +6,9 @@
 // (keyed by TARGET, so a display-text edit is not a drop), dates (canonicalized
 // to YYYY-MM-DD, so an ISO<->DD-Mon-YYYY reformat of the same day is not a drop),
 // version strings, link DESTINATIONS ([text](url) / <autolink> / bare URL),
-// frontmatter keys, backtick `code spans` (keyed verbatim), double-quoted
+// frontmatter keys, backtick `code spans` (keyed verbatim), fenced code-block
+// content lines (whitespace-collapsed — the inline codespan RE is single-line,
+// blind to what sits inside a ```fence```), double-quoted
 // "spans"/"spans" (curly or straight, keyed by the quoted text — a style
 // restyle is not a drop), and number-shaped tokens (ratios, percents, ~Nk /
 // N.N forms, comma-grouped counts like 44,192 keyed comma-less, and bare
@@ -49,7 +51,18 @@ const WIKILINK_RE = /\[\[([^[\]]+)\]\]/g;
 const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g;
 // The series' DD-Mon-YYYY house style ("15-Jun-2026") — used heavily in memory files.
 const DMY_DATE_RE = /\b\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{4}\b/g;
-const VERSION_RE = /\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?\b/g;
+// GREEDY whole dotted-numeric run (3+ parts): `1.2.3.4` extracts as one whole
+// token, never the fragment `1.2.3` — else the SET-based inventory collapses a
+// standalone `1.2.3` with `1.2.3.4`, and a genuine DROP of `1.2.3` while
+// `1.2.3.4` survives goes UNDETECTED (silent version loss through the gate).
+const VERSION_RE = /\bv?\d+\.\d+(?:\.\d+)+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?\b/g;
+// A `v`-PREFIXED short version (v1.2) slips VERSION_RE (not 3-part) and its
+// leading `v` kills the \b the number scan needs ("1.2" in "v1.2" is never a
+// bare decimal); REQUIRING the `v` keeps genuine bare decimals (0.92) in the
+// number class. Trailing `(?:\.\d+)*` is GREEDY for the SAME whole-run reason:
+// `v1.2.3.4` extracts whole, never the fragment `v1.2.3` that would re-add the
+// dropped token to the new inventory and defeat VERSION_RE's collapse fix.
+const V_SHORT_VERSION_RE = /\bv\d+\.\d+(?:\.\d+)*(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?\b/g;
 // Link DESTINATIONS are the most common fact-carrier in prose docs — a dropped
 // [text](url), <autolink>, or bare URL is a lost fact the wikilink RE never saw.
 const MDLINK_DEST_RE = /\]\(\s*<?([^\s)>]+)/g; // the URL after ](  (strips an optional < and any title)
@@ -83,6 +96,44 @@ const BIDI_ZW_CTRL = [
 // the mechanical floor closing that hole). Single-line: markdown inline code
 // never spans a paragraph break, matching every other regex in this module.
 const CODESPAN_RE = /`([^`\n]+)`/g;
+
+// Fenced code blocks (```/~~~, GFM). CODESPAN_RE is single-line by design, so it
+// NEVER sees content INSIDE a fence — a rewrite that drops or alters a
+// command/flag/path in a ```fenced``` example passed the gate blind while the
+// INLINE form of the SAME token FAILED. Inventory each fence's CONTENT lines as
+// tokens (whitespace-collapsed, so a reindent is not a drop; set semantics, so a
+// reorder/dedup is not a drop) — a dropped/changed fence line then fails the
+// gate exactly as an inline codespan drop does.
+const FENCE_LINE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+// TODO(ic): this tracks ```/~~~ fences only — a CommonMark >=4-space/tab
+// INDENTED code block is invisible to it (quick.mjs's stripEmptyTables now
+// conservative-skips one there, but this gate still can't ACCOUNT for a drop
+// inside one). Not fixed here: a correct detector needs paragraph-
+// interruption + list/blockquote-indent context this line-local fence state
+// machine doesn't track — a wrong heuristic risks mis-classifying real
+// nested-list prose as "protected code" and masking a genuine drop, which is
+// worse than the current honest gap. Broom-side conservative-skip is the
+// fix that shipped; this stays a known asymmetry.
+export function fencedLines(text) {
+  const out = new Set();
+  let fence = null; // { char, len } while inside a fence
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = FENCE_LINE_RE.exec(line);
+    if (fence) {
+      // a closing fence: same fence char, run length >= the opener's, nothing
+      // but whitespace after the run.
+      if (m && m[1][0] === fence.char && m[1].length >= fence.len && m[2].trim() === '') { fence = null; continue; }
+      const collapsed = line.trim().replace(/\s+/g, ' ');
+      if (collapsed) out.add(collapsed);
+    } else if (m) {
+      // an opener: a backtick fence's info string may not contain a backtick
+      // (CommonMark) — otherwise it is inline code on one line, not a fence.
+      if (m[1][0] === '`' && m[2].includes('`')) continue;
+      fence = { char: m[1][0], len: m[1].length };
+    }
+  }
+  return out;
+}
 
 // Double-quoted spans — curly "..." (the series' house style) and straight
 // "..." — a verbatim QUOTE (a user's exact words) dropped during a
@@ -156,7 +207,7 @@ function maskOut(text, res) {
 // ALSO a redundant bare "92". Order: magnitude (~Nk) > percent > ratio >
 // decimal > bare integer (2+ digits only — a lone digit is prose noise).
 function numberTokens(text) {
-  let working = maskOut(text, [ISO_DATE_RE, DMY_DATE_RE, VERSION_RE, MDLINK_DEST_RE, AUTOLINK_RE, BAREURL_RE]);
+  let working = maskOut(text, [ISO_DATE_RE, DMY_DATE_RE, VERSION_RE, V_SHORT_VERSION_RE, MDLINK_DEST_RE, AUTOLINK_RE, BAREURL_RE]);
   const out = new Set();
   // Comma-grouped first (most specific), keyed comma-less — see COMMA_NUM_RE.
   for (const v of matchSet(working, COMMA_NUM_RE, 0)) out.add(v.replace(/,/g, ''));
@@ -270,6 +321,22 @@ export function evidenceAnchors(text) {
 
 // Top-level frontmatter keys from a leading `---` YAML block (key names only —
 // a dropped key is a dropped fact-slot; value edits are the semantic layer's call).
+// Key shape: everything from column 0 up to the SEPARATOR colon — not just
+// `[A-Za-z0-9_-]` (that narrowing silently dropped any other key shape, e.g.
+// a dotted `coalwash.updateMode`, `$ref`, a `/`-path key, a unicode key: the
+// key never matched, so DROPPING it passed the gate clean, a silent miss of
+// the contract this function promises). The SEPARATOR is the colon YAML 1.2
+// treats as ending a plain-scalar key — one followed by whitespace or EOL
+// (`(?=\s|$)`) — NOT merely the first `:` in the line: a plain-scalar key may
+// itself embed a colon not followed by a space (`a:b: value` -> key `a:b`);
+// matching only the first `:` collapsed `a:b`/`a:c`/bare `a` all down to
+// `"a"`, so dropping `a:b` while `a` survived passed the gate clean (a second
+// silent miss, closed by widening the capture past an embedded colon to the
+// real separator). Column-0 anchor keeps it TOP-LEVEL ONLY (an indented
+// `  nested: x` line has no non-space char at position 0, so it stays
+// excluded — by design). `#`/`-` are excluded as a first char so a YAML
+// comment or a `- list:` sequence item inside the block is never mistaken
+// for a key.
 export function frontmatterKeys(text) {
   const s = String(text);
   if (!/^---\r?\n/.test(s)) return new Set();
@@ -278,7 +345,7 @@ export function frontmatterKeys(text) {
   const block = s.slice(3, 3 + end.index);
   const keys = new Set();
   for (const line of block.split(/\r?\n/)) {
-    const m = /^([A-Za-z0-9_-]+)\s*:/.exec(line);
+    const m = /^([^\s:#-][^\n]*?)\s*:(?=\s|$)/.exec(line);
     if (m) keys.add(m[1]);
   }
   return keys;
@@ -301,12 +368,13 @@ export function inventory(text) {
   return {
     wikilinks,
     dates,
-    versions: matchSet(s, VERSION_RE),
+    versions: new Set([...matchSet(s, VERSION_RE), ...matchSet(s, V_SHORT_VERSION_RE)]),
     links,
     frontmatter: frontmatterKeys(s),
     codespans: matchSet(s, CODESPAN_RE, 1),
     quotes,
     numbers: numberTokens(s),
+    fencedLines: fencedLines(s),
   };
 }
 
@@ -328,6 +396,7 @@ export function inventoryDropKeys(text) {
   add(inv.codespans, 'codespan-drop');
   add(inv.quotes, 'quote-drop');
   add(inv.numbers, 'number-drop');
+  add(inv.fencedLines, 'fenced-line-drop');
   return keys;
 }
 
@@ -353,6 +422,7 @@ export function checkFidelity(origText, newText) {
     ...diffDrops(oi.frontmatter, ni.frontmatter, 'frontmatter-key-drop'),
     ...diffDrops(oi.codespans, ni.codespans, 'codespan-drop'),
     ...diffDrops(oi.quotes, ni.quotes, 'quote-drop'),
+    ...diffDrops(oi.fencedLines, ni.fencedLines, 'fenced-line-drop'),
   ];
   // Numbers: a dropped value with a strictly-coarser rounded survivor is the
   // class-9 'number-precision' shape (survivor named, approval key stays the
@@ -413,6 +483,7 @@ export function checkFidelity(origText, newText) {
       codespans: { orig: oi.codespans.size, kept: oi.codespans.size - drops.filter((d) => d.type === 'codespan-drop').length },
       quotes: { orig: oi.quotes.size, kept: oi.quotes.size - drops.filter((d) => d.type === 'quote-drop').length },
       numbers: { orig: oi.numbers.size, kept: oi.numbers.size - drops.filter((d) => d.type === 'number-drop' || d.type === 'number-precision').length },
+      fencedLines: { orig: oi.fencedLines.size, kept: oi.fencedLines.size - drops.filter((d) => d.type === 'fenced-line-drop').length },
       evidenceAnchors: { orig: evOrig.size, kept: evOrig.size - drops.filter((d) => d.type === 'evidence-anchor-drop').length },
     },
   };
