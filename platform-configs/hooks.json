@@ -1,0 +1,46 @@
+// CoalWash — Antigravity (AG 2.0) hooks template, per the v2.3.1 primary spec
+// (antigravity.google/docs/hooks, fetched 2026-07-23).
+//
+// Copy this file to ONE of:
+//   - project:  <workspace>/.agents/hooks.json
+//   - global:   ~/.gemini/config/hooks.json
+// then replace __COALWASH_DIR__ with the directory holding CoalWash's hooks/ +
+// scripts/lib (a global file-copy install puts them at
+// ~/.gemini/config/skills/coalwash — copy the WHOLE plugin tree: the adapter
+// imports ../scripts/lib).
+//
+// If AG's parser rejects // comments, strip these comment lines — the object
+// below is otherwise strict JSON. (Mirrors the repo's platform-configs idiom
+// and CoalHearth's AG template — one flock.)
+//
+// Event mapping (AG has no SessionStart; full facts + named limitations:
+// skills/coalwash/references/platform-ag.md):
+//   PreInvocation -> first-of-conversation SILENT gauge (tmp-marker guarded)
+//                    + the 0p seatbelt sweep (drop FYI via injectSteps).
+//   Stop          -> the band ask/directive delivery: {decision:'continue',
+//                    reason} — AG's real enforcement analogue of CC's
+//                    Stop-block; nothing pending answers {decision:'allow'}.
+//   PreToolUse    -> the 0p airbag (pre-edit snapshot of class-B files) +
+//                    seatbelt enqueue; always answers {decision:'ask'} (the
+//                    neutral value — never widens, never blocks).
+// PostToolUse is deliberately NOT registered: its payload carries no
+// toolCall and its output is ignored — nothing CoalWash can honestly use.
+// timeout is in SECONDS (AG spec; default 30).
+{
+  "coalwash": {
+    "PreInvocation": [
+      { "type": "command", "command": "node \"__COALWASH_DIR__/hooks/coalwash-ag.js\" PreInvocation", "timeout": 30 }
+    ],
+    "Stop": [
+      { "type": "command", "command": "node \"__COALWASH_DIR__/hooks/coalwash-ag.js\" Stop", "timeout": 30 }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          { "type": "command", "command": "node \"__COALWASH_DIR__/hooks/coalwash-ag.js\" PreToolUse", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}
