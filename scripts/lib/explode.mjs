@@ -166,14 +166,17 @@ export function collidesWithSource(candidate, src, srcFd) {
 export const CLAUDE_DEFAULT_CUT_TYPES = Object.freeze(['custom-title', 'mode', 'queue-operation', 'last-prompt']);
 
 const NL = 0x0a;
-// EXPORTED (CHUNK + DEFAULT_MAX_LINES) so detonate's gate floor references the SAME memory-granularity + line
-// budget the engine actually reads with — single source of truth, no magic number drift. A wave READS up to
-// CHUNK per iteration, so a per-wave budget BELOW one CHUNK (or a maxLines that drains less than a chunk)
-// cannot bound memory (a CHUNK is already buffered) and only forces the wave to re-read the chunk tail next
-// wave = the O(waves × CHUNK) re-read explosion (L4). The gated entry rejects a sub-floor budget.
+// EXPORTED (CHUNK + DEFAULT_MAX_LINES + DEFAULT_MAX_BYTES) so detonate's gate references the SAME memory-
+// granularity + line/byte budgets the engine actually reads with — single source of truth, no magic-number
+// drift. A wave READS up to CHUNK per iteration, so a per-wave budget BELOW one CHUNK (or a maxLines that
+// drains less than a chunk) cannot bound memory (a CHUNK is already buffered) and only forces the wave to
+// re-read the chunk tail next wave = the O(waves × CHUNK) re-read explosion (L4) — the gated entry rejects a
+// sub-floor budget. DEFAULT_MAX_BYTES is ALSO the gated CEILING: a per-wave budget ABOVE the factory budget
+// lets ONE wave buffer the whole file's kept lines (peak RAM O(filesize) — the MEMORY twin of the re-read
+// explosion), so the gated entry rejects an over-ceiling budget too (see detonate gate 5 / MAX_WAVE_LINES).
 export const CHUNK = 1 << 20; // 1 MiB read granularity
-export const DEFAULT_MAX_LINES = 20000; // per-wave line budget (bounded work — rail 3)
-const DEFAULT_MAX_BYTES = 16 * 1024 * 1024; // per-wave source-byte budget
+export const DEFAULT_MAX_LINES = 20000; // per-wave line budget (bounded work — rail 3) · also the gated maxLines FLOOR
+export const DEFAULT_MAX_BYTES = 16 * 1024 * 1024; // per-wave source-byte budget (16 × CHUNK) · also the gated maxBytes CEILING
 // WAVE-8 L4-B: the TOTAL re-read work of a wave-DRIVEN reduce (reduceToCompletion) may not exceed this multiple
 // of the FILESIZE. A sub-CHUNK per-wave budget on a file larger than one chunk re-reads a full chunk PER WAVE →
 // projected re-read = waves × CHUNK; amplification = (waves × CHUNK)/size = CHUNK/advance, so an 8× cap requires

@@ -8,8 +8,8 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { detonate, survey } from './detonate.mjs';
-import { CLAUDE_DEFAULT_CUT_TYPES, sha256File, reduceFile } from './explode.mjs';
+import { detonate, survey, MAX_WAVE_LINES } from './detonate.mjs';
+import { CLAUDE_DEFAULT_CUT_TYPES, sha256File, reduceFile, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'cwd-')); }
 function rm(dir) { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -242,6 +242,62 @@ test('forged / non-finite params (budget 0/NaN, forged offset, present resume) �
       assert.strictEqual(r.failedCheck, 'params');
     }
     assert.strictEqual(fs.existsSync(path.join(dir, 'o.jsonl')), false, 'never triggered on any forged params');
+  } finally { rm(dir); }
+});
+
+test('gate 5 MEMORY ceiling — a FINITE-but-huge per-wave budget (would let ONE wave buffer the whole file → O(filesize) RAM) is REFUSED, extending the Infinity guard to finite values; source untouched, never triggered', () => {
+  const dir = tmp();
+  try {
+    const src = writeNdjson(dir, 'a.jsonl', CLAUDEISH);
+    const before = sha256File(src);
+    const out = path.join(dir, 'o.jsonl');
+    const base = { cutTypes: ['mode'], outPath: out, snapshotDir: path.join(dir, 's') };
+    for (const bad of [
+      { ...base, maxBytes: 1e15 },                  // finite-but-huge byte budget — the reported OOM (kept[] concat = O(filesize))
+      { ...base, maxLines: 1e15 },                  // finite-but-huge line budget (kept[] slot count = O(filesize))
+      { ...base, maxBytes: 1e15, maxLines: 1e15 },  // the exact red-team repro
+      { ...base, maxBytes: DEFAULT_MAX_BYTES + 1 }, // one byte OVER the ceiling → refused (the boundary)
+      { ...base, maxLines: MAX_WAVE_LINES + 1 },    // one line OVER the ceiling → refused (the boundary)
+      { ...base, maxBytes: Infinity },              // Infinity still refused (unchanged — the guard the finite case extends)
+      { ...base, maxLines: Infinity },
+    ]) {
+      const r = detonate(src, bad);
+      assert.strictEqual(r.ok, false, `${JSON.stringify({ maxBytes: bad.maxBytes, maxLines: bad.maxLines })} must refuse`);
+      assert.strictEqual(r.refused, true);
+      assert.strictEqual(r.failedCheck, 'params', 'an over-ceiling per-wave budget refuses at the params gate');
+    }
+    assert.strictEqual(fs.existsSync(out), false, 'never triggered on any over-ceiling budget');
+    assert.strictEqual(sha256File(src), before, 'source byte-intact — no wave ever ran');
+  } finally { rm(dir); }
+});
+
+test('gate 5 MEMORY ceiling — no regression: a budget AT the ceiling still reduces (one wave), and a legal in-window budget MULTI-WAVES byte-correctly (the streaming path is intact, waves stay > 1)', () => {
+  const dir = tmp();
+  try {
+    // (A) the window is INCLUSIVE (<=): the LARGEST legal per-wave budget still executes on a small file
+    const src = writeNdjson(dir, 'a.jsonl', CLAUDEISH);
+    const rMax = detonate(src, { cutTypes: CLAUDE_DEFAULT_CUT_TYPES, outPath: path.join(dir, 'o.jsonl'), snapshotDir: path.join(dir, 's'), maxBytes: DEFAULT_MAX_BYTES, maxLines: MAX_WAVE_LINES });
+    assert.strictEqual(rMax.ok, true, 'a budget exactly AT the ceiling is accepted (the [floor, ceiling] window is inclusive, not off-by-one)');
+    assert.strictEqual(rMax.triggered, true);
+    assert.deepStrictEqual(outTypes(path.join(dir, 'o.jsonl')), ['user', 'assistant', 'attachment'], 'the cut is still correct at the ceiling budget');
+
+    // (B) a legal ABOVE-FLOOR budget still forces N>1 waves and the multi-wave reduce is byte-correct. >DEFAULT_MAX_LINES
+    // units so a legal maxLines drives ≥2 waves; every 2000th unit is a KEPT 'user' with a unique marker, the rest
+    // cuttable 'mode' → the surviving markers + their ORDER prove no wave dropped/duplicated/reordered a line across
+    // the boundary. Fixture stays < CHUNK, so the (separate, don't-touch) re-read belts never enter here.
+    const units = [];
+    for (let i = 0; i < 22000; i++) units.push(i % 2000 === 0 ? { type: 'user', message: { content: `keep-${i}` } } : { type: 'mode', v: i });
+    const keepers = units.filter((u) => u.type === 'user').map((u) => u.message.content); // keep-0 .. keep-20000, in order
+    const big = writeNdjson(dir, 'big.jsonl', units);
+    assert.ok(fs.statSync(big).size < CHUNK, 'the multi-wave fixture is under one CHUNK (isolates the line-driven wave split)');
+    const out2 = path.join(dir, 'big.reduced.jsonl');
+    const r = detonate(big, { cutTypes: ['mode'], outPath: out2, snapshotDir: path.join(dir, 's2'), maxLines: DEFAULT_MAX_LINES + 1000 }); // 21000 — legal, above the floor
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.triggered, true);
+    assert.ok(r.waves > 1, `the legal budget still MULTI-waves (waves=${r.waves}) — the ceiling did not collapse streaming to one whole-file wave`);
+    const got = fs.readFileSync(out2, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(got.every((u) => u.type === 'user'), 'only the kept type survives across all waves');
+    assert.deepStrictEqual(got.map((u) => u.message.content), keepers, 'every kept unit survived byte-correct and IN ORDER across the wave boundary (no drop / dup / reorder)');
   } finally { rm(dir); }
 });
 

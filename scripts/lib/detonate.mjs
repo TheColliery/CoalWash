@@ -31,7 +31,7 @@
 // the main engine already holds the safety floor (source-sacred / no-torn / byte-exact).
 import fs from 'node:fs';
 import path from 'node:path';
-import { discoverStructure, reduceToCompletion, collidesWithSource, scanWave, physicalForCreate, isContainedIn, CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, CHUNK, DEFAULT_MAX_LINES } from './explode.mjs';
+import { discoverStructure, reduceToCompletion, collidesWithSource, scanWave, physicalForCreate, isContainedIn, CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
 
 // The long-string boundary for the advisory free-form flag (config key `freeStringMaxChars`, default 80).
 // A string whose UTF-8 BYTE length exceeds this, anywhere in a unit, is a mechanical "possible ore" signal
@@ -60,6 +60,23 @@ const NL = 0x0a;                            // newline byte — for the bounded 
 const SKIP_SCAN_CHUNK = 1 << 20;            // 1 MiB forward-scan granularity when stepping over an oversized unit (memory-bounded)
 const OVERSIZED_FRONT_BYTES = 4096;         // FIX 7-R2: bounded front-read to recover an oversized unit's type token
                                             // (the type sits at the object front; the giant unit is NEVER buffered whole)
+
+// gate-5 per-wave budget CEILINGS (the MEMORY axis — the upper twin of the CHUNK / DEFAULT_MAX_LINES FLOORS).
+// A wave buffers its kept lines and flushes once via Buffer.concat (explode.mjs reduceFile), so a per-wave budget
+// large enough to span the WHOLE file makes ONE wave hold every kept line in RAM at once — peak RAM O(filesize),
+// the exact OOM gate 5 ALREADY refuses for Infinity. A FINITE-but-huge budget (e.g. 1e15) reaches the IDENTICAL
+// whole-file buffer yet sailed through the bare `Number.isFinite && >= floor` check — its premise "finite ⇒
+// bounded" is wrong: a per-wave budget ≥ the filesize gives no memory bound BELOW the filesize. The ceiling closes
+// that. Ceiling = 16 × the FLOOR for BOTH budgets: the BYTE ceiling is the engine's own DEFAULT_MAX_BYTES factory
+// budget (= 16 × CHUNK — the largest per-wave DATA memory the engine self-selects; a gated caller may LOWER toward
+// CHUNK but never RAISE above the factory budget), and the LINE ceiling mirrors that same 16× headroom over
+// DEFAULT_MAX_LINES so the kept[] array's per-line-Buffer SLOT count is bounded too (the concat blob is bounded by
+// the byte ceiling; the view objects by this). Together they hold one wave's peak RAM to a filesize-INDEPENDENT
+// constant (the streaming rail: memory ≤ ceiling on ANY filesize) while a large file still reduces in N>1 bounded
+// waves. REFUSE above the ceiling (fail-closed, mirroring gate 5's floor refusal + the Infinity precedent), never
+// clamp. The RAW reduceFile stays permissive — its budget is a documented manual/test tool on SMALL files where
+// the wave count is bounded — the same gated-vs-raw split as the floor. EXPORTED for the gate test.
+export const MAX_WAVE_LINES = 16 * DEFAULT_MAX_LINES; // 320000 — the gated maxLines ceiling (16 × the DEFAULT_MAX_LINES floor); the byte ceiling is DEFAULT_MAX_BYTES itself
 
 function refuse(failedCheck, reason, extra = {}) {
   return { ok: false, refused: true, triggered: false, verified: false, failedCheck, reason, cut: [], ...extra };
@@ -439,7 +456,11 @@ export function detonate(src, request = {}, opts = {}) {
         // offset/resume — the forged offset/outLen the main engine only benign-no-ops on is REJECTED here)
         // Number.isFinite (NOT typeof==='number'): Infinity is a number that satisfies the floor, yet an Infinity
         // per-wave byte budget makes a wave buffer the whole file unbounded (OOM). Reject non-finite — one-flock
-        // with the freeStringMaxChars guards (299/459), which already use Number.isFinite.
+        // with the freeStringMaxChars guards (299/459), which already use Number.isFinite. UPPER CEILING (the twin
+        // OOM): a FINITE-but-huge budget (e.g. 1e15 ≥ the filesize) reaches the SAME whole-file kept-line buffer as
+        // Infinity, so each budget is ALSO capped at its ceiling — maxBytes ≤ DEFAULT_MAX_BYTES (the factory budget)
+        // · maxLines ≤ MAX_WAVE_LINES (16 × the floor) — see the MAX_WAVE_LINES block. Above the ceiling = the same
+        // fail-closed refuse as below the floor; the legal window is [floor, ceiling]. Omit a budget → the default.
         // L4 (WAVE-6 re-read explosion): the FLOOR is one CHUNK for maxBytes / the factory line budget for
         // maxLines, NOT `>= 1`. A wave READS up to CHUNK per iteration; a per-wave budget that stops the wave
         // after consuming FAR LESS than a chunk (maxBytes=1.5/1000, maxLines=2/10) discards the rest of the
@@ -449,8 +470,8 @@ export function detonate(src, request = {}, opts = {}) {
         // Raw reduceFile stays permissive (a tiny budget is its documented manual/test tool, exercised on SMALL
         // files where the wave count is bounded) — this gate protects the GATED whole-file entry, same split as
         // the Infinity precedent. Omit a budget → the safe factory defaults (16MB / 20000 lines).
-        if (maxLines !== undefined && !(Number.isFinite(maxLines) && maxLines >= DEFAULT_MAX_LINES)) return refuse('params', `maxLines must be a finite number >= ${DEFAULT_MAX_LINES} (the factory line budget; a smaller per-wave cap forces a re-read explosion on a large file — omit it for the default)`);
-        if (maxBytes !== undefined && !(Number.isFinite(maxBytes) && maxBytes >= CHUNK)) return refuse('params', `maxBytes must be a finite number >= ${CHUNK} (one read chunk; a sub-chunk per-wave budget bounds no memory and forces a re-read explosion on a large file — omit it for the default)`);
+        if (maxLines !== undefined && !(Number.isFinite(maxLines) && maxLines >= DEFAULT_MAX_LINES && maxLines <= MAX_WAVE_LINES)) return refuse('params', `maxLines must be a finite number in [${DEFAULT_MAX_LINES}, ${MAX_WAVE_LINES}] (the factory line budget .. 16× it; BELOW the floor forces a re-read explosion, ABOVE the ceiling lets one wave buffer the whole file's kept lines = O(filesize) RAM [the OOM the Infinity guard rejects] — omit it for the default)`);
+        if (maxBytes !== undefined && !(Number.isFinite(maxBytes) && maxBytes >= CHUNK && maxBytes <= DEFAULT_MAX_BYTES)) return refuse('params', `maxBytes must be a finite number in [${CHUNK}, ${DEFAULT_MAX_BYTES}] (one read chunk .. the factory per-wave budget; BELOW the floor bounds no memory + re-read-explodes, ABOVE the ceiling lets one wave buffer the whole file = O(filesize) RAM [the OOM the Infinity guard rejects] — omit it for the default)`);
         if ((offset !== undefined && offset !== 0) || resume != null) {
           return refuse('params', 'detonate performs a FRESH full-file reduction — a mid-stream offset/resume (incl. a forged offset or non-finite outLen) is refused; drive reduceFile directly for manual resumption');
         }
