@@ -54,6 +54,19 @@ const SAMPLE_AGG_BYTES = 128;               // FIX 3-R2: redaction budget — on
                                             // (kept < SAMPLE_STR_CAP so the marker is visible within the capped sample:
                                             // an aggregate-flagged unit shows STRUCTURE + the first little bit, never a
                                             // WALL of raw prose). Mirrors isFreeFormBearing's aggregate discipline.
+// TYPE-CARDINALITY ceiling for the SURVEY census (wantSet=null / accept-all). perType allocates one entry per
+// DISTINCT type token; without a cap an adversarial ndjson where EVERY line carries a unique `type` drives it
+// O(distinct-types) = O(N) memory (measured: a 42MB unique-type flood → 1.6M entries → ~449MB peak, self-OOM
+// on the engine's own 50MB+ target — the one census axis SAMPLE_MAX / WALK_DEPTH / REPORT_MAX_BYTES / oversized
+// step-over had left uncapped). Real transcripts hold <100 distinct unit types (Claude ~5:
+// user/assistant/system/tool_use/tool_result; other platforms measured similarly low), so a low-thousands cap
+// leaves ~40× headroom over even a pathologically-rich real file while bounding perType to O(cap) entries,
+// filesize-INDEPENDENT. Sibling of SAMPLE_MAX / WALK_DEPTH: a named cap, floor-not-ceiling. Past the cap a unit
+// is still COUNTED in aggregate (otherTypesUnits → totalUnits stays complete) and typesTruncated:true NAMES the
+// bounding — NEVER a silent tail-drop (the census-fidelity rail: no unit vanishes). detonate's report path
+// (wantSet a Set) is already bounded by |cutTypes| → the cap never fires there (byte-identical). EXPORTED for
+// the gate test (one-flock with MAX_WAVE_LINES).
+export const TYPE_CENSUS_MAX = 4096;
 const REPORT_MAX_BYTES = 16 * 1024 * 1024;  // per-wave carry bound for the report scan (constant memory; mirrors explode's default)
 const REPORT_MAX_LINES = Number.MAX_SAFE_INTEGER; // bytes is the real per-wave bound; lines effectively unbounded
 const NL = 0x0a;                            // newline byte — for the bounded forward-scan that steps over an oversized unit
@@ -209,7 +222,9 @@ function oversizedTypeToken(fd, size, start, typeField) {
 // ADVISORY'S LIMIT: it can MISS deep/obfuscated ore and can FALSE-FLAG a long id/hash) — a signal that INFORMS
 // the agent, never a verdict; the redacted `sample` collapses long strings and is length-capped, so the ore
 // bytes are NEVER dumped into the report.
-// Returns { perType, oversizedSkipped, unitsUnparsed }: a >per-wave-budget unit the scan STEPPED OVER (FIX 3)
+// Returns { perType, oversizedSkipped, unitsUnparsed, typesTruncated, otherTypesUnits } (the last two: the
+// survey-path type-cardinality cap — see TYPE_CENSUS_MAX; always false/0 on detonate's wantSet path).
+// A >per-wave-budget unit the scan STEPPED OVER (FIX 3)
 // is never content-classified (never buffered). FIX META (WAVE-9): oversizedSkipped counts EVERY over-budget
 // unit (typed-recovered AND unrecoverable/non-requested) — the COMPLETE oversized total, so a consumer always
 // reconciles: totalUnits (content-classified) + unitsUnparsed + oversizedSkipped = every physical unit. FIX
@@ -229,13 +244,29 @@ function buildReport(fd, size, struct, typeField, wantSet = null, maxChars) {
   // body pass omits every unparseable line with no signal) is the fake-0 class. reduceFile already computes
   // this exact count (unitsUnparsed); carry it to the census surfaces so an omission is NAMED, never silent.
   let unitsUnparsed = 0;
+  // TYPE-CARDINALITY CAP state (see TYPE_CENSUS_MAX): bound perType to O(cap) distinct slots on the survey path.
+  let namedTypeCount = 0;   // distinct keys allocated in perType (≤ TYPE_CENSUS_MAX in survey mode)
+  let typesTruncated = false;
+  let otherTypesUnits = 0;  // aggregate unitCount for types PAST the cap — accounted, just not per-type named
+  // getOrAllocType: the SINGLE allocation gate BOTH census sites route through (the per-line observe below AND
+  // the oversized-token pass) so the cardinality cap holds for every perType key. Returns the record, or null
+  // when a NEW type would exceed the cap — but ONLY on the survey path (wantSet === null). detonate (wantSet a
+  // Set) is already bounded by |cutTypes|, so it NEVER caps here → byte-identical behavior for detonate's report.
+  const getOrAllocType = (key) => {
+    const existing = perType[key];
+    if (existing !== undefined) return existing;
+    if (wantSet === null && namedTypeCount >= TYPE_CENSUS_MAX) { typesTruncated = true; return null; }
+    namedTypeCount++;
+    return (perType[key] = { unitCount: 0, freeFormCount: 0, sample: [] });
+  };
   const observe = (obj) => {
     const t = typeToken(obj, typeField);
     // wantSet a Set → detonate: only requested types (typeless skipped). wantSet null → survey: EVERY
     // distinct type, a typeless unit bucketed under '(untyped)' — the census is type-complete.
     if (wantSet !== null && (t === null || !wantSet.has(t))) return;
     const key = t === null ? '(untyped)' : t;
-    const rec = perType[key] || (perType[key] = { unitCount: 0, freeFormCount: 0, sample: [] });
+    const rec = getOrAllocType(key);
+    if (rec === null) { otherTypesUnits++; return; } // past the cap: unit COUNTED in aggregate, no per-type slot (memory O(cap), never O(N))
     rec.unitCount++;
     const ff = isFreeFormBearing(obj, maxChars);
     if (ff.bearing) {
@@ -250,7 +281,7 @@ function buildReport(fd, size, struct, typeField, wantSet = null, maxChars) {
   };
   if (struct.structure === 'json-single') {
     try { observe(JSON.parse(readWhole(fd, struct.bomLen, size - struct.bomLen).toString('utf8'))); } catch { unitsUnparsed++; /* discovery verified parseable; defensive — but if it somehow won't parse, SURFACE it, never drop it silently */ }
-    return { perType, oversizedSkipped, unitsUnparsed };
+    return { perType, oversizedSkipped, unitsUnparsed, typesTruncated, otherTypesUnits };
   }
   // ndjson: chunked wave loop — carry bounded to REPORT_MAX_BYTES (constant memory). A SINGLE unit past
   // that budget (e.g. a >16MB embedded blob) is pathological: scanWave returns overlong with nextOffset
@@ -282,8 +313,10 @@ function buildReport(fd, size, struct, typeField, wantSet = null, maxChars) {
       oversizedSkipped++; // every over-budget unit — the complete oversized total (reconcile-safe)
       const t = oversizedTypeToken(fd, size, r.nextOffset, typeField);
       if (t !== null && (wantSet === null || wantSet.has(t))) {
-        const rec = perType[t] || (perType[t] = { unitCount: 0, freeFormCount: 0, sample: [] });
-        rec.oversizedCount = (rec.oversizedCount || 0) + 1; // finer per-type breakdown (subset of oversizedSkipped)
+        // Route through the SAME cardinality gate. Past the cap → no named slot, but oversizedSkipped (above)
+        // ALREADY counted this unit, so the aggregate + the reconcile hold and typesTruncated is set — no vanish.
+        const rec = getOrAllocType(t);
+        if (rec !== null) rec.oversizedCount = (rec.oversizedCount || 0) + 1; // finer per-type breakdown (subset of oversizedSkipped)
       }
       const skip = nextNewlineAfter(fd, size, r.nextOffset);
       if (skip === null) break; // the oversized unit is the file's tail — nothing after it to count
@@ -299,7 +332,7 @@ function buildReport(fd, size, struct, typeField, wantSet = null, maxChars) {
     if (next <= offset) break;
     offset = next;
   }
-  return { perType, oversizedSkipped, unitsUnparsed };
+  return { perType, oversizedSkipped, unitsUnparsed, typesTruncated, otherTypesUnits };
 }
 
 // Is snapshotDir creatable — does its nearest EXISTING ancestor exist and is it a directory? (mkdirSync
@@ -540,7 +573,10 @@ export function detonate(src, request = {}, opts = {}) {
 //   Runs gate 1 (FILE) + gate 2 (STRUCTURE) ONLY — missing/dir/opaque/unparseable → the SAME refuse(...) shape
 //   detonate uses ({ok:false, refused:true, triggered:false, failedCheck, reason}); can't survey what we can't
 //   parse (fail-closed, identical posture to detonate).
-//   Returns { ok:true, structure, totalUnits, unitsUnparsed, oversizedSkipped, types:{ [type]:{ unitCount, freeFormCount, sample:[…≤2 redacted], oversizedCount?, depthCappedCount? } } };
+//   Returns { ok:true, structure, totalUnits, unitsUnparsed, oversizedSkipped, types:{ [type]:{ unitCount, freeFormCount, sample:[…≤2 redacted], oversizedCount?, depthCappedCount? } }, typesTruncated?, otherTypesUnits? };
+//   typesTruncated (only present when set) = the file held MORE than TYPE_CENSUS_MAX distinct types → the census
+//   named TYPE_CENSUS_MAX and BOUNDED the rest (O(cap) memory, not O(N)); otherTypesUnits = the aggregate unit
+//   mass of that unnamed remainder (folded into totalUnits, so the reconcile stays complete — never a silent drop).
 //   unitsUnparsed (BREAK 4) = real BODY lines that would not parse (past a clean front sample) — surfaced so
 //   the census can never report totalUnits while silently omitting live content (the fake-0 class).
 //   depthCappedCount (L6) = units whose free-form walk was TRUNCATED at the depth cap (structure existed
@@ -587,13 +623,22 @@ export function survey(src, opts = {}) {
         return refuse('structure', `unverifiable structure (${struct.structure}: ${struct.reason}) — never survey what we cannot parse`);
       }
       // --- CENSUS: whole-file scan, ALL types (wantSet=null). No cut, no snapshot — read-only. ---
-      const { perType, oversizedSkipped, unitsUnparsed } = buildReport(fd, size, struct, typeField, null, maxChars);
-      let totalUnits = 0;
+      const { perType, oversizedSkipped, unitsUnparsed, typesTruncated, otherTypesUnits } = buildReport(fd, size, struct, typeField, null, maxChars);
+      // Overflow units (parsed real units whose type fell past TYPE_CENSUS_MAX and got no named slot) are still
+      // counted here, so totalUnits stays COMPLETE and the reconcile (totalUnits + unitsUnparsed + oversizedSkipped
+      // = every physical unit) holds. On a normal file otherTypesUnits is 0 → identical to the pre-cap totalUnits.
+      let totalUnits = otherTypesUnits;
       for (const t of Object.keys(perType)) totalUnits += perType[t].unitCount;
       // BREAK 4 (WAVE-7 META): unitsUnparsed = real BODY content the census could not type (unparseable
       // lines past a clean front sample). Surfaced so a census can NEVER report "totalUnits N" while
       // silently omitting live content — the caller sees the accounted (totalUnits) AND the unaccounted.
-      return { ok: true, structure: struct.structure, totalUnits, unitsUnparsed, oversizedSkipped, types: perType };
+      // typesTruncated / otherTypesUnits: added ONLY when the type-cardinality cap actually fired (a normal
+      // few-type file omits both → byte-identical shape). typesTruncated:true tells a reader the census named
+      // TYPE_CENSUS_MAX types and bounded the rest; otherTypesUnits is the aggregate unit mass of that remainder
+      // (the honest signal: overflow types are counted in aggregate, never each named — a distinct-overflow-type
+      // count would need an O(N) set, defeating the cap; the flag + the mass are what a bounded census can honestly report).
+      return { ok: true, structure: struct.structure, totalUnits, unitsUnparsed, oversizedSkipped, types: perType,
+        ...(typesTruncated ? { typesTruncated: true, otherTypesUnits } : {}) };
     } catch (e) {
       // The census NEVER throws: an injected fs error or any other throw inside the gated body → refuse('internal');
       // the finally still closes fd.

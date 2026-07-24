@@ -8,7 +8,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { detonate, survey, MAX_WAVE_LINES } from './detonate.mjs';
+import { detonate, survey, MAX_WAVE_LINES, TYPE_CENSUS_MAX } from './detonate.mjs';
 import { CLAUDE_DEFAULT_CUT_TYPES, sha256File, reduceFile, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'cwd-')); }
@@ -988,5 +988,45 @@ test('WAVE-9 META (census reconcile): an over-budget VALID cut-type unit is coun
     const d = detonate(src, { cutTypes: ['mode'], snapshotDir: path.join(dir, 's') }); // dry-run
     assert.strictEqual(d.report.oversizedSkipped, 1, 'detonate.report also surfaces the requested over-budget unit in oversizedSkipped (pre-fix: 0)');
     assert.strictEqual(d.report.perType.mode.oversizedCount, 1, 'per-type oversizedCount names it in detonate mode too');
+  } finally { rm(dir); }
+});
+
+test('type-cardinality cap: a unique-type-per-line flood bounds perType to TYPE_CENSUS_MAX (O(cap) memory, not O(N)) — overflow units stay ACCOUNTED (typesTruncated + otherTypesUnits, totalUnits complete, reconcile holds); a normal file is byte-identical (no flag); detonate.report (wantSet) is untouched', () => {
+  const dir = tmp();
+  try {
+    // (a) ADVERSARIAL: every line a UNIQUE `type` → without the cap perType is O(distinct-types)=O(N) (the
+    //     confirmed self-OOM: a 42MB unique-type flood measured ~449MB peak). The cap bounds it to O(cap).
+    const overflow = 250;
+    const flood = TYPE_CENSUS_MAX + overflow;
+    const floodObjs = [];
+    for (let i = 0; i < flood; i++) floodObjs.push({ type: 't' + i, i });
+    const src = writeNdjson(dir, 'flood.jsonl', floodObjs);
+    const s = survey(src);
+    assert.strictEqual(s.ok, true);
+    assert.strictEqual(s.structure, 'ndjson');
+    assert.ok(Object.keys(s.types).length <= TYPE_CENSUS_MAX, 'perType is BOUNDED to the cap — memory O(cap), not O(distinct-types)');
+    assert.strictEqual(Object.keys(s.types).length, TYPE_CENSUS_MAX, 'the flood fills exactly TYPE_CENSUS_MAX named slots, then stops allocating');
+    assert.strictEqual(s.typesTruncated, true, 'the census SIGNALS it was bounded (never a silent truncation)');
+    assert.strictEqual(s.otherTypesUnits, overflow, 'the units under un-named (overflow) types are counted in aggregate');
+    assert.strictEqual(s.totalUnits, flood, 'totalUnits stays COMPLETE — every parsed unit accounted (named + overflow), no undercount');
+    assert.strictEqual(s.totalUnits + s.unitsUnparsed + s.oversizedSkipped, flood, 'the physical-unit reconcile holds through the cap');
+    assert.strictEqual(s.types.t0.unitCount, 1, 'a named type still carries its real count');
+
+    // (b) NO-REGRESSION: a normal few-type file → IDENTICAL shape, NO truncation fields present.
+    const normal = writeNdjson(dir, 'normal.jsonl', CLAUDEISH);
+    const n = survey(normal);
+    assert.strictEqual(n.ok, true);
+    assert.strictEqual(n.totalUnits, CLAUDEISH.length, 'every unit censused');
+    assert.strictEqual(n.typesTruncated, undefined, 'a normal file carries NO truncation flag (shape identical to pre-cap)');
+    assert.strictEqual(n.otherTypesUnits, undefined, 'and no otherTypesUnits field');
+    const distinctNormal = new Set(CLAUDEISH.map((o) => o.type)).size;
+    assert.strictEqual(Object.keys(n.types).length, distinctNormal, 'all its distinct types are named, none dropped');
+
+    // (c) detonate's requested-types path (wantSet a Set) is UNTOUCHED — bounded by |cutTypes|, not the file's
+    //     cardinality. Run over the SAME flood file: the report holds only the requested type, never truncates.
+    const d = detonate(src, { cutTypes: ['t0'], snapshotDir: path.join(dir, 's') }); // dry-run (no outPath)
+    assert.strictEqual(d.report.typesTruncated, false, 'detonate.report never truncates — the cap gate is a no-op on the wantSet path');
+    assert.strictEqual(Object.keys(d.report.perType).length, 1, 'the report holds ONLY the requested type — bounded by |cutTypes|, independent of file cardinality');
+    assert.strictEqual(d.report.otherTypesUnits, 0, 'no overflow on the bounded path');
   } finally { rm(dir); }
 });
