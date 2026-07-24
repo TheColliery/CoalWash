@@ -1118,6 +1118,23 @@ export function snapshotSource(src, snapshotDir) {
     // bytes into `existing` = harmless (the garbage lands in the manifest-aid, never src). Any failure skips
     // the manifest (it is an aid, not a gate). Do NOT unlink-then-create on EEXIST — that reintroduces the
     // race wx closes; a stale .pid.tmp from a crash simply skips the manifest that run (acceptable for an aid).
+    //
+    // GRADUATION-RECORD RESIDUAL (cost, KNOWN + ACCEPTED — a class-a-ultra prototype note): this read-whole +
+    // rewrite + rename is O(M) in the manifest's current row count, so N snapshots to ONE shared store cost
+    // O(N²) cumulative (measured ~3.4→14.4ms/call over 12k rows). It is NOT reduced to an O(1) appendFileSync
+    // because the temp→rename IS the load-bearing safety construction, and an in-place append is fundamentally
+    // incompatible with it: the FIX-1-R3 property (proved by explode.test.mjs 'FIX 1-R3', case B) is that a
+    // manifest.jsonl HARDLINKED to src stays harmless EVEN ON an ino:0 volume where the dev/ino alias belts (the
+    // reduceFile:535 / detonate:476 collidesWithSource pre-checks) SELF-DISABLE. An O(1) append can only stay safe
+    // by DETECTING the alias (dev/ino — which is exactly what fails on ino:0) or by REPLACING the inode (which is
+    // the O(M) rewrite). There is no O(1) append that survives the ino:0 + hardlink case, so restoring the append
+    // would reopen FIX-1-R3 for that case (and for any DIRECT caller of this exported primitive, which by design
+    // leans on NO caller guard). Severity is LOW/by-design here: O(N²) only bites a LONG-LIVED, SHARED store at
+    // ~30k+ snapshots; the real ULTRA/estate caller's store is per-batch/short-lived (few snapshots per run), so
+    // the row count never reaches the knee. UPGRADE PATH if a long-lived shared store ever emerges: give that
+    // store an append-only journal compacted out-of-band (verify the destination inode ONCE at store creation,
+    // not per row), or shard the manifest per run — a store-lifecycle change, never an inline per-snapshot swap
+    // that trades this safety for speed. Under-fix over reopening a source-corruption hole.
     const manifestPath = path.join(snapshotDir, SNAPSHOT_MANIFEST);
     const row = `${JSON.stringify({ original: src, sha256: sha, bytes, at: new Date().toISOString(), deduped })}\n`;
     const manifestTmp = `${manifestPath}.${process.pid}.tmp`;

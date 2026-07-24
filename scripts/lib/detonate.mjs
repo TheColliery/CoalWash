@@ -47,6 +47,19 @@ const FREE_FORM_AGG_BYTES = 1024;           // aggregate free-form signal: a uni
 const WALK_DEPTH = 18;                      // depth cap for the field-agnostic unit walk (raised 6→12→18: covers common
                                             // nested tool-JSON). A cap is floor-not-ceiling: raising it MOVES the miss
                                             // boundary (Rice), it NEVER removes the miss — the header's "CAN MISS" holds.
+const WALK_BREADTH = 256;                   // BREADTH budget for the redacted SAMPLE walk (redactUnit) — a TOTAL count of
+                                            // array-elements/object-entries the redaction may MATERIALIZE, shared across
+                                            // the WHOLE walk (NOT per-node). redactUnit builds a redacted COPY that
+                                            // JSON.stringify then renders WHOLE before the SAMPLE_STR_CAP slice, so an
+                                            // un-capped walk of a fat unit (a tool_result with ~1e6 short strings — a real
+                                            // dir-listing/grep/token-id shape — or a whole-file json-single unit) materializes
+                                            // an O(unit) structure = O(filesize) sample-build PEAK + retain (measured: a 120MB
+                                            // file secretly RETAINED ~240MB in the returned census, self-OOM). A TOTAL budget
+                                            // bounds the built structure to O(WALK_BREADTH) regardless of SHAPE; a per-node cap
+                                            // alone would let a deep-but-moderately-wide tree (fan-out < cap, WALK_DEPTH deep)
+                                            // still visit O(unit) nodes. 256 comfortably overfills the 200-char preview yet
+                                            // holds one in-flight redaction to ~KB. Past the budget: one honest "…(N more)"
+                                            // marker. Sibling of WALK_DEPTH / SAMPLE_MAX: a named cap, floor-not-ceiling.
 const SAMPLE_MAX = 2;                       // up to N redacted examples per free-form-bearing type
 const SAMPLE_STR_CAP = 200;                 // cap each redacted sample's length (the report stays small)
 const SAMPLE_AGG_BYTES = 128;               // FIX 3-R2: redaction budget — once a sample's cumulative raw-string
@@ -148,6 +161,10 @@ function isFreeFormBearing(v, maxChars) {
 // JSON.parse output is acyclic → stringify-safe.
 function redactUnit(v, maxChars) {
   let aggBytes = 0; // cumulative raw-string bytes KEPT (not collapsed) so far — shared across the whole unit's walk
+  let budget = WALK_BREADTH; // TOTAL array-elements/object-entries the redaction may materialize — shared across the
+                             // WHOLE walk (see WALK_BREADTH). Without it a fat unit's full-breadth redacted copy is
+                             // O(unit), and JSON.stringify renders it WHOLE before the SAMPLE_STR_CAP slice → the
+                             // sample-build PEAK and the retained SlicedString were BOTH O(filesize) (the confirmed OOM).
   const walk = (x, depth) => {
     if (typeof x === 'string') {
       // FIX 4-R3 (byte-PARITY with isFreeFormBearing's flag): the single-string collapse is BYTE-aware (was
@@ -161,15 +178,40 @@ function redactUnit(v, maxChars) {
       return x;
     }
     if (depth >= WALK_DEPTH) return '«…»';
-    if (Array.isArray(x)) return x.map((e) => walk(e, depth + 1));
+    // BREADTH cap (WALK_BREADTH): materialize at most `budget` MORE entries across the WHOLE structure, then emit an
+    // honest "…(N more)" marker. Bounds the built copy — and thus JSON.stringify + the slice — to O(WALK_BREADTH),
+    // filesize-INDEPENDENT. The sample is a redacted PREVIEW, so a truncated tail is expected, NEVER a census lie:
+    // redactUnit only runs for a unit ALREADY flagged free-form-bearing, so a breadth-truncated preview hides no
+    // ore-detection (unlike the depthCapped signal, which guards a freeFormCount:0 → nothing to compensate here).
+    if (Array.isArray(x)) {
+      const out = [];
+      let i = 0;
+      for (; i < x.length && budget > 0; i++) { budget--; out.push(walk(x[i], depth + 1)); }
+      if (i < x.length) out.push(`«…(${x.length - i} more)»`);
+      return out;
+    }
     if (x && typeof x === 'object') {
       const out = {};
-      for (const [k, val] of Object.entries(x)) out[k] = walk(val, depth + 1);
+      const keys = Object.keys(x);
+      let i = 0;
+      for (; i < keys.length && budget > 0; i++) { budget--; out[keys[i]] = walk(x[keys[i]], depth + 1); }
+      if (i < keys.length) out['«…»'] = `«${keys.length - i} more keys»`;
       return out;
     }
     return x;
   };
   return walk(v, 0);
+}
+
+// SAMPLE_STR_CAP the stringified redacted sample for the report — but a bare `.slice(0, cap)` on a long string
+// yields a V8 SlicedString that RETAINS the whole parent (redactUnit's stringify output). The WALK_BREADTH cap
+// already bounds that parent to ~KB, yet a bounded-but-nonzero retain × up to TYPE_CENSUS_MAX types still accretes
+// into the RETURNED census — so force a FLAT copy (no parent ref) via a zero-dep Buffer round-trip. A string
+// already ≤ cap is the fresh stringify output (retains nothing external) → returned as-is. UTF-8 round-trips
+// losslessly; a surrogate pair split exactly at the cap → one trailing U+FFFD in a redacted PREVIEW (cosmetic —
+// the sample is already a lossy preview).
+function sampleSlice(s) {
+  return s.length <= SAMPLE_STR_CAP ? s : Buffer.from(s.slice(0, SAMPLE_STR_CAP), 'utf8').toString('utf8');
 }
 
 function readWhole(fd, start, len) {
@@ -271,7 +313,7 @@ function buildReport(fd, size, struct, typeField, wantSet = null, maxChars) {
     const ff = isFreeFormBearing(obj, maxChars);
     if (ff.bearing) {
       rec.freeFormCount++;
-      if (rec.sample.length < SAMPLE_MAX) rec.sample.push(JSON.stringify(redactUnit(obj, maxChars)).slice(0, SAMPLE_STR_CAP));
+      if (rec.sample.length < SAMPLE_MAX) rec.sample.push(sampleSlice(JSON.stringify(redactUnit(obj, maxChars))));
     } else if (ff.depthCapped) {
       // L6 (WAVE-5): content-free WITHIN the depth cap, but the walk was TRUNCATED (real structure past
       // WALK_DEPTH went uninspected) → this unit's freeFormCount 0 is UNCERTAIN. Surface it per-type (mirrors

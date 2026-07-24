@@ -8,6 +8,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { detonate, survey, MAX_WAVE_LINES, TYPE_CENSUS_MAX } from './detonate.mjs';
 import { CLAUDE_DEFAULT_CUT_TYPES, sha256File, reduceFile, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
 
@@ -1028,5 +1029,67 @@ test('type-cardinality cap: a unique-type-per-line flood bounds perType to TYPE_
     assert.strictEqual(d.report.typesTruncated, false, 'detonate.report never truncates — the cap gate is a no-op on the wantSet path');
     assert.strictEqual(Object.keys(d.report.perType).length, 1, 'the report holds ONLY the requested type — bounded by |cutTypes|, independent of file cardinality');
     assert.strictEqual(d.report.otherTypesUnits, 0, 'no overflow on the bounded path');
+  } finally { rm(dir); }
+});
+
+test('BUG-1 breadth cap: a fat-breadth unit (huge array of short strings) redacts to a BOUNDED, capped sample that STILL flags the free-form content; a normal unit is unaffected (no breadth marker, redacted as before)', () => {
+  const dir = tmp();
+  try {
+    // A tool_result with a 200k-element array of short strings — the realistic dir-listing / grep-output / token-id
+    // shape. Pre-fix redactUnit materialized the WHOLE array and JSON.stringify rendered it WHOLE before the
+    // 200-char slice → an O(unit) build PEAK and a V8 SlicedString that RETAINED the multi-MB parent in the census.
+    const fat = { type: 'tool_result', content: Array.from({ length: 200000 }, (_, i) => 'itm' + (i % 1000)) };
+    const src = writeNdjson(dir, 'fat.jsonl', [{ type: 'user', message: 'hi' }, fat]);
+    const s = survey(src);
+    assert.strictEqual(s.ok, true);
+    assert.strictEqual(s.types.tool_result.unitCount, 1);
+    assert.ok(s.types.tool_result.freeFormCount >= 1, 'the fat unit is STILL flagged free-form-bearing — the breadth cap bounds the PREVIEW, never the detection (honesty preserved)');
+    const sample = s.types.tool_result.sample[0];
+    assert.ok(sample.length <= 200, 'the census sample is bounded to SAMPLE_STR_CAP (200) — no O(unit) string lands in the returned census');
+    assert.ok(sample.startsWith('{"type":"tool_result"'), 'the sample still shows the redacted STRUCTURE (which field carries the content), not a wall of raw prose');
+
+    // NO-REGRESSION: a small normal unit (well under WALK_BREADTH nodes) redacts EXACTLY as before — the breadth
+    // cap is a no-op below the budget, so no spurious "…(N more)" truncation marker appears.
+    const small = writeNdjson(dir, 'small.jsonl', [{ type: 'mode', note: 'x'.repeat(200) }]);
+    const n = survey(small);
+    assert.strictEqual(n.types.mode.sample[0], '{"type":"mode","note":"«free-form 200 chars»"}', 'a normal unit redacts byte-identically to pre-fix (long string collapsed; NO breadth truncation)');
+    assert.ok(!n.types.mode.sample[0].includes('more)'), 'no breadth-truncation marker on a normal unit (the cap never fired)');
+  } finally { rm(dir); }
+});
+
+test('BUG-1 retention: the returned census does NOT retain O(unit) — a fat-breadth unit is redacted to a FLAT, bounded sample so retained heap is filesize-INDEPENDENT (the V8 SlicedString parent is defeated). Runs a --expose-gc child (post-GC heapUsed).', () => {
+  const dir = tmp();
+  try {
+    // Measuring RETAINED heap needs global.gc() → the suite runs without --expose-gc, so spawn a child that has it.
+    // The child builds a ~12MB ndjson whose fat unit is UNDER REPORT_MAX_BYTES (classified + sampled), runs survey,
+    // GCs, and asserts the census it still HOLDS retains < 8MB. Pre-fix this held ~20-25MB (the SlicedString parent
+    // of the multi-MB stringified redaction); post-fix it holds only the flat ≤200-char sample (~KB).
+    const detonateUrl = JSON.stringify(new URL('./detonate.mjs', import.meta.url).href);
+    const dirUrl = JSON.stringify(dir.replace(/\\/g, '/'));
+    const child = [
+      `import { survey } from ${detonateUrl};`,
+      `import fs from 'node:fs'; import path from 'node:path';`,
+      `const dir = ${dirUrl};`,
+      // build in a function so the transient source array is GC'd before the baseline is taken
+      `function build(){ const a = new Array(1200000); for (let i=0;i<a.length;i++) a[i] = 'itm'+(i%100000);`,
+      `  const fd = fs.openSync(path.join(dir,'big.jsonl'),'w');`,
+      `  for (let i=0;i<5;i++) fs.writeSync(fd, JSON.stringify({type:'user',message:'hi'+i})+'\\n');`, // small lines first → passes the ndjson sniff
+      `  fs.writeSync(fd, JSON.stringify({type:'tool_result',content:a})+'\\n'); fs.closeSync(fd); }`,
+      `build();`,
+      `global.gc(); global.gc();`,
+      `const base = process.memoryUsage().heapUsed;`,
+      `const census = survey(path.join(dir,'big.jsonl'));`,
+      `global.gc(); global.gc();`,
+      `const retainedMB = (process.memoryUsage().heapUsed - base) / (1<<20);`,
+      `if (!census.ok) { console.error('survey refused: '+census.reason); process.exit(3); }`,
+      `const s = census.types.tool_result.sample[0] || '';`, // reading census here also keeps it referenced past the measurement
+      `if (s.length > 200) { console.error('sample not capped: '+s.length); process.exit(4); }`,
+      `if (!(census.types.tool_result.freeFormCount >= 1)) { console.error('fat unit not flagged'); process.exit(5); }`,
+      `if (retainedMB > 8) { console.error('census RETAINS O(unit): retainedMB='+retainedMB.toFixed(1)+' (SlicedString parent held)'); process.exit(6); }`,
+      `console.log('OK retainedMB='+retainedMB.toFixed(2));`,
+    ].join('\n');
+    const r = spawnSync(process.execPath, ['--expose-gc', '--input-type=module', '-e', child], { encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, `retention-proof child failed (status ${r.status}): ${r.stderr || r.stdout}`);
+    assert.match(r.stdout, /OK retainedMB=/, 'the child ran the full measurement');
   } finally { rm(dir); }
 });
