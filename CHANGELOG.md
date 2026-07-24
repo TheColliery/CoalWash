@@ -2,6 +2,20 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [0.2.0-rc.5] - 2026-07-24
+
+The class-B blind-IC field-lab batch — the shipped output of the 8-wave setter≠solver campaign (9-piece function lab + blind IC-pin surgery on the engine legs; every fix reproduced by a fresh blind verifier before landing, hermetic test + gate-liveness per fix).
+
+### Security
+- **[CRITICAL] Forged-PLAN.json containment (apply RCE class).** `applyPlan` derived its containment trust anchor from the untrusted PLAN file — a forged plan could both name a target and supply the "containing" root that blessed it. The anchor now derives from the caller/cwd, never the plan, with a home-swallow guard (a root that swallows `~/.claude` whole is refused); rollback honesty preserved (a refused apply reports exactly what it did not do).
+
+### Fixed
+- **fidelity-gate: the version-superversion collapse** closed one-flock across all 4 version regexes (`VERSION_RE`, `V_SHORT`, `CLAIM`, `TA`) — a superstring version (`v1.2.30` over `v1.2.3`) no longer satisfies a shorter token's survival check — plus the frontmatter-key separator fix.
+- **retier: anchor-survival rewritten** to re-extract survivors through the same `topAnchors` tokenizer that nominated them — compound/version/NBSP/astral/multi-word anchors can no longer strand silently by tokenization asymmetry (killed by construction, not per-case patching); the dig-row anchor cap raised to `TOP_ANCHOR_N`.
+
+### Changed
+- **quick: empty-table + emptied-heading auto-cut RETIRED to flag-only** (safety-over-yield, USER decision — the own-residue distinction stayed unstable across 6 blind IC waves; no auto-cut = no false-cut). `flagEmptyTables`/`flagEmptyHeadings` remain the surfaces; a human/wizard adjudicates. EOL (CRLF) preservation hardened on the rewrite path.
+
 ## [0.2.0-rc.4] - 2026-07-17
 
 Security + fidelity hardening from a nasa-L3 CoalBoard audit + a CoalMine Heavy scan (each finding reproduced before fixing, hermetic test + gate-liveness per fix).
@@ -28,6 +42,7 @@ Estate-hardening batch on the 0.2.0 line — the class-A ULTRA/RE-TIER machinery
 - **runBudget — a per-run work-limit on the ULTRA session loop (the one unbounded axis)** (`estate.runBudget` = `maxSessionsPerRun` def 25 · `maxBytesPerRun` def 500 MB). The loop STOPS at a completed session-unit boundary once either limit is reached — never mid-unit (each unit is an independent copy-verify-delete tx, so a stop leaves ZERO partial); the report says "archived N/M — run again for the rest" and a second run continues. RE-TIER carries no runBudget by construction (ONE atomic tx, not an incremental loop; its work is bounded by the wizard-gated store roster — the named divergence lives in `retier.mjs`). Senior: SQLite `incremental_vacuum` / an SSD's bounded-burst GC.
 - **#57(d) cloud-placeholder read-poison guard** (MASTER-LOSS-TAXONOMY #57, 4th member) — before trusting a source read as ground truth for a copy-verify-then-delete (estate WARM path) or a rewrite (`applyPlan`), a shared `isCloudPlaceholder` metadata sniff (never a content read) fail-closes on a dehydrated OneDrive/iCloud stub (a `size>0`, `blocks===0` file that returns self-consistent stub bytes, blinding the external-writer guard). **Platform-calibrated:** on win32 the blocks sniff is a documented no-op — a legit NTFS sparse file shares the `size>0`/`blocks===0` stub fingerprint and the reparse attribute that distinguishes them is unexposed by Node `fs`, so a blocks-only sniff would over-refuse real sparse files (the earlier "`blocks===0` for every win32 file" rationale was version drift, corrected from field data — thanks @mehvetero, #8); win32 is a NAMED residual, upgrade path = a native reparse-attribute read at the two injectable call sites, CORRECT on POSIX where `blocks` is real.
 - **#58 deletion-unaware time-travel-restore advisory** (MASTER-LOSS-TAXONOMY #58) — `estate-search`/`estate-restore` now cross-check recovered content against the tombstone registry (keeps.json anchors + the bins' death-log) and LABEL a result whose wording overlaps a gate-adjudicated cut ("⚠ later-removed? verify against the current live store"). Advisory only — recovery still works, the signal never blocks; opt-in (the CLI builds the registry, a direct caller passes it).
+- **MANUAL-tier wizard rework** (backfilled 2026-07-24; shipped in this release, commit `941bf52`) — 2×2 entry + choice-4 agent tier + CoalFace hand-off + background handshake on the `/coalwash` MANUAL wizard.
 - **Role-memory discovery (#22)** — `discoverClassB` now also returns `roleMemories`: the native-subagent `agent-memory/<role>/` stores (index + siblings), reported PER-STORE so gauge/wash/stats SEE them. Nested-habitat: a role store loads into a SUB when the role spawns, not the main every session, so it is a SEPARATE tier — never folded into the main's always-loaded footprint (the main gauge/BMI/force/break-even stay byte-identical with or without role dirs). Promotes RE-TIER's store enumeration up to the central discovery layer; unlocks (does not build) the docketed #55 cross-store detector.
 
 ### Changed
