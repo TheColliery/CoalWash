@@ -50,7 +50,7 @@ One standing gauge sits at the chokepoint — memory loads every session, so a s
 | Stage | Who | What |
 |---|---|---|
 | Gauge | code | Discover class-B per platform → measure footprint → break-even math → band verdict |
-| Quick | code-gated mechanics | Exact-dedup, dead-link fix, whitespace, index rebuild, empty-table removal, own-knife residue sweep — free, deterministic; oversize/stale files flagged, never rewritten here |
+| Quick | code-gated mechanics | Exact-dedup, dead-link fix, whitespace, index rebuild — free, deterministic; oversize/stale files flagged, never rewritten here |
 | Full | one outsider sub + the insider | Semantic garbage judgment (superseded / duplicate / point-in-time / over-verbose) by a zero-context outsider; session agent adjudicates every flag — always a separate consent |
 | Fidelity gate | code | Inventory diff, original vs new; any dropped link/date/version/frontmatter key blocks the apply |
 | Apply | code | Delete/merge authorization is plan-sourced (no separate approval step) — lock → verified snapshot → WAL → atomic writes → deletes last → commit, or whole-run rollback; `pinned` files refused outright |

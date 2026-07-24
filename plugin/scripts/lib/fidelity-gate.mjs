@@ -106,14 +106,14 @@ const CODESPAN_RE = /`([^`\n]+)`/g;
 // gate exactly as an inline codespan drop does.
 const FENCE_LINE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 // TODO(ic): this tracks ```/~~~ fences only — a CommonMark >=4-space/tab
-// INDENTED code block is invisible to it (quick.mjs's stripEmptyTables now
-// conservative-skips one there, but this gate still can't ACCOUNT for a drop
-// inside one). Not fixed here: a correct detector needs paragraph-
+// INDENTED code block is invisible to it, so this gate still can't ACCOUNT
+// for a drop inside one. Not fixed here: a correct detector needs paragraph-
 // interruption + list/blockquote-indent context this line-local fence state
 // machine doesn't track — a wrong heuristic risks mis-classifying real
 // nested-list prose as "protected code" and masking a genuine drop, which is
-// worse than the current honest gap. Broom-side conservative-skip is the
-// fix that shipped; this stays a known asymmetry.
+// worse than the current honest gap. (The broom's empty-table cut was retired
+// to flag-only 2026-07-24, so there is NO broom-side mitigation to lean on —
+// a standalone gate gap, not an asymmetry with a broom counterpart.)
 export function fencedLines(text) {
   const out = new Set();
   let fence = null; // { char, len } while inside a fence
