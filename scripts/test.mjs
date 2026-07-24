@@ -23,6 +23,8 @@ const TESTS = [
   'scripts/lib/retention-policy.test.mjs',
   'scripts/lib/cli.test.mjs',
   'scripts/lib/dig-gauge.test.mjs',
+  'scripts/lib/explode.test.mjs',
+  'scripts/lib/detonate.test.mjs',
   'scripts/lib/receipt.test.mjs',
   'scripts/lib/conductor.test.mjs',
   'scripts/lib/ask.test.mjs',
