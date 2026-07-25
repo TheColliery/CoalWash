@@ -45,7 +45,7 @@
 //   COLD — older than `purgeAfterDays` (0 = never): NOT auto-deleted. The
 //     report lists them and names the first-party `claude project purge`
 //     command. Only an explicit `estate.deleteCold: true` archives-then-
-//     deletes them, appending a death-certificate line (bins.mjs's pattern).
+//     deletes them, appending a death-certificate line (tailings.mjs's pattern).
 //
 // RUN-GATE (0h-GUARD's sibling): every mutating export here is called ONLY
 // from a wizard-consented ULTRA run (the SKILL's third wizard choice) via the
@@ -68,11 +68,11 @@ import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort } from '.
 // time (collectTombstones), so the existing apply<->retier<->estate cycle stays
 // safe. Advisory-only — this NEVER blocks a dig/restore.
 import { loadKeeps, loadGlobalKeeps } from './keeps.mjs';
-import { readDeathLog, FAT_BIN_NAME, STORE_OLD_NAME } from './bins.mjs';
+import { readDeathLog, FAT_BIN_NAME, STORE_OLD_NAME } from './tailings.mjs';
 
 export const ESTATE_ARCHIVE_DIRNAME = 'estate-archive';
 export const ESTATE_INDEX_NAME = 'index.jsonl';
-const DEATH_LOG_NAME = 'death.log'; // one-flock with bins.mjs's certificate log
+const DEATH_LOG_NAME = 'death.log'; // one-flock with tailings.mjs's certificate log
 const DAY_MS = 86400000;
 // ~est display ratio for "MB after" on the bill — jsonl compresses ~10:1
 // (blueprint §19's own figure). A display heuristic, never a promise.
@@ -362,7 +362,7 @@ function appendDeathCert(archiveDir, slug, line) {
     const dir = path.join(archiveDir, slug);
     fs.mkdirSync(dir, { recursive: true });
     fs.appendFileSync(path.join(dir, DEATH_LOG_NAME), line + '\n', 'utf8');
-  } catch { /* the certificate is a record, not a gate (bins.mjs's own rule) */ }
+  } catch { /* the certificate is a record, not a gate (tailings.mjs's own rule) */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +748,7 @@ function tombstoneSignal(hits, hasDeathLog) {
   return `⚠ later-removed? this recovered wording matches a gate-adjudicated keep${hits.length > 1 ? 's' : ''}: ${named}${more} — the live store may have since removed/changed it; VERIFY against the current store before treating this archived copy as current fact (see keeps.json${deathNote}).`;
 }
 
-// Bare-name allowlist — bins.mjs's F1 rule verbatim: a session id is a flat
+// Bare-name allowlist — tailings.mjs's F1 rule verbatim: a session id is a flat
 // program-generated name; any traversal shape is a clean not-found.
 function isBareId(id) {
   return typeof id === 'string' && !!id && id !== '.' && id !== '..' && path.basename(id) === id;

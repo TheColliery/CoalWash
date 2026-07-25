@@ -10,7 +10,7 @@
 // while drifting further from the ORIGINAL with no ground-truth anchor after
 // pass 1 — "a photocopy of a photocopy" (MASTER-LOSS-TAXONOMY.md). CW already
 // keeps ground-truth anchors on disk as a side effect of its OWN safety net:
-// apply.mjs's verified snapshots (`snap.complete`) and bins.mjs's per-cut
+// apply.mjs's verified snapshots (`snap.complete`) and tailings.mjs's per-cut
 // records. This module is pure composition over those EXISTING artifacts —
 // no new storage, no new write path.
 //
@@ -27,7 +27,7 @@
 // Rails: (a) advisory only; (b) NEVER worded "lost" — a candidate absent
 // because content legitimately evolved is mechanically indistinguishable from
 // drift, so the report says "candidate" + points at the anchor snapshot for
-// restore-BY-REFERENCE (the human/insider judges, same law as bins.mjs
+// restore-BY-REFERENCE (the human/insider judges, same law as tailings.mjs
 // restore — code never re-authors a guess); (c) fail-silent — no verified
 // snapshot for this file => null, never invented; (d) read-only, always —
 // this module writes nothing.
@@ -37,7 +37,7 @@ import os from 'node:os';
 import { inventory } from './fidelity-gate.mjs';
 import { txDirFor } from './apply.mjs';
 import { physicalOrNull, containedIn } from './class-b.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './bins.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './tailings.mjs';
 
 const CLASSES = ['wikilinks', 'dates', 'versions', 'links', 'frontmatter', 'codespans', 'quotes', 'numbers'];
 const SNAP_DIR_RE = /^snap-(\d+)$/;
@@ -104,7 +104,7 @@ function oldestAnchor(txDir, physTarget) {
 
 // Every bin record (fat-bin + store.old) naming `physTarget`, recorded AT OR
 // AFTER `sinceAt` — CW's own approved drops for this file since the anchor.
-// Content via bins.mjs's own pull-only restoreFromBin (never a fresh read).
+// Content via tailings.mjs's own pull-only restoreFromBin (never a fresh read).
 function approvedSince(projectRoot, physTarget, sinceAt) {
   const texts = [];
   for (const name of [FAT_BIN_NAME, STORE_OLD_NAME]) {

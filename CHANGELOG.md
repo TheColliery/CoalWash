@@ -2,6 +2,11 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Changed
+- **Themed engine filenames — `scripts/lib/quick.mjs` → `broom.mjs`, `scripts/lib/bins.mjs` → `tailings.mjs`** (with their test files, `quick.test.mjs` → `broom.test.mjs` and `bins.test.mjs` → `tailings.test.mjs`). The two modules were the last engine files still named for a tier (`quick`) or a generic container (`bins`) instead of the mine vocabulary the rest of the codebase already speaks — the mechanical pass has always been "the broom", and the recovery bins hold what the wash separated out. Filenames + every reference to them only: imports, the `verify.mjs` lib roster, the `test.mjs` suite roster, engine comments, `CONTRIBUTING.md`'s module table, and `references/method.md`. **No behaviour, export, config key, or function name changed** — `quickVsFull`, the Quick tier's name, `FAT_BIN_NAME`/`recordBinItem`/`listBin`, and every bin concept are untouched, so no user-visible surface moves.
+
 ## [0.2.0-rc.5] - 2026-07-24
 
 The class-B blind-IC field-lab batch — the shipped output of the 8-wave setter≠solver campaign (9-piece function lab + blind IC-pin surgery on the engine legs; every fix reproduced by a fresh blind verifier before landing, hermetic test + gate-liveness per fix).

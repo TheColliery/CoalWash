@@ -77,7 +77,7 @@ import {
 } from './caliper.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './bins.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './tailings.mjs';
 import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
 import { loadMergedConfig, findProjectRoot } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';

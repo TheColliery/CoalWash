@@ -140,7 +140,7 @@ User asks for a preview → run the whole pipeline with NO `applyPlan` call, rec
 
 ## 8. The two bins — retention + pull-only restore
 
-`bins.mjs` ships two DUAL-LIMIT (age + size, 0i) retention bins beside the per-run snapshot (§4/§5 above) — Recycle-Bin / Windows.old economics, not a new global layer. Routing is by the apply plan's `origin` field (§4): `program-cut` (the default) → `fat-bin`; `wizard-cut` → `store.old`. **Every wizard-tier plan MUST set `origin: 'wizard-cut'`** before calling `applyPlan` — a plan that omits it silently lands in the fat bin, correct only for the ambient Quick/Force pipeline.
+`tailings.mjs` ships two DUAL-LIMIT (age + size, 0i) retention bins beside the per-run snapshot (§4/§5 above) — Recycle-Bin / Windows.old economics, not a new global layer. Routing is by the apply plan's `origin` field (§4): `program-cut` (the default) → `fat-bin`; `wizard-cut` → `store.old`. **Every wizard-tier plan MUST set `origin: 'wizard-cut'`** before calling `applyPlan` — a plan that omits it silently lands in the fat bin, correct only for the ambient Quick/Force pipeline.
 
 | Bin | Horizon | What lands there | Economics |
 |---|---|---|---|
@@ -157,14 +157,14 @@ Both share ONE destruction law (`retention.mjs`, a pure function — hermetic-te
 
 **Breadcrumb (the "unused-door fear" countermeasure):** a JUDGMENT cut (never a certain-garbage one) should leave `breadcrumb({ date, binPath })`'s one fixed line in the washed file — "washed [date] · removed content recoverable at [bin path] — check the bin/journal before re-deriving; never invent a missing memory." Program-side fixed template, the same discipline as `ask.mjs` — never agent-composed prose.
 
-**Honest status — do not overclaim:** `sweepFatBin`/`sweepStoreOld` (retention/expiry) AND `recordBinItem` (writing a landed cut into a bin, routed by `origin`, at commit — §5's "bin population" step) are wired and live as of beta.14. Inserting the `breadcrumb()` line is **NOT YET** called from any pipeline step — it is a shipped, hermetically-tested engine primitive (`bins.test.mjs`) awaiting that wiring; until then, a judgment cut leaves no in-file trace pointing back at its bin entry. The per-run snapshot (§4-§5 — verified at creation, kept 3, whole-run rollback) remains the *broader* undo path; the bins are the *per-item* one.
+**Honest status — do not overclaim:** `sweepFatBin`/`sweepStoreOld` (retention/expiry) AND `recordBinItem` (writing a landed cut into a bin, routed by `origin`, at commit — §5's "bin population" step) are wired and live as of beta.14. Inserting the `breadcrumb()` line is **NOT YET** called from any pipeline step — it is a shipped, hermetically-tested engine primitive (`tailings.test.mjs`) awaiting that wiring; until then, a judgment cut leaves no in-file trace pointing back at its bin entry. The per-run snapshot (§4-§5 — verified at creation, kept 3, whole-run rollback) remains the *broader* undo path; the bins are the *per-item* one.
 
 **Restore by reference, never by content:** list the index FIRST — metadata only, no file content ships in this call:
 
 ```bash
 node --input-type=module -e "
 import { pathToFileURL } from 'node:url';
-const { listBin, FAT_BIN_NAME } = await import(pathToFileURL('[LIB]/bins.mjs').href);
+const { listBin, FAT_BIN_NAME } = await import(pathToFileURL('[LIB]/tailings.mjs').href);
 console.log(JSON.stringify(listBin('[PROJECT_ROOT]', FAT_BIN_NAME), null, 1));
 "
 ```

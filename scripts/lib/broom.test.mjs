@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { sweepResidue, stripEmptyTables, flagEmptyHeadings, flagEmptyTables } from './quick.mjs';
+import { sweepResidue, stripEmptyTables, flagEmptyHeadings, flagEmptyTables } from './broom.mjs';
 
 // ---------------------------------------------------------------------------
 // (1) sweepResidue — RETIRED as a text-mutator (IC-PIN wave-6, a blind re-IC
@@ -78,7 +78,7 @@ test('0d ship condition: a heading title containing markdown emphasis/formatting
 // ---------------------------------------------------------------------------
 // (2) stripEmptyTables — RETIRED as a text-mutator (USER decision 2026-07-24,
 // safety-over-yield, after SIX consecutive blind-IC waves on its provenance/
-// identity mechanism -- see quick.mjs's own top-of-file note (2)). Every test
+// identity mechanism -- see broom.mjs's own top-of-file note (2)). Every test
 // below that used to prove a CUT now proves the opposite: the text round-
 // trips byte-identical and the empty table (if any) is surfaced only via
 // flagEmptyTables. Recognition-boundary regressions (what even COUNTS as a

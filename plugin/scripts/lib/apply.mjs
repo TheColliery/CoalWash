@@ -64,7 +64,7 @@ import { claudeBaseDir, findProjectRoot } from './config-load.mjs';
 import { isCloudPlaceholder, ccMemoryDir } from './class-b.mjs';
 // NOTE a deliberate module cycle: keeps.mjs imports txDirFor/ensureSelfIgnore
 // from THIS file. Both sides bind function declarations used only at CALL
-// time, so ESM resolves the cycle safely regardless of entry order. bins.mjs
+// time, so ESM resolves the cycle safely regardless of entry order. tailings.mjs
 // forms the SAME shape of cycle (it imports txDirFor/ensureSelfIgnore from
 // here; this file imports sweepFatBin/sweepStoreOld from there) — identical
 // reasoning, identical safety.
@@ -77,7 +77,7 @@ import { loadKeepsAt, KEEPS_NAME, globalKeepsPath } from './keeps.mjs';
 // COMMIT below — applyPlan is the one choke-point every cut flows through
 // (Quick/Force/wizard all apply through here), so wiring it here wires every
 // cut site at once.
-import { sweepFatBin, sweepStoreOld, recordBinItem, FAT_BIN_NAME, STORE_OLD_NAME } from './bins.mjs';
+import { sweepFatBin, sweepStoreOld, recordBinItem, FAT_BIN_NAME, STORE_OLD_NAME } from './tailings.mjs';
 // 0i V2: the bins' size budget is a multiple of the MEASURED STORE — read
 // from the session gauge's cached verdict (caliper state; zero new I/O
 // beyond one small state read). caliper imports only config-load/jsonc, so
@@ -86,7 +86,7 @@ import { loadState } from './caliper.mjs';
 // Wikilink-orphan advisory (the git filter-branch cross-reference lesson):
 // ONE reference-detection implementation, shared with RE-TIER — never
 // duplicated. NOTE the same deliberate module-cycle shape as keeps.mjs/
-// bins.mjs above (retier.mjs imports applyPlan from THIS file): both sides
+// tailings.mjs above (retier.mjs imports applyPlan from THIS file): both sides
 // bind function declarations used only at CALL time, so ESM resolves the
 // cycle safely — identical reasoning, identical safety.
 import { unreferencedTopics } from './retier.mjs';

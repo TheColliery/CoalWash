@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine } from './apply.mjs';
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './bins.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
 import { HORIZON_MS } from './retention.mjs';
 import { ccMemoryDir } from './class-b.mjs';
 
