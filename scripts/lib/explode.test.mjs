@@ -2118,6 +2118,30 @@ test('RUNG5 §1.2 NULL-POLARITY: an UNRESOLVABLE src/outPath REFUSES at every co
   } finally { rm(dir); }
 });
 
+test('RUNG5 A7 BLOB INDEPENDENCE: an ALIAS of the source planted at <store>/<sha> is never accepted as its own backup — a snapshot must survive the source changing', (t) => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store'); fs.mkdirSync(store, { recursive: true });
+    const src = path.join(dir, 'src.txt'); fs.writeFileSync(src, 'ORIGINAL-PRECIOUS-BYTES');
+    const sha = sha256File(src);
+    try {
+      fs.linkSync(src, path.join(store, sha)); // the alias hashes EXACTLY equal to sha — it IS the source
+    } catch (e) {
+      t.skip(`cannot create a hardlink here (${e.code}) — capability genuinely absent, not assumed`);
+      return;
+    }
+    const r = snapshotSource(src, store);
+    assert.strictEqual(r.ok, true, 'the snapshot still succeeds — the alias is replaced by a real blob, not refused');
+    assert.strictEqual(r.deduped, false,
+      'the alias must NOT be deduped-to. Content equality is trivially satisfied by the source itself; pre-fix this returned deduped:true and the store recorded a "backup" that was the same bytes on disk as the thing it protects');
+
+    // THE DAMAGE, made explicit: destroy the source and the backup must still hold the original.
+    fs.writeFileSync(src, 'DESTROYED');
+    assert.strictEqual(fs.readFileSync(path.join(store, sha), 'utf8'), 'ORIGINAL-PRECIOUS-BYTES',
+      'the blob is INDEPENDENT of the source. Pre-fix it read "DESTROYED" — the undo net silently held nothing');
+  } finally { rm(dir); }
+});
+
 test('BLOB-SYMLINK: a link planted at <store>/<sha> can never make snapshotSource write THROUGH it — the blob lands via temp->rename, the outside victim is untouched', (t) => {
   const dir = tmp();
   try {

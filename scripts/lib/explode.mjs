@@ -1196,7 +1196,18 @@ export function snapshotSource(src, snapshotDir) {
     // name before trusting it — a pre-seeded / corrupted blob at the hash path is NOT
     // the source, and blindly deduping to it would make the "snapshot" a lie the
     // whole rail-5 recovery rests on. If it fails, overwrite with the true source.
-    if (fs.existsSync(snapshotPath) && sha256File(snapshotPath) === sha) deduped = true;
+    //
+    // ...AND CONTENT EQUALITY IS NOT ENOUGH: A BACKUP MUST ALSO BE INDEPENDENT (rung-5 A7).
+    // A hardlink (or symlink) to `src` placed at the blob path hashes EXACTLY equal to `sha` —
+    // it IS the source — so the content check passed it and the store recorded a "snapshot"
+    // that is the same bytes on disk as the thing it is meant to protect. Measured: plant a
+    // hardlink, snapshotSource returns ok:true deduped:true, then rewrite the source and the
+    // "backup" reads the new content. The undo net was a lie, silently. A snapshot's whole
+    // job is to survive the source changing, so independence is part of the definition, not
+    // an extra check. `collidesWithSource` (realpath both sides + dev/ino) is the same
+    // primitive gate 4 uses — reused here rather than re-derived.
+    const aliasOfSrc = fs.existsSync(snapshotPath) ? collidesWithSource(snapshotPath, src) : null;
+    if (!aliasOfSrc && fs.existsSync(snapshotPath) && sha256File(snapshotPath) === sha) deduped = true;
     else {
       // WRITE THE BLOB VIA temp->rename, NEVER copyFileSync ONTO the blob path.
       // A bare `copyFileSync(src, snapshotPath)` FOLLOWS a symlink sitting at the destination, so
@@ -1210,7 +1221,16 @@ export function snapshotSource(src, snapshotDir) {
       // an O_EXCL fresh inode at a per-pid temp, then an atomic rename that REPLACES the directory
       // entry (rename does not follow a link at the destination). A stale same-pid temp fails the
       // snapshot loudly, which is rail 5 behaving correctly: no snapshot, no destroy.
-      const blobTmp = `${snapshotPath}.${process.pid}.tmp`;
+      // UNPREDICTABLE temp name, not `<blob>.<pid>.tmp`. A pid is guessable and observable, so a
+      // per-pid temp path can be PRE-PLACED by anyone able to write the store — and the lab reports
+      // that on win32 a DANGLING symlink sitting there defeats COPYFILE_EXCL/`wx` (the existence
+      // check follows the link, finds nothing, and the create proceeds THROUGH it). I could not
+      // reproduce that specific bypass on this box — file-symlink creation is EPERM here — so I am
+      // not relying on the EXCL semantics being what I hope. Random naming removes the PRECONDITION
+      // instead of arguing about the primitive: an attacker cannot pre-place at a path it cannot
+      // predict. EXCL stays as the second belt (cross-nature: one guard defeats prediction, the
+      // other defeats a race). 12 bytes of CSPRNG, and `crypto` is already imported.
+      const blobTmp = `${snapshotPath}.${crypto.randomBytes(12).toString('hex')}.tmp`;
       try {
         fs.copyFileSync(src, blobTmp, fs.constants.COPYFILE_EXCL);
         fs.renameSync(blobTmp, snapshotPath);
