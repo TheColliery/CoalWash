@@ -8,11 +8,13 @@
 // OS mints the alias `RUNNER~1`, tmpdir inherits it, and every fixture path then
 // disagreed with every engine path by exactly that component — 91 failures.
 //
-// WHY NOBODY COULD SEE IT. `C:\Users\zxc59` is short enough that Windows never
-// generates an 8.3 alias AT ALL, so the dev box cannot produce the condition at
-// any effort. Same family as the twin-pin vacuity finding and the empty-`projects/`
-// perf blind spot: A TEST ENVIRONMENT THAT CANNOT EXPRESS THE FAILURE ALWAYS
-// REPORTS GREEN. That is what this file exists to stop being true.
+// WHY NOBODY SAW IT. `C:\Users\zxc59` is short enough that Windows mints no 8.3
+// alias for it, so the dev box's tmpdir never CARRIES one and only CI was handed
+// the condition. The VOLUME still mints an alias for a long name on demand
+// (measured), which is why the guard below now mints its own rather than wait for
+// a host to supply one. Same family as the twin-pin vacuity finding and the
+// empty-`projects/` perf blind spot: A TEST ENVIRONMENT THAT CANNOT EXPRESS THE
+// FAILURE ALWAYS REPORTS GREEN. That is what this file exists to stop being true.
 //
 // WHAT IT ASSERTS: a fixture root must be canonical BY THE ENGINE'S OWN
 // CANONICALIZER — not by "some realpath was called on it". Keying on
@@ -25,6 +27,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { canonicalOrNull } from './config-load.mjs';
 
@@ -38,29 +41,75 @@ test('a fixture root built the CORRECT way is canonical by the engine canonicali
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('GUARD: a fixture root built the WRONG way is caught — raw tmpdir join, and the non-native realpath variant', () => {
-  // (1) raw join, no realpath at all. Non-canonical wherever tmpdir is a symlink
-  //     (macOS /var -> /private/var) or carries an 8.3 component (CI Windows).
-  const raw = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-fixraw-'));
-  // (2) the exact CI defect: realpath called, but the variant that does not expand 8.3.
-  const nonNative = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-fixnn-')));
-  try {
-    // On a box where tmpdir is already canonical AND has no 8.3 alias, both forms
-    // happen to be canonical — the guard cannot fire, and saying so is the honest
-    // move. It fires on macOS (symlinked tmpdir) and on any Windows host whose
-    // tmpdir carries a short-name component, which is exactly CI.
-    const tmpIsCanonical = canonicalOrNull(os.tmpdir()) === os.tmpdir();
-    if (tmpIsCanonical) {
-      assert.strictEqual(canonicalOrNull(raw), raw, 'sanity: on a canonical-tmpdir host even a raw join is canonical');
-      assert.strictEqual(canonicalOrNull(nonNative), nonNative, 'sanity: same for the non-native variant');
-      return; // not a skip: the assertions above DID run and did hold
-    }
-    assert.notStrictEqual(canonicalOrNull(raw), raw, 'a raw tmpdir join must be caught as non-canonical');
-    assert.notStrictEqual(canonicalOrNull(nonNative), nonNative, 'the non-native realpath variant must be caught as non-canonical');
-  } finally {
-    fs.rmSync(raw, { recursive: true, force: true });
-    fs.rmSync(nonNative, { recursive: true, force: true });
+// THE TWO "WRONG WAY" SHAPES ARE TWO CLAIMS, NOT ONE. They need DIFFERENT
+// capabilities from the host, and covering both with a single "is tmpdir
+// canonical" gate keyed the second one to the wrong axis. macOS proved it: APFS
+// has no 8.3 aliasing, but its tmpdir IS non-canonical (`/var` -> `/private/var`),
+// so the shared gate opened — and both realpath variants resolve a symlink to the
+// same string (measured on a win32 junction: plain === native === the real dir).
+// The "wrong way" was therefore not wrong there, nothing was caught, and the leg
+// failed on a host that cannot express the defect it guards. Split, and probe the
+// capability each leg actually needs. The axis is the VOLUME, never the platform.
+
+test('GUARD: a fixture root built the WRONG way — a raw tmpdir join — is caught', (t) => {
+  // CAPABILITY: the host's own tmpdir must be non-canonical (macOS symlinks
+  // `/var`; a Windows TEMP can carry a short-name component). Where tmpdir is
+  // already canonical a raw join IS canonical — no defect exists to catch here,
+  // and a visible skip beats a green tick over an assertion about a non-defect.
+  if (canonicalOrNull(os.tmpdir()) === os.tmpdir()) {
+    t.skip('tmpdir is already canonical on this host, so a raw join cannot be non-canonical — capability measured, not assumed');
+    return;
   }
+  const raw = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-fixraw-'));
+  try {
+    assert.notStrictEqual(canonicalOrNull(raw), raw, 'a raw tmpdir join must be caught as non-canonical');
+  } finally { fs.rmSync(raw, { recursive: true, force: true }); }
+});
+
+// 8.3 alias minting is the ONLY axis on which the two realpath variants diverge —
+// both resolve symlinks — so this leg cannot borrow the tmpdir gate above. Nor may
+// it wait for a tmpdir that HAPPENS to carry a short name: that is CI's
+// `RUNNER~1`, an accident of one runner image's username length, and a guard
+// living on an accident dies with it. It mints the alias itself, the same move the
+// portable half below makes with its symlink.
+// TWIN of the helper in config-load.test.mjs (which pins the PRIMITIVE side: that
+// canonicalOrNull expands 8.3) and of the inline probe in twin-pin.test.mjs. Three
+// copies, one fact — when one learns something about 8.3, the others learn it too.
+// NAMED DIVERGENCE from those two: both sit behind a `platform === 'win32'` branch
+// and so are never reached off Windows. This one is called UNGUARDED, by design —
+// the platform must not be consulted here — which means POSIX really does run it,
+// where `sh` chokes on the `( )` and writes a syntax error to stderr. Silencing
+// that channel is the whole reason for the stdio triple: the throw is the signal,
+// the noise is not.
+function shortName(p) {
+  try {
+    return execSync(`cmd /c for %I in ("${p}") do @echo %~sI`,
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch { return p; }
+}
+
+test('GUARD: a fixture root built the WRONG way — the non-native realpath variant — is caught', (t) => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-fixnn-LONGNAME-FOR-8DOT3-')));
+  try {
+    // THE CAPABILITY, STATED AS ITSELF: can the wrong variant actually BE wrong on
+    // this volume? Note what is compared — the two variants against each other, on
+    // the most alias-prone spelling the volume will give us. Where no alias exists
+    // `%~sI` hands back the path unchanged, and on a host with no cmd.exe at all
+    // (the whole POSIX family) the helper's catch does the same, so BOTH cases end
+    // at the same POSITIVE measurement on a real path: these two calls agree here.
+    // That is what makes this a proven-absent capability and not a swallowed throw
+    // (the R3 rule), and it is why no `process.platform` appears in this gate —
+    // keying on the platform instead of the volume is the defect class this whole
+    // file exists to stop.
+    const aliased = shortName(dir);
+    if (fs.realpathSync(aliased) === fs.realpathSync.native(aliased)) {
+      t.skip('plain realpathSync and .native return the same string for every spelling this volume offers (no 8.3 alias mintable), so the non-native variant is not a defect here — capability measured, not assumed');
+      return;
+    }
+    const nonNative = fs.realpathSync(aliased); // the exact CI defect: realpath called, wrong variant
+    assert.notStrictEqual(canonicalOrNull(nonNative), nonNative, 'the non-native realpath variant must be caught as non-canonical');
+    assert.strictEqual(canonicalOrNull(nonNative), dir, 'and it canonicalizes to the one real spelling of that root');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // THE PORTABLE HALF — this one fires on EVERY platform, including a dev box whose
