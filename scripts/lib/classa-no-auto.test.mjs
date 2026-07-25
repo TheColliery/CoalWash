@@ -62,6 +62,25 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// ANCHOR INVARIANT — SELF-REFERENTIAL, AND IT MUST STAY THAT WAY.
+// `repo` is derived from THIS FILE's own location (import.meta.url + a fixed
+// offset): the tree that contains me. Never from a project-root RESOLVER, never
+// from cwd, never from home. A resolver can mis-answer "where is the project?";
+// nothing can mis-answer "where am I?".
+// This is load-bearing, not style. The whole guarantee is "class-A is not
+// reachable from anything in THIS workspace" — so if the anchor ever pointed
+// outside the workspace, the walk would scan a foreign tree, find no violations,
+// and pass. A MIS-ANCHORED RUN FAILS GREEN, which is the worst possible failure
+// for a safety test. Live proof this is not hypothetical: the vendor-churn lab
+// returned FAIL on findProjectRoot's ROOT_MARKERS — a marker in any ancestor
+// beats the directory passed in, the walk can return a strict ancestor of `home`,
+// and a junction can anchor outside home, all silently. Swapping this line for
+// that shared helper would look like a tidy-up and would silently couple this
+// guarantee to a root that bug can move.
+// The backstop, if someone does it anyway: the liveness test below asserts both
+// kinds are discovered AND the conductor + writeguard are reached, so a
+// mis-anchored run goes RED instead of vacuously green. Verified 2026-07-25 by
+// running this file from an unrelated cwd — identical results, 3/3.
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 // The class-A engine — declared human-only, therefore must not be auto-reachable.
