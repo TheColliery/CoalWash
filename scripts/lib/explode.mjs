@@ -1330,7 +1330,18 @@ export function restoreFromSnapshot(ref, toPath, opts) {
     // The bytes are content-verified. Guard the DESTINATION before publishing (BREAK 1).
     // (a) A PRECISE source-alias diagnostic when the caller declares a protected `src` (kept, now redundant
     //     with the intrinsic clobber below but the sharper message).
-    if (src != null) {
+    //
+    // GATED ON `!force` (rung-5 A6). This branch used to fire UNCONDITIONALLY, which broke the
+    // PRIMARY undo: restoring a snapshot back OVER the file it was taken from is the whole point of
+    // the recovery store, and a caller doing exactly that — declaring `src` so the engine knows what
+    // it is protecting, and passing `force:true` to authorise the overwrite — was refused anyway.
+    // Worse, the refusal told them to "pass force:true" while ignoring the force:true they had
+    // already set: a message naming the flag it does not read. The honest caller was punished for
+    // being explicit (omit `src` and the same restore succeeded), and the operator meeting this is
+    // by definition mid-recovery. This is the sharper DIAGNOSTIC for the clobber guard below, and
+    // that guard is force-gated — so this one must be too, or the two disagree about what force
+    // means. Without `force` the refusal still fires, with its precise alias reason.
+    if (!force && src != null) {
       let srcFd = null;
       try { srcFd = fs.openSync(src, 'r'); } catch { /* src unopenable → not a live file to protect */ }
       if (srcFd != null) {
