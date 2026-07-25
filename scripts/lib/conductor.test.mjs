@@ -326,10 +326,31 @@ test('hysteresis: a store must fall to CEILING_REARM_BMI or below to actually cl
 // ---------------------------------------------------------------------------
 
 function parseBlock(stdout) {
-  const j = JSON.parse(stdout);
+  let j;
+  try {
+    j = JSON.parse(stdout);
+  } catch (e) {
+    // Diagnostic wrap, not a swallow (still throws -> the test still FAILS,
+    // no retry-until-green): a bare JSON.parse crash gives no way to tell
+    // "the hook wrote nothing" from "the hook wrote garbage" from "the pipe
+    // lost the tail" -- the exact ambiguity that made the 2026-07-25 close-
+    // before-drain-class CI flake (conductor.test.mjs:885) opaque. Surfacing
+    // stdout's own length + raw bytes turns the next occurrence (any cause)
+    // into an immediately legible failure instead of a re-derive-from-the-
+    // CI-log exercise.
+    throw new Error(`parseBlock: stdout was not valid JSON (length=${(stdout || '').length}, raw=${JSON.stringify(stdout)}) -- ${e.message}`);
+  }
   assert.strictEqual(j.decision, 'block', 'Stop must use the structured block decision, not plain stdout');
   return j.reason;
 }
+
+test('parseBlock: an empty or truncated stdout (the close-before-drain hazard class -- forced directly here, never raced for) throws a DIAGNOSTIC error naming its own length and raw bytes, not a bare opaque JSON.parse crash', () => {
+  assert.throws(() => parseBlock(''), (e) => /length=0/.test(e.message) && /parseBlock/.test(e.message), 'empty stdout must self-report as empty, not just "Unexpected end of JSON input"');
+  const truncated = '{"decision":"block","rea';
+  assert.throws(() => parseBlock(truncated), (e) => e.message.includes(`length=${truncated.length}`) && e.message.includes(JSON.stringify(truncated)), 'a truncated stdout must show its own length + raw bytes so a future occurrence is legible from the failure alone');
+  // still fails loud on VALID-JSON-wrong-shape too (the pre-existing assert, untouched) -- this hardening never masks a real defect into a pass.
+  assert.throws(() => parseBlock(JSON.stringify({ decision: 'not-block', reason: 'x' })), /must use the structured block decision/);
+});
 
 test('0d: an unconsumed OBESE crossing with the DEFAULT (quick) exercise auto-runs — no ask, standing config authorizes it, then self-consumes', () => {
   const { home, proj } = sandbox();
