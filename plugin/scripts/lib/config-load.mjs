@@ -36,11 +36,21 @@ export function claudeBaseDirs(home = os.homedir()) {
 // explode.mjs's `isContainedIn` (which documents the same win32 caveat): that module
 // is the class-A engine and is EXCLUDED from the shipped dist, so importing it here
 // would break the plugin. Named divergence, not drift — keep the two in step.
+// Both arguments MUST already be canonical (a canonicalOrNull result). That used to
+// be true only because every caller happened to do it — "it happens to be called
+// correctly" is the same shape that produced the R4 escape, so it is now ENFORCED
+// rather than assumed: a non-canonical argument fails CLOSED instead of being
+// silently lexically compared. The check is free (no syscall) and idempotent on a
+// real canonical path, which is always absolute and already normalized.
+function isCanonicalShape(p) {
+  return typeof p === 'string' && !!p && path.isAbsolute(p) && path.resolve(p) === p;
+}
 export function pathWithin(childPhys, basePhys) {
   if (!childPhys || !basePhys) return false; // fail-closed
+  if (!isCanonicalShape(childPhys) || !isCanonicalShape(basePhys)) return false; // fail-closed: caller must canonicalize
   const norm = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
-  const c = norm(path.resolve(childPhys));
-  const b = norm(path.resolve(basePhys));
+  const c = norm(childPhys);
+  const b = norm(basePhys);
   return c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
 }
 // Is `p` inside ANY configured base dir, or does it CONTAIN one? Either direction

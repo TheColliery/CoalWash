@@ -81,15 +81,19 @@ import crypto from 'node:crypto';
 // (blind wave R3 / TP-3). Kept BYTE-EQUIVALENT to config-load.mjs `canonicalOrNull`;
 // that function is the source of truth. Change one, change the other IN THE SAME
 // COMMIT — an unsynced twin makes the "idiom is stable" claim above a lie.
+// CAUGHT BY THE TWIN-PIN GATE ON ITS FIRST RUN, before it shipped: the R4 fix
+// removed the 8.3 OUTPUT check from the class-B side (it is a pure false positive —
+// `.native` expands a genuine alias, so the branch could only ever fire on a LEGAL
+// name like `backup~1`) and this twin still carried it. A fifth wave of exactly the
+// drift the four before it produced. The gate is `twin-pin.test.mjs`; keep the two
+// bodies behaviourally identical or it goes red.
 const WIN_UNC_OR_DEVICE_RE = /^[\\/]{2}/;
-const WIN_SHORT_8_3_RE = /(^|[\\/])[^\\/]{1,8}~\d+(\.[^\\/]{1,3})?([\\/]|$)/;
 function physicalOrNull(p) {
   if (typeof p !== 'string' || !p) return null;
+  if (process.platform === 'win32' && WIN_UNC_OR_DEVICE_RE.test(p)) return null; // INPUT side: where the ambiguity lives
   let out;
   try { out = fs.realpathSync.native(p); } catch { return null; }
-  if (process.platform !== 'win32') return out;
-  if (WIN_UNC_OR_DEVICE_RE.test(p) || WIN_UNC_OR_DEVICE_RE.test(out)) return null;
-  if (WIN_SHORT_8_3_RE.test(out)) return null;
+  if (process.platform === 'win32' && WIN_UNC_OR_DEVICE_RE.test(out)) return null; // a mapped network drive resolves TO a UNC
   return out;
 }
 // Physical form of a path ABOUT TO BE CREATED (may not exist yet): realpath the

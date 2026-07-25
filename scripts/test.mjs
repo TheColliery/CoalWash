@@ -38,6 +38,7 @@ const TESTS = [
   'scripts/lib/estate-archive.test.mjs',
   'scripts/lib/retier.test.mjs',
   'scripts/lib/gate-liveness.test.mjs',
+  'scripts/lib/twin-pin.test.mjs',
   'scripts/build-plugin.test.mjs',
 ];
 
