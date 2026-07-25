@@ -1,42 +1,61 @@
 // classa-no-auto.test.mjs — pins the standing property: THE CLASS-A ENGINE IS
 // NEVER AUTO-INVOKED.
 //
-// WHY A TEST AND NOT A CLAIM (USER 2026-07-25): class-A operates on the at-rest
-// transcript estate — the accumulated past — and is a destructive reducer. Being
-// un-wired today is not the same as being PINNED un-wired. A future conductor
-// edit could reach it in one line (`await import(lib('explode.mjs'))`) and
-// nothing in the suite would notice. This file is the something that notices.
+// WHY A TEST AND NOT A CLAIM (USER 2026-07-25): class-A is a destructive reducer
+// over the at-rest transcript estate — the accumulated past. Being un-wired today
+// is not the same as being PINNED un-wired. A future edit reaches it in one line
+// (`await import(lib('explode.mjs'))`) and nothing in the suite would notice.
+// This file is the something that notices.
 //
-// THE PROPERTY IS INVERTED, NOT AN ENUMERATION. It deliberately does NOT keep a
-// denylist of "places that must not mention explode" — such a list is stale the
-// moment a new surface exists. Instead:
-//   * the AUTO surface is DERIVED from hooks/hooks.json — the only surface that
-//     fires with NO human in the loop (SessionStart / Stop / PreToolUse /
-//     PostToolUse). Add a new hook script tomorrow and it becomes a root here
-//     automatically, because the roots are read from the manifest, not typed in.
-//   * everything that surface can REACH is computed transitively.
-//   * class-A is declared HUMAN_ONLY and asserted ABSENT from that reachable set.
-// So the default posture is "an entry point is human-required"; being reachable
-// from a hook is the thing that must never silently happen.
+// ── THE INVERSION, AND WHY IT HAD TO MOVE UP A LEVEL ────────────────────────
+// v1 derived its roots from hooks/hooks.json alone. That inverted over PLACES
+// (it never listed forbidden dirs) but silently assumed ONE CLASS of auto
+// surface. A GitHub Action entry script is invoked by a WORKFLOW, not a hook
+// manifest: v1 would have stayed green while the strictest auto surface the
+// product can have — a runner executing an untrusted checkout with no human
+// present — went completely uncovered.
 //
-// THE EXPLICIT UPGRADE is the human-invoked surface (`commands/`, `skills/`) — a
-// user typing the command or invoking the SKILL. That is NOT asserted against,
-// on purpose: wiring class-A into the SKILL is the PLANNED graduation step (the
-// same moment the `UNWIRED_ENGINE` dist exclusion in build-plugin.mjs is
-// deleted). Wiring it into a HOOK is never planned. This test draws the line
-// exactly there, so the planned step stays possible and the silent one goes red.
+// The fix is NOT "hooks.json + workflows". That is the same enumeration trap one
+// rung up: the next surface class (a scheduled job, an MCP-style entry, a
+// platform's new invocation channel) would be invisible in exactly the same way.
+// So this test knows what an auto surface KIND is:
+//   1. find every artifact in the repo that DECLARES AN INVOCATION — names
+//      something to run without a human;
+//   2. derive roots from each KIND it recognises;
+//   3. FAIL LOUDLY on any invocation-declaring artifact whose kind it does NOT
+//      recognise.
+// (3) is the point. An unrecognised kind is not "nothing to see"; it is "someone
+// must teach me this or the guarantee is void." The test reports that it has been
+// OUTGROWN instead of quietly under-covering.
 //
-// ponytail: the reachability walk is a STATIC text scan (import/require
-// specifiers + every `*.mjs`/`*.js` string literal), not a real module graph.
-// The literal sweep is what catches this codebase's actual dynamic idiom —
-// hooks/coalwash-conductor.js:93 builds `lib('writeguard.mjs')` and dynamically
-// imports it, so a static-import-only walk would see nothing. Ceiling: a
-// genuinely computed specifier (`lib('explo' + 'de.mjs')`) evades it. That is
-// accepted — this pins against ACCIDENT and silent drift, which is the stated
-// threat; it is not an adversarial sandbox, and a developer determined to route
-// around a named safety test is out of scope. UPGRADE PATH if that ever matters:
-// walk the real graph by importing each root under a loader hook and recording
-// resolved specifiers.
+// ── WHAT IS DELIBERATELY *NOT* ASSERTED ─────────────────────────────────────
+// The human-invoked surface (`commands/`, `skills/`) is the EXPLICIT UPGRADE — a
+// user typing the command or invoking the SKILL. Wiring class-A there is the
+// PLANNED graduation step (the same moment build-plugin's UNWIRED_ENGINE dist
+// exclusion is deleted), so it must stay possible. Wiring it into a hook or a
+// workflow never is. The line is drawn exactly there: the planned step stays
+// green, the silent one goes red.
+//
+// ── CEILINGS, NAMED ─────────────────────────────────────────────────────────
+// ponytail: reachability is a STATIC text walk, not a real module graph. A string
+// literal counts ONLY in an IMPORT CONTEXT (`from '…'`, `require(…)`, `import(…)`),
+// which is what makes it both sharp and safe here:
+//   * it FOLLOWS this codebase's real dynamic idiom, `await import(lib('x.mjs'))`
+//     (hooks/coalwash-conductor.js), which a static-import-only walk misses;
+//   * it IGNORES a mere MENTION — and there are two live ones that would
+//     otherwise turn this test red for the wrong reason: verify.mjs's
+//     `UNLISTED_OK` set and build-plugin.mjs's `UNWIRED_ENGINE` list both name
+//     the engine files as strings precisely in order to EXCLUDE them.
+// Accepted blind spots: a fully computed specifier (`lib('explo'+'de.mjs')`), and
+// a dynamic import whose specifier is a variable (verify.mjs imports its LIBS
+// roster that way — those are class-B libs and the roster explicitly excludes
+// class-A). Both accepted: this pins against ACCIDENT and silent drift, the
+// stated threat; it is not an adversarial sandbox. UPGRADE PATH if that changes:
+// walk the real graph under a loader hook and record resolved specifiers.
+// Skipped dirs: `plugin/` is a byte-verified copy of source (verify.mjs
+// checkDist) so scanning it only double-reports; `.claude/`+`.agents/` hold
+// RUNTIME artifacts (CoalHearth's journal, CoalWash's own sandbox), not product
+// declarations.
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
@@ -45,60 +64,120 @@ import { fileURLToPath } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-// The class-A engine — declared human-only. Not upgraded, so it must not be
-// reachable from any auto root. (detonate is the gate, explode the reducer;
-// detonate imports explode, so either one appearing is the violation.)
+// The class-A engine — declared human-only, therefore must not be auto-reachable.
+// (detonate is the gate, explode the reducer; detonate imports explode, so either
+// one surfacing is the violation.)
 const HUMAN_ONLY = ['explode.mjs', 'detonate.mjs'];
 
-// AUTO ROOTS, derived: every script named by a command in hooks/hooks.json.
-// Read from the manifest so a NEW hook script is covered without editing this test.
-function autoRoots() {
-  const manifest = JSON.parse(fs.readFileSync(path.join(repo, 'hooks', 'hooks.json'), 'utf8'));
-  const commands = [];
-  const walk = (node) => {
-    if (Array.isArray(node)) return node.forEach(walk);
-    if (node && typeof node === 'object') {
-      if (typeof node.command === 'string') commands.push(node.command);
-      return Object.values(node).forEach(walk);
-    }
-  };
-  walk(manifest.hooks);
-  const roots = new Set();
-  for (const cmd of commands) {
-    // a command looks like: node "${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js"
-    for (const m of cmd.matchAll(/[\w./-]+\.(?:mjs|js|cjs)/g)) {
-      const rel = m[0].replace(/^.*?(hooks|scripts)\//, '$1/');
-      const abs = path.join(repo, rel);
-      if (fs.existsSync(abs)) roots.add(abs);
-    }
+const SKIP_DIRS = new Set(['.git', 'node_modules', 'plugin', 'work', '.claude', '.agents']);
+
+function walkFiles(dir = repo, acc = []) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) {
+      if (SKIP_DIRS.has(e.name)) continue;
+      walkFiles(path.join(dir, e.name), acc);
+    } else acc.push(path.join(dir, e.name));
   }
-  return [...roots];
+  return acc;
+}
+const relOf = (abs) => path.relative(repo, abs).split(path.sep).join('/');
+
+// ── (1) Does this artifact DECLARE AN INVOCATION? ───────────────────────────
+// Config/manifest-shaped files only: a .md or a .mjs is not a DECLARATION of an
+// entry point — it IS one, or documents one. Deliberately broad on the signal
+// side: over-flagging costs one registry line, under-flagging costs the guarantee.
+const CONFIG_EXT = /\.(json|ya?ml|toml)$/i;
+// A DECLARATION needs a key that MEANS "run this", or an interpreter actually
+// running something. A bare filename is only a MENTION — the same mention-vs-
+// wiring distinction the closure walk makes below. (Measured: a filename-alone
+// signal false-flagged three files that merely NAME a script — the issue-template
+// component dropdown, a config comment, and a SkillSpector scan report.)
+const INVOCATION_SIGNALS = [
+  /^\s*(?:-\s*)?(?:run|uses|entrypoint|exec|main)\s*:/m,                        // YAML step / action / entrypoint
+  /"(?:command|entrypoint|main|scripts)"\s*:/,                                  // JSON manifest keys
+  /\b(?:node|npx|bash|sh|pwsh|powershell|python3?)\s+["']?[\w./${}-]+\.(?:mjs|cjs|js|sh|ps1|py)\b/, // an interpreter running a script
+];
+function declaresInvocation(abs) {
+  if (!CONFIG_EXT.test(abs)) return false;
+  let text;
+  try { text = fs.readFileSync(abs, 'utf8'); } catch { return false; }
+  return INVOCATION_SIGNALS.some((re) => re.test(text));
 }
 
-// Every repo-local module `file` can reach: static import/require specifiers PLUS
-// any bare `*.mjs`/`*.js` string literal (the `lib('x.mjs')` dynamic idiom).
+// ── (2) The KINDS this test understands, each with its own root extractor ───
+// To teach it a new kind, add an entry here. That is the intended maintenance
+// action when the first assertion below goes red.
+const scriptsIn = (text, re) => [...text.matchAll(re)].map((m) => m[1]);
+const KINDS = [
+  {
+    name: 'hook-manifest',
+    matches: (rel) => /(^|\/)hooks\.json$/.test(rel),
+    roots(text) { // every `command` string, e.g. node "${CLAUDE_PLUGIN_ROOT}/hooks/x.js"
+      const out = [];
+      const walk = (n) => {
+        if (Array.isArray(n)) return n.forEach(walk);
+        if (n && typeof n === 'object') {
+          if (typeof n.command === 'string') out.push(...scriptsIn(n.command, /([\w./-]+\.(?:mjs|cjs|js))/g));
+          return Object.values(n).forEach(walk);
+        }
+      };
+      try { walk(JSON.parse(text)); } catch { /* unparseable manifest → no roots (verify.mjs owns JSON validity) */ }
+      return out;
+    },
+  },
+  {
+    name: 'workflow',
+    matches: (rel) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(rel),
+    // a runner executes these with NO human present, against an untrusted
+    // checkout — the strictest auto surface the product can have.
+    roots: (text) => scriptsIn(text, /\b(?:node|npx|bash|sh|pwsh|powershell|python3?)\s+["']?([\w./-]+\.(?:mjs|cjs|js|sh|ps1|py))/g),
+  },
+];
+
+function classify() {
+  const known = [];
+  const unknown = [];
+  for (const rel of walkFiles().filter(declaresInvocation).map(relOf)) {
+    const kind = KINDS.find((k) => k.matches(rel));
+    if (kind) known.push({ rel, kind }); else unknown.push(rel);
+  }
+  return { known, unknown };
+}
+
+// ── (3) Reachability: import-context literals only, transitive ──────────────
 function refsOf(file) {
   let text;
   try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
-  // strip line comments so a MENTION in prose is not mistaken for a wiring
-  const code = text.replace(/^\s*\/\/.*$/gm, '');
-  const out = new Set();
-  for (const m of code.matchAll(/['"`]([^'"`\n]+?\.(?:mjs|js|cjs))['"`]/g)) out.add(m[1]);
-  const here = path.dirname(file);
-  const resolved = [];
-  for (const spec of out) {
-    if (spec.startsWith('node:')) continue;
-    for (const cand of [path.resolve(here, spec), path.join(repo, 'scripts', 'lib', spec), path.join(repo, spec)]) {
-      if (fs.existsSync(cand) && fs.statSync(cand).isFile()) { resolved.push(cand); break; }
+  const code = text.replace(/^\s*\/\/.*$/gm, ''); // a commented mention is not a wiring
+  const specs = new Set();
+  for (const m of code.matchAll(/\bfrom\s*['"]([^'"\n]+)['"]/g)) specs.add(m[1]);
+  for (const re of [/\brequire\s*\(([^)]*)\)/g, /\bimport\s*\(([^)]*)\)/g]) {
+    for (const m of code.matchAll(re)) {
+      for (const lit of String(m[1]).matchAll(/['"`]([^'"`\n]+)['"`]/g)) specs.add(lit[1]);
     }
   }
-  return resolved;
+  const here = path.dirname(file);
+  const out = [];
+  for (const spec of specs) {
+    if (!spec || spec.startsWith('node:')) continue;
+    for (const cand of [path.resolve(here, spec), path.join(repo, 'scripts', 'lib', spec), path.join(repo, spec)]) {
+      try { if (fs.statSync(cand).isFile()) { out.push(cand); break; } } catch { /* not this candidate */ }
+    }
+  }
+  return out;
 }
 
 function autoClosure() {
+  const queue = [];
+  for (const { rel, kind } of classify().known) {
+    for (const s of kind.roots(fs.readFileSync(path.join(repo, rel), 'utf8'))) {
+      const stripped = s.replace(/^.*?\$\{[^}]*\}\/?/, ''); // drop ${CLAUDE_PLUGIN_ROOT}/ style prefixes
+      for (const cand of [path.join(repo, stripped), path.join(repo, s)]) {
+        try { if (fs.statSync(cand).isFile()) { queue.push(cand); break; } } catch { /* not this candidate */ }
+      }
+    }
+  }
   const seen = new Set();
-  const queue = autoRoots();
-  assert.ok(queue.length > 0, 'derived at least one auto root from hooks/hooks.json (a zero-root walk would pass vacuously)');
   while (queue.length) {
     const f = queue.pop();
     if (seen.has(f)) continue;
@@ -108,23 +187,39 @@ function autoClosure() {
   return seen;
 }
 
-test('class-A is NEVER auto-invoked: the engine is unreachable from every hook-declared entry point', () => {
-  const closure = autoClosure();
-  const reached = [...closure].map((f) => path.basename(f));
+// ── the assertions ──────────────────────────────────────────────────────────
+
+test('every invocation-declaring artifact is of a RECOGNISED kind (an unknown kind voids the guarantee — teach the test, never silence it)', () => {
+  const { unknown, known } = classify();
+  assert.deepStrictEqual(
+    unknown, [],
+    'found artifact(s) that declare an invocation but whose KIND this test does not recognise:\n' +
+    `  ${unknown.join('\n  ')}\n` +
+    'Each can name a script that runs with NO human present, so the no-auto guarantee below does NOT cover it.\n' +
+    'FIX: add a kind to the KINDS registry in this file (a matcher + a root extractor). Do not silence this.\n' +
+    `recognised kinds: ${KINDS.map((k) => k.name).join(', ')} · currently matched: ${known.map((k) => k.rel).join(', ')}`,
+  );
+});
+
+test('class-A is NEVER auto-invoked: the engine is unreachable from every auto entry point of every recognised kind', () => {
+  const reached = [...autoClosure()].map((f) => path.basename(f));
   const violations = HUMAN_ONLY.filter((n) => reached.includes(n));
   assert.deepStrictEqual(
     violations, [],
-    `the class-A engine became reachable from an AUTO (hook) entry point: ${violations.join(', ')}.\n` +
+    `the class-A engine became reachable from an AUTO entry point: ${violations.join(', ')}.\n` +
     'class-A is a destructive reducer over the at-rest transcript estate and must never fire without a human.\n' +
-    'If this is a DELIBERATE graduation, it belongs on the human-invoked surface (commands/ or skills/), not a hook.\n' +
+    'If this is a DELIBERATE graduation it belongs on the human-invoked surface (commands/ or skills/), never a hook or a workflow.\n' +
     `auto-reachable set was: ${reached.sort().join(', ')}`,
   );
 });
 
-test('the walk is LIVE, not vacuous: it really does reach the conductor and the libs the conductor imports', () => {
+test('the walk is LIVE, not vacuous: both kinds are really discovered and the conductor\'s dynamic lib() import is followed', () => {
+  const kinds = new Set(classify().known.map((k) => k.kind.name));
+  // Without these, the assertions above could pass for the wrong reason (an empty
+  // root set or a blind walk) — the exact vacuous-green trap.
+  assert.ok(kinds.has('hook-manifest'), `the hook manifest must be discovered; got: ${[...kinds].join(', ')}`);
+  assert.ok(kinds.has('workflow'), `the workflows must be discovered; got: ${[...kinds].join(', ')}`);
   const reached = [...autoClosure()].map((f) => path.basename(f));
-  // Sentinel: if the closure ever stops reaching these, the test above would pass
-  // for the wrong reason (an empty/blind walk), so pin the walk's own liveness.
-  assert.ok(reached.includes('coalwash-conductor.js'), `the hook root itself must be in the closure; got: ${reached.sort().join(', ')}`);
+  assert.ok(reached.includes('coalwash-conductor.js'), `the hook root must be reached; got: ${reached.sort().join(', ')}`);
   assert.ok(reached.includes('writeguard.mjs'), `the conductor's dynamic lib() import must be followed; got: ${reached.sort().join(', ')}`);
 });
