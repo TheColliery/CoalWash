@@ -30,9 +30,13 @@ Thumbs.db
 .env.*
 *.tmp
 
-# IC lab prototypes — ungraduated, never ship (blueprint §19.6 gate)
-scripts/lib/explode.mjs
-scripts/lib/explode.test.mjs
-scripts/lib/detonate.mjs
-scripts/lib/detonate.test.mjs
+# Class-A ULTRA engine (scripts/lib/{explode,detonate}.mjs + tests) is deliberately NOT listed here.
+# It was parked under this block as an ungraduated prototype; since the graduation landing (A1-A5) it
+# is TRACKED SOURCE, gated by the suite like any other lib. It is kept out of the shipped plugin/ dist
+# by the named UNWIRED_ENGINE exclusion in scripts/build-plugin.mjs (enforced in both directions by
+# verify.mjs), NOT by this file — and it ships once the class-A SKILL surface wires it. Re-adding it
+# here would change nothing in git (the files are tracked) while hiding them from ripgrep and
+# re-implying "never ship".
+
+# IC lab scratch — throwaway prototypes/notes, never committed (this is the guard that still serves)
 work/

@@ -3,7 +3,10 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildDist, checkDist, DIST_ITEMS } from './build-plugin.mjs';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function scratchDist() {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-dist-')));
@@ -24,6 +27,21 @@ test('buildDist produces a clean, in-sync dist: manifest + bin + hooks + engine,
     const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
     assert.strictEqual(walk(dist).some((f) => /\.test\.[cm]?js$/.test(f)), false, 'no test files ship');
     assert.ok(DIST_ITEMS.length >= 4, 'dist item set stays explicit');
+  } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
+test('the UNWIRED class-A engine never ships: absent from a fresh dist, checkDist still PASSES with it in source, and a hand-copied one fails loud', () => {
+  const dist = scratchDist();
+  try {
+    buildDist(dist);
+    for (const name of ['explode.mjs', 'detonate.mjs']) {
+      assert.ok(fs.existsSync(path.join(repoRoot, 'scripts', 'lib', name)), `${name} IS in source (landed, gated by the suite)`);
+      assert.strictEqual(fs.existsSync(path.join(dist, 'scripts', 'lib', name)), false, `${name} is NOT in the dist (unwired -> unshipped)`);
+    }
+    assert.deepStrictEqual(checkDist(dist), [], 'source-present + dist-absent is IN SYNC — the exclusion is what makes verify PASS');
+    // ...and the exclusion is not a blind spot: a hand-copied engine file is caught.
+    fs.copyFileSync(path.join(repoRoot, 'scripts', 'lib', 'explode.mjs'), path.join(dist, 'scripts', 'lib', 'explode.mjs'));
+    assert.ok(checkDist(dist).some((d) => d.includes('unwired class-A engine present in plugin/')), 'a leaked engine file fails loud');
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 

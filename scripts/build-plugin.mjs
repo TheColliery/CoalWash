@@ -10,7 +10,8 @@
 // it lives): CoalWash ships `scripts/lib/` in the dist because the ENGINE is
 // cross-agent scripts (blueprint §7b code-core — any agent runs `node
 // scripts/lib/... `), and the hooks/ conductor imports the same modules so hook
-// and engine can never diverge. Tests are filtered out of the dist.
+// and engine can never diverge. Tests are filtered out of the dist, and so is the
+// UNWIRED class-A engine (see UNWIRED_ENGINE below).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,13 +32,28 @@ export const DIST_ITEMS = [
 
 const isTest = (p) => /\.test\.[cm]?js$/.test(p);
 
+// LANDED IN SOURCE, DELIBERATELY NOT SHIPPED — the class-A ULTRA at-rest reduce engine.
+// explode.mjs/detonate.mjs landed on main with the class-A graduation (A1-A5), so source is the SSoT
+// and the suite gates them like any other lib. But NOTHING in the shipped SKILL surface invokes them
+// yet: shipping an engine no shipped code path can call would put unreachable code — and a live
+// destructive reducer — in every user's plugin. So they are excluded from the build AND from both
+// directions of the dist check, which is why verify.mjs PASSES with them present in scripts/lib/.
+// This is a NAMED, deliberate divergence from "the dist carries all of scripts/lib", not an oversight.
+// REVISIT at the class-A skill-wiring release: wire the SKILL surface, delete this block, rebuild —
+// the engine then ships together with the caller that makes it reachable.
+const UNWIRED_ENGINE = [
+  path.join('scripts', 'lib', 'explode.mjs'),
+  path.join('scripts', 'lib', 'detonate.mjs'),
+];
+const isUnwiredEngine = (rel) => UNWIRED_ENGINE.includes(rel);
+
 export function buildDist(distRoot = dist) {
   fs.rmSync(distRoot, { recursive: true, force: true });
   for (const rel of DIST_ITEMS) {
     const src = path.join(repo, rel);
     const dst = path.join(distRoot, rel);
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) }); // recursive always; EXCLUDE *.test.* — dev-only tests never ship (clean-clone)
+    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isUnwiredEngine(path.relative(repo, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine
   }
 }
 
@@ -48,7 +64,7 @@ export function buildDist(distRoot = dist) {
 export function checkDist(distRoot = dist) {
   const out = [];
   const filesUnder = (root, rel) => {
-    if (isTest(rel)) return []; // excluded from the dist -> excluded here too, both directions
+    if (isTest(rel) || isUnwiredEngine(rel)) return []; // excluded from the dist -> excluded here too, both directions
     const abs = path.join(root, rel);
     if (!fs.existsSync(abs)) return [];
     if (fs.statSync(abs).isDirectory()) return fs.readdirSync(abs).flatMap((n) => filesUnder(root, path.join(rel, n)));
@@ -63,6 +79,12 @@ export function checkDist(distRoot = dist) {
     for (const rel of filesUnder(distRoot, item)) {
       if (!fs.existsSync(path.join(repo, rel))) out.push(`orphan in plugin/ (no source): ${rel}`);
     }
+  }
+  // The exclusion above must not become a BLIND SPOT: skipping these paths in both walks means a
+  // hand-copied engine file in the dist would otherwise pass unnoticed (it has a source, so the
+  // orphan check clears it). Assert absence explicitly instead.
+  for (const rel of UNWIRED_ENGINE) {
+    if (fs.existsSync(path.join(distRoot, rel))) out.push(`unwired class-A engine present in plugin/ (must not ship until the SKILL surface wires it): ${rel}`);
   }
   const allowedTops = new Set(DIST_ITEMS.map((rel) => rel.split(path.sep)[0]));
   if (fs.existsSync(distRoot)) {
