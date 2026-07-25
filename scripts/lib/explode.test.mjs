@@ -2093,6 +2093,31 @@ test('R3/TP-3: a SHORT-NAME snapshot store cannot slip past store containment �
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('RUNG5 §1.2 NULL-POLARITY: an UNRESOLVABLE src/outPath REFUSES at every contained==REFUSE guard — a fail-closed null must never read as ALLOW', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store'); fs.mkdirSync(store, { recursive: true });
+    const src = path.join(store, 'victim.jsonl');
+    fs.writeFileSync(src, '{"type":"mode"}\n{"type":"user"}\n');
+    const before = sha256File(src);
+    // path.toNamespacedPath is NODE'S OWN documented long-path helper, not a contrived spelling.
+    // physicalOrNull rejects every win32 device/UNC form by design, so it yields null here — and a
+    // broken junction anywhere in the ancestor chain produces the same null on any platform.
+    const nsSrc = path.toNamespacedPath(src);
+    const nsStore = path.toNamespacedPath(store);
+
+    const rSnap = snapshotSource(nsSrc, nsStore);
+    assert.strictEqual(rSnap.ok, false,
+      'snapshotSource must REFUSE a src it cannot prove is outside the store. Pre-fix, isContainedIn folded the unresolvable path into false, and because this guard is REFUSE-polarity, false meant ALLOW — the store write proceeded against a src living inside the store');
+    const rRed = reduceFile(nsSrc, { cutTypes: ['mode'], outPath: path.join(dir, 'o.jsonl'), snapshotDir: nsStore });
+    assert.strictEqual(rRed.ok, false, 'reduceFile floor refuses the same shape (both #6 and FIX-1 legs are REFUSE-polarity)');
+    assert.strictEqual(sha256File(src), before, 'source byte-intact');
+
+    // The permit-polarity caller keeps its ORIGINAL meaning — the fix must not invert it.
+    assert.strictEqual(isContainedIn(null, store), false, 'permit-polarity: unknown is still not-contained (twin-pin behaviour unchanged)');
+  } finally { rm(dir); }
+});
+
 test('BLOB-SYMLINK: a link planted at <store>/<sha> can never make snapshotSource write THROUGH it — the blob lands via temp->rename, the outside victim is untouched', (t) => {
   const dir = tmp();
   try {
