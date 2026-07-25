@@ -49,7 +49,7 @@ function write(p, content) { fs.mkdirSync(path.dirname(p), { recursive: true });
 
 // apply.mjs sandbox: a project with a memory store (roots = [store]).
 function applySandbox() {
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwgl-a-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwgl-a-')));
   const store = path.join(proj, 'memory');
   fs.mkdirSync(store, { recursive: true });
   return { proj, store };
@@ -64,8 +64,8 @@ const apply = (plan, opts = {}) => applyPlan(plan, { projectRoot: plan && plan.p
 // estate/retier sandbox: a CC-shaped home (so detectPlatform === 'claude-code')
 // + a project.
 function ccSandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwgl-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwgl-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwgl-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwgl-proj-')));
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   return { home, proj };
 }

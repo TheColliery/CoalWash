@@ -30,8 +30,8 @@ const REPO = path.resolve(here, '..', '..');
 const HOOK = path.join(REPO, 'hooks', 'coalwash-conductor.js');
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwh-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwh-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwh-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwh-proj-')));
   // root the project (found by the stop-at-home walk) without overriding config
   fs.writeFileSync(path.join(proj, '.coalwash.json'), '{}');
   return { home, proj };
@@ -59,7 +59,7 @@ function muteUpdate(home, extra = {}) {
 }
 function seedClassB(home, proj, { claudeMdBytes = 100, indexBytes = 60 } = {}) {
   fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'a'.repeat(claudeMdBytes), 'utf8');
-  const slug = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
+  const slug = fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-');
   const mem = path.join(home, '.claude', 'projects', slug, 'memory');
   fs.mkdirSync(mem, { recursive: true });
   fs.writeFileSync(path.join(mem, 'MEMORY.md'), 'i'.repeat(indexBytes), 'utf8');
@@ -69,7 +69,7 @@ function seedClassB(home, proj, { claudeMdBytes = 100, indexBytes = 60 } = {}) {
 // state.json (flat, one file per project). The OLD single-file root is at
 // <home>/.claude/.coalwash-state.json (a migration source only).
 function projStatePath(home, proj) {
-  const slug = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
+  const slug = fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-');
   return path.join(home, '.claude', 'projects', slug, 'coalwash', 'state.json');
 }
 function seedState(home, proj, projState, opts = {}) {
@@ -79,7 +79,7 @@ function seedState(home, proj, projState, opts = {}) {
     // store at the OLD-ROOT path (no schema) — SessionStart's first loadState
     // reads it via the fallback + migrates (location + schema reset).
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), JSON.stringify({ projects: { [fs.realpathSync(proj)]: projState } }), 'utf8');
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash-state.json'), JSON.stringify({ projects: { [fs.realpathSync.native(proj)]: projState } }), 'utf8');
     return;
   }
   // Default: a store already on the current version at the NEW per-project path.

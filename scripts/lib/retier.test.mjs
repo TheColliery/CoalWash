@@ -35,8 +35,8 @@ const repoDir = path.resolve(here, '..', '..');
 const R = { targetTokens: 500, armPct: 20, disarmPct: 10, headroomPct: 10 };
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-proj-')));
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   return { home, proj };
 }
@@ -447,7 +447,7 @@ test('gate wiring: rollbackFromSnapshot restores every manifest original byte-ex
 
 test('H1: rollbackFromSnapshot REFUSES a manifest original OUTSIDE the trusted roots (poisoned-manifest close)', () => {
   const { home, proj } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-victim-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-victim-')));
   try {
     const victim = path.join(outside, 'victim.md');
     write(victim, 'PRISTINE-OUTSIDE');
@@ -546,8 +546,8 @@ test('helpers: moveVerify passes a verbatim move and fails a lossy one; unrefere
 });
 
 test('platform gate (armor #2): a non-Claude-Code home → retierScan refuses + runRetier no-ops (conservative flag); with ~/.claude the gate keys CC — detectPlatform, not a hardcode', () => {
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-npproj-')));
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-nphome-'))); // NO ~/.claude
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-npproj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-nphome-'))); // NO ~/.claude
   try {
     const scan = retierScan({ projectRoot: proj, home, retier: R });
     assert.strictEqual(scan.platform, 'unknown');

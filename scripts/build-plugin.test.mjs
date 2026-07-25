@@ -9,7 +9,7 @@ import { buildDist, checkDist, DIST_ITEMS } from './build-plugin.mjs';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function scratchDist() {
-  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-dist-')));
+  return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-dist-')));
 }
 
 test('buildDist produces a clean, in-sync dist: manifest + bin + hooks + engine, tests filtered out', () => {

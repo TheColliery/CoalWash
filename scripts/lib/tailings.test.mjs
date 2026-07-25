@@ -12,7 +12,7 @@ import { txDirFor } from './apply.mjs';
 import { TIER1_KEEP_ALL_MS, HORIZON_MS } from './retention.mjs';
 
 function sandbox() {
-  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-proj-')));
+  return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-proj-')));
 }
 function clean(...dirs) {
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });

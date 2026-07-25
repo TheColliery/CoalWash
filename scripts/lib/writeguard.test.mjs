@@ -14,8 +14,8 @@ import {
 delete process.env.CLAUDE_CONFIG_DIR; // hermetic: sandbox home only
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-proj-')));
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   return { home, proj };
 }
@@ -51,10 +51,10 @@ test('isGuardedTarget: root governance basenames + markdown under a .claude tree
     const src = path.join(proj, 'src', 'index.js'); fs.mkdirSync(path.dirname(src), { recursive: true }); fs.writeFileSync(src, 'code', 'utf8');
     const doc = path.join(proj, 'docs', 'readme.md'); fs.mkdirSync(path.dirname(doc), { recursive: true }); fs.writeFileSync(doc, '# docs', 'utf8');
 
-    assert.strictEqual(isGuardedTarget(gov, { projectRoot: proj, home }), fs.realpathSync(gov));
-    assert.strictEqual(isGuardedTarget(mem, { projectRoot: proj, home }), fs.realpathSync(mem));
-    assert.strictEqual(isGuardedTarget(rule, { projectRoot: proj, home }), fs.realpathSync(rule));
-    assert.strictEqual(isGuardedTarget(globalGov, { projectRoot: proj, home }), fs.realpathSync(globalGov));
+    assert.strictEqual(isGuardedTarget(gov, { projectRoot: proj, home }), fs.realpathSync.native(gov));
+    assert.strictEqual(isGuardedTarget(mem, { projectRoot: proj, home }), fs.realpathSync.native(mem));
+    assert.strictEqual(isGuardedTarget(rule, { projectRoot: proj, home }), fs.realpathSync.native(rule));
+    assert.strictEqual(isGuardedTarget(globalGov, { projectRoot: proj, home }), fs.realpathSync.native(globalGov));
     assert.strictEqual(isGuardedTarget(src, { projectRoot: proj, home }), null, 'source code is never guarded');
     assert.strictEqual(isGuardedTarget(doc, { projectRoot: proj, home }), null, 'a plain docs .md outside .claude is not guarded (undercount-is-safe ceiling)');
   } finally { clean(home, proj); }
@@ -71,7 +71,7 @@ test('isGuardedTarget: CW\'s OWN sandbox (.claude/coalwash/**) is NEVER guarded 
 
 test('isGuardedTarget: an unresolvable / out-of-tree path is fail-closed (null)', () => {
   const { home, proj } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-out-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-out-')));
   try {
     const stray = path.join(outside, 'CLAUDE.md'); fs.writeFileSync(stray, GOV, 'utf8');
     assert.strictEqual(isGuardedTarget(stray, { projectRoot: proj, home }), null, 'a governance basename OUTSIDE the trees is not contained -> fail-closed');
@@ -130,7 +130,7 @@ test('FP lab (a): a CARELESS drop — an edit that silently loses a link — fir
     const r = seatbeltCheck(proj, 'sess', gov, { home });
     assert.ok(r && !r.oversize, 'a diff ran');
     assert.ok(r.classes.includes('link-drop'), JSON.stringify(r.classes));
-    assert.strictEqual(r.file, fs.realpathSync(gov));
+    assert.strictEqual(r.file, fs.realpathSync.native(gov));
     assert.ok(r.snapshotPath && fs.existsSync(r.snapshotPath), 'the snapshot pointer is a real file');
   } finally { clean(home, proj); }
 });
@@ -265,7 +265,7 @@ test('recovery: listWriteguard returns METADATA only (never content); readWriteg
 
 test('recovery: readWriteguardSnapshot rejects a non-bare / traversal name (F1) and a miss -> null', () => {
   const { home, proj } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-secret-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-secret-')));
   try {
     fs.writeFileSync(path.join(outside, 'secret.md'), 'not yours', 'utf8');
     for (const evil of ['../../' + path.basename(outside) + '/secret.md', '..\\secret', '.', '..', 'a/b']) {

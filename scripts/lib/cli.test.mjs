@@ -19,8 +19,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(here, 'cli.mjs');
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj-')));
   fs.writeFileSync(path.join(proj, '.coalwash.json'), '{}');
   fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# gov\n' + 'a'.repeat(400), 'utf8');
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true }); // platform marker for detectPlatform
@@ -31,7 +31,7 @@ function clean(...dirs) {
 }
 // task #13: per-project state lives beside the CC memory dir.
 function projStatePath(home, proj) {
-  const slug = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
+  const slug = fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-');
   return path.join(home, '.claude', 'projects', slug, 'coalwash', 'state.json');
 }
 function run(cwd, home, args) {

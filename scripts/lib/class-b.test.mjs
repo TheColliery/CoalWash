@@ -11,8 +11,8 @@ import { measureEntries } from './caliper.mjs';
 delete process.env.CLAUDE_CONFIG_DIR;
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-proj-')));
   return { home, proj };
 }
 function clean(...dirs) {
@@ -74,7 +74,7 @@ test('discoverClassB (CC): governance walk + @import closure + rules + memory st
     write(path.join(mem, 'notes.txt'), 'ignored — not .md');
 
     const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
-    const by = (p) => d.entries.find((e) => e.path === fs.realpathSync(p));
+    const by = (p) => d.entries.find((e) => e.path === fs.realpathSync.native(p));
 
     assert.strictEqual(d.platform, 'claude-code');
     for (const p of ['CLAUDE.md', 'AGENTS.md', 'MEMORY.md'].map((n) => path.join(proj, n))) {
@@ -109,7 +109,7 @@ test('an @import cycle terminates and counts each file once', () => {
 
 test('an @import escaping BOTH trees is skipped and flagged (fail-closed reads)', () => {
   const { home, proj } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-out-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-out-')));
   try {
     write(path.join(outside, 'secret.md'), 'outside');
     write(path.join(proj, 'CLAUDE.md'), '@' + path.join(outside, 'secret.md'));
@@ -174,7 +174,7 @@ test('containedIn / physicalOrNull primitives behave (equal counts as inside; ab
 
 test('G1: a directory junction inside .claude/rules pointing OUTSIDE the trees leaks nothing (Windows-unprivileged; skips visibly elsewhere)', (t) => {
   const { home, proj } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-escape-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-escape-')));
   try {
     write(path.join(proj, '.claude', 'rules', 'real-rule.md'), 'a real rule');
     write(path.join(outside, 'leaked-secret.md'), 'SHOULD NEVER APPEAR IN DISCOVERY');
@@ -202,7 +202,7 @@ test('G1: containment is case-INSENSITIVE-safe on win32 — a differently-cased 
     const insideMismatchedCase = path.join(proj, 'file.md').toUpperCase();
     write(path.join(proj, 'file.md'), 'x');
     assert.strictEqual(containedIn(physicalOrNull(insideMismatchedCase), [rootPhys]), true, 'a case-differing but genuinely-inside path is recognized as contained');
-    const sibling = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-sibling-')));
+    const sibling = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-sibling-')));
     try {
       assert.strictEqual(containedIn(physicalOrNull(sibling), [rootPhys]), false, 'a genuinely-outside sibling is never wrongly contained');
     } finally { clean(sibling); }
@@ -348,7 +348,7 @@ test('managed: both signals can independently tag the same discovery pass', () =
 });
 
 test('physicalForCreate (#57 write-side twin of physicalOrNull): resolves the deepest EXISTING ancestor physically, reattaches the missing tail, collapses `..`, surfaces a symlinked intermediate at its REAL location, null when nothing exists', () => {
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwcb-pfc-')));
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwcb-pfc-')));
   try {
     // missing tail reattached under the existing physical ancestor
     assert.strictEqual(physicalForCreate(path.join(base, 'a', 'b', 'c.gz')), path.join(base, 'a', 'b', 'c.gz'));
@@ -454,7 +454,7 @@ test('#22 role-memory discovery: standalone helper is fail-closed (a role dir sy
 });
 
 test('R4/TP-2 [SECURITY]: physicalForCreate never reattaches a tail across an EXISTING but unresolvable segment — a junction whose target is unresolvable cannot aim a write outside the guarded root', (t) => {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-pfc-')));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-pfc-')));
   try {
     const store = path.join(dir, 'store');
     const outside = path.join(dir, 'OUTSIDE');
@@ -465,12 +465,12 @@ test('R4/TP-2 [SECURITY]: physicalForCreate never reattaches a tail across an EX
     const jn = path.join(store, 'esc');
     try { fs.symlinkSync(outside, jn, 'junction'); } catch (e) { t.skip(`junction unavailable (${e.code})`); return; }
     const resolved = physicalForCreate(path.join(jn, 'payload.gz'));
-    assert.ok(resolved === null || !containedIn(resolved, [fs.realpathSync(store)]),
+    assert.ok(resolved === null || !containedIn(resolved, [fs.realpathSync.native(store)]),
       'a junction out of the store is never reported as inside it');
 
     // The climb itself: a path under a dir that EXISTS resolves normally...
     const fresh = path.join(store, 'newdir', 'newfile.gz');
     const okPath = physicalForCreate(fresh);
-    assert.ok(okPath && containedIn(okPath, [fs.realpathSync(store)]), 'a genuinely absent tail still resolves (that is the function\'s job)');
+    assert.ok(okPath && containedIn(okPath, [fs.realpathSync.native(store)]), 'a genuinely absent tail still resolves (that is the function\'s job)');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

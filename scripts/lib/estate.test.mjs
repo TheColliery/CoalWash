@@ -16,8 +16,8 @@ import { ccProjectSlug } from './class-b.mjs';
 delete process.env.CLAUDE_CONFIG_DIR;
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwe-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwe-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwe-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwe-proj-')));
   return { home, proj };
 }
 function clean(...dirs) {
@@ -77,7 +77,7 @@ test('discoverEstateCC: fail-silent — a missing projects dir, or a project wit
 
 test('discoverEstateCC: realpath-contain rejects an out-of-tree junction inside a session dir (Windows-unprivileged; skips visibly elsewhere)', (t) => {
   const { home, proj } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwe-out-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwe-out-')));
   try {
     const slugDir = slugDirFor(home, proj);
     write(path.join(slugDir, 'sess-a.jsonl'), 'x');
@@ -181,7 +181,7 @@ test('attributeTranscript: non-transcript entries never sniff a topic', () => {
 
 test('detectOrphanSlugs: a slug whose cwd no longer exists is flagged; a live project is not', () => {
   const { home, proj } = sandbox();
-  const goneProj = path.join(fs.realpathSync(os.tmpdir()), 'cwe-gone-' + Date.now());
+  const goneProj = path.join(fs.realpathSync.native(os.tmpdir()), 'cwe-gone-' + Date.now());
   try {
     // Live project — its own slug dir must NOT be reported as an orphan.
     write(path.join(slugDirFor(home, proj), 'sess.jsonl'), jsonlUserLine(proj, 'alive'));

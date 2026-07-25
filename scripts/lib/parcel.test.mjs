@@ -8,8 +8,8 @@ import path from 'node:path';
 import { verifyParcelCandidates, compareParcelToAdapter, SAMPLE_MIN_CHARS, SAMPLE_COMPARE_CHARS } from './parcel.mjs';
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwp-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwp-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwp-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwp-proj-')));
   return { home, proj };
 }
 function clean(...dirs) {
@@ -42,7 +42,7 @@ test('0l verifier: a legit candidate (real file, head sample AS SEEN) round-trip
     );
     assert.strictEqual(rejected.length, 0, JSON.stringify(rejected));
     assert.strictEqual(verified.length, 1);
-    assert.strictEqual(verified[0].path, fs.realpathSync(f));
+    assert.strictEqual(verified[0].path, fs.realpathSync.native(f));
     assert.strictEqual(verified[0].bytes, fs.statSync(f).size);
     assert.ok(verified[0].tokensEst > 0);
   } finally { clean(home, proj); }
@@ -91,7 +91,7 @@ test('0l verifier: a mid-file quote is NOT a head — rejected (head means head)
 
 test('0l verifier: traversal / absolute-outside / symlink-escape paths are rejected FAIL-CLOSED (realpath-and-contain, both sides)', (t) => {
   const { home, proj } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwp-outside-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwp-outside-')));
   try {
     const secret = path.join(outside, 'secret.md');
     fs.writeFileSync(secret, 'outside content that must never verify as class-B of this project or home. ', 'utf8');
@@ -135,7 +135,7 @@ test('0l verifier: missing file · unreadable sample floor · malformed candidat
       null,
     ], { home, projectRoot: proj });
     assert.strictEqual(verified.length, 1, 'only the whole-content tiny file verifies');
-    assert.strictEqual(verified[0].path, fs.realpathSync(tiny));
+    assert.strictEqual(verified[0].path, fs.realpathSync.native(tiny));
     assert.strictEqual(rejected.length, 5);
     assert.ok(rejected.some((r) => r.reason.includes('does not resolve')), 'missing file named');
     assert.ok(rejected.some((r) => r.reason.includes('too short')), 'substance floor named');

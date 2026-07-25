@@ -7,7 +7,7 @@ import { keepsPath, loadKeeps, recordKeep, globalKeepsPath, loadGlobalKeeps, rec
 import { txDirFor } from './apply.mjs';
 
 function sandbox() {
-  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-proj-')));
+  return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-proj-')));
 }
 function clean(...dirs) {
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
@@ -124,7 +124,7 @@ test('R5: a NEWER-schema keeps.json is READ-ONLY — loadKeeps [], recordKeep re
 // ---------------------------------------------------------------------------
 
 test('global keeps: recordGlobalKeep writes beside the global state file, independent of any project', () => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome-')));
   try {
     assert.deepStrictEqual(loadGlobalKeeps(home), []);
     const ok = recordGlobalKeep(home, { target: 'global-claude-md-section', reason: 'shields it machine-wide' });
@@ -139,8 +139,8 @@ test('global keeps: recordGlobalKeep writes beside the global state file, indepe
 });
 
 test('global keeps: upserts by target (same as the project store) and stays fully isolated from any project keeps.json', () => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome2-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome2-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-proj-')));
   try {
     recordGlobalKeep(home, { target: 'x', reason: 'first look', date: '2026-01-01' });
     recordGlobalKeep(home, { target: 'x', reason: 'second look, still load-bearing', date: '2026-02-02' });
@@ -156,7 +156,7 @@ test('global keeps: upserts by target (same as the project store) and stays full
 });
 
 test('global keeps: [] on missing/corrupt/wrong-shape/newer-schema, same conservative behavior as the project store', () => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome3-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome3-')));
   try {
     assert.deepStrictEqual(loadGlobalKeeps(home), []);
     fs.mkdirSync(path.dirname(globalKeepsPath(home)), { recursive: true });

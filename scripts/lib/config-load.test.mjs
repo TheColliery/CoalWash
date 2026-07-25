@@ -9,8 +9,8 @@ import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, cla
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-proj-')));
   return { home, proj };
 }
 function clean(...dirs) {
@@ -294,10 +294,14 @@ function shortName(p) {
 
 test('R3/TP-1: canonicalOrNull EXPANDS an 8.3 short name (plain realpathSync does not) so a short and long spelling compare EQUAL', (t) => {
   if (process.platform !== 'win32') { t.skip('8.3 is a win32 form'); return; }
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-LONGDIRNAME-FOR-8DOT3-')));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-LONGDIRNAME-FOR-8DOT3-')));
   try {
     const s = shortName(dir);
     if (s === dir) { t.skip('8.3 creation disabled on this volume'); return; }
+    // DELIBERATELY the plain variant — this line IS the contrast the test exists to
+    // draw, so it must never be swept to `.native` along with the fixture roots.
+    // (It was, once: the CI-red sweep that aligned every fixture with the engine's
+    // canonicalizer hit this too and silently inverted the assertion's meaning.)
     assert.notStrictEqual(fs.realpathSync(s), dir, 'plain realpathSync leaves the 8.3 form (the bug)');
     assert.strictEqual(canonicalOrNull(s), dir, 'canonicalOrNull expands it to the long form');
     assert.strictEqual(canonicalOrNull(s), canonicalOrNull(dir), 'both spellings canonicalize to ONE value');
@@ -306,7 +310,7 @@ test('R3/TP-1: canonicalOrNull EXPANDS an 8.3 short name (plain realpathSync doe
 
 test('R3/TP-1: canonicalOrNull refuses BY SHAPE the forms it cannot canonicalize — UNC and \\\\?\\ — instead of fail-opening to path.resolve', (t) => {
   if (process.platform !== 'win32') { t.skip('UNC / \\\\?\\ are win32 forms'); return; }
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-shape-')));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-shape-')));
   try {
     assert.strictEqual(canonicalOrNull('\\\\localhost\\' + dir[0] + '$' + dir.slice(2)), null, 'UNC refused (native does not collapse it to the drive-letter form)');
     assert.strictEqual(canonicalOrNull('\\\\?\\' + dir), null, '\\\\?\\ refused (it switches OFF Windows path normalization)');
