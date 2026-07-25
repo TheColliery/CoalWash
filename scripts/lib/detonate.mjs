@@ -31,7 +31,7 @@
 // the main engine already holds the safety floor (source-sacred / no-torn / byte-exact).
 import fs from 'node:fs';
 import path from 'node:path';
-import { discoverStructure, reduceToCompletion, collidesWithSource, scanWave, physicalForCreate, isContainedIn, CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
+import { discoverStructure, reduceToCompletion, collidesWithSource, scanWave, physicalForCreate, isContainedIn, containment, CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
 
 // The long-string boundary for the advisory free-form flag (config key `freeStringMaxChars`, default 80).
 // A string whose UTF-8 BYTE length exceeds this, anywhere in a unit, is a mechanical "possible ore" signal
@@ -528,8 +528,12 @@ export function detonate(src, request = {}, opts = {}) {
         // the floor; this belt refuses BEFORE triggering (triggered:false), same realpath-and-contain shape.
         // (Checked BEFORE the LOW outPath-symmetry belt below so a source-corruption refusal reason wins when
         // both apply — the source-sacred message is the one that matters.)
-        if (isContainedIn(realOrNull(src), physicalForCreate(snapshotDir))) {
-          return refuse('path', `src must not resolve inside the snapshot store (${snapshotDir}) — snapshotSource writes the manifest/blobs there and would corrupt the source`);
+        // REFUSE-POLARITY (rung-5 §1.2): require a PROVEN 'outside'. The boolean form folded an
+        // unresolvable path into false == ALLOW. This belt held at the frozen SHA only because
+        // `realOrNull` lacks explode's device-path rejection — i.e. TWIN DRIFT was the only thing
+        // saving the outer gate, which is not a defense. Now it is closed on purpose.
+        if (containment(realOrNull(src), physicalForCreate(snapshotDir)) !== 'outside') {
+          return refuse('path', `src must not resolve inside the snapshot store (${snapshotDir}), and must be resolvable enough to prove it — snapshotSource writes the manifest/blobs there and would corrupt the source`);
         }
         // FIX 1-R2 belt (source-sacred, the ALIAS the path-guard above misses — mirrors reduceFile's floor):
         // a <snapshotDir>/manifest.jsonl HARDLINKED to a src living OUTSIDE snapshotDir defeats the path-
@@ -546,8 +550,8 @@ export function detonate(src, request = {}, opts = {}) {
         // never exploitable). Mirror the floor here so the belt refuses BEFORE triggering (triggered:false); the
         // floor stays the load-bearing guard. (Same-dir temp is covered transitively — if outPath is not inside,
         // its sibling temp isn't either.)
-        if (isContainedIn(physicalForCreate(outPath), physicalForCreate(snapshotDir))) {
-          return refuse('path', 'outPath must not resolve inside the snapshot store — it would overwrite a recovery blob or manifest');
+        if (containment(physicalForCreate(outPath), physicalForCreate(snapshotDir)) !== 'outside') { // REFUSE-polarity: unknown refuses (§1.2)
+          return refuse('path', 'outPath must not resolve inside the snapshot store, and must be resolvable enough to prove it — it would overwrite a recovery blob or manifest');
         }
         // gate 5: PARAMS (finite budgets at/above the memory floor; a fresh detonation carries NO mid-stream
         // offset/resume — the forged offset/outLen the main engine only benign-no-ops on is REJECTED here)

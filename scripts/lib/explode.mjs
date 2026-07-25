@@ -119,17 +119,38 @@ export function physicalForCreate(p) {
     cur = parent;
   }
 }
-// Is `childPhys` the same as, or nested under, `basePhys`? Both args are PHYSICAL paths
-// (realpath'd or physicalForCreate'd). win32 case-folds (realpath does NOT normalize case on
-// Windows). A null on either side → NOT contained (fail-closed). Used by the snapshot-store
-// collision guard (#6, reduceFile) and the restore ref-traversal guard (#2, restoreFromSnapshot).
-// EXPORTED so detonate.mjs reuses the identical containment primitive for its FIX 1 belt.
-export function isContainedIn(childPhys, basePhys) {
-  if (!childPhys || !basePhys) return false;
+// THE THREE-STATE CONTAINMENT ANSWER — 'inside' | 'outside' | 'unknown'.
+//
+// WHY THIS EXISTS (rung-5 §1.2, a CLASS not an instance): the old boolean conflated "provably
+// outside" with "cannot tell", and `null` was folded into `false` under a comment claiming
+// "fail-closed". That claim is only true where contained == PERMITTED. At a guard whose polarity
+// is contained == REFUSE, `false` means ALLOW — so an unresolvable path walked straight through
+// the guard. `physicalOrNull` returns null for every win32 UNC/device spelling BY DESIGN, and a
+// broken junction anywhere in the ancestor chain produces one too, so this was reachable with
+// `path.toNamespacedPath()` — Node's own documented helper, no exotic input required.
+//
+// The lesson, kept at the primitive so it cannot be re-learned per call site: **`null` is not a
+// safe default; it is a value, and its meaning is decided by the CALLER'S POLARITY.** A boolean
+// cannot carry that. This function refuses to answer when it does not know, and each caller must
+// then say what "unknown" means for its own direction:
+//   contained == PERMITTED  → require 'inside'   (`isContainedIn`, unchanged semantics)
+//   contained == REFUSE     → require 'outside'  (`!== 'outside'` refuses inside AND unknown)
+export function containment(childPhys, basePhys) {
+  if (!childPhys || !basePhys) return 'unknown';
   const norm = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
   const c = norm(childPhys);
   const b = norm(basePhys);
-  return c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
+  return (c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep)) ? 'inside' : 'outside';
+}
+// Is `childPhys` the same as, or nested under, `basePhys`? Both args are PHYSICAL paths
+// (realpath'd or physicalForCreate'd). win32 case-folds (realpath does NOT normalize case on
+// Windows). PERMIT-POLARITY ONLY: unknown answers false, which is fail-closed *for a caller that
+// requires containment to proceed* — never use this at a guard where containment means REFUSE;
+// use `containment(...) !== 'outside'` there. Behaviour is byte-identical to the pre-tri-state
+// version, so the class-b twin-pin gate is unaffected.
+// EXPORTED so detonate.mjs reuses the identical containment primitive for its FIX 1 belt.
+export function isContainedIn(childPhys, basePhys) {
+  return containment(childPhys, basePhys) === 'inside';
 }
 // Does `candidate` resolve to the SAME physical file as `src` by any route a lexical
 // path.resolve compare misses? TWO complementary checks (verified on win32):
@@ -575,17 +596,20 @@ export function reduceFile(src, opts = {}) {
       if (detail) return fail(`outPath must differ from the source: ${detail} — writing over it would truncate the source before reading (in-place replace is the destruction ladder's gated step)`);
       // #6: the slim copy (and its temp) must never land INSIDE the snapshot store — writing over
       // manifest.jsonl or a content-addressed blob would corrupt the rail-5 recovery net the cut
-      // rests on. Realpath-and-contain (win32 case-fold via isContainedIn), fail-closed.
+      // rests on. REFUSE-POLARITY: only a PROVEN 'outside' may proceed, so an unresolvable path
+      // (win32 device spelling, broken junction in the chain) refuses instead of walking through —
+      // the old `isContainedIn(...)` folded that unknown into false == ALLOW (rung-5 §1.2).
       if (snapshotDir) {
         const snapReal = physicalForCreate(snapshotDir);
-        if (isContainedIn(physicalForCreate(outPath), snapReal) || isContainedIn(physicalForCreate(`${outPath}.${process.pid}.tmp`), snapReal)) {
-          return fail(`outPath must not resolve inside the snapshot store (${snapshotDir}) — it would overwrite a recovery blob or manifest`);
+        if (containment(physicalForCreate(outPath), snapReal) !== 'outside' || containment(physicalForCreate(`${outPath}.${process.pid}.tmp`), snapReal) !== 'outside') {
+          return fail(`outPath must not resolve inside the snapshot store (${snapshotDir}), and must be resolvable enough to prove it — it would overwrite a recovery blob or manifest`);
         }
         // FIX 1 (source-sacred): src must not resolve INSIDE snapshotDir either. snapshotSource appends
         // manifest.jsonl (and writes content blobs) into snapshotDir — a src that IS the manifest path
         // (basename manifest.jsonl with snapshotDir == dirname(src)) or a blob path gets CORRUPTED by that
-        // recovery write. The guard asymmetry only checked outPath; mirror it to src, fail-closed.
-        if (isContainedIn(physicalOrNull(src), snapReal)) {
+        // recovery write. The guard asymmetry only checked outPath; mirror it to src — REFUSE-polarity,
+        // so unknown refuses (this is the site whose "fail-closed" comment was false before §1.2).
+        if (containment(physicalOrNull(src), snapReal) !== 'outside') {
           return fail(`src must not resolve inside the snapshot store (${snapshotDir}) — snapshotSource writes the manifest/blobs there and would corrupt the source`);
         }
         // FIX 1-R2 (source-sacred, the ALIAS the FIX 1 path-guard above misses): the path-containment
@@ -1156,11 +1180,12 @@ export function snapshotSource(src, snapshotDir) {
     // snapshotDir==dirname(src) makes the manifest path === src, and the manifest temp→rename below REPLACES
     // src with existing+row (source corruption, formerly ok:true). reduceFile's floor (:411) + detonate's
     // gate-4 belt (:369) both refuse this, but a DIRECT call to this primitive bypassed them — so the guard
-    // must live HERE too (one-flock, same isContainedIn check). The ALIAS (hardlink) route stays closed
+    // must live HERE too (one-flock, same containment primitive). The ALIAS (hardlink) route stays closed
     // safe-by-construction by the wx+rename manifest write below + content-addressing for the blob; this
     // containment check closes the LITERAL src-inside-store route an alias defense cannot (a same path is not
-    // an alias). Fail-closed.
-    if (isContainedIn(physicalOrNull(src), physicalForCreate(snapshotDir))) {
+    // an alias). REFUSE-POLARITY: 'unknown' refuses too — this comment used to say "Fail-closed" while the
+    // boolean form let an unresolvable src through (rung-5 §1.2, the third false claim in this file).
+    if (containment(physicalOrNull(src), physicalForCreate(snapshotDir)) !== 'outside') {
       return { ok: false, reason: `src resolves inside the snapshot store (${snapshotDir}) — snapshotSource writes the manifest/blobs there and would corrupt the source (refused)` };
     }
     const sha = sha256File(src);
