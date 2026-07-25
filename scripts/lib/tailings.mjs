@@ -63,7 +63,14 @@ function binDir(projectRoot, name) {
 // otherwise read arbitrary files to stdout) and a POISONED index.json
 // shipped inside a cloned repo (loadIndex filters below — sweepBinAt rm's
 // through index ids, the recoverDangling-class recovery-path hole).
-function isBareId(id) {
+// EXPORTED as the canonical copy (anchor-diff.mjs imports it — that module already
+// depends on this one, so reusing it costs no new coupling and avoids a FOURTH
+// hand-rolled copy of a security predicate). estate-archive.mjs and writeguard.mjs
+// still keep byte-identical local copies on purpose: both sit on hot/isolated paths
+// where an extra module load is not worth paying. They are verified identical today;
+// if this body ever changes, change all three IN THE SAME COMMIT (the twin-drift law
+// — one concept with N implementations is what shipped two HIGHs in R2/R3).
+export function isBareId(id) {
   return typeof id === 'string' && !!id && id !== '.' && id !== '..' && path.basename(id) === id;
 }
 

@@ -37,7 +37,7 @@ import os from 'node:os';
 import { inventory } from './fidelity-gate.mjs';
 import { txDirFor } from './apply.mjs';
 import { physicalOrNull, containedIn } from './class-b.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './tailings.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin, isBareId } from './tailings.mjs';
 
 const CLASSES = ['wikilinks', 'dates', 'versions', 'links', 'frontmatter', 'codespans', 'quotes', 'numbers'];
 const SNAP_DIR_RE = /^snap-(\d+)$/;
@@ -95,6 +95,13 @@ function oldestAnchor(txDir, physTarget) {
     if (!Array.isArray(manifest)) continue;
     const hit = manifest.find((m) => m && samePath(m.original, physTarget));
     if (!hit) continue;
+    // PROVENANCE: `hit.snap` comes from the manifest, which is untrusted data — a
+    // poisoned manifest shipped inside a cloned repo could name `../../..` and read
+    // an arbitrary file as if it were our own snapshot. The trusted root (`dir`,
+    // derived from txDir) was already in hand here and simply went unused. `m.snap`
+    // is program-generated FLAT (`f0`, `f1`, … — apply.mjs's snapshot writer), so
+    // the bare-name allowlist is exactly right and admits every legitimate value.
+    if (!isBareId(hit.snap)) continue;
     const snapFile = path.join(dir, hit.snap);
     if (!fs.existsSync(snapFile)) continue; // manifest says so but the copy is gone — keep looking
     return { snapDir: dir, snapFile, at };

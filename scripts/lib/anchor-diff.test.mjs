@@ -134,3 +134,45 @@ test('no-snapshot no-op: null when the file has no verified snapshot yet, and wh
     assert.strictEqual(anchorDiff(strayFile, { projectRoot: proj }), null, 'a path outside projectRoot is fail-closed, not resolved');
   } finally { clean(proj, outside); }
 });
+
+// R5/F2 — `hit.snap` comes out of the snapshot manifest, which is untrusted data
+// (a poisoned manifest can ship inside a cloned repo). It was joined onto the
+// trusted dir with NO check — not a circular-root bug like F1, just an unused
+// trusted root: `dir` was already in hand. `m.snap` is program-generated flat
+// (`f0`, `f1`, ...), so the bare-name allowlist admits every legitimate value.
+test('R5/F2: a poisoned manifest naming a traversal snap is SKIPPED, never read as our own snapshot', () => {
+  const { proj, store } = sandbox();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwad-secret-')));
+  try {
+    const secret = path.join(outside, 'secret.txt');
+    fs.writeFileSync(secret, 'SECRET-CANARY-abc123 [[secret-link]]', 'utf8');
+    const target = path.join(store, 'MEMORY.md');
+    write(target, '# live\n');
+    const txDir = path.join(proj, '.claude', 'coalwash');
+    const snapDir = path.join(txDir, 'snap-1000');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '1000');
+    // the manifest points OUT of the snapshot dir, at a file we must never read
+    const rel = path.relative(snapDir, secret);
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: rel, original: fs.realpathSync(target) }]));
+
+    const r = anchorDiff(target, { projectRoot: proj });
+    const blob = JSON.stringify(r);
+    assert.ok(!blob.includes('SECRET-CANARY'), 'the out-of-snapshot file must never be read in as an anchor');
+    assert.ok(!blob.includes('secret-link'), 'no token from the traversal target leaks into the diff');
+  } finally { clean(proj, outside); }
+});
+
+test('R5/F2 CONTROL: a normal flat snap name (f0, as apply.mjs writes) is still accepted — the allowlist must not over-block', () => {
+  const { proj, store } = sandbox();
+  try {
+    const target = path.join(store, 'MEMORY.md');
+    write(target, '# live\n');
+    const plan = planFor(proj, store, [{ type: 'rewrite', path: target, content: '# live\nkeep [[anchor-one]] 2026-01-02\n' }]);
+    const res = applyPlan(plan, { projectRoot: proj });
+    assert.ok(res.ok, `precondition: the plan applies (${JSON.stringify(res).slice(0, 200)})`);
+    // a real snapshot now exists with a program-generated flat snap name
+    const r = anchorDiff(target, { projectRoot: proj });
+    assert.ok(r && typeof r === 'object', 'a genuine snapshot is still found and diffed');
+  } finally { clean(proj); }
+});

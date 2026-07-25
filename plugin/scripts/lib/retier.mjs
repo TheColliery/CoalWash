@@ -656,7 +656,10 @@ export function rollbackFromSnapshot(snapshotDir, createdPaths = [], trustedRoot
     const srcPhys = physicalOrNull(src);
     const dstPhys = physicalForCreate(m.original);
     if (!snapPhys || !srcPhys || !containedIn(srcPhys, [snapPhys]) || !dstPhys || !containedIn(dstPhys, roots)) { failed++; continue; }
-    try { fs.copyFileSync(src, m.original); } catch { failed++; }
+    // Write to dstPhys — the form that was VALIDATED — not the raw `m.original`.
+    // Same check-one-spelling-act-on-another mismatch as apply.mjs's restore twin;
+    // fixed in the same commit so the two do not drift.
+    try { fs.copyFileSync(src, dstPhys); } catch { failed++; }
   }
   for (const p of createdPaths) {
     const pp = physicalForCreate(p);

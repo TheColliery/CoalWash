@@ -239,6 +239,79 @@ test('lock release is OWNER-VERIFIED: a stale-stolen holder cannot delete the ne
   } finally { clean(proj); }
 });
 
+// R5/F1 — THE COVERAGE GAP THAT LET THIS SHIP: every pre-existing poisoned-journal
+// test below plants `snapDir` INSIDE txDirFor(proj), so the out-of-tree SOURCE
+// vector was never exercised. The destination axis was gated; the source axis
+// anchored containment on the candidate's own canonical self.
+test('R5/F1: recoverDangling REFUSES a journal whose snapDir points OUTSIDE the tx dir (provenance — a data-derived root is not a root)', () => {
+  const { proj, store } = sandbox();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f1-snap-')));
+  try {
+    // A fully-formed, marker-complete snapshot the ATTACKER owns, outside the tx dir.
+    fs.writeFileSync(path.join(outside, 'f0'), 'ATTACKER PAYLOAD');
+    const target = path.join(store, 'MEMORY.md');
+    write(target, 'ORIGINAL');
+    fs.writeFileSync(path.join(outside, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: target }]));
+    fs.writeFileSync(path.join(outside, 'snap.complete'), '1');
+    const txDir = txDirFor(proj);
+    fs.mkdirSync(txDir, { recursive: true });
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir: outside, roots: [store],
+      steps: [{ i: 0, type: 'rewrite', path: target, status: 'done' }],
+    }));
+
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'none', 'an out-of-tx snapDir is refused outright, never replayed');
+    assert.match(String(r.error), /snapDir is outside the transaction directory/, 'the refusal is NAMED, not a silent skip');
+    // the destination is inside a trusted root, so ONLY the source gate can save it
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'ORIGINAL', 'the attacker payload must NOT be restored over a real file');
+    assert.strictEqual(fs.existsSync(path.join(txDir, 'journal.json')), true, 'a refused recovery keeps the journal for a human');
+  } finally { clean(proj, outside); }
+});
+
+test('R5/F1: the refusal precedes the filesystem probes — no existence oracle at an attacker-named path', () => {
+  const { proj, store } = sandbox();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f1-oracle-')));
+  try {
+    // NOTHING exists at the attacker path — no marker, no manifest. Pre-fix, the
+    // marker probe ran there first and the ABSENCE decided the outcome
+    // ('no-mutation' + journal deleted). Post-fix the binding decides, so the two
+    // cases (payload present vs absent) are INDISTINGUISHABLE from the outside.
+    const txDir = txDirFor(proj);
+    fs.mkdirSync(txDir, { recursive: true });
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir: path.join(outside, 'does-not-exist'), roots: [store],
+      steps: [],
+    }));
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'none', 'refused on provenance, NOT reported as no-mutation from a probe');
+    assert.match(String(r.error), /snapDir is outside the transaction directory/);
+    assert.strictEqual(fs.existsSync(path.join(txDir, 'journal.json')), true,
+      'the journal is NOT deleted — a probe-driven no-mutation cleanup would have removed it, leaking that the path was absent');
+  } finally { clean(proj, outside); }
+});
+
+test('R5/F1 CONTROL: a legitimate in-tx snapDir still restores normally — the binding must not over-block', () => {
+  const { proj, store } = sandbox();
+  try {
+    const target = path.join(store, 'MEMORY.md');
+    write(target, 'DAMAGED');
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-555');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'GOOD ORIGINAL');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: target }]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '555');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [store],
+      steps: [{ i: 0, type: 'rewrite', path: target, status: 'done' }],
+    }));
+    const r = recoverDangling(proj);
+    assert.notStrictEqual(r.recovered, 'none', `a legitimate recovery must still run (got ${JSON.stringify(r)})`);
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'GOOD ORIGINAL', 'the real snapshot was restored');
+  } finally { clean(proj); }
+});
+
 test('recoverDangling REFUSES an out-of-root target from a poisoned journal (empirical A / containment bypass)', () => {
   const { proj, store } = sandbox();
   try {

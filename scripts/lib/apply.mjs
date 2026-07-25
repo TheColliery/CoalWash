@@ -935,7 +935,27 @@ export function recoverDangling(projectRoot, opts = {}) {
       return { recovered: 'cleaned' };
     }
     const snapDir = journal.snapDir;
-    const marker = snapDir && fs.existsSync(path.join(snapDir, SNAP_MARKER));
+    // PROVENANCE GATE (F1). THE RULE: a containment root must be PROVENANCE-TRUSTED
+    // — caller-derived, or a fixed home/project anchor — NEVER data-derived.
+    // Canonicalizing a data-derived root does not launder it.
+    // `journal.snapDir` comes out of the same attacker-writable file as
+    // `journal.roots`, and the source-side check below anchored containment on
+    // `physicalOrNull(snapDir)` — the candidate's OWN canonical self, which passes
+    // for ANY absolute path the journal names. That is the precise circularity the
+    // long comment below warns about for `jroots`, committed a few lines later on
+    // the SOURCE axis. Bind snapDir to the CALLER-DERIVED tx dir here.
+    // BEFORE the probes, deliberately: `existsSync` on the marker and the manifest
+    // read are filesystem probes at an attacker-named absolute path, so leaving
+    // them ahead of the binding is an existence oracle even though nothing is
+    // written. physicalForCreate (not physicalOrNull) so a snapshot dir that was
+    // never created still resolves through its existing ancestor and reaches the
+    // no-mutation path below, instead of being refused as merely unresolvable.
+    const txPhys = physicalOrNull(txDir);
+    const snapPhys = snapDir ? physicalForCreate(snapDir) : null;
+    if (snapDir && (!txPhys || !snapPhys || !containedIn(snapPhys, [txPhys]))) {
+      return { recovered: 'none', error: 'journal snapDir is outside the transaction directory — refusing to replay (left for inspection)' };
+    }
+    const marker = snapPhys && fs.existsSync(path.join(snapPhys, SNAP_MARKER));
     if (!marker) {
       // no complete snapshot => the first mutation never happened
       fs.rmSync(journalPath, { force: true });
@@ -971,12 +991,14 @@ export function recoverDangling(projectRoot, opts = {}) {
     if (!trustedRoots.length) {
       return { recovered: 'none', error: 'no trusted root resolves — refusing to replay (fail-closed)' };
     }
-    const snapPhys = physicalOrNull(snapDir);
+    // snapPhys is the tx-dir-BOUND canonical form resolved above — not a fresh
+    // canonicalization of the raw journal string. Every read below goes through it,
+    // so the manifest is loaded from the bound location, never the raw one.
     const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
-    const manifest = JSON.parse(fs.readFileSync(path.join(snapDir, 'manifest.json'), 'utf8'));
+    const manifest = JSON.parse(fs.readFileSync(path.join(snapPhys, 'manifest.json'), 'utf8'));
     let restored = 0, failed = 0, refused = 0;
     for (const m of manifest) {
-      const src = path.join(snapDir, m.snap);
+      const src = path.join(snapPhys, m.snap);
       // A DELETED FILE IS THE ONLY DAMAGE A DELETE-PHASE CRASH LEAVES — deletes run
       // LAST by construction — and physicalOrNull could not resolve one, because it
       // is GONE: ENOENT -> null -> the target was refused and mis-reported as
@@ -992,7 +1014,12 @@ export function recoverDangling(projectRoot, opts = {}) {
       // CALLER-TRUSTED root (the outer gate a poisoned journal can't widen) AND
       // the journal's own declared roots (secondary narrowing).
       if (!inSnap(src) || !origPhys || !containedIn(origPhys, trustedRoots) || !containedIn(origPhys, jroots)) { refused++; continue; }
-      try { fs.copyFileSync(src, m.original); restored++; } catch { failed++; /* restore the rest */ }
+      // Write to origPhys, the form that was VALIDATED — not the raw `m.original`
+      // string. Checking one spelling and acting on another lets the OS re-resolve
+      // the path a second time, so any divergence between them (a symlink, a case
+      // or short-name alias, a race between the check and the write) lands the
+      // write somewhere containment never approved.
+      try { fs.copyFileSync(src, origPhys); restored++; } catch { failed++; /* restore the rest */ }
     }
     // creates the interrupted run added are removed — REGARDLESS of the journal's
     // step.status. A crash BETWEEN atomicWrite and the writeJournal that would
