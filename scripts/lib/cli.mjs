@@ -90,7 +90,36 @@ import {
 import { retierScan, retierScanLines, runRetier, runRetierReport } from './retier.mjs';
 
 // The full gauge, importable (tests and /stats call it directly; the CLI main
-// below is just argv plumbing around it). Pure composition — no state writes.
+// below is just argv plumbing around it).
+//
+// ⚠ NOT read-only: gauge() RUNS A RECOVERY PREFLIGHT THAT CAN WRITE, and it runs
+// FIRST — before the config is even loaded. This comment previously said "pure
+// composition — no state writes", which was true of the measurement composition
+// below and FALSE of the preflight, i.e. false about the only part that can touch
+// your files. A reader deciding "is it safe to call gauge here?" reads this line
+// and stops, so the wrong version of it was an incident waiting to happen.
+//
+// WHEN IT WRITES: only when a transaction journal exists at the project's own
+// `.claude/coalwash/journal.json`. Then `recoverDangling` either finishes an
+// interrupted run — restoring snapshotted files over the live ones and removing
+// the creates it added — or, for a terminal/never-started journal, deletes the
+// journal file. With NO journal present it writes nothing. It refuses (and still
+// writes nothing) when the journal is unreadable, schema-newer, has no verifiable
+// roots, names a snapDir outside the tx dir, or when no trusted root resolves.
+//
+// CONSEQUENCE FOR AUTOMATED CALLERS: an unattended runner (a CI/Action gauge)
+// must NOT call this against an untrusted checkout — an attacker-authored
+// journal.json is exactly the R5/F1 vector, with no human present.
+//
+// THE SEAM, if a recovery-free entry is ever wanted (measured, not built): the
+// preflight is the FIRST statement and `recover` is consumed ONLY by the returned
+// object — nothing in the measurement below reads it. So everything from
+// `loadMergedConfig` down is already a pure read-only composition and lifts out
+// whole; `gauge()` then becomes that composition plus the preflight, spreading
+// `recover` into the result. The conductor's stamping path is not involved at all
+// (it never calls gauge — it drives caliper directly), so the split cannot disturb
+// it. Deliberately NOT done here: nobody has ordered the entry point yet, and an
+// unused export is debt.
 export function gauge({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const projectRoot = findProjectRoot(cwd, home);
   const recover = recoverDangling(projectRoot);
@@ -107,8 +136,10 @@ export function gauge({ cwd = process.cwd(), home = os.homedir() } = {}) {
   // — real or provisional — identically to them.
   const leanFloorTokens = sanitizeLeanFloor(proj.leanFloorTokens, m.alwaysLoaded.tokensEst);
   const floorProvisional = proj.leanFloorProvisional === true;
-  // Read-only hysteresis + latch state (never written here — this CLI
-  // stamps/records nothing, per its own doc comment): without them, a probe
+  // Read-only hysteresis + latch state — the gauge CONSUMES these and never
+  // stamps or records them (the conductor's SessionStart/Stop are the stamping
+  // site). That is a claim about THIS composition only: the recovery preflight
+  // above can still write, see the header. Without them, a probe
   // run between two SessionStarts would show the ceiling flapping LEAN in
   // the dead zone (or a latched economic FULL flapping back to OBESE, 0g Q2)
   // instead of reporting the SAME armed state the conductor is tracking.
