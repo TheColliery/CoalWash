@@ -8,7 +8,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execSync } from 'node:child_process';
 import { detonate, survey, MAX_WAVE_LINES, TYPE_CENSUS_MAX } from './detonate.mjs';
 import { CLAUDE_DEFAULT_CUT_TYPES, sha256File, reduceFile, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
 
@@ -558,6 +558,40 @@ test('FIX 1 (source-sacred) — src resolving INSIDE the snapshot store is REFUS
     assert.match(rRed.reason, /src must not resolve inside the snapshot store/i);
     assert.strictEqual(sha256File(srcIn), beforeIn, 'reduceFile never mutated the source');
   } finally { rm(dir); }
+});
+
+test('FIX 1 / 8.3 REGRESSION — the src-inside-store belt fires when the store is spelled as a win32 SHORT NAME (mixed realpath variants used to make it silently miss)', (t) => {
+  if (process.platform !== 'win32') { t.skip('8.3 is a win32 form'); return; }
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-83belt-')));
+  try {
+    const store = path.join(dir, 'SNAPSHOT-STORE-LONGNAME');
+    fs.mkdirSync(store, { recursive: true });
+    // same idiom as explode.test.mjs R3/TP-3 — an args-array spawnSync mangles the
+    // cmd quoting and `%~sI` comes back unexpanded
+    const short = execSync(`cmd /c for %I in ("${store}") do @echo %~sI`, { encoding: 'utf8' }).trim();
+    if (!short || short === store) { t.skip('8.3 creation disabled on this volume'); return; }
+
+    // src lives INSIDE the store and is deliberately NOT named manifest.jsonl, so the
+    // narrower manifest-alias check cannot cover for the belt.
+    //
+    // THE SHORT SPELLING MUST BE ON THE **SRC** SIDE. The belt is
+    // `isContainedIn(realOrNull(src), physicalForCreate(snapshotDir))`: the store side
+    // goes through physicalForCreate, which expands either spelling, so handing the
+    // store in short proves nothing — both variants agree and the test passes even
+    // with the defect restored (verified: it did). Only `src` runs through the helper
+    // under test, so only a short-spelled src can tell the variants apart.
+    writeNdjson(store, 'victim.jsonl', CLAUDEISH);
+    const src = path.join(short, 'victim.jsonl'); // same file, SHORT spelling
+    const before = sha256File(src);
+    const r = detonate(src, { cutTypes: ['mode'], outPath: path.join(dir, 'out.jsonl'), snapshotDir: store });
+
+    assert.strictEqual(r.ok, false, 'a src inside the snapshot store is refused however the store is spelled');
+    assert.strictEqual(r.failedCheck, 'path', 'it is the PATH gate that refuses');
+    assert.match(r.reason, /src must not resolve inside the snapshot store/i,
+      'the SRC belt is what fires — pre-fix realOrNull used the non-expanding realpathSync, so isContainedIn compared a short spelling against an expanded one, returned false, and this belt was skipped entirely');
+    assert.strictEqual(r.triggered, false, 'refused BEFORE the reducer ran (pre-fix the gate fell through and the deeper floor had to catch it)');
+    assert.strictEqual(sha256File(src), before, 'source byte-intact');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('FIX 2 (prototype pollution) — a unit typed as a JS builtin name (__proto__ / constructor) is censused as a real own-key: no vanish, no undercount, no census collapse, no Object.prototype pollution', () => {
