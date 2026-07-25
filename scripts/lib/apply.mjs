@@ -397,6 +397,117 @@ export function ensureSelfIgnore(dir) {
 // opts.home (def os.homedir()) — where globalLockPath resolves; override for
 // hermetic tests, exactly like opts.txDir/opts.now/opts.keepSnapshots.
 // Returns { ok, deferred?, error?, applied?, snapshotDir?, rolledBack?, flagged? }.
+
+// THE ANCHOR GATE — ONE primitive, both mutating doors. Returns
+// { ok:true, roots } or { ok:false, error }.
+//
+// `applyPlan` and `recoverDangling` are the two functions that MUTATE the store,
+// and both build the SAME trusted-root set from the same project anchor. Until
+// this was extracted, only applyPlan carried the two guards in front of that
+// derivation — so recoverDangling was applyPlan WITHOUT THE GUARDS. A
+// repo-shipped `.claude/coalwash/journal.json`, reached through `cli.mjs gauge`
+// (Step 0 of every run, and the /stats front door), could therefore ride a
+// home-collapsed or config-territory anchor into restoring attacker bytes over
+// ~/.claude/settings.json and rmSync-ing ~/.ssh — exit 0, and the journal is
+// deleted on the success path so the evidence self-destructs. R5 closed the
+// SOURCE axis of that function (snapDir bound to the caller-derived tx dir);
+// the TARGET axis was never enumerated.
+//
+// WHY THIS IS EXTRACTED AND NOT PASTED — recorded so nobody re-does the wrong
+// fix. Copying the two guards above recoverDangling's derivation is six correct
+// lines and the twin-drift shape this room has now paid for three times (R2's
+// case-fold, R3's 8.3 short name, detonate's mixed realpath variant): two peer
+// functions with duplicated guards diverge the moment someone hardens one side,
+// and the divergence ships silently because both still LOOK guarded. R3's law is
+// FIX THE PRIMITIVE, NEVER THE GUARDS.
+//
+// `trustedAnchor` = the caller supplied its OWN anchor (applyPlan's
+// opts.projectRoot: cli.mjs / runRetier) instead of deriving it from cwd. It
+// skips ONLY the home-swallow check, which exists for a DERIVATION collapsing to
+// home. recoverDangling never sets it: its `projectRoot` parameter is whatever
+// its caller derived from cwd, and it has no way to tell a derived anchor from a
+// vouched one, so it takes the fail-closed reading.
+function trustedRootsForAnchor(projectRoot, home, { trustedAnchor = false } = {}) {
+  // SECURITY — DERIVED-ANCHOR HOME-SWALLOW GUARD (untrusted-anchor path only).
+  // When the anchor is DERIVED, findProjectRoot can collapse it to home: cwd=home
+  // with no marker (returns home), OR a non-git cwd under a home that itself
+  // carries ~/.git (versioned dotfiles) — the walk climbs past the unmarked
+  // project to the ~/.git marker and returns home. A home-level anchor puts ~
+  // ITSELF into the trusted roots below, so the containment gate faithfully
+  // authorizes a forged roots:[home] to delete ~/.ssh AND inject a hook into
+  // ~/.claude/settings.json => code execution next session. Refuse fail-closed
+  // when the anchor SWALLOWS home (is home, or an ancestor of it) — realpath BOTH
+  // sides, the room's own containedIn (home inside anchor === anchor contains
+  // home). A derived anchor BELOW home (a real project dir, git or not) stays
+  // ALLOWED — a forged roots:[home] then escapes it and the gate refuses as
+  // before, blast bounded to the project + snapshot-backed; non-git users keep
+  // working (no-external-assumption).
+  if (!trustedAnchor) {
+    const anchorPhys = physicalOrNull(projectRoot);
+    const homePhys = physicalOrNull(home);
+    if (!anchorPhys || !homePhys || containedIn(homePhys, [anchorPhys])) {
+      return { ok: false, error: `containment: the derived project anchor (${anchorPhys || projectRoot}) is the home directory or an ancestor of it — refusing fail-closed (a home-level anchor would authorize writes anywhere under ~, e.g. ~/.ssh or ~/.claude/settings.json); run from the actual project dir, or pass a trusted opts.projectRoot` };
+    }
+  }
+  // SECURITY — CONFIG-TERRITORY ANCHOR GUARD (the trust boundary; blind wave R2).
+  // The Claude base dir holds settings.json (a `SessionStart` command hook there =
+  // code execution next session) and the plugin cache (a rewritten conductor.js =
+  // the same). NOTHING in there is ever a project to wash, so no legitimate anchor
+  // touches it — the global class-B store CoalWash DOES wash enters the trusted
+  // set below as ccMemoryDir, derived FROM the project anchor, never as the
+  // anchor itself.
+  //
+  // ONE question, asked ONCE, at the consumer: does the anchor touch config
+  // territory in EITHER direction (inside it, or containing it)? That is
+  // deliberately the OPPOSITE nature to findProjectRoot's marker walk — two earlier
+  // attempts hardened the WALK and were walked past. It binds a TRUSTED anchor
+  // too: no caller has a legitimate config-dir anchor, so binding it deletes the
+  // "which callers are trusted" question from a security path.
+  //
+  // WHAT THIS ACTUALLY GUARANTEES, and its LIMIT. The comparison is only as good as
+  // the canonical form underneath it, so the strength lives in config-load's
+  // `canonicalOrNull`: `realpathSync.native` (expands win32 8.3 short names, which
+  // plain realpathSync does NOT) plus case-folding, across EVERY CLAUDE_CONFIG_DIR
+  // entry.
+  // THE LIMIT — stated plainly, and corrected a THIRD time, because each
+  // previous wording was complete-sounding on exactly the axis that was still open:
+  //   v1 "the base dir is never a project root"  -> false: the walk's fallbacks.
+  //   v2 "unconditional, every entry, both directions" -> false: 8.3 / UNC spellings.
+  //   v3 "either canonicalized and compared, or refused by shape" -> STILL false:
+  //      it described only the ANCHOR. An unresolvable BASE on the other side of the
+  //      comparison silently answered "does not touch" for every anchor and turned
+  //      this guard into a no-op.
+  // WHAT HOLDS NOW: BOTH SIDES refuse rather than pass. The anchor is canonicalized
+  // or refused; a configured base dir that EXISTS but cannot be canonicalized also
+  // refuses; only a genuinely ABSENT base is treated as no-constraint (nothing to
+  // contain, and a fresh install must still work). That is a statement about both
+  // inputs of a two-sided compare — which is the shape of claim this guard's history
+  // says to make. A new path form joins the refuse list in `canonicalOrNull`; it is
+  // never waved through here.
+  if (touchesClaudeBase(projectRoot, home)) {
+    return { ok: false, error: `containment: the project anchor (${projectRoot}) is inside the Claude configuration directory (or contains it) — refusing fail-closed (that tree holds settings.json and the plugin cache; a write there is next-session code execution). Run from the actual project directory.` };
+  }
+  // THE TRUSTED OUTER GATE. Both doors take untrusted root lists — applyPlan its
+  // plan.roots, recoverDangling its journal.roots — and anchoring containment on
+  // EITHER alone is CIRCULAR: the same artifact supplies both the target AND the
+  // roots that "contain" it, so the check always passes. Anchor on the roots a
+  // plan/journal cannot widen. The PRECISE legit set (NOT the whole ~/.claude —
+  // that would still let a poisoned artifact target ~/.claude/settings.json =
+  // hook/permission injection):
+  //   - projectRoot      — every project-scope store (project MEMORY.md,
+  //                        .claude/agent-memory/<role>/, CW's own tx dir);
+  //   - ccMemoryDir(...) — the ONLY global-physical store CoalWash washes today:
+  //                        ~/.claude/projects/<slug>/memory (the 'main' store in
+  //                        runRetier's collectStores).
+  // The untrusted list stays a SECONDARY narrowing: it may restrict to a SUBSET,
+  // never widen past these. ponytail: when the PENDING global-GOVERNANCE wash
+  // driver ships (MEMORY "Global lock/keeps DRIVER"), add those SPECIFIC roots
+  // here — never claudeBaseDir wholesale.
+  const roots = [physicalOrNull(projectRoot), physicalOrNull(ccMemoryDir(projectRoot, home))].filter(Boolean);
+  if (!roots.length) return { ok: false, error: 'containment: no trusted root resolves (fail-closed)' };
+  return { ok: true, roots };
+}
+
 export function applyPlan(plan, opts = {}) {
   const now = opts.now || Date.now();
   const home = opts.home || os.homedir();
@@ -415,65 +526,12 @@ export function applyPlan(plan, opts = {}) {
     // is IGNORED; a forged one is then caught below because its declared roots will
     // not sit inside the real trusted set (the fail-closed the containment gate gives).
     const projectRoot = opts.projectRoot || findProjectRoot(opts.cwd || process.cwd(), home);
-    // SECURITY — DERIVED-ANCHOR HOME-SWALLOW GUARD (untrusted-plan path only). When
-    // the anchor is DERIVED (no trusted opts.projectRoot), findProjectRoot can collapse
-    // it to home: cwd=home with no marker (returns home), OR a non-git cwd under a home
-    // that itself carries ~/.git (versioned dotfiles) — the walk climbs past the
-    // unmarked project to the ~/.git marker and returns home. A home-level anchor puts
-    // ~ ITSELF into trustedRoots below, so the containment gate faithfully authorizes a
-    // forged roots:[home] to delete ~/.ssh AND inject a hook into ~/.claude/settings.json
-    // => code execution next session. Refuse fail-closed when the DERIVED anchor SWALLOWS
-    // home (is home, or an ancestor of home) — realpath BOTH sides, the room's own
-    // containedIn (home inside anchor === anchor contains home). A trusted opts.projectRoot
-    // is the caller's own anchor and stays UNCHECKED (runRetier/cli.mjs). A derived anchor
-    // BELOW home (a real project dir, git or not) stays ALLOWED — a forged roots:[home]
-    // then escapes it and the gate refuses as before, blast bounded to the project +
-    // snapshot-backed; non-git users keep working (no-external-assumption).
-    if (!opts.projectRoot) {
-      const anchorPhys = physicalOrNull(projectRoot);
-      const homePhys = physicalOrNull(home);
-      if (!anchorPhys || !homePhys || containedIn(homePhys, [anchorPhys])) {
-        return { ok: false, error: `containment: the derived project anchor (${anchorPhys || projectRoot}) is the home directory or an ancestor of it — refusing fail-closed (a home-level anchor would authorize writes anywhere under ~, e.g. ~/.ssh or ~/.claude/settings.json); run from the actual project dir, or pass a trusted opts.projectRoot` };
-      }
-    }
-    // SECURITY — CONFIG-TERRITORY ANCHOR GUARD (the trust boundary; blind wave R2).
-    // The Claude base dir holds settings.json (a `SessionStart` command hook there =
-    // code execution next session) and the plugin cache (a rewritten conductor.js =
-    // the same). NOTHING in there is ever a project to wash, so no legitimate anchor
-    // touches it — the global class-B store CoalWash DOES wash enters trustedRoots
-    // separately below as ccMemoryDir, derived FROM the project anchor, never as the
-    // anchor itself.
-    //
-    // ONE question, asked ONCE, at the consumer: does the anchor touch config
-    // territory in EITHER direction (inside it, or containing it)? That is
-    // deliberately the OPPOSITE nature to findProjectRoot's marker walk — two earlier
-    // attempts hardened the WALK and were walked past.
-    //
-    // WHAT THIS ACTUALLY GUARANTEES, and its LIMIT. The comparison is only as good as
-    // the canonical form underneath it, so the strength lives in config-load's
-    // `canonicalOrNull`: `realpathSync.native` (expands win32 8.3 short names, which
-    // plain realpathSync does NOT) plus case-folding, across EVERY CLAUDE_CONFIG_DIR
-    // entry, binding a TRUSTED opts.projectRoot too (no caller has a legitimate
-    // config-dir anchor, so binding it deletes the "which callers are trusted"
-    // question from a security path).
-    // THE LIMIT — stated plainly, and now corrected a THIRD time, because each
-    // previous wording was complete-sounding on exactly the axis that was still open:
-    //   v1 "the base dir is never a project root"  -> false: the walk's fallbacks.
-    //   v2 "unconditional, every entry, both directions" -> false: 8.3 / UNC spellings.
-    //   v3 "either canonicalized and compared, or refused by shape" -> STILL false:
-    //      it described only the ANCHOR. An unresolvable BASE on the other side of the
-    //      comparison silently answered "does not touch" for every anchor and turned
-    //      this guard into a no-op.
-    // WHAT HOLDS NOW: BOTH SIDES refuse rather than pass. The anchor is canonicalized
-    // or refused; a configured base dir that EXISTS but cannot be canonicalized also
-    // refuses; only a genuinely ABSENT base is treated as no-constraint (nothing to
-    // contain, and a fresh install must still work). That is a statement about both
-    // inputs of a two-sided compare — which is the shape of claim this guard's history
-    // says to make. A new path form joins the refuse list in `canonicalOrNull`; it is
-    // never waved through here.
-    if (touchesClaudeBase(projectRoot, home)) {
-      return { ok: false, error: `containment: the project anchor (${projectRoot}) is inside the Claude configuration directory (or contains it) — refusing fail-closed (that tree holds settings.json and the plugin cache; a write there is next-session code execution). Run from the actual project directory.` };
-    }
+    // THE ANCHOR GATE (see trustedRootsForAnchor above): the home-swallow guard,
+    // the config-territory guard, and the trusted-root derivation — the SAME three
+    // recoverDangling runs, from the same primitive, so they cannot drift apart.
+    // A trusted opts.projectRoot skips only the home-swallow leg.
+    const anchorGate = trustedRootsForAnchor(projectRoot, home, { trustedAnchor: Boolean(opts.projectRoot) });
+    if (!anchorGate.ok) return { ok: false, error: anchorGate.error };
     if (!Array.isArray(roots) || !roots.length) return { ok: false, error: 'plan needs non-empty roots[]' };
     if (!Array.isArray(actions) || !actions.length) return { ok: false, error: 'plan needs non-empty actions[]' };
     for (const a of actions) {
@@ -486,23 +544,12 @@ export function applyPlan(plan, opts = {}) {
     // ---- containment: realpath-and-contain BOTH sides, fail-closed ----
     const physRoots = roots.map((r) => physicalOrNull(r)).filter(Boolean);
     if (physRoots.length !== roots.length) return { ok: false, error: 'containment: a declared root does not resolve (fail-closed)' };
-    // THE TRUSTED OUTER GATE (parity with recoverDangling's C1/H1 close below):
-    // plan.roots is part of the SAME plan as the actions, so anchoring containment
-    // on plan.roots ALONE is CIRCULAR — a forged/injected plan supplies BOTH the
-    // target AND the roots that "contain" it, and the check always passes. Anchor
-    // on the CALLER-TRUSTED roots a plan cannot widen: the `projectRoot` resolved
-    // ABOVE (opts.projectRoot or findProjectRoot(cwd) — NEVER plan.projectRoot, which
-    // would re-open the circularity one level up) + the ONLY global-physical store
-    // CoalWash washes today, ccMemoryDir — the SAME set recoverDangling uses, so the
-    // two paths stay symmetric. plan.roots stays a
-    // SECONDARY narrowing: a plan may restrict to a SUBSET of the trusted roots,
-    // never widen beyond them; a declared root outside the trusted set fails
-    // closed. ponytail: when the PENDING global-GOVERNANCE wash driver ships
-    // (MEMORY "Global lock/keeps DRIVER"), add those SPECIFIC roots here too,
-    // exactly as recoverDangling's trustedRoots note says — never claudeBaseDir
-    // wholesale (that would let a poisoned plan target ~/.claude/settings.json).
-    const trustedRoots = [physicalOrNull(projectRoot), physicalOrNull(ccMemoryDir(projectRoot, home))].filter(Boolean);
-    if (!trustedRoots.length) return { ok: false, error: 'containment: no trusted root resolves (fail-closed)' };
+    // The trusted outer gate, resolved once by the anchor gate above (its comment
+    // carries the full rationale). plan.roots is the SECONDARY narrowing validated
+    // against it here, element by element — the whole plan is refused if any
+    // declared root escapes, which is what makes physRoots safe to gate actions on
+    // later (root-provenance.test.mjs keys on this exact loop).
+    const trustedRoots = anchorGate.roots;
     for (const r of physRoots) {
       if (!containedIn(r, trustedRoots)) return { ok: false, error: `containment: declared root ${r} escapes the caller-trusted roots (projectRoot + global class-B) — fail-closed refuse` };
     }
@@ -912,6 +959,15 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 export function recoverDangling(projectRoot, opts = {}) {
   try {
     const home = opts.home || os.homedir();
+    // THE ANCHOR GATE, ABOVE THE FIRST FILESYSTEM TOUCH. This function restores
+    // and deletes; the anchor decides what it is allowed to reach, exactly as it
+    // does in applyPlan, and until this call existed it decided NOTHING here. The
+    // gate is the same primitive both doors run (trustedRootsForAnchor), never a
+    // copy — see its comment for why a paste was the wrong fix. No trustedAnchor:
+    // the caller derived this root from cwd (cli.mjs gauge), so it takes the
+    // fail-closed reading of both legs.
+    const anchorGate = trustedRootsForAnchor(projectRoot, home);
+    if (!anchorGate.ok) return { recovered: 'none', error: anchorGate.error };
     const txDir = opts.txDir || txDirFor(projectRoot);
     const journalPath = path.join(txDir, JOURNAL_NAME);
     if (!fs.existsSync(journalPath)) return { recovered: 'none' };
@@ -968,28 +1024,11 @@ export function recoverDangling(projectRoot, opts = {}) {
     if (!jroots.length) {
       return { recovered: 'none', error: 'journal has no verifiable roots — refusing to replay (left for inspection)' };
     }
-    // THE TRUSTED OUTER GATE (C1/H1): journal.roots is attacker-controlled, so
-    // anchoring containment on jroots ALONE is CIRCULAR — a poisoned journal
-    // supplies both the target AND the roots that "contain" it, and the check
-    // always passes. Gate every restore/delete on CALLER-TRUSTED roots the
-    // journal cannot widen. The PRECISE legit set (NOT the whole ~/.claude — that
-    // would still let a poisoned journal target ~/.claude/settings.json =
-    // hook/permission injection):
-    //   - projectRoot            — every project-scope store (project MEMORY.md,
-    //                              .claude/agent-memory/<role>/, CW's own tx dir);
-    //   - ccMemoryDir(...)       — the ONLY global-physical store CoalWash washes
-    //                              today: ~/.claude/projects/<slug>/memory (the
-    //                              'main' store in runRetier's collectStores — the
-    //                              sole applyPlan caller in the engine).
-    // ponytail: when the PENDING global-GOVERNANCE wash driver ships (washes the
-    // global CLAUDE.md closure + ~/.claude/rules — MEMORY "Global lock/keeps
-    // DRIVER"), add those SPECIFIC roots here, never claudeBaseDir wholesale.
-    // jroots stays a SECONDARY narrowing; the trusted gate is the one a tamperer
-    // cannot move. Fail-closed if neither trusted root resolves.
-    const trustedRoots = [physicalOrNull(projectRoot), physicalOrNull(ccMemoryDir(projectRoot, home))].filter(Boolean);
-    if (!trustedRoots.length) {
-      return { recovered: 'none', error: 'no trusted root resolves — refusing to replay (fail-closed)' };
-    }
+    // The trusted outer gate, resolved by the anchor gate at the top of this
+    // function (its comment carries the full rationale). jroots below is the
+    // SECONDARY narrowing — ANDed with these on every use, never standing alone,
+    // which is the circularity a poisoned journal would otherwise exploit.
+    const trustedRoots = anchorGate.roots;
     // snapPhys is the tx-dir-BOUND canonical form resolved above — not a fresh
     // canonicalization of the raw journal string. Every read below goes through it,
     // so the manifest is loaded from the bound location, never the raw one.
@@ -1030,7 +1069,40 @@ export function recoverDangling(projectRoot, opts = {}) {
         if (!fs.existsSync(step.path)) continue; // never written (or already gone) = nothing to undo
         const p = physicalOrNull(step.path);
         if (!p || !containedIn(p, trustedRoots) || !containedIn(p, jroots)) { refused++; continue; } // exists but out-of-(trusted∩journal)-root = refuse
-        try { fs.rmSync(step.path, { force: true }); } catch {}
+        // BANK THE BYTES BEFORE REMOVING THEM — this is the one delete in the
+        // engine that had NO recovery handle. Every other destructive path is
+        // backed: a rewrite/delete is snapshotted before the first mutation and
+        // banked in the bin after the commit. A create has nothing to snapshot,
+        // because on a LEGITIMATE journal the pre-transaction state of that path
+        // is "absent" (applyPlan refuses a create whose target exists, and aborts
+        // if one appears mid-run) — so removing it is the correct undo and there
+        // is genuinely nothing to lose.
+        //
+        // The unbacked delete is wrong for the case the loop's own comment above
+        // describes without noticing: it removes every create in a dangling txn
+        // REGARDLESS of step.status, precisely because a crash can leave the step
+        // 'pending' while the file exists. That reasoning cannot distinguish "our
+        // file, stamp lost" from "somebody ELSE's file, written at that path after
+        // our crash" — a non-adversarial data-loss path with no attacker in it.
+        // A poisoned journal is the same shape with intent: it names pre-existing
+        // files as its own creates. Containment bounds WHERE that reaches; it
+        // gives those bytes no handle, and the journal is deleted on the success
+        // path, so nothing survives to tell the user what went.
+        //
+        // Cannot bank => do NOT destroy: count it refused, which keeps the journal
+        // and the snapshot and reports 'partial'. An un-undone create is a mixed
+        // state a human can still fix; an unrecoverable delete is not. (A
+        // directory at a create path also lands here — readFileSync throws EISDIR
+        // — where it used to be a silently-swallowed rmSync failure reported as a
+        // clean rolled-back.)
+        let body = null;
+        try { body = fs.readFileSync(p, 'utf8'); } catch { body = null; }
+        if (body === null || !recordBinItem(projectRoot, FAT_BIN_NAME, { content: body, original: p, origin: 'program-cut' })) { refused++; continue; }
+        // Remove p, the spelling that was VALIDATED — not the raw `step.path`.
+        // Checking one spelling and acting on another lets the OS re-resolve the
+        // path a second time (THE PROVENANCE RULE's fourth clause); the restore
+        // loop above was fixed for this and this line was written after the rule.
+        try { fs.rmSync(p, { force: true }); } catch {}
       }
     }
     // Only clear the WAL when the recovery was CLEAN. A partial/refused replay keeps

@@ -145,7 +145,13 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
     wasEconLatched,
     floorProvisional,
   });
-  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, verdict, breakEven: econ };
+  // The INHERITED-ANCESTOR tier, measured the same way and reported SEPARATELY —
+  // never added into `measure`, which is what the verdict acts on. The series law
+  // calls this "context-cost-not-room-fat": it is real per-session cost the reader
+  // should see, and it is not this room's to wash or externalize. Same
+  // measureEntries, so the number is comparable to the room's own.
+  const inherited = measureEntries(disc.inherited, { withGzip: false });
+  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, inherited, verdict, breakEven: econ };
 }
 
 // The full gauge = measureOnly + the recovery preflight. Importable (tests and
@@ -173,8 +179,15 @@ export function gauge(opts = {}) {
   // The preflight runs FIRST and is the only write in this composition. `recover`
   // is consumed by nothing in the measurement — only by the caller — which is why
   // the two separate cleanly.
-  const projectRoot = findProjectRoot(opts.cwd || process.cwd(), opts.home || os.homedir());
-  const recover = recoverDangling(projectRoot);
+  // opts.home reaches BOTH halves. It used to feed only findProjectRoot, so the
+  // recovery preflight resolved its own home independently — harmless in
+  // production (both land on os.homedir()) but a false-green trap in a test that
+  // sandboxes HOME: recoverDangling's anchor guard would compare a sandbox anchor
+  // against the REAL ~/.claude, so a config-territory case could never fire
+  // through this front door and the gate would pass vacuously.
+  const home = opts.home || os.homedir();
+  const projectRoot = findProjectRoot(opts.cwd || process.cwd(), home);
+  const recover = recoverDangling(projectRoot, { home });
   return { ...measureOnly(opts), recover };
 }
 
