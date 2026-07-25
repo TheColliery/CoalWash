@@ -349,3 +349,24 @@ test('NESTED-HABITAT CONTROL 2: the umbrella is excluded, the room\'s own fat is
     assert.strictEqual(g.verdict.band, 'FULL', 'excluding the ancestor tier must not excuse the room\'s own fat');
   } finally { clean(home); }
 });
+
+// ---------------------------------------------------------------------------
+// STATION-4 finding, answered in CODE: every recovery REFUSAL returns
+// recovered:'none' + an error, so the terse line dropped all of them and a
+// poisoned journal in a fresh checkout produced byte-identical output to no
+// journal at all. 'none' WITHOUT an error still stays silent — that is the
+// common path and it is genuinely nothing.
+// ---------------------------------------------------------------------------
+test('gaugeLine SURFACES a refused recovery, and stays silent when there was simply nothing to do', () => {
+  const base = { verdict: { band: 'LEAN', bmi: 0 }, measure: { alwaysLoaded: { tokensEst: 1000 } } };
+  const quiet = gaugeLine({ ...base, recover: { recovered: 'none' } });
+  assert.ok(!/REFUSED|recovered dangling/.test(quiet), `no journal = no clause (got: ${quiet})`);
+  const refused = gaugeLine({ ...base, recover: { recovered: 'none', error: 'containment: the derived project anchor (/x) is the home directory or an ancestor of it — refusing fail-closed' } });
+  assert.match(refused, /dangling run REFUSED/, 'a refusal must be VISIBLE at the front door, not only under --json');
+  assert.match(refused, /--json/, 'and it must point at where the reason lives');
+  assert.ok(refused.length < quiet.length + 90, 'the terse line stays terse — the long reason belongs in --json');
+  const done = gaugeLine({ ...base, recover: { recovered: 'rolled-back', restored: 2 } });
+  assert.match(done, /recovered dangling run: rolled-back/, 'the success clause is unchanged');
+  const partial = gaugeLine({ ...base, recover: { recovered: 'partial', restored: 1, error: 'x' } });
+  assert.match(partial, /recovered dangling run: partial/, "'partial' reports as itself, never as a refusal");
+});

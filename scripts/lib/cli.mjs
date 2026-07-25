@@ -170,7 +170,12 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
 // the creates it added — or, for a terminal/never-started journal, deletes the
 // journal file. With NO journal present it writes nothing. It refuses (and still
 // writes nothing) when the journal is unreadable, schema-newer, has no verifiable
-// roots, names a snapDir outside the tx dir, or when no trusted root resolves.
+// roots, names a snapDir outside the tx dir, when no trusted root resolves, or —
+// the two ANCHOR-GATE refusals, which fire BEFORE the journal is even read —
+// when the project anchor is the home dir or an ancestor of it, or sits inside
+// (or contains) the Claude configuration directory. Those two are the reason a
+// repo-shipped journal reached through this front door can no longer restore over
+// ~/.claude/settings.json; the list is load-bearing, so it stays complete.
 //
 // AN UNATTENDED CALLER WANTS `measureOnly` INSTEAD: a CI/Action runner must NOT
 // call gauge() against an untrusted checkout — an attacker-authored journal.json
@@ -194,8 +199,23 @@ export function gauge(opts = {}) {
 // The terse one-line gauge (method.md §0's reporting shape).
 export function gaugeLine(g) {
   const bmi = g.verdict.bmi ? `BMI ${g.verdict.bmi.toFixed(2)}` : 'no floor yet';
-  const recovered = g.recover && g.recover.recovered && g.recover.recovered !== 'none'
-    ? ` · recovered dangling run: ${g.recover.recovered}` : '';
+  // A REFUSAL IS AN EVENT, AND SILENCE MADE IT INDISTINGUISHABLE FROM NOTHING.
+  // Every refusal returns recovered:'none' + an error, so the old `!== 'none'`
+  // test dropped ALL of them: a user with a poisoned journal sitting in a fresh
+  // checkout saw byte-identical output to a user with no journal at all. That is
+  // the same shape as the bug this recovery path just closed, where a successful
+  // -looking message was the defect's cover — inverted: here the good news (we
+  // found something and refused to touch it) is the thing being hidden.
+  // The two cases are genuinely different and now read differently:
+  //   'none' with NO error  -> nothing to do, stay silent (the common path).
+  //   'none' WITH an error  -> we found a journal and REFUSED it: say so.
+  // Terse by design — the reason is long (an anchor refusal names the path) and
+  // belongs in --json, which the SKILL text now points at. The line's job is to
+  // make the reader ASK.
+  const rec = g.recover || {};
+  const recovered = rec.recovered && rec.recovered !== 'none'
+    ? ` · recovered dangling run: ${rec.recovered}`
+    : (rec.error ? ' · dangling run REFUSED, left for inspection (--json for the reason)' : '');
   return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${recovered}`;
 }
 
