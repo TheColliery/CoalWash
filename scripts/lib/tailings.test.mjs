@@ -282,3 +282,50 @@ test('breadcrumb: missing date/binPath degrade to safe defaults, never throw', (
   const line = breadcrumb();
   assert.match(line, /^<!-- washed \d{4}-\d{2}-\d{2} · removed content recoverable at \.claude\/coalwash\/fat-bin — check the bin\/journal before re-deriving; never invent a missing memory -->$/);
 });
+
+// ---------------------------------------------------------------------------
+// 0h-GUARD MIRROR (station-3 finding). The bin functions are run-gated: they run
+// inside a REAL run, never off a hook/timer. `retier.test.mjs` and
+// `estate-archive.test.mjs` each pin their own engine that way; the BIN layer
+// never got the same pin, and it just became load-bearing — recoverDangling now
+// WRITES a bin entry before undoing a create, and recoverDangling sits at
+// `cli.mjs gauge` Step 0. The invariant holds today (the conductor imports only
+// config-load/config-schema/class-b/caliper/writeguard), but "holds today" with
+// no test is exactly how the next import lands silently.
+//
+// The check is TRANSITIVE on purpose: a hook that imported apply.mjs or cli.mjs
+// would inherit the bin writers without ever naming them, so grepping the hook
+// text for 'recordbinitem' alone would pass while the door stood open.
+// ---------------------------------------------------------------------------
+test('0h-GUARD: no hook reaches a bin WRITER, directly or through apply/cli (grep hooks/ = 0)', () => {
+  // URL-relative so this needs no repo-root helper and no extra import.
+  const hooksUrl = new URL('../../hooks/', import.meta.url);
+  // MATCH SYNTAX, NEVER A RAW SUBSTRING — this guard's first cut used
+  // `content.includes(...)` and immediately flagged the conductor for the COMMENT
+  // that documents its compliance ("NOT a bin sweep / no retention.mjs"). A guard
+  // that fires on the sentence asserting the invariant is worse than none: the
+  // next person deletes the comment to get green. Third instance of this exact
+  // substring-FP family in this repo (root-provenance's `jroots` ⊃ `roots` was
+  // the second), so it is matched as a CALL and as an import SPECIFIER.
+  const BANNED_CALLS = /\b(recordBinItem|sweepFatBin|sweepStoreOld|recoverDangling)\s*\(/;
+  // Modules that CARRY a bin writer. retention.mjs is deliberately NOT here: it
+  // exports the retention POLICY (horizons, budget math) and destroys nothing —
+  // banning it would ban the wrong thing and teach the next reader the wrong rule.
+  const BANNED_MODULES = ['apply.mjs', 'cli.mjs', 'tailings.mjs'];
+  let checked = 0;
+  for (const d of fs.readdirSync(hooksUrl, { withFileTypes: true })) {
+    if (!d.isFile() || !/\.(js|mjs|cjs)$/.test(d.name)) continue;
+    checked++;
+    const content = fs.readFileSync(new URL(d.name, hooksUrl), 'utf8');
+    const call = BANNED_CALLS.exec(content);
+    assert.ok(!call, `hooks/${d.name} CALLS ${call && call[1]} — destruction and bin population are RUN-GATED, never hook-driven (0h)`);
+    // Only real import/require syntax has a quoted specifier, so prose can never
+    // match here.
+    const specs = [...content.matchAll(/(?:from\s*|require\s*\(\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);
+    for (const mod of BANNED_MODULES) {
+      assert.ok(!specs.some((s) => s.endsWith(mod)),
+        `hooks/${d.name} imports ${mod}, which carries the bin writers transitively — the run-gate is a REACHABILITY property, not a spelling one (recoverDangling now WRITES a bin entry and sits at gauge Step 0)`);
+    }
+  }
+  assert.ok(checked > 0, 'no hook files were scanned — a guard that scans nothing passes vacuously');
+});
