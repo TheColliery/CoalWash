@@ -1544,6 +1544,14 @@ test('WAVE-8 L-META (resume anchor — source-desync): a source REWRITTEN betwee
     // an external process rewrites the source in place, SAME byte length (cloud-sync / compaction pulls a newer copy)
     const v2 = Buffer.from(fs.readFileSync(src).toString('utf8').replace(/ORIG/g, 'HAKD'), 'utf8');
     assert.strictEqual(v2.length, fs.statSync(src).size, 'the rewrite is length-preserving');
+    // CodeQL js/file-system-race (#25) — DISMISSED, and the reason lives here so it is not
+    // re-litigated: the read/stat/write trio below is not a check-then-act guard, it IS the
+    // simulated external writer this test exists to provoke. `src` lives in a per-test mkdtemp dir
+    // that no other actor can name, the suite is single-process, and the stat is an ASSERTION about
+    // the replacement buffer's length, not a precondition protecting the write. There is no second
+    // writer to race, so there is no flake: a genuine concurrent modification would fail the
+    // length assertion loudly rather than corrupt anything. Re-open this if the fixture ever moves
+    // to a shared directory or the suite gains intra-file concurrency.
     fs.writeFileSync(src, v2);
     // resume from the byte-exact-correct checkpoint — the source no longer matches the held snapshot
     const r = reduceFile(src, { ...opts, offset: w1.nextOffset, resume: w1.checkpoint });

@@ -418,6 +418,7 @@ test('#2 depth — a long string nested past the OLD WALK_DEPTH=6 cap is now cau
 test('#1 belt — on an inode-less volume (stat.ino===0: exFAT/FAT/SMB) a SAME-directory outPath is fail-closed refused; a DIFFERENT-directory outPath is allowed; a normal (ino≠0) volume is UNCHANGED', () => {
   const dir = tmp();
   const realStat = fs.statSync;
+  const realFstat = fs.fstatSync;
   try {
     const src = writeNdjson(dir, 'a.jsonl', CLAUDEISH);
     const sub = path.join(dir, 'sub'); fs.mkdirSync(sub);
@@ -427,8 +428,13 @@ test('#1 belt — on an inode-less volume (stat.ino===0: exFAT/FAT/SMB) a SAME-d
     const rNormal = detonate(src, { cutTypes: ['mode'], outPath: path.join(dir, 'a.reduced.jsonl'), snapshotDir: path.join(dir, 's0') });
     assert.strictEqual(rNormal.ok, true, 'normal ino≠0: a same-dir outPath is allowed (unchanged behavior)');
 
-    // force ino===0 everywhere (exFAT/FAT/SMB simulation) — the dev/ino hardlink backstop self-disables there
+    // force ino===0 everywhere (exFAT/FAT/SMB simulation) — the dev/ino hardlink backstop self-disables there.
+    // BOTH stat entry points must be stubbed: gate 1 now fstats the FD (the CodeQL #23/#24 race fix), so a
+    // statSync-only stub would leave a real ino on the object gate 4 inspects and the belt would never arm —
+    // the simulation would silently stop reaching the code under test. A genuine inode-less volume reports
+    // ino 0 through fstat too, so production behaviour is unchanged; only the stub had to follow the fd.
     fs.statSync = function (p, ...a) { const s = realStat.call(this, p, ...a); s.ino = 0; return s; };
+    fs.fstatSync = function (fd, ...a) { const s = realFstat.call(this, fd, ...a); s.ino = 0; return s; };
 
     // (2) ino===0 + SAME-directory outPath → fail-closed refuse at the path gate
     const rSame = detonate(src, { cutTypes: ['mode'], outPath: path.join(dir, 'a.reduced2.jsonl'), snapshotDir: path.join(dir, 's1') });
@@ -446,6 +452,7 @@ test('#1 belt — on an inode-less volume (stat.ino===0: exFAT/FAT/SMB) a SAME-d
     assert.strictEqual(sha256File(src), before, 'source byte-intact throughout — the belt is defense-in-depth, no data loss either way');
   } finally {
     fs.statSync = realStat;
+    fs.fstatSync = realFstat;
     rm(dir);
   }
 });
@@ -592,6 +599,27 @@ test('FIX 1 / 8.3 REGRESSION — the src-inside-store belt fires when the store 
     assert.strictEqual(r.triggered, false, 'refused BEFORE the reducer ran (pre-fix the gate fell through and the deeper floor had to catch it)');
     assert.strictEqual(sha256File(src), before, 'source byte-intact');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CodeQL #23/#24 (js/file-system-race) — gate 1 sizes the read from the FD, not from a path-stat: a stale/again-changed path-stat cannot shrink the census', () => {
+  const dir = tmp();
+  const realStat = fs.statSync;
+  try {
+    const src = writeNdjson(dir, 's.jsonl', Array.from({ length: 100 }, (_, i) => ({ type: 'user', i })));
+    const trueSize = realStat.call(fs, src).size;
+    // Simulate the TOCTOU deterministically: the path-stat reports a file 1/10th the real size,
+    // exactly as it would if the file grew between a statSync(path) and the openSync(path).
+    // The engine must never see this, because it stats the FD it actually reads.
+    fs.statSync = function (p, ...rest) {
+      const st = realStat.call(fs, p, ...rest);
+      if (String(p) === src && !rest.length) { try { Object.defineProperty(st, 'size', { value: Math.floor(trueSize / 10) }); } catch { /* frozen stat — leave it */ } }
+      return st;
+    };
+    const r = survey(src);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.totalUnits, 100,
+      'the whole file is censused. Pre-fix gate 1 did statSync(path) then openSync(path) and sized the read from the PATH stat, so a stale size silently truncated the census to 10/100 — and the census is what the agent reads to choose cutTypes, so an undercount understates a content-bearing type on the destructive decision path');
+  } finally { fs.statSync = realStat; rm(dir); }
 });
 
 test('FIX 2 (prototype pollution) — a unit typed as a JS builtin name (__proto__ / constructor) is censused as a real own-key: no vanish, no undercount, no census collapse, no Object.prototype pollution', () => {
