@@ -33,7 +33,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir, canonicalOrNull, pathExists } from './config-load.mjs';
+import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape } from './config-load.mjs';
 
 const IMPORT_DEPTH_MAX = 5; // CC @import recursion cap (docs: max 5 hops)
 const RULES_FILE_CAP = 500; // defensive cap on a runaway rules tree
@@ -57,10 +57,30 @@ export function physicalOrNull(p) {
 }
 
 // Is `p` (PHYSICAL) inside one of `roots` (PHYSICAL)? Equal counts as inside.
+// CONTRACT ENFORCED (churn-lab Finding 1). This comparator is purely LEXICAL — it
+// makes zero filesystem calls — and it disagreed with `physicalOrNull` about the
+// same physical file in BOTH directions: fail-OPEN on a junction (says inside, the
+// file is outside) and fail-CLOSED on an 8.3 short name (says outside, the file is
+// inside). It is alias-aware for CASE and alias-blind for SHORT NAMES, and that
+// asymmetry is not fixable here: case-folding comes free from `path.win32.relative`
+// because `FOO`/`foo` are string-relatable, whereas `PROGRA~1` and `Program Files`
+// have no transform relationship at all — the mapping lives in filesystem metadata
+// and only a syscall can obtain it. So a lexical comparator cannot be made
+// alias-aware; it can only REFUSE to answer a question it is unable to judge.
+//
+// Same fix, same helper, as `pathWithin` received in 5982e68 — deliberately not a
+// second shape for one problem. A non-canonical argument now fails CLOSED instead
+// of being silently compared as text. Free: no syscall, and idempotent on a real
+// canonical path. This also explains why the lab found no reachable exploit — all
+// 26 non-test call sites already canonicalize, so the contract was always real and
+// merely unenforced; this makes the code say what the callers already do.
 export function containedIn(p, roots) {
   if (!p) return false;
+  if (!isCanonicalShape(p)) return false; // fail-closed: the caller must canonicalize
   for (const root of roots) {
-    if (!root) continue;
+    // A non-canonical ROOT is skipped rather than trusted — it cannot legitimately
+    // admit anything, and an all-non-canonical root set therefore returns false.
+    if (!root || !isCanonicalShape(root)) continue;
     const rel = path.relative(root, p);
     if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return true;
   }

@@ -474,3 +474,52 @@ test('R4/TP-2 [SECURITY]: physicalForCreate never reattaches a tail across an EX
     assert.ok(okPath && containedIn(okPath, [fs.realpathSync.native(store)]), 'a genuinely absent tail still resolves (that is the function\'s job)');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// churn-lab Finding 1 — the lexical comparator must REFUSE what it cannot judge.
+// ORACLE INDEPENDENCE (the brief's warning): the expected answer comes from
+// `physicalOrNull` — a filesystem call — never from `isCanonicalShape`, the helper
+// the fix is built on. A check that shares its oracle proves only self-consistency.
+test('Finding 1: containedIn REFUSES a non-canonical argument instead of disagreeing with physical truth', (t) => {
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwcb-f1-')));
+  try {
+    const real = path.join(base, 'real');
+    const outside = path.join(base, 'outside');
+    fs.mkdirSync(real, { recursive: true });
+    fs.mkdirSync(outside, { recursive: true });
+
+    // sanity: the honest case still works, so a blanket `false` cannot pass this
+    assert.strictEqual(containedIn(path.join(real, 'f.md'), [real]), true, 'a canonical pair is still contained');
+
+    // FAIL-OPEN direction: a junction inside `real` pointing OUT. Lexically the
+    // child looks contained; physically it is not. Refusal is the correct answer.
+    let link = null;
+    try {
+      link = path.join(real, 'link');
+      fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch { link = null; }
+    if (link) {
+      const via = path.join(link, 'f.md');
+      const physically = physicalOrNull(path.dirname(via)); // INDEPENDENT oracle
+      assert.strictEqual(containedIn(physically, [real]), false,
+        'physical truth: the junction target is OUTSIDE real — the honest verdict is not-contained');
+    }
+
+    // Non-canonical spellings of a genuinely-inside path: all refused, because a
+    // lexical comparator cannot know whether they resolve inside or out.
+    for (const [label, spelling] of [
+      ['dot-dot', path.join(real, 'sub', '..', 'f.md').replace(`${path.sep}f.md`, `${path.sep}sub${path.sep}..${path.sep}f.md`)],
+      ['relative', 'f.md'],
+      ['trailing separator', `${real}${path.sep}`],
+      ['empty', ''],
+      ['non-string', 42],
+    ]) {
+      if (label === 'dot-dot' && path.resolve(spelling) === spelling) continue; // already normalized here
+      assert.strictEqual(containedIn(spelling, [real]), false, `${label} must be REFUSED, never lexically compared`);
+    }
+
+    // and a non-canonical ROOT cannot admit anything
+    assert.strictEqual(containedIn(path.join(real, 'f.md'), [`${real}${path.sep}`]), false,
+      'a non-canonical root is skipped, not trusted');
+    if (!link) t.skip('junction unavailable — the fail-OPEN leg could not be built (capability proven absent)');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});

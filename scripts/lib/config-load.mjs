@@ -42,7 +42,7 @@ export function claudeBaseDirs(home = os.homedir()) {
 // rather than assumed: a non-canonical argument fails CLOSED instead of being
 // silently lexically compared. The check is free (no syscall) and idempotent on a
 // real canonical path, which is always absolute and already normalized.
-function isCanonicalShape(p) {
+export function isCanonicalShape(p) {
   return typeof p === 'string' && !!p && path.isAbsolute(p) && path.resolve(p) === p;
 }
 export function pathWithin(childPhys, basePhys) {
