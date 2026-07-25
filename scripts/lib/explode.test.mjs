@@ -75,13 +75,13 @@ test('ndjson: cuts exactly cutTypes, keeps the rest byte-exact (survivors verbat
     assert.strictEqual(r.ok, true);
     assert.strictEqual(r.structure, 'ndjson');
     assert.strictEqual(r.unitsSeen, 7);
-    assert.strictEqual(r.unitsCut, 4, 'mode+custom-title+queue-operation+last-prompt');
-    assert.strictEqual(r.unitsKept, 3, 'user+assistant+attachment survive');
+    assert.strictEqual(r.unitsCut, 2, 'mode+custom-title (the A4-rescoped default pair)');
+    assert.strictEqual(r.unitsKept, 5, 'user+assistant+attachment survive — and so do queue-operation+last-prompt, which the A4 ruling removed from the blind default');
     const expected = expectKept(lines, CLAUDEISH, 'type', CLAUDE_DEFAULT_CUT_TYPES);
     assert.ok(fs.readFileSync(out).equals(expected), 'output is the byte-exact concat of kept source lines');
     // survivors are still valid, unmodified JSON of the SAME objects
     const gotObjs = fs.readFileSync(out, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
-    assert.deepStrictEqual(gotObjs.map((o) => o.type), ['user', 'assistant', 'attachment']);
+    assert.deepStrictEqual(gotObjs.map((o) => o.type), ['user', 'assistant', 'queue-operation', 'last-prompt', 'attachment']);
   } finally { rm(dir); }
 });
 
@@ -363,7 +363,7 @@ test('dry-run measures without writing (no outPath, no snapshotDir needed)', () 
     const src = write(dir, 'a.jsonl', buf);
     const r = reduceToCompletion(src, { cutTypes: CLAUDE_DEFAULT_CUT_TYPES });
     assert.strictEqual(r.dryRun, true);
-    assert.strictEqual(r.unitsCut, 4);
+    assert.strictEqual(r.unitsCut, 2);
     assert.ok(r.bytesCut > 0 && r.reductionPct > 0);
     assert.deepStrictEqual(fs.readdirSync(dir), ['a.jsonl'], 'dry-run wrote nothing');
   } finally { rm(dir); }
@@ -1425,7 +1425,7 @@ test('WAVE-7 L4-A (BREAK 3-A): the exported PRIMITIVES self-guard cutTypes — a
     // an OMITTED cutTypes still applies the factory default (convenience preserved — only undefined defaults)
     const rDef = reduceFile(src, { outPath: path.join(dir, 'def.jsonl'), snapshotDir: path.join(dir, 'sdef') });
     assert.strictEqual(rDef.ok, true, 'omitted cutTypes → the factory default (still works)');
-    assert.strictEqual(rDef.unitsCut, CLAUDE_DEFAULT_CUT_TYPES.length, 'the 4 default bookkeeping types are cut');
+    assert.strictEqual(rDef.unitsCut, CLAUDE_DEFAULT_CUT_TYPES.length, 'the 2 default UI-state types are cut (A4-rescoped pair)');
     assert.strictEqual(sha256File(src), before, 'source byte-intact throughout');
   } finally { rm(dir); }
 });

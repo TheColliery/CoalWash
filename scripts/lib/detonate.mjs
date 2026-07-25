@@ -459,7 +459,7 @@ export function detonate(src, request = {}, opts = {}) {
       // Non-string entries are SURFACED (droppedCutTypes), never silently dropped.
       // L4#1 (WAVE-5 fail-OPEN destructive): a NON-ARRAY cutTypes that is not undefined (null / {} / a bare
       // string / a number) is a MALFORMED request, NOT "no preference" — REFUSE it, never let it fall through
-      // to the factory default (which would cut 4 bookkeeping categories the caller never asked for, then
+      // to the factory default (which would cut 2 bookkeeping categories the caller never asked for, then
       // EXECUTE). ONLY an OMITTED key (undefined) means "no preference → convenience default". This is the
       // sibling fix-round-4 (`[]` → refuse) missed: `Array.isArray(x) ? x : DEFAULT` routes null/{}/'mode' to
       // the SAME destructive default as undefined. A validation branch that sends malformed input to a
@@ -470,7 +470,7 @@ export function detonate(src, request = {}, opts = {}) {
       // FIX 2-R2: an explicit empty array means "cut NOTHING", distinct from an OMITTED key ("no preference →
       // apply the convenience default"). The real ULTRA caller is PROGRAMMATIC (the agent computes cutTypes
       // from the survey) → a computed [] (agent decided nothing is cuttable) must NEVER fall through to the
-      // factory default and cut 4 categories the caller never asked for. `Array.isArray` alone (no `&& .length`):
+      // factory default and cut 2 categories the caller never asked for. `Array.isArray` alone (no `&& .length`):
       // [] → requested=[] → the cutlist gate below cleanly refuses ("nothing to cut"); undefined → the default.
       const requestedList = Array.isArray(requestedRaw) ? requestedRaw : CLAUDE_DEFAULT_CUT_TYPES;
       const requested = [...new Set(requestedList.filter((t) => typeof t === 'string'))];

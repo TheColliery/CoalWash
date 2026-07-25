@@ -5,11 +5,14 @@
 //
 // WHAT IT DOES (the data-polarity view, §19.6 rail 6): a class-A transcript is
 // signal (the real user/assistant conversation) buried in noise (valueless
-// bookkeeping the platform re-creates every session — UI state, mode stamps,
-// queue ops, re-stamped last-prompts). This engine KILLS the noise: it explodes
+// bookkeeping the platform re-creates every session — session titles, editor
+// mode stamps). This engine KILLS the noise: it explodes
 // a file into typed units on a DISCOVERED boundary, then hard-cuts exactly the
 // caller-specified obj.types, byte-exact, snapshot-backed. Everything it does
-// not verify as a cut-type, it KEEPS verbatim.
+// not verify as a cut-type, it KEEPS verbatim. WHICH types read as noise is a
+// PER-FILE, MEASURED question, never an assumption — the A4 ruling at
+// CLAUDE_DEFAULT_CUT_TYPES records two types that LOOK like bookkeeping and are
+// not (a `last-prompt` is usually the only surviving copy of a user prompt).
 //
 // THE 7 LOCKED RAILS (§19.6 + the 2026-07-17 refinements):
 //   1. INCOMPLETE BY DESIGN — the cut-type-list is an INPUT (cutTypes), not
@@ -143,11 +146,35 @@ export function collidesWithSource(candidate, src, srcFd) {
 
 // Observed convenience default for the known Claude .jsonl shape (rail 1 — the
 // PASSED-IN list is authoritative; this is only a fallback for the Claude
-// platform). These four are pure UI/bookkeeping the platform re-stamps every
-// session (never the conversation): custom-title/mode = editor state,
-// queue-operation = the input-queue journal, last-prompt = the re-stamped prompt
-// echo. Deliberately EXCLUDED (kept): user/assistant (the conversation),
-// attachment (real file content), system (may carry meaningful directives).
+// platform). These two are pure UI/editor state the platform re-stamps every
+// session (never the conversation): custom-title = the session label, mode =
+// the editor mode stamp. Deliberately EXCLUDED (kept): user/assistant (the
+// conversation), attachment (real file content), system (may carry meaningful
+// directives), and the two types the A4 ruling below removed.
+//
+// THE A4 FIDELITY RULING (2026-07-25) — the default was RE-SCOPED from four types
+// to this proven-lossless PAIR. A transcript census measured the two dropped
+// types and neither is the valueless bookkeeping their names suggest:
+//   · last-prompt     — in 64% of cases the unit is the SOLE surviving copy of a
+//                       user prompt, NOT a re-stamped echo of a line that also
+//                       lives on as a `user` unit. Cutting it blind destroys real
+//                       user text that exists nowhere else in the file.
+//   · queue-operation — content-free only CONDITIONALLY: a ~4% tail carries
+//                       free-form payload. Lossless on most files, lossy on some
+//                       — and "usually safe" is exactly what disqualifies a type
+//                       from a BLIND default.
+// The bar for membership here is not "usually noise", it is LOSSLESS ON EVERY
+// FILE IT MEETS SIGHT-UNSEEN, because this list is what gets applied when the
+// caller expressed no preference and nobody looked at the file.
+//
+// THE SAFE CONTRACT — how to cut MORE (deliberate, never blind): this default is a
+// FLOOR, not a ceiling, and it is not the recommended path. A caller that wants
+// last-prompt, queue-operation, or anything else cut passes an EXPLICIT cutTypes
+// list DERIVED FROM THAT FILE's own survey — detonate's per-type `freeFormCount`
+// (0 = content-free in THIS file) is the evidence that makes the cut deliberate
+// instead of assumed. Per-file measurement is what makes an aggressive cut safe;
+// baking the same type into the blind default is what made it unsafe. Do NOT
+// re-add a type to this list to spare a caller the survey.
 //
 // PROVENANCE + THE ENGINE/AGENT BOUNDARY (harvested from the session's explode
 // prototype, which reduced a real 50 MB Claude session 94.8%): the prototype hit
@@ -161,9 +188,9 @@ export function collidesWithSource(candidate, src, srcFd) {
 // input-verify/distill step, not here. This engine stays purely mechanical: it
 // cuts a `user` unit only if the caller puts 'user' in cutTypes; it never peers
 // inside message.content to judge a survivor. The safe default therefore cuts
-// ONLY the four un-debatable bookkeeping types; a caller wanting the aggressive
-// digest passes its own bigger list.
-export const CLAUDE_DEFAULT_CUT_TYPES = Object.freeze(['custom-title', 'mode', 'queue-operation', 'last-prompt']);
+// ONLY the two un-debatable UI-state types; a caller wanting the aggressive
+// digest passes its own bigger list, measured per the safe contract above.
+export const CLAUDE_DEFAULT_CUT_TYPES = Object.freeze(['custom-title', 'mode']);
 
 const NL = 0x0a;
 // EXPORTED (CHUNK + DEFAULT_MAX_LINES + DEFAULT_MAX_BYTES) so detonate's gate references the SAME memory-

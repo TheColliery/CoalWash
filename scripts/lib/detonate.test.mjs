@@ -46,7 +46,7 @@ test('execute: a clean agent cut-list → byte-exact output, cut reflects PRESEN
     assert.strictEqual(r.ok, true);
     assert.strictEqual(r.verified, true);
     assert.strictEqual(r.triggered, true);
-    assert.deepStrictEqual([...r.cut].sort(), [...CLAUDE_DEFAULT_CUT_TYPES].sort(), 'all four present bookkeeping types are in cut');
+    assert.deepStrictEqual([...r.cut].sort(), [...CLAUDE_DEFAULT_CUT_TYPES].sort(), 'both present UI-state types are in cut (A4-rescoped pair)');
     assert.deepStrictEqual(r.droppedCutTypes, [], 'nothing dropped');
     for (const t of CLAUDE_DEFAULT_CUT_TYPES) {
       assert.ok(r.report.perType[t], `report has an entry for the present type ${t}`);
@@ -54,7 +54,7 @@ test('execute: a clean agent cut-list → byte-exact output, cut reflects PRESEN
       assert.strictEqual(r.report.perType[t].freeFormCount, 0, `${t} is content-free`);
     }
     assert.ok(!r.report.perType.user, 'the report only covers REQUESTED cut-types (user was not requested)');
-    assert.deepStrictEqual(outTypes(out), ['user', 'assistant', 'attachment'], 'only the conversation survives, in order');
+    assert.deepStrictEqual(outTypes(out), ['user', 'queue-operation', 'assistant', 'last-prompt', 'attachment'], 'the conversation survives in order — and so do queue-operation + last-prompt, which the A4 ruling removed from the blind default');
     assert.ok(fs.existsSync(snap), 'the snapshot store was created (main engine WAS triggered)');
     assert.strictEqual(sha256File(src), before, 'source byte-intact — the reduction writes a SEPARATE slim copy');
   } finally { rm(dir); }
@@ -280,7 +280,7 @@ test('gate 5 MEMORY ceiling — no regression: a budget AT the ceiling still red
     const rMax = detonate(src, { cutTypes: CLAUDE_DEFAULT_CUT_TYPES, outPath: path.join(dir, 'o.jsonl'), snapshotDir: path.join(dir, 's'), maxBytes: DEFAULT_MAX_BYTES, maxLines: MAX_WAVE_LINES });
     assert.strictEqual(rMax.ok, true, 'a budget exactly AT the ceiling is accepted (the [floor, ceiling] window is inclusive, not off-by-one)');
     assert.strictEqual(rMax.triggered, true);
-    assert.deepStrictEqual(outTypes(path.join(dir, 'o.jsonl')), ['user', 'assistant', 'attachment'], 'the cut is still correct at the ceiling budget');
+    assert.deepStrictEqual(outTypes(path.join(dir, 'o.jsonl')), ['user', 'queue-operation', 'assistant', 'last-prompt', 'attachment'], 'the cut is still correct at the ceiling budget');
 
     // (B) a legal ABOVE-FLOOR budget still forces N>1 waves and the multi-wave reduce is byte-correct. >DEFAULT_MAX_LINES
     // units so a legal maxLines drives ≥2 waves; every 2000th unit is a KEPT 'user' with a unique marker, the rest
@@ -714,7 +714,7 @@ test('FIX 2-R2 (explicit [] ≠ omitted) — cutTypes:[] REFUSES at the cutlist 
     const rOmit = detonate(src, { outPath: out2, snapshotDir: path.join(dir, 's2') });
     assert.strictEqual(rOmit.ok, true);
     assert.strictEqual(rOmit.triggered, true, 'an omitted cutTypes still applies the factory default');
-    assert.deepStrictEqual([...rOmit.cut].sort(), [...CLAUDE_DEFAULT_CUT_TYPES].sort(), 'the 4 default bookkeeping types are cut');
+    assert.deepStrictEqual([...rOmit.cut].sort(), [...CLAUDE_DEFAULT_CUT_TYPES].sort(), 'the 2 default UI-state types are cut (A4-rescoped pair)');
 
     assert.notStrictEqual(rEmpty.ok, rOmit.ok, 'explicit [] and omitted now DIFFER (was conflated before FIX 2-R2)');
   } finally { rm(dir); }
@@ -903,7 +903,7 @@ test('L4#1 (WAVE-5 gate-bypass) — a NON-ARRAY cutTypes (null / {} / a bare str
     for (const [i, bad] of [null, {}, 'mode', 42, true].entries()) {
       const out = path.join(dir, `o-${i}.jsonl`);
       const r = detonate(src, { cutTypes: bad, outPath: out, snapshotDir: path.join(dir, `s-${i}`) });
-      assert.strictEqual(r.ok, false, `cutTypes=${JSON.stringify(bad)} must refuse (pre-fix: fell to the factory default and cut 4 categories)`);
+      assert.strictEqual(r.ok, false, `cutTypes=${JSON.stringify(bad)} must refuse (pre-fix: fell to the factory default and cut its categories)`);
       assert.strictEqual(r.refused, true);
       assert.strictEqual(r.failedCheck, 'cutlist');
       assert.strictEqual(r.triggered, false, 'the main engine was NEVER triggered');
