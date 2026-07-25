@@ -173,8 +173,15 @@ export function gauge(opts = {}) {
   // The preflight runs FIRST and is the only write in this composition. `recover`
   // is consumed by nothing in the measurement — only by the caller — which is why
   // the two separate cleanly.
-  const projectRoot = findProjectRoot(opts.cwd || process.cwd(), opts.home || os.homedir());
-  const recover = recoverDangling(projectRoot);
+  // opts.home reaches BOTH halves. It used to feed only findProjectRoot, so the
+  // recovery preflight resolved its own home independently — harmless in
+  // production (both land on os.homedir()) but a false-green trap in a test that
+  // sandboxes HOME: recoverDangling's anchor guard would compare a sandbox anchor
+  // against the REAL ~/.claude, so a config-territory case could never fire
+  // through this front door and the gate would pass vacuously.
+  const home = opts.home || os.homedir();
+  const projectRoot = findProjectRoot(opts.cwd || process.cwd(), home);
+  const recover = recoverDangling(projectRoot, { home });
   return { ...measureOnly(opts), recover };
 }
 
