@@ -389,7 +389,20 @@ function ancestorIsDir(p) {
   }
 }
 
-function realOrNull(p) { try { return fs.realpathSync(p); } catch { return null; } }
+// `.native` IS THE SECURITY-RELEVANT VARIANT, not a style choice — the plain
+// realpathSync does NOT expand a win32 8.3 short name (the R3 finding), and this
+// helper feeds CONTAINMENT comparisons. It was plain, and the damage was not
+// theoretical: at the gate-4 belt below it is compared against
+// `physicalForCreate(snapshotDir)`, which DOES expand — so with a short-name
+// tmpdir the two sides spelled the same directory differently, `isContainedIn`
+// returned false, and the source-sacred "src inside the snapshot store" refusal
+// SILENTLY DID NOT FIRE. The source survived only because a narrower downstream
+// check (manifest-path alias) happened to catch that one shape; a src inside the
+// store under any other name had no belt left. Reproduced by running the suite
+// with TEMP pointed at an 8.3 alias.
+// MIXED VARIANTS ON TWO SIDES OF ONE COMPARE IS THE BUG CLASS — keep every
+// canonicalizer in this engine on `.native` so both sides always agree.
+function realOrNull(p) { try { return fs.realpathSync.native(p); } catch { return null; } }
 function isUnder(childReal, baseReal) {
   if (!childReal || !baseReal) return false;
   const norm = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);

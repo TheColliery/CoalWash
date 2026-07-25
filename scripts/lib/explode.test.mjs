@@ -2027,7 +2027,7 @@ test('WAVE-9 L4 nit-b (no orphan snapshot): an ndjson all-absent no-op reduceFil
 });
 
 test('TP-1 (win32 rounded-ino): two DISTINCT files whose Number(ino) collides are NOT reported as a hardlink — the guard compares the 64-bit id exactly (bigint), so a rounding coincidence can no longer refuse a legit reduce', () => {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-ino-')));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-ino-')));
   try {
     // On win32 an NTFS 64-bit File ID routinely exceeds 2^53, so Number(ino) is a
     // ROUNDED double (measured ulp = 4 at ~3.3e16) and distinct files DO collide.
@@ -2058,7 +2058,10 @@ test('TP-1 (win32 rounded-ino): two DISTINCT files whose Number(ino) collides ar
 
 test('R3/TP-3: a SHORT-NAME snapshot store cannot slip past store containment — the undo net stays available (a short outPath used to clobber a prior snapshot blob)', (t) => {
   if (process.platform !== 'win32') { t.skip('8.3 is a win32 form'); return; }
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-LONGSTORE-NAME-FOR-8DOT3-')));
+  // The 8.3 SPECIMEN in this test is `short` below (minted by `%~sI`) and it is
+  // assertively used; this sandbox root is not the contrast being drawn, so it
+  // takes `.native` like every other root.
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-LONGSTORE-NAME-FOR-8DOT3-')));
   try {
     const store = path.join(dir, 'SNAPSHOT-STORE-LONGNAME');
     fs.mkdirSync(store, { recursive: true });
