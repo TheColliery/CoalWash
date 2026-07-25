@@ -25,7 +25,8 @@ import { execSync } from 'node:child_process';
 
 import { physicalForCreate as pfcClassB, physicalOrNull as ponClassB, containedIn } from './class-b.mjs';
 import { pathWithin } from './config-load.mjs';
-import { physicalForCreate as pfcClassA, isContainedIn } from './explode.mjs';
+import { physicalForCreate as pfcClassA, isContainedIn, snapshotSource } from './explode.mjs';
+import { detonate } from './detonate.mjs';
 
 const WIN = process.platform === 'win32';
 
@@ -215,5 +216,111 @@ test('TWIN-PIN is not vacuous: the cases that RAN on this platform drive both re
     }
     const shapeRefusals = cases.filter(([l, i]) => typeof i === 'string' && i && verdict(i) === null);
     assert.ok(shapeRefusals.length >= 1, `at least one PATH-SHAPE refusal must run here, not just bad types (got ${shapeRefusals.length})`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// THE FOURTH TWIN — the SOURCE-SACRED DOOR PAIR, pinned through PUBLIC callers.
+//
+// A third canonicalizer lives inside the class-A engines themselves: detonate.mjs
+// keeps a module-private `realOrNull` (a bare fs.realpathSync.native) beside
+// explode.mjs's module-private `physicalOrNull`, which additionally refuses every
+// win32 device/UNC spelling BY SHAPE (the R3/R4 law: a shape refusal belongs on the
+// INPUT). Both helpers are private, and this file has never imported a private
+// helper. It does not need to: two PUBLIC front doors carry the IDENTICAL
+// containment expression against the same base, differing only in which helper
+// resolves the src —
+//
+//   detonate(src, { outPath, snapshotDir })  gate-4 source-sacred belt
+//   snapshotSource(src, snapshotDir)         the primitive's own self-guard
+//
+// so the pair is comparable behaviourally with no export and no API-surface growth.
+// Both promise the same thing: a src resolving INSIDE the snapshot store is refused,
+// because the manifest/blob writes that land there would corrupt the source.
+//
+// WHY IT EXISTS — MEASURED, NOT ARGUED. The belt was being handed a WRONG answer,
+// not merely an unknown one, and refuse-polarity ("unknown refuses") is armour only
+// against the latter. `.native` collapses `\\?\C:\x` but returns a UNC spelling
+// VERBATIM, so a src passed as `\\localhost\C$\...\store\v.jsonl` compared against a
+// drive-letter base answered 'outside' — for a file physically inside the store. The
+// belt did not fire, `triggered:true`, and the refusal came from reduceFile's deeper
+// floor instead: the same "carried by the guard behind it" shape as the
+// namespaced-outPath finding one commit earlier. A UNC store is not exotic; a
+// redirected Windows profile is one.
+//
+// TWO ASSERTIONS, DELIBERATELY OF DIFFERENT KINDS. Equality is the twin half and
+// catches drift. It is also structurally blind to BOTH sides being weakened in step,
+// which is precisely what a "consistency fix" does — so the second assertion is
+// ABSOLUTE: every spelling of a src inside the store must be refused BEFORE the
+// reducer runs. That one goes red on a coordinated weakening the equality cannot see.
+// ---------------------------------------------------------------------------
+
+// REFUSED means nothing was handed on. For detonate, `triggered === false` is the
+// load-bearing half: an `ok:false` reached only because a DEEPER floor caught it is
+// exactly the defect this pins, so it must NOT read as a refusal here.
+const doorVerdictDetonate = (src, store, outPath) => {
+  const r = detonate(src, { cutTypes: ['mode'], outPath, snapshotDir: store });
+  return (r.ok === false && r.triggered === false) ? 'REFUSED' : 'ALLOWED';
+};
+const doorVerdictSnapshot = (src, store) => (snapshotSource(src, store).ok === false ? 'REFUSED' : 'ALLOWED');
+
+function buildDoorCases() {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-DOORS-')));
+  const store = path.join(root, 'store');
+  fs.mkdirSync(store, { recursive: true });
+  const nd = Array.from({ length: 30 }, (_, i) => JSON.stringify({ type: i % 3 ? 'user' : 'mode', i })).join('\n') + '\n';
+  const inside = path.join(store, 'victim.jsonl');
+  const outside = path.join(root, 'outside.jsonl');
+  fs.writeFileSync(inside, nd);
+  fs.writeFileSync(outside, nd);
+
+  // [label, src spelling, does it physically live inside the store]
+  const rows = [['plain INSIDE', inside, true], ['plain OUTSIDE', outside, false]];
+  if (WIN) {
+    // The device spellings are win32-only BY CONSTRUCTION — `physicalOrNull`'s shape
+    // refusal is platform-gated, so on POSIX the two helpers are identical and there
+    // is nothing to diverge. The POSIX leg still runs the plain rows, so the absolute
+    // assertion below keeps its teeth there rather than being switched off.
+    rows.push(['namespaced INSIDE', path.toNamespacedPath(inside), true]);
+    rows.push(['namespaced OUTSIDE', path.toNamespacedPath(outside), false]);
+    // PROVE the spelling reaches the file before pinning a verdict on it (the 8.3
+    // lesson above): an unreachable admin share would make detonate refuse at gate 1
+    // for a reason that has nothing to do with these twins.
+    const unc = (p) => `\\\\localhost\\${p[0]}$${p.slice(2)}`;
+    for (const [label, p, isIn] of [['UNC INSIDE', inside, true], ['UNC OUTSIDE', outside, false]]) {
+      const u = unc(p);
+      if (fs.existsSync(u)) rows.push([label, u, isIn]);
+    }
+  }
+  return { root, store, rows };
+}
+
+test('TWIN-PIN: the source-sacred doors (detonate gate 4 / snapshotSource) agree on every spelling, and refuse an in-store src BEFORE the reducer runs', () => {
+  const { root, store, rows } = buildDoorCases();
+  try {
+    assert.ok(rows.length >= 2, `table too small (${rows.length}) — a pin over nothing proves nothing`);
+    const diffs = [];
+    const seen = [];
+    rows.forEach(([label, src, insideStore], i) => {
+      let a, b;
+      try { a = doorVerdictDetonate(src, store, path.join(root, `out-${i}.jsonl`)); } catch (e) { a = `THREW ${e.code || e.name}`; }
+      try { b = doorVerdictSnapshot(src, store); } catch (e) { b = `THREW ${e.code || e.name}`; }
+      seen.push([label, a, insideStore]);
+      if (a !== b) diffs.push(`${label}: detonate-gate4=${a} snapshotSource=${b}`);
+    });
+    assert.deepStrictEqual(diffs, [], `TWIN DRIFT between the two source-sacred doors — one resolver learned something the other did not:\n  ${diffs.join('\n  ')}`);
+
+    // ABSOLUTE half — the claim the equality above structurally cannot make.
+    for (const [label, verdict, insideStore] of seen) {
+      if (insideStore) {
+        assert.strictEqual(verdict, 'REFUSED',
+          `${label}: a src living INSIDE the snapshot store must be refused BEFORE the reducer runs, by EVERY spelling of it. ` +
+          'Measured pre-fix on the UNC spelling: triggered:true, the belt silently skipped and reduceFile\'s floor did the refusing.');
+      }
+    }
+    // Not vacuous: the table really drives an ALLOW too, so REFUSED above is a verdict
+    // and not simply this door's only answer.
+    assert.ok(seen.some(([, verdict, insideStore]) => !insideStore && verdict === 'ALLOWED'),
+      `no row was ALLOWED (${seen.map(([l, v]) => `${l}=${v}`).join(', ')}) — a door that refuses everything proves nothing`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

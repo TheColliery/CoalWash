@@ -542,7 +542,25 @@ export function detonate(src, request = {}, opts = {}) {
         // unresolvable path into false == ALLOW. This belt held at the frozen SHA only because
         // `realOrNull` lacks explode's device-path rejection — i.e. TWIN DRIFT was the only thing
         // saving the outer gate, which is not a defense. Now it is closed on purpose.
-        if (containment(realOrNull(src), physicalForCreate(snapshotDir)) !== 'outside') {
+        //
+        // AND THE SIDE THAT REMAINED OPEN AFTER THAT FIX — measured, not argued. Refuse-polarity
+        // is armour against 'unknown'; it is NO armour at all against a CONFIDENTLY WRONG
+        // 'outside'. `realOrNull` is a bare `realpathSync.native`, and `.native` returns a UNC
+        // spelling VERBATIM (`\\localhost\C$\...\store\v.jsonl` stays UNC — it collapses `\\?\`
+        // but not `\\server\share`). Compared against a drive-letter `physicalForCreate` base
+        // that answers 'outside' — for a file that is physically INSIDE the store. Measured on
+        // the frozen SHA: the belt did not fire, `triggered:true`, and the refusal came from
+        // reduceFile's deeper floor again. The SAME shape as the namespaced-outPath finding one
+        // commit ago: a belt whose whole contract is "refuse BEFORE triggering" carried by the
+        // guard behind it. A UNC store is not exotic — a redirected Windows profile is one.
+        // FIX = use the SAME resolver as the floor this belt mirrors. `physicalForCreate` routes
+        // through explode's `physicalOrNull`, which refuses every device/UNC spelling by SHAPE
+        // (R3/R4: the refusal belongs on the INPUT), so an unresolvable spelling lands on
+        // 'unknown' and REFUSES instead of being handed a wrong answer. src always exists here
+        // (gate 1 opened it), so physicalForCreate's climb never runs — this is exactly
+        // `physicalOrNull(src)`, spelled with the export detonate already imports. The two
+        // doors are now pinned against each other in twin-pin.test.mjs.
+        if (containment(physicalForCreate(src), physicalForCreate(snapshotDir)) !== 'outside') {
           return refuse('path', `src must not resolve inside the snapshot store (${snapshotDir}), and must be resolvable enough to prove it — snapshotSource writes the manifest/blobs there and would corrupt the source`);
         }
         // FIX 1-R2 belt (source-sacred, the ALIAS the path-guard above misses — mirrors reduceFile's floor):
