@@ -86,7 +86,29 @@ test('GUARD (portable): a root reached through a symlink/junction is caught on A
 
 // The sweep that fixed CI must stay swept: no test file may build a sandbox root
 // with the non-expanding variant again. Source-level, so it fires on any box.
-test('CONFORMANCE: no test file builds a sandbox root with the non-native realpath variant', () => {
+// ⚠ THE RULE IS NOT "EVERY FIXTURE PATH MUST BE CANONICAL" — READ THIS BEFORE
+// "COMPLETING" THE SWEEP. There are two fixture path roles and they take OPPOSITE
+// treatment:
+//
+//   EXPECTED VALUE (compared against engine output) — MUST be canonical. Otherwise
+//     the test asserts the engine is wrong about a spelling the engine deliberately
+//     normalizes. That is the class the CI-red sweep fixed, and it stays fixed.
+//   INPUT (handed TO the engine) — SHOULD carry adversarial shapes, non-canonical
+//     included. That IS the test surface. Canonicalizing inputs would blind the
+//     suite to exactly the mixed-variant bug class we spent a day closing — and it
+//     nearly happened: class-a correctly REFUSED to sweep its raw `tmp()` helpers,
+//     because doing so would have MASKED a live engine bug (detonate.mjs's
+//     `realOrNull` used the plain variant while the other side of its comparison
+//     expanded, so a source-sacred containment refusal silently did not fire).
+//
+// So this scan is deliberately NARROW: it flags only the construction of a sandbox
+// ROOT, which is the expectation-side idiom, and says nothing about a path built
+// inline as an adversarial input. A root that is intentionally non-canonical
+// because it IS the input under test declares itself with `fixture-input:` and the
+// declaration is the review. A guard that cannot express this distinction should
+// not pretend to — this one expresses it by staying narrow and by naming the part
+// it does not police.
+test('CONFORMANCE: no test file builds a sandbox ROOT with the non-native realpath variant (expectation side only — inputs are deliberately left alone)', () => {
   const offenders = [];
   for (const f of fs.readdirSync(LIB).filter((n) => n.endsWith('.test.mjs'))) {
     // THIS file is exempt by name: it deliberately BUILDS the defect shape as a
@@ -99,6 +121,10 @@ test('CONFORMANCE: no test file builds a sandbox root with the non-native realpa
     const src = fs.readFileSync(path.join(LIB, f), 'utf8');
     src.split(/\r?\n/).forEach((line, i) => {
       if (/^\s*(\/\/|\*)/.test(line)) return;
+      // An opt-out for a root that is non-canonical ON PURPOSE because it is the
+      // INPUT under test. Declaring it is the review; silently sweeping it is the
+      // thing that blinds the suite.
+      if (/fixture-input:/.test(line)) return;
       // the defect shape: plain realpathSync wrapping a temp-dir creation
       if (/fs\.realpathSync\((?!\s*\/\*)[^)]*mkdtempSync/.test(line)) offenders.push(`${f}:${i + 1}`);
     });

@@ -61,7 +61,20 @@ function buildCases() {
     // an empty/unchanged result means this volume really has no 8.3 alias for `dir`.
     if (short && short !== dir) cases.push(['8.3 short name', short]);
   }
-  return { root, dir, cases };
+  // A PORTABLE path-shape REFUSAL, so the vacuity assertion below stays real on
+  // POSIX instead of being switched off there. Every other refusing row above is
+  // a win32 spelling (UNC / \\?\ / 8.3), which is exactly why the POSIX table had
+  // nothing to refuse and the guard fired. A dangling symlink is refused by the
+  // SAME fail-closed rule on both platforms: lstat says the segment exists, so the
+  // walk may not climb past it, but realpath cannot resolve it (R4/TP-2).
+  let linkOk = false;
+  try {
+    const dangling = path.join(dir, 'dangling-link');
+    fs.symlinkSync(path.join(dir, 'no-such-target'), dangling, WIN ? 'junction' : 'dir');
+    cases.push(['under a dangling symlink', path.join(dangling, 'x.txt')]);
+    linkOk = true;
+  } catch { /* capability genuinely absent — the caller skips VISIBLY, never silently */ }
+  return { root, dir, cases, linkOk };
 }
 
 test('TWIN-PIN: physicalForCreate behaves IDENTICALLY in class-b.mjs and explode.mjs across the shared input table', () => {
@@ -175,14 +188,32 @@ test('DEPENDENCY (win32): path.relative case-folds, which is the only reason con
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
-test('TWIN-PIN is not vacuous: the table contains at least one case whose verdict is NON-trivial on this platform', () => {
-  const { root, dir, cases } = buildCases();
+// EVALUATED AGAINST THE CASES THAT ACTUALLY RAN — not against an assumed table.
+// This guard fired on POSIX CI and it was RIGHT to: the UNC / \\?\ / 8.3 rows are
+// win32-only, and the old counters additionally excluded every non-string case
+// (`typeof i === 'string' && i`), so on POSIX the refusal count was structurally
+// zero and the pin was proving nothing. Two fixes, not one: count the refusals the
+// table really produces (a bad TYPE is a real refusal), and carry a portable
+// path-shape refusal (the dangling symlink above) so the assertion has teeth on
+// both platforms rather than being weakened on one.
+test('TWIN-PIN is not vacuous: the cases that RAN on this platform drive both real resolutions and real refusals', (t) => {
+  const { root, dir, cases, linkOk } = buildCases();
   try {
     assert.ok(cases.length >= 11, `table too small (${cases.length}) — a pin over nothing proves nothing`);
-    const resolvable = cases.filter(([, i]) => typeof i === 'string' && i && pfcClassB(i) !== null);
-    const refused = cases.filter(([, i]) => typeof i === 'string' && i && pfcClassB(i) === null);
-    assert.ok(resolvable.length >= 4, 'the table drives real resolutions');
-    assert.ok(refused.length >= 2, 'the table drives real refusals');
+    const verdict = (i) => { try { return pfcClassB(i); } catch { return null; } };
+    const resolvable = cases.filter(([, i]) => verdict(i) !== null);
+    const refused = cases.filter(([, i]) => verdict(i) === null);
+    assert.ok(resolvable.length >= 4, `the table drives real resolutions (got ${resolvable.length})`);
+    assert.ok(refused.length >= 2, `the table drives real refusals (got ${refused.length} of ${cases.length} on ${process.platform})`);
     assert.ok(pfcClassB(dir) !== null, 'sanity: an ordinary existing dir resolves');
+    // The PATH-SHAPE half, reported separately from the type-guard half: without a
+    // shape refusal the pin would still pass on type errors alone, which is a
+    // weaker claim than the one this file's title makes.
+    if (!linkOk) {
+      t.skip('no symlink/junction capability here — the portable path-shape refusal could not be built (capability proven absent, not assumed)');
+      return;
+    }
+    const shapeRefusals = cases.filter(([l, i]) => typeof i === 'string' && i && verdict(i) === null);
+    assert.ok(shapeRefusals.length >= 1, `at least one PATH-SHAPE refusal must run here, not just bad types (got ${shapeRefusals.length})`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

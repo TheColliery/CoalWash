@@ -273,7 +273,17 @@ test('R2/TP-1+TP-3: touchesClaudeBase is case-folded and covers EVERY CLAUDE_CON
     for (const base of [a, b]) {
       assert.strictEqual(touchesClaudeBase(base, home), true, 'the base dir itself');
       assert.strictEqual(touchesClaudeBase(path.join(base, 'projects', 'x'), home), true, 'a path INSIDE it');
-      assert.strictEqual(touchesClaudeBase(base.toUpperCase(), home), process.platform === 'win32', 'a case variant, on win32');
+      // KEY ON THE CAPABILITY, NOT THE PLATFORM NAME. This asserted
+      // `=== (platform === 'win32')` and went red on macOS CI, because the axis is
+      // not the OS — it is whether the FILESYSTEM is case-insensitive, and APFS is
+      // by default. There the uppercased spelling genuinely resolves to the same
+      // directory, so canonicalOrNull returns the real path and containment is
+      // TRUE without the win32 case-fold being involved at all. Probing the
+      // volume is both correct and portable to a case-sensitive Windows volume or
+      // a case-insensitive Linux mount, neither of which a platform check survives.
+      const caseInsensitiveFs = fs.existsSync(base.toUpperCase());
+      assert.strictEqual(touchesClaudeBase(base.toUpperCase(), home), caseInsensitiveFs,
+        `a case variant resolves iff this volume is case-insensitive (probed: ${caseInsensitiveFs})`);
     }
     assert.strictEqual(touchesClaudeBase(home, home), true, 'a path CONTAINING a base dir (either direction)');
     assert.strictEqual(touchesClaudeBase(proj, home), false, 'an unrelated project does NOT touch config territory');
