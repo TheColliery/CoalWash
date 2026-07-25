@@ -25,6 +25,7 @@ const TESTS = [
   'scripts/lib/dig-gauge.test.mjs',
   'scripts/lib/explode.test.mjs',
   'scripts/lib/detonate.test.mjs',
+  'scripts/lib/classa-no-auto.test.mjs',
   'scripts/lib/receipt.test.mjs',
   'scripts/lib/conductor.test.mjs',
   'scripts/lib/ask.test.mjs',
