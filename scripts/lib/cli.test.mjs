@@ -275,3 +275,77 @@ test('measureOnly and gauge agree on every measurement field — the split chang
     assert.ok('recover' in g && !('recover' in m), 'the ONLY difference is the recover key');
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// NESTED-HABITAT: THE INHERITED-ANCESTOR TIER (series law; the CoalTipple
+// false-FULL the docket named, now measured). The CLAUDE.md up-tree walk loads
+// the umbrella ANCESTOR's governance into every room on top of the room's own —
+// and it all landed in `entries` as scope 'project', so the room's cap/verdict
+// was computed on a habitat the room cannot act on. Measured 2026-07-25, one
+// gauge run per room: the umbrella alone is 30,487 tok = 85% of the 36,000
+// ceiling before a room holds one byte of its own, FALSE-FULLing three rooms.
+//
+// THE CONTROL BELOW IS THE POINT: "the room reads LEAN now" alone is equally
+// consistent with "the wall stopped firing". A room over its OWN cap must still
+// read FULL, or the fix is a broken gate wearing a green badge.
+// ---------------------------------------------------------------------------
+function nested({ umbrellaBytes, roomBytes }) {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwn-home-')));
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true }); // platform marker
+  const umb = path.join(home, 'work', 'umbrella');
+  const room = path.join(umb, 'room');
+  fs.mkdirSync(room, { recursive: true });
+  // The umbrella: a CLAUDE.md whose @import closure is the bulk (this series'
+  // real shape — CLAUDE.md is thin and pulls AGENTS.md + MEMORY.md + rules).
+  if (umbrellaBytes > 0) {
+    fs.writeFileSync(path.join(umb, 'CLAUDE.md'), '# umbrella\n@AGENTS.md\n@MEMORY.md\n', 'utf8');
+    fs.writeFileSync(path.join(umb, 'AGENTS.md'), 'u'.repeat(Math.floor(umbrellaBytes / 2)), 'utf8');
+    fs.writeFileSync(path.join(umb, 'MEMORY.md'), 'm'.repeat(Math.floor(umbrellaBytes / 2)), 'utf8');
+  }
+  // The room: its own CLAUDE.md (also the ROOT_MARKER, so findProjectRoot stops
+  // HERE — innermost wins, the fail-closed direction) + its own MEMORY.md.
+  fs.writeFileSync(path.join(room, '.coalwash.json'), '{}');
+  fs.writeFileSync(path.join(room, 'CLAUDE.md'), '# room\n@MEMORY.md\n', 'utf8');
+  fs.writeFileSync(path.join(room, 'MEMORY.md'), 'r'.repeat(roomBytes), 'utf8');
+  return { home, umb, room };
+}
+
+test('NESTED-HABITAT: a room FALSE-FULLed by its inherited umbrella now reads LEAN — the cap is computed on room-owned only', () => {
+  // Umbrella far over any plausible ceiling; the room itself is trivial.
+  const { home, room } = nested({ umbrellaBytes: 400_000, roomBytes: 4_000 });
+  try {
+    const g = measureOnly({ cwd: room, home });
+    assert.strictEqual(g.verdict.band, 'LEAN', `the room's OWN content is ~1k tok — it must not be FULL (got ${g.verdict.band}/${g.verdict.reason})`);
+    // and the inherited cost is REPORTED, not merely invisible (law: it is real
+    // per-session cost, it is just not this room's to wash or externalize).
+    assert.ok(g.inherited.alwaysLoaded.tokensEst > g.verdict.hardCeilingTokens,
+      'the ancestor tier is measured and exceeds the ceiling on its own — that is the number a reader needs to SEE');
+    assert.ok(g.measure.alwaysLoaded.tokensEst < g.verdict.hardCeilingTokens / 4,
+      'the room-owned footprint is a small fraction of the ceiling');
+  } finally { clean(home); }
+});
+
+test('NESTED-HABITAT CONTROL: a room over its OWN cap still reads FULL — the wall did not stop firing', () => {
+  // No umbrella at all; the room's own governance is the thing over the ceiling.
+  const { home, room } = nested({ umbrellaBytes: 0, roomBytes: 4_000 });
+  try {
+    fs.writeFileSync(path.join(room, 'CLAUDE.md'), '# room\n@MEMORY.md\n' + 'R'.repeat(400_000), 'utf8');
+    const g = measureOnly({ cwd: room, home });
+    // ASSERTS THE BAND ONLY, ON PURPOSE: a control earns its name by being GREEN
+    // on BOTH the pre-fix and post-fix bodies. Asserting the new `inherited`
+    // field here would make it fail pre-fix for a reason that has nothing to do
+    // with the wall, and a control that goes red with the change proves nothing.
+    assert.strictEqual(g.verdict.band, 'FULL', 'room-owned fat over the ceiling must still hit the wall');
+    assert.strictEqual(g.verdict.reason, 'absolute-cap');
+  } finally { clean(home); }
+});
+
+test('NESTED-HABITAT CONTROL 2: the umbrella is excluded, the room\'s own fat is NOT — a room that is BOTH still reads FULL', () => {
+  const { home, room } = nested({ umbrellaBytes: 400_000, roomBytes: 4_000 });
+  try {
+    fs.writeFileSync(path.join(room, 'CLAUDE.md'), '# room\n@MEMORY.md\n' + 'R'.repeat(400_000), 'utf8');
+    const g = measureOnly({ cwd: room, home });
+    // Band-only for the same reason as the control above: green on both bodies.
+    assert.strictEqual(g.verdict.band, 'FULL', 'excluding the ancestor tier must not excuse the room\'s own fat');
+  } finally { clean(home); }
+});

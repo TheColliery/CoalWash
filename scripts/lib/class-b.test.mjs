@@ -523,3 +523,43 @@ test('Finding 1: containedIn REFUSES a non-canonical argument instead of disagre
     if (!link) t.skip('junction unavailable — the fail-OPEN leg could not be built (capability proven absent)');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+// ---------------------------------------------------------------------------
+// NESTED-HABITAT tier split, at the discovery layer (the sibling of #22's role
+// tier, which this file already implements and documents). An ancestor's
+// governance is NOT room-owned: the room can neither wash it (law clause 2 —
+// that is the umbrella room's jurisdiction) nor externalize it, which is the
+// exact advice a capHit FULL gives.
+// ---------------------------------------------------------------------------
+test('NESTED-HABITAT: ancestor governance lands in `inherited`, room governance in `entries` — and the GLOBAL memory store stays in `entries`', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwnh-home-')));
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const umb = path.join(home, 'work', 'umbrella');
+    const room = path.join(umb, 'room');
+    fs.mkdirSync(room, { recursive: true });
+    fs.writeFileSync(path.join(umb, 'CLAUDE.md'), '# umbrella\n@AGENTS.md\n', 'utf8');
+    fs.writeFileSync(path.join(umb, 'AGENTS.md'), 'umbrella rules\n', 'utf8');
+    fs.writeFileSync(path.join(room, 'CLAUDE.md'), '# room\n@MEMORY.md\n', 'utf8');
+    fs.writeFileSync(path.join(room, 'MEMORY.md'), 'room memory\n', 'utf8');
+    // the GLOBAL memory store CoalWash actually washes — scope 'project', but it
+    // lives under HOME, OUTSIDE the room. It must NOT be mistaken for inherited.
+    const gstore = ccMemoryDir(room, home);
+    fs.mkdirSync(gstore, { recursive: true });
+    fs.writeFileSync(path.join(gstore, 'MEMORY.md'), 'global index\n', 'utf8');
+
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    // Assert the tier EXISTS before dereferencing it, so a body without it fails
+    // as an assertion naming the missing tier — never a TypeError, which reads
+    // exactly like a broken test rather than a proved defect.
+    assert.ok(Array.isArray(d.inherited), 'discoverClassB must return the inherited-ancestor tier as its own field (nested-habitat law: three tiers, never a flat global/project pair)');
+    const inh = d.inherited.map((e) => path.basename(e.path)).sort();
+    const own = d.entries.map((e) => e.path);
+    assert.deepStrictEqual(inh, ['AGENTS.md', 'CLAUDE.md'], 'the umbrella CLAUDE.md AND its @import closure are the ancestor tier');
+    assert.ok(own.includes(path.join(room, 'CLAUDE.md')) && own.includes(path.join(room, 'MEMORY.md')), 'the room\'s own governance stays room-owned');
+    assert.ok(own.includes(path.join(gstore, 'MEMORY.md')),
+      'THE TRAP: the global memory store is outside the room but is NOT inherited — outside-the-room and not-the-room\'s are different questions');
+    assert.ok(!own.some((p) => p.startsWith(umb + path.sep) && !p.startsWith(room + path.sep)),
+      'no ancestor file may remain in entries — everything downstream of entries is a verdict the room is told to ACT on');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

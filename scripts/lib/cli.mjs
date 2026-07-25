@@ -145,7 +145,13 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
     wasEconLatched,
     floorProvisional,
   });
-  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, verdict, breakEven: econ };
+  // The INHERITED-ANCESTOR tier, measured the same way and reported SEPARATELY —
+  // never added into `measure`, which is what the verdict acts on. The series law
+  // calls this "context-cost-not-room-fat": it is real per-session cost the reader
+  // should see, and it is not this room's to wash or externalize. Same
+  // measureEntries, so the number is comparable to the room's own.
+  const inherited = measureEntries(disc.inherited, { withGzip: false });
+  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, inherited, verdict, breakEven: econ };
 }
 
 // The full gauge = measureOnly + the recovery preflight. Importable (tests and
