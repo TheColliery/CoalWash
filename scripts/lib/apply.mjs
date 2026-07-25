@@ -61,7 +61,7 @@ import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull } fr
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
 // (security-audit locality), but this stub-sniff is imported to stay single-source.
-import { isCloudPlaceholder, ccMemoryDir, physicalForCreate } from './class-b.mjs';
+import { isCloudPlaceholder, ccMemoryDir, physicalForCreate, containedIn } from './class-b.mjs';
 // NOTE a deliberate module cycle: keeps.mjs imports txDirFor/ensureSelfIgnore
 // from THIS file. Both sides bind function declarations used only at CALL
 // time, so ESM resolves the cycle safely regardless of entry order. tailings.mjs
@@ -226,15 +226,14 @@ export function deadLinkLine(deadLinks) {
 function physicalOrNull(p) {
   return canonicalOrNull(p);
 }
-function containedIn(p, roots) {
-  if (!p) return false;
-  for (const root of roots) {
-    if (!root) continue;
-    const rel = path.relative(root, p);
-    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return true;
-  }
-  return false;
-}
+// CONSOLIDATED (R5): the duplicate local copy is GONE — apply.mjs imports THE
+// containment primitive from class-b.mjs, which already carried the exported twin
+// (bodies were identical but for the `export` keyword, and this module already
+// imported class-b, so the dedup cost no new dependency edge). One concept, one
+// implementation. The class-A engine keeps its own standalone twin ON PURPOSE — it
+// may not import this chain — and twin-pin.test.mjs pins the two BEHAVIOURALLY,
+// which is exactly why class-A is free to diverge structurally: there is no shared
+// primitive to twin, and there does not need to be.
 
 // Flag-not-rewrite sniff (ports e2defrag's rewrite-what-you-can't-parse; the
 // NUL-sniff mirrors CoalLedger beta.5's doc-unreadable guard, flock-canonical):
