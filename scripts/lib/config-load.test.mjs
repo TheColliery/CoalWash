@@ -225,3 +225,37 @@ test('root-anchor: no marker anywhere still falls back to startDir (unchanged fa
     assert.strictEqual(findProjectRoot(deep, home), deep, 'unmarked tree: unchanged');
   } finally { clean(home, proj); }
 });
+
+test('TP-4 [SECURITY]: the Claude base dir is NEVER a project root — ~/.claude/CLAUDE.md (the user global instruction file) must not make ~/.claude a trusted anchor', () => {
+  const { home, proj } = sandbox();
+  try {
+    const claude = path.join(home, '.claude');
+    const deep = path.join(claude, 'projects', 'C--some-proj', 'memory');
+    fs.mkdirSync(deep, { recursive: true });
+    fs.writeFileSync(path.join(claude, 'CLAUDE.md'), '# global user instructions\n'); // the real, documented file
+    assert.notStrictEqual(findProjectRoot(deep, home), claude, '~/.claude is NOT a project root (it would become an applyPlan trusted root -> settings.json hook injection)');
+    assert.strictEqual(findProjectRoot(deep, home), deep, 'no other marker -> the fail-closed startDir fallback, exactly as before CLAUDE.md was a marker');
+    // the exclusion is the BASE DIR, not "any dot-dir": a real project keeps working
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# a real room\n');
+    const sub = path.join(proj, 'a', 'b');
+    fs.mkdirSync(sub, { recursive: true });
+    assert.strictEqual(findProjectRoot(sub, home), proj, 'the state-scatter fix still holds for REAL projects');
+  } finally { fs.rmSync(path.join(home, '.claude'), { recursive: true, force: true }); clean(home, proj); }
+});
+
+test('TP-4: the exclusion follows CLAUDE_CONFIG_DIR (derived, never hardcoded)', () => {
+  const { home, proj } = sandbox();
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const alt = path.join(home, 'altconfig');
+    fs.mkdirSync(alt, { recursive: true });
+    fs.writeFileSync(path.join(alt, 'CLAUDE.md'), '# global\n');
+    process.env.CLAUDE_CONFIG_DIR = alt;
+    const deep = path.join(alt, 'projects', 'x');
+    fs.mkdirSync(deep, { recursive: true });
+    assert.notStrictEqual(findProjectRoot(deep, home), alt, 'the relocated base dir is excluded too');
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+    clean(home, proj);
+  }
+});

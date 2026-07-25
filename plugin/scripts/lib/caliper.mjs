@@ -623,20 +623,38 @@ function rmdirIfEmpty(dir) {
 // A file with NO recorded root (written before this fix) is KEPT — keep-on-doubt,
 // the same stance pruneDeadEntries takes. That leftover class is bounded: the
 // never-create guard means no new one can ever be minted.
+//
+// OWNERSHIP IS NEVER TESTED BY SLUG-STRING PREFIX. `ccProjectSlug` maps EVERY
+// non-alphanumeric char to '-', so the slug of the SIBLING project `work/proj-notes`
+// is byte-identical in shape to that of the SUBDIR `work/proj/notes` — a
+// `startsWith(mine + '-')` test cannot tell them apart and deleted a sibling
+// project's gate-passed lean floor (blind wave R1 / TP-2: its baseline reset to
+// provisional → BMI 1.00 → CW goes silent on that project). Ownership is decided by
+// the RECORDED ROOT alone, with the dir name required to be that root's own slug so
+// a planted state file cannot nominate someone else's directory for deletion.
+//
+// Every rm is realpath-contained first (TP-3): a junction planted under
+// `projects/` otherwise makes the delete land OUTSIDE ~/.claude, which is the one
+// thing every other CoalWash write/delete already guards (realpath BOTH sides).
 // Touches ONLY `coalwash/state.json` + the dirs it leaves empty — never a foreign
 // file, never a non-empty dir (the recovery-paths lesson). Fail-silent.
 function pruneStrayStateDirs(projectRoot, home) {
   try {
-    const projectsDir = path.join(claudeBaseDir(home), 'projects');
+    const base = claudeBaseDir(home);
+    const projectsDir = path.join(base, 'projects');
+    const mineRoot = physicalDir(projectRoot);
     const mine = ccProjectSlug(projectRoot);
     for (const name of fs.readdirSync(projectsDir)) {
-      if (name === mine || !name.startsWith(mine + '-')) continue; // only subdir-shaped strays OF THIS project
+      if (name === mine) continue;
       const slugDir = path.join(projectsDir, name);
       const f = path.join(slugDir, 'coalwash', 'state.json');
       const rec = readStateFile(f)?.projectRoot;
-      if (typeof rec !== 'string' || !rec) continue;               // legacy/unknown → keep-on-doubt
-      if (physicalDir(findProjectRoot(rec, home)) === physicalDir(rec)) continue; // a REAL root → keep
-      fs.rmSync(f, { force: true });                               // ours, and spurious
+      if (typeof rec !== 'string' || !rec) continue;            // legacy/unknown → keep-on-doubt
+      if (name !== ccProjectSlug(rec)) continue;                // the dir must BE that root's slug (anti-plant)
+      if (physicalDir(findProjectRoot(rec, home)) !== mineRoot) continue; // not a stray cwd of THIS project → not ours to touch
+      if (physicalDir(rec) === mineRoot) continue;              // that IS this project's root, not a stray
+      if (!containedNewPath(f, base)) continue;                 // realpath-and-contain before ANY rm (junction escape)
+      fs.rmSync(f, { force: true });                            // ours, and spurious
       rmdirIfEmpty(path.join(slugDir, 'coalwash'));
       rmdirIfEmpty(slugDir);
     }
@@ -654,7 +672,15 @@ function saveState(proj, projectRoot, home) {
     const tmp = p + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(toWrite), 'utf8');
     fs.renameSync(tmp, p);
-    dropOldRootEntry(projectRoot, home); // no-old-version-leftover
+    dropOldRootEntry(projectRoot, home); // no-old-version-leftover (the rc.2-era legacy file)
+    // EXACTLY ONE LIVE HOME. loadState reads the slug-dir path then the coal/
+    // fallback, so a fallback copy left behind after the home flips is not merely
+    // stale — when the slug dir later disappears (project removed /
+    // cleanupPeriodDays) the read silently RESURRECTS it and the lean floor
+    // reverts to a pre-flip value (blind wave R1 / TP-5). Reap our own old copy on
+    // the write that moves home; same no-old-version-leftover mechanism as above.
+    const fb = stateFallbackPath(projectRoot, home);
+    if (path.resolve(p) !== path.resolve(fb)) { try { fs.rmSync(fb, { force: true }); } catch { /* best-effort */ } }
     pruneStrayStateDirs(projectRoot, home);
     return true;
   } catch {

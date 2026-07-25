@@ -22,6 +22,21 @@ const LIBS = [
   'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs',
 ];
 
+// LIBS is hand-listed, so it silently rots: a new lib nobody adds here is never
+// import-checked. Same BOTH-DIRECTION drift check test.mjs runs on its suite
+// roster — listed-but-missing is caught by the file loop below, this catches
+// on-disk-but-unlisted. Tests + the deliberately-unshipped class-A engine are
+// gated by the suite and build-plugin respectively, not here.
+const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs']);
+console.log('lib roster drift:');
+try {
+  const onDisk = fs.readdirSync(path.join(repo, 'scripts', 'lib'))
+    .filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs') && !UNLISTED_OK.has(f));
+  const unlisted = onDisk.filter((f) => !LIBS.includes(f));
+  if (unlisted.length) fail(`${unlisted.length} lib(s) on disk but NOT in verify.mjs LIBS — ${unlisted.join(', ')}`);
+  else ok(`every scripts/lib/*.mjs is on the LIBS roster (${onDisk.length} checked)`);
+} catch (e) { fail(`lib roster drift: ${e.message}`); }
+
 console.log('files:');
 for (const [label, p] of [
   ['hooks/coalwash-conductor.js', path.join(repo, 'hooks', 'coalwash-conductor.js')],

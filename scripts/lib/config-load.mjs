@@ -46,11 +46,27 @@ const ROOT_MARKERS = ['.git', '.coalwash.json', 'CLAUDE.md'];
 
 // Walk up from startDir looking for a project-root marker; NEVER walk above
 // `home` — stop there and fall back to startDir.
+//
+// THE CONFIG-DIR EXCLUSION IS A SECURITY GATE, NOT A TIDINESS RULE. The Claude
+// base dir (`~/.claude`) is a CONFIG/DATA area, and `~/.claude/CLAUDE.md` — the
+// user's own global instruction file — is a documented, near-universal file. So
+// the moment `CLAUDE.md` became a marker, EVERY cwd under `~/.claude` resolved
+// its project root to `~/.claude` itself, which then became a TRUSTED ROOT in
+// applyPlan; the home-swallow guard never fired because `~/.claude` sits BELOW
+// home. A forged PLAN.json declaring `roots: [~/.claude]` could then write a
+// `SessionStart` command hook into `settings.json` = code execution next
+// session. Proven live (blind wave R1 / TP-4) — fail-closed had become
+// fail-OPEN. The base dir is therefore NEVER a project root; a cwd under it with
+// no other marker walks out to the fail-closed startDir fallback, exactly as it
+// did before the marker existed. Derived via claudeBaseDir (the same base
+// class-b's ccMemoryDir builds on), never hardcoded, so CLAUDE_CONFIG_DIR moves
+// the exclusion with it.
 export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
   let dir = physicalDir(startDir);
   const homeAbs = physicalDir(home);
+  const claudeAbs = physicalDir(claudeBaseDir(home));
   while (true) {
-    if (ROOT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))) return dir;
+    if (dir !== claudeAbs && ROOT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))) return dir;
     if (dir === homeAbs) return startDir;
     const parent = path.dirname(dir);
     if (parent === dir) return startDir; // filesystem root reached

@@ -6,7 +6,7 @@ import path from 'node:path';
 import {
   tokensEst, tokensEstFromBytes, gzipRatio, measureEntries, statOnlyFootprintBytes,
   bandVerdict, breakEven, sessionsPerDay, gaugeVerdict,
-  statePath, oldStatePath, loadState, recordStamp, setLeanFloor, ensureProvisionalFloor,
+  statePath, stateFallbackPath, oldStatePath, loadState, recordStamp, setLeanFloor, ensureProvisionalFloor,
   sanitizeLeanFloor, LEAN_FLOOR_MAX_MULTIPLE, containedNewPath,
   recordVerdict, markQuickTried, recordSubSpawn,
   STATE_SCHEMA, SCHEMA_RESET_FIELDS,
@@ -1559,4 +1559,63 @@ test('self-clean (h6): the sweep never reaches OUTSIDE this project — an unrel
     recordStamp(home, proj, 333, 1);
     assert.ok(fs.existsSync(path.join(otherStrayDir, 'coalwash', 'state.json')), 'another project\'s stray is ITS OWN run\'s job, never ours');
   } finally { clean(home, proj, other); }
+});
+
+test('TP-2: a SIBLING project is never pruned — `work/proj-notes` and `work/proj/notes` produce the same slug SHAPE, so ownership is decided by the recorded root, not a slug-string prefix', () => {
+  const { home, proj } = sandbox();
+  const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-work-')));
+  try {
+    const mineDir = path.join(work, 'proj');        // project A
+    const sibDir = path.join(work, 'proj-notes');   // project B — a SEPARATE project
+    fs.mkdirSync(mineDir, { recursive: true });
+    fs.mkdirSync(sibDir, { recursive: true });
+    fs.writeFileSync(path.join(mineDir, 'CLAUDE.md'), '# A\n');
+    ccSlugDir(home, mineDir);
+    ccSlugDir(home, sibDir);
+    setLeanFloor(home, sibDir, 7777);               // B records its own gate-passed floor
+    const sibState = path.join(home, '.claude', 'projects', fs.realpathSync(sibDir).replace(/[^A-Za-z0-9]/g, '-'), 'coalwash', 'state.json');
+    assert.ok(fs.existsSync(sibState) && sibState.includes(fs.realpathSync(mineDir).replace(/[^A-Za-z0-9]/g, '-') + '-notes'), 'B\'s slug really does start with A\'s slug + "-"');
+
+    fs.writeFileSync(path.join(work, 'CLAUDE.md'), '# umbrella\n'); // the shared parent gains governance
+    setLeanFloor(home, mineDir, 100);                                // ONE ordinary write in A
+
+    assert.ok(fs.existsSync(sibState), 'B\'s state survives (pre-fix: deleted -> floor reset to provisional -> BMI 1.00 -> CW silent on B)');
+    assert.strictEqual(loadState(sibDir, home).leanFloorTokens, 7777, 'B\'s gate-passed floor is intact');
+  } finally { fs.rmSync(work, { recursive: true, force: true }); clean(home, proj); }
+});
+
+test('TP-3: the prune realpath-contains before ANY rm — a junction under projects/ cannot make the delete escape ~/.claude', (t) => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));
+  try {
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# proj\n');
+    ccSlugDir(home, proj);
+    const notARoot = path.join(proj, 'sub', 'deeper');
+    fs.mkdirSync(notARoot, { recursive: true });
+    fs.mkdirSync(path.join(outside, 'coalwash'), { recursive: true });
+    const victim = path.join(outside, 'coalwash', 'state.json');
+    fs.writeFileSync(victim, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: notARoot, leanFloorTokens: 42 }));
+    const junc = path.join(home, '.claude', 'projects', fs.realpathSync(notARoot).replace(/[^A-Za-z0-9]/g, '-'));
+    try { fs.symlinkSync(outside, junc, 'junction'); } catch (e) { t.skip(`junction unavailable (${e.code})`); return; }
+
+    setLeanFloor(home, proj, 1234); // triggers the prune
+
+    assert.ok(fs.existsSync(victim), 'the OUTSIDE victim is untouched — realpath containment refused the escaping path');
+    assert.ok(fs.existsSync(path.join(outside, 'coalwash')), 'and its dir was not rmdir\'d either');
+  } finally { fs.rmSync(outside, { recursive: true, force: true }); clean(home, proj); }
+});
+
+test('TP-5: exactly ONE live home — the coal/ copy is reaped when the write moves to the slug dir, so a later slug-dir removal cannot RESURRECT a stale floor', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude', 'projects'), { recursive: true });
+    setLeanFloor(home, proj, 1000);              // no slug dir yet -> coal/ fallback
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 1000);
+    const slugDir = ccSlugDir(home, proj);       // CC's first real session appears
+    setLeanFloor(home, proj, 5000);              // write moves home
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 5000);
+    assert.strictEqual(fs.existsSync(stateFallbackPath(proj, home)), false, 'the old coal/ copy was reaped (no-old-version-leftover)');
+    fs.rmSync(slugDir, { recursive: true, force: true }); // project removed / cleanupPeriodDays
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, undefined, 'a fresh bootstrap — NOT the stale 1000 (pre-fix the floor silently reverted)');
+  } finally { clean(home, proj); }
 });

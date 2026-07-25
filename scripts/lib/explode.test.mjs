@@ -1238,8 +1238,13 @@ test('FIX 1-R3 (manifest safe-BY-CONSTRUCTION) — snapshotSource never writes t
     const snap2 = path.join(dir, 'snap2'); fs.mkdirSync(snap2);
     try { fs.linkSync(src2, path.join(snap2, SNAPSHOT_MANIFEST)); } catch (e) { t.skip(`hardlink unavailable (${e.code})`); return; }
     const before2 = sha256File(src2);
-    fs.statSync = function (p, ...a) { const s = realStat.call(this, p, ...a); s.ino = 0; return s; };
-    fs.fstatSync = function (fd, ...a) { const s = realFstat.call(this, fd, ...a); s.ino = 0; return s; };
+    // ino-unreporting volume. The guard reads BIGINT stats (win32 NTFS ids exceed
+    // 2^53 — see the TP-1 test), so the stub must zero the field in the SAME
+    // precision the caller asked for, else `0 !== 0n` leaves the belt armed and
+    // this test stops simulating the ino:0 hole it exists to cover.
+    const zeroIno = (s, a) => { s.ino = (a[0] && a[0].bigint) ? 0n : 0; return s; };
+    fs.statSync = function (p, ...a) { return zeroIno(realStat.call(this, p, ...a), a); };
+    fs.fstatSync = function (fd, ...a) { return zeroIno(realFstat.call(this, fd, ...a), a); };
     let rRed;
     try { rRed = reduceFile(src2, { cutTypes: ['mode'], outPath: path.join(dir, 'out2.jsonl'), snapshotDir: snap2 }); }
     finally { fs.statSync = realStat; fs.fstatSync = realFstat; }
@@ -2019,4 +2024,34 @@ test('WAVE-9 L4 nit-b (no orphan snapshot): an ndjson all-absent no-op reduceFil
     assert.strictEqual(typeof rc.snapshotPath, 'string', 'a real cut still snapshots');
     assert.ok(fs.readdirSync(path.join(dir, 'snap2')).some((f) => /^[0-9a-f]{64}$/.test(f)), 'the real cut wrote a content-addressed blob');
   } finally { rm(dir); }
+});
+
+test('TP-1 (win32 rounded-ino): two DISTINCT files whose Number(ino) collides are NOT reported as a hardlink — the guard compares the 64-bit id exactly (bigint), so a rounding coincidence can no longer refuse a legit reduce', () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-ino-')));
+  try {
+    // On win32 an NTFS 64-bit File ID routinely exceeds 2^53, so Number(ino) is a
+    // ROUNDED double (measured ulp = 4 at ~3.3e16) and distinct files DO collide.
+    // Find a real colliding pair if this filesystem produces one; assert the guard
+    // is clean either way (elsewhere the loop simply finds none).
+    const seen = new Map();
+    let a = null, b = null;
+    for (let i = 0; i < 4000 && !a; i++) {
+      const p = path.join(dir, `f${i}.bin`);
+      fs.writeFileSync(p, `x${i}`);
+      const key = `${fs.statSync(p).dev}:${fs.statSync(p).ino}`; // the OLD number-precision key
+      if (seen.has(key)) { a = seen.get(key); b = p; } else seen.set(key, p);
+    }
+    if (a) {
+      assert.notStrictEqual(fs.readFileSync(a, 'utf8'), fs.readFileSync(b, 'utf8'), 'the pair really is two different files');
+      assert.strictEqual(collidesWithSource(b, a), null, 'a rounded-ino coincidence is NOT a collision (pre-fix: "is a hardlink to the source" -> reduce refused, random-red gate)');
+    }
+    // The true positive must survive the precision change.
+    const src = path.join(dir, 'src.txt');
+    fs.writeFileSync(src, 'payload');
+    const link = path.join(dir, 'link.txt');
+    try {
+      fs.linkSync(src, link);
+      assert.ok(/hardlink/i.test(collidesWithSource(link, src) || ''), 'a REAL hardlink is still caught exactly');
+    } catch { /* no hardlink support here — the FP half above still ran */ }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

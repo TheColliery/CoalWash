@@ -47,13 +47,33 @@ const UNWIRED_ENGINE = [
 ];
 const isUnwiredEngine = (rel) => UNWIRED_ENGINE.includes(rel);
 
+// THE DIST WALK IS A DENYLIST, SO ANY STRAY UNDER A DIST_ITEM RIDES ALONG. A
+// CoalHearth journal written by a command whose cwd happened to be scripts/lib
+// left `scripts/lib/.claude/coalhearth/session_handoff.json` in the tree; the
+// build copied it into plugin/ and checkDist cleared it as "has a source", so
+// verify still printed "nothing leaked" (blind wave R1 / TP-6). It is gitignored,
+// so a git install is safe — but the ZIP and `--plugin-dir` surfaces ship the
+// directory as-is, SESSION CONTENT included. A dot-dir is never plugin payload:
+// exclude it from the build AND assert its absence, the same explicit-absence
+// belt UNWIRED_ENGINE uses (skipping a path in both walks is otherwise a blind
+// spot). The stray FILE itself is CoalHearth's cwd-anchoring class, fixed in the
+// CH room — this makes the dist immune to it and to any future stray dot-dir.
+//
+// Scoped BELOW the DIST_ITEM, never across it: `.claude-plugin/plugin.json` is
+// itself a DIST_ITEM that legitimately starts with a dot, so a whole-path test
+// silently dropped the plugin manifest from the dist — and, because the same test
+// skipped it in both checkDist walks, verify still printed PASS. Caught here
+// before commit; it is the identical exclusion-becomes-blind-spot shape this
+// very fix exists to close, which is why `sub` is measured from the item root.
+const hasStrayDotDir = (sub) => sub.split(/[\\/]/).some((seg) => seg.startsWith('.') && seg !== '.' && seg !== '..');
+
 export function buildDist(distRoot = dist) {
   fs.rmSync(distRoot, { recursive: true, force: true });
   for (const rel of DIST_ITEMS) {
     const src = path.join(repo, rel);
     const dst = path.join(distRoot, rel);
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isUnwiredEngine(path.relative(repo, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine
+    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isUnwiredEngine(path.relative(repo, s)) && !hasStrayDotDir(path.relative(src, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine + any stray dot-dir BELOW the item
   }
 }
 
@@ -63,11 +83,11 @@ export function buildDist(distRoot = dist) {
 // Returns [] when in sync.
 export function checkDist(distRoot = dist) {
   const out = [];
-  const filesUnder = (root, rel) => {
-    if (isTest(rel) || isUnwiredEngine(rel)) return []; // excluded from the dist -> excluded here too, both directions
+  const filesUnder = (root, rel, item = rel) => {
+    if (isTest(rel) || isUnwiredEngine(rel) || hasStrayDotDir(path.relative(item, rel))) return []; // excluded from the dist -> excluded here too, both directions
     const abs = path.join(root, rel);
     if (!fs.existsSync(abs)) return [];
-    if (fs.statSync(abs).isDirectory()) return fs.readdirSync(abs).flatMap((n) => filesUnder(root, path.join(rel, n)));
+    if (fs.statSync(abs).isDirectory()) return fs.readdirSync(abs).flatMap((n) => filesUnder(root, path.join(rel, n), item));
     return [rel];
   };
   for (const item of DIST_ITEMS) {
@@ -85,6 +105,20 @@ export function checkDist(distRoot = dist) {
   // orphan check clears it). Assert absence explicitly instead.
   for (const rel of UNWIRED_ENGINE) {
     if (fs.existsSync(path.join(distRoot, rel))) out.push(`unwired class-A engine present in plugin/ (must not ship until the SKILL surface wires it): ${rel}`);
+  }
+  // Same blind-spot belt for the dot-dir exclusion: skipped in both walks, so assert absence.
+  const strayDotDirsIn = (root, rel) => {
+    const abs = path.join(root, rel);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return [];
+    return fs.readdirSync(abs, { withFileTypes: true }).flatMap((e) => {
+      if (!e.isDirectory()) return [];
+      const r = path.join(rel, e.name);
+      return e.name.startsWith('.') ? [r] : strayDotDirsIn(root, r);
+    });
+  };
+  for (const item of DIST_ITEMS) {
+    // from the item ROOT down — a DIST_ITEM that is itself dot-named is legitimate.
+    for (const rel of strayDotDirsIn(distRoot, item)) out.push(`stray dot-dir in plugin/ (never plugin payload — it rode the dist walk): ${rel}`);
   }
   const allowedTops = new Set(DIST_ITEMS.map((rel) => rel.split(path.sep)[0]));
   if (fs.existsSync(distRoot)) {

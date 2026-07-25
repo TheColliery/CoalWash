@@ -130,15 +130,26 @@ export function collidesWithSource(candidate, src, srcFd) {
   // caller passes srcFd (unchanged fast path); the self-open fires only for a bare (candidate, src) call.
   let ownFd = null;
   try {
+    // BIGINT STATS ARE REQUIRED FOR CORRECTNESS ON win32, not a micro-optimisation.
+    // An NTFS 64-bit File ID routinely exceeds 2^53, so the default NUMBER `ino`
+    // is a ROUNDED double: measured on this box, ino ~3.3e16 has a ulp of 4, and
+    // 4000 distinct files produced 5 identical (dev, ino) pairs. That made this
+    // guard FALSE-POSITIVE on two unrelated files — refusing a legitimate reduce
+    // and turning the suite random-red (blind wave R1 / TP-1, a 788/790 run).
+    // `{ bigint: true }` compares the ID exactly: 0 collisions over the same 4000
+    // files, and a real hardlink is still detected. The guard is not weakened —
+    // the rounding was the bug, so exact compare removes the false positive
+    // WITHOUT relaxing the true-positive hardlink catch.
+    const opts = { bigint: true };
     let s;
     if (srcFd !== undefined && srcFd !== null) {
-      s = fs.fstatSync(srcFd);
+      s = fs.fstatSync(srcFd, opts);
     } else {
       ownFd = fs.openSync(src, 'r'); // src unopenable → throws → caught → null (not a detectable hardlink)
-      s = fs.fstatSync(ownFd);
+      s = fs.fstatSync(ownFd, opts);
     }
-    const c = fs.statSync(candidate); // an absent candidate throws → cannot be a hardlink to src
-    if (s.ino !== 0 && s.dev === c.dev && s.ino === c.ino) return 'is a hardlink to the source (same device + inode)';
+    const c = fs.statSync(candidate, opts); // an absent candidate throws → cannot be a hardlink to src
+    if (s.ino !== 0n && s.dev === c.dev && s.ino === c.ino) return 'is a hardlink to the source (same device + inode)';
   } catch { /* candidate absent / src unopenable → not a detectable hardlink to src */ }
   finally { if (ownFd !== null) { try { fs.closeSync(ownFd); } catch { /* best effort */ } } }
   return null;
