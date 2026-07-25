@@ -26,13 +26,31 @@ export function physicalDir(p) {
   try { return fs.realpathSync(p); } catch { return path.resolve(p); }
 }
 
-// Walk up from startDir looking for `.coalwash.json` or `.git` (project root
-// marker); NEVER walk above `home` — stop there and fall back to startDir.
+// Project-root markers, in the order a project actually declares itself.
+// `CLAUDE.md` = the GOVERNANCE root — the same up-tree governance walk
+// discoverClassB §2 already performs, added here because it was the missing
+// third marker: a project that declares itself by governance and NOT by git
+// (this series' own umbrella: CLAUDE.md/AGENTS.md/MEMORY.md, no `.git`) matched
+// nothing, so the walk ran to home and fell back to the RAW startDir — a
+// DIFFERENT "project root" for every SUBDIR. Field damage (2026-07-25): a
+// session resumed from a subdir minted a spurious `~/.claude/projects/<slug>/`
+// per subdir (the rc.3 OS-scatter class, new form) and split ONE project's BMI
+// floor/crossings across those slugs.
+//   `AGENTS.md` is deliberately NOT a marker: Codex reads a CHAIN of per-DIRECTORY
+//   AGENTS.md files, so treating one as a root would re-create the very
+//   per-subdir scatter this fixes.
+// Adding a marker can only make the walk stop LOWER — a NARROWER, fail-closed
+// containment anchor for apply.mjs — except in exactly the no-marker fallback
+// above, where the governance root IS the correct answer.
+const ROOT_MARKERS = ['.git', '.coalwash.json', 'CLAUDE.md'];
+
+// Walk up from startDir looking for a project-root marker; NEVER walk above
+// `home` — stop there and fall back to startDir.
 export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
   let dir = physicalDir(startDir);
   const homeAbs = physicalDir(home);
   while (true) {
-    if (fs.existsSync(path.join(dir, '.git')) || fs.existsSync(path.join(dir, '.coalwash.json'))) return dir;
+    if (ROOT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))) return dir;
     if (dir === homeAbs) return startDir;
     const parent = path.dirname(dir);
     if (parent === dir) return startDir; // filesystem root reached

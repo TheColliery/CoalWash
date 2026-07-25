@@ -175,3 +175,53 @@ test('H6: a UTF-16LE global config kill switch is honored, not mojibake-dropped 
     assert.strictEqual(loadMergedConfig({ cwd: proj, home }).coalwashMode, 'off', 'BOM-less UTF-16LE recovers via the NUL fallback');
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// ROOT-ANCHORED DERIVATION (2026-07-25 field fix, layer 1). A project that
+// declares itself by GOVERNANCE and not by git used to match no marker at all,
+// so the walk ran to home and fell back to the raw cwd — a different "project
+// root" per subdir, which minted a spurious ~/.claude/projects/<slug>/ per subdir.
+// ---------------------------------------------------------------------------
+
+test('root-anchor: a governance-only project (CLAUDE.md, no .git) resolves to the SAME root from its root and from any deep subdir', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# room entrypoint\n'); // governance root, deliberately NO .git
+    const deep = path.join(proj, 'scratchpad', 'virus-hunt');
+    fs.mkdirSync(deep, { recursive: true });
+    assert.strictEqual(findProjectRoot(proj, home), proj, 'root resolves to itself');
+    assert.strictEqual(findProjectRoot(deep, home), proj, 'deep subdir resolves to the SAME root (was: the raw subdir)');
+    assert.strictEqual(findProjectRoot(path.join(proj, 'scratchpad'), home), proj, 'mid subdir too');
+  } finally { clean(home, proj); }
+});
+
+test('root-anchor: AGENTS.md is deliberately NOT a root marker (Codex reads a per-DIRECTORY chain — treating one as a root would re-create the subdir scatter)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const sub = path.join(proj, 'pkg');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(proj, '.git'), 'gitdir: elsewhere\n'); // worktree-style marker file
+    fs.writeFileSync(path.join(sub, 'AGENTS.md'), '# per-package instructions\n');
+    assert.strictEqual(findProjectRoot(sub, home), proj, 'a nested AGENTS.md does not anchor a root');
+  } finally { clean(home, proj); }
+});
+
+test('root-anchor: a nested repo still wins over its governance parent (walk stops LOWER = the fail-closed direction)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# umbrella\n');
+    const room = path.join(proj, 'RoomRepo');
+    fs.mkdirSync(path.join(room, 'scripts', 'lib'), { recursive: true });
+    fs.mkdirSync(path.join(room, '.git'), { recursive: true });
+    assert.strictEqual(findProjectRoot(path.join(room, 'scripts', 'lib'), home), room, 'the nearer repo root wins, not the umbrella');
+  } finally { clean(home, proj); }
+});
+
+test('root-anchor: no marker anywhere still falls back to startDir (unchanged fail-closed behavior)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const deep = path.join(proj, 'a', 'b');
+    fs.mkdirSync(deep, { recursive: true });
+    assert.strictEqual(findProjectRoot(deep, home), deep, 'unmarked tree: unchanged');
+  } finally { clean(home, proj); }
+});

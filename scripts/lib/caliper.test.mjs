@@ -29,6 +29,19 @@ function sandbox() {
   return { home, proj };
 }
 
+// Model CC having created this project's slug dir. Required premise for the
+// per-project state location: under the NEVER-CREATE guard (2026-07-25) CW writes
+// into `projects/<slug>/` only when CC already made it, so a test that expects the
+// per-project path must first say "CC has seen this project".
+function ccSlugDir(home, proj) {
+  // Lenient like ccProjectSlug (path.resolve, existence-independent): a modelled
+  // stray cwd need not exist on disk for its slug dir to.
+  let abs; try { abs = fs.realpathSync(proj); } catch { abs = path.resolve(proj); }
+  const d = path.join(home, '.claude', 'projects', abs.replace(/[^A-Za-z0-9]/g, '-'));
+  fs.mkdirSync(d, { recursive: true });
+  return d;
+}
+
 // task #13: state now lives per-project at <claudeBase>/projects/<slug>/coalwash/
 // state.json (flat). pstate = the project's flat state (the migrated view);
 // statePath(proj, home) is the real per-project file path (used to seed/corrupt).
@@ -255,6 +268,7 @@ test('sessionsPerDay: bootstrap 1/day under 2 stamps; measured rate; clamped [0.
 test('state: recordStamp persists and ring-caps; floor round-trips; corrupt file self-heals', () => {
   const { home, proj } = sandbox();
   try {
+    ccSlugDir(home, proj); // CC has seen this project → writes land in projects/<slug>/ (never-create guard)
     for (let i = 0; i < STAMP_RING_MAX + 5; i++) recordStamp(home, proj, 100 + i, 1000 + i);
     const ps = pstate(home, proj);
     assert.strictEqual(ps.stamps.length, STAMP_RING_MAX, 'ring-capped');
@@ -265,7 +279,8 @@ test('state: recordStamp persists and ring-caps; floor round-trips; corrupt file
     assert.strictEqual(ps2.leanFloorTokens, 777);
     assert.strictEqual(ps2.stamps.length, STAMP_RING_MAX, 'the floor write keeps the stamps');
 
-    // task #13: state is per-project — the file lives beside the CC memory dir.
+    // task #13: state is per-project — the file lives beside the CC memory dir
+    // (once CC has created the slug dir; see the never-create guard).
     assert.strictEqual(statePath(proj, home), path.join(home, '.claude', 'projects', fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-'), 'coalwash', 'state.json'), 'state rides the memory dir');
     fs.writeFileSync(statePath(proj, home), '{ corrupt', 'utf8');
     assert.deepStrictEqual(loadState(proj, home), {}, 'corrupt state self-heals to empty');
@@ -331,6 +346,7 @@ test('sanitizeLeanFloor: without a usable footprint to compare against, basic sa
 test('(a) new-location round-trip: writes land beside the CC memory dir, reads come back', () => {
   const { home, proj } = sandbox();
   try {
+    ccSlugDir(home, proj); // CC has seen this project (never-create guard's premise)
     recordStamp(home, proj, 1234, 1);
     const p = statePath(proj, home);
     assert.ok(p.startsWith(path.join(home, '.claude', 'projects')), 'inside ~/.claude/projects');
@@ -1438,4 +1454,109 @@ test('sanitizeCrossing: escalation:true passes through; escalation absent/false 
 test('REGAUGE_DELTA_TOKENS / ALWAYS_LOADED_PATHS_CAP are positive, sane placeholder constants', () => {
   assert.ok(REGAUGE_DELTA_TOKENS > 0);
   assert.ok(ALWAYS_LOADED_PATHS_CAP > 0);
+});
+
+// ---------------------------------------------------------------------------
+// STATE SCATTER — the 2026-07-25 field fix (3 orphan ~/.claude/projects/ dirs,
+// each holding ONLY coalwash/state.json and 0 transcripts, minted by sessions
+// whose cwd sat in a SUBDIR of the project). Layer 1 = root-anchored derivation
+// (config-load ROOT_MARKERS, tested there). Layers 2/3 below.
+// ---------------------------------------------------------------------------
+
+test('never-create (h1): the root-derived slug dir EXISTS → state is written there', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    assert.strictEqual(recordStamp(home, proj, 4242, 1).stamps[0].fp, 4242);
+    const p = statePath(proj, home);
+    assert.ok(p.startsWith(path.join(home, '.claude', 'projects')), 'per-project location used');
+    assert.ok(fs.existsSync(p), 'file on disk');
+  } finally { clean(home, proj); }
+});
+
+test('never-create (h2): slug dir ABSENT → state goes to the coal/ fallback and ~/.claude/projects gains NO new dir', () => {
+  const { home, proj } = sandbox();
+  try {
+    const projectsDir = path.join(home, '.claude', 'projects');
+    fs.mkdirSync(projectsDir, { recursive: true });
+    const before = fs.readdirSync(projectsDir).sort();
+
+    recordStamp(home, proj, 999, 1);
+    setLeanFloor(home, proj, 555);
+
+    assert.deepStrictEqual(fs.readdirSync(projectsDir).sort(), before, 'CW minted NO slug dir — the phantom-project class cannot happen');
+    const p = statePath(proj, home);
+    assert.ok(p.startsWith(path.join(home, '.claude', 'coal', 'coalwash')), 'fell back to coal/, still inside ~/.claude');
+    assert.ok(fs.existsSync(p), 'the fallback file exists');
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 555, 'state still round-trips through the fallback');
+  } finally { clean(home, proj); }
+});
+
+test('never-create (h3): a fallback-written state is NOT stranded when CC later creates the slug dir', () => {
+  const { home, proj } = sandbox();
+  try {
+    setLeanFloor(home, proj, 321);                       // lands in coal/ (no slug dir yet)
+    ccSlugDir(home, proj);                               // CC's first real session appears
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 321, 'the lean-floor baseline survives the location flip');
+  } finally { clean(home, proj); }
+});
+
+test('self-clean (h4): a stray slug dir CW minted for a NON-root cwd is removed on the next write; a REAL nested project is untouched', () => {
+  const { home, proj } = sandbox();
+  try {
+    // proj declares itself by governance only (the field shape: no .git).
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# root\n');
+    const strayCwd = path.join(proj, 'scratchpad', 'virus-hunt');   // NOT a root -> resolves up to proj
+    const realNested = path.join(proj, 'RoomRepo');                 // IS a root (.git) -> resolves to itself
+    fs.mkdirSync(strayCwd, { recursive: true });
+    fs.mkdirSync(path.join(realNested, '.git'), { recursive: true });
+
+    const projectsDir = path.join(home, '.claude', 'projects');
+    ccSlugDir(home, proj);
+    const strayDir = ccSlugDir(home, strayCwd);
+    const nestedDir = ccSlugDir(home, realNested);
+    // Both hold ONLY coalwash/state.json and 0 transcripts — the contents are
+    // IDENTICAL, so only the recorded root can tell them apart (a real project's
+    // dir legitimately looks like this once CC sweeps its transcripts).
+    for (const [d, root] of [[strayDir, strayCwd], [nestedDir, realNested]]) {
+      fs.mkdirSync(path.join(d, 'coalwash'), { recursive: true });
+      fs.writeFileSync(path.join(d, 'coalwash', 'state.json'), JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: root, leanFloorTokens: 90 }), 'utf8');
+    }
+    // A planted FOREIGN file in a third stray — must never be touched.
+    const foreignDir = ccSlugDir(home, path.join(proj, 'other'));
+    fs.writeFileSync(path.join(foreignDir, 'someone-elses.jsonl'), 'keep me', 'utf8');
+
+    recordStamp(home, proj, 111, 1); // the write that triggers the sweep
+
+    assert.ok(!fs.existsSync(strayDir), 'the spurious per-subdir slug dir is gone, dir and all');
+    assert.ok(fs.existsSync(path.join(nestedDir, 'coalwash', 'state.json')), 'a REAL nested project keeps its state (its root resolves to itself)');
+    assert.strictEqual(fs.readFileSync(path.join(foreignDir, 'someone-elses.jsonl'), 'utf8'), 'keep me', 'a foreign file is never touched');
+    assert.ok(fs.existsSync(foreignDir), 'and its non-empty dir is never removed');
+    assert.ok(fs.existsSync(path.join(projectsDir, fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-'))), 'our own dir survives');
+  } finally { clean(home, proj); }
+});
+
+test('self-clean (h5): a pre-fix state file with NO recorded root is KEPT (keep-on-doubt — a slug cannot be inverted to a path)', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    const legacyDir = ccSlugDir(home, path.join(proj, 'sub'));
+    fs.mkdirSync(path.join(legacyDir, 'coalwash'), { recursive: true });
+    fs.writeFileSync(path.join(legacyDir, 'coalwash', 'state.json'), JSON.stringify({ stateSchema: STATE_SCHEMA, leanFloorTokens: 7 }), 'utf8');
+    recordStamp(home, proj, 222, 1);
+    assert.ok(fs.existsSync(path.join(legacyDir, 'coalwash', 'state.json')), 'no recorded root → never guessed at');
+  } finally { clean(home, proj); }
+});
+
+test('self-clean (h6): the sweep never reaches OUTSIDE this project — an unrelated project\'s slug dir is not even a candidate', () => {
+  const { home, proj } = sandbox();
+  const other = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-other-')));
+  try {
+    ccSlugDir(home, proj);
+    const otherStrayDir = ccSlugDir(home, path.join(other, 'deep'));
+    fs.mkdirSync(path.join(otherStrayDir, 'coalwash'), { recursive: true });
+    fs.writeFileSync(path.join(otherStrayDir, 'coalwash', 'state.json'), JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: path.join(other, 'deep') }), 'utf8');
+    recordStamp(home, proj, 333, 1);
+    assert.ok(fs.existsSync(path.join(otherStrayDir, 'coalwash', 'state.json')), 'another project\'s stray is ITS OWN run\'s job, never ours');
+  } finally { clean(home, proj, other); }
 });

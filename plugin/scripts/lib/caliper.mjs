@@ -57,7 +57,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
-import { claudeBaseDir } from './config-load.mjs';
+// findProjectRoot/physicalDir: the room's ONE root resolver — the stray-state
+// detector re-uses it rather than hand-rolling a second walk.
+import { claudeBaseDir, findProjectRoot, physicalDir } from './config-load.mjs';
 import { parseJsonc } from './jsonc.mjs';
 // task #13 (OS-citizen state): the per-project state path RIDES the CC memory
 // dir, so we reuse the SAME adapter discovery computes (ccMemoryDir/ccProjectSlug)
@@ -443,11 +445,28 @@ export function containedNewPath(target, base) {
 // somehow escapes the sandbox (task #13 pt 2). Never throws: ccMemoryDir is a
 // pure path.join (existence-independent), so a slug-rotted / absent memory dir
 // yields a deterministic path here and simply an empty read downstream (pt 5).
+// The fail-closed home: the global coal/ namespace, still inside ~/.claude.
+export function stateFallbackPath(projectRoot, home = os.homedir()) {
+  return path.join(claudeBaseDir(home), 'coal', 'coalwash', `state-${ccProjectSlug(projectRoot)}.json`);
+}
+
+// NEVER-CREATE GUARD (2026-07-25 field fix, layer 2 — independent of the layer-1
+// derivation fix in config-load's ROOT_MARKERS). CW may write its `coalwash/`
+// state ONLY INTO a slug dir that ALREADY EXISTS — CC creates that dir, and its
+// existence is CC's own ground truth that this path is a real project. CW never
+// mkdirs a slug dir itself, so even a FUTURE derivation bug cannot manufacture a
+// phantom `~/.claude/projects/<slug>/`: prevention by construction, not by
+// correctness. (Creating the `coalwash/` SUBDIR inside an existing slug dir is
+// still fine — that one is ours.) Absent slug dir → the rc.3 coal/ fallback.
+function isExistingDir(p) {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
 export function statePath(projectRoot, home = os.homedir()) {
   const base = claudeBaseDir(home);
-  const derived = path.join(path.dirname(ccMemoryDir(projectRoot, home)), 'coalwash', 'state.json');
-  if (containedNewPath(derived, base)) return derived;
-  return path.join(base, 'coal', 'coalwash', `state-${ccProjectSlug(projectRoot)}.json`);
+  const slugDir = path.dirname(ccMemoryDir(projectRoot, home)); // <base>/projects/<slug>
+  const derived = path.join(slugDir, 'coalwash', 'state.json');
+  if (isExistingDir(slugDir) && containedNewPath(derived, base)) return derived;
+  return stateFallbackPath(projectRoot, home);
 }
 
 // The OLD single-file, project-keyed state (pre-relocation). Read as a migration
@@ -574,7 +593,11 @@ function dropOldRootEntry(projectRoot, home) {
 // included — acts on version-clean state without a write. The location move +
 // the schema stamp persist on the next saveState.
 export function loadState(projectRoot, home = os.homedir()) {
-  const fresh = readStateFile(statePath(projectRoot, home));
+  // Read the ACTIVE path first, then the coal/ fallback: under the never-create
+  // guard a project whose slug dir did not exist yet wrote to coal/, and the slug
+  // dir can appear later (CC's first real session) — reading both keeps that
+  // state (the lean-floor baseline) from stranding on the location flip.
+  const fresh = readStateFile(statePath(projectRoot, home)) || readStateFile(stateFallbackPath(projectRoot, home));
   const proj = fresh || readOldRootEntry(projectRoot, home) || {};
   return migrateProjSchema(proj);
 }
@@ -583,15 +606,56 @@ export function loadState(projectRoot, home = os.homedir()) {
 // tmp→rename), stamp the current schema, and drain the old-root entry. The dir
 // (<claudeBase>/projects/<slug>/coalwash/) sits inside ~/.claude — a data area,
 // not a git tree — so no self-ignore is needed (unlike the project bins).
+function rmdirIfEmpty(dir) {
+  try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* not empty / gone */ }
+}
+
+// Self-clean CW's OWN pre-fix scatter (no-old-version-leftover, rc.3 precedent):
+// slug dirs minted for a NON-root cwd before the layer-1/layer-2 fix.
+//
+// THE DISCRIMINATOR IS THE RECORDED ROOT, NEVER THE DIR CONTENTS. Verified on the
+// live tree 2026-07-25: `projects/<slug-of-a-REAL-project>/` can legitimately hold
+// ONLY `coalwash/` with 0 transcripts (CC sweeps transcripts at
+// `cleanupPeriodDays`) — so an "only coalwash/, no .jsonl" heuristic would delete a
+// LIVE project's lean-floor baseline. Instead: a state file records the root it was
+// written for; if the CURRENT resolver does not resolve that root TO ITSELF, the
+// path is not a project root, so the file is ours and spurious.
+// A file with NO recorded root (written before this fix) is KEPT — keep-on-doubt,
+// the same stance pruneDeadEntries takes. That leftover class is bounded: the
+// never-create guard means no new one can ever be minted.
+// Touches ONLY `coalwash/state.json` + the dirs it leaves empty — never a foreign
+// file, never a non-empty dir (the recovery-paths lesson). Fail-silent.
+function pruneStrayStateDirs(projectRoot, home) {
+  try {
+    const projectsDir = path.join(claudeBaseDir(home), 'projects');
+    const mine = ccProjectSlug(projectRoot);
+    for (const name of fs.readdirSync(projectsDir)) {
+      if (name === mine || !name.startsWith(mine + '-')) continue; // only subdir-shaped strays OF THIS project
+      const slugDir = path.join(projectsDir, name);
+      const f = path.join(slugDir, 'coalwash', 'state.json');
+      const rec = readStateFile(f)?.projectRoot;
+      if (typeof rec !== 'string' || !rec) continue;               // legacy/unknown → keep-on-doubt
+      if (physicalDir(findProjectRoot(rec, home)) === physicalDir(rec)) continue; // a REAL root → keep
+      fs.rmSync(f, { force: true });                               // ours, and spurious
+      rmdirIfEmpty(path.join(slugDir, 'coalwash'));
+      rmdirIfEmpty(slugDir);
+    }
+  } catch { /* fail-silent — cleanup is best-effort, never blocks a write */ }
+}
+
 function saveState(proj, projectRoot, home) {
   try {
     const p = statePath(projectRoot, home);
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    const toWrite = (proj && typeof proj === 'object' && !Array.isArray(proj)) ? { ...proj, stateSchema: STATE_SCHEMA } : { stateSchema: STATE_SCHEMA };
+    fs.mkdirSync(path.dirname(p), { recursive: true }); // the coalwash/ subdir only — the slug dir must already exist (never-create guard)
+    // `projectRoot` is the stray-detector's key (above). Version-STABLE metadata,
+    // no field's SEMANTICS change → no STATE_SCHEMA bump (this file's own rule).
+    const base = (proj && typeof proj === 'object' && !Array.isArray(proj)) ? proj : {};
+    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot) };
     const tmp = p + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(toWrite), 'utf8');
     fs.renameSync(tmp, p);
     dropOldRootEntry(projectRoot, home); // no-old-version-leftover
+    pruneStrayStateDirs(projectRoot, home);
     return true;
   } catch {
     return false;
