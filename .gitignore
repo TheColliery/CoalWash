@@ -7,6 +7,8 @@ AGENTS.md
 COALWASH_BLUEPRINT.md
 SENIOR-INCIDENT-AUDIT.md
 LAB-ARCHIVE.md
+# machine-local agent-org process (supplier branches / assembly line) - not part of the shipped skill
+ASSEMBLY-LINE.md
 
 # Dependencies / build cruft
 node_modules/
