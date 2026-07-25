@@ -2093,10 +2093,37 @@ test('R3/TP-3: a SHORT-NAME snapshot store cannot slip past store containment �
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('BLOB-SYMLINK: a link planted at <store>/<sha> can never make snapshotSource write THROUGH it — the blob lands via temp->rename, the outside victim is untouched', (t) => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store'); fs.mkdirSync(store, { recursive: true });
+    const src = path.join(dir, 'src.txt'); fs.writeFileSync(src, 'SECRET-SOURCE-BYTES');
+    const victim = path.join(dir, 'VICTIM.txt'); fs.writeFileSync(victim, 'original-victim');
+    const sha = sha256File(src);
+    try {
+      fs.symlinkSync(victim, path.join(store, sha), 'file');
+    } catch (e) {
+      t.skip(`cannot create a symlink here (${e.code}) — capability genuinely absent, not assumed`);
+      return;
+    }
+    const r = snapshotSource(src, store);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'original-victim',
+      'the file OUTSIDE the store is untouched. Pre-fix, copyFileSync followed the planted link and pushed the source bytes through it — an arbitrary write that still reported ok:true');
+    assert.strictEqual(r.ok, true, 'and the snapshot still succeeds — the link entry is replaced, not followed');
+    assert.strictEqual(sha256File(path.join(store, sha)), sha, 'the blob at the content-address really is the source (a real undo net, not a lie)');
+  } finally { rm(dir); }
+});
+
 test('R3/LOW: restoreFromSnapshot never THROWS on a bad ref — a recovery primitive answers {ok:false}, it does not crash the caller', () => {
+  // NOTE: toPath is a per-test sandbox path, NOT a predictable name in the shared system tmpdir.
+  // The old `path.join(os.tmpdir(), 'cw-nope.jsonl')` was a fixed name every concurrent run would
+  // share, and it was the taint source CodeQL traced into sha256File for #22.
+  const dir = tmp();
+  try {
   for (const bad of [undefined, null, 42, '', {}]) {
-    const r = restoreFromSnapshot(bad, path.join(os.tmpdir(), 'cw-nope.jsonl'), {});
+    const r = restoreFromSnapshot(bad, path.join(dir, 'cw-nope.jsonl'), {});
     assert.strictEqual(r.ok, false, `${String(bad)} => fail-closed`);
     assert.strictEqual(r.verified, false);
   }
+  } finally { rm(dir); }
 });
