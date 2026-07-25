@@ -273,17 +273,35 @@ test('R2/TP-1+TP-3: touchesClaudeBase is case-folded and covers EVERY CLAUDE_CON
     for (const base of [a, b]) {
       assert.strictEqual(touchesClaudeBase(base, home), true, 'the base dir itself');
       assert.strictEqual(touchesClaudeBase(path.join(base, 'projects', 'x'), home), true, 'a path INSIDE it');
-      // KEY ON THE CAPABILITY, NOT THE PLATFORM NAME. This asserted
-      // `=== (platform === 'win32')` and went red on macOS CI, because the axis is
-      // not the OS — it is whether the FILESYSTEM is case-insensitive, and APFS is
-      // by default. There the uppercased spelling genuinely resolves to the same
-      // directory, so canonicalOrNull returns the real path and containment is
-      // TRUE without the win32 case-fold being involved at all. Probing the
-      // volume is both correct and portable to a case-sensitive Windows volume or
-      // a case-insensitive Linux mount, neither of which a platform check survives.
-      const caseInsensitiveFs = fs.existsSync(base.toUpperCase());
-      assert.strictEqual(touchesClaudeBase(base.toUpperCase(), home), caseInsensitiveFs,
-        `a case variant resolves iff this volume is case-insensitive (probed: ${caseInsensitiveFs})`);
+      // TWO MECHANISMS, ONE RESULT — and this line conflated them TWICE before
+      // landing here, each time keyed to the wrong axis.
+      //   v1 asserted `=== (platform === 'win32')`: red on macOS, because the axis
+      //      is the VOLUME (APFS is case-insensitive), not the OS.
+      //   v2 asserted `=== caseInsensitiveFs`: red on ubuntu, because the RESULT is
+      //      true on every volume — only the ROUTE differs.
+      // The routes — and MEASURED, because the obvious label for the first one is
+      // wrong: on a case-INsensitive volume realpathSync.native NORMALIZES the
+      // casing (C:\USERS\... comes back C:\Users\...), so the variant resolves to
+      // the identical canonical string and containment is reached by RESOLUTION,
+      // not by pathWithin's case-fold. (That fold is a separate belt, for spellings
+      // that differ without resolving differently — a drive-case anchor.) On a
+      // case-sensitive volume the variant does not exist at all, canonicalOrNull
+      // returns null, and the R4/TP-1 rule fires instead: present-but-unresolvable
+      // ANCHOR is REFUSED. Right answer, two different roads. A claim that only
+      // means something on one volume has to be stated as two claims, so: assert
+      // the invariant that holds everywhere, then pin WHICH road actually ran here
+      // — otherwise this passes as "true for some reason" and detects neither.
+      const variant = base.toUpperCase();
+      const caseInsensitiveFs = fs.existsSync(variant);
+      assert.strictEqual(touchesClaudeBase(variant, home), true,
+        'a case variant is refused on EVERY volume — by case-fold where it resolves, fail-closed where it does not');
+      if (caseInsensitiveFs) {
+        assert.notStrictEqual(canonicalOrNull(variant), null,
+          'case-INsensitive volume: the variant RESOLVES (realpath normalizes casing), so RESOLUTION is what produced the refusal');
+      } else {
+        assert.strictEqual(canonicalOrNull(variant), null,
+          'case-sensitive volume: the variant does not resolve, so the FAIL-CLOSED anchor rule is what produced it');
+      }
     }
     assert.strictEqual(touchesClaudeBase(home, home), true, 'a path CONTAINING a base dir (either direction)');
     assert.strictEqual(touchesClaudeBase(proj, home), false, 'an unrelated project does NOT touch config territory');
