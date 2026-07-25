@@ -9,8 +9,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { gauge, gaugeLine } from './cli.mjs';
+import { gauge, gaugeLine, measureOnly } from './cli.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem } from './tailings.mjs';
 import { snapshotOnFirstWrite } from './writeguard.mjs';
 
@@ -208,4 +209,65 @@ test('gauge() direct call: honors an explicit home/cwd and applies the floor san
     if (savedEnv !== undefined) process.env.CLAUDE_CONFIG_DIR = savedEnv;
     clean(home, proj);
   }
+});
+
+// measureOnly — the recovery-free entry an unattended runner (CI/Action) needs.
+// PROVED BY TREE STATE, not by reading the code: plant a dangling journal (the
+// exact input that makes gauge() write) and require the tree to come back
+// byte-identical. Reading the source would only prove I read it right today.
+function treeSnapshot(dir) {
+  const out = [];
+  const walk = (d, rel) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const abs = path.join(d, e.name); const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { out.push(`D ${r}`); walk(abs, r); }
+      else { const b = fs.readFileSync(abs); out.push(`F ${r} ${b.length} ${crypto.createHash('sha256').update(b).digest('hex')}`); }
+    }
+  };
+  walk(dir, '');
+  return out.join('\n');
+}
+
+test('measureOnly: writes NOTHING even with a dangling journal present — the tree is byte-identical after the call', () => {
+  const { home, proj } = sandbox();
+  try {
+    // the exact input that makes gauge() write: a real dangling transaction
+    const txDir = path.join(proj, '.claude', 'coalwash');
+    const snapDir = path.join(txDir, 'snap-4242');
+    fs.mkdirSync(snapDir, { recursive: true });
+    const target = path.join(proj, 'CLAUDE.md');
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'SNAPSHOT CONTENT THAT MUST NOT BE RESTORED', 'utf8');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: target }]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '4242');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [proj],
+      steps: [{ i: 0, type: 'rewrite', path: target, status: 'done' }],
+    }));
+
+    const beforeProj = treeSnapshot(proj);
+    const beforeHome = treeSnapshot(home);
+    const r = measureOnly({ cwd: proj, home });
+
+    assert.ok(r && r.measure && r.verdict, 'it still measures and judges');
+    assert.strictEqual(r.recover, undefined, 'no recovery result — it never ran one');
+    assert.strictEqual(treeSnapshot(proj), beforeProj, 'PROJECT tree byte-identical: no restore, no journal deletion, no state write');
+    assert.strictEqual(treeSnapshot(home), beforeHome, 'HOME tree byte-identical: no state/stamp written either');
+
+    // and the control: gauge() on the SAME input DOES act, which is what makes
+    // the assertion above meaningful rather than vacuous.
+    gauge({ cwd: proj, home });
+    assert.notStrictEqual(treeSnapshot(proj), beforeProj, 'gauge() DOES touch the tree — so measureOnly leaving it untouched is a real difference');
+  } finally { clean(home, proj); }
+});
+
+test('measureOnly and gauge agree on every measurement field — the split changed nothing but the preflight', () => {
+  const { home, proj } = sandbox();
+  try {
+    const m = measureOnly({ cwd: proj, home });
+    const g = gauge({ cwd: proj, home });
+    for (const k of ['projectRoot', 'platform']) assert.deepStrictEqual(g[k], m[k], k);
+    assert.deepStrictEqual(g.verdict, m.verdict, 'same verdict');
+    assert.deepStrictEqual(g.measure.alwaysLoaded.tokensEst, m.measure.alwaysLoaded.tokensEst, 'same footprint');
+    assert.ok('recover' in g && !('recover' in m), 'the ONLY difference is the recover key');
+  } finally { clean(home, proj); }
 });

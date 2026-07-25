@@ -89,40 +89,22 @@ import {
 } from './estate-archive.mjs';
 import { retierScan, retierScanLines, runRetier, runRetierReport } from './retier.mjs';
 
-// The full gauge, importable (tests and /stats call it directly; the CLI main
-// below is just argv plumbing around it).
+// RECOVERY-FREE measurement — the same gauge composition with the write-capable
+// preflight left out. READ-ONLY: it discovers, measures, and judges; it stamps
+// nothing, records nothing, and recovers nothing. Built for an unattended caller
+// (the CI/Action gauge) that must never run a file-restoring path against an
+// untrusted checkout.
 //
-// ⚠ NOT read-only: gauge() RUNS A RECOVERY PREFLIGHT THAT CAN WRITE, and it runs
-// FIRST — before the config is even loaded. This comment previously said "pure
-// composition — no state writes", which was true of the measurement composition
-// below and FALSE of the preflight, i.e. false about the only part that can touch
-// your files. A reader deciding "is it safe to call gauge here?" reads this line
-// and stops, so the wrong version of it was an incident waiting to happen.
-//
-// WHEN IT WRITES: only when a transaction journal exists at the project's own
-// `.claude/coalwash/journal.json`. Then `recoverDangling` either finishes an
-// interrupted run — restoring snapshotted files over the live ones and removing
-// the creates it added — or, for a terminal/never-started journal, deletes the
-// journal file. With NO journal present it writes nothing. It refuses (and still
-// writes nothing) when the journal is unreadable, schema-newer, has no verifiable
-// roots, names a snapDir outside the tx dir, or when no trusted root resolves.
-//
-// CONSEQUENCE FOR AUTOMATED CALLERS: an unattended runner (a CI/Action gauge)
-// must NOT call this against an untrusted checkout — an attacker-authored
-// journal.json is exactly the R5/F1 vector, with no human present.
-//
-// THE SEAM, if a recovery-free entry is ever wanted (measured, not built): the
-// preflight is the FIRST statement and `recover` is consumed ONLY by the returned
-// object — nothing in the measurement below reads it. So everything from
-// `loadMergedConfig` down is already a pure read-only composition and lifts out
-// whole; `gauge()` then becomes that composition plus the preflight, spreading
-// `recover` into the result. The conductor's stamping path is not involved at all
-// (it never calls gauge — it drives caliper directly), so the split cannot disturb
-// it. Deliberately NOT done here: nobody has ordered the entry point yet, and an
-// unused export is debt.
-export function gauge({ cwd = process.cwd(), home = os.homedir() } = {}) {
+// THE REFUSAL STAYS, AND HERE IS WHY — do not "simplify" it away now that the
+// danger is gone. An automated caller must still REFUSE LOUDLY when a journal is
+// present, rather than quietly measuring past it: the split removes the DANGER,
+// the refusal keeps the SIGNAL. A journal sitting in a PR checkout is either an
+// interrupted run someone committed by accident or a planted one, and a human
+// wants to hear about both. Measuring silently past it would be a silent-refusal
+// defect arriving through a path we built on purpose. A guard whose reason has
+// been forgotten is the one that gets deleted, so the reason lives here.
+export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const projectRoot = findProjectRoot(cwd, home);
-  const recover = recoverDangling(projectRoot);
   const cfg = loadMergedConfig({ cwd, home });
   const fullPercent = clampedRead(cfg, 'fullPercent');
   const managedPaths = clampedRead(cfg, 'managedPaths');
@@ -163,7 +145,37 @@ export function gauge({ cwd = process.cwd(), home = os.homedir() } = {}) {
     wasEconLatched,
     floorProvisional,
   });
-  return { projectRoot, recover, platform: disc.platform, flags: disc.flags, measure: m, verdict, breakEven: econ };
+  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, verdict, breakEven: econ };
+}
+
+// The full gauge = measureOnly + the recovery preflight. Importable (tests and
+// /stats call it directly; the CLI main below is just argv plumbing around it).
+//
+// ⚠ NOT read-only: gauge() RUNS A RECOVERY PREFLIGHT THAT CAN WRITE, and it runs
+// FIRST — before the config is even loaded. This comment once said "pure
+// composition — no state writes", which was true of the measurement half and
+// FALSE of the preflight, i.e. false about the only part that can touch your
+// files. A reader deciding "is it safe to call gauge here?" reads this line and
+// stops, so the wrong version of it was an incident waiting to happen.
+//
+// WHEN IT WRITES: only when a transaction journal exists at the project's own
+// `.claude/coalwash/journal.json`. Then `recoverDangling` either finishes an
+// interrupted run — restoring snapshotted files over the live ones and removing
+// the creates it added — or, for a terminal/never-started journal, deletes the
+// journal file. With NO journal present it writes nothing. It refuses (and still
+// writes nothing) when the journal is unreadable, schema-newer, has no verifiable
+// roots, names a snapDir outside the tx dir, or when no trusted root resolves.
+//
+// AN UNATTENDED CALLER WANTS `measureOnly` INSTEAD: a CI/Action runner must NOT
+// call gauge() against an untrusted checkout — an attacker-authored journal.json
+// is exactly the R5/F1 vector, with no human present.
+export function gauge(opts = {}) {
+  // The preflight runs FIRST and is the only write in this composition. `recover`
+  // is consumed by nothing in the measurement — only by the caller — which is why
+  // the two separate cleanly.
+  const projectRoot = findProjectRoot(opts.cwd || process.cwd(), opts.home || os.homedir());
+  const recover = recoverDangling(projectRoot);
+  return { ...measureOnly(opts), recover };
 }
 
 // The terse one-line gauge (method.md §0's reporting shape).
