@@ -446,7 +446,15 @@ function trustedRootsForAnchor(projectRoot, home, { trustedAnchor = false } = {}
     const anchorPhys = physicalOrNull(projectRoot);
     const homePhys = physicalOrNull(home);
     if (!anchorPhys || !homePhys || containedIn(homePhys, [anchorPhys])) {
-      return { ok: false, error: `containment: the derived project anchor (${anchorPhys || projectRoot}) is the home directory or an ancestor of it — refusing fail-closed (a home-level anchor would authorize writes anywhere under ~, e.g. ~/.ssh or ~/.claude/settings.json); run from the actual project dir, or pass a trusted opts.projectRoot` };
+      // THE REMEDY NAMES ONLY WHAT IS TRUE FOR EVERY CALLER. This message used to
+      // end "or pass a trusted opts.projectRoot" — accurate for applyPlan, and a
+      // dead end for recoverDangling, which has no such channel and can never set
+      // trustedAnchor. A refusal that offers a remedy the reader cannot perform is
+      // worse than one that offers none: it sends them looking for an option that
+      // does not exist on the door they are standing at. "Run from the actual
+      // project dir" is the remedy for BOTH. The developer-facing half lives in
+      // the comment above, where a developer is already reading.
+      return { ok: false, error: `containment: the derived project anchor (${anchorPhys || projectRoot}) is the home directory or an ancestor of it — refusing fail-closed (a home-level anchor would authorize writes anywhere under ~, e.g. ~/.ssh or ~/.claude/settings.json); run from the actual project dir` };
     }
   }
   // SECURITY — CONFIG-TERRITORY ANCHOR GUARD (the trust boundary; blind wave R2).
@@ -955,7 +963,21 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 // this): a dangling 'applying' journal with a complete snapshot rolls back
 // wholesale; without the snap marker nothing was ever mutated (first mutation
 // happens only after the marker exists) so the journal is just cleared.
-// Returns { recovered: 'rolled-back'|'no-mutation'|'cleaned'|'none', restored? }.
+// Returns { recovered, ... } with FIVE values, not four. 'partial' was missing
+// from this list while the body returned it, and it is the one a caller must
+// branch on — it is the only outcome that leaves the store in a MIXED state:
+//   'rolled-back'  — the snapshot was replayed in full; nothing left to do.
+//   'partial'      — some restore FAILED or some target was REFUSED. The journal
+//                    and snapshot are KEPT for a human, and the run is NOT clean.
+//                    Carries { restored, restoreFailures, refusedOutOfRoot, error }.
+//   'no-mutation'  — no completion marker, so the first mutation never happened.
+//   'cleaned'      — a terminal journal (committed/rolled-back) was just removed.
+//   'none'         — nothing done. WITH an `error` field this is a REFUSAL (the
+//                    anchor gate, an unreadable/schema-newer journal, an out-of-tx
+//                    snapDir, no verifiable roots); WITHOUT one it means there was
+//                    no journal at all. A caller that treats those two alike is
+//                    the gaugeLine defect (see cli.mjs).
+// `restored` accompanies 'rolled-back' and 'partial'.
 export function recoverDangling(projectRoot, opts = {}) {
   try {
     const home = opts.home || os.homedir();

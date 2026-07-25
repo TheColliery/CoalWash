@@ -1705,6 +1705,11 @@ test('RUNG-5 §1.1 [SECURITY]: recoverDangling REFUSES a home-collapsed anchor �
     const r = recoverDangling(home, { home });
     assert.strictEqual(r.recovered, 'none', 'a home-collapsed anchor is refused outright, never replayed');
     assert.match(String(r.error), /home directory|ancestor/, 'the refusal is NAMED');
+    // The remedy must be one this caller can actually perform. recoverDangling has
+    // no opts.projectRoot channel, so naming it here sent the reader looking for
+    // an option that does not exist on the door they are standing at.
+    assert.doesNotMatch(String(r.error), /opts\.projectRoot/, 'the shared refusal must not offer a remedy this caller cannot perform');
+    assert.match(String(r.error), /run from the actual project dir/, 'it still names the remedy that IS true for every caller');
     assert.strictEqual(fs.readFileSync(settings, 'utf8'), ORIG_SETTINGS, '~/.claude/settings.json NOT hook-injected');
     assert.strictEqual(fs.existsSync(key), true, '~/.ssh/authorized_keys NOT deleted by the create-undo loop');
     assert.strictEqual(fs.existsSync(journalPath), true, 'the journal is KEPT for a human — the success path deletes it, so the evidence self-destructs');
