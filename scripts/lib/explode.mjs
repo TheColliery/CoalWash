@@ -1172,7 +1172,28 @@ export function snapshotSource(src, snapshotDir) {
     // the source, and blindly deduping to it would make the "snapshot" a lie the
     // whole rail-5 recovery rests on. If it fails, overwrite with the true source.
     if (fs.existsSync(snapshotPath) && sha256File(snapshotPath) === sha) deduped = true;
-    else fs.copyFileSync(src, snapshotPath);
+    else {
+      // WRITE THE BLOB VIA temp->rename, NEVER copyFileSync ONTO the blob path.
+      // A bare `copyFileSync(src, snapshotPath)` FOLLOWS a symlink sitting at the destination, so
+      // anyone able to write the store could pre-place a link at <store>/<sha> aimed anywhere and
+      // this line would push the SOURCE's bytes through it — an arbitrary write reported as ok:true.
+      // (Proved: a planted link made snapshotSource overwrite a file outside the store.) The
+      // existsSync/hash dedup above cannot stop it: a link to a wrong-content file fails the hash
+      // check and falls straight into this branch, which is the write.
+      // COPYFILE_EXCL alone is NOT the fix here (unlike the restore temp): dedup REQUIRES overwriting
+      // a wrong-hash blob, and EXCL would refuse that. So use the manifest writer's idiom instead —
+      // an O_EXCL fresh inode at a per-pid temp, then an atomic rename that REPLACES the directory
+      // entry (rename does not follow a link at the destination). A stale same-pid temp fails the
+      // snapshot loudly, which is rail 5 behaving correctly: no snapshot, no destroy.
+      const blobTmp = `${snapshotPath}.${process.pid}.tmp`;
+      try {
+        fs.copyFileSync(src, blobTmp, fs.constants.COPYFILE_EXCL);
+        fs.renameSync(blobTmp, snapshotPath);
+      } catch (e) {
+        try { if (fs.existsSync(blobTmp)) fs.unlinkSync(blobTmp); } catch { /* best-effort reap */ }
+        return { ok: false, reason: `snapshot blob write failed: ${e.message}` };
+      }
+    }
     const bytes = fs.statSync(snapshotPath).size;
     // FIX 1-R3 (source-sacred, safe-BY-CONSTRUCTION — closes the WHOLE manifest-alias class at the root,
     // not one route). The old appendFileSync opened the manifest path in append mode; if
