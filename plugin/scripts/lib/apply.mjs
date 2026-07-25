@@ -56,7 +56,7 @@ import os from 'node:os';
 import { checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, findProjectRoot, touchesClaudeBase } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull } from './config-load.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -218,8 +218,13 @@ export function deadLinkLine(deadLinks) {
   return `advisory: ${deadLinks.length} deleted topic(s) still referenced by surviving files (possible dead [[link]]s): ${head}${deadLinks.length > 5 ? ', …' : ''} — a deliberate delete is fine; recovery door: cli.mjs restore <id>`;
 }
 
+// Routes through THE canonicalization primitive (config-load canonicalOrNull):
+// .native so an 8.3 short name expands, and a shape it cannot canonicalize (UNC,
+// \\?\) yields null so the caller fails closed. Was a bare realpathSync, which
+// left a short-name / UNC alias comparing UNEQUAL to the same real directory —
+// defeating both the config-territory guard and the older home-swallow guard.
 function physicalOrNull(p) {
-  try { return fs.realpathSync(p); } catch { return null; }
+  return canonicalOrNull(p);
 }
 function containedIn(p, roots) {
   if (!p) return false;
@@ -442,16 +447,25 @@ export function applyPlan(plan, opts = {}) {
     //
     // ONE question, asked ONCE, at the consumer: does the anchor touch config
     // territory in EITHER direction (inside it, or containing it)? That is
-    // deliberately the OPPOSITE nature to findProjectRoot's marker walk. Two earlier
-    // attempts hardened the WALK instead and R2 walked past both — a case-variant
-    // CLAUDE_CONFIG_DIR, a cwd AT the base dir, a cwd in the plugin cache, and a
-    // second comma-separated base dir all still produced a config-dir anchor and a
-    // mutated victim. `touchesClaudeBase` case-folds (win32 realpath does not
-    // normalize case) and covers EVERY CLAUDE_CONFIG_DIR entry.
+    // deliberately the OPPOSITE nature to findProjectRoot's marker walk — two earlier
+    // attempts hardened the WALK and were walked past.
     //
-    // Unlike the home-swallow guard above, this binds a TRUSTED opts.projectRoot too:
-    // it costs nothing (no caller has a legitimate config-dir anchor) and it removes
-    // the "which callers are trusted" question from a security path entirely.
+    // WHAT THIS ACTUALLY GUARANTEES, and its LIMIT. The comparison is only as good as
+    // the canonical form underneath it, so the strength lives in config-load's
+    // `canonicalOrNull`: `realpathSync.native` (expands win32 8.3 short names, which
+    // plain realpathSync does NOT) plus case-folding, across EVERY CLAUDE_CONFIG_DIR
+    // entry, binding a TRUSTED opts.projectRoot too (no caller has a legitimate
+    // config-dir anchor, so binding it deletes the "which callers are trusted"
+    // question from a security path).
+    // THE LIMIT — say it plainly rather than claim completeness a third time: some
+    // win32 spellings CANNOT be canonicalized to a comparable form (a UNC
+    // `\\server\share` path stays UNC; a `\\?\` path switches OS normalization off;
+    // an 8.3 component can survive). Those are REFUSED BY SHAPE, not resolved. So the
+    // honest statement is "every anchor is either canonicalized and compared, or
+    // refused" — NOT "every alias is detected". An earlier revision of this comment
+    // asserted the guard was unconditional; that was the same false-completeness
+    // claim this guard's own history is made of. If a new path form appears, it must
+    // land on the refuse list in `canonicalOrNull`, never be waved through here.
     if (touchesClaudeBase(projectRoot, home)) {
       return { ok: false, error: `containment: the project anchor (${projectRoot}) is inside the Claude configuration directory (or contains it) — refusing fail-closed (that tree holds settings.json and the plugin cache; a write there is next-session code execution). Run from the actual project directory.` };
     }

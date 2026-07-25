@@ -124,25 +124,29 @@ export function checkDist(distRoot = dist) {
     // from the item ROOT down — a DIST_ITEM that is itself dot-named is legitimate.
     for (const rel of strayDotEntriesIn(distRoot, item)) out.push(`stray dot-entry in plugin/ (never plugin payload — it rode the dist walk): ${rel}`);
   }
-  // A FILE-shaped DIST_ITEM (.claude-plugin/plugin.json) only ever checks that one
-  // path, so its PARENT directory in the dist was never enumerated — anything else
-  // planted beside it (marketplace.json, a whole junk/ tree) passed silently (R2 /
-  // TP-5). Enumerate the parent and treat every unaccounted entry as an orphan.
-  const fileItems = DIST_ITEMS.filter((rel) => { const a = path.join(repo, rel); return fs.existsSync(a) && !fs.statSync(a).isDirectory(); });
-  for (const parent of new Set(fileItems.map((rel) => path.dirname(rel)).filter((d) => d && d !== '.'))) {
-    const abs = path.join(distRoot, parent);
-    if (!fs.existsSync(abs)) continue;
-    const expected = new Set(fileItems.filter((rel) => path.dirname(rel) === parent).map((rel) => path.basename(rel)));
-    for (const name of fs.readdirSync(abs)) {
-      if (!expected.has(name)) out.push(`orphan in plugin/ (nothing under ${parent} is a DIST_ITEM): ${path.join(parent, name)}`);
+  // NOTHING IN THE DIST IS UNACCOUNTED FOR, AT ANY DEPTH. Three waves running, this
+  // gate was blind one level away from wherever it had just been taught to look: a
+  // top-level allowlist admitted `scripts`, and the per-parent check only covered
+  // FILE-shaped items — so `scripts/lib` being a DIRECTORY item at depth 2 meant
+  // `plugin/scripts/` itself was NEVER walked. Proven blind: `plugin/scripts/leak.mjs`,
+  // `plugin/scripts/junk/deep/x.mjs`, and `plugin/scripts/.claude/coalhearth/…` — the
+  // literal R1 incident file, one directory up (R3 / TP-2).
+  // So state the invariant GENERALLY instead of enumerating cases: every entry in the
+  // dist is either covered by a DIST_ITEM (filesUnder already byte-checks those) or an
+  // ANCESTOR directory on the way to one. Anything else is an orphan, whatever its depth.
+  const underItem = (rel) => DIST_ITEMS.some((it) => rel === it || rel.startsWith(it + path.sep));
+  const ancestorOfItem = (rel) => DIST_ITEMS.some((it) => it.startsWith(rel + path.sep));
+  const sweepUnaccounted = (rel) => {
+    const abs = path.join(distRoot, rel);
+    if (!fs.existsSync(abs)) return;
+    for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+      const r = rel ? path.join(rel, e.name) : e.name;
+      if (underItem(r)) continue;                                   // a DIST_ITEM's own subtree
+      if (e.isDirectory() && ancestorOfItem(r)) { sweepUnaccounted(r); continue; } // on the way to one
+      out.push(`orphan in plugin/ (no DIST_ITEM accounts for it): ${r}`);
     }
-  }
-  const allowedTops = new Set(DIST_ITEMS.map((rel) => rel.split(path.sep)[0]));
-  if (fs.existsSync(distRoot)) {
-    for (const name of fs.readdirSync(distRoot)) {
-      if (!allowedTops.has(name)) out.push(`orphan top-level in plugin/ (no DIST_ITEM): ${name}`);
-    }
-  }
+  };
+  if (fs.existsSync(distRoot)) sweepUnaccounted('');
   return out;
 }
 

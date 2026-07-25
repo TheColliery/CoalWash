@@ -58,7 +58,7 @@ test('checkDist fails loud in both directions: stale file and orphan', () => {
     assert.ok(drift.some((d) => d.includes('orphan in plugin/')), drift.join('; '));
     fs.mkdirSync(path.join(dist, 'unexpected-top'), { recursive: true });
     drift = checkDist(dist);
-    assert.ok(drift.some((d) => d.includes('orphan top-level')), drift.join('; '));
+    assert.ok(drift.some((d) => d.includes('no DIST_ITEM accounts for it')), drift.join('; '));
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
@@ -112,5 +112,26 @@ test('R2/TP-5: a FILE-shaped DIST_ITEM has its PARENT dir enumerated — anythin
     buildDist(dist);
     fs.mkdirSync(path.join(dist, '.claude-plugin', 'junk'), { recursive: true });
     assert.ok(checkDist(dist).some((d) => d.includes('orphan in plugin/')), 'a whole planted dir beside it is caught too');
+  } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
+test('R3/TP-2: the dist gate accounts for EVERY entry at EVERY depth — plugin/scripts/ (parent of the directory item scripts/lib) was never walked', () => {
+  const dist = scratchDist();
+  try {
+    for (const plant of [
+      ['scripts', 'leak.mjs'],
+      ['scripts', 'junk', 'deep', 'x.mjs'],
+      ['scripts', '.claude', 'coalhearth', 'session_handoff.json'], // the literal R1 incident, one dir up
+    ]) {
+      buildDist(dist);
+      assert.deepStrictEqual(checkDist(dist), [], 'clean build is clean');
+      const p = path.join(dist, ...plant);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, 'leaked');
+      assert.ok(checkDist(dist).length > 0, `planted ${plant.join('/')} must be caught (pre-fix: allowedTops admitted "scripts" and nothing walked it)`);
+    }
+    buildDist(dist);
+    fs.mkdirSync(path.join(dist, 'scripts', 'emptyjunk'), { recursive: true });
+    assert.ok(checkDist(dist).some((d) => d.includes('orphan in plugin/')), 'an empty planted dir is caught too');
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });

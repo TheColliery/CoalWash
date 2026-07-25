@@ -33,7 +33,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir } from './config-load.mjs';
+import { claudeBaseDir, canonicalOrNull } from './config-load.mjs';
 
 const IMPORT_DEPTH_MAX = 5; // CC @import recursion cap (docs: max 5 hops)
 const RULES_FILE_CAP = 500; // defensive cap on a runaway rules tree
@@ -50,8 +50,10 @@ export const UNKNOWN_PLATFORM_FLAG = 'unknown platform: conservative — no auto
 
 // Physical form of a path; null when it cannot be resolved (absent/looping) —
 // callers treat null as fail-closed (skip the candidate).
+// Delegates to THE canonicalization primitive (config-load canonicalOrNull) so
+// every class-B containment check inherits the win32 8.3 / UNC fail-closed rules.
 export function physicalOrNull(p) {
-  try { return fs.realpathSync(p); } catch { return null; }
+  return canonicalOrNull(p);
 }
 
 // Is `p` (PHYSICAL) inside one of `roots` (PHYSICAL)? Equal counts as inside.

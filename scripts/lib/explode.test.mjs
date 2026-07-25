@@ -9,11 +9,11 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import {
   discoverStructure, reduceFile, reduceToCompletion,
   snapshotSource, restoreFromSnapshot, sha256File, collidesWithSource,
-  CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST,
+  CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, isContainedIn, physicalForCreate,
 } from './explode.mjs';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'cwx-')); }
@@ -2054,4 +2054,38 @@ test('TP-1 (win32 rounded-ino): two DISTINCT files whose Number(ino) collides ar
       assert.ok(/hardlink/i.test(collidesWithSource(link, src) || ''), 'a REAL hardlink is still caught exactly');
     } catch { /* no hardlink support here — the FP half above still ran */ }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R3/TP-3: a SHORT-NAME snapshot store cannot slip past store containment — the undo net stays available (a short outPath used to clobber a prior snapshot blob)', (t) => {
+  if (process.platform !== 'win32') { t.skip('8.3 is a win32 form'); return; }
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-LONGSTORE-NAME-FOR-8DOT3-')));
+  try {
+    const store = path.join(dir, 'SNAPSHOT-STORE-LONGNAME');
+    fs.mkdirSync(store, { recursive: true });
+    let short;
+    short = execSync(`cmd /c for %I in ("${store}") do @echo %~sI`, { encoding: 'utf8' }).trim(); // no catch: a throw here must FAIL, not masquerade as "8.3 disabled"
+    if (short === store) { t.skip('8.3 creation disabled on this volume'); return; }
+
+    const src = write(dir, 'src.jsonl', buildJsonl(CLAUDEISH).buf);
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true, 'a snapshot exists to protect');
+
+    // The short spelling must canonicalize to the SAME store, so containment sees it.
+    assert.ok(isContainedIn(physicalForCreate(path.join(short, 'blob')), physicalForCreate(store)),
+      'a short-name path inside the store is recognised AS inside it (pre-fix it compared unequal, so a write there escaped the check)');
+
+    // and the recovery blob still restores byte-exact
+    const out = path.join(dir, 'restored.jsonl');
+    const r = restoreFromSnapshot(snap.sha256, out, { snapshotDir: store });
+    assert.strictEqual(r.ok, true, `restore still works: ${r.reason || ''}`);
+    assert.strictEqual(sha256File(out), snap.sha256, 'recovery blob byte-exact — the undo net is available');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R3/LOW: restoreFromSnapshot never THROWS on a bad ref — a recovery primitive answers {ok:false}, it does not crash the caller', () => {
+  for (const bad of [undefined, null, 42, '', {}]) {
+    const r = restoreFromSnapshot(bad, path.join(os.tmpdir(), 'cw-nope.jsonl'), {});
+    assert.strictEqual(r.ok, false, `${String(bad)} => fail-closed`);
+    assert.strictEqual(r.verified, false);
+  }
 });

@@ -70,10 +70,27 @@ import crypto from 'node:crypto';
 // MIRRORED from scripts/lib/class-b.mjs (physicalOrNull/physicalForCreate) — kept
 // local ON PURPOSE (named one-flock divergence): this engine is a standalone
 // zero-internal-coupling byte-splitter (the break harness loads it in isolation),
-// so it must not drag the config-load chain in through class-b. The idiom is stable
-// (realpath-and-contain); if class-b's copy changes semantics, sync this one.
+// so it must not drag the config-load chain in through class-b.
+//
+// ⚠️ SYNC OBLIGATION, NOW PROVEN LOAD-BEARING. This copy's own comments already knew
+// "realpath does NOT normalize an 8.3 short name" (see collidesWithSource), yet the
+// shipped class-B guard did not — one concept, two implementations, and the one that
+// had learned it never taught the other. A short-name `outPath` therefore passed the
+// store-containment check and CLOBBERED a prior snapshot's recovery blob: integrity
+// held (the hash check refuses wrong bytes) but the UNDO NET's availability was gone
+// (blind wave R3 / TP-3). Kept BYTE-EQUIVALENT to config-load.mjs `canonicalOrNull`;
+// that function is the source of truth. Change one, change the other IN THE SAME
+// COMMIT — an unsynced twin makes the "idiom is stable" claim above a lie.
+const WIN_UNC_OR_DEVICE_RE = /^[\\/]{2}/;
+const WIN_SHORT_8_3_RE = /(^|[\\/])[^\\/]{1,8}~\d+(\.[^\\/]{1,3})?([\\/]|$)/;
 function physicalOrNull(p) {
-  try { return fs.realpathSync(p); } catch { return null; }
+  if (typeof p !== 'string' || !p) return null;
+  let out;
+  try { out = fs.realpathSync.native(p); } catch { return null; }
+  if (process.platform !== 'win32') return out;
+  if (WIN_UNC_OR_DEVICE_RE.test(p) || WIN_UNC_OR_DEVICE_RE.test(out)) return null;
+  if (WIN_SHORT_8_3_RE.test(out)) return null;
+  return out;
 }
 // Physical form of a path ABOUT TO BE CREATED (may not exist yet): realpath the
 // deepest EXISTING ancestor, then reattach the missing tail so a `..` derivation or
@@ -1212,6 +1229,14 @@ function existsPopulated(p) {
 // caller declares one; the intrinsic clobber refusal is the load-bearing default guard. Restoring to a
 // fresh/empty scratch/target path is unaffected; overwriting a populated file is opt-in via force.
 export function restoreFromSnapshot(ref, toPath, { snapshotDir = null, src = null, force = false } = {}) {
+  // A RECOVERY PRIMITIVE MUST NEVER THROW. Every other bad ref returns a fail-closed
+  // {ok:false}, but a non-string ref reached path.isAbsolute and threw
+  // ERR_INVALID_ARG_TYPE — the one input shape that crashes the caller instead of
+  // telling it no, in the code path a user reaches only when something has already
+  // gone wrong (R3 / LOW).
+  if (typeof ref !== 'string' || !ref) {
+    return { ok: false, verified: false, reason: `snapshot ref must be a non-empty string (got ${ref === null ? 'null' : typeof ref}) — refused` };
+  }
   // L3#1 (store-boundary containment): when a store is declared, EVERY ref — relative OR absolute — must
   // resolve INSIDE it (an absolute out-of-store ref is an exfil vector). Realpath-and-contain, fail-closed.
   let blob;

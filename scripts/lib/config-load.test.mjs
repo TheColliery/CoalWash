@@ -3,7 +3,8 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDirs, touchesClaudeBase } from './config-load.mjs';
+import { execSync } from 'node:child_process';
+import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -276,6 +277,62 @@ test('R2/TP-1+TP-3: touchesClaudeBase is case-folded and covers EVERY CLAUDE_CON
     }
     assert.strictEqual(touchesClaudeBase(home, home), true, 'a path CONTAINING a base dir (either direction)');
     assert.strictEqual(touchesClaudeBase(proj, home), false, 'an unrelated project does NOT touch config territory');
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+    clean(home, proj);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R3/TP-1 — the canonicalization PRIMITIVE. win32 has path spellings that name the
+// same directory but that realpathSync does not canonicalize; every containment
+// guard in the engine routes through canonicalOrNull, so it fails CLOSED on them.
+// ---------------------------------------------------------------------------
+function shortName(p) {
+  try { return execSync(`cmd /c for %I in ("${p}") do @echo %~sI`, { encoding: 'utf8' }).trim(); } catch { return p; }
+}
+
+test('R3/TP-1: canonicalOrNull EXPANDS an 8.3 short name (plain realpathSync does not) so a short and long spelling compare EQUAL', (t) => {
+  if (process.platform !== 'win32') { t.skip('8.3 is a win32 form'); return; }
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-LONGDIRNAME-FOR-8DOT3-')));
+  try {
+    const s = shortName(dir);
+    if (s === dir) { t.skip('8.3 creation disabled on this volume'); return; }
+    assert.notStrictEqual(fs.realpathSync(s), dir, 'plain realpathSync leaves the 8.3 form (the bug)');
+    assert.strictEqual(canonicalOrNull(s), dir, 'canonicalOrNull expands it to the long form');
+    assert.strictEqual(canonicalOrNull(s), canonicalOrNull(dir), 'both spellings canonicalize to ONE value');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R3/TP-1: canonicalOrNull refuses BY SHAPE the forms it cannot canonicalize — UNC and \\\\?\\ — instead of fail-opening to path.resolve', (t) => {
+  if (process.platform !== 'win32') { t.skip('UNC / \\\\?\\ are win32 forms'); return; }
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-shape-')));
+  try {
+    assert.strictEqual(canonicalOrNull('\\\\localhost\\' + dir[0] + '$' + dir.slice(2)), null, 'UNC refused (native does not collapse it to the drive-letter form)');
+    assert.strictEqual(canonicalOrNull('\\\\?\\' + dir), null, '\\\\?\\ refused (it switches OFF Windows path normalization)');
+    assert.strictEqual(canonicalOrNull(dir), dir, 'the ordinary form still canonicalizes — no false refusal');
+    assert.strictEqual(canonicalOrNull(path.join(dir, 'does-not-exist')), null, 'an unresolvable path is null, NOT a lexical path.resolve fallback');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R3/TP-1: touchesClaudeBase treats an UNCANONICALIZABLE path as touching — "I could not resolve it" is not a yes', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.strictEqual(touchesClaudeBase(path.join(proj, 'nope', 'gone'), home), true, 'unresolvable => refuse (a false here would restore the fail-open)');
+    assert.strictEqual(touchesClaudeBase(proj, home), false, 'a real project dir still passes');
+  } finally { clean(home, proj); }
+});
+
+test('R3/LOW: claudeBaseDir agrees with claudeBaseDirs when CLAUDE_CONFIG_DIR has a leading empty entry (the dir the code WRITES to must be in the guarded set)', () => {
+  const { home, proj } = sandbox();
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const x = path.join(home, 'cfgX');
+    fs.mkdirSync(x, { recursive: true });
+    process.env.CLAUDE_CONFIG_DIR = `,${x}`;
+    assert.deepStrictEqual(claudeBaseDirs(home), [x]);
+    assert.strictEqual(claudeBaseDir(home), x, 'singular no longer falls through to ~/.claude while plural reports X');
+    assert.strictEqual(touchesClaudeBase(x, home), true, 'and the write target is guarded');
   } finally {
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
     clean(home, proj);

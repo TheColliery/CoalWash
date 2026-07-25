@@ -11,9 +11,12 @@ import path from 'node:path';
 import os from 'node:os';
 import { parseJsonc } from './jsonc.mjs';
 
+// The ONE dir CoalWash writes to. Must agree with claudeBaseDirs() below or the dir
+// the code actually writes to ends up outside the guarded set — which is exactly what
+// a leading empty entry (`",X"`) used to do: `.split(',')[0]` was `''`, so this fell
+// through to ~/.claude while the plural form reported only X (R3 / LOW).
 export function claudeBaseDir(home = os.homedir()) {
-  const c = process.env.CLAUDE_CONFIG_DIR;
-  return (c && c.split(',')[0].trim()) || path.join(home, '.claude');
+  return claudeBaseDirs(home)[0];
 }
 // EVERY configured base dir, not just the first. `claudeBaseDir` returns entry[0]
 // because a single write target must be unambiguous — but a SECURITY exclusion that
@@ -42,10 +45,19 @@ export function pathWithin(childPhys, basePhys) {
 }
 // Is `p` inside ANY configured base dir, or does it CONTAIN one? Either direction
 // means the path straddles config territory. Physical on both sides, fail-closed.
+// A path we cannot canonicalize counts as TOUCHING — the answer a security caller
+// needs is "may I trust this anchor?", and "I could not resolve it" is not a yes.
+// (Returning false here would turn every refused shape back into a fail-open.)
 export function touchesClaudeBase(p, home = os.homedir()) {
-  const target = physicalDir(p);
+  const target = canonicalOrNull(p);
+  if (!target) return true; // unresolvable ANCHOR: refuse
   return claudeBaseDirs(home).some((b) => {
-    const base = physicalDir(b);
+    const base = canonicalOrNull(b);
+    // An absent/unresolvable BASE is not a constraint — it cannot contain anything and
+    // holds no settings.json to protect. Refusing here instead would lock out every
+    // anchor on a fresh install (no ~/.claude yet). Asymmetric on purpose: the
+    // unresolvable side that matters is the anchor, above.
+    if (!base) return false;
     return pathWithin(target, base) || pathWithin(base, target);
   });
 }
@@ -53,11 +65,47 @@ export function globalConfigPath(home = os.homedir()) {
   return path.join(claudeBaseDir(home), '.coalwash.json');
 }
 
-// realpath a dir to its PHYSICAL path, falling back to a lexical resolve if
-// realpath throws (an absent dir has no realpath). Fail-open is correct here —
-// this feeds a read-only COMPARE, not a delete (SKILL-REPO-PATTERN CI rules).
+// THE canonicalization primitive. Every containment/security decision in the
+// engine resolves through this one function, so a path-form the OS treats as an
+// alias cannot make one guard disagree with another.
+//
+// WHY `.native` AND WHY SHAPE-REFUSAL (all measured on win32, 8.3 creation ENABLED
+// = the Windows per-volume default; blind wave R3):
+//   fs.realpathSync('…\CW-HOM~1\CLAUDE~1')  -> returns the 8.3 form UNEXPANDED
+//   fs.realpathSync.native(same)            -> expands to the long form
+//   fs.realpathSync('\\?\C:\…')             -> THROWS EISDIR (the old code then
+//                                              fail-OPENed to path.resolve)
+//   both variants on '\\localhost\C$\…'     -> leave the UNC form UNCOLLAPSED
+// So a short-name or UNC spelling of the SAME directory compared unequal to its
+// long/local spelling and walked straight through every containment guard: a
+// short-name cwd rewrote settings.json and a plugin conductor.js, a UNC cwd
+// rewrote settings.json, and the older home-swallow guard fell to the same trick
+// (~/.ssh/authorized_keys gained a key). One primitive, one fix, every guard.
+//
+// FAIL CLOSED, never lexical: a form we cannot canonicalize returns null and the
+// CALLER refuses. The previous `catch { return path.resolve(p) }` was the fail-open
+// that made an unresolvable shape look like a clean path.
+const WIN_UNC_OR_DEVICE_RE = /^[\\/]{2}/;               // \\server\share AND \\?\ / \\.\ device paths
+const WIN_SHORT_8_3_RE = /(^|[\\/])[^\\/]{1,8}~\d+(\.[^\\/]{1,3})?([\\/]|$)/;
+export function canonicalOrNull(p) {
+  if (typeof p !== 'string' || !p) return null;
+  let out;
+  try { out = fs.realpathSync.native(p); } catch { return null; }
+  if (process.platform !== 'win32') return out; // these shapes are win32-only; `a~1` is a legal POSIX name
+  // Refuse the shapes native does NOT canonicalize. A UNC spelling of a local dir
+  // stays UNC, so it can never be compared against a drive-letter root; `\\?\`
+  // switches OFF Windows path normalization entirely. Neither is a form a real
+  // project cwd needs, and refusing is recoverable (run from the normal path).
+  if (WIN_UNC_OR_DEVICE_RE.test(p) || WIN_UNC_OR_DEVICE_RE.test(out)) return null;
+  if (WIN_SHORT_8_3_RE.test(out)) return null; // an 8.3 component survived native — do not guess
+  return out;
+}
+
+// LENIENT variant — NON-SECURITY USE ONLY (the findProjectRoot marker walk, which
+// must keep walking over dirs that do not exist). Falls back to a lexical resolve.
+// Anything making a trust decision MUST use canonicalOrNull and refuse on null.
 export function physicalDir(p) {
-  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+  return canonicalOrNull(p) ?? path.resolve(p);
 }
 
 // Project-root markers, in the order a project actually declares itself.
