@@ -1,6 +1,6 @@
 # Verifying CoalWash
 
-CoalWash is verified under the same framework as its TheColliery siblings — Phoenix-13 hooks, reproducible builds, and event-driven independent scans. It is **high-privilege by nature** (it rewrites and deletes memory/governance files), so the load-bearing safety gates live in CODE, not prose — see Structural Safety below.
+CoalWash is verified under the same framework as its TheColliery siblings — Phoenix-13 hooks, reproducible builds, and event-driven independent scans. It is **high-privilege by nature** (it rewrites/deletes memory+governance files and archives/deletes transcript files), so the load-bearing safety gates live in CODE, not prose — see Structural Safety below.
 
 ## Reporting a Vulnerability
 
