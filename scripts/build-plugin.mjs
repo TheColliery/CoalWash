@@ -106,19 +106,36 @@ export function checkDist(distRoot = dist) {
   for (const rel of UNWIRED_ENGINE) {
     if (fs.existsSync(path.join(distRoot, rel))) out.push(`unwired class-A engine present in plugin/ (must not ship until the SKILL surface wires it): ${rel}`);
   }
-  // Same blind-spot belt for the dot-dir exclusion: skipped in both walks, so assert absence.
-  const strayDotDirsIn = (root, rel) => {
+  // ASSERT ABSENCE OVER EXACTLY THE SET THE EXCLUSION REMOVES — no wider, no
+  // NARROWER. The exclusion drops any dot-named SEGMENT, files included; the first
+  // version of this assert enumerated DIRECTORIES only, so a dist-only dot-FILE
+  // orphan that the pre-exclusion gate used to catch became invisible (blind wave R2
+  // / TP-4). One notch short of the set is the same blind spot in miniature.
+  const strayDotEntriesIn = (root, rel) => {
     const abs = path.join(root, rel);
     if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return [];
     return fs.readdirSync(abs, { withFileTypes: true }).flatMap((e) => {
-      if (!e.isDirectory()) return [];
       const r = path.join(rel, e.name);
-      return e.name.startsWith('.') ? [r] : strayDotDirsIn(root, r);
+      if (e.name.startsWith('.')) return [r];           // dot FILE or dot DIR — both excluded, both asserted
+      return e.isDirectory() ? strayDotEntriesIn(root, r) : [];
     });
   };
   for (const item of DIST_ITEMS) {
     // from the item ROOT down — a DIST_ITEM that is itself dot-named is legitimate.
-    for (const rel of strayDotDirsIn(distRoot, item)) out.push(`stray dot-dir in plugin/ (never plugin payload — it rode the dist walk): ${rel}`);
+    for (const rel of strayDotEntriesIn(distRoot, item)) out.push(`stray dot-entry in plugin/ (never plugin payload — it rode the dist walk): ${rel}`);
+  }
+  // A FILE-shaped DIST_ITEM (.claude-plugin/plugin.json) only ever checks that one
+  // path, so its PARENT directory in the dist was never enumerated — anything else
+  // planted beside it (marketplace.json, a whole junk/ tree) passed silently (R2 /
+  // TP-5). Enumerate the parent and treat every unaccounted entry as an orphan.
+  const fileItems = DIST_ITEMS.filter((rel) => { const a = path.join(repo, rel); return fs.existsSync(a) && !fs.statSync(a).isDirectory(); });
+  for (const parent of new Set(fileItems.map((rel) => path.dirname(rel)).filter((d) => d && d !== '.'))) {
+    const abs = path.join(distRoot, parent);
+    if (!fs.existsSync(abs)) continue;
+    const expected = new Set(fileItems.filter((rel) => path.dirname(rel) === parent).map((rel) => path.basename(rel)));
+    for (const name of fs.readdirSync(abs)) {
+      if (!expected.has(name)) out.push(`orphan in plugin/ (nothing under ${parent} is a DIST_ITEM): ${path.join(parent, name)}`);
+    }
   }
   const allowedTops = new Set(DIST_ITEMS.map((rel) => rel.split(path.sep)[0]));
   if (fs.existsSync(distRoot)) {

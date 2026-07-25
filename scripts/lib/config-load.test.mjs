@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { globalConfigPath, findProjectRoot, loadMergedConfig } from './config-load.mjs';
+import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDirs, touchesClaudeBase } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -254,6 +254,28 @@ test('TP-4: the exclusion follows CLAUDE_CONFIG_DIR (derived, never hardcoded)',
     const deep = path.join(alt, 'projects', 'x');
     fs.mkdirSync(deep, { recursive: true });
     assert.notStrictEqual(findProjectRoot(deep, home), alt, 'the relocated base dir is excluded too');
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+    clean(home, proj);
+  }
+});
+
+test('R2/TP-1+TP-3: touchesClaudeBase is case-folded and covers EVERY CLAUDE_CONFIG_DIR entry (the raw `dir !== claudeAbs` compare missed a drive-case variant, and only entry[0] was ever excluded)', () => {
+  const { home, proj } = sandbox();
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const a = path.join(home, 'cfgA'); const b = path.join(home, 'cfgB');
+    fs.mkdirSync(path.join(a, 'projects'), { recursive: true });
+    fs.mkdirSync(path.join(b, 'projects'), { recursive: true });
+    process.env.CLAUDE_CONFIG_DIR = `${a},${b}`;
+    assert.deepStrictEqual(claudeBaseDirs(home), [a, b], 'both entries are known');
+    for (const base of [a, b]) {
+      assert.strictEqual(touchesClaudeBase(base, home), true, 'the base dir itself');
+      assert.strictEqual(touchesClaudeBase(path.join(base, 'projects', 'x'), home), true, 'a path INSIDE it');
+      assert.strictEqual(touchesClaudeBase(base.toUpperCase(), home), process.platform === 'win32', 'a case variant, on win32');
+    }
+    assert.strictEqual(touchesClaudeBase(home, home), true, 'a path CONTAINING a base dir (either direction)');
+    assert.strictEqual(touchesClaudeBase(proj, home), false, 'an unrelated project does NOT touch config territory');
   } finally {
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
     clean(home, proj);

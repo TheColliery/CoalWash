@@ -15,6 +15,40 @@ export function claudeBaseDir(home = os.homedir()) {
   const c = process.env.CLAUDE_CONFIG_DIR;
   return (c && c.split(',')[0].trim()) || path.join(home, '.claude');
 }
+// EVERY configured base dir, not just the first. `claudeBaseDir` returns entry[0]
+// because a single write target must be unambiguous — but a SECURITY exclusion that
+// covers 1 of N is incoherent: a cwd under entry[1] was still handed out as a project
+// anchor and rewrote its own settings.json (blind wave R2 / TP-3). Callers deciding
+// "is this path config territory?" must ask about all of them.
+// ⚠️ Whether Claude Code itself honours a comma list is unverified offline; this
+// code's own `.split(',')` asserts it does, so the guard matches the parse.
+export function claudeBaseDirs(home = os.homedir()) {
+  const c = process.env.CLAUDE_CONFIG_DIR;
+  const fromEnv = (c || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return fromEnv.length ? fromEnv : [path.join(home, '.claude')];
+}
+
+// Same-or-nested containment on PHYSICAL paths, case-folded on win32 (realpath does
+// NOT normalize case or drive-letter case on Windows). Deliberate twin of
+// explode.mjs's `isContainedIn` (which documents the same win32 caveat): that module
+// is the class-A engine and is EXCLUDED from the shipped dist, so importing it here
+// would break the plugin. Named divergence, not drift — keep the two in step.
+export function pathWithin(childPhys, basePhys) {
+  if (!childPhys || !basePhys) return false; // fail-closed
+  const norm = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
+  const c = norm(path.resolve(childPhys));
+  const b = norm(path.resolve(basePhys));
+  return c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
+}
+// Is `p` inside ANY configured base dir, or does it CONTAIN one? Either direction
+// means the path straddles config territory. Physical on both sides, fail-closed.
+export function touchesClaudeBase(p, home = os.homedir()) {
+  const target = physicalDir(p);
+  return claudeBaseDirs(home).some((b) => {
+    const base = physicalDir(b);
+    return pathWithin(target, base) || pathWithin(base, target);
+  });
+}
 export function globalConfigPath(home = os.homedir()) {
   return path.join(claudeBaseDir(home), '.coalwash.json');
 }
@@ -47,26 +81,33 @@ const ROOT_MARKERS = ['.git', '.coalwash.json', 'CLAUDE.md'];
 // Walk up from startDir looking for a project-root marker; NEVER walk above
 // `home` — stop there and fall back to startDir.
 //
-// THE CONFIG-DIR EXCLUSION IS A SECURITY GATE, NOT A TIDINESS RULE. The Claude
-// base dir (`~/.claude`) is a CONFIG/DATA area, and `~/.claude/CLAUDE.md` — the
-// user's own global instruction file — is a documented, near-universal file. So
-// the moment `CLAUDE.md` became a marker, EVERY cwd under `~/.claude` resolved
-// its project root to `~/.claude` itself, which then became a TRUSTED ROOT in
-// applyPlan; the home-swallow guard never fired because `~/.claude` sits BELOW
-// home. A forged PLAN.json declaring `roots: [~/.claude]` could then write a
-// `SessionStart` command hook into `settings.json` = code execution next
-// session. Proven live (blind wave R1 / TP-4) — fail-closed had become
-// fail-OPEN. The base dir is therefore NEVER a project root; a cwd under it with
-// no other marker walks out to the fail-closed startDir fallback, exactly as it
-// did before the marker existed. Derived via claudeBaseDir (the same base
-// class-b's ccMemoryDir builds on), never hardcoded, so CLAUDE_CONFIG_DIR moves
-// the exclusion with it.
+// CONFIG-DIR AWARENESS HERE IS STATE HYGIENE. THE SECURITY DECISION IS NOT HERE.
+// `~/.claude/CLAUDE.md` (the user's global instruction file) matches the CLAUDE.md
+// marker, so without this skip a cwd under the config dir would resolve its project
+// root to the config dir and CoalWash would keep per-project STATE for a directory
+// that is not a project. Skipping the marker there keeps that state sane.
+//
+// It is NOT a security boundary, and an earlier revision of this comment WRONGLY
+// claimed "the base dir is therefore NEVER a project root … walks out to the
+// fail-closed startDir fallback". Running proved otherwise (blind wave R2): the two
+// `return startDir` exits below hand back the RAW cwd untested, so a cwd AT the
+// config dir still yields it as the anchor; and a case-variant CLAUDE_CONFIG_DIR
+// slipped past the compare entirely. Both reached applyPlan and mutated a victim.
+// A wrong claim in a security comment is worse than an undocumented residual — the
+// next reviewer stops looking.
+//
+// WHAT ACTUALLY HOLDS: `applyPlan` refuses ANY anchor that touches a configured base
+// dir, in either direction, case-folded, across every CLAUDE_CONFIG_DIR entry
+// (`touchesClaudeBase`). That is one check at the TRUST BOUNDARY, in the opposite
+// nature to this resolver — stacking more conditions in here is what R2 walked past
+// twice. Do not re-add a security claim to this function.
 export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
   let dir = physicalDir(startDir);
   const homeAbs = physicalDir(home);
-  const claudeAbs = physicalDir(claudeBaseDir(home));
+  const bases = claudeBaseDirs(home).map(physicalDir);
+  const isBase = (d) => bases.some((b) => pathWithin(d, b) && pathWithin(b, d)); // same dir, case-folded
   while (true) {
-    if (dir !== claudeAbs && ROOT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))) return dir;
+    if (!isBase(dir) && ROOT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))) return dir;
     if (dir === homeAbs) return startDir;
     const parent = path.dirname(dir);
     if (parent === dir) return startDir; // filesystem root reached

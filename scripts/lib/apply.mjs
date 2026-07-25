@@ -56,7 +56,7 @@ import os from 'node:os';
 import { checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, findProjectRoot } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, touchesClaudeBase } from './config-load.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -431,6 +431,29 @@ export function applyPlan(plan, opts = {}) {
       if (!anchorPhys || !homePhys || containedIn(homePhys, [anchorPhys])) {
         return { ok: false, error: `containment: the derived project anchor (${anchorPhys || projectRoot}) is the home directory or an ancestor of it — refusing fail-closed (a home-level anchor would authorize writes anywhere under ~, e.g. ~/.ssh or ~/.claude/settings.json); run from the actual project dir, or pass a trusted opts.projectRoot` };
       }
+    }
+    // SECURITY — CONFIG-TERRITORY ANCHOR GUARD (the trust boundary; blind wave R2).
+    // The Claude base dir holds settings.json (a `SessionStart` command hook there =
+    // code execution next session) and the plugin cache (a rewritten conductor.js =
+    // the same). NOTHING in there is ever a project to wash, so no legitimate anchor
+    // touches it — the global class-B store CoalWash DOES wash enters trustedRoots
+    // separately below as ccMemoryDir, derived FROM the project anchor, never as the
+    // anchor itself.
+    //
+    // ONE question, asked ONCE, at the consumer: does the anchor touch config
+    // territory in EITHER direction (inside it, or containing it)? That is
+    // deliberately the OPPOSITE nature to findProjectRoot's marker walk. Two earlier
+    // attempts hardened the WALK instead and R2 walked past both — a case-variant
+    // CLAUDE_CONFIG_DIR, a cwd AT the base dir, a cwd in the plugin cache, and a
+    // second comma-separated base dir all still produced a config-dir anchor and a
+    // mutated victim. `touchesClaudeBase` case-folds (win32 realpath does not
+    // normalize case) and covers EVERY CLAUDE_CONFIG_DIR entry.
+    //
+    // Unlike the home-swallow guard above, this binds a TRUSTED opts.projectRoot too:
+    // it costs nothing (no caller has a legitimate config-dir anchor) and it removes
+    // the "which callers are trusted" question from a security path entirely.
+    if (touchesClaudeBase(projectRoot, home)) {
+      return { ok: false, error: `containment: the project anchor (${projectRoot}) is inside the Claude configuration directory (or contains it) — refusing fail-closed (that tree holds settings.json and the plugin cache; a write there is next-session code execution). Run from the actual project directory.` };
     }
     if (!Array.isArray(roots) || !roots.length) return { ok: false, error: 'plan needs non-empty roots[]' };
     if (!Array.isArray(actions) || !actions.length) return { ok: false, error: 'plan needs non-empty actions[]' };

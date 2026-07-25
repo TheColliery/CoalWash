@@ -668,7 +668,16 @@ function saveState(proj, projectRoot, home) {
     // `projectRoot` is the stray-detector's key (above). Version-STABLE metadata,
     // no field's SEMANTICS change → no STATE_SCHEMA bump (this file's own rule).
     const base = (proj && typeof proj === 'object' && !Array.isArray(proj)) ? proj : {};
-    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot) };
+    // ONE-SHOT, not per-write (Phoenix #3). The stray sweep is a ONE-TIME migration
+    // for a condition the never-create guard makes unrepeatable, but it ran on EVERY
+    // saveState at O(dirs in ~/.claude/projects) — measured ~0.7 ms per dir, which at
+    // this box's 21 dirs pushed the real hook median to 102.6 ms, over the <=100 ms
+    // budget, on a PostToolUse(Agent) path that fires on every spawn (blind wave R2 /
+    // TP-6). The suite never saw it because every fixture starts with an empty
+    // projects/. The flag is version-STABLE bookkeeping — no field's semantics
+    // change, so no STATE_SCHEMA bump (this file's own rule).
+    const alreadySwept = base.strayPruneDone === true;
+    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true };
     const tmp = p + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(toWrite), 'utf8');
     fs.renameSync(tmp, p);
@@ -681,7 +690,7 @@ function saveState(proj, projectRoot, home) {
     // the write that moves home; same no-old-version-leftover mechanism as above.
     const fb = stateFallbackPath(projectRoot, home);
     if (path.resolve(p) !== path.resolve(fb)) { try { fs.rmSync(fb, { force: true }); } catch { /* best-effort */ } }
-    pruneStrayStateDirs(projectRoot, home);
+    if (!alreadySwept) pruneStrayStateDirs(projectRoot, home);
     return true;
   } catch {
     return false;

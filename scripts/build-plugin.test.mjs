@@ -73,7 +73,7 @@ test('TP-6: a stray dot-dir under a DIST_ITEM never ships, and the exclusion is 
     assert.deepStrictEqual(checkDist(dist), [], 'in sync with the stray present in source');
     fs.mkdirSync(path.join(dist, 'scripts', 'lib', '.claude', 'coalhearth'), { recursive: true });
     fs.writeFileSync(path.join(dist, 'scripts', 'lib', '.claude', 'coalhearth', 'session_handoff.json'), '{"session":"leaked"}');
-    assert.ok(checkDist(dist).some((d) => d.includes('stray dot-dir in plugin/')), 'a planted dot-dir fails loud, not silently cleared as "has a source"');
+    assert.ok(checkDist(dist).some((d) => d.includes('stray dot-entry in plugin/')), 'a planted dot-dir fails loud, not silently cleared as "has a source"');
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
@@ -87,5 +87,30 @@ test('TP-6 regression: the dot-dir exclusion is scoped BELOW the item — `.clau
     // and its absence must be VISIBLE, not skipped by the exclusion
     fs.rmSync(manifest, { force: true });
     assert.ok(checkDist(dist).some((d) => d.includes('missing in plugin/')), 'a missing manifest fails loud');
+  } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
+test('R2/TP-4: absence is asserted over EXACTLY the excluded set — a dist-only dot-FILE orphan is caught, not just a dot-DIR (the assert used to enumerate dirs only)', () => {
+  const dist = scratchDist();
+  try {
+    buildDist(dist);
+    fs.writeFileSync(path.join(dist, 'scripts', 'lib', '.env'), 'SECRET=leaked');
+    assert.ok(checkDist(dist).some((d) => d.includes('stray dot-entry in plugin/')), 'a dot-FILE orphan fails loud (pre-fix: checkDist() === [] while verify printed "nothing else leaked")');
+    buildDist(dist);
+    fs.mkdirSync(path.join(dist, 'scripts', 'lib', '.cache'), { recursive: true });
+    assert.ok(checkDist(dist).some((d) => d.includes('stray dot-entry in plugin/')), 'a dot-DIR orphan still fails loud');
+  } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
+test('R2/TP-5: a FILE-shaped DIST_ITEM has its PARENT dir enumerated — anything planted beside .claude-plugin/plugin.json is an orphan', () => {
+  const dist = scratchDist();
+  try {
+    buildDist(dist);
+    assert.deepStrictEqual(checkDist(dist), [], 'clean build stays clean');
+    fs.writeFileSync(path.join(dist, '.claude-plugin', 'marketplace.json'), '{"plugins":[]}');
+    assert.ok(checkDist(dist).some((d) => d.includes('orphan in plugin/')), 'a repo file planted beside the manifest is caught (pre-fix: silent — only plugin.json itself was ever checked)');
+    buildDist(dist);
+    fs.mkdirSync(path.join(dist, '.claude-plugin', 'junk'), { recursive: true });
+    assert.ok(checkDist(dist).some((d) => d.includes('orphan in plugin/')), 'a whole planted dir beside it is caught too');
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });

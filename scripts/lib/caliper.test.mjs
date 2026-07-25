@@ -1619,3 +1619,31 @@ test('TP-5: exactly ONE live home — the coal/ copy is reaped when the write mo
     assert.strictEqual(loadState(proj, home).leanFloorTokens, undefined, 'a fresh bootstrap — NOT the stale 1000 (pre-fix the floor silently reverted)');
   } finally { clean(home, proj); }
 });
+
+test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is a one-time migration for a condition the never-create guard makes unrepeatable, and O(dirs in projects/) on every write blew the <=100ms hook budget', () => {
+  const { home, proj } = sandbox();
+  try {
+    const projectsDir = path.join(home, '.claude', 'projects');
+    ccSlugDir(home, proj);
+    // Populate projects/ the way a real box is (this one had 21) — the suite never
+    // caught the cost because every other fixture starts with an EMPTY projects/.
+    for (let i = 0; i < 21; i++) fs.mkdirSync(path.join(projectsDir, `C--other-project-${i}`), { recursive: true });
+
+    setLeanFloor(home, proj, 10);                                    // write #1 sweeps
+    assert.strictEqual(loadState(proj, home).strayPruneDone, true, 'the sweep is marked done in state');
+
+    // Prove write #2 does NOT sweep: plant a stray that write #1 would have removed.
+    const strayCwd = path.join(proj, 'sub');
+    fs.mkdirSync(strayCwd, { recursive: true });
+    const strayDir = ccSlugDir(home, strayCwd);
+    fs.mkdirSync(path.join(strayDir, 'coalwash'), { recursive: true });
+    const strayFile = path.join(strayDir, 'coalwash', 'state.json');
+    fs.writeFileSync(strayFile, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: strayCwd }), 'utf8');
+
+    const t0 = process.hrtime.bigint();
+    setLeanFloor(home, proj, 20);                                    // write #2 must skip the sweep
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    assert.ok(fs.existsSync(strayFile), 'write #2 did not walk projects/ (one-shot held)');
+    assert.ok(ms < 50, `a post-migration write stays far under the hook budget (was ${ms.toFixed(1)}ms with 22 dirs)`);
+  } finally { clean(home, proj); }
+});

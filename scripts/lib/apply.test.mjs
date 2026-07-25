@@ -1463,3 +1463,89 @@ test('BREAK B: a rollback that cannot remove a created file reports PARTIAL, nev
     assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'f1 original', 'the snapshot restore of the deleted file still succeeded');
   } finally { clean(proj); }
 });
+
+// ---------------------------------------------------------------------------
+// R2/TP-1+TP-2 [SECURITY] — THE CONFIG-TERRITORY ANCHOR GUARD, at the trust
+// boundary. Two earlier attempts hardened findProjectRoot's WALK instead and the
+// blind wave walked past both: a cwd AT the base dir, a cwd in the plugin cache, a
+// case-variant CLAUDE_CONFIG_DIR, and a second comma entry all still produced a
+// config-dir anchor and a MUTATED victim. applyPlan now asks once, at the anchor.
+// ---------------------------------------------------------------------------
+function claudeSandbox() {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  const base = path.join(home, '.claude');
+  fs.mkdirSync(base, { recursive: true });
+  const victim = path.join(base, 'settings.json');
+  fs.writeFileSync(victim, '{"permissions":{}}', 'utf8');
+  return { home, base, victim };
+}
+const EVIL_HOOK = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'calc.exe' }] }] } });
+
+test('R2/TP-2 [SECURITY]: an anchor AT the Claude base dir is refused — settings.json is not mutated (a SessionStart command hook there = next-session code execution)', () => {
+  const { home, base, victim } = claudeSandbox();
+  try {
+    const before = fs.readFileSync(victim, 'utf8');
+    const r = applyPlan({ roots: [base], actions: [{ type: 'rewrite', path: victim, content: EVIL_HOOK }], sessionId: 's' }, { cwd: base, projectRoot: base, home });
+    assert.strictEqual(r.ok, false, 'refused');
+    assert.match(r.error, /Claude configuration directory/, 'refused BY the boundary guard, not incidentally by the fidelity gate');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), before, 'victim byte-intact');
+  } finally { clean(home); }
+});
+
+test('R2/TP-2 [SECURITY]: an anchor INSIDE the plugin cache is refused — a rewritten conductor.js is code execution just like settings.json', () => {
+  const { home, base } = claudeSandbox();
+  try {
+    const hooks = path.join(base, 'plugins', 'cache', 'somePlugin', 'hooks');
+    fs.mkdirSync(hooks, { recursive: true });
+    const victim = path.join(hooks, 'conductor.js');
+    fs.writeFileSync(victim, '// harmless\n', 'utf8');
+    const r = applyPlan({ roots: [hooks], actions: [{ type: 'rewrite', path: victim, content: 'require("child_process").exec("calc.exe");\n' }], sessionId: 's' }, { cwd: hooks, projectRoot: hooks, home });
+    assert.strictEqual(r.ok, false, 'refused');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), '// harmless\n', 'plugin hook byte-intact');
+  } finally { clean(home); }
+});
+
+test('R2/TP-1 [SECURITY]: a CASE-VARIANT config dir is refused (win32 realpath does not normalize case, so the old raw compare missed it)', (t) => {
+  if (process.platform !== 'win32') { t.skip('case-folding is a win32 property'); return; }
+  const { home, base, victim } = claudeSandbox();
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    process.env.CLAUDE_CONFIG_DIR = base.toUpperCase(); // same dir, different case
+    const before = fs.readFileSync(victim, 'utf8');
+    const r = applyPlan({ roots: [base], actions: [{ type: 'rewrite', path: victim, content: EVIL_HOOK }], sessionId: 's' }, { cwd: base, projectRoot: base, home });
+    assert.strictEqual(r.ok, false, 'refused despite the case variant');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), before, 'victim byte-intact');
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+    clean(home);
+  }
+});
+
+test('R2/TP-3 [SECURITY]: EVERY CLAUDE_CONFIG_DIR entry is config territory — an anchor under entry[1] is refused (only entry[0] used to be)', () => {
+  const { home } = claudeSandbox();
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const a = path.join(home, 'cfgA'); const b = path.join(home, 'cfgB');
+    fs.mkdirSync(a, { recursive: true }); fs.mkdirSync(b, { recursive: true });
+    const victim = path.join(b, 'settings.json');
+    fs.writeFileSync(victim, '{"permissions":{}}', 'utf8');
+    process.env.CLAUDE_CONFIG_DIR = `${a},${b}`;
+    const r = applyPlan({ roots: [b], actions: [{ type: 'rewrite', path: victim, content: EVIL_HOOK }], sessionId: 's' }, { cwd: b, projectRoot: b, home });
+    assert.strictEqual(r.ok, false, 'refused');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), '{"permissions":{}}', 'entry[1] victim byte-intact');
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+    clean(home);
+  }
+});
+
+test('R2 control: a NORMAL project anchor is unaffected by the config-territory guard (the guard refuses config dirs, not projects)', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-h2-')));
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, '# m\n\n- a fact\n- another fact\n');
+    const r = applyPlan(planFor(proj, store, [{ type: 'rewrite', path: f, content: '# m\n\n- a fact\n- another fact\n- added\n' }]), { cwd: proj, projectRoot: proj, home });
+    assert.strictEqual(r.ok, true, `a real project still applies: ${r.error || ''}`);
+  } finally { clean(proj, home); }
+});
