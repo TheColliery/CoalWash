@@ -1179,3 +1179,54 @@ test('BUG-1 retention: the returned census does NOT retain O(unit) — a fat-bre
     assert.match(r.stdout, /OK retainedMB=/, 'the child ran the full measurement');
   } finally { rm(dir); }
 });
+
+// ---------------------------------------------------------------------------
+// GATE-4 REFUSE-POLARITY (rung-5 §1.2, station-3 MEDIUM). The explode twin was
+// covered; detonate — the gate this room called only-accidentally-safe — was not.
+// ---------------------------------------------------------------------------
+
+test('gate 4 REFUSE-polarity: an UNRESOLVABLE outPath aimed inside the snapshot store is refused AT THE GATE (triggered:false), not caught later by the floor', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store'); fs.mkdirSync(store, { recursive: true });
+    const src = writeNdjson(dir, 'src.jsonl', Array.from({ length: 30 }, (_, i) => ({ type: i % 3 ? 'user' : 'mode', i })));
+    const before = sha256File(src);
+
+    // physicalForCreate() routes through explode's physicalOrNull, which REJECTS every win32
+    // device/UNC spelling by design -> null. Pre-fix the boolean folded that null into
+    // false == NOT-contained, and because this guard is REFUSE-polarity, false meant ALLOW.
+    const nsOut = path.toNamespacedPath(path.join(store, 'blob-clobber.jsonl'));
+    const r = detonate(src, { cutTypes: ['mode'], outPath: nsOut, snapshotDir: store });
+
+    assert.strictEqual(r.ok, false, 'an outPath inside the store is refused however it is spelled');
+    assert.strictEqual(r.failedCheck, 'path', 'it is GATE 4 that refuses');
+    assert.strictEqual(r.triggered, false,
+      'THE LOAD-BEARING ASSERTION: the gate refuses BEFORE the reducer runs. Pre-fix this measured triggered:true with failedCheck:undefined — gate 4 failed open and the main engine was entered, with the refusal coming from reduceFile\'s deeper floor instead. A belt whose whole contract is "refuse before triggering" was being carried by a guard behind it');
+    assert.strictEqual(sha256File(src), before, 'source byte-intact');
+    assert.strictEqual(fs.readdirSync(store).filter((f) => f.includes('clobber')).length, 0, 'nothing landed in the recovery store');
+  } finally { rm(dir); }
+});
+
+test('gate 4 REFUSE-polarity: a namespaced src INSIDE the store is refused ON PURPOSE — it previously held only by TWIN DRIFT between realOrNull and physicalOrNull', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store'); fs.mkdirSync(store, { recursive: true });
+    const src = writeNdjson(store, 'victim.jsonl', Array.from({ length: 30 }, (_, i) => ({ type: i % 3 ? 'user' : 'mode', i })));
+    const before = sha256File(src);
+
+    // MEASURED, and the reason this test exists: on the frozen SHA this input made detonate
+    // REFUSE while explode's reduceFile FAILED OPEN on the identical input — because
+    // detonate's realOrNull (fs.realpathSync.native) RESOLVES a \?\ form while explode's
+    // physicalOrNull REJECTS it. The gate was correct by accident: a future "consistency fix"
+    // aligning realOrNull to reject device paths would have silently re-opened it. Post-fix
+    // the REFUSE-polarity requires a proven 'outside', so the answer no longer depends on
+    // which twin resolves what.
+    const r = detonate(path.toNamespacedPath(src), { cutTypes: ['mode'], outPath: path.join(dir, 'o.jsonl'), snapshotDir: store });
+
+    assert.strictEqual(r.ok, false, 'a src living inside the snapshot store is refused');
+    assert.strictEqual(r.failedCheck, 'path', 'at gate 4');
+    assert.strictEqual(r.triggered, false, 'before the reducer runs');
+    assert.match(r.reason, /snapshot store/i, 'and it says why');
+    assert.strictEqual(sha256File(src), before, 'source byte-intact');
+  } finally { rm(dir); }
+});
