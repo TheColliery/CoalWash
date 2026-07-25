@@ -97,8 +97,9 @@ function lib(name) {
 // ...} per the CC hook contract) — this is how main() tells the SessionStart
 // and Stop branches apart. Fail-safe: an absent/short/malformed/
 // never-closing stdin resolves to {} within STDIN_BUDGET_MS rather than ever
-// blocking the hook (Phoenix #3/#4) — an unrecognized/missing event name just
-// falls through to the SessionStart gauge (its existing default).
+// blocking the hook (Phoenix #3/#4) — an unrecognized/missing event name is
+// then silently skipped by main() (Phoenix #12/#13: a read failure must
+// never be guessed as the loudest branch; see main()'s closing comment).
 function readStdinJson() {
   return new Promise((resolve) => {
     let data = '';
@@ -558,7 +559,16 @@ async function main() {
     if (input && SPAWN_TOOLS.has(input.tool_name)) return handleSpawnMeter(input);
     return handleSeatbelt(input);
   }
-  return handleSessionStart(input);
+  if (event === 'SessionStart') return handleSessionStart(input);
+  // Phoenix #12/#13: an unrecognized event — including '' from a stdin read
+  // that failed/timed out (readStdinJson() resolves {} on any parse error,
+  // never throws) — must never be GUESSED as SessionStart. The four checks
+  // above are hooks.json's entire wired vocabulary; defaulting the unknown
+  // case to the loudest branch (SessionStart can print the self-update-due
+  // line) turned a rare stdin race on ANY event into spurious noise during
+  // e.g. a Stop turn. Silence is the fail-safe response to "we don't know
+  // what this invocation is", matching Stop's own "nothing pending -> return"
+  // shape. (Formerly an unconditional `return handleSessionStart(input);`.)
 }
 
 main().catch(() => {

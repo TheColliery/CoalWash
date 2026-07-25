@@ -113,7 +113,7 @@ test('coalwashMode off: fully silent even over a FULL-band store', () => {
   try {
     seedClassB(home, proj, { claudeMdBytes: 60000 });
     writeGlobalCfg(home, { coalwashMode: 'off' }); // off silences update scheduling too
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
   } finally { clean(home, proj); }
@@ -124,7 +124,7 @@ test('LEAN (small store, no floor yet): silent — Phoenix #13 healthy path; 0j 
   try {
     muteUpdate(home);
     seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
@@ -140,7 +140,7 @@ test('manual mode: gauge silent (no stamp), but the self-update scheduler still 
   try {
     seedClassB(home, proj, { claudeMdBytes: 60000 }); // would be OBESE/FULL if gauged
     writeGlobalCfg(home, { coalwashMode: 'manual' }); // updateMode defaults to ask -> due on first boot
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.ok(r.stdout.includes('[self-update due]'));
     assert.strictEqual(fs.existsSync(projStatePath(home, proj)), false, 'no stamp in manual mode');
@@ -161,7 +161,7 @@ test('SessionStart: OBESE crossing is measured+cached SILENTLY (no ask text any 
     const mem = seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
     seedBigRecall(mem);
     seedState(home, proj, { leanFloorTokens: 10000 });
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'SessionStart never prints a band ask/directive any more');
     const st = readProjState(home, proj);
@@ -177,7 +177,7 @@ test('SessionStart: FULL via the absolute index cap fires even with no floor mea
   try {
     muteUpdate(home);
     seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // index over the 25KB cap class
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
@@ -196,7 +196,7 @@ test('SessionStart: FULL with the break-even in favor caches economical:true + t
     // horizonCarry = 16200*14 = 226800 > 108600 -> economical.
     seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
     seedState(home, proj, { leanFloorTokens: 20000 });
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
@@ -219,7 +219,7 @@ test('SessionStart: FULL band but break-even NOT in favor caches economical:fals
     const mem = seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
     fs.writeFileSync(path.join(mem, 'recall-big.md'), 'r'.repeat(400 * 1024), 'utf8');
     seedState(home, proj, { leanFloorTokens: 20000 });
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
@@ -237,7 +237,7 @@ test('SessionStart: FULL(externalize) is cached (reason + hardCeilingTokens) and
     // CAPACITY_TOKENS) -> externalize.
     seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
     seedState(home, proj, { leanFloorTokens: 36000 });
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'externalize is information, delivered by Stop, never printed at SessionStart');
     const st = readProjState(home, proj);
@@ -258,7 +258,7 @@ test('growable-full: a large HEALTHY floor (TheColliery-shaped, ~29k) stays LEAN
     // (MEMORY.md "THE CALIBRATION FINDING").
     seedClassB(home, proj, { claudeMdBytes: 116332, indexBytes: 60 });
     seedState(home, proj, { leanFloorTokens: 29054 });
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'a healthy large floor must never false-fire');
     const st = readProjState(home, proj);
@@ -284,14 +284,14 @@ test('hysteresis: a store that armed OBESE and settles into the dead zone stays 
     const mem = seedClassB(home, proj, { claudeMdBytes: floor * 1.502 * 4, indexBytes: 0 });
     seedBigRecall(mem);
     seedState(home, proj, { leanFloorTokens: floor });
-    const r1 = run(proj, home);
+    const r1 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r1);
     assert.strictEqual(readProjState(home, proj).lastVerdict.overCeiling, true);
 
     // Second boot: bmi drops to 1.35 — inside the dead zone (>1.2, <1.5).
     // Un-armed-from-scratch this would be LEAN; armed, it must STAY OBESE.
     fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'a'.repeat(Math.round(floor * 1.35 * 4)), 'utf8');
-    const r2 = run(proj, home);
+    const r2 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r2);
     const st2 = readProjState(home, proj);
     assert.strictEqual(st2.lastVerdict.band, 'OBESE', 'the dead zone holds the PRIOR armed state');
@@ -306,12 +306,12 @@ test('hysteresis: a store must fall to CEILING_REARM_BMI or below to actually cl
     const floor = 10000;
     seedClassB(home, proj, { claudeMdBytes: Math.round(floor * 1.502 * 4), indexBytes: 0 });
     seedState(home, proj, { leanFloorTokens: floor });
-    run(proj, home); // arms OBESE
+    run(proj, home, { hook_event_name: 'SessionStart' }); // arms OBESE
     assert.strictEqual(readProjState(home, proj).lastVerdict.overCeiling, true);
 
     // Drop to bmi 1.1 — at/under the 1.2 low-water mark -> clears.
     fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'a'.repeat(Math.round(floor * 1.1 * 4)), 'utf8');
-    run(proj, home);
+    run(proj, home, { hook_event_name: 'SessionStart' });
     const st = readProjState(home, proj);
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
     assert.strictEqual(st.lastVerdict.overCeiling, false);
@@ -1037,6 +1037,25 @@ test('Stop: nothing pending is silent, exit 0, and creates no state file at all'
   } finally { clean(home, proj); }
 });
 
+test('main() dispatch: an unreadable/unrecognized event (readStdinJson -> {}) is SILENT, never guessed as SessionStart (Phoenix #12/#13)', () => {
+  const { home, proj } = sandbox();
+  try {
+    // Deterministic repro of the Windows-CI stdin-race class WITHOUT racing a
+    // real pipe: a Stop payload that fails to arrive intact resolves
+    // readStdinJson() -> {} via the exact same JSON.parse-catch path as no
+    // stdin at all, so omitting input forces the identical {} result on
+    // demand. A fresh sandbox home has no update stamp yet (mode defaults to
+    // 'auto', updateMode to 'ask'), so if main() mis-routed this unrecognized
+    // event to handleSessionStart, updateDue() would fire and print the
+    // self-update line -> the exact CI failure this pins ("Stop: nothing
+    // pending is silent..." expected '' got '[CoalWash] [self-update due] ...').
+    const r = run(proj, home);
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '', 'an unrecognized event must never print the SessionStart self-update line');
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude', 'coal', 'coalwash', 'update-check')), false, 'handleSessionStart (and its updateDue side effect) must never have run at all');
+  } finally { clean(home, proj); }
+});
+
 test('Stop: an already-consumed crossing never re-emits', () => {
   const { home, proj } = sandbox();
   try {
@@ -1436,12 +1455,12 @@ test('self-update: due on first boot (default ask), stamped, then silent inside 
   const { home, proj } = sandbox();
   try {
     seedClassB(home, proj, { claudeMdBytes: 100 }); // LEAN -> only the update line prints
-    const r1 = run(proj, home);
+    const r1 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r1);
     assert.ok(r1.stdout.includes('[CoalWash] [self-update due]'));
     assert.ok(r1.stdout.includes('never assume'), 'gold no-external-assumption wording');
     assert.ok(fs.existsSync(path.join(home, '.claude', 'coal', 'coalwash', 'update-check')), 'crash-safe stamp written to the coal/ namespace (task #13)');
-    const r2 = run(proj, home);
+    const r2 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r2);
     assert.strictEqual(r2.stdout, '', 'inside the window: silent');
   } finally { clean(home, proj); }
@@ -1484,7 +1503,7 @@ test('language lock is appended to the self-update directive (band nudges carry 
     writeGlobalCfg(home, { language: 'th' }); // updateMode defaults to ask -> due on first boot
     seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 }); // OBESE-shaped, but SessionStart stays silent regardless
     seedState(home, proj, { leanFloorTokens: 10000 });
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.ok(r.stdout.includes('[self-update due]'), r.stdout);
     assert.ok(r.stdout.includes('(language=th'), r.stdout);
@@ -1499,7 +1518,7 @@ test('a corrupt state file self-heals: the hook still gauges and exits 0 (Phoeni
     const sp = projStatePath(home, proj);
     fs.mkdirSync(path.dirname(sp), { recursive: true });
     fs.writeFileSync(sp, '{ definitely not json', 'utf8');
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     const st = readProjState(home, proj);
     assert.strictEqual(st.stamps.length, 1, 'stamping resumed over the corrupt file');
@@ -1521,7 +1540,7 @@ test('a poisoned/implausible stored leanFloor is discarded at read — bootstrap
     muteUpdate(home);
     seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // absolute-cap FULL
     seedState(home, proj, { leanFloorTokens: 999999999 }); // grossly larger than the measured footprint
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
@@ -1544,7 +1563,7 @@ test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no sta
         fs.mkdirSync(path.dirname(sp), { recursive: true });
         fs.writeFileSync(sp, content, 'utf8');
       }
-      const r = run(proj, home);
+      const r = run(proj, home, { hook_event_name: 'SessionStart' });
       assertGraceful(r);
       assert.strictEqual(r.stdout, '');
       return readProjState(home, proj).lastVerdict;
@@ -1568,7 +1587,7 @@ test('no class-B at all (empty project, no memory dir): silent, exit 0', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    const r = run(proj, home);
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
   } finally { clean(home, proj); }
