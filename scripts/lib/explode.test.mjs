@@ -2176,3 +2176,25 @@ test('R3/LOW: restoreFromSnapshot never THROWS on a bad ref — a recovery primi
   }
   } finally { rm(dir); }
 });
+
+test('RUNG5 A6 PRIMARY UNDO: restoring a snapshot back OVER its own source succeeds when the caller declares src AND passes force — the refusal must not name a flag it ignores', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    const src = path.join(dir, 'live.jsonl'); fs.writeFileSync(src, 'GOOD-ORIGINAL');
+    const snap = snapshotSource(src, store);
+    fs.writeFileSync(src, 'CORRUPTED-BY-A-BAD-RUN'); // the disaster the undo net exists for
+
+    const r = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src, force: true });
+    assert.strictEqual(r.ok, true,
+      'the PRIMARY undo must work. Pre-fix the src-alias branch fired unconditionally, so a caller who declared src (being explicit about what it protects) and set force:true was refused — by a message telling them to pass force:true, which they had already passed');
+    assert.strictEqual(fs.readFileSync(src, 'utf8'), 'GOOD-ORIGINAL', 'the source really is restored');
+
+    // and WITHOUT force the precise alias refusal still fires — force is the whole difference
+    fs.writeFileSync(src, 'CORRUPTED-AGAIN');
+    const rNo = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src });
+    assert.strictEqual(rNo.ok, false, 'no force → still refused');
+    assert.match(rNo.reason, /alias|overwrite|force/i, 'and the refusal still explains itself');
+    assert.strictEqual(fs.readFileSync(src, 'utf8'), 'CORRUPTED-AGAIN', 'a refused restore leaves the destination untouched');
+  } finally { rm(dir); }
+});
