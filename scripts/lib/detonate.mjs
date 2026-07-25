@@ -442,9 +442,16 @@ export function detonate(src, request = {}, opts = {}) {
     const maxChars = (Number.isFinite(freeStringMaxChars) && freeStringMaxChars >= 1) ? freeStringMaxChars : FREE_STRING_MAX_CHARS;
 
     // --- gate 1: FILE (exists · regular file · inside storeRoot if given) ---
+    // OPEN FIRST, THEN fstat THE FD — never statSync(path) then openSync(path). A path-stat
+    // followed by a path-open is check-then-act: the two calls can land on DIFFERENT inodes, so
+    // `stat.size` and `isFile()` would describe a file the fd is not looking at. The fd-based form
+    // is the idiom this engine already uses (sha256File, collidesWithSource) and it closes the
+    // window by construction rather than narrowing it.
+    let fd;
+    try { fd = fs.openSync(src, 'r'); } catch (e) { return refuse('file', `cannot open src for read: ${e.message}`); }
     let stat;
-    try { stat = fs.statSync(src); } catch (e) { return refuse('file', `cannot stat src: ${e.message}`); }
-    if (!stat.isFile()) return refuse('file', 'src is not a regular file (directory / device / socket refused)');
+    try { stat = fs.fstatSync(fd); } catch (e) { try { fs.closeSync(fd); } catch { /* best effort */ } return refuse('file', `cannot stat src: ${e.message}`); }
+    if (!stat.isFile()) { try { fs.closeSync(fd); } catch { /* best effort */ } return refuse('file', 'src is not a regular file (directory / device / socket refused)'); }
     // storeRoot (OPTIONAL, null default) = best-effort defense-in-depth containment: src's realpath must sit inside
     // the expected store. HONEST LIMIT (floor-not-ceiling, same discipline as FIX 6-R2 / WALK_DEPTH): this is a
     // check-then-reopen TOCTOU — reduceToCompletion reopens src by PATH, so a symlink flipped between here and that
@@ -453,14 +460,16 @@ export function detonate(src, request = {}, opts = {}) {
     // this containment check; and the ULTRA caller passes no storeRoot (the real path never exercises it). A TOCTOU-
     // tight version would thread the open fd through the reducer — deferred as over-engineering for an optional,
     // read-only, unused-in-the-real-path defense.
+    // RESIDUAL, UNCHANGED AND STILL PATH-BASED: this containment check realpaths a PATH, so it keeps
+    // its own check-then-reopen window (a realpath cannot be taken through an fd portably). The fd
+    // above removed the size/isFile half of the race; this half stays, with the honest limit above.
     if (storeRoot != null && !isUnder(realOrNull(src), realOrNull(storeRoot))) {
+      try { fs.closeSync(fd); } catch { /* best effort */ }
       return refuse('file', `src does not resolve inside the expected store root (${storeRoot})`);
     }
 
-    let fd;
-    try { fd = fs.openSync(src, 'r'); } catch (e) { return refuse('file', `cannot open src for read: ${e.message}`); }
     try {
-      const size = stat.size;
+      const size = stat.size; // from fstat(fd) — describes the SAME inode the reads below use
 
       // --- gate 2: STRUCTURE (ndjson | json-single only; opaque/unparseable → never explode) ---
       const struct = discoverStructure(fd, size);
@@ -661,17 +670,22 @@ export function survey(src, opts = {}) {
     const maxChars = (Number.isFinite(freeStringMaxChars) && freeStringMaxChars >= 1) ? freeStringMaxChars : FREE_STRING_MAX_CHARS;
 
     // --- gate 1: FILE (exists · regular file · inside storeRoot if given) — identical to detonate's gate 1 ---
+    // OPEN FIRST, THEN fstat THE FD (same reason as detonate's gate 1: a path-stat followed by a
+    // path-open can land on two different inodes; the fd form closes that window by construction).
+    let fd;
+    try { fd = fs.openSync(src, 'r'); } catch (e) { return refuse('file', `cannot open src for read: ${e.message}`); }
     let stat;
-    try { stat = fs.statSync(src); } catch (e) { return refuse('file', `cannot stat src: ${e.message}`); }
-    if (!stat.isFile()) return refuse('file', 'src is not a regular file (directory / device / socket refused)');
+    try { stat = fs.fstatSync(fd); } catch (e) { try { fs.closeSync(fd); } catch { /* best effort */ } return refuse('file', `cannot stat src: ${e.message}`); }
+    if (!stat.isFile()) { try { fs.closeSync(fd); } catch { /* best effort */ } return refuse('file', 'src is not a regular file (directory / device / socket refused)'); }
+    // Residual (unchanged, path-based — see detonate's gate 1): realpath needs a path, so this half
+    // keeps its window.
     if (storeRoot != null && !isUnder(realOrNull(src), realOrNull(storeRoot))) {
+      try { fs.closeSync(fd); } catch { /* best effort */ }
       return refuse('file', `src does not resolve inside the expected store root (${storeRoot})`);
     }
 
-    let fd;
-    try { fd = fs.openSync(src, 'r'); } catch (e) { return refuse('file', `cannot open src for read: ${e.message}`); }
     try {
-      const size = stat.size;
+      const size = stat.size; // from fstat(fd) — same inode as the reads below
       // --- gate 2: STRUCTURE (ndjson | json-single only; opaque/unparseable → never survey) ---
       const struct = discoverStructure(fd, size);
       if (struct.structure !== 'ndjson' && struct.structure !== 'json-single') {

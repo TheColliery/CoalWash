@@ -758,7 +758,11 @@ export function reduceFile(src, opts = {}) {
           // (a) SOURCE-DESYNC: the current source must STILL hash to the checkpoint snapshot's content-address
           // (its basename is the sha256 of the source as of the checkpoint). A source changed since the
           // checkpoint = fail-closed refuse, never splice two source states.
-          const expectSha = (resume && typeof resume.snapshotPath === 'string') ? path.basename(resume.snapshotPath) : '';
+          // `resume` is non-null HERE BY DOMINANCE, not by luck: the outLen guard above (same
+          // `offset !== 0 && !dryRun` block) already refused a falsy resume, so the old `resume &&`
+          // was provably dead. Naming the dependency instead of re-testing it — if that guard ever
+          // moves out from under this block, this line is one of the things that must move with it.
+          const expectSha = typeof resume.snapshotPath === 'string' ? path.basename(resume.snapshotPath) : '';
           if (!/^[0-9a-f]{64}$/.test(expectSha)) {
             return fail('resume: a real-cut resume requires the checkpoint snapshotPath (the content-addressed source anchor) — missing or malformed (forged/corrupt checkpoint refused)');
           }
@@ -1285,7 +1289,16 @@ export function restoreFromSnapshot(ref, toPath, opts) {
   const tmpPath = `${toPath}.${process.pid}.tmp`;
   try {
     fs.mkdirSync(path.dirname(path.resolve(toPath)), { recursive: true });
-    fs.copyFileSync(blob, tmpPath);
+    // COPYFILE_EXCL = the O_EXCL half of the temp→rename idiom this file already uses at its two
+    // write sites (`openSync(tmpPath, 'wx')`). This RECOVERY path predated that idiom and was the
+    // one temp created WITHOUT exclusive semantics: `${toPath}.${pid}.tmp` is fully predictable, and
+    // a plain copyFileSync both overwrites an existing file AND follows a symlink planted at the
+    // destination — so anyone able to write toPath's directory could aim the restored bytes
+    // somewhere else, on the undo net itself. EXCL makes the temp a fresh inode or nothing.
+    // A stale same-pid temp from a crash now fails the restore loudly (EEXIST -> the catch below)
+    // instead of being silently reused; that matches the manifest writer's documented choice NOT to
+    // unlink-then-create, which would reopen the very race EXCL closes.
+    fs.copyFileSync(blob, tmpPath, fs.constants.COPYFILE_EXCL);
     const got = sha256File(tmpPath);
     if (got !== expect) {
       try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
