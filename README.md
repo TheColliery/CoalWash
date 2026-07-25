@@ -4,7 +4,7 @@
 
 > *Coal washing is the real mining process that cleans raw coal — separating the waste without damaging the coal.* This one is a memory washer/defragmenter for your agent: **it cleans the fat, never the meat.**
 
-**A fidelity-first memory-defragment/cleanup engine** for agent class-B memory — the memory and governance files your platform loads into context every session. A free mechanical Quick pass plus a code-enforced fidelity gate prove zero **structured-token** loss by diff (links, dates, versions, URLs, quotes, numbers, code-spans, frontmatter — not hope; prose fidelity is the paid semantic layer's job); the semantic Full pass is a separate consent; every cut is snapshot-backed and revertible.
+**A fidelity-first memory-defragment/cleanup engine** for agent memory — **two lanes, different contracts**: **class-B** (the memory and governance files your platform loads into context every session) gets the semantic wash — a free mechanical Quick pass plus a code-enforced fidelity gate prove zero **structured-token** loss by diff (links, dates, versions, URLs, quotes, numbers, code-spans, frontmatter — not hope; prose fidelity is the paid semantic layer's job), a separate-consent Full pass, every cut snapshot-backed and revertible. **class-A** (transcripts — the estate) gets byte-identity archiving instead — copy-verify-then-delete, never semantic-edited.
 
 ![version](https://img.shields.io/github/v/tag/TheColliery/CoalWash?label=version&color=blue)
 ![license](https://img.shields.io/badge/license-Apache_2.0-blue)
