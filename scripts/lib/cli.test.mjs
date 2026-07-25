@@ -248,7 +248,11 @@ test('measureOnly: writes NOTHING even with a dangling journal present — the t
     const beforeHome = treeSnapshot(home);
     const r = measureOnly({ cwd: proj, home });
 
-    assert.ok(r && r.measure && r.verdict, 'it still measures and judges');
+    // No `r &&` guard: measureOnly returns an unconditional object literal, so the
+    // falsy branch is unreachable — CodeQL #27 was a true positive. A guard over an
+    // impossible case proves nothing (the R4/TP-3 lesson), and if the contract ever
+    // did change, `r.measure` throws and the test still fails.
+    assert.ok(r.measure && r.verdict, 'it still measures and judges');
     assert.strictEqual(r.recover, undefined, 'no recovery result — it never ran one');
     assert.strictEqual(treeSnapshot(proj), beforeProj, 'PROJECT tree byte-identical: no restore, no journal deletion, no state write');
     assert.strictEqual(treeSnapshot(home), beforeHome, 'HOME tree byte-identical: no state/stamp written either');
