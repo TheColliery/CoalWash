@@ -53,12 +53,21 @@ export function touchesClaudeBase(p, home = os.homedir()) {
   if (!target) return true; // unresolvable ANCHOR: refuse
   return claudeBaseDirs(home).some((b) => {
     const base = canonicalOrNull(b);
-    // An absent/unresolvable BASE is not a constraint — it cannot contain anything and
-    // holds no settings.json to protect. Refusing here instead would lock out every
-    // anchor on a fresh install (no ~/.claude yet). Asymmetric on purpose: the
-    // unresolvable side that matters is the anchor, above.
-    if (!base) return false;
-    return pathWithin(target, base) || pathWithin(base, target);
+    if (base) return pathWithin(target, base) || pathWithin(base, target);
+    // A TWO-SIDED CONTAINMENT COMPARE HAS TWO ATTACK INPUTS. Hardening the subject
+    // while letting "the reference didn't resolve" be a free pass is the same
+    // false-completeness shape one axis over — and it was exploitable: a
+    // CLAUDE_CONFIG_DIR spelled UNC or `\\?\` made this return false for EVERY
+    // anchor, turning the whole guard into a no-op (settings.json took a
+    // SessionStart command hook; a cached plugin conductor.js was rewritten).
+    // So split the two meanings that were conflated:
+    //   ABSENT        -> not a constraint. Nothing to contain, no settings.json to
+    //                    protect; refusing would lock out every anchor on a fresh
+    //                    install that has no ~/.claude yet.
+    //   PRESENT but unresolvable -> REFUSE. It is real config territory wearing a
+    //                    spelling we cannot compare against, i.e. exactly the case
+    //                    the guard exists for.
+    return pathExists(b);
   });
 }
 export function globalConfigPath(home = os.homedir()) {
@@ -85,20 +94,37 @@ export function globalConfigPath(home = os.homedir()) {
 // FAIL CLOSED, never lexical: a form we cannot canonicalize returns null and the
 // CALLER refuses. The previous `catch { return path.resolve(p) }` was the fail-open
 // that made an unresolvable shape look like a clean path.
-const WIN_UNC_OR_DEVICE_RE = /^[\\/]{2}/;               // \\server\share AND \\?\ / \\.\ device paths
-const WIN_SHORT_8_3_RE = /(^|[\\/])[^\\/]{1,8}~\d+(\.[^\\/]{1,3})?([\\/]|$)/;
+// A SHAPE-REFUSAL BELONGS ON THE INPUT, WHERE THE AMBIGUITY LIVES — never on the
+// canonicalizer's OUTPUT, where canonicalization has already resolved it away.
+// The previous revision tested an 8.3 pattern against `out` and had it exactly
+// backwards (measured): a REAL alias `…\A-DIRE~1` is EXPANDED by native, so the
+// branch never fired on one; while `…\PROGRA~1` and `…\backup~1` — real
+// directories whose LEGAL long names merely look 8.3-ish — come back unchanged and
+// were REFUSED. Pure false positive, and an expensive one: it made a project at
+// `…\work\backup~1\myproject` unwashable and silently switched off the writeguard
+// airbag for `notes~1.md`. There is no residual 8.3 ambiguity to refuse: if the
+// path exists, native resolves the alias; if it does not, native throws and we
+// return null. So the check is GONE rather than moved.
+const WIN_UNC_OR_DEVICE_RE = /^[\\/]{2}/; // \\server\share AND \\?\ / \\.\ device paths
 export function canonicalOrNull(p) {
   if (typeof p !== 'string' || !p) return null;
+  // INPUT-side shape refusal: `\\?\` switches OFF Windows path normalization, and a
+  // UNC spelling of a local dir can never be compared against a drive-letter root.
+  if (process.platform === 'win32' && WIN_UNC_OR_DEVICE_RE.test(p)) return null;
   let out;
   try { out = fs.realpathSync.native(p); } catch { return null; }
-  if (process.platform !== 'win32') return out; // these shapes are win32-only; `a~1` is a legal POSIX name
-  // Refuse the shapes native does NOT canonicalize. A UNC spelling of a local dir
-  // stays UNC, so it can never be compared against a drive-letter root; `\\?\`
-  // switches OFF Windows path normalization entirely. Neither is a form a real
-  // project cwd needs, and refusing is recoverable (run from the normal path).
-  if (WIN_UNC_OR_DEVICE_RE.test(p) || WIN_UNC_OR_DEVICE_RE.test(out)) return null;
-  if (WIN_SHORT_8_3_RE.test(out)) return null; // an 8.3 component survived native — do not guess
+  // OUTPUT-side, and this one is NOT a duplicate of the input check: a mapped
+  // network drive (`Z:\…`) has an ordinary input shape but native RESOLVES it to a
+  // UNC form, which is again incomparable with a drive-letter root.
+  if (process.platform === 'win32' && WIN_UNC_OR_DEVICE_RE.test(out)) return null;
   return out;
+}
+
+// Does the path exist at all (without following the final link)? Used to tell
+// "absent" apart from "present but unresolvable" — a distinction two guards below
+// depend on, and conflating them is how a fail-closed check becomes a free pass.
+export function pathExists(p) {
+  try { fs.lstatSync(p); return true; } catch { return false; }
 }
 
 // LENIENT variant — NON-SECURITY USE ONLY (the findProjectRoot marker walk, which

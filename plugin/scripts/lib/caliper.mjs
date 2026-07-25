@@ -670,11 +670,16 @@ function saveState(proj, projectRoot, home) {
     const base = (proj && typeof proj === 'object' && !Array.isArray(proj)) ? proj : {};
     // ONE-SHOT, not per-write (Phoenix #3). The stray sweep is a ONE-TIME migration
     // for a condition the never-create guard makes unrepeatable, but it ran on EVERY
-    // saveState at O(dirs in ~/.claude/projects) — measured ~0.7 ms per dir, which at
-    // this box's 21 dirs pushed the real hook median to 102.6 ms, over the <=100 ms
-    // budget, on a PostToolUse(Agent) path that fires on every spawn (blind wave R2 /
-    // TP-6). The suite never saw it because every fixture starts with an empty
-    // projects/. The flag is version-STABLE bookkeeping — no field's semantics
+    // saveState at O(dirs in ~/.claude/projects), on a PostToolUse(Agent) path that
+    // fires on every spawn (blind wave R2 / TP-6). The suite never saw it because
+    // every fixture starts with an empty projects/.
+    // HONEST NUMBERS, re-measured with a REAL state.json in each sibling dir (the
+    // first figures were taken against EMPTY siblings, so the per-dir read never
+    // happened — an under-measurement, corrected here): the ONE-SHOT migration write
+    // costs 9.4 ms @ N=21 · 14.5 ms @ N=100 · 107.6 ms @ N=1000. Steady state is flat
+    // at ~3.2-3.5 ms regardless of N, which is the property that matters: only the
+    // single migration write pays, and only once per project. The flag is
+    // version-STABLE bookkeeping — no field's semantics
     // change, so no STATE_SCHEMA bump (this file's own rule).
     const alreadySwept = base.strayPruneDone === true;
     const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true };

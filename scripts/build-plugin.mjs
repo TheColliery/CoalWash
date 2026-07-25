@@ -147,6 +147,26 @@ export function checkDist(distRoot = dist) {
     }
   };
   if (fs.existsSync(distRoot)) sweepUnaccounted('');
+  // THE RULE, so a FOURTH exclusion inherits it by construction: EVERY exclusion
+  // sharing the filesUnder walks owns an absence-assert over exactly what it removes.
+  // UNWIRED_ENGINE had one, the dot-entry exclusion gained one, and `isTest` — the
+  // third — had none, so anything named *.test.* INSIDE a DIST_ITEM was invisible in
+  // both directions (sweepUnaccounted skips it too: it IS under a DIST_ITEM). Proven
+  // blind for plugin/scripts/lib/pwned.test.mjs, plugin/hooks/pwned.test.js, and an
+  // `x.test.mjs/` DIRECTORY — an unlimited unchecked subtree. Fourth wave for this
+  // shape; adding the assert is not enough, the invariant has to be the thing stated.
+  const testEntriesIn = (rel) => {
+    const abs = path.join(distRoot, rel);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return [];
+    return fs.readdirSync(abs, { withFileTypes: true }).flatMap((e) => {
+      const r = path.join(rel, e.name);
+      if (isTest(e.name)) return [r];                       // file OR directory
+      return e.isDirectory() ? testEntriesIn(r) : [];
+    });
+  };
+  for (const item of DIST_ITEMS) {
+    for (const rel of testEntriesIn(item)) out.push(`test artifact present in plugin/ (dev-only, never ships — clean-clone): ${rel}`);
+  }
   return out;
 }
 

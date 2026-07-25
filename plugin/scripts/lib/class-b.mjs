@@ -33,7 +33,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir, canonicalOrNull } from './config-load.mjs';
+import { claudeBaseDir, canonicalOrNull, pathExists } from './config-load.mjs';
 
 const IMPORT_DEPTH_MAX = 5; // CC @import recursion cap (docs: max 5 hops)
 const RULES_FILE_CAP = 500; // defensive cap on a runaway rules tree
@@ -82,6 +82,15 @@ export function physicalForCreate(p) {
   for (;;) {
     const phys = physicalOrNull(cur);
     if (phys) return tail.length ? path.join(phys, ...tail.reverse()) : phys;
+    // A FAIL-CLOSED PRIMITIVE BECOMES FAIL-OPEN AT THE FIRST CALLER THAT TREATS null
+    // AS "CLIMB HIGHER AND GUESS LEXICALLY". Climbing is only legitimate over a
+    // segment that DOES NOT EXIST YET (the whole point: resolve the deepest existing
+    // ancestor of a path about to be created). A segment that EXISTS but that
+    // physicalOrNull refused is the opposite case — reattaching the tail across it
+    // skips the very resolution the refusal demanded, and a junction planted there
+    // then aims the write outside the guarded store (the GHSA-2hvf-7c8p-28fx /
+    // loss-class-#57 threat this function exists to close). Fail closed instead.
+    if (pathExists(cur)) return null;
     const parent = path.dirname(cur);
     if (parent === cur) return null;
     tail.push(path.basename(cur));

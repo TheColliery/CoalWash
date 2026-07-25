@@ -135,3 +135,20 @@ test('R3/TP-2: the dist gate accounts for EVERY entry at EVERY depth — plugin/
     assert.ok(checkDist(dist).some((d) => d.includes('orphan in plugin/')), 'an empty planted dir is caught too');
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
+
+test('R4/TP-4: a planted *.test.* inside a DIST_ITEM fails loud — isTest was the third exclusion sharing the walks and the only one with no absence-assert (sweepUnaccounted skips it: it IS under a DIST_ITEM)', () => {
+  const dist = scratchDist();
+  try {
+    for (const plant of [['scripts', 'lib', 'pwned.test.mjs'], ['hooks', 'pwned.test.js']]) {
+      buildDist(dist);
+      assert.deepStrictEqual(checkDist(dist), [], 'clean build is clean');
+      fs.writeFileSync(path.join(dist, ...plant), '// planted');
+      assert.ok(checkDist(dist).some((d) => d.includes('test artifact present in plugin/')), `${plant.join('/')} must fail loud`);
+    }
+    // a DIRECTORY named *.test.mjs was an unlimited unchecked subtree
+    buildDist(dist);
+    fs.mkdirSync(path.join(dist, 'scripts', 'lib', 'x.test.mjs', 'deep'), { recursive: true });
+    fs.writeFileSync(path.join(dist, 'scripts', 'lib', 'x.test.mjs', 'deep', 'anything.js'), '// hidden subtree');
+    assert.ok(checkDist(dist).some((d) => d.includes('test artifact present in plugin/')), 'a *.test.* DIRECTORY is caught too');
+  } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});

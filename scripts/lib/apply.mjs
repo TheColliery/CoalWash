@@ -61,7 +61,7 @@ import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull } fr
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
 // (security-audit locality), but this stub-sniff is imported to stay single-source.
-import { isCloudPlaceholder, ccMemoryDir } from './class-b.mjs';
+import { isCloudPlaceholder, ccMemoryDir, physicalForCreate } from './class-b.mjs';
 // NOTE a deliberate module cycle: keeps.mjs imports txDirFor/ensureSelfIgnore
 // from THIS file. Both sides bind function declarations used only at CALL
 // time, so ESM resolves the cycle safely regardless of entry order. tailings.mjs
@@ -457,15 +457,21 @@ export function applyPlan(plan, opts = {}) {
     // entry, binding a TRUSTED opts.projectRoot too (no caller has a legitimate
     // config-dir anchor, so binding it deletes the "which callers are trusted"
     // question from a security path).
-    // THE LIMIT — say it plainly rather than claim completeness a third time: some
-    // win32 spellings CANNOT be canonicalized to a comparable form (a UNC
-    // `\\server\share` path stays UNC; a `\\?\` path switches OS normalization off;
-    // an 8.3 component can survive). Those are REFUSED BY SHAPE, not resolved. So the
-    // honest statement is "every anchor is either canonicalized and compared, or
-    // refused" — NOT "every alias is detected". An earlier revision of this comment
-    // asserted the guard was unconditional; that was the same false-completeness
-    // claim this guard's own history is made of. If a new path form appears, it must
-    // land on the refuse list in `canonicalOrNull`, never be waved through here.
+    // THE LIMIT — stated plainly, and now corrected a THIRD time, because each
+    // previous wording was complete-sounding on exactly the axis that was still open:
+    //   v1 "the base dir is never a project root"  -> false: the walk's fallbacks.
+    //   v2 "unconditional, every entry, both directions" -> false: 8.3 / UNC spellings.
+    //   v3 "either canonicalized and compared, or refused by shape" -> STILL false:
+    //      it described only the ANCHOR. An unresolvable BASE on the other side of the
+    //      comparison silently answered "does not touch" for every anchor and turned
+    //      this guard into a no-op.
+    // WHAT HOLDS NOW: BOTH SIDES refuse rather than pass. The anchor is canonicalized
+    // or refused; a configured base dir that EXISTS but cannot be canonicalized also
+    // refuses; only a genuinely ABSENT base is treated as no-constraint (nothing to
+    // contain, and a fresh install must still work). That is a statement about both
+    // inputs of a two-sided compare — which is the shape of claim this guard's history
+    // says to make. A new path form joins the refuse list in `canonicalOrNull`; it is
+    // never waved through here.
     if (touchesClaudeBase(projectRoot, home)) {
       return { ok: false, error: `containment: the project anchor (${projectRoot}) is inside the Claude configuration directory (or contains it) — refusing fail-closed (that tree holds settings.json and the plugin cache; a write there is next-session code execution). Run from the actual project directory.` };
     }
@@ -971,7 +977,17 @@ export function recoverDangling(projectRoot, opts = {}) {
     let restored = 0, failed = 0, refused = 0;
     for (const m of manifest) {
       const src = path.join(snapDir, m.snap);
-      const origPhys = physicalOrNull(m.original);
+      // A DELETED FILE IS THE ONLY DAMAGE A DELETE-PHASE CRASH LEAVES — deletes run
+      // LAST by construction — and physicalOrNull could not resolve one, because it
+      // is GONE: ENOENT -> null -> the target was refused and mis-reported as
+      // "out-of-root" while sitting squarely inside the trusted roots. So recovery
+      // silently could not undo the one thing it most needed to. Use the DESTINATION
+      // twin, which resolves the deepest existing ancestor and reattaches the tail —
+      // safe to rely on only now that it fails closed instead of reattaching across
+      // an existing-but-unresolvable segment (the TP-2 hole, fixed in this commit).
+      // Containment is unchanged: the resolved path must still sit inside BOTH the
+      // caller-trusted roots and the journal's own declared roots.
+      const origPhys = physicalForCreate(m.original);
       // src must sit inside the snapshot dir; target must sit inside a
       // CALLER-TRUSTED root (the outer gate a poisoned journal can't widen) AND
       // the journal's own declared roots (secondary narrowing).

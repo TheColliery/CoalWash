@@ -1549,3 +1549,37 @@ test('R2 control: a NORMAL project anchor is unaffected by the config-territory 
     assert.strictEqual(r.ok, true, `a real project still applies: ${r.error || ''}`);
   } finally { clean(proj, home); }
 });
+
+test('R4/TP-3: recoverDangling restores a file the crash had ALREADY DELETED — the only damage a delete-phase crash leaves (deletes run LAST), and the gone path could not be resolved so it was mis-refused as out-of-root', () => {
+  const { proj, store } = sandbox();
+  try {
+    const rewritten = path.join(store, 'f.md');
+    write(rewritten, 'HALF-APPLIED GARBAGE');
+    const deleted = path.join(store, 'TOPIC.md'); // the crash already removed it: NOT on disk
+
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-777');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'the original content');
+    fs.writeFileSync(path.join(snapDir, 'f1'), '# topic\n\n- a fact that must come back\n');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([
+      { snap: 'f0', original: rewritten },
+      { snap: 'f1', original: deleted },
+    ]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), '777');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [store],
+      steps: [
+        { i: 0, type: 'rewrite', path: rewritten, status: 'done' },
+        { i: 1, type: 'delete', path: deleted, status: 'done' }, // DONE, not pending — the untested case
+      ],
+    }));
+
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'rolled-back', 'a full rollback, not "partial"');
+    assert.strictEqual(fs.readFileSync(rewritten, 'utf8'), 'the original content', 'the rewritten file rolls back (this always worked)');
+    assert.ok(fs.existsSync(deleted), 'the DELETED file comes BACK (pre-fix: silently refused — physicalOrNull returns null for a gone path, so it was counted as out-of-root)');
+    assert.strictEqual(fs.readFileSync(deleted, 'utf8'), '# topic\n\n- a fact that must come back\n', 'restored byte-exact');
+    assert.strictEqual(r.restored, 2, 'BOTH files restored');
+  } finally { clean(proj); }
+});

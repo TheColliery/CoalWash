@@ -452,3 +452,25 @@ test('#22 role-memory discovery: standalone helper is fail-closed (a role dir sy
     assert.deepStrictEqual(unknown.roleMemories, [], 'an unknown platform gets no role discovery (conservative)');
   } finally { clean(home, proj); }
 });
+
+test('R4/TP-2 [SECURITY]: physicalForCreate never reattaches a tail across an EXISTING but unresolvable segment — a junction whose target is unresolvable cannot aim a write outside the guarded root', (t) => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-pfc-')));
+  try {
+    const store = path.join(dir, 'store');
+    const outside = path.join(dir, 'OUTSIDE');
+    fs.mkdirSync(store, { recursive: true });
+    fs.mkdirSync(outside, { recursive: true });
+
+    // Control: an ordinary junction resolves, so containment SEES the escape and refuses.
+    const jn = path.join(store, 'esc');
+    try { fs.symlinkSync(outside, jn, 'junction'); } catch (e) { t.skip(`junction unavailable (${e.code})`); return; }
+    const resolved = physicalForCreate(path.join(jn, 'payload.gz'));
+    assert.ok(resolved === null || !containedIn(resolved, [fs.realpathSync(store)]),
+      'a junction out of the store is never reported as inside it');
+
+    // The climb itself: a path under a dir that EXISTS resolves normally...
+    const fresh = path.join(store, 'newdir', 'newfile.gz');
+    const okPath = physicalForCreate(fresh);
+    assert.ok(okPath && containedIn(okPath, [fs.realpathSync(store)]), 'a genuinely absent tail still resolves (that is the function\'s job)');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

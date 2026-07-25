@@ -338,3 +338,38 @@ test('R3/LOW: claudeBaseDir agrees with claudeBaseDirs when CLAUDE_CONFIG_DIR ha
     clean(home, proj);
   }
 });
+
+test('R4/TP-2: a LEGAL long name that merely looks 8.3-ish is NOT refused — the previous check tested the canonicalizer OUTPUT, where a real alias has already been expanded, so it could only ever fire on legal names', () => {
+  const { home, proj } = sandbox();
+  try {
+    for (const name of ['PROGRA~1', 'backup~1', 'notes~2', 'a~1', 'x~10']) {
+      const d = path.join(proj, name);
+      fs.mkdirSync(d, { recursive: true });
+      assert.strictEqual(canonicalOrNull(d), d, `${name} is a legal directory name and must canonicalize (it made such a project unwashable and switched off the writeguard airbag)`);
+      assert.strictEqual(touchesClaudeBase(d, home), false, `${name} is not config territory`);
+    }
+  } finally { clean(home, proj); }
+});
+
+test('R4/TP-1 [SECURITY]: an unresolvable BASE must REFUSE, not switch the guard off — absent is "no constraint", present-but-unresolvable is "refuse"', () => {
+  const { home, proj } = sandbox();
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    // ABSENT base -> not a constraint (a fresh install with no ~/.claude must still work)
+    process.env.CLAUDE_CONFIG_DIR = path.join(home, 'never-created');
+    assert.strictEqual(touchesClaudeBase(proj, home), false, 'absent base => not a constraint');
+
+    // PRESENT but spelled in a form we refuse to canonicalize -> refuse EVERY anchor
+    const real = path.join(home, 'cfgReal');
+    fs.mkdirSync(real, { recursive: true });
+    if (process.platform === 'win32') {
+      process.env.CLAUDE_CONFIG_DIR = '\u005C\u005C?\u005C' + real;   // \?\ spelling of a REAL config dir
+      assert.strictEqual(touchesClaudeBase(proj, home), true, 'present-but-unresolvable base => refuse (pre-fix this returned false for EVERY anchor and the whole guard became a no-op)');
+      process.env.CLAUDE_CONFIG_DIR = '\u005C\u005Clocalhost\u005C' + real[0] + '$' + real.slice(2); // UNC spelling
+      assert.strictEqual(touchesClaudeBase(proj, home), true, 'UNC-spelled base => refuse');
+    }
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+    clean(home, proj);
+  }
+});

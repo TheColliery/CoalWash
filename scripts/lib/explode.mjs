@@ -103,6 +103,12 @@ export function physicalForCreate(p) {
   for (;;) {
     const phys = physicalOrNull(cur);
     if (phys) return tail.length ? path.join(phys, ...tail.reverse()) : phys;
+    // TWIN of class-b.mjs physicalForCreate — same rule, same commit (sync obligation
+    // above). Climbing is only legitimate over a segment that DOES NOT EXIST YET; a
+    // segment that EXISTS but that physicalOrNull refused must fail CLOSED, or the
+    // lexical tail-reattach skips the resolution the refusal demanded and a junction
+    // planted there aims the write outside the store.
+    try { fs.lstatSync(cur); return null; } catch { /* absent -> climbing is legitimate */ }
     const parent = path.dirname(cur);
     if (parent === cur) return null;
     tail.push(path.basename(cur));
@@ -1228,7 +1234,11 @@ function existsPopulated(p) {
 // safe. `src` (OPTIONAL, kept) only yields a sharper "you aimed at the protected source" diagnostic when a
 // caller declares one; the intrinsic clobber refusal is the load-bearing default guard. Restoring to a
 // fresh/empty scratch/target path is unaffected; overwriting a populated file is opt-in via force.
-export function restoreFromSnapshot(ref, toPath, { snapshotDir = null, src = null, force = false } = {}) {
+export function restoreFromSnapshot(ref, toPath, opts) {
+  // `= {}` only defaults `undefined`, so an explicit null third argument threw on
+  // destructuring — the one caller shape that crashed a primitive whose own contract
+  // (below) is that it never throws. Normalize first, destructure after.
+  const { snapshotDir = null, src = null, force = false } = (opts && typeof opts === 'object') ? opts : {};
   // A RECOVERY PRIMITIVE MUST NEVER THROW. Every other bad ref returns a fail-closed
   // {ok:false}, but a non-string ref reached path.isAbsolute and threw
   // ERR_INVALID_ARG_TYPE — the one input shape that crashes the caller instead of
