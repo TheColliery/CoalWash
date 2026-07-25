@@ -622,6 +622,30 @@ test('CodeQL #23/#24 (js/file-system-race) — gate 1 sizes the read from the FD
   } finally { fs.statSync = realStat; rm(dir); }
 });
 
+test('RUNG5 A2 PARSER PARITY — the census reads a line through the REDUCER\'s lineText: a BOM-prefixed unit counts as unparsed, and is never advertised as cuttable', () => {
+  const dir = tmp();
+  try {
+    const objs = Array.from({ length: 40 }, (_, i) => ({ type: 'user', i }));
+    const src = writeNdjson(dir, 's.jsonl', objs);
+    // splice a U+FEFF-prefixed unit in: JS `.trim()` treats a BOM as whitespace, the reducer's
+    // lineText does not. Enough good lines around it that discovery still classifies ndjson.
+    const lines = fs.readFileSync(src, 'utf8').split('\n').filter(Boolean);
+    lines.splice(20, 0, '﻿' + JSON.stringify({ type: 'mode', i: 'BOMMED' }));
+    fs.writeFileSync(src, lines.join('\n') + '\n', 'utf8');
+
+    const r = survey(src);
+    assert.strictEqual(r.ok, true, 'the file is still ndjson — this is about parity, not discovery');
+    assert.strictEqual(r.unitsUnparsed, 1,
+      'the BOM unit is COUNTED as unparsed. Pre-fix the census `.trim()`ed before parsing, so it parsed, and unitsUnparsed reported 0 — the honesty counter read zero for a unit the census had silently mis-typed');
+    assert.ok(!r.types || !r.types.mode,
+      'and it is NOT advertised as a cuttable type: pre-fix the census offered `mode` as 1 cuttable unit while the reducer refused to parse that very line, so an agent acting on the census got a no-op cut');
+
+    // the reducer is the authority; parity means it agrees
+    const rr = reduceFile(src, { cutTypes: ['mode'], outPath: path.join(dir, 'o.jsonl'), snapshotDir: path.join(dir, 's') });
+    assert.strictEqual(rr.unitsCut || 0, 0, 'the reducer cuts nothing here — which is exactly what the census must now predict');
+  } finally { rm(dir); }
+});
+
 test('FIX 2 (prototype pollution) — a unit typed as a JS builtin name (__proto__ / constructor) is censused as a real own-key: no vanish, no undercount, no census collapse, no Object.prototype pollution', () => {
   const dir = tmp();
   try {

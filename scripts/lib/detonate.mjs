@@ -31,7 +31,7 @@
 // the main engine already holds the safety floor (source-sacred / no-torn / byte-exact).
 import fs from 'node:fs';
 import path from 'node:path';
-import { discoverStructure, reduceToCompletion, collidesWithSource, scanWave, physicalForCreate, isContainedIn, containment, CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
+import { discoverStructure, reduceToCompletion, collidesWithSource, scanWave, physicalForCreate, isContainedIn, containment, lineText, CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
 
 // The long-string boundary for the advisory free-form flag (config key `freeStringMaxChars`, default 80).
 // A string whose UTF-8 BYTE length exceeds this, anywhere in a unit, is a mechanical "possible ore" signal
@@ -335,9 +335,19 @@ function buildReport(fd, size, struct, typeField, wantSet = null, maxChars) {
   let offset = struct.bomLen;
   for (;;) {
     const r = scanWave(fd, size, offset, REPORT_MAX_LINES, REPORT_MAX_BYTES, (lineBuf) => {
-      const text = lineBuf.toString('utf8').trim();
-      if (!text) return; // blank line — structural, not a unit (matches the reducer's blank-line handling)
-      let obj; try { obj = JSON.parse(text); } catch { unitsUnparsed++; return; } // unparseable BODY unit → counted (BREAK 4), never a silent drop; still not a cut candidate (matches the reducer)
+      // PARSE THROUGH THE REDUCER'S OWN lineText — never a second, looser reading of a line.
+      // This used to be `.toString('utf8').trim()` under a comment claiming it "matches the
+      // reducer". It did not. `.trim()` strips U+FEFF (JS treats a BOM as whitespace) while the
+      // reducer's lineText strips ONLY the line terminator — so a BOM-prefixed unit PARSED for the
+      // census and FAILED for the reducer. The census then typed it as a cut candidate while
+      // reporting `unitsUnparsed: 0`, i.e. it advertised a cuttable unit the reducer would silently
+      // refuse to cut, and simultaneously asserted nothing was unparseable (rung-5 A2). Measured:
+      // survey said 1 cuttable `mode` + unitsUnparsed 0; the reduce cut 0 and returned skipped.
+      // Two parsers on one substrate is the defect — sharing lineText removes the divergence class,
+      // not just the BOM instance.
+      const text = lineText(lineBuf);
+      if (!text.trim()) return; // blank line — structural, not a unit (blank-check may trim; the PARSE must not)
+      let obj; try { obj = JSON.parse(text); } catch { unitsUnparsed++; return; } // unparseable BODY unit → counted (BREAK 4), never a silent drop; still not a cut candidate (now genuinely matching the reducer)
       observe(obj);
     });
     if (r.done) break;
