@@ -510,7 +510,13 @@ export const STATE_SCHEMA = 1;
 // next SessionStart recomputes it, and prevBand→LEAN lets a still-FULL store
 // re-arm via the tested "qualifying past" rise). Resetting these is the SAFE
 // direction: a spurious reset just re-offers, never strands.
-export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastVerdict']);
+// `lastObeseFat` (the OBESE re-loop watermark) joins the reset for the same
+// reason `lastEscalationFat` is here — it is crossing-family state, and a
+// watermark written by a version with different re-arm semantics is not
+// trustworthy. Resetting it is the SAFE direction (worst case: one extra FREE
+// mechanical sweep). Its ADDITION is not itself a schema bump — no existing
+// field's meaning changed, per this file's own rule above.
+export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict']);
 // VERSION-STABLE — PRESERVED across a schema bump AND across the location move:
 // the project's real footprint BASELINE + history. Must survive a reinstall/
 // upgrade, or every version bump false-FULLs the store until the next clean. NOT
@@ -997,8 +1003,14 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     delete proj.quickTried;
     delete proj.quickTriedAt;
     delete proj.lastEscalationFat;
+    delete proj.lastObeseFat;
   } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
+    // OBESE RE-LOOP watermark (see the branch at the end): stamp the fat level
+    // this sweep was armed at, so the re-arm below needs GENUINE new inflow and
+    // not merely a re-read of the same fat. Stamped on the CROSSING's own state,
+    // never on the crossing OBJECT — the crossing shape is pinned by tests.
+    if (newBand === 'OBESE') proj.lastObeseFat = fatTokens;
   } else if (
     // ASK (the wizard escalation, 0f's SOLE ask site): a PLAIN force was JUST
     // consumed (case-b Quick ran this episode → quickTried set) and the store is
@@ -1055,6 +1067,40 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     (quickTried || proj.lastCrossing.session !== session)
   ) {
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
+  } else if (
+    // OBESE RE-LOOP on new fat inflow (USER 2026-07-25). BEFORE: OBESE armed
+    // exactly ONCE, on the RISE — branches 3 and 4 above are both FULL-only, so
+    // a store sitting at OBESE while it kept accreting mechanical garbage was
+    // swept once and then went silent until it either rose to FULL or fell back
+    // to LEAN. Every new wave of free-to-cut fat just rode along. NOW: each new
+    // inflow re-arms the FREE mechanical sweep, and the accumulated fat is what
+    // eventually carries the store into FULL, where the wizard ask lives.
+    //
+    // OBESE STILL NEVER ASKS. This arms a PLAIN crossing only; `escalation:true`
+    // remains FULL-only (0d/0f), so the auto-Quick loop can never turn into a
+    // question. The consent is the same standing config that already authorizes
+    // OBESE's auto-Quick — nothing costed became automatic here.
+    //
+    // THE PLATEAU GUARD is what makes this branch safe to add at all. rc.2 (g)
+    // was right that a bare `>= OBESE` gate "re-armed every flat plateau
+    // forever" — because OBESE had no watermark of its own and borrowed FULL's
+    // absent `lastEscalationFat` (`fat > -1` = always true). The fix is a
+    // watermark of its OWN, not a wider gate: `lastObeseFat` is stamped every
+    // time an OBESE crossing is armed, so an unchanged plateau compares equal
+    // and stays SILENT. Growth, never a clock — the 0e frequency law.
+    //
+    // NAMED DIVERGENCE from the FULL watermark above, which uses a strict `>`:
+    // this one carries a REGAUGE_DELTA_TOKENS cushion. FULL's re-arm fires only
+    // after a wizard ask (rare); this fires on ordinary accretion at every Stop
+    // tick, so jitter — a timestamp edit, a few reworded words — must not buy a
+    // whole sweep. Same constant and same meaning as the WARP-HOLE gate that
+    // decides "did anything real change": below it, nothing meaningful did.
+    newBand === 'OBESE' &&
+    proj.lastCrossing && proj.lastCrossing.consumed === true &&
+    fatTokens > (proj.lastObeseFat ?? 0) + REGAUGE_DELTA_TOKENS
+  ) {
+    proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
+    proj.lastObeseFat = fatTokens;
   }
   return saveState(proj, projectRoot, home);
 }

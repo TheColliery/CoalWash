@@ -83,7 +83,7 @@ export function forceAuto(opts) {
   } else {
     headline = `FULL band + break-even proven (numbers: fat ~${fat} tok)`;
   }
-  return `[CoalWash] ${headline}.${payback}${spawnBill} force is non-optional at FULL (the OS-maintenance model) — run the free mechanical Quick pass NOW (stage-only; every cut is snapshot-backed — one command rolls the whole run back), then note the receipt path to the user in one line. This fires once per crossing, not per session. ${ANSWER_FIRST_REMINDER}`;
+  return `[CoalWash] ${headline}.${payback}${spawnBill} force is non-optional at FULL (the OS-maintenance model) — run the free mechanical Quick pass NOW (stage-only; every cut is snapshot-backed — one command rolls the whole run back), then push the one-line result (receipt.mjs's oneLineResult) — ALWAYS, even when the pass cut nothing, so the user can tell a working autopilot from a dead one. Render its prose in the user's language; keep the numbers and the unit \`tok\` verbatim. This fires once per crossing, not per session. ${ANSWER_FIRST_REMINDER}`;
 }
 
 // The OBESE auto-directive (queue 0d "OBESE AUTO-QUICK, NO ASK"; F3 made it
@@ -103,7 +103,7 @@ export function obeseAutoQuick(opts) {
   const { fatTokens, breakEven } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
   const payback = paybackLine(breakEven, 'quick');
-  return `[CoalWash] memory crossed the OBESE ceiling (fat ~${fat} tok) — the configured exercise is quick.${payback} standing config authorizes the free mechanical Quick pass NOW, no ask — run it (stage-only; every cut is snapshot-backed and revertible), then push ONLY the one-line result (receipt.mjs's oneLineResult — no full receipt block, no narration; cutting nothing stays silent). This fires once per crossing, not per session. ${ANSWER_FIRST_REMINDER}`;
+  return `[CoalWash] memory crossed the OBESE ceiling (fat ~${fat} tok) — the configured exercise is quick.${payback} standing config authorizes the free mechanical Quick pass NOW, no ask — run it (stage-only; every cut is snapshot-backed and revertible), then push ONLY the one-line result (receipt.mjs's oneLineResult — no full receipt block, no narration). ALWAYS push that line, even when the pass cut nothing: a silent run is indistinguishable from no run at all. Render its prose in the user's language; keep the numbers and the unit \`tok\` verbatim. This fires once per crossing, not per session — and a NEW crossing arms on each new lump of fat, never on a timer and never on an unchanged plateau. ${ANSWER_FIRST_REMINDER}`;
 }
 
 // The wizard-escalation ask (queue 0f, "AUTHORITATIVE 3-FLOW" — SUPERSEDES

@@ -419,6 +419,17 @@ async function handleStop(input) {
     caliper.markQuickTried(home, projectRoot, now);
   }
 
+  // LANGUAGE (series standard system #2) — the Stop channel was the ONE
+  // delivery surface that never carried the locked-language clause the
+  // SessionStart and seatbelt channels both emit; every directive above ends in
+  // a user-facing push (the one-line receipt at minimum), so the lock has to
+  // reach here too. `auto` stays silent by design: following the conversation's
+  // language is baseline agent behaviour and costs no tokens to ask for.
+  const language = clampedRead(cfg, 'language');
+  if (language !== 'auto') {
+    reason += `\n[CoalWash] (language=${language} — deliver user-facing prose in that language; keep technical terms, commands, paths, numbers, and units verbatim)`;
+  }
+
   caliper.consumeCrossing(home, projectRoot, now); // once per crossing (consume-at-emission)
   process.stdout.write(JSON.stringify({ decision: 'block', reason })); // sanctioned Stop blocking-feedback channel (Phoenix #13; mirrors rot-canary-stop.js)
 }

@@ -15,19 +15,32 @@ function ktok(n) {
 
 // One-line RESULT surface (beta.12 item 2 — MEMORY.md "DISPLAY FORMAT FINAL"
 // / "COLLAPSED TO ONE SENTENCE EVER"): the single line CoalWash speaks after
-// ANY wash that actually cut something — a big clean, a small clean, or the
-// autonomous broom, all the SAME template, only the numbers differ. Cutting
-// NOTHING is SILENCE (returns null — no second message type exists, per the
-// user's own trim: "แค่นี้พอ...การมีใบเสร็จมันรกด้วย"). This is the terse
-// PUSH surface; buildReceipt's full block stays the opt-in PULL surface
-// (available on request via /stats or the wizard, never advertised per-run).
+// EVERY wash — a big clean, a small clean, the autonomous broom, the FULL
+// force-run, all the SAME template, only the numbers differ.
+//
+// ALWAYS SPEAKS — กฎเหล็ก (USER 2026-07-25). This REVERSES the beta.12 trim
+// ("cutting nothing is SILENCE", returns null, per the user's own
+// "แค่นี้พอ...การมีใบเสร็จมันรกด้วย"). The reversal is deliberate and the
+// reason is the loop above it: once the OBESE sweep re-fires on every new fat
+// inflow, a silent zero-cut run is indistinguishable from a run that never
+// happened, and the user cannot tell a working autopilot from a dead one. A
+// zero line is the proof of life. NEVER reintroduce the null return.
+//
+// Canonical form is the user's: `ตัดไขมัน X tok (−Y%)` — TWO numbers, which is
+// also what SKILL.md always claimed ("ONE line, two numbers") while the code
+// shipped three. The EN string below is the BASELINE (series language standard:
+// factory auto follows the conversation, EN needs no extra work); the agent
+// renders the PROSE in the user's language and keeps the numbers and the unit
+// `tok` VERBATIM. This is the terse PUSH surface; buildReceipt's full block
+// stays the opt-in PULL surface (/stats or the wizard, never advertised).
 export function oneLineResult(opts) {
-  const { cutTokens, cutPercent, savedTokens } = opts || {};
-  const cut = Math.round(Number(cutTokens) || 0);
-  if (cut <= 0) return null; // nothing cut -> silence IS the system working
-  const pct = Number.isFinite(cutPercent) ? Math.round(cutPercent) : 0;
-  const saved = Math.max(0, Math.round(Number(savedTokens) || 0));
-  return `[CoalWash] cut ~${ktok(cut)} tok fat (−${pct}%), saved ~${ktok(saved)} tok`;
+  const { cutTokens, cutPercent } = opts || {};
+  // Clamped, never null: a nonsensical negative cut renders as a clean zero
+  // rather than a garbled line — the old code returned null here, and silence
+  // is exactly what the กฎเหล็ก forbids.
+  const cut = Math.max(0, Math.round(Number(cutTokens) || 0));
+  const pct = Number.isFinite(cutPercent) ? Math.max(0, Math.round(cutPercent)) : 0;
+  return `[CoalWash] cut ~${ktok(cut)} tok (−${pct}%)`;
 }
 
 // r = {

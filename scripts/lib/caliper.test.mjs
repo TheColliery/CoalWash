@@ -1302,14 +1302,109 @@ test('rc.2: a no-session call NEVER re-arms a consumed crossing (undefined !== u
   } finally { clean(home, proj); }
 });
 
-test('rc.2 (g) FULL-ONLY GATE: an OBESE consumed crossing NEVER re-arms via branch 4 — even a fat-grown new session (the blocker fix: OBESE has no lastEscalationFat, so `>= OBESE` re-armed every flat plateau forever; OBESE auto-Quicks through its OWN crossing path, it does not need — and must not get — the FULL wizard re-arm)', () => {
+// THE POST-SKIP LOOP, END TO END (USER spec 2, 2026-07-25). The pieces are each
+// pinned above (rc.2 (d)/(h)/(i)); this walks the WHOLE user-described sequence
+// in one test, because every piece can be green while the SEQUENCING is broken.
+// Note what "the user pressed Skip" means mechanically: NOTHING is recorded. The
+// crossing is consumed at EMISSION and no CLI exists for the agent to report a
+// choice back, so declining and never answering are the same state — the loop
+// below is what re-engages either way, driven purely by new fat.
+test('POST-SKIP LOOP (USER spec 2): FULL → force-Quick → still over → wizard ask → (skip) → NEW fat → force-Quick AGAIN → ask AGAIN', () => {
+  const { home, proj } = sandbox();
+  try {
+    const S = 'sess-A';
+    // 1. rise into FULL arms a PLAIN crossing → the Stop hook force-runs Quick.
+    recordCrossing(home, proj, 'FULL', 'LEAN', 1000, { fatTokens: 5000, session: S });
+    assert.strictEqual(pstate(home, proj).lastCrossing.escalation, undefined, 'a rise arms a PLAIN force, never an ask');
+    consumeCrossing(home, proj, 1100);          // emitted forceAuto
+    markQuickTried(home, proj, 1100);           // the force always runs Quick
+
+    // 2. still over after the free sweep → the ONE ask site arms.
+    recordCrossing(home, proj, 'FULL', 'FULL', 2000, { quickTried: true, fatTokens: 5000, session: S });
+    assert.strictEqual(pstate(home, proj).lastCrossing.escalation, true, 'force-THEN-ask: the wizard escalation arms');
+    assert.strictEqual(pstate(home, proj).lastEscalationFat, 5000, 'the ask stamps the level it flagged');
+    consumeCrossing(home, proj, 2100);          // emitted wizardEscalation; user presses SKIP (nothing recorded)
+
+    // 3. SKIP does not latch: the same fat re-arms NOTHING (no nag)...
+    recordCrossing(home, proj, 'FULL', 'FULL', 3000, { quickTried: true, fatTokens: 5000, session: S });
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'post-skip plateau stays silent — the ask is growth-driven, never a timer');
+
+    // 4. ...but NEW fat re-runs the FREE sweep FIRST (never ask about fat the
+    //    code could have cut), and only then re-offers the wizard.
+    recordCrossing(home, proj, 'FULL', 'FULL', 4000, { quickTried: true, fatTokens: 9000, session: S });
+    const reForce = pstate(home, proj).lastCrossing;
+    assert.strictEqual(reForce.consumed, false, 'new fat re-arms');
+    assert.notStrictEqual(reForce.escalation, true, 'and it is a PLAIN force-Quick, NOT a straight re-ask');
+    consumeCrossing(home, proj, 4100);
+    markQuickTried(home, proj, 4100);
+
+    // 5. still over → the wizard ask RE-OFFERS at the new level.
+    recordCrossing(home, proj, 'FULL', 'FULL', 5000, { quickTried: true, fatTokens: 9000, session: S });
+    assert.strictEqual(pstate(home, proj).lastCrossing.escalation, true, 'the ask re-offers while fat remains');
+    assert.strictEqual(pstate(home, proj).lastEscalationFat, 9000, 'the watermark climbs monotonic — one ask per new lump');
+  } finally { clean(home, proj); }
+});
+
+// RE-BASED 2026-07-25 by USER order (the OBESE RE-LOOP). This test used to pin
+// "an OBESE consumed crossing NEVER re-arms". That premise is REVERSED: the free
+// mechanical sweep must now re-fire on every new fat inflow. What the old test
+// was really protecting — the every-session-PLATEAU nag rc.2 (g) closed — is NOT
+// weakened, it moves to its own test below: the re-arm is growth-gated by
+// `lastObeseFat`, so a plateau still stays silent. The old gate achieved no-nag
+// by refusing ALL re-arms; the new one achieves it by requiring real growth.
+test('OBESE RE-LOOP (USER 2026-07-25): a consumed OBESE crossing RE-ARMS the free sweep once fat GROWS by a meaningful lump — the new-inflow loop', () => {
   const { home, proj } = sandbox();
   try {
     seedConsumed(home, proj, { band: 'OBESE', at: 1000, session: 'sess-A' });
-    // new session, fat grown — under the buggy `>= OBESE` gate this re-armed;
-    // FULL-only gate leaves the consumed OBESE crossing consumed.
     recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { fatTokens: 3000, session: 'sess-B' });
-    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'OBESE does NOT re-arm — the FULL-only gate closes the every-session-plateau nag');
+    const c = pstate(home, proj).lastCrossing;
+    assert.strictEqual(c.consumed, false, 'new fat inflow re-arms the OBESE auto-Quick');
+    assert.strictEqual(c.band, 'OBESE');
+    assert.notStrictEqual(c.escalation, true, 'OBESE arms a PLAIN crossing — it must NEVER arm the wizard escalation (0d/0f)');
+    assert.strictEqual(pstate(home, proj).lastObeseFat, 3000, 'the watermark advances to the swept level');
+  } finally { clean(home, proj); }
+});
+
+test('OBESE RE-LOOP: an unchanged PLATEAU still re-arms NOTHING — the rc.2 (g) no-nag guarantee, now kept by the growth gate instead of a blanket refusal', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedConsumed(home, proj, { band: 'OBESE', at: 1000, session: 'sess-A' }, { lastObeseFat: 3000 });
+    // same fat, later session, and again — a plateau must stay silent forever.
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { fatTokens: 3000, session: 'sess-B' });
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'plateau: no re-arm');
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 3000, { fatTokens: 3000, session: 'sess-C' });
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'still silent on the third consecutive plateau session');
+  } finally { clean(home, proj); }
+});
+
+test('OBESE RE-LOOP: a JITTER-sized rise (under the REGAUGE_DELTA_TOKENS cushion) does NOT buy a sweep — a timestamp edit is not an inflow', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedConsumed(home, proj, { band: 'OBESE', at: 1000, session: 'sess-A' }, { lastObeseFat: 3000 });
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { fatTokens: 3000 + REGAUGE_DELTA_TOKENS, session: 'sess-B' });
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'exactly at the cushion is NOT past it — still silent');
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 3000, { fatTokens: 3000 + REGAUGE_DELTA_TOKENS + 1, session: 'sess-C' });
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, false, 'one token past the cushion re-arms');
+  } finally { clean(home, proj); }
+});
+
+test('OBESE RE-LOOP: the rise into OBESE stamps the watermark, so the very next same-fat gauge does NOT immediately re-arm (the plateau-forever bug rc.2 (g) named)', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordCrossing(home, proj, 'OBESE', 'LEAN', 1000, { fatTokens: 4000, session: 'sess-A' });
+    assert.strictEqual(pstate(home, proj).lastObeseFat, 4000, 'the rise stamps the watermark');
+    consumeCrossing(home, proj, 1500);
+    recordCrossing(home, proj, 'OBESE', 'OBESE', 2000, { fatTokens: 4000, session: 'sess-B' });
+    assert.strictEqual(pstate(home, proj).lastCrossing.consumed, true, 'same fat after the rise → silent, not an instant re-arm');
+  } finally { clean(home, proj); }
+});
+
+test('OBESE RE-LOOP: the LEAN reset clears the watermark, so a re-fattened store starts its loop fresh', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedConsumed(home, proj, { band: 'OBESE', at: 1000, session: 'sess-A' }, { lastObeseFat: 9000 });
+    recordCrossing(home, proj, 'LEAN', 'OBESE', 2000, { fatTokens: 0 });
+    assert.strictEqual(pstate(home, proj).lastObeseFat, undefined, 'LEAN clears the OBESE watermark like every other crossing-family field');
   } finally { clean(home, proj); }
 });
 
@@ -1434,7 +1529,11 @@ test('rc.2 SCHEMA (f): a FRESH install (no state file) → loadState is {} and w
 });
 
 test('rc.2 SCHEMA (e): the reset-list constant matches the fields actually cleared (the mechanism a future ruling extends)', () => {
-  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastVerdict']);
+  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict']);
+  // STATE_SCHEMA stays 1 even though the OBESE re-loop (2026-07-25) added
+  // `lastObeseFat` to the list: adding a NEW field is not a semantics change to
+  // any EXISTING one, which is this file's own stated bump rule. A pre-existing
+  // rc-era state simply has no watermark and starts its loop from zero.
   assert.strictEqual(STATE_SCHEMA, 1);
   // every write stamps the schema (round-trip through the public write API)
   const { home, proj } = sandbox();

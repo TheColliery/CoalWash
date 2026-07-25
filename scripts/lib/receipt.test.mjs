@@ -79,27 +79,44 @@ test('a receipt built with missing gate fields degrades to "unknown" — never a
 // only the numbers differ; cutting nothing is SILENCE).
 // ---------------------------------------------------------------------------
 
-test('oneLineResult: cuts fat, one line, two numbers, no box-art/receipt narration', () => {
-  const r = oneLineResult({ cutTokens: 12345, cutPercent: 23.7, savedTokens: 12000 });
-  assert.strictEqual(r, '[CoalWash] cut ~12.3k tok fat (−24%), saved ~12.0k tok');
+test('oneLineResult: cuts fat, one line, exactly TWO numbers, no box-art/receipt narration', () => {
+  const r = oneLineResult({ cutTokens: 12345, cutPercent: 23.7 });
+  assert.strictEqual(r, '[CoalWash] cut ~12.3k tok (−24%)');
   assert.strictEqual(r.split('\n').length, 1, 'exactly one line');
 });
 
-test('oneLineResult: cutting nothing is SILENCE (null) — the fail-safe default, never an empty-clean sentence', () => {
-  assert.strictEqual(oneLineResult({ cutTokens: 0, cutPercent: 0, savedTokens: 0 }), null);
-  assert.strictEqual(oneLineResult({ cutTokens: -5 }), null, 'a negative cut is nonsensical -> silence, never a garbled line');
-  assert.strictEqual(oneLineResult(), null, 'missing input degrades to silence, never throws');
+// RE-BASED 2026-07-25 by USER order (กฎเหล็ก: EVERY run prints the receipt).
+// This test used to pin the OPPOSITE — "cutting nothing is SILENCE (null)".
+// The reversal is the point: with the OBESE sweep re-firing on every new fat
+// inflow, a silent zero-cut run is indistinguishable from a run that never
+// happened, so the zero line IS the proof of life.
+test('oneLineResult: EVERY run speaks — a zero cut prints the same one-line receipt, never null (no silent runs)', () => {
+  assert.strictEqual(oneLineResult({ cutTokens: 0, cutPercent: 0 }), '[CoalWash] cut ~0 tok (−0%)');
+  assert.strictEqual(oneLineResult({ cutTokens: -5 }), '[CoalWash] cut ~0 tok (−0%)', 'a nonsensical negative cut clamps to a clean zero, never a garbled line');
+  assert.strictEqual(oneLineResult(), '[CoalWash] cut ~0 tok (−0%)', 'missing input still speaks, never throws');
   assert.doesNotThrow(() => oneLineResult(null));
+  assert.strictEqual(oneLineResult(null), '[CoalWash] cut ~0 tok (−0%)');
+});
+
+test('oneLineResult: one template for every path — Auto-Quick, Force-Quick and the Full Pass differ ONLY in the numbers', () => {
+  const shape = /^\[CoalWash\] cut ~\S+ tok \(−\d+%\)$/;
+  for (const [label, o] of [
+    ['auto-quick, nothing found', { cutTokens: 0, cutPercent: 0 }],
+    ['auto-quick, small cut', { cutTokens: 400, cutPercent: 5 }],
+    ['force-quick', { cutTokens: 8000, cutPercent: 12 }],
+    ['full pass', { cutTokens: 120000, cutPercent: 41 }],
+  ]) assert.match(oneLineResult(o), shape, label);
 });
 
 test('oneLineResult: a small cut under 1000 tok renders as a bare number (ktok\'s own convention), never "0.1k"', () => {
-  const r = oneLineResult({ cutTokens: 400, cutPercent: 5, savedTokens: 380 });
-  assert.strictEqual(r, '[CoalWash] cut ~400 tok fat (−5%), saved ~380 tok');
+  assert.strictEqual(oneLineResult({ cutTokens: 400, cutPercent: 5 }), '[CoalWash] cut ~400 tok (−5%)');
 });
 
-test('oneLineResult: malformed percent/saved degrade to safe zeros/rounding, never NaN/Infinity', () => {
-  const r = oneLineResult({ cutTokens: 1000, cutPercent: NaN, savedTokens: 'nope' });
+test('oneLineResult: malformed percent degrades to a safe zero, never NaN/Infinity/a negative percent', () => {
+  const r = oneLineResult({ cutTokens: 1000, cutPercent: NaN });
   assert.ok(!r.includes('NaN'));
   assert.ok(!r.includes('Infinity'));
-  assert.strictEqual(r, '[CoalWash] cut ~1.0k tok fat (−0%), saved ~0 tok');
+  assert.strictEqual(r, '[CoalWash] cut ~1.0k tok (−0%)');
+  assert.strictEqual(oneLineResult({ cutTokens: 1000, cutPercent: -30 }), '[CoalWash] cut ~1.0k tok (−0%)', 'a negative percent clamps — never renders "(−-30%)"');
+  assert.strictEqual(oneLineResult({ cutTokens: 1000, cutPercent: Infinity }), '[CoalWash] cut ~1.0k tok (−0%)');
 });

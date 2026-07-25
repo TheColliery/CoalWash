@@ -1447,6 +1447,37 @@ test('self-update: due on first boot (default ask), stamped, then silent inside 
   } finally { clean(home, proj); }
 });
 
+// The Stop channel carries the language lock too (2026-07-25). It was the ONE
+// delivery surface that never did — harmless while its directives were pure
+// agent instructions, but every one of them now ends in a user-facing push (the
+// one-line receipt, which must print on EVERY run), so the lock has to reach it.
+test('language lock reaches the STOP channel — every directive there ends in a user-facing receipt push', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { updateMode: 'off', language: 'th' });
+    seedState(home, proj, {
+      lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'OBESE', reason: 'bmi', economical: false, fatTokens: 1234, at: Date.now() },
+    });
+    const reason = parseBlock(run(proj, home, { hook_event_name: 'Stop' }).stdout);
+    assert.ok(reason.includes('(language=th'), reason);
+    assert.ok(reason.includes('numbers, and units verbatim'), 'the receipt numbers/units must NOT be translated');
+  } finally { clean(home, proj); }
+});
+
+test('language lock: `auto` (the factory default) adds NO clause to the Stop channel — following the conversation is baseline behaviour, not a token to spend', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home); // language defaults to auto
+    seedState(home, proj, {
+      lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'OBESE', reason: 'bmi', economical: false, fatTokens: 1234, at: Date.now() },
+    });
+    const reason = parseBlock(run(proj, home, { hook_event_name: 'Stop' }).stdout);
+    assert.ok(!reason.includes('language='), reason);
+  } finally { clean(home, proj); }
+});
+
 test('language lock is appended to the self-update directive (band nudges carry no text of their own to translate any more)', () => {
   const { home, proj } = sandbox();
   try {
