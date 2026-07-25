@@ -33,7 +33,7 @@ The conductor measures at session start; the CLI gauge reports the band (`cli.mj
 | Band | Trigger | Behavior |
 |---|---|---|
 | LEAN | Ceiling disarmed (BMI under the 1.5×/1.2× hysteresis or unmeasurable) and the capacity wall un-hit | Silent — a run would no-op; do not offer one. |
-| OBESE | Ceiling armed (BMI ≥ 1.5× the floor, until it falls back to 1.2×), but washing does not yet pay for itself | Auto-runs the mechanical Quick pass under standing config, **no ask** — pushes `oneLineResult` only, silent if nothing cut. **OBESE never asks, however long it persists** — the wizard door lives at FULL only. |
+| OBESE | Ceiling armed (BMI ≥ 1.5× the floor, until it falls back to 1.2×), but washing does not yet pay for itself | Auto-runs the mechanical Quick pass under standing config, **no ask** — pushes `oneLineResult` every time, including a zero cut. Re-arms on each genuinely new wave of fat past a growth watermark (not a clock), so a store that keeps accreting garbage keeps getting swept; an unchanged plateau stays silent. **OBESE never asks, however long it persists** — the wizard door lives at FULL only. |
 | FULL | Ceiling armed AND the break-even proof holds (`economic`, latched per episode) — OR the capacity wall is hit (`absolute-cap` / `externalize`) | `economic`/`absolute-cap`: **force-runs the mechanical Quick pass**, numbers SHOWN every fire, every cut snapshot-backed. Still over FULL after that Quick ran this episode → **ONE run/later wizard ask** (re-armed only once fat grows past the last-flagged level). `externalize` (~all muscle): pure information — advise externalize/split, never a wash. |
 
 ## The run pipeline (every `/coalwash` run — ordered; mechanics in method)
@@ -44,7 +44,7 @@ The conductor measures at session start; the CLI gauge reports the band (`cli.mj
 3. **Fidelity gate (code, the floor):** `gateFiles` on every rewrite/merge — ANY structured-token drop **blocks the apply** until restored, or until the plan names that exact drop in `approvedDrops` (method §4). Nothing drops silently.
 4. **Delete authorization:** a delete/merge IN the plan is its own authorization — `apply.mjs` needs no approval flag. Safety is UNDO.
 5. **Apply (code, transactional):** `applyPlan` — snapshot verified-at-creation before the first mutation → external-writer re-read (any foreign change aborts + rolls back) → atomic writes → verify → **deletes LAST** → commit → bin population by the plan's `origin` (method §5/§8). Any failure before commit restores the snapshot. `deferred: true` → lock held: say so, stop.
-6. **Receipt (code):** push `oneLineResult` — ONE line, two numbers; cutting nothing is SILENCE. After a **gate-passed FULL clean only**, stamp `setLeanFloor` (never after Quick/partial — uncleaned fat contaminates the floor). The fuller receipt is pull-only (`/coalwash:stats`), never pushed.
+6. **Receipt (code):** push `oneLineResult` — ONE line, two numbers, on every run including a zero cut (a silent run would be indistinguishable from one that never happened). After a **gate-passed FULL clean only**, stamp `setLeanFloor` (never after Quick/partial — uncleaned fat contaminates the floor). The fuller receipt is pull-only (`/coalwash:stats`), never pushed.
 
 ## Recovery — the bins (pull-only, method §8)
 
@@ -64,7 +64,7 @@ You never compose ask prose or invent a rationale — render exactly the templat
 
 - **SessionStart only MEASURES** (caches the verdict + arms/clears the once-per-crossing edge); the **`Stop` hook is the sole delivery surface** — a `{decision:'block', reason}` blocking channel (rot-canary's), enforced, not an ignorable context line.
 - **Answer-first, always:** answer the user's actual message for this turn FIRST; the ask/directive rides at the END of your response, never preempts the prompt (once it resolves, return to that answer).
-- **`obeseAutoQuick`** — the OBESE default, NO ask (standing config): run Quick NOW, push `oneLineResult` only; marks the episode "Quick tried".
+- **`obeseAutoQuick`** — the OBESE default, NO ask (standing config): run Quick NOW, push `oneLineResult` only; marks the episode "Quick tried"; re-arms on the next genuinely new wave of fat past a growth watermark, not on an unchanged plateau.
 - **`wizardEscalation`** — the **ONE ask site in the system**: FULL still over after its forced Quick already ran this episode → a run/later opening the wizard's semantic tier; re-arms only on fat GROWTH, never a timer. OBESE never reaches it.
 - **`forceAuto`** — every FULL crossing (`economic` and `absolute-cap`) force-runs Quick under the same standing consent, **non-optional, NO off switch** (the only full stop is `coalwashMode: off`); numbers shown every fire. Do NOT add a force toggle.
 - **`externalizeAdvisory`** — FULL(externalize) is pure information: never an ask, never a force (a wash cannot shrink muscle).

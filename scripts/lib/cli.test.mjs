@@ -90,7 +90,7 @@ test('gauge --json: one call returns recover + platform + measure + verdict + br
   } finally { clean(home, proj); }
 });
 
-test('gauge is READ-ONLY toward CoalWash state: no state file, no stamp, no verdict cache is written', () => {
+test('gauge writes no state when no dangling journal exists: no state file, no stamp, no verdict cache is written', () => {
   const { home, proj } = sandbox();
   try {
     const r = run(proj, home, ['gauge', '--json']);

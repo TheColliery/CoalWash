@@ -4,7 +4,7 @@
 
 ## 0. Preflight — the one-shot gauge CLI
 
-ONE call does the whole preflight (recoverDangling → discoverClassB → measureEntries → breakEven → bandVerdict — 0g: economics run BEFORE the band, since the band IS the break-even now; read-only toward CoalWash state — no stamp, no snooze):
+ONE call does the whole preflight (recoverDangling → discoverClassB → measureEntries → breakEven → bandVerdict — 0g: economics run BEFORE the band, since the band IS the break-even now; the MEASUREMENT is read-only — no stamp, no snooze — but `recoverDangling` runs FIRST and CAN write: only when a dangling prior run's journal exists, it finishes or discards that run):
 
 ```bash
 node "[LIB]/cli.mjs" gauge --json

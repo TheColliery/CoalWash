@@ -54,7 +54,7 @@ One standing gauge sits at the chokepoint — memory loads every session, so a s
 | Full | one outsider sub + the insider | Semantic garbage judgment (superseded / duplicate / point-in-time / over-verbose) by a zero-context outsider; session agent adjudicates every flag — always a separate consent |
 | Fidelity gate | code | Inventory diff, original vs new; any dropped link/date/version/frontmatter key blocks the apply |
 | Apply | code | Delete/merge authorization is plan-sourced (no separate approval step) — lock → verified snapshot → WAL → atomic writes → deletes last → commit, or whole-run rollback; `pinned` files refused outright |
-| Receipt | code | Pushes **one line** after any run that cuts something — `cut ~N tok fat (−P%), saved ~M tok` (silent if nothing cut); the fuller `class B: X KB -> X' KB · removed/trimmed/kept · fidelity gate: PASS` block is an on-demand pull (`/coalwash:stats` or the wizard), never automatic |
+| Receipt | code | Pushes **one line** after every run, including one that cuts nothing — `[CoalWash] cut ~N tok (−P%)`; the fuller `class B: X KB -> X' KB · removed/trimmed/kept · fidelity gate: PASS` block is an on-demand pull (`/coalwash:stats` or the wizard), never automatic |
 
 **Why an outsider judges, not you:** it's a stranger walking through a house it's never lived in — it can't know what you still use, so it never discards anything itself. Its only power: point and ask, *"what is this, can it go?"* You answer with a concrete reason, not a feeling — a settled answer sticks (an adjudicated keep isn't re-asked without new evidence).
 
