@@ -30,7 +30,7 @@ import { physicalForCreate as pfcClassA, isContainedIn } from './explode.mjs';
 const WIN = process.platform === 'win32';
 
 function buildCases() {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-LONGNAME-')));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-LONGNAME-')));
   const dir = path.join(root, 'store');
   const nested = path.join(dir, 'a', 'b');
   fs.mkdirSync(nested, { recursive: true });
@@ -118,7 +118,7 @@ test('TWIN-PIN: the case-folding containment compare behaves IDENTICALLY (config
 // fallback and nothing goes red, so the shapes are asserted here. BOTH sides: a
 // containment compare has two inputs, and a guard that checks one is half a guard.
 test('pathWithin REFUSES a non-canonical argument on EITHER side', () => {
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-CANON-')));
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-CANON-')));
   const child = path.join(base, 'a', 'b');
   const S = path.sep;
   try {
@@ -161,7 +161,7 @@ test('pathWithin REFUSES a non-canonical argument on EITHER side', () => {
 // two shapes (pathWithin / isContainedIn), which fold case explicitly.
 test('DEPENDENCY (win32): path.relative case-folds, which is the only reason containedIn is case-insensitive', (t) => {
   if (!WIN) { t.skip('win32-only property — POSIX paths are case-SENSITIVE by design'); return; }
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-FOLD-')));
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-FOLD-')));
   const child = path.join(base, 'a', 'b');
   try {
     assert.strictEqual(containedIn(child, [base]), true, 'sanity: same-case child is contained');

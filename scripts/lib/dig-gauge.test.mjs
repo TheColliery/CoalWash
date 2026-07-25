@@ -145,14 +145,14 @@ test('a path that cannot be stat\'d (missing / unexpanded glob) is SKIPPED, neve
 // ---------------------------------------------------------------------------
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwd-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwd-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwd-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwd-proj-')));
   fs.writeFileSync(path.join(proj, '.coalwash.json'), '{}'); // factory digCrush defaults
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   return { home, proj };
 }
 function projStatePath(home, proj) {
-  const slug = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
+  const slug = fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-');
   return path.join(home, '.claude', 'projects', slug, 'coalwash', 'state.json');
 }
 function run(cwd, home, args) {

@@ -29,8 +29,8 @@ const DAY_MS = 86400000;
 const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwea-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwea-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwea-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwea-proj-')));
   return { home, proj };
 }
 function clean(...dirs) {

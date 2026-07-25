@@ -40,6 +40,7 @@ const TESTS = [
   'scripts/lib/retier.test.mjs',
   'scripts/lib/gate-liveness.test.mjs',
   'scripts/lib/twin-pin.test.mjs',
+  'scripts/lib/fixture-canonical.test.mjs',
   'scripts/lib/root-provenance.test.mjs',
   'scripts/build-plugin.test.mjs',
 ];

@@ -11,7 +11,7 @@ import { HORIZON_MS } from './retention.mjs';
 import { ccMemoryDir } from './class-b.mjs';
 
 function sandbox() {
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj-')));
   const store = path.join(proj, 'memory');
   fs.mkdirSync(store, { recursive: true });
   return { proj, store };
@@ -155,7 +155,7 @@ test('PIN protection: pinned: true refuses BOTH delete and rewrite (gap #1)', ()
 
 test('containment is realpath-and-contain, fail-closed: a path outside the declared roots aborts untouched', () => {
   const { proj, store } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-out-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-out-')));
   try {
     const victim = path.join(outside, 'victim.md');
     write(victim, 'safe');
@@ -245,7 +245,7 @@ test('lock release is OWNER-VERIFIED: a stale-stolen holder cannot delete the ne
 // anchored containment on the candidate's own canonical self.
 test('R5/F1: recoverDangling REFUSES a journal whose snapDir points OUTSIDE the tx dir (provenance — a data-derived root is not a root)', () => {
   const { proj, store } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f1-snap-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f1-snap-')));
   try {
     // A fully-formed, marker-complete snapshot the ATTACKER owns, outside the tx dir.
     fs.writeFileSync(path.join(outside, 'f0'), 'ATTACKER PAYLOAD');
@@ -271,7 +271,7 @@ test('R5/F1: recoverDangling REFUSES a journal whose snapDir points OUTSIDE the 
 
 test('R5/F1: the refusal precedes the filesystem probes — no existence oracle at an attacker-named path', () => {
   const { proj, store } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f1-oracle-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f1-oracle-')));
   try {
     // NOTHING exists at the attacker path — no marker, no manifest. Pre-fix, the
     // marker probe ran there first and the ABSENCE decided the outcome
@@ -315,7 +315,7 @@ test('R5/F1 CONTROL: a legitimate in-tx snapDir still restores normally — the 
 test('recoverDangling REFUSES an out-of-root target from a poisoned journal (empirical A / containment bypass)', () => {
   const { proj, store } = sandbox();
   try {
-    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-victim-')));
+    const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-victim-')));
     const victim = path.join(outside, 'victim.md');
     write(victim, 'ORIGINAL VICTIM CONTENT');
     const txDir = txDirFor(proj);
@@ -343,7 +343,7 @@ test('recoverDangling REFUSES a poisoned journal whose OWN roots point outside t
   try {
     // THE CIRCULAR ATTACK the old jroots-only check missed: the journal declares
     // its own roots to be the OUTSIDE dir, so containedIn(victim, jroots) passed.
-    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-victim2-')));
+    const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-victim2-')));
     const victim = path.join(outside, 'victim.md');
     write(victim, 'ORIGINAL VICTIM CONTENT');
     const txDir = txDirFor(proj);
@@ -366,7 +366,7 @@ test('recoverDangling REFUSES a poisoned journal whose OWN roots point outside t
 
 test('recoverDangling still restores a LEGITIMATE global memory store (~/.claude/projects/<slug>/memory) — do not over-block', () => {
   const { proj } = sandbox();
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   try {
     const gstore = ccMemoryDir(proj, home); // the REAL global memory store CoalWash washes
     fs.mkdirSync(gstore, { recursive: true });
@@ -390,7 +390,7 @@ test('recoverDangling still restores a LEGITIMATE global memory store (~/.claude
 
 test('recoverDangling REFUSES a ~/.claude file OUTSIDE CoalWash\'s memory store (settings.json escalation close)', () => {
   const { proj } = sandbox();
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home2-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home2-')));
   try {
     // Inside ~/.claude but OUTSIDE the memory store: a poisoned journal that
     // declares the WHOLE ~/.claude as its roots must not restore attacker bytes
@@ -628,7 +628,7 @@ test('tx dir self-ignores: a .gitignore containing * lands inside .claude/coalwa
 
 test('global-scope lock: a global-scope action takes a lock beside the global state file and releases it on success', () => {
   const { proj, store } = sandbox();
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome-')));
   try {
     const g = path.join(store, 'global.md');
     write(g, 'global content');
@@ -640,8 +640,8 @@ test('global-scope lock: a global-scope action takes a lock beside the global st
 });
 
 test('global-scope lock: a held global lock defers a DIFFERENT project\'s global-scope run even though its OWN project lock is free', () => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome2-')));
-  const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj2-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome2-')));
+  const proj2 = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj2-')));
   const store2 = path.join(proj2, 'memory');
   fs.mkdirSync(store2, { recursive: true });
   try {
@@ -661,7 +661,7 @@ test('global-scope lock: a held global lock defers a DIFFERENT project\'s global
 
 test('global-scope lock: a plan with NO global-scope actions never touches the global lock file at all', () => {
   const { proj, store } = sandbox();
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome3-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome3-')));
   try {
     const f = path.join(store, 'local.md');
     write(f, 'v1');
@@ -829,8 +829,8 @@ test('R4: NUL-bearing and unparseable-frontmatter targets are FLAGGED, never rew
     assert.strictEqual(r.ok, true, r.error);
     assert.strictEqual(r.applied, 1, 'only the clean file was applied');
     assert.strictEqual(r.flagged.length, 2);
-    assert.ok(r.flagged.some((x) => x.path === fs.realpathSync(fbin) && /NUL/.test(x.reason)));
-    assert.ok(r.flagged.some((x) => x.path === fs.realpathSync(ffm) && /frontmatter/.test(x.reason)));
+    assert.ok(r.flagged.some((x) => x.path === fs.realpathSync.native(fbin) && /NUL/.test(x.reason)));
+    assert.ok(r.flagged.some((x) => x.path === fs.realpathSync.native(ffm) && /frontmatter/.test(x.reason)));
     assert.strictEqual(fs.readFileSync(fbin, 'utf8'), binContent, 'the binary file is byte-untouched');
     assert.strictEqual(fs.readFileSync(ffm, 'utf8'), fmContent, 'the unparseable file is byte-untouched');
     assert.strictEqual(fs.readFileSync(fok, 'utf8'), 'clean rewritten', 'the run continued on the rest');
@@ -855,7 +855,7 @@ test('#57(d) cloud-placeholder read poison (rewrite): a rewrite target that read
     const fok = path.join(store, 'clean.md');
     write(fstub, 'the REAL hydrated content a plain read would never see for a dehydrated placeholder');
     write(fok, 'clean content');
-    const stubPhys = fs.realpathSync(fstub);
+    const stubPhys = fs.realpathSync.native(fstub);
     // Inject the placeholder predicate (a real Files-On-Demand stub cannot exist
     // in a sandbox): fstub reads as a dehydrated placeholder.
     const isPlaceholder = (p) => p === stubPhys;
@@ -981,7 +981,7 @@ test('KEEPS-GATE: a whitespace-reflowed anchor still matches (normalized form ac
 
 test('KEEPS-GATE: GLOBAL keeps are consulted too (an adjudicated keep shields machine-wide)', () => {
   const { proj, store } = sandbox();
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   try {
     const f = path.join(store, 'shared.md');
     write(f, 'Global wisdom: never trust a raw floor value. Extra.');
@@ -1310,7 +1310,7 @@ test('wikilink-orphan advisory: deleting a topic a SURVIVING file still links to
 
 test('BREAK A: a forged plan whose roots point OUTSIDE projectRoot+global is REFUSED fail-closed (was: victim overwritten via circular self-authorization)', () => {
   const { proj, store } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-forged-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-forged-')));
   try {
     const victim = path.join(outside, 'victim.md');
     write(victim, 'the original user notes'); // plain prose: no structured token, so the fidelity gate never fires — isolates the containment hole
@@ -1334,7 +1334,7 @@ test('BREAK A: a forged plan whose roots point OUTSIDE projectRoot+global is REF
     // LEGIT #2 — the REAL global class-B store (ccMemoryDir, retier's 'main'
     // store) is IN the trusted set, so a plan targeting it applies (proves the
     // live RE-TIER caller's roots-shape is not broken by the new gate).
-    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-fhome-')));
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-fhome-')));
     try {
       const gstore = ccMemoryDir(proj, home);
       fs.mkdirSync(gstore, { recursive: true });
@@ -1360,8 +1360,8 @@ test('BREAK A: a forged plan whose roots point OUTSIDE projectRoot+global is REF
 
 test('BREAK A2: a forged plan.projectRoot cannot widen containment — an out-of-project victim is REFUSED for BOTH rewrite and delete (anchor is the CALLER root, never the plan)', () => {
   const { proj, store } = sandbox();                                             // the REAL, caller-trusted project
-  const victimDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-a2vic-')));
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-a2home-'))); // sandbox home: ccMemoryDir(anything) never resolves
+  const victimDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-a2vic-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-a2home-'))); // sandbox home: ccMemoryDir(anything) never resolves
   try {
     const victim = path.join(victimDir, 'victim.md');
     write(victim, 'the original user notes');                                    // plain prose: fidelity never fires -> isolates containment
@@ -1427,7 +1427,7 @@ test('BREAK A2: a forged plan.projectRoot cannot widen containment — an out-of
 test('BREAK A3: a DERIVED anchor collapsing to home is REFUSED — a forged zero-opts plan cannot delete ~/.ssh or inject a ~/.claude/settings.json hook (RCE); a project below home still washes', () => {
   // sandbox HOME (never the real ~): every call below is ZERO-opts (opts.projectRoot
   // ABSENT — the method.md §4 shape), only home + cwd overridden.
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-a3home-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-a3home-')));
   try {
     const ORIG_SETTINGS = '{"permissions":"allow","note":"real user config"}\n';
     // superset rewrite: keeps every original token + ADDS a hook -> fidelity PASSES,
@@ -1545,7 +1545,7 @@ test('BREAK B: a rollback that cannot remove a created file reports PARTIAL, nev
 // config-dir anchor and a MUTATED victim. applyPlan now asks once, at the anchor.
 // ---------------------------------------------------------------------------
 function claudeSandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   const base = path.join(home, '.claude');
   fs.mkdirSync(base, { recursive: true });
   const victim = path.join(base, 'settings.json');
@@ -1614,7 +1614,7 @@ test('R2/TP-3 [SECURITY]: EVERY CLAUDE_CONFIG_DIR entry is config territory — 
 
 test('R2 control: a NORMAL project anchor is unaffected by the config-territory guard (the guard refuses config dirs, not projects)', () => {
   const { proj, store } = sandbox();
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-h2-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-h2-')));
   try {
     const f = path.join(store, 'MEMORY.md');
     write(f, '# m\n\n- a fact\n- another fact\n');

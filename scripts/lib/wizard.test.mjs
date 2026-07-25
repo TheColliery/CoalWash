@@ -12,8 +12,8 @@ import { ccProjectSlug } from './class-b.mjs';
 delete process.env.CLAUDE_CONFIG_DIR;
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cww-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cww-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cww-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cww-proj-')));
   return { home, proj };
 }
 function clean(...dirs) {
@@ -150,7 +150,7 @@ test('wizardHandshake: a matched contract (same projectRoot/slug/config) proceed
 
 test('wizardHandshake: a clone landing in a DIFFERENT project refuses fail-closed (projectRoot + slug named)', () => {
   const { home, proj } = sandbox();
-  const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cww-proj2-')));
+  const proj2 = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cww-proj2-')));
   try {
     markedProj(proj); markedProj(proj2);
     const contract = wizardContract({ projectRoot: proj, home });

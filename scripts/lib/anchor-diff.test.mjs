@@ -9,7 +9,7 @@ import { applyPlan } from './apply.mjs';
 import { computeCandidates, anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 
 function sandbox() {
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwad-proj-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwad-proj-')));
   const store = path.join(proj, 'memory');
   fs.mkdirSync(store, { recursive: true });
   return { proj, store };
@@ -116,7 +116,7 @@ test('approved-drop excluded: a token CW itself cut (and recorded to a bin) is n
 
 test('no-snapshot no-op: null when the file has no verified snapshot yet, and when the path escapes the project root', () => {
   const { proj, store } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwad-out-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwad-out-')));
   try {
     const untouched = path.join(store, 'never-washed.md');
     write(untouched, ORIGINAL);
@@ -142,7 +142,7 @@ test('no-snapshot no-op: null when the file has no verified snapshot yet, and wh
 // (`f0`, `f1`, ...), so the bare-name allowlist admits every legitimate value.
 test('R5/F2: a poisoned manifest naming a traversal snap is SKIPPED, never read as our own snapshot', () => {
   const { proj, store } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwad-secret-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwad-secret-')));
   try {
     const secret = path.join(outside, 'secret.txt');
     fs.writeFileSync(secret, 'SECRET-CANARY-abc123 [[secret-link]]', 'utf8');
@@ -154,7 +154,7 @@ test('R5/F2: a poisoned manifest naming a traversal snap is SKIPPED, never read 
     fs.writeFileSync(path.join(snapDir, 'snap.complete'), '1000');
     // the manifest points OUT of the snapshot dir, at a file we must never read
     const rel = path.relative(snapDir, secret);
-    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: rel, original: fs.realpathSync(target) }]));
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: rel, original: fs.realpathSync.native(target) }]));
 
     const r = anchorDiff(target, { projectRoot: proj });
     const blob = JSON.stringify(r);

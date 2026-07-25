@@ -24,8 +24,8 @@ delete process.env.CLAUDE_CONFIG_DIR; // hermetic: sandbox home only
 const THAI_WORD = String.fromCharCode(0x0e17, 0x0e33, 0x0e07, 0x0e32, 0x0e19);
 
 function sandbox() {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-home-')));
-  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj-')));
   return { home, proj };
 }
 
@@ -36,7 +36,7 @@ function sandbox() {
 function ccSlugDir(home, proj) {
   // Lenient like ccProjectSlug (path.resolve, existence-independent): a modelled
   // stray cwd need not exist on disk for its slug dir to.
-  let abs; try { abs = fs.realpathSync(proj); } catch { abs = path.resolve(proj); }
+  let abs; try { abs = fs.realpathSync.native(proj); } catch { abs = path.resolve(proj); }
   const d = path.join(home, '.claude', 'projects', abs.replace(/[^A-Za-z0-9]/g, '-'));
   fs.mkdirSync(d, { recursive: true });
   return d;
@@ -59,7 +59,7 @@ function seedProj(home, proj, projState, opts = {}) {
 // Seed the OLD single-file root state (pre-relocation) — models a pre-upgrade store.
 function seedOldRoot(home, entriesByProj, { stateSchema } = {}) {
   const projects = {};
-  for (const [pr, st] of entriesByProj) projects[fs.realpathSync(pr)] = st;
+  for (const [pr, st] of entriesByProj) projects[fs.realpathSync.native(pr)] = st;
   const obj = { projects };
   if (stateSchema !== undefined) obj.stateSchema = stateSchema;
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
@@ -281,7 +281,7 @@ test('state: recordStamp persists and ring-caps; floor round-trips; corrupt file
 
     // task #13: state is per-project — the file lives beside the CC memory dir
     // (once CC has created the slug dir; see the never-create guard).
-    assert.strictEqual(statePath(proj, home), path.join(home, '.claude', 'projects', fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-'), 'coalwash', 'state.json'), 'state rides the memory dir');
+    assert.strictEqual(statePath(proj, home), path.join(home, '.claude', 'projects', fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-'), 'coalwash', 'state.json'), 'state rides the memory dir');
     fs.writeFileSync(statePath(proj, home), '{ corrupt', 'utf8');
     assert.deepStrictEqual(loadState(proj, home), {}, 'corrupt state self-heals to empty');
     const after = recordStamp(home, proj, 42, 999);
@@ -291,7 +291,7 @@ test('state: recordStamp persists and ring-caps; floor round-trips; corrupt file
 
 test('state isolation: two projects each get their OWN per-project file — they never mix', () => {
   const { home, proj } = sandbox();
-  const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2-')));
+  const proj2 = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2-')));
   try {
     recordStamp(home, proj, 100, 1);
     recordStamp(home, proj2, 200, 2);
@@ -396,7 +396,7 @@ test('(b2) migration also runs the pre-rc.2 SCHEMA reset (old-root with NO schem
 
 test('(b3) legacy-file drain also prunes a since-deleted project\'s stale entry (keep-on-doubt), so the file can empty out', () => {
   const { home, proj } = sandbox();
-  const deadProj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-')));
+  const deadProj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-dead-')));
   try {
     seedOldRoot(home, [[proj, { leanFloorTokens: 5000 }], [deadProj, { leanFloorTokens: 999 }]], { stateSchema: STATE_SCHEMA });
     fs.rmSync(deadProj, { recursive: true, force: true }); // the dead project's folder is gone
@@ -418,9 +418,9 @@ test('(c) containment: containedNewPath accepts an in-sandbox path, rejects an o
 
 test('(c2) containment fail-closed: a projects/<slug> dir symlinked OUT of ~/.claude → statePath falls back to coal/, never writes outside', (t) => {
   const { home, proj } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));
   const base = path.join(home, '.claude');
-  const slug = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
+  const slug = fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-');
   try {
     fs.mkdirSync(path.join(base, 'projects'), { recursive: true });
     try {
@@ -439,10 +439,10 @@ test('(c2) containment fail-closed: a projects/<slug> dir symlinked OUT of ~/.cl
 
 test('(d) ride-the-memory: the state path follows the memory-dir slug — a different project → a different dir, no ghost at the old one', () => {
   const { home, proj } = sandbox();
-  const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2b-')));
+  const proj2 = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2b-')));
   try {
-    const slug1 = fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-');
-    const slug2 = fs.realpathSync(proj2).replace(/[^A-Za-z0-9]/g, '-');
+    const slug1 = fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-');
+    const slug2 = fs.realpathSync.native(proj2).replace(/[^A-Za-z0-9]/g, '-');
     assert.ok(statePath(proj, home).includes(slug1), 'proj state rides proj\'s slug dir');
     assert.ok(statePath(proj2, home).includes(slug2), 'proj2 state rides proj2\'s slug dir');
     recordStamp(home, proj2, 42, 1);
@@ -1282,7 +1282,7 @@ test('rc.2 (f) the rise + ask branches carry the session field but behave identi
     recordCrossing(home, proj, 'FULL', 'OBESE', 1000, { quickTried: true, fatTokens: 4000, session: 'sess-A' });
     assert.deepStrictEqual(pstate(home, proj).lastCrossing, { band: 'FULL', at: 1000, consumed: false, session: 'sess-A' });
     // ask WITH a session: after a plain force is consumed, the escalation arms with the session field + lastEscalationFat.
-    const proj2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2rc-')));
+    const proj2 = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-proj2rc-')));
     try {
       seedConsumed(home, proj2, { band: 'FULL', at: 4000, session: 'sess-A' }); // a plain force just ran + consumed
       recordCrossing(home, proj2, 'FULL', 'FULL', 5000, { quickTried: true, fatTokens: 700, session: 'sess-A' });
@@ -1631,7 +1631,7 @@ test('self-clean (h4): a stray slug dir CW minted for a NON-root cwd is removed 
     assert.ok(fs.existsSync(path.join(nestedDir, 'coalwash', 'state.json')), 'a REAL nested project keeps its state (its root resolves to itself)');
     assert.strictEqual(fs.readFileSync(path.join(foreignDir, 'someone-elses.jsonl'), 'utf8'), 'keep me', 'a foreign file is never touched');
     assert.ok(fs.existsSync(foreignDir), 'and its non-empty dir is never removed');
-    assert.ok(fs.existsSync(path.join(projectsDir, fs.realpathSync(proj).replace(/[^A-Za-z0-9]/g, '-'))), 'our own dir survives');
+    assert.ok(fs.existsSync(path.join(projectsDir, fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-'))), 'our own dir survives');
   } finally { clean(home, proj); }
 });
 
@@ -1649,7 +1649,7 @@ test('self-clean (h5): a pre-fix state file with NO recorded root is KEPT (keep-
 
 test('self-clean (h6): the sweep never reaches OUTSIDE this project — an unrelated project\'s slug dir is not even a candidate', () => {
   const { home, proj } = sandbox();
-  const other = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-other-')));
+  const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-other-')));
   try {
     ccSlugDir(home, proj);
     const otherStrayDir = ccSlugDir(home, path.join(other, 'deep'));
@@ -1662,7 +1662,7 @@ test('self-clean (h6): the sweep never reaches OUTSIDE this project — an unrel
 
 test('TP-2: a SIBLING project is never pruned — `work/proj-notes` and `work/proj/notes` produce the same slug SHAPE, so ownership is decided by the recorded root, not a slug-string prefix', () => {
   const { home, proj } = sandbox();
-  const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-work-')));
+  const work = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-work-')));
   try {
     const mineDir = path.join(work, 'proj');        // project A
     const sibDir = path.join(work, 'proj-notes');   // project B — a SEPARATE project
@@ -1672,8 +1672,8 @@ test('TP-2: a SIBLING project is never pruned — `work/proj-notes` and `work/pr
     ccSlugDir(home, mineDir);
     ccSlugDir(home, sibDir);
     setLeanFloor(home, sibDir, 7777);               // B records its own gate-passed floor
-    const sibState = path.join(home, '.claude', 'projects', fs.realpathSync(sibDir).replace(/[^A-Za-z0-9]/g, '-'), 'coalwash', 'state.json');
-    assert.ok(fs.existsSync(sibState) && sibState.includes(fs.realpathSync(mineDir).replace(/[^A-Za-z0-9]/g, '-') + '-notes'), 'B\'s slug really does start with A\'s slug + "-"');
+    const sibState = path.join(home, '.claude', 'projects', fs.realpathSync.native(sibDir).replace(/[^A-Za-z0-9]/g, '-'), 'coalwash', 'state.json');
+    assert.ok(fs.existsSync(sibState) && sibState.includes(fs.realpathSync.native(mineDir).replace(/[^A-Za-z0-9]/g, '-') + '-notes'), 'B\'s slug really does start with A\'s slug + "-"');
 
     fs.writeFileSync(path.join(work, 'CLAUDE.md'), '# umbrella\n'); // the shared parent gains governance
     setLeanFloor(home, mineDir, 100);                                // ONE ordinary write in A
@@ -1685,7 +1685,7 @@ test('TP-2: a SIBLING project is never pruned — `work/proj-notes` and `work/pr
 
 test('TP-3: the prune realpath-contains before ANY rm — a junction under projects/ cannot make the delete escape ~/.claude', (t) => {
   const { home, proj } = sandbox();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));
   try {
     fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# proj\n');
     ccSlugDir(home, proj);
@@ -1694,7 +1694,7 @@ test('TP-3: the prune realpath-contains before ANY rm — a junction under proje
     fs.mkdirSync(path.join(outside, 'coalwash'), { recursive: true });
     const victim = path.join(outside, 'coalwash', 'state.json');
     fs.writeFileSync(victim, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: notARoot, leanFloorTokens: 42 }));
-    const junc = path.join(home, '.claude', 'projects', fs.realpathSync(notARoot).replace(/[^A-Za-z0-9]/g, '-'));
+    const junc = path.join(home, '.claude', 'projects', fs.realpathSync.native(notARoot).replace(/[^A-Za-z0-9]/g, '-'));
     try { fs.symlinkSync(outside, junc, 'junction'); } catch (e) { t.skip(`junction unavailable (${e.code})`); return; }
 
     setLeanFloor(home, proj, 1234); // triggers the prune
