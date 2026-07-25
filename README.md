@@ -122,6 +122,14 @@ Every tool in the series supports two config levels — a global `~/.claude/.coa
 
 Full key reference: every key + default lives in [`scripts/lib/config-schema.mjs`](scripts/lib/config-schema.mjs) and the commented template [`platform-configs/.coalwash.json`](platform-configs/.coalwash.json).
 
+## 🔐 Permissions
+
+CoalWash requests the heaviest profile in the series, because washing is mutation, not just reading: it reads your whole memory folder to see what's actually loaded, writes only inside its own transaction directory while a run is in progress, and deletes only through a human-gated, undo-backed pipeline — snapshot first, a recovery bin second, a verified delete last, and a file marked `pinned: true` is never touched. That is exactly why it carries the series' whole safety stack.
+
+The one outsider it spawns for semantic judgment never sees your memory folder or your model choice — it works only from the exact content handed to it, and `localOnly: true` skips spawning it at all. CoalWash never executes code and never makes a network call.
+
+Full series matrix + the must-fail set: [Permission Matrix](https://github.com/TheColliery/.github/blob/main/PERMISSION-MATRIX.md)
+
 ## 📊 Benchmark
 
 CoalWash's claims are measured, not asserted, by fixture-based benchmarks with a runnable mechanical scorer: **sawtooth-vs-bloat** (clean-at-threshold vs let-it-bloat over N sessions — the cumulative always-loaded saving Δ%, the headline) plus the **infinity-loop fact-loss** and **consecutive-run ceiling** measurements behind the warning above. Headline digest: [`benchmarks/CoalWash/RESULTS.md`](https://github.com/TheColliery/.github/blob/main/benchmarks/CoalWash/RESULTS.md).
