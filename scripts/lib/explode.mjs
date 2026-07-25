@@ -354,7 +354,7 @@ function writeFull(fd, buf) {
 // The utf8 text of a line for PARSING only (its exact bytes are what we keep).
 // Strips a single trailing \n and a preceding \r. Invalid utf8 → U+FFFD → the
 // JSON.parse fails → the unit is KEPT (fail-closed), never mis-cut.
-function lineText(lineBuf) {
+export function lineText(lineBuf) {
   let end = lineBuf.length;
   if (end > 0 && lineBuf[end - 1] === NL) end--;
   if (end > 0 && lineBuf[end - 1] === 0x0d) end--;
