@@ -1,4 +1,4 @@
-// bins.mjs — the two bins (fat bin + store.old), WIRING retention.mjs's pure
+// tailings.mjs — the two bins (fat bin + store.old), WIRING retention.mjs's pure
 // policy into actual filesystem effects (beta.12 item 4). retention.mjs
 // already IS the destruction law (birth=event-only, life=dual-axis thinning,
 // horizon=burst-gap-derived) — this module only writes items, runs that

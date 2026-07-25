@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { sweepResidue, stripEmptyTables, flagEmptyHeadings } from './quick.mjs';
+import { sweepResidue, stripEmptyTables, flagEmptyHeadings } from './broom.mjs';
 
 // ---------------------------------------------------------------------------
 // (1) sweepResidue — scoped to OUR OWN knife's residue (orig-vs-new), the r1

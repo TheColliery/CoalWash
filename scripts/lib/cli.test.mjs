@@ -11,7 +11,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gauge, gaugeLine } from './cli.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem } from './bins.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem } from './tailings.mjs';
 import { snapshotOnFirstWrite } from './writeguard.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));

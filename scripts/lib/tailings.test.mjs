@@ -7,7 +7,7 @@ import {
   FAT_BIN_NAME, STORE_OLD_NAME,
   recordBinItem, listBin, restoreFromBin,
   sweepFatBin, sweepStoreOld, readDeathLog, breadcrumb,
-} from './bins.mjs';
+} from './tailings.mjs';
 import { txDirFor } from './apply.mjs';
 import { TIER1_KEEP_ALL_MS, HORIZON_MS } from './retention.mjs';
 

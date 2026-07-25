@@ -1,4 +1,4 @@
-// quick.mjs — beta.12 item 7 (queue item 0b, "QUICK-CEILING EXPANSION"): the
+// broom.mjs — beta.12 item 7 (queue item 0b, "QUICK-CEILING EXPANSION"): the
 // FIRST two Quick-tier ops promoted from agent-executed procedure
 // (method.md §1, which has always been hand-run, never coded) into
 // deterministic CODE. Both are LAB-GRADUATED — named, real defects the wear
