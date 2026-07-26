@@ -523,6 +523,14 @@ export function detonate(src, request = {}, opts = {}) {
         // LOAD-BEARING anti-truncation protection (the break proved 0 data loss); this belt conservatively
         // fail-closes a SAME-DIRECTORY outPath when the inode signal is unavailable — over-refusing a same-dir
         // outPath only on inode-less volumes (rare, a safe cost). (isUnder both ways ⇒ dirs are equal.)
+        // POLARITY, STATED because it reads backwards: this is REFUSE-polarity (same-dir == refuse),
+        // so an UNRESOLVABLE side (null) SKIPS the belt, and so does a mismatched spelling of one
+        // physical dir — it fails OPEN, it does not refuse. Do not re-read it as fail-closed; the
+        // 2026-07-26 resolver audit did exactly that and called it safe. SUSPECTED-unreachable, not
+        // confirmed: it needs `stat.ino === 0` and NTFS never reports 0, so the branch is
+        // structurally unmeasurable on this box. It is defense-in-depth over reduceFile's temp→rename,
+        // and the outPath-symmetry belt below refuses the same inputs ~20 lines on. Reasoning fixed;
+        // code deliberately unchanged — an unmeasurable branch is not a place to ship a speculative edit.
         if (stat.ino === 0) {
           const srcDir = realOrNull(path.dirname(src));
           const outDir = realOrNull(path.dirname(outPath));
@@ -556,10 +564,26 @@ export function detonate(src, request = {}, opts = {}) {
         // FIX = use the SAME resolver as the floor this belt mirrors. `physicalForCreate` routes
         // through explode's `physicalOrNull`, which refuses every device/UNC spelling by SHAPE
         // (R3/R4: the refusal belongs on the INPUT), so an unresolvable spelling lands on
-        // 'unknown' and REFUSES instead of being handed a wrong answer. src always exists here
-        // (gate 1 opened it), so physicalForCreate's climb never runs — this is exactly
-        // `physicalOrNull(src)`, spelled with the export detonate already imports. The two
-        // doors are now pinned against each other in twin-pin.test.mjs.
+        // 'unknown' and REFUSES instead of being handed a wrong answer. The two doors are
+        // pinned against each other in twin-pin.test.mjs.
+        //
+        // PREMISE, NOT A FACT — and the distinction is load-bearing. Gate 1 opened src, so
+        // src is EXPECTED to exist here and physicalForCreate's climb is EXPECTED not to
+        // run, making this equivalent to `physicalOrNull(src)`. It is not guaranteed:
+        // `ancestorIsDir(snapshotDir)` above is a path-based fs call, so src can be removed
+        // in that window. Measured (statSync patched to unlink src mid-window): a src
+        // OUTSIDE the store that vanishes goes triggered:false -> triggered:TRUE, because
+        // the climb reattaches a lexical `<realparent>/<basename>` that reads as 'outside'
+        // where physicalOrNull would have returned null. The DANGEROUS direction stays shut
+        // (a vanishing src INSIDE the store still reattaches inside and refuses) and nothing
+        // mutates — the floor refuses ENOENT — but the belt's own triggered:false contract
+        // is violated on that race, so state it as a race, never as a fact.
+        //
+        // THE GENERAL LAW, which is the part to carry: `physicalForCreate(x)` equals
+        // `physicalOrNull(x)` ONLY WHILE x EXISTS. When x is absent the climb returns a
+        // CONFIDENT lexical path where physicalOrNull returns null — and at a REFUSE-polarity
+        // guard that converts a refusal into a possible allow. Same class as the bug this
+        // fix closed, one level up: a confident wrong answer, not an unknown.
         if (containment(physicalForCreate(src), physicalForCreate(snapshotDir)) !== 'outside') {
           return refuse('path', `src must not resolve inside the snapshot store (${snapshotDir}), and must be resolvable enough to prove it — snapshotSource writes the manifest/blobs there and would corrupt the source`);
         }
