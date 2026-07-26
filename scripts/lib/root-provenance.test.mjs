@@ -35,6 +35,7 @@ const TRUSTED_ROOTS = new Map([
   ['[anchorPhys]', 'caller-derived: the resolved project anchor (opts.projectRoot or findProjectRoot(cwd))'],
   ['trustedRoots', 'caller-derived: resolved projectRoot + ccMemoryDir — never plan/journal-supplied'],
   ['[txPhys]', 'caller-derived: opts.txDir or txDirFor(projectRoot)'],
+  ['[projPhys]', 'caller-derived: physicalOrNull(discoverClassB\'s projectRoot parameter, itself findProjectRoot(cwd) at every call site) — class-b.mjs nested-habitat TIER classification (room-owned vs inherited-ancestor), not an authorization: both outcomes are measured and reported, neither grants a write. Listed anyway because the gate rightly does not care what a containment answer is USED for'],
   ['[basePhys]', 'home-anchored: the Claude base dir'],
   ['claudeRoots', 'home-anchored: the Claude base dir'],
   ['[claudeRoot]', 'home-anchored: the Claude base dir'],

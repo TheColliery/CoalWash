@@ -230,6 +230,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     return {
       platform: plat,
       entries: [],
+      inherited: [],
       flags: [UNKNOWN_PLATFORM_FLAG],
       roleMemories: [],
     };
@@ -244,6 +245,27 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   const roots = [homePhys, projPhys].filter(Boolean);
   const seen = new Set();
   const entries = [];
+  // #22's SIBLING TIER, and the reason this file already argued for one.
+  // NESTED-HABITAT (series law): a governance-measuring tool models THREE tiers
+  // — global (~/.claude) / INHERITED-ANCESTOR (the umbrella above the room) /
+  // room-owned — never a flat global/project pair. The role-memory tier below
+  // implements the room-owned half of that law and cites the CoalTipple
+  // false-FULL lesson by name; the ancestor half was never built, so the
+  // umbrella's CLAUDE.md closure kept landing in `entries` as scope 'project'.
+  // MEASURED 2026-07-25, one gauge run per room at one moment: the umbrella
+  // alone is 30,487 tok = 85% of the 36,000 hard ceiling BEFORE a room holds one
+  // byte of its own, and it FALSE-FULLed three rooms (CoalTipple by 76 tokens —
+  // the exemplar the docket named). No room's own content was near the ceiling.
+  //
+  // A ROOM CANNOT ACT ON ITS UMBRELLA, in either direction: it may not wash it
+  // (law clause 2 — that is the umbrella room's jurisdiction, and washing it
+  // from here is cross-room contamination), and it cannot externalize it, which
+  // is the exact advice a capHit FULL gives. So an inherited file must not sit
+  // in `entries`: everything downstream of `entries` is a verdict the room is
+  // told to ACT on. Splitting the tier fixes the measurement and removes the
+  // mutation exposure in one move, and leaves the cost REPORTABLE (returned as
+  // its own field) rather than invisible.
+  const inherited = [];
   // Windows paths are case-insensitive -> lowercase the dedupe key there ONLY
   // (lowercasing on POSIX would wrongly merge two case-distinct files).
   const dedupeKey = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
@@ -253,7 +275,18 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // hardcodes a pack name like "ecc", works for any synced directory).
   const rulesSeen = []; // [{ entry, relTail }]
 
-  const add = (candidate, { scope, kind, alwaysLoaded }) => {
+  // `upTree` = this candidate came from the CLAUDE.md ancestor walk, the ONLY
+  // step that can reach above the room. The tier is then decided PER FILE by
+  // LOCATION, not by which step queued it, so an @import that escapes upward out
+  // of the room's own CLAUDE.md is classified correctly too.
+  //
+  // WHY THE FLAG AND NOT AN UNCONDITIONAL LOCATION TEST — the trap I nearly shipped:
+  // the global memory store (step 4, ~/.claude/projects/<slug>/memory) is tagged
+  // scope 'project' and sits OUTSIDE projPhys, so an unconditional "outside the
+  // room ⇒ inherited" test would silently drop the one global store CoalWash
+  // actually washes out of the cap. Outside-the-room and not-the-room's are
+  // different questions; only the ancestor walk asks the second one.
+  const add = (candidate, { scope, kind, alwaysLoaded, upTree = false }) => {
     const phys = physicalOrNull(candidate);
     if (!phys) return null; // fail-closed: unresolvable candidate is skipped
     if (!containedIn(phys, roots)) {
@@ -264,16 +297,17 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     const bytes = statBytes(phys);
     if (bytes == null) return null;
     seen.add(dedupeKey(phys));
-    entries.push({ path: phys, bytes, scope, kind, alwaysLoaded, managed: false });
+    const isInherited = upTree && projPhys && !containedIn(phys, [projPhys]);
+    (isInherited ? inherited : entries).push({ path: phys, bytes, scope, kind, alwaysLoaded, managed: false });
     return phys;
   };
 
   // A governance file + its @import closure (depth-capped, cycle-safe).
-  const addWithImports = (file, scope) => {
+  const addWithImports = (file, scope, upTree = false) => {
     const queue = [{ file, depth: 0 }];
     while (queue.length) {
       const { file: f, depth } = queue.shift();
-      const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true });
+      const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true, upTree });
       if (!phys || depth >= IMPORT_DEPTH_MAX) continue;
       let text;
       try { text = fs.readFileSync(phys, 'utf8'); } catch { continue; }
@@ -293,7 +327,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     let dir = projPhys;
     while (true) {
       const cl = path.join(dir, 'CLAUDE.md');
-      if (fs.existsSync(cl)) addWithImports(cl, 'project');
+      if (fs.existsSync(cl)) addWithImports(cl, 'project', true);
       if (dir === homePhys) break;
       const parent = path.dirname(dir);
       if (parent === dir) break; // filesystem root
@@ -412,7 +446,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     }
   }
 
-  return { platform: plat, entries, flags, roleMemories: discoverRoleMemories({ projectRoot, home }) };
+  return { platform: plat, entries, inherited, flags, roleMemories: discoverRoleMemories({ projectRoot, home }) };
 }
 
 // #22 ROLE-MEMORY DISCOVERY (promoted from retier.mjs's collectStores into the
