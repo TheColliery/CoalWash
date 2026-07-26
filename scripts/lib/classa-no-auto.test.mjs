@@ -59,6 +59,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -90,12 +91,30 @@ const HUMAN_ONLY = ['explode.mjs', 'detonate.mjs'];
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'plugin', 'work', '.claude', '.agents']);
 
+// A nested git worktree or clone (its root holds a `.git` ENTRY — a FILE holding a
+// `gitdir:` pointer for a worktree, a dir for a clone) is a DUPLICATE VIEW of files
+// this walk already scans in the real tree, not new content. Excluding a duplicate
+// view is not silencing a finding; counting one twice is the defect (a flock-wide
+// line count walked the two caretaker benches and published inflated figures).
+// This is NOT the "teach the kind, never silence" case above — that rule is about an
+// artifact KIND the walk does not recognise, which this is not.
+// Marker, not a name list: it also covers a nested clone and cannot rot when a bench
+// is renamed. `.gitignore` fences git; it does not fence readdirSync.
+// The test is at the DESCENT, never at the entry: the tree you were asked to walk is
+// by definition not a nested one, so no anchor can skip ITSELF — including `repo`,
+// which holds `.git` too. Checking on entry instead would return an EMPTY walk and
+// turn every assertion below vacuously green; the first draft did exactly that, and
+// the both-ways test at the bottom of this file is what caught it.
+// ponytail: a `.git` planted mid-tree would hide content — accepted, same ceiling the
+// header states (this pins against ACCIDENT and drift, not an adversary).
 function walkFiles(dir = repo, acc = []) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, e.name);
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name)) continue;
-      walkFiles(path.join(dir, e.name), acc);
-    } else acc.push(path.join(dir, e.name));
+      if (fs.existsSync(path.join(abs, '.git'))) continue;
+      walkFiles(abs, acc);
+    } else acc.push(abs);
   }
   return acc;
 }
@@ -241,4 +260,27 @@ test('the walk is LIVE, not vacuous: both kinds are really discovered and the co
   const reached = [...autoClosure()].map((f) => path.basename(f));
   assert.ok(reached.includes('coalwash-conductor.js'), `the hook root must be reached; got: ${reached.sort().join(', ')}`);
   assert.ok(reached.includes('writeguard.mjs'), `the conductor's dynamic lib() import must be followed; got: ${reached.sort().join(', ')}`);
+});
+
+test('the nested-worktree skip cuts BOTH ways: a nested checkout is excluded, and everything else — including the anchor, which holds .git too — is still walked', () => {
+  // Hermetic, because the real benches are machine-local and gitignored: asserting
+  // against them would be vacuously green on CI, where no bench exists.
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-walkskip-')));
+  try {
+    fs.writeFileSync(path.join(base, '.git'), 'gitdir: /elsewhere\n'); // the anchor itself is marked
+    fs.mkdirSync(path.join(base, 'real'));
+    fs.writeFileSync(path.join(base, 'real', 'keep.yml'), 'run: node x.mjs\n');
+    fs.mkdirSync(path.join(base, 'bench', 'deep'), { recursive: true });
+    fs.writeFileSync(path.join(base, 'bench', '.git'), 'gitdir: /elsewhere/worktrees/bench\n');
+    fs.writeFileSync(path.join(base, 'bench', 'deep', 'dup.yml'), 'run: node x.mjs\n');
+    const found = walkFiles(base).map((f) => path.relative(base, f).split(path.sep).join('/'));
+    // ABSENCE: the duplicate view is gone.
+    assert.ok(!found.some((f) => f.startsWith('bench/')), `a nested checkout must not be walked; got: ${found.join(', ')}`);
+    // PRESENCE: an exclusion needs the other side asserted, or it can over-skip in
+    // silence — the failure that would make every assertion above vacuously green.
+    assert.ok(found.includes('real/keep.yml'), `the rest of the tree must still be walked; got: ${found.join(', ')}`);
+    assert.ok(found.includes('.git'), `the ANCHOR is exempt from its own marker; got: ${found.join(', ')}`);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });
