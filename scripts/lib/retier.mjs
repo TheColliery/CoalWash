@@ -1,3 +1,4 @@
+// ponytail: 944 lines at declaration — the separation-of-powers rail (envelope places, treatment table treats, pressure never escalates) guards the SEAM between this file's two mechanisms; split them apart and the quota-driven-loss interlock becomes a cross-module invariant no single reader sees.
 // retier.mjs — RE-TIER: the wizard's FOURTH choice (blueprint §19.3).
 //
 // RE-TIER = keep every class-B memory INDEX inside an ENVELOPE — each store

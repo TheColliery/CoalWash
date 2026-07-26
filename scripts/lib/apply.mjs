@@ -1,3 +1,4 @@
+// ponytail: 1047 lines at declaration — one atomic transaction: applyPlan and recoverDangling are two halves of a single snapshot/rollback protocol, and the containment + provenance guards (the R5 rule) thread through both; a split scatters guards that must be audited in one view.
 // apply.mjs — the all-or-nothing transactional apply (blueprint §14.5 + §14.11,
 // gap #3): snapshot-marker -> write .tmp -> fsync -> atomic rename -> verify ->
 // deletes LAST -> commit; a step failure rolls back from the snapshot. The
