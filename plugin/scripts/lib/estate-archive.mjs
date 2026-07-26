@@ -1,3 +1,4 @@
+// ponytail: 821 lines at declaration — already the mutation half of a deliberate split (estate.mjs stays pure-read BECAUSE every mutating estate op is corralled here); archive/index/search/restore share one on-disk layout whose writer and readers must move together for byte-exact restore.
 // estate-archive.mjs — class-A ESTATE layer, PHASE 2 PARTIAL: the ULTRA
 // wizard tier (compress + index + search + restore). COALWASH_BLUEPRINT.md
 // §19 is the authority; estate.mjs stays the pure-read P1 report — every
