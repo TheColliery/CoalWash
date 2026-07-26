@@ -1,3 +1,4 @@
+// ponytail: 1147 lines at declaration — one hysteresis state machine: the verdict logic (Schmitt trigger, econ latch, crossings) defines the SEMANTICS of the persisted fields it reads back, and the STATE_SCHEMA reset discipline audits field meaning against rulings; splitting verdict from state separates each field's writer from the logic that gives it meaning.
 // caliper.mjs — footprint measurement + the ceiling verdict + the economic
 // break-even math (beta.12 "THE BAND COLLAPSE" — supersedes the beta.7/beta.8
 // 4-band PLUMP/OBESE/FULL(fat-budget) ladder).

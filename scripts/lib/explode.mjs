@@ -1,3 +1,4 @@
+// ponytail: 1360 lines at declaration — a dependency-isolated engine (node builtins only, no shared-lib imports by class-A design): a split multiplies the files the dist-exclusion roster and the no-auto walk must each track, and the wave loop's cut/snapshot/resume halves share offset+byte bookkeeping a module seam would sever.
 // explode.mjs — the MAIN engine of CoalWash's ULTRA class-A reducer (blueprint
 // §19.6, the `.jsonl`/class-A "explode-reduce" mechanism). STEP 1 of the phased
 // build: the destruction/reduction engine ONLY. The SUPPORT input-verify engine
