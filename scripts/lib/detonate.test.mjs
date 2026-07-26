@@ -581,12 +581,19 @@ test('FIX 1 / 8.3 REGRESSION — the src-inside-store belt fires when the store 
     // src lives INSIDE the store and is deliberately NOT named manifest.jsonl, so the
     // narrower manifest-alias check cannot cover for the belt.
     //
-    // THE SHORT SPELLING MUST BE ON THE **SRC** SIDE. The belt is
-    // `isContainedIn(realOrNull(src), physicalForCreate(snapshotDir))`: the store side
-    // goes through physicalForCreate, which expands either spelling, so handing the
-    // store in short proves nothing — both variants agree and the test passes even
-    // with the defect restored (verified: it did). Only `src` runs through the helper
-    // under test, so only a short-spelled src can tell the variants apart.
+    // THE SHORT SPELLING IS ON THE **SRC** SIDE, and the reason is now HISTORICAL, not
+    // structural. The belt is `containment(physicalForCreate(src),
+    // physicalForCreate(snapshotDir)) !== 'outside'` — BOTH sides route through
+    // physicalForCreate, so either side would now expose a non-expanding regression.
+    // It did not always: this comment previously said the store side expands while
+    // "only `src` runs through the helper under test", which was true when src went
+    // through detonate's own `realOrNull`. That is false as of the source-sacred
+    // resolver fix, and a comment quoting an expression that no longer exists is the
+    // failure this room names first — the next reviewer reads it and stops looking.
+    // The test still discriminates: a `physicalOrNull` regressed off `.native` leaves
+    // the short spelling unexpanded, the two sides spell one directory two ways,
+    // containment answers 'outside' and the belt is skipped. Keep the short spelling
+    // here rather than moving it — this is the side the R3 defect actually lived on.
     writeNdjson(store, 'victim.jsonl', CLAUDEISH);
     const src = path.join(short, 'victim.jsonl'); // same file, SHORT spelling
     const before = sha256File(src);
