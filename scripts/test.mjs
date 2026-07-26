@@ -43,6 +43,7 @@ const TESTS = [
   'scripts/lib/fixture-canonical.test.mjs',
   'scripts/lib/root-provenance.test.mjs',
   'scripts/build-plugin.test.mjs',
+  'scripts/verify.test.mjs',
 ];
 
 const missing = TESTS.filter((t) => !fs.existsSync(path.join(repo, t)));
