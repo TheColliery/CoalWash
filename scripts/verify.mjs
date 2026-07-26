@@ -157,6 +157,11 @@ try {
 
 console.log('config (factory vs schema):');
 try {
+  // NOT the conductor's `lib()` — that one returns a URL STRING consumed by a
+  // textual `import(lib(...))`, which classa-no-auto's literal harvest can see.
+  // This helper PERFORMS the import, so `await lib('x')` has no textual
+  // `import(` and is INVISIBLE to that scanner — tolerable only because
+  // verify.mjs is outside the scan's auto closure. Never copy it into hooks/.
   const lib = (l) => import(pathToFileURL(path.join(repo, 'scripts', 'lib', l)).href);
   const { CONFIG_SCHEMA, validateConfig } = await lib('config-schema.mjs');
   const { stripJsonc } = await lib('jsonc.mjs');
