@@ -4,11 +4,16 @@
 // plugin/ dist is stale. Wrapped per-check so one bad input yields a clean
 // FAIL line, not a stack trace (scripts-quality.md: CLI = fail loud).
 
+// NODE BUILTINS ONLY at the top level — every scripts/lib/ import in this file
+// is DYNAMIC, inside the check that uses it. A static `from './lib/x.mjs'`
+// resolves during module-graph load, BEFORE the first try/catch exists, so an
+// absent lib kills the gate with a raw ERR_MODULE_NOT_FOUND and zero FAIL
+// lines — and a gate that dies is indistinguishable from a gate never run.
+// Real: a sparse caretaker bench (scripts/lib/ minus config-schema.mjs)
+// reported nothing at all. Pinned by scripts/verify.test.mjs.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { CONFIG_SCHEMA, validateConfig } from './lib/config-schema.mjs';
-import { stripJsonc } from './lib/jsonc.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let fails = 0;
@@ -86,20 +91,22 @@ function frontmatterField(text, key) {
 // Dynamic scan (skills/*/SKILL.md for any dir that has one, commands/*.md) so a
 // new skill/command is covered without editing this gate.
 const descTargets = [];
-const skillsDir = path.join(repo, 'skills');
-if (fs.existsSync(skillsDir)) {
-  for (const d of fs.readdirSync(skillsDir, { withFileTypes: true })) {
-    if (!d.isDirectory()) continue;
-    const smd = path.join(skillsDir, d.name, 'SKILL.md');
-    if (fs.existsSync(smd)) descTargets.push([`skills/${d.name}/SKILL.md`, smd, true]);
+try {
+  const skillsDir = path.join(repo, 'skills');
+  if (fs.existsSync(skillsDir)) {
+    for (const d of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
+      const smd = path.join(skillsDir, d.name, 'SKILL.md');
+      if (fs.existsSync(smd)) descTargets.push([`skills/${d.name}/SKILL.md`, smd, true]);
+    }
   }
-}
-const commandsDir = path.join(repo, 'commands');
-if (fs.existsSync(commandsDir)) {
-  for (const f of fs.readdirSync(commandsDir)) {
-    if (f.endsWith('.md')) descTargets.push([`commands/${f}`, path.join(commandsDir, f), false]);
+  const commandsDir = path.join(repo, 'commands');
+  if (fs.existsSync(commandsDir)) {
+    for (const f of fs.readdirSync(commandsDir)) {
+      if (f.endsWith('.md')) descTargets.push([`commands/${f}`, path.join(commandsDir, f), false]);
+    }
   }
-}
+} catch (e) { fail(`description target scan: ${e.message}`); }
 for (const [label, p, isSkill] of descTargets) {
   try {
     const text = fs.readFileSync(p, 'utf8');
@@ -150,6 +157,9 @@ try {
 
 console.log('config (factory vs schema):');
 try {
+  const lib = (l) => import(pathToFileURL(path.join(repo, 'scripts', 'lib', l)).href);
+  const { CONFIG_SCHEMA, validateConfig } = await lib('config-schema.mjs');
+  const { stripJsonc } = await lib('jsonc.mjs');
   let c = fs.readFileSync(path.join(repo, 'platform-configs', '.coalwash.json'), 'utf8');
   if (c.charCodeAt(0) === 0xFEFF) c = c.slice(1);
   const cfg = JSON.parse(stripJsonc(c));

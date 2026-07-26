@@ -1,0 +1,58 @@
+// VERIFY-GATE LIVENESS — the gate must REPORT its own failure, never die of it.
+//
+// WHAT WENT WRONG. verify.mjs carried two STATIC top-level imports of
+// scripts/lib/ modules. ESM resolves a static import while linking the module
+// graph, BEFORE the first try/catch in the file exists — so on a sparse
+// caretaker bench (scripts/lib/ checked out minus config-schema.mjs) the gate
+// died with a raw ERR_MODULE_NOT_FOUND and printed ZERO `FAIL <item>` lines.
+// Every per-check wrap in that file was correct: a per-check wrap structurally
+// cannot cover the file's own imports.
+//
+// WHY THIS OUTRANKS TIDINESS: a gate that dies is indistinguishable from a gate
+// that was never run. The bench reported nothing, which reads exactly like
+// nothing to report.
+//
+// WHAT THIS ASSERTS: the REAL verify.mjs, run against an EMPTY tree (the
+// maximal form of "a required file is missing"), honours the fail-loud contract
+// scripts-quality.md §1 sets and verify.mjs's own header claims — non-zero
+// exit, one enumerated FAIL line per missing item, its own summary line, and no
+// raw stack trace.
+//
+// PROVED RED, not assumed: restoring either static import empties stdout and
+// puts an ERR_MODULE_NOT_FOUND trace on stderr, flipping assertions 2-4.
+import { test } from 'node:test';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const VERIFY = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify.mjs');
+
+test('verify.mjs REPORTS missing scripts/lib files instead of dying on them', () => {
+  // verify.mjs derives `repo` from its OWN location, so a lone copy in an empty
+  // tree makes every required file missing — no repo copy, no mutation of the
+  // real checkout. Fixture root canonicalized the engine's way (.native).
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verifygate-')));
+  try {
+    const dest = path.join(root, 'scripts', 'verify.mjs');
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(VERIFY, dest);
+
+    const r = spawnSync(process.execPath, [dest], { encoding: 'utf8' });
+    const stdout = r.stdout ?? '';
+    const stderr = r.stderr ?? '';
+
+    assert.notStrictEqual(r.status, 0, `fail LOUD: everything is missing, exit must be non-zero\n${stdout}`);
+    assert.doesNotMatch(stderr, /ERR_MODULE_NOT_FOUND/, `the gate must not die on its own imports\n${stderr}`);
+    assert.doesNotMatch(stderr, /^\s+at /m, `a raw stack trace is the banned failure mode\n${stderr}`);
+    // The two libs verify.mjs used to import statically; any lib would do, these
+    // are the ones whose absence used to be fatal.
+    for (const lib of ['config-schema.mjs', 'jsonc.mjs']) {
+      assert.ok(stdout.includes(`FAIL scripts/lib/${lib} missing`),
+        `every missing lib gets its own enumerated FAIL line (${lib})\n${stdout}`);
+    }
+    assert.match(stdout, /\nVERIFY: FAIL \(\d+\)/, `the run must reach its own summary line\n${stdout}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
