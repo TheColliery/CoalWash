@@ -581,12 +581,19 @@ test('FIX 1 / 8.3 REGRESSION — the src-inside-store belt fires when the store 
     // src lives INSIDE the store and is deliberately NOT named manifest.jsonl, so the
     // narrower manifest-alias check cannot cover for the belt.
     //
-    // THE SHORT SPELLING MUST BE ON THE **SRC** SIDE. The belt is
-    // `isContainedIn(realOrNull(src), physicalForCreate(snapshotDir))`: the store side
-    // goes through physicalForCreate, which expands either spelling, so handing the
-    // store in short proves nothing — both variants agree and the test passes even
-    // with the defect restored (verified: it did). Only `src` runs through the helper
-    // under test, so only a short-spelled src can tell the variants apart.
+    // THE SHORT SPELLING IS ON THE **SRC** SIDE, and the reason is now HISTORICAL, not
+    // structural. The belt is `containment(physicalForCreate(src),
+    // physicalForCreate(snapshotDir)) !== 'outside'` — BOTH sides route through
+    // physicalForCreate, so either side would now expose a non-expanding regression.
+    // It did not always: this comment previously said the store side expands while
+    // "only `src` runs through the helper under test", which was true when src went
+    // through detonate's own `realOrNull`. That is false as of the source-sacred
+    // resolver fix, and a comment quoting an expression that no longer exists is the
+    // failure this room names first — the next reviewer reads it and stops looking.
+    // The test still discriminates: a `physicalOrNull` regressed off `.native` leaves
+    // the short spelling unexpanded, the two sides spell one directory two ways,
+    // containment answers 'outside' and the belt is skipped. Keep the short spelling
+    // here rather than moving it — this is the side the R3 defect actually lived on.
     writeNdjson(store, 'victim.jsonl', CLAUDEISH);
     const src = path.join(short, 'victim.jsonl'); // same file, SHORT spelling
     const before = sha256File(src);
@@ -620,6 +627,30 @@ test('CodeQL #23/#24 (js/file-system-race) — gate 1 sizes the read from the FD
     assert.strictEqual(r.totalUnits, 100,
       'the whole file is censused. Pre-fix gate 1 did statSync(path) then openSync(path) and sized the read from the PATH stat, so a stale size silently truncated the census to 10/100 — and the census is what the agent reads to choose cutTypes, so an undercount understates a content-bearing type on the destructive decision path');
   } finally { fs.statSync = realStat; rm(dir); }
+});
+
+test('RUNG5 A2 PARSER PARITY — the census reads a line through the REDUCER\'s lineText: a BOM-prefixed unit counts as unparsed, and is never advertised as cuttable', () => {
+  const dir = tmp();
+  try {
+    const objs = Array.from({ length: 40 }, (_, i) => ({ type: 'user', i }));
+    const src = writeNdjson(dir, 's.jsonl', objs);
+    // splice a U+FEFF-prefixed unit in: JS `.trim()` treats a BOM as whitespace, the reducer's
+    // lineText does not. Enough good lines around it that discovery still classifies ndjson.
+    const lines = fs.readFileSync(src, 'utf8').split('\n').filter(Boolean);
+    lines.splice(20, 0, '﻿' + JSON.stringify({ type: 'mode', i: 'BOMMED' }));
+    fs.writeFileSync(src, lines.join('\n') + '\n', 'utf8');
+
+    const r = survey(src);
+    assert.strictEqual(r.ok, true, 'the file is still ndjson — this is about parity, not discovery');
+    assert.strictEqual(r.unitsUnparsed, 1,
+      'the BOM unit is COUNTED as unparsed. Pre-fix the census `.trim()`ed before parsing, so it parsed, and unitsUnparsed reported 0 — the honesty counter read zero for a unit the census had silently mis-typed');
+    assert.ok(!r.types || !r.types.mode,
+      'and it is NOT advertised as a cuttable type: pre-fix the census offered `mode` as 1 cuttable unit while the reducer refused to parse that very line, so an agent acting on the census got a no-op cut');
+
+    // the reducer is the authority; parity means it agrees
+    const rr = reduceFile(src, { cutTypes: ['mode'], outPath: path.join(dir, 'o.jsonl'), snapshotDir: path.join(dir, 's') });
+    assert.strictEqual(rr.unitsCut || 0, 0, 'the reducer cuts nothing here — which is exactly what the census must now predict');
+  } finally { rm(dir); }
 });
 
 test('FIX 2 (prototype pollution) — a unit typed as a JS builtin name (__proto__ / constructor) is censused as a real own-key: no vanish, no undercount, no census collapse, no Object.prototype pollution', () => {
@@ -1153,5 +1184,56 @@ test('BUG-1 retention: the returned census does NOT retain O(unit) — a fat-bre
     const r = spawnSync(process.execPath, ['--expose-gc', '--input-type=module', '-e', child], { encoding: 'utf8' });
     assert.strictEqual(r.status, 0, `retention-proof child failed (status ${r.status}): ${r.stderr || r.stdout}`);
     assert.match(r.stdout, /OK retainedMB=/, 'the child ran the full measurement');
+  } finally { rm(dir); }
+});
+
+// ---------------------------------------------------------------------------
+// GATE-4 REFUSE-POLARITY (rung-5 §1.2, station-3 MEDIUM). The explode twin was
+// covered; detonate — the gate this room called only-accidentally-safe — was not.
+// ---------------------------------------------------------------------------
+
+test('gate 4 REFUSE-polarity: an UNRESOLVABLE outPath aimed inside the snapshot store is refused AT THE GATE (triggered:false), not caught later by the floor', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store'); fs.mkdirSync(store, { recursive: true });
+    const src = writeNdjson(dir, 'src.jsonl', Array.from({ length: 30 }, (_, i) => ({ type: i % 3 ? 'user' : 'mode', i })));
+    const before = sha256File(src);
+
+    // physicalForCreate() routes through explode's physicalOrNull, which REJECTS every win32
+    // device/UNC spelling by design -> null. Pre-fix the boolean folded that null into
+    // false == NOT-contained, and because this guard is REFUSE-polarity, false meant ALLOW.
+    const nsOut = path.toNamespacedPath(path.join(store, 'blob-clobber.jsonl'));
+    const r = detonate(src, { cutTypes: ['mode'], outPath: nsOut, snapshotDir: store });
+
+    assert.strictEqual(r.ok, false, 'an outPath inside the store is refused however it is spelled');
+    assert.strictEqual(r.failedCheck, 'path', 'it is GATE 4 that refuses');
+    assert.strictEqual(r.triggered, false,
+      'THE LOAD-BEARING ASSERTION: the gate refuses BEFORE the reducer runs. Pre-fix this measured triggered:true with failedCheck:undefined — gate 4 failed open and the main engine was entered, with the refusal coming from reduceFile\'s deeper floor instead. A belt whose whole contract is "refuse before triggering" was being carried by a guard behind it');
+    assert.strictEqual(sha256File(src), before, 'source byte-intact');
+    assert.strictEqual(fs.readdirSync(store).filter((f) => f.includes('clobber')).length, 0, 'nothing landed in the recovery store');
+  } finally { rm(dir); }
+});
+
+test('gate 4 REFUSE-polarity: a namespaced src INSIDE the store is refused ON PURPOSE — it previously held only by TWIN DRIFT between realOrNull and physicalOrNull', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store'); fs.mkdirSync(store, { recursive: true });
+    const src = writeNdjson(store, 'victim.jsonl', Array.from({ length: 30 }, (_, i) => ({ type: i % 3 ? 'user' : 'mode', i })));
+    const before = sha256File(src);
+
+    // MEASURED, and the reason this test exists: on the frozen SHA this input made detonate
+    // REFUSE while explode's reduceFile FAILED OPEN on the identical input — because
+    // detonate's realOrNull (fs.realpathSync.native) RESOLVES a \?\ form while explode's
+    // physicalOrNull REJECTS it. The gate was correct by accident: a future "consistency fix"
+    // aligning realOrNull to reject device paths would have silently re-opened it. Post-fix
+    // the REFUSE-polarity requires a proven 'outside', so the answer no longer depends on
+    // which twin resolves what.
+    const r = detonate(path.toNamespacedPath(src), { cutTypes: ['mode'], outPath: path.join(dir, 'o.jsonl'), snapshotDir: store });
+
+    assert.strictEqual(r.ok, false, 'a src living inside the snapshot store is refused');
+    assert.strictEqual(r.failedCheck, 'path', 'at gate 4');
+    assert.strictEqual(r.triggered, false, 'before the reducer runs');
+    assert.match(r.reason, /snapshot store/i, 'and it says why');
+    assert.strictEqual(sha256File(src), before, 'source byte-intact');
   } finally { rm(dir); }
 });

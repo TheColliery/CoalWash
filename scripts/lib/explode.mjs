@@ -119,17 +119,38 @@ export function physicalForCreate(p) {
     cur = parent;
   }
 }
-// Is `childPhys` the same as, or nested under, `basePhys`? Both args are PHYSICAL paths
-// (realpath'd or physicalForCreate'd). win32 case-folds (realpath does NOT normalize case on
-// Windows). A null on either side → NOT contained (fail-closed). Used by the snapshot-store
-// collision guard (#6, reduceFile) and the restore ref-traversal guard (#2, restoreFromSnapshot).
-// EXPORTED so detonate.mjs reuses the identical containment primitive for its FIX 1 belt.
-export function isContainedIn(childPhys, basePhys) {
-  if (!childPhys || !basePhys) return false;
+// THE THREE-STATE CONTAINMENT ANSWER — 'inside' | 'outside' | 'unknown'.
+//
+// WHY THIS EXISTS (rung-5 §1.2, a CLASS not an instance): the old boolean conflated "provably
+// outside" with "cannot tell", and `null` was folded into `false` under a comment claiming
+// "fail-closed". That claim is only true where contained == PERMITTED. At a guard whose polarity
+// is contained == REFUSE, `false` means ALLOW — so an unresolvable path walked straight through
+// the guard. `physicalOrNull` returns null for every win32 UNC/device spelling BY DESIGN, and a
+// broken junction anywhere in the ancestor chain produces one too, so this was reachable with
+// `path.toNamespacedPath()` — Node's own documented helper, no exotic input required.
+//
+// The lesson, kept at the primitive so it cannot be re-learned per call site: **`null` is not a
+// safe default; it is a value, and its meaning is decided by the CALLER'S POLARITY.** A boolean
+// cannot carry that. This function refuses to answer when it does not know, and each caller must
+// then say what "unknown" means for its own direction:
+//   contained == PERMITTED  → require 'inside'   (`isContainedIn`, unchanged semantics)
+//   contained == REFUSE     → require 'outside'  (`!== 'outside'` refuses inside AND unknown)
+export function containment(childPhys, basePhys) {
+  if (!childPhys || !basePhys) return 'unknown';
   const norm = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
   const c = norm(childPhys);
   const b = norm(basePhys);
-  return c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
+  return (c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep)) ? 'inside' : 'outside';
+}
+// Is `childPhys` the same as, or nested under, `basePhys`? Both args are PHYSICAL paths
+// (realpath'd or physicalForCreate'd). win32 case-folds (realpath does NOT normalize case on
+// Windows). PERMIT-POLARITY ONLY: unknown answers false, which is fail-closed *for a caller that
+// requires containment to proceed* — never use this at a guard where containment means REFUSE;
+// use `containment(...) !== 'outside'` there. Behaviour is byte-identical to the pre-tri-state
+// version, so the class-b twin-pin gate is unaffected.
+// EXPORTED so detonate.mjs reuses the identical containment primitive for its FIX 1 belt.
+export function isContainedIn(childPhys, basePhys) {
+  return containment(childPhys, basePhys) === 'inside';
 }
 // Does `candidate` resolve to the SAME physical file as `src` by any route a lexical
 // path.resolve compare misses? TWO complementary checks (verified on win32):
@@ -354,7 +375,7 @@ function writeFull(fd, buf) {
 // The utf8 text of a line for PARSING only (its exact bytes are what we keep).
 // Strips a single trailing \n and a preceding \r. Invalid utf8 → U+FFFD → the
 // JSON.parse fails → the unit is KEPT (fail-closed), never mis-cut.
-function lineText(lineBuf) {
+export function lineText(lineBuf) {
   let end = lineBuf.length;
   if (end > 0 && lineBuf[end - 1] === NL) end--;
   if (end > 0 && lineBuf[end - 1] === 0x0d) end--;
@@ -575,17 +596,20 @@ export function reduceFile(src, opts = {}) {
       if (detail) return fail(`outPath must differ from the source: ${detail} — writing over it would truncate the source before reading (in-place replace is the destruction ladder's gated step)`);
       // #6: the slim copy (and its temp) must never land INSIDE the snapshot store — writing over
       // manifest.jsonl or a content-addressed blob would corrupt the rail-5 recovery net the cut
-      // rests on. Realpath-and-contain (win32 case-fold via isContainedIn), fail-closed.
+      // rests on. REFUSE-POLARITY: only a PROVEN 'outside' may proceed, so an unresolvable path
+      // (win32 device spelling, broken junction in the chain) refuses instead of walking through —
+      // the old `isContainedIn(...)` folded that unknown into false == ALLOW (rung-5 §1.2).
       if (snapshotDir) {
         const snapReal = physicalForCreate(snapshotDir);
-        if (isContainedIn(physicalForCreate(outPath), snapReal) || isContainedIn(physicalForCreate(`${outPath}.${process.pid}.tmp`), snapReal)) {
-          return fail(`outPath must not resolve inside the snapshot store (${snapshotDir}) — it would overwrite a recovery blob or manifest`);
+        if (containment(physicalForCreate(outPath), snapReal) !== 'outside' || containment(physicalForCreate(`${outPath}.${process.pid}.tmp`), snapReal) !== 'outside') {
+          return fail(`outPath must not resolve inside the snapshot store (${snapshotDir}), and must be resolvable enough to prove it — it would overwrite a recovery blob or manifest`);
         }
         // FIX 1 (source-sacred): src must not resolve INSIDE snapshotDir either. snapshotSource appends
         // manifest.jsonl (and writes content blobs) into snapshotDir — a src that IS the manifest path
         // (basename manifest.jsonl with snapshotDir == dirname(src)) or a blob path gets CORRUPTED by that
-        // recovery write. The guard asymmetry only checked outPath; mirror it to src, fail-closed.
-        if (isContainedIn(physicalOrNull(src), snapReal)) {
+        // recovery write. The guard asymmetry only checked outPath; mirror it to src — REFUSE-polarity,
+        // so unknown refuses (this is the site whose "fail-closed" comment was false before §1.2).
+        if (containment(physicalOrNull(src), snapReal) !== 'outside') {
           return fail(`src must not resolve inside the snapshot store (${snapshotDir}) — snapshotSource writes the manifest/blobs there and would corrupt the source`);
         }
         // FIX 1-R2 (source-sacred, the ALIAS the FIX 1 path-guard above misses): the path-containment
@@ -1156,11 +1180,12 @@ export function snapshotSource(src, snapshotDir) {
     // snapshotDir==dirname(src) makes the manifest path === src, and the manifest temp→rename below REPLACES
     // src with existing+row (source corruption, formerly ok:true). reduceFile's floor (:411) + detonate's
     // gate-4 belt (:369) both refuse this, but a DIRECT call to this primitive bypassed them — so the guard
-    // must live HERE too (one-flock, same isContainedIn check). The ALIAS (hardlink) route stays closed
+    // must live HERE too (one-flock, same containment primitive). The ALIAS (hardlink) route stays closed
     // safe-by-construction by the wx+rename manifest write below + content-addressing for the blob; this
     // containment check closes the LITERAL src-inside-store route an alias defense cannot (a same path is not
-    // an alias). Fail-closed.
-    if (isContainedIn(physicalOrNull(src), physicalForCreate(snapshotDir))) {
+    // an alias). REFUSE-POLARITY: 'unknown' refuses too — this comment used to say "Fail-closed" while the
+    // boolean form let an unresolvable src through (rung-5 §1.2, the third false claim in this file).
+    if (containment(physicalOrNull(src), physicalForCreate(snapshotDir)) !== 'outside') {
       return { ok: false, reason: `src resolves inside the snapshot store (${snapshotDir}) — snapshotSource writes the manifest/blobs there and would corrupt the source (refused)` };
     }
     const sha = sha256File(src);
@@ -1171,7 +1196,18 @@ export function snapshotSource(src, snapshotDir) {
     // name before trusting it — a pre-seeded / corrupted blob at the hash path is NOT
     // the source, and blindly deduping to it would make the "snapshot" a lie the
     // whole rail-5 recovery rests on. If it fails, overwrite with the true source.
-    if (fs.existsSync(snapshotPath) && sha256File(snapshotPath) === sha) deduped = true;
+    //
+    // ...AND CONTENT EQUALITY IS NOT ENOUGH: A BACKUP MUST ALSO BE INDEPENDENT (rung-5 A7).
+    // A hardlink (or symlink) to `src` placed at the blob path hashes EXACTLY equal to `sha` —
+    // it IS the source — so the content check passed it and the store recorded a "snapshot"
+    // that is the same bytes on disk as the thing it is meant to protect. Measured: plant a
+    // hardlink, snapshotSource returns ok:true deduped:true, then rewrite the source and the
+    // "backup" reads the new content. The undo net was a lie, silently. A snapshot's whole
+    // job is to survive the source changing, so independence is part of the definition, not
+    // an extra check. `collidesWithSource` (realpath both sides + dev/ino) is the same
+    // primitive gate 4 uses — reused here rather than re-derived.
+    const aliasOfSrc = fs.existsSync(snapshotPath) ? collidesWithSource(snapshotPath, src) : null;
+    if (!aliasOfSrc && fs.existsSync(snapshotPath) && sha256File(snapshotPath) === sha) deduped = true;
     else {
       // WRITE THE BLOB VIA temp->rename, NEVER copyFileSync ONTO the blob path.
       // A bare `copyFileSync(src, snapshotPath)` FOLLOWS a symlink sitting at the destination, so
@@ -1185,7 +1221,16 @@ export function snapshotSource(src, snapshotDir) {
       // an O_EXCL fresh inode at a per-pid temp, then an atomic rename that REPLACES the directory
       // entry (rename does not follow a link at the destination). A stale same-pid temp fails the
       // snapshot loudly, which is rail 5 behaving correctly: no snapshot, no destroy.
-      const blobTmp = `${snapshotPath}.${process.pid}.tmp`;
+      // UNPREDICTABLE temp name, not `<blob>.<pid>.tmp`. A pid is guessable and observable, so a
+      // per-pid temp path can be PRE-PLACED by anyone able to write the store — and the lab reports
+      // that on win32 a DANGLING symlink sitting there defeats COPYFILE_EXCL/`wx` (the existence
+      // check follows the link, finds nothing, and the create proceeds THROUGH it). I could not
+      // reproduce that specific bypass on this box — file-symlink creation is EPERM here — so I am
+      // not relying on the EXCL semantics being what I hope. Random naming removes the PRECONDITION
+      // instead of arguing about the primitive: an attacker cannot pre-place at a path it cannot
+      // predict. EXCL stays as the second belt (cross-nature: one guard defeats prediction, the
+      // other defeats a race). 12 bytes of CSPRNG, and `crypto` is already imported.
+      const blobTmp = `${snapshotPath}.${crypto.randomBytes(12).toString('hex')}.tmp`;
       try {
         fs.copyFileSync(src, blobTmp, fs.constants.COPYFILE_EXCL);
         fs.renameSync(blobTmp, snapshotPath);
@@ -1330,7 +1375,18 @@ export function restoreFromSnapshot(ref, toPath, opts) {
     // The bytes are content-verified. Guard the DESTINATION before publishing (BREAK 1).
     // (a) A PRECISE source-alias diagnostic when the caller declares a protected `src` (kept, now redundant
     //     with the intrinsic clobber below but the sharper message).
-    if (src != null) {
+    //
+    // GATED ON `!force` (rung-5 A6). This branch used to fire UNCONDITIONALLY, which broke the
+    // PRIMARY undo: restoring a snapshot back OVER the file it was taken from is the whole point of
+    // the recovery store, and a caller doing exactly that — declaring `src` so the engine knows what
+    // it is protecting, and passing `force:true` to authorise the overwrite — was refused anyway.
+    // Worse, the refusal told them to "pass force:true" while ignoring the force:true they had
+    // already set: a message naming the flag it does not read. The honest caller was punished for
+    // being explicit (omit `src` and the same restore succeeded), and the operator meeting this is
+    // by definition mid-recovery. This is the sharper DIAGNOSTIC for the clobber guard below, and
+    // that guard is force-gated — so this one must be too, or the two disagree about what force
+    // means. Without `force` the refusal still fires, with its precise alias reason.
+    if (!force && src != null) {
       let srcFd = null;
       try { srcFd = fs.openSync(src, 'r'); } catch { /* src unopenable → not a live file to protect */ }
       if (srcFd != null) {

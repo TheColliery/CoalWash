@@ -2093,6 +2093,55 @@ test('R3/TP-3: a SHORT-NAME snapshot store cannot slip past store containment �
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('RUNG5 §1.2 NULL-POLARITY: an UNRESOLVABLE src/outPath REFUSES at every contained==REFUSE guard — a fail-closed null must never read as ALLOW', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store'); fs.mkdirSync(store, { recursive: true });
+    const src = path.join(store, 'victim.jsonl');
+    fs.writeFileSync(src, '{"type":"mode"}\n{"type":"user"}\n');
+    const before = sha256File(src);
+    // path.toNamespacedPath is NODE'S OWN documented long-path helper, not a contrived spelling.
+    // physicalOrNull rejects every win32 device/UNC form by design, so it yields null here — and a
+    // broken junction anywhere in the ancestor chain produces the same null on any platform.
+    const nsSrc = path.toNamespacedPath(src);
+    const nsStore = path.toNamespacedPath(store);
+
+    const rSnap = snapshotSource(nsSrc, nsStore);
+    assert.strictEqual(rSnap.ok, false,
+      'snapshotSource must REFUSE a src it cannot prove is outside the store. Pre-fix, isContainedIn folded the unresolvable path into false, and because this guard is REFUSE-polarity, false meant ALLOW — the store write proceeded against a src living inside the store');
+    const rRed = reduceFile(nsSrc, { cutTypes: ['mode'], outPath: path.join(dir, 'o.jsonl'), snapshotDir: nsStore });
+    assert.strictEqual(rRed.ok, false, 'reduceFile floor refuses the same shape (both #6 and FIX-1 legs are REFUSE-polarity)');
+    assert.strictEqual(sha256File(src), before, 'source byte-intact');
+
+    // The permit-polarity caller keeps its ORIGINAL meaning — the fix must not invert it.
+    assert.strictEqual(isContainedIn(null, store), false, 'permit-polarity: unknown is still not-contained (twin-pin behaviour unchanged)');
+  } finally { rm(dir); }
+});
+
+test('RUNG5 A7 BLOB INDEPENDENCE: an ALIAS of the source planted at <store>/<sha> is never accepted as its own backup — a snapshot must survive the source changing', (t) => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store'); fs.mkdirSync(store, { recursive: true });
+    const src = path.join(dir, 'src.txt'); fs.writeFileSync(src, 'ORIGINAL-PRECIOUS-BYTES');
+    const sha = sha256File(src);
+    try {
+      fs.linkSync(src, path.join(store, sha)); // the alias hashes EXACTLY equal to sha — it IS the source
+    } catch (e) {
+      t.skip(`cannot create a hardlink here (${e.code}) — capability genuinely absent, not assumed`);
+      return;
+    }
+    const r = snapshotSource(src, store);
+    assert.strictEqual(r.ok, true, 'the snapshot still succeeds — the alias is replaced by a real blob, not refused');
+    assert.strictEqual(r.deduped, false,
+      'the alias must NOT be deduped-to. Content equality is trivially satisfied by the source itself; pre-fix this returned deduped:true and the store recorded a "backup" that was the same bytes on disk as the thing it protects');
+
+    // THE DAMAGE, made explicit: destroy the source and the backup must still hold the original.
+    fs.writeFileSync(src, 'DESTROYED');
+    assert.strictEqual(fs.readFileSync(path.join(store, sha), 'utf8'), 'ORIGINAL-PRECIOUS-BYTES',
+      'the blob is INDEPENDENT of the source. Pre-fix it read "DESTROYED" — the undo net silently held nothing');
+  } finally { rm(dir); }
+});
+
 test('BLOB-SYMLINK: a link planted at <store>/<sha> can never make snapshotSource write THROUGH it — the blob lands via temp->rename, the outside victim is untouched', (t) => {
   const dir = tmp();
   try {
@@ -2125,5 +2174,27 @@ test('R3/LOW: restoreFromSnapshot never THROWS on a bad ref — a recovery primi
     assert.strictEqual(r.ok, false, `${String(bad)} => fail-closed`);
     assert.strictEqual(r.verified, false);
   }
+  } finally { rm(dir); }
+});
+
+test('RUNG5 A6 PRIMARY UNDO: restoring a snapshot back OVER its own source succeeds when the caller declares src AND passes force — the refusal must not name a flag it ignores', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    const src = path.join(dir, 'live.jsonl'); fs.writeFileSync(src, 'GOOD-ORIGINAL');
+    const snap = snapshotSource(src, store);
+    fs.writeFileSync(src, 'CORRUPTED-BY-A-BAD-RUN'); // the disaster the undo net exists for
+
+    const r = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src, force: true });
+    assert.strictEqual(r.ok, true,
+      'the PRIMARY undo must work. Pre-fix the src-alias branch fired unconditionally, so a caller who declared src (being explicit about what it protects) and set force:true was refused — by a message telling them to pass force:true, which they had already passed');
+    assert.strictEqual(fs.readFileSync(src, 'utf8'), 'GOOD-ORIGINAL', 'the source really is restored');
+
+    // and WITHOUT force the precise alias refusal still fires — force is the whole difference
+    fs.writeFileSync(src, 'CORRUPTED-AGAIN');
+    const rNo = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src });
+    assert.strictEqual(rNo.ok, false, 'no force → still refused');
+    assert.match(rNo.reason, /alias|overwrite|force/i, 'and the refusal still explains itself');
+    assert.strictEqual(fs.readFileSync(src, 'utf8'), 'CORRUPTED-AGAIN', 'a refused restore leaves the destination untouched');
   } finally { rm(dir); }
 });
