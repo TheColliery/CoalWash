@@ -42,3 +42,8 @@ Thumbs.db
 
 # IC lab scratch — throwaway prototypes/notes, never committed (this is the guard that still serves)
 work/
+
+# Caretaker benches — git worktrees nested inside this repo (machine-local, never shipped).
+# MUST stay ignored: an un-ignored nested checkout would be committed whole into a PUBLIC repo.
+/CW-class-a/
+/CW-class-b/
