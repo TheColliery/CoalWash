@@ -50,7 +50,7 @@ The conductor measures at session start; the CLI gauge reports the band (`cli.mj
 
 Every landed cut is recorded to a bin by the plan's `origin`: `program-cut` (default, ambient Quick/Force) → the **fat bin**; `wizard-cut` (wizard deletes/shrinks) → **`store.old`**. **Every wizard-tier plan MUST set `origin: 'wizard-cut'`** before `applyPlan` — omitting it silently lands in the fat bin, the wrong bin for wizard work.
 
-Retention is dual-limit (age ∧ size, whichever binds first) and **run-gated — the sweep runs ONLY inside `applyPlan`, never a clock/hook/cron/SessionStart age-sweep (0h-GUARD)**; a destroy is verified + death-certified, never claimed on an unverifiable delete.
+Retention is dual-limit (age ∧ size — the 48h keep-all floor beats byte pressure; an unsatisfiable cap is reported, never silently resolved) and **run-gated — the sweep runs ONLY inside `applyPlan`, never a clock/hook/cron/SessionStart age-sweep (0h-GUARD)**; a destroy is verified + death-certified, never claimed on an unverifiable delete.
 
 **Restore by reference, never by content:** list a bin's index (`listBin` — metadata only), then recover ONE id with `node scripts/lib/cli.mjs restore <id> > recovered.md` — code moves the bytes to stdout→file; the recovered content never enters your context, and you never re-author it. It never writes to the store.
 
@@ -60,7 +60,7 @@ Advisory nets for every OTHER hand editing a class-B governance/memory file (mai
 
 ## Asks (Stop hook — CODE-built templates, `ask.mjs`)
 
-You never compose ask prose or invent a rationale — render exactly the template's two-button question or one-line directive (a store-loaded agent composing its own ask once quoted the loaded backlog at itself — the closed loop this closes).
+You never compose ask prose or invent a rationale — render exactly the template's two-button question or one-line directive (the why: `ask.mjs` header).
 
 - **SessionStart only MEASURES** (caches the verdict + arms/clears the once-per-crossing edge); the **`Stop` hook is the sole delivery surface** — a `{decision:'block', reason}` blocking channel (rot-canary's), enforced, not an ignorable context line.
 - **Answer-first, always:** answer the user's actual message for this turn FIRST; the ask/directive rides at the END of your response, never preempts the prompt (once it resolves, return to that answer).
