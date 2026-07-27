@@ -246,11 +246,44 @@ function physicalOrNull(p) {
 // (delete authorization itself is plan-sourced, below; UNDO is the safety net).
 export function sniffUnrewritable(buf) {
   if (buf.includes(0)) return 'binary content (NUL byte) — flagged, not rewritten';
+  const text = buf.toString('utf8');
+  // ── THE ROUND TRIP (USER ruling 2026-07-28) ────────────────────────────────
+  // A REWRITE reads the file as TEXT, so a byte that is not valid UTF-8 came
+  // back as U+FFFD and was then written OVER the original — the live file lost
+  // the byte, permanently. Measured through the shipped door: `sniffUnrewritable`
+  // returned null and applyPlan reported ok.
+  //
+  // THE GATE CANNOT COVER THIS, which is why the refusal has to live here:
+  // checkFidelity compares structured tokens of before and after, and BOTH sides
+  // were decoded the same lossy way, so the inventories match and nothing drops.
+  //
+  // WHY A ROUND TRIP AND NOT AN ENCODING DETECTOR: a detector guesses, and a
+  // wrong guess is a NEW risk on a tool that overwrites memory. `decode ->
+  // re-encode -> compare bytes` asks the only question that matters — can this
+  // file survive the trip we are about to put it through — and answers it
+  // exactly, deterministically, with no table and no heuristic. Valid UTF-8 is
+  // byte-identical through it whatever the script; Thai, CJK and emoji pass by
+  // construction, and a control test pins that so nobody reads this as an
+  // ASCII rule.
+  //
+  // ORDER: after the NUL check (cheaper, and it already catches UTF-16/binary)
+  // and BEFORE readFrontmatter — there is no point parsing a decode that is
+  // already known to be lossy.
+  //
+  // THE DECLARED TRADE: a non-UTF-8 file is FLAGGED, not washed. Yield loss,
+  // never safety loss, and the user has a way out — convert it to UTF-8 and
+  // CoalWash treats it normally — so the message says so rather than reporting
+  // a vague "unverifiable" that sounds like CoalWash is confused about its own
+  // state. Deletes are unaffected: they never decode, and the bins now bank the
+  // original bytes.
+  if (!Buffer.from(text, 'utf8').equals(buf)) {
+    return 'not valid UTF-8 — a legacy single-byte encoding (CP1252 / Latin-1, e.g. a Notepad "ANSI" save) or another non-UTF-8 encoding: rewriting it would replace the undecodable bytes with U+FFFD and lose them permanently — flagged, not rewritten (convert the file to UTF-8 and CoalWash will wash it normally)';
+  }
   // ONE frontmatter primitive, shared with isPinned and the gate's
   // frontmatterKeys (fidelity-gate.mjs) — see its comment for why a private
   // `/^---\r?\n/` here was blind to a BOM. This caller's safe direction: an
   // unverifiable head means "do not rewrite".
-  const fm = readFrontmatter(buf.toString('utf8'));
+  const fm = readFrontmatter(text);
   if (fm.state === 'unverifiable') return `${fm.why} — flagged, not rewritten`;
   return null;
 }

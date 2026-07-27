@@ -2373,6 +2373,68 @@ test('G3-3: a deleted non-UTF-8 file restores from the bin BYTE-IDENTICAL', () =
   } finally { clean(proj); }
 });
 
+// ---------------------------------------------------------------------------
+// G3-4 (USER ruling 2026-07-28) — REFUSE A REWRITE OF A NON-UTF-8 FILE
+// ---------------------------------------------------------------------------
+// G3-3's live-file twin: a rewrite read the file as text, so a byte that is not
+// valid UTF-8 came back as U+FFFD and was written over the original. The gate is
+// structurally blind (both sides decode the same lossy way, so the inventories
+// match). `sniffUnrewritable` existed to refuse what it cannot parse but only
+// scanned the first FM_HEAD_SCAN=64 chars, so a bad byte deeper in was invisible.
+// The instrument is a ROUND TRIP, not an encoding detector: a detector can guess
+// wrong, and a wrong guess is a new risk. Decode, re-encode, compare bytes.
+const LEAD = '# note\n' + 'p'.repeat(120) + '\n'; // pushes the probe byte past FM_HEAD_SCAN(64)
+
+test('G3-4: a rewrite of a non-UTF-8 file is REFUSED — the live file is never transcoded', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'ANSI.md');
+    // 0xE9 is 'e-acute' in CP1252/Latin-1 and is not valid UTF-8 (Notepad "ANSI").
+    const bytes = Buffer.concat([Buffer.from(LEAD + 'caf', 'ascii'), Buffer.from([0xe9]), Buffer.from('\ntail line\n', 'ascii')]);
+    fs.writeFileSync(f, bytes);
+    const why = sniffUnrewritable(bytes);
+    assert.ok(why, 'the sniff must refuse it');
+    assert.match(why, /UTF-8/, 'the reason must name the REAL cause — the user needs to know THEIR FILE is not UTF-8, not that CoalWash is confused');
+    // and end-to-end: flagged, excluded, file untouched byte-for-byte
+    const rewritten = bytes.toString('utf8').split('\n').filter((l) => l !== 'tail line').join('\n');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: rewritten }]));
+    assert.deepStrictEqual(fs.readFileSync(f), bytes, 'the live file must be byte-identical — this is the whole point');
+    assert.ok((r.flagged || []).some((x) => x.path === f && /UTF-8/.test(x.reason)), `the file is FLAGGED with the real reason: ${JSON.stringify(r.flagged)}`);
+  } finally { clean(proj); }
+});
+
+// THE CONTROL THAT MATTERS MOST. If this goes red, CoalWash just stopped washing
+// every Thai file — and Thai governance files are this project's real corpus.
+// Valid UTF-8 round-trips exactly, whatever the script; the refusal is about
+// ENCODING VALIDITY, never about being non-ASCII.
+test('G3-4 CONTROL: real UTF-8 non-ASCII — Thai, CJK, emoji, BOM — still round-trips and still washes', () => {
+  const THAI = String.fromCharCode(0x0e08, 0x0e33); // "จำ"
+  const CJK = String.fromCharCode(0x4e2d, 0x6587);  // "中文"
+  const EMOJI = String.fromCodePoint(0x1f600);      // astral, a surrogate pair in JS
+  const BOM = String.fromCharCode(0xfeff);
+  const cases = [
+    ['thai', LEAD + THAI + ' note\ntail line\n'],
+    ['cjk', LEAD + CJK + ' note\ntail line\n'],
+    ['emoji', LEAD + EMOJI + ' note\ntail line\n'],
+    ['bom+thai', BOM + LEAD + THAI + ' note\ntail line\n'],
+    ['combined', LEAD + THAI + CJK + EMOJI + '\ntail line\n'],
+  ];
+  for (const [label, text] of cases) {
+    const buf = Buffer.from(text, 'utf8');
+    assert.strictEqual(sniffUnrewritable(buf), null, `${label}: valid UTF-8 must NOT be refused — the bar is encoding validity, not ASCII`);
+    const { proj, store } = sandbox();
+    try {
+      const f = path.join(store, 'UTF8.md');
+      fs.writeFileSync(f, buf);
+      const rewritten = text.split('\n').filter((l) => l !== 'tail line').join('\n');
+      const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: rewritten }]));
+      assert.strictEqual(r.ok, true, `${label}: the rewrite must still run — ${r.error}`);
+      assert.deepStrictEqual((r.flagged || []).filter((x) => x.path === f), [], `${label}: never flagged`);
+      assert.deepStrictEqual(fs.readFileSync(f), Buffer.from(rewritten, 'utf8'), `${label}: the wash landed byte-exact`);
+    } finally { clean(proj); }
+  }
+});
+
 test('G3-3: recoverDangling banks a non-UTF-8 create-undo BYTE-IDENTICAL too', () => {
   const { proj, store } = sandbox();
   try {
