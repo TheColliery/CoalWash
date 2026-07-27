@@ -1,0 +1,3 @@
+# The git hooks are executed by /bin/sh — a CRLF working copy is "bad interpreter"
+# on Linux/macOS, and core.autocrlf=true would produce exactly that. Pin them to LF.
+/.githooks/** text eol=lf

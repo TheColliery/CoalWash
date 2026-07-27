@@ -4,6 +4,8 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.2.0-rc.7] - 2026-07-27
+
 ### Security
 
 - **MEDIUM (station 3, round 4) - the fence bypass survived the THIRD fix as well, and the defect was never the LIST: it is the POLARITY.** Ten more characters still read `state: 'none'` - U+034F CGJ - U+3164 HANGUL FILLER - U+115F / U+1160 Choseong & Jungseong Filler - U+FE0F VS-16 - U+17B4 KHMER VOWEL INHERENT AQ - U+180B FVS1 - U+FFA0 HALFWIDTH HANGUL FILLER - U+2800 BRAILLE PATTERN BLANK - U+0303 COMBINING TILDE - and **not one of them is White_Space, Cf or Cc**, so a `pinned: true` file carrying one measured deletable AND rewritable end-to-end, all three protections off exactly as in N1.
