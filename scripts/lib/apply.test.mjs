@@ -243,6 +243,44 @@ test('sniffUnrewritable sees an UNCLOSED frontmatter through a BOM (the same lex
   );
 });
 
+// N1 (graduation-lab round 2): ONE invisible byte after the opening --- turned
+// state 'none' -> isPinned false -> applyPlan DELETED a pinned file, REWROTE it
+// on the unattended path, and the unclosed-fence refusal switched off — three
+// protections, one opening-fence line. The fix lives at the shared primitive
+// (readFrontmatter), never at a call site; these are the end-to-end proofs.
+test('PIN + FENCE SHAPE: trailing space/tab after the opening --- must NOT defeat pinned:true (delete AND rewrite refused)', () => {
+  const { proj, store } = sandbox();
+  try {
+    for (const [name, opener] of [['space', '--- \n'], ['tab', '---\t\n']]) {
+      const f = path.join(store, `fence-${name}-pinned.md`);
+      const body = `${opener}pinned: true\n---\ncritical directive`;
+      write(f, body);
+      assert.strictEqual(isPinned(f), true, `${name}: a trailing-whitespace fence must not read as unpinned`);
+      const del = apply(planFor(proj, store, [{ type: 'delete', path: f }]));
+      assert.strictEqual(del.ok, false, `${name}: the delete must refuse`);
+      assert.ok(del.error.includes('PIN-protected'), `${name}: expected a PIN refusal, got: ${del.error}`);
+      assert.ok(fs.existsSync(f), `${name}: the pinned file must still be on disk`);
+      // the unattended-path shape: a token-preserving rewrite, NO approvedDrops
+      const rw = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: `${opener}pinned: true\n---\ncritical directive trimmed` }]));
+      assert.strictEqual(rw.ok, false, `${name}: the rewrite must refuse`);
+      assert.ok(rw.error.includes('PIN-protected'), `${name}: expected a PIN refusal on the rewrite, got: ${rw.error}`);
+      assert.strictEqual(fs.readFileSync(f, 'utf8'), body, `${name}: byte-exact survival`);
+    }
+    // control: the same fence shape UNPINNED stays washable (no over-refusal)
+    const u = path.join(store, 'fence-space-unpinned.md');
+    write(u, '--- \npinned: false\n---\nbody');
+    assert.strictEqual(isPinned(u), false, 'a trailing-space fence with pinned:false parses as unpinned');
+    // fail-closed control: a lone-CR (classic-Mac) fence head is unverifiable -> pinned
+    const cr = path.join(store, 'fence-cr-pinned.md');
+    write(cr, '---\rpinned: true\r---\rcontent');
+    assert.strictEqual(isPinned(cr), true, 'a lone-CR fence head must fail CLOSED');
+  } finally { clean(proj); }
+});
+
+test('sniffUnrewritable: an unclosed fence with a trailing-space opener is still flagged (the third disabled protection)', () => {
+  assert.ok(sniffUnrewritable(Buffer.from('--- \nowner: me\nno closing fence\n', 'utf8')), 'trailing space must not hide an unclosed frontmatter');
+});
+
 test('containment is realpath-and-contain, fail-closed: a path outside the declared roots aborts untouched', () => {
   const { proj, store } = sandbox();
   const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-out-')));

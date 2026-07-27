@@ -541,3 +541,54 @@ test('DOUBLE BOM: a residual U+FEFF after the one legal strip is unverifiable, n
   // must not be dragged into the refuse set — position 0 only.
   assert.strictEqual(readFrontmatter(BOM + '---\nowner: a' + BOM + 'b\n---\nx').state, 'closed', 'ZWNBSP inside content is content, not a preamble');
 });
+
+// ── THE FENCE-SHAPE BYPASS (graduation-lab round 2, N1) ────────────────────
+// The primitive CONTRADICTED ITSELF: its closing fence has accepted trailing
+// [ \t]* since it was written, and its opening fence did not — so `--- \n`
+// (ONE invisible byte, which Markdown editors deliberately preserve: two
+// trailing spaces are a hard break, so trim-on-save is commonly off for .md)
+// read as state 'none' = "genuinely no frontmatter". One space switched off
+// the pin refusal on delete, the pin refusal on the unattended rewrite, AND
+// the unclosed-fence refusal. Same class as the encoding preamble (284e7c6):
+// a lexical NO on decoded text read as a confident claim about the file.
+// The parameter space is enumerated here, not just the reported byte.
+test('FENCE SHAPE: trailing whitespace after the opening --- parses, symmetric with the closing fence', () => {
+  const body = 'pinned: true\n---\ncontent';
+  for (const [name, opener] of [
+    ['one space', '--- \n'],
+    ['one tab', '---\t\n'],
+    ['three spaces', '---   \n'],
+    ['mixed space/tab run', '--- \t \n'],
+    ['space then CRLF', '--- \r\n'],
+  ]) {
+    const r = readFrontmatter(opener + body);
+    assert.strictEqual(r.state, 'closed', `${name}: opening-fence tolerance must match the closing fence`);
+    assert.match(r.block, /pinned: true/, `${name}: the block must carry the keys`);
+  }
+  // parity pin — the closing fence's pre-existing tolerance still holds
+  assert.strictEqual(readFrontmatter('---\npinned: true\n--- \ncontent').state, 'closed', 'closing-fence trailing space (pre-existing)');
+  // and the key inventory flows through the shared primitive
+  assert.deepStrictEqual([...frontmatterKeys('--- \npinned: true\n---\nx')], ['pinned']);
+});
+
+test('FENCE SHAPE: a lone-CR (classic-Mac) fence head is UNVERIFIABLE, never "none"', () => {
+  // fence-SHAPED, but a line discipline this tooling cannot faithfully parse —
+  // "I could not tell" is not "no" (the tri-state doctrine).
+  assert.strictEqual(readFrontmatter('---\rpinned: true\r---\rcontent').state, 'unverifiable');
+  assert.strictEqual(readFrontmatter('--- \rpinned: true\r---\rcontent').state, 'unverifiable', 'trailing space + lone CR');
+});
+
+test('FENCE SHAPE controls: what must NOT become frontmatter (no over-refusal)', () => {
+  // a pasted diff header is prose, not a fence — must stay washable
+  assert.strictEqual(readFrontmatter('--- a/file.txt\n+++ b/file.txt\ncontext').state, 'none');
+  // 4+ dashes at line 1 = a thematic break, not a fence
+  assert.strictEqual(readFrontmatter('----\nprose').state, 'none');
+  // a leading blank line = not frontmatter BY CONVENTION (a position-0
+  // construct — the BOM addendum's "position 0 only" ruling, same axis).
+  // DECIDED and pinned here so the choice is visible, not accidental; the
+  // lab called it a room judgment call and this row is the room's answer.
+  assert.strictEqual(readFrontmatter('\n---\npinned: true\n---\nx').state, 'none');
+  // the third consequence: an unclosed fence whose OPENER carries trailing
+  // whitespace is still "opens but never closes" = unverifiable, not 'none'
+  assert.strictEqual(readFrontmatter('--- \nkey: v\nnever closes').state, 'unverifiable');
+});

@@ -393,10 +393,37 @@ export function readFrontmatter(text) {
   if (head.includes('\u0000') || head.includes('\uFFFD')) {
     return { state: 'unverifiable', block: '', why: 'the head is not decodable UTF-8 text (an encoding preamble — UTF-16/32 BOM, NUL-interleaved, or binary)' };
   }
-  if (!/^---\r?\n/.test(s)) return { state: 'none', block: '' };
-  const end = /\r?\n---[ \t]*(?:\r?\n|$)/.exec(s.slice(3));
+  // THE OPENING FENCE, symmetric with the closing fence below (graduation-lab
+  // round 2, N1): the closing fence has tolerated trailing [ \t]* since it was
+  // written and the opener did not, so `--- \n` — ONE invisible byte, which
+  // Markdown editors deliberately preserve (two trailing spaces = a hard
+  // break, so trim-on-save is commonly off for .md) — read as state 'none' =
+  // "genuinely no frontmatter", and one space switched off the pin refusal on
+  // delete, the pin refusal on the unattended rewrite, AND the unclosed-fence
+  // refusal at once. Same class as the encoding preamble above: a lexical NO
+  // on decoded text read as a confident claim about the FILE. The tolerance
+  // is now identical on both fences.
+  const open = /^---[ \t]*\r?\n/.exec(s);
+  if (!open) {
+    // Fence-SHAPED but a line discipline this tooling does not parse: a bare
+    // CR (classic-Mac) line terminator. Every scan in this module splits on
+    // \r?\n, so parsing on would be a guess wearing a parse — "I could not
+    // tell" is not "no" (the tri-state doctrine). Deeper prose starting with
+    // `--- ` plus TEXT (a pasted diff header `--- a/file`) is NOT fence-shaped
+    // and stays 'none' — over-refusing it would make ordinary files unwashable.
+    if (/^---[ \t]*\r/.test(s)) {
+      return { state: 'unverifiable', block: '', why: 'the opening fence line ends in a bare CR (classic-Mac line endings) — a line discipline this tooling cannot faithfully parse' };
+    }
+    return { state: 'none', block: '' };
+  }
+  // Slice from the opener's OWN newline (not past it) so the closing-fence
+  // regex, which anchors on a preceding newline, still sees an immediately
+  // following `---`; for the bare `---\n` opener this is byte-identical to
+  // the old fixed slice(3).
+  const bodyStart = open[0].length - (open[0].endsWith('\r\n') ? 2 : 1);
+  const end = /\r?\n---[ \t]*(?:\r?\n|$)/.exec(s.slice(bodyStart));
   if (!end) return { state: 'unverifiable', block: '', why: 'frontmatter opens but never closes (unparseable)' };
-  return { state: 'closed', block: s.slice(3, 3 + end.index) };
+  return { state: 'closed', block: s.slice(bodyStart, bodyStart + end.index) };
 }
 
 export function frontmatterKeys(text) {
