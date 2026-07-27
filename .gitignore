@@ -43,6 +43,18 @@ Thumbs.db
 # IC lab scratch — throwaway prototypes/notes, never committed (this is the guard that still serves)
 work/
 
+# Internal design specs — process artifacts, not product (CLEAN-CLONE PRINCIPLE: a skill clone
+# carries ONLY the skill). Added by MAIN 2026-07-27 after a resident measured that `git add -A`
+# would stage two design specs into this PUBLIC repo; main's own dispatch had asserted this dir
+# was already fenced, and `git check-ignore` on the DIRECTORY agreed while the FILES were exposed.
+# Check the file, never the directory.
+docs/
+
+# Board reports — audit output lands INSIDE the scanned part by rule, but it is process, not
+# product. Same add -A leak class as docs/ above; caught by station 3 the same day the docs/
+# fence went in (an unfenced .coalboard/ would stage the board verdict into this PUBLIC repo).
+.coalboard/
+
 # Caretaker benches — git worktrees nested inside this repo (machine-local, never shipped).
 # MUST stay ignored: an un-ignored nested checkout would be committed whole into a PUBLIC repo.
 /CW-class-a/
