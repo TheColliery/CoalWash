@@ -116,7 +116,7 @@ test('idle producer: a lone monthly snapshot is never thinned before its horizon
 
 // --- density axis + fail direction ------------------------------------------
 
-test('intra-slot new-replaces-old: within one day slot only the newest survives; a same-timestamp tie keeps the later-listed (newer write)', () => {
+test('intra-slot new-replaces-old: within one day slot only the newest EVENT survives; a same-timestamp pair IS one event and survives together', () => {
   const now = T0 + 10 * DAY;
   const slotBase = now - 5 * DAY; // squarely in tier 2
   const a = { id: 'older', at: slotBase };
@@ -124,10 +124,62 @@ test('intra-slot new-replaces-old: within one day slot only the newest survives;
   const r1 = retentionPlan([a, b], now);
   assert.deepStrictEqual(r1.keep.map((s) => s.id), ['newer']);
   assert.deepStrictEqual(r1.destroy.map((s) => s.id), ['older']);
+  // The old assertion here ("tie -> the later-listed wins") ENCODED the N2
+  // defect: a same-`at` pair is by construction ONE WASH's own files
+  // (applyPlan banks a whole transaction on one clock reading), and this
+  // test demanded the engine destroy half of it. Same-`at` = same event.
   const t1 = { id: 'first-write', at: slotBase };
   const t2 = { id: 'second-write', at: slotBase };
   const r2 = retentionPlan([t1, t2], now);
-  assert.deepStrictEqual(r2.keep.map((s) => s.id), ['second-write'], 'tie -> the later-listed (append order = newer) wins');
+  assert.deepStrictEqual(r2.keep.map((s) => s.id).sort(), ['first-write', 'second-write'], 'a same-`at` pair is one event — both survive');
+  assert.strictEqual(r2.destroy.length, 0);
+});
+
+// N2 (graduation-lab round 2): ONE WASH cutting N files banks all N with the
+// TRANSACTION's single clock reading (applyPlan passes one `now` to every
+// recordBinItem), so all N landed in ONE density slot and N-1 were destroyed
+// at 49h — ordinary path, no crash, no attacker, byte cap off; the bigger the
+// wash, the more of it was discarded. The density UNIT is now the EVENT
+// (items sharing one `at` = one transaction) — the true Time-Machine port:
+// a snapshot is a point-in-time SET, and "one per day" means one SNAPSHOT,
+// never one file of it.
+test('N2: all items of ONE wash (shared `at`) survive density together — the recovery unit is the EVENT, not one file of it', () => {
+  const now = T0 + 10 * DAY;
+  const at = now - 49 * HOUR; // past the 48h floor, squarely in tier 2
+  const r = retentionPlan(['f1', 'f2', 'f3', 'f4', 'f5'].map((id) => ({ id, at })), now);
+  assert.strictEqual(r.destroy.length, 0, `one event must never thin itself (destroyed: ${r.destroy.map((d) => d.id).join(',')})`);
+  assert.strictEqual(r.keep.length, 5, 'every file of the wash stays recoverable');
+});
+
+test('N2 MUST-BREAK: two EVENTS in one day slot still thin — the older event dies WHOLE, the newer survives WHOLE', () => {
+  // Explicit day-boundary placement (the epoch-week craft rule, day form):
+  // both events inside ONE day slot, both past the 48h floor for any T0.
+  const day = Math.floor(T0 / DAY) - 5;
+  const now = T0;
+  const older = ['a1', 'a2'].map((id) => ({ id, at: day * DAY + 2 * HOUR }));
+  const newer = ['b1', 'b2', 'b3'].map((id) => ({ id, at: day * DAY + 20 * HOUR }));
+  const r = retentionPlan([...older, ...newer], now);
+  assert.deepStrictEqual(r.destroy.map((d) => d.id).sort(), ['a1', 'a2'], 'the older event dies whole [density]');
+  for (const d of r.destroy) assert.strictEqual(r.reasons.get(d), 'density');
+  assert.deepStrictEqual(r.keep.map((k) => k.id).sort(), ['b1', 'b2', 'b3'], 'the newer event survives whole');
+});
+
+test('N2 CONTROL: the same 5 cuts spread across days keep 5 — the cadence is unchanged, only the unit moved', () => {
+  const now = T0 + 10 * DAY;
+  const r = retentionPlan([3, 4, 5, 6, 7].map((d, i) => ({ id: `s${i}`, at: now - d * DAY })), now);
+  assert.strictEqual(r.destroy.length, 0, 'one event per day-slot = nothing to thin');
+  assert.strictEqual(r.keep.length, 5);
+});
+
+test('N2 tier 3: two events in one epoch WEEK — the older event dies whole, the newer survives whole', () => {
+  const WEEK = 7 * DAY;
+  const weekStart = Math.floor(T0 / WEEK) * WEEK;
+  const now = weekStart + 24 * DAY; // ages 21-23d: tier 3, inside the 30d horizon
+  const evA = ['a1', 'a2'].map((id) => ({ id, at: weekStart + 1 * DAY }));
+  const evB = ['b1', 'b2'].map((id) => ({ id, at: weekStart + 3 * DAY }));
+  const r = retentionPlan([...evA, ...evB], now);
+  assert.deepStrictEqual(r.destroy.map((d) => d.id).sort(), ['a1', 'a2'], 'older event whole [density], week slot');
+  assert.deepStrictEqual(r.keep.map((k) => k.id).sort(), ['b1', 'b2']);
 });
 
 test('tier 3 thins per WEEK slot; tier boundaries use age, slots use fixed epoch buckets', () => {

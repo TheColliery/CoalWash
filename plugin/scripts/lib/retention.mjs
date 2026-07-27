@@ -9,7 +9,9 @@
 //             density axis — new-replaces-old WITHIN a slot (the user's own
 //               contribution, = Time Machine's intra-slot rule; closes
 //               "replacement-alone = depth-1", the rejected proposal whose
-//               fatal case is wash-on-wash data loss);
+//               fatal case is wash-on-wash data loss); the UNIT is the
+//               EVENT — items sharing one `at` are one transaction and
+//               survive or die together (lab-grad2 N2, see thin() below);
 //             age axis — keep-ALL until 48h -> LAST-per-day until 14d ->
 //               LAST-per-week until the horizon (closes "kept-N =
 //               busy-collapse": a busy afternoon must not evict the only
@@ -141,23 +143,40 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
     (age <= TIER2_LAST_PER_DAY_MS ? tier2 : tier3).push(item);
   }
 
-  // Density axis: new-replaces-old WITHIN a slot — keep the newest item per
-  // slot, destroy the rest. Tie on `at` (same millisecond): the later-listed
-  // item wins (deterministic; callers list in append order, so "later" is the
-  // newer write).
+  // Density axis: new-replaces-old WITHIN a slot — and the UNIT is the EVENT,
+  // never the item (graduation-lab round 2, N2). One wash cutting N files
+  // banks all N with the transaction's single clock reading (applyPlan hands
+  // one `now` to every recordBinItem), so per-ITEM slotting collapsed a whole
+  // wash into one survivor: 4 banked, 3 destroyed at 49h, ordinary path, no
+  // crash, cap off — and it scaled the wrong way (the bigger the wash, the
+  // more of it discarded). Items sharing one `at` ARE one event; the newest
+  // EVENT per slot survives WHOLE, older events die whole. This is the true
+  // Time-Machine port: a snapshot is a point-in-time SET, and "one per day"
+  // always meant one SNAPSHOT — never one file of it. Two genuinely separate
+  // transactions colliding on one millisecond would merge into one event and
+  // BOTH survive (keep-more, the safe direction; measured latent-not-live
+  // across 40 real runs). Same-`at` = same event also supersedes the old
+  // "tie keeps the later-listed" rule — a tie was precisely a wash's own
+  // files fighting each other.
   const thin = (list, slotMs) => {
-    const bySlot = new Map();
+    const events = new Map(); // at -> the event's items (insertion = append order)
     for (const item of list) {
-      const slot = Math.floor(Number(item.at) / slotMs);
+      const at = Number(item.at);
+      if (!events.has(at)) events.set(at, []);
+      events.get(at).push(item);
+    }
+    const bySlot = new Map(); // slot -> [at, items[]] — the newest event so far
+    for (const [at, its] of events) {
+      const slot = Math.floor(at / slotMs);
       const cur = bySlot.get(slot);
-      if (!cur || Number(item.at) >= Number(cur.at)) {
-        if (cur) kill(cur, 'density');
-        bySlot.set(slot, item);
+      if (!cur || at >= cur[0]) {
+        if (cur) for (const i of cur[1]) kill(i, 'density');
+        bySlot.set(slot, [at, its]);
       } else {
-        kill(item, 'density');
+        for (const i of its) kill(i, 'density');
       }
     }
-    for (const survivor of bySlot.values()) keep.push(survivor);
+    for (const [, its] of bySlot.values()) for (const i of its) keep.push(i);
   };
   thin(tier2, DAY_MS);
   thin(tier3, WEEK_MS);

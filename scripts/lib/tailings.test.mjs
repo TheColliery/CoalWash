@@ -180,6 +180,39 @@ test('sweep: density thinning still applies within a bin — multiple same-day i
   } finally { clean(proj); }
 });
 
+// N2 (graduation-lab round 2) END-TO-END: the real banking shape — applyPlan
+// hands ONE `now` to every recordBinItem of a transaction — collapsed a whole
+// wash into one density slot, so an ordinary sweep at 49h destroyed 3 of 4
+// banked files (restoreFromBin -> null) with no crash, no attacker, cap off.
+test('N2: one wash banking 4 files stays 4/4 recoverable at 49h (the event survives together)', () => {
+  const proj = sandbox();
+  try {
+    const washAt = Date.now() - (TIER1_KEEP_ALL_MS + 3600000); // banked 49h ago
+    const ids = ['alpha', 'beta', 'gamma', 'delta'].map((name) =>
+      recordBinItem(proj, FAT_BIN_NAME, { content: `content-${name}`, original: `${name}.md`, now: washAt }));
+    const r = sweepFatBin(proj, { now: Date.now() });
+    assert.strictEqual(r.destroyed, 0, 'nothing of a lone event is thinned');
+    assert.strictEqual(r.kept, 4);
+    ids.forEach((id, i) => assert.ok(restoreFromBin(proj, FAT_BIN_NAME, id) !== null, `file ${i} must still restore`));
+  } finally { clean(proj); }
+});
+
+test('N2 MUST-BREAK end-to-end: two washes in one day slot — the older wash dies whole, the newer restores whole', () => {
+  const proj = sandbox();
+  try {
+    // Explicit day-boundary placement so both events share a slot for any wall
+    // clock (the epoch craft rule): a full day, 3+ days back (past the floor).
+    const day = Math.floor(Date.now() / 86400000) - 4;
+    const wash1 = ['w1a', 'w1b'].map((n) => recordBinItem(proj, FAT_BIN_NAME, { content: n, now: day * 86400000 + 2 * 3600000 }));
+    const wash2 = ['w2a', 'w2b'].map((n) => recordBinItem(proj, FAT_BIN_NAME, { content: n, now: day * 86400000 + 20 * 3600000 }));
+    const r = sweepFatBin(proj, { now: Date.now() });
+    assert.strictEqual(r.destroyed, 2, 'the older EVENT dies whole');
+    assert.strictEqual(r.kept, 2);
+    for (const id of wash1) assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, id), null, 'older wash gone (thinned)');
+    for (const id of wash2) assert.ok(restoreFromBin(proj, FAT_BIN_NAME, id) !== null, 'newer wash restores whole');
+  } finally { clean(proj); }
+});
+
 // ---------------------------------------------------------------------------
 // 0i SIZE-CAP ∧ TIME-HORIZON, floor-ordered (3ded5ec) — the sweep's second
 // limit: budget = BIN_BUDGET_STORE_MULTIPLE x opts.storeBytes (the measured
