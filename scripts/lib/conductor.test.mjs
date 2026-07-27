@@ -945,8 +945,8 @@ test('Stop: an OBESE ask carries the break-even payback line when it is cached (
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
-    assert.ok(reason.includes('~200 tok/session'), reason);
-    assert.ok(reason.includes('pays back in ~4 session(s)'), reason);
+    assert.ok(reason.includes('~200 tok/day'), reason);
+    assert.ok(reason.includes('pays back in ~4 day(s)'), reason);
   } finally { clean(home, proj); }
 });
 
@@ -987,7 +987,7 @@ test('0m: a FULL crossing emits the force directive with the payback numbers whe
     assert.ok(reason.includes('stage-only'), reason);
     assert.ok(reason.includes('snapshot-backed'), reason);
     assert.ok(reason.includes('once per crossing, not per session'), reason);
-    assert.ok(reason.includes('~1200 tok/session'), 'the force directive also shows the payback numbers');
+    assert.ok(reason.includes('~1200 tok/day'), 'the force directive also shows the payback numbers');
     assert.ok(!reason.includes('question tool'), 'force never asks');
   } finally { clean(home, proj); }
 });

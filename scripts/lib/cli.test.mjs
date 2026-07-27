@@ -90,6 +90,20 @@ test('gauge --json: one call returns recover + platform + measure + verdict + br
   } finally { clean(home, proj); }
 });
 
+test('gauge --json: roleMemories is PER-STORE in the output (per method.md §0) — a role-memory store must be visible from the door every caller uses, not just inside discoverClassB', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.claude', 'agent-memory', 'coder'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.claude', 'agent-memory', 'coder', 'MEMORY.md'), '# coder index', 'utf8');
+    const r = run(proj, home, ['gauge', '--json']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const g = JSON.parse(r.stdout);
+    assert.ok(Array.isArray(g.roleMemories), 'roleMemories must be a field on the gauge --json door, not just discoverClassB internals');
+    assert.strictEqual(g.roleMemories.length, 1);
+    assert.strictEqual(g.roleMemories[0].store, 'agent:coder');
+  } finally { clean(home, proj); }
+});
+
 test('gauge writes no state when no dangling journal exists: no state file, no stamp, no verdict cache is written', () => {
   const { home, proj } = sandbox();
   try {

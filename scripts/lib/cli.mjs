@@ -151,7 +151,7 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   // should see, and it is not this room's to wash or externalize. Same
   // measureEntries, so the number is comparable to the room's own.
   const inherited = measureEntries(disc.inherited, { withGzip: false });
-  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, inherited, verdict, breakEven: econ };
+  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, inherited, verdict, breakEven: econ, roleMemories: disc.roleMemories };
 }
 
 // The full gauge = measureOnly + the recovery preflight. Importable (tests and

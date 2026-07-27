@@ -31,9 +31,16 @@ export const ANSWER_FIRST_REMINDER =
 // recordVerdict cache round-trip); absent/zero-fat degrades to ''.
 function paybackLine(breakEven, exercise) {
   if (!breakEven || !Number.isFinite(breakEven.perDay) || breakEven.perDay <= 0) return '';
-  const be = Number.isFinite(breakEven.breakEvenDays) ? `~${Math.ceil(breakEven.breakEvenDays)} session(s)` : 'n/a';
+  const be = Number.isFinite(breakEven.breakEvenDays) ? `~${Math.ceil(breakEven.breakEvenDays)} day(s)` : 'n/a';
   const upperBound = breakEven.floorUnmeasured ? ' (floor unmeasured — an upper bound)' : '';
-  return ` Carrying this fat costs ~${breakEven.perDay} tok/session${upperBound}; one ${exercise} run pays back in ${be}.`;
+  // UNIT FIX (2026-07-26): caliper.mjs breakEven() computes perDay = fatTokens *
+  // sessionsPerDay (tok PER DAY) and breakEvenDays = runCostTokens / perDay
+  // (DAYS) -- this line rendered them as "tok/session" / "session(s)" for every
+  // release through rc.6, silently contradicting commands/stats.md's own
+  // correct "fat/day" + "break-even days" labels on the SAME numbers. Caught
+  // twice independently at sessionsPerDay=5 (5x too high one way, 5x too low
+  // the other) -- QA's find, not a derivation.
+  return ` Carrying this fat costs ~${breakEven.perDay} tok/day${upperBound}; one ${exercise} run pays back in ${be}.`;
 }
 
 // 0o true-bill clause — the accumulated sub-spawn parcel bill, rendered ONLY

@@ -44,8 +44,8 @@ test('forceAuto (absolute-cap without wall numbers): degrades to a plain fat fig
 test('forceAuto: carries the payback line too when breakEven is supplied; no reason at all defaults to the economic headline', () => {
   const r = forceAuto({ fatTokens: 4004, breakEven: { perDay: 300, breakEvenDays: 2, floorUnmeasured: false } });
   assert.ok(r.includes('FULL band + break-even proven'), r);
-  assert.ok(r.includes('~300 tok/session'), r);
-  assert.ok(r.includes('pays back in ~2 session(s)'), r);
+  assert.ok(r.includes('~300 tok/day'), r);
+  assert.ok(r.includes('pays back in ~2 day(s)'), r);
 });
 
 test('0o spawn-bill clause: renders on forceAuto AND wizardEscalation only when subSpawns > 0, with real numbers; zero/absent/malformed = ABSENT', () => {
@@ -139,8 +139,8 @@ test('obeseAutoQuick: carries the payback line when breakEven is supplied; malfo
   const bare = obeseAutoQuick({ fatTokens: 800 });
   assert.ok(!bare.includes('pays back'), bare);
   const withBE = obeseAutoQuick({ fatTokens: 800, breakEven: { perDay: 150, breakEvenDays: 4, floorUnmeasured: false } });
-  assert.ok(withBE.includes('~150 tok/session'), withBE);
-  assert.ok(withBE.includes('pays back in ~4 session(s)'), withBE);
+  assert.ok(withBE.includes('~150 tok/day'), withBE);
+  assert.ok(withBE.includes('pays back in ~4 day(s)'), withBE);
   assert.doesNotThrow(() => obeseAutoQuick());
   assert.doesNotThrow(() => obeseAutoQuick({}));
   assert.doesNotThrow(() => obeseAutoQuick(null));
@@ -169,8 +169,8 @@ test('wizardEscalation: a REAL two-button ask (question tool present) — names 
 
 test('wizardEscalation: carries the payback line when breakEven is supplied; malformed/missing input never throws', () => {
   const withBE = wizardEscalation({ fatTokens: 900, breakEven: { perDay: 300, breakEvenDays: 5, floorUnmeasured: false } });
-  assert.ok(withBE.includes('~300 tok/session'), withBE);
-  assert.ok(withBE.includes('pays back in ~5 session(s)'), withBE);
+  assert.ok(withBE.includes('~300 tok/day'), withBE);
+  assert.ok(withBE.includes('pays back in ~5 day(s)'), withBE);
   assert.doesNotThrow(() => wizardEscalation());
   assert.doesNotThrow(() => wizardEscalation({}));
   assert.doesNotThrow(() => wizardEscalation(null));
