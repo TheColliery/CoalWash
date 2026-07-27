@@ -337,12 +337,68 @@ export function evidenceAnchors(text) {
 // excluded — by design). `#`/`-` are excluded as a first char so a YAML
 // comment or a `- list:` sequence item inside the block is never mistaken
 // for a key.
-export function frontmatterKeys(text) {
-  const s = String(text);
-  if (!/^---\r?\n/.test(s)) return new Set();
+// ── THE FRONTMATTER PRIMITIVE (2026-07-27, the encoding-preamble CRITICAL) ──
+// ONE answer to "does this text open with a frontmatter block", for all three
+// callers that used to ask it with their own copy of `/^---\r?\n/`:
+// `isPinned` and `sniffUnrewritable` (apply.mjs — BOTH gate destruction) and
+// `frontmatterKeys` below. Three copies of a lexical test is the twin-drift
+// shape this room has already paid for twice (R2's case-fold, R3's 8.3 short
+// name); R3's law is FIX THE PRIMITIVE, NEVER THE GUARDS.
+//
+// WHAT WAS WRONG, and it was the DIRECTION, not the regex. `/^---\r?\n/` is a
+// LEXICAL test on decoded text being asked a question about the FILE, and its
+// NO answer was read as "definitely not frontmatter". Anything in front of the
+// fence makes it say NO: a 3-byte UTF-8 BOM (Notepad, `Set-Content`, any
+// editor with BOM-on-save) or a UTF-16 preamble (PowerShell 5.1's `>` default).
+// So a `pinned: true` file gained a BOM and `applyPlan` DELETED it — the one
+// thing the README promises three times is untouchable.
+//
+// TRI-STATE, because "I could not tell" is not "no". Same shape, and for the
+// same reason, as the class-A containment primitive's outside/inside/unknown:
+// the primitive reports what it knows and EACH CALLER DECLARES ITS OWN SAFE
+// DIRECTION. A two-valued answer forces the unknown case to masquerade as one
+// of the two, and it always ends up masquerading as the permissive one.
+//   'none'         — decodable, and it does not open with a fence.
+//   'closed'       — decodable, opens and closes; `block` is the body.
+//   'unverifiable' — the head is not decodable UTF-8 text (an encoding
+//                    preamble), OR it opens and never closes in the text given.
+//
+// A leading U+FEFF is STRIPPED rather than refused: a UTF-8 BOM is a legal
+// signature and the file is fully decodable, so the honest answer is to parse
+// it — which makes the pin promise TRUE for those files instead of merely
+// refusing to work on them. Undecodable encodings cannot be parsed at all and
+// take the fail-closed branch.
+//
+// SCAN WINDOW, and why it is small: `isPinned` decodes a 64 KB byte window, so
+// a multi-byte character straddling that boundary decodes to U+FFFD at the END
+// of the string. Scanning the whole text for U+FFFD would refuse a perfectly
+// good large file on a truncation artefact. A real encoding preamble is at
+// offset 0, so only the head is scanned.
+const FM_HEAD_SCAN = 64;
+export function readFrontmatter(text) {
+  let s = String(text);
+  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1); // UTF-8 BOM: legal signature, parse on
+  const head = s.slice(0, FM_HEAD_SCAN);
+  // NUL = UTF-16/32 interleaving (or binary); U+FFFD = bytes that were not
+  // valid UTF-8 (a UTF-16/32 BOM decodes to replacement characters).
+  if (head.includes('\u0000') || head.includes('\uFFFD')) {
+    return { state: 'unverifiable', block: '', why: 'the head is not decodable UTF-8 text (an encoding preamble — UTF-16/32 BOM, NUL-interleaved, or binary)' };
+  }
+  if (!/^---\r?\n/.test(s)) return { state: 'none', block: '' };
   const end = /\r?\n---[ \t]*(?:\r?\n|$)/.exec(s.slice(3));
-  if (!end) return new Set();
-  const block = s.slice(3, 3 + end.index);
+  if (!end) return { state: 'unverifiable', block: '', why: 'frontmatter opens but never closes (unparseable)' };
+  return { state: 'closed', block: s.slice(3, 3 + end.index) };
+}
+
+export function frontmatterKeys(text) {
+  const fm = readFrontmatter(text);
+  // 'none' and 'unverifiable' both yield no keys — UNCHANGED semantics for the
+  // unverifiable case on purpose. Whether an un-inventoriable frontmatter should
+  // make the GATE refuse (rather than silently inventory nothing) is a separate
+  // open question and is NOT decided here; this change only stops a BOM from
+  // emptying the inventory of a file that is perfectly readable.
+  if (fm.state !== 'closed') return new Set();
+  const block = fm.block;
   const keys = new Set();
   for (const line of block.split(/\r?\n/)) {
     const m = /^([^\s:#-][^\n]*?)\s*:(?=\s|$)/.exec(line);

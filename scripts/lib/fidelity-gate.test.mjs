@@ -504,3 +504,25 @@ test('BREAK-1 LOW: a dropped v-prefixed 2-part version (v1.2) is caught (it esca
   // a 3-part version is unaffected (regression guard)
   assert.deepStrictEqual(checkFidelity('shipped v1.2.3 today', 'shipped today').drops, [{ type: 'version-drop', value: 'v1.2.3' }]);
 });
+
+// ── THE ENCODING-PREAMBLE INVENTORY BLINDNESS (2026-07-27) ─────────────────
+// A UTF-8 BOM in front of the fence made frontmatterKeys return an EMPTY set,
+// so every frontmatter key in the original became silently droppable and the
+// gate passed a rewrite that erased all of them. Same one-line lexical anchor
+// as the pin bypass; fixed at the shared readFrontmatter primitive.
+test('frontmatterKeys reads through a UTF-8 BOM — a BOM must not empty the inventory', () => {
+  const body = '---\nowner: me\nstatus: live\n---\n# doc\n';
+  const withBom = String.fromCharCode(0xfeff) + body;
+  assert.deepStrictEqual([...frontmatterKeys(body)].sort(), ['owner', 'status'], 'control: no BOM');
+  assert.deepStrictEqual([...frontmatterKeys(withBom)].sort(), ['owner', 'status'], 'a BOM must not hide the keys');
+  // and the gate must therefore SEE the drop it was blind to
+  const stripped = String.fromCharCode(0xfeff) + '# doc\n';
+  const r = checkFidelity(withBom, stripped);
+  assert.strictEqual(r.pass, false, 'dropping every frontmatter key must fail the gate');
+  assert.ok(r.drops.some((d) => d.type === 'frontmatter-key-drop'), `expected frontmatter-key-drop, got ${JSON.stringify(r.drops)}`);
+});
+
+test('frontmatterKeys on an UNDECODABLE head yields no keys and does not throw (state is unverifiable, not closed)', () => {
+  const u16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('---\nowner: me\n---\nbody', 'utf16le')]).toString('utf8');
+  assert.deepStrictEqual([...frontmatterKeys(u16)], []);
+});

@@ -153,6 +153,78 @@ test('PIN protection: pinned: true refuses BOTH delete and rewrite (gap #1)', ()
   } finally { clean(proj); }
 });
 
+// ── THE ENCODING-PREAMBLE PIN BYPASS (CRITICAL, 2026-07-27) ────────────────
+// `isPinned` answered the physical question "does this file open with a
+// frontmatter fence?" with a LEXICAL test on decoded text (`/^---\r?\n/`), and
+// took the NO answer as "definitely not pinned" — a fail-OPEN default on the
+// one gate that guards deletion. Any byte sequence in front of the fence
+// (a UTF-8 BOM, a UTF-16 BOM + NUL-interleaved text) makes the test say NO.
+// Fixtures are written as BYTES, never through `write()`, because the whole
+// defect lives in bytes that `writeFileSync(..., 'utf8')` would never produce.
+function writeBytes(p, buf) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, buf);
+}
+const BOM8 = Buffer.from([0xef, 0xbb, 0xbf]);
+
+test('PIN + BOM: a UTF-8 BOM in front of the fence must NOT defeat pinned:true (applyPlan refuses the delete)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'bom-pinned.md');
+    const body = '---\npinned: true\n---\ncritical directive';
+    writeBytes(f, Buffer.concat([BOM8, Buffer.from(body, 'utf8')]));
+    assert.strictEqual(isPinned(f), true, 'a BOM must not make a pinned file read as unpinned');
+    const del = apply(planFor(proj, store, [{ type: 'delete', path: f }]));
+    assert.strictEqual(del.ok, false);
+    assert.ok(del.error.includes('PIN-protected'), `expected a PIN refusal, got: ${del.error}`);
+    assert.ok(fs.existsSync(f), 'the pinned file must still be on disk');
+    const rw = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'trimmed' }]));
+    assert.strictEqual(rw.ok, false);
+    // byte-exact survival, BOM included
+    assert.strictEqual(Buffer.compare(fs.readFileSync(f), Buffer.concat([BOM8, Buffer.from(body, 'utf8')])), 0);
+  } finally { clean(proj); }
+});
+
+test('PIN + UTF-16LE: a frontmatter this engine cannot decode is UNVERIFIABLE, so it refuses (fail-closed)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'utf16-pinned.md');
+    // PowerShell 5.1's `>` default. `utf16le` in Node emits no BOM, so prepend it.
+    const u16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('---\npinned: true\n---\nbody', 'utf16le')]);
+    writeBytes(f, u16);
+    assert.strictEqual(isPinned(f), true, 'an undecodable head must fail CLOSED, not read as unpinned');
+    const del = apply(planFor(proj, store, [{ type: 'delete', path: f }]));
+    assert.strictEqual(del.ok, false);
+    assert.ok(del.error.includes('PIN-protected'), `expected a PIN refusal, got: ${del.error}`);
+    assert.strictEqual(Buffer.compare(fs.readFileSync(f), u16), 0);
+  } finally { clean(proj); }
+});
+
+test('PIN + BOM CONTROL: the fix must not over-refuse — a BOM\'d file with NO frontmatter, and a BOM\'d pinned:false, are still touchable', () => {
+  const { proj, store } = sandbox();
+  try {
+    // The common case the engine exists to serve: ordinary markdown, no fence.
+    const plain = path.join(store, 'bom-plain.md');
+    writeBytes(plain, Buffer.concat([BOM8, Buffer.from('# notes\n\nbody\n', 'utf8')]));
+    assert.strictEqual(isPinned(plain), false, 'a BOM alone must never make a file untouchable');
+    const rw = apply(planFor(proj, store, [{ type: 'rewrite', path: plain, content: '# notes\n' }]));
+    assert.strictEqual(rw.ok, true, `a BOM'd unpinned file must stay washable: ${rw.error || ''}`);
+    // An explicit pinned:false behind a BOM is still parsed as false.
+    const unpinned = path.join(store, 'bom-unpinned.md');
+    writeBytes(unpinned, Buffer.concat([BOM8, Buffer.from('---\npinned: false\n---\nbody', 'utf8')]));
+    assert.strictEqual(isPinned(unpinned), false);
+  } finally { clean(proj); }
+});
+
+test('sniffUnrewritable sees an UNCLOSED frontmatter through a BOM (the same lexical anchor, the same blindness)', () => {
+  const openOnly = '---\nowner: me\nno closing fence here\n';
+  assert.ok(sniffUnrewritable(Buffer.from(openOnly, 'utf8')), 'control: unclosed frontmatter is flagged without a BOM');
+  assert.ok(
+    sniffUnrewritable(Buffer.concat([BOM8, Buffer.from(openOnly, 'utf8')])),
+    'a BOM must not hide an unclosed frontmatter from the rewrite sniff',
+  );
+});
+
 test('containment is realpath-and-contain, fail-closed: a path outside the declared roots aborts untouched', () => {
   const { proj, store } = sandbox();
   const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-out-')));

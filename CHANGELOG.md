@@ -2,6 +2,22 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Security
+
+- **CRITICAL — an encoding preamble defeated the `pinned: true` refusal, and `applyPlan` deleted the file.** A 3-byte UTF-8 BOM in front of the frontmatter fence (Notepad, `Set-Content`, any editor with BOM-on-save) made `isPinned` answer `false`, so the pin gate passed and both the delete and the rewrite went through on a file the README promises three times is never touched. A UTF-16LE file (PowerShell 5.1's `>` default) failed the same way; its NUL bytes already blocked the *rewrite* path via the binary sniff, but deletes are not sniffed, so the delete still ran. Reported by the graduation lab against `8fab00d`, whose engine blobs are byte-identical to the released rc.6 — **the defect is live in rc.6**.
+  - **Fixed at ONE primitive, not three call sites.** `readFrontmatter` (`fidelity-gate.mjs`) is now the single answer to "does this text open with a frontmatter block", used by `isPinned`, `sniffUnrewritable` (both in `apply.mjs`, both gating destruction) and `frontmatterKeys`. Three private copies of `/^---\r?\n/` was the twin-drift shape this engine has already paid for twice.
+  - **The fix is a DIRECTION change, not a wider regex.** The primitive is tri-state — `none` / `closed` / `unverifiable` — and each caller declares its own safe direction, because "I could not tell" is not "no". Previously the unknown case fell into the permissive branch by default; `isPinned`'s own docstring had promised fail-closed since it was written.
+  - A leading U+FEFF is now **stripped and the file parsed** (a UTF-8 BOM is a legal signature and the file is fully decodable), so a BOM'd `pinned: true` file is correctly protected rather than merely refused.
+- **HIGH (same root cause) — a BOM emptied the frontmatter inventory,** so every frontmatter key in a BOM'd original was silently droppable and the fidelity gate passed a rewrite that erased all of them. Closed by the same primitive.
+
+### Changed — behaviour WIDENING, stated on its own terms
+
+- `isPinned` now returns `true` (refuse to touch) for a file whose head is **not decodable UTF-8 text** — a UTF-16/32 preamble, NUL-interleaved content, or binary. Previously such a file read as unpinned and was deletable. This is deliberate over-refusal in the safe direction and it is the contract the function already documented; a file CoalWash cannot read is a file CoalWash does not destroy.
+- `frontmatterKeys` now returns real keys for BOM-prefixed text, so the gate detects drops it previously could not see. An apply that used to pass may now be blocked — that is the gate working.
+- **NOT changed, and named so it is not read as covered:** an `unverifiable` frontmatter still yields an empty key set rather than making the gate refuse. Whether an un-inventoriable frontmatter should block an apply outright is a separate open question and was not decided here.
+
 ## [0.2.0-rc.6] - 2026-07-27
 
 > Step-release (USER decision 2026-07-27, "ไปทีละสเต็ป"): shipped with two backend systems **not yet lab-tested on this build** — the recovery layer (bins / restore / estate-restore round-trips) and the in-flight write-path guard (airbag/seatbelt). The destruction lanes below carry their own per-fix reproduction evidence; the full graduation labtest runs separately and gates the NEXT step, not this one.

@@ -54,7 +54,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
+import { checkFidelity, inventoryDropKeys, readFrontmatter } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
 import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull } from './config-load.mjs';
@@ -245,10 +245,12 @@ function physicalOrNull(p) {
 // (delete authorization itself is plan-sourced, below; UNDO is the safety net).
 export function sniffUnrewritable(buf) {
   if (buf.includes(0)) return 'binary content (NUL byte) — flagged, not rewritten';
-  const s = buf.toString('utf8');
-  if (/^---\r?\n/.test(s) && !/\r?\n---[ \t]*(?:\r?\n|$)/.test(s.slice(3))) {
-    return 'frontmatter opens but never closes (unparseable) — flagged, not rewritten';
-  }
+  // ONE frontmatter primitive, shared with isPinned and the gate's
+  // frontmatterKeys (fidelity-gate.mjs) — see its comment for why a private
+  // `/^---\r?\n/` here was blind to a BOM. This caller's safe direction: an
+  // unverifiable head means "do not rewrite".
+  const fm = readFrontmatter(buf.toString('utf8'));
+  if (fm.state === 'unverifiable') return `${fm.why} — flagged, not rewritten`;
   return null;
 }
 
@@ -269,13 +271,22 @@ export function isPinned(file) {
     } finally {
       fs.closeSync(fd);
     }
-    if (!/^---\r?\n/.test(head)) return false; // no frontmatter opener = definitely not pinned
-    const end = /\r?\n---[ \t]*(?:\r?\n|$)/.exec(head.slice(3));
-    // The opener exists but the block does not CLOSE within the window (a huge or
-    // truncated frontmatter) -> unverifiable -> fail-closed (treat as pinned).
-    if (!end) return true;
-    const block = head.slice(3, 3 + end.index);
-    return /^pinned\s*:\s*true\s*$/m.test(block);
+    // ONE frontmatter primitive (fidelity-gate.mjs readFrontmatter), shared with
+    // sniffUnrewritable above and the gate's frontmatterKeys. THE LINE THAT USED
+    // TO BE HERE — `if (!/^---\r?\n/.test(head)) return false; // no frontmatter
+    // opener = definitely not pinned` — was this whole function's contract
+    // inverted by one word. "definitely" was a confident claim that was simply
+    // false: a 3-byte UTF-8 BOM in front of the fence makes the test say no, so a
+    // `pinned: true` file read as UNPINNED and applyPlan DELETED it. The docstring
+    // above already promised fail-closed; that line was the one place the code
+    // did not do it. Each state's direction is now declared explicitly rather
+    // than falling out of a boolean's default branch.
+    const fm = readFrontmatter(head);
+    // Unverifiable = an undecodable head (encoding preamble) OR an opener that
+    // does not close inside PIN_READ_BYTES -> refuse to touch.
+    if (fm.state === 'unverifiable') return true;
+    if (fm.state === 'none') return false; // decodable, and genuinely no frontmatter
+    return /^pinned\s*:\s*true\s*$/m.test(fm.block);
   } catch {
     return true; // read error on a file we are about to mutate -> refuse (fail-closed)
   }
