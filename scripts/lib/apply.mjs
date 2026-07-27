@@ -994,9 +994,11 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 // from this list while the body returned it, and it is the one a caller must
 // branch on — it is the only outcome that leaves the store in a MIXED state:
 //   'rolled-back'  — the snapshot was replayed in full; nothing left to do.
-//   'partial'      — some restore FAILED or some target was REFUSED. The journal
-//                    and snapshot are KEPT for a human, and the run is NOT clean.
-//                    Carries { restored, restoreFailures, refusedOutOfRoot, error }.
+//   'partial'      — some restore FAILED or some target was REFUSED (out-of-root
+//                    OR pinned — the pin promise binds this door too, N3). The
+//                    journal and snapshot are KEPT for a human; the run is NOT
+//                    clean. Carries { restored, restoreFailures, refusedOutOfRoot,
+//                    refusedPinned, error }.
 //   'no-mutation'  — no completion marker, so the first mutation never happened.
 //   'cleaned'      — a terminal journal (committed/rolled-back) was just removed.
 //   'none'         — nothing done. WITH an `error` field this is a REFUSAL (the
@@ -1083,7 +1085,7 @@ export function recoverDangling(projectRoot, opts = {}) {
     // so the manifest is loaded from the bound location, never the raw one.
     const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
     const manifest = JSON.parse(fs.readFileSync(path.join(snapPhys, 'manifest.json'), 'utf8'));
-    let restored = 0, failed = 0, refused = 0;
+    let restored = 0, failed = 0, refused = 0, refusedPinned = 0;
     for (const m of manifest) {
       const src = path.join(snapPhys, m.snap);
       // A DELETED FILE IS THE ONLY DAMAGE A DELETE-PHASE CRASH LEAVES — deletes run
@@ -1101,6 +1103,21 @@ export function recoverDangling(projectRoot, opts = {}) {
       // CALLER-TRUSTED root (the outer gate a poisoned journal can't widen) AND
       // the journal's own declared roots (secondary narrowing).
       if (!inSnap(src) || !origPhys || !containedIn(origPhys, trustedRoots) || !containedIn(origPhys, jroots)) { refused++; continue; }
+      // THE PIN PROMISE RIDES THE RECOVERY DOOR TOO (lab-grad2 N3 — the
+      // recovery-paths class, 4th instance in this room). This replay had 7
+      // fs-mutation lines and ZERO isPinned sites while the module header
+      // promises "refuses delete AND rewrite" unconditionally. A LEGITIMATE
+      // journal never names a pinned target (applyPlan refuses them at plan
+      // time), so a pin found here is either the user's NEWEST instruction
+      // (pinned after the crash — honor it) or a poisoned journal (refuse it);
+      // both directions agree. EXISTING targets only: isPinned fail-closes
+      // (true) on a read error, so probing a nonexistent path would kill the
+      // R4/TP-3 deleted-file restore — the one damage a delete-phase crash
+      // leaves. The rare legitimate loss: a crashed transaction whose OWN
+      // rewrite added `pinned: true` cannot be rolled back automatically —
+      // partial + journal kept, a human resolves; over-refusal is the safe
+      // direction on a destroying door.
+      if (fs.existsSync(origPhys) && isPinned(origPhys)) { refusedPinned++; continue; }
       // Write to origPhys, the form that was VALIDATED — not the raw `m.original`
       // string. Checking one spelling and acting on another lets the OS re-resolve
       // the path a second time, so any divergence between them (a symlink, a case
@@ -1118,6 +1135,14 @@ export function recoverDangling(projectRoot, opts = {}) {
         if (!fs.existsSync(step.path)) continue; // never written (or already gone) = nothing to undo
         const p = physicalOrNull(step.path);
         if (!p || !containedIn(p, trustedRoots) || !containedIn(p, jroots)) { refused++; continue; } // exists but out-of-(trusted∩journal)-root = refuse
+        // N3, the delete side: the file at this create path EXISTS (checked
+        // above) and carries `pinned: true` — an applyPlan create cannot have
+        // produced a pinned file the plan gate would then refuse to touch, so
+        // this is a post-crash pin or a poisoned journal naming a pre-existing
+        // file as its own create. Either way the pin wins: no bank, no rm.
+        // isPinned's fail-closed reading (unreadable = pinned) is correct
+        // here — an unreadable file is not one to destroy.
+        if (isPinned(p)) { refusedPinned++; continue; }
         // BANK THE BYTES BEFORE REMOVING THEM — this is the one delete in the
         // engine that had NO recovery handle. Every other destructive path is
         // backed: a rewrite/delete is snapshotted before the first mutation and
@@ -1156,8 +1181,8 @@ export function recoverDangling(projectRoot, opts = {}) {
     }
     // Only clear the WAL when the recovery was CLEAN. A partial/refused replay keeps
     // the journal + snapshot for a human (never report a mixed state as done).
-    if (failed || refused) {
-      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root; journal + snapshot kept at ${snapDir}` };
+    if (failed || refused || refusedPinned) {
+      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, refusedPinned, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root, ${refusedPinned} refused as pinned; journal + snapshot kept at ${snapDir}` };
     }
     fs.rmSync(journalPath, { force: true });
     return { recovered: 'rolled-back', restored };

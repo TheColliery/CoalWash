@@ -492,6 +492,91 @@ test('recoverDangling REFUSES a poisoned journal whose OWN roots point outside t
   } finally { clean(proj); }
 });
 
+// N3 (graduation-lab round 2): the header's pin promise ("a pinned: true file
+// refuses delete AND rewrite") did not exist on the recovery path — the replay
+// had 7 fs-mutation lines and ZERO isPinned call sites, so a forged journal
+// (or an honest crash + a post-crash user pin) could overwrite or delete a
+// pinned file through recoverDangling. A legitimate journal never names a
+// pinned target (applyPlan refuses them at plan time), so a pin found here is
+// either the user's NEWEST instruction (pinned after the crash) or a poisoned
+// journal — refusing costs nothing legitimate.
+test('N3: recoverDangling must not RESTORE OVER a pinned file (per-item refusal; unpinned siblings still restore)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const pinnedFile = path.join(store, 'pinned.md');
+    const pinnedBody = '---\npinned: true\n---\nuser content the pin protects';
+    write(pinnedFile, pinnedBody);
+    const plainFile = path.join(store, 'plain.md');
+    write(plainFile, 'DAMAGED');
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-n3');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'REPLAY PAYLOAD (would trample the pin)');
+    fs.writeFileSync(path.join(snapDir, 'f1'), 'GOOD ORIGINAL');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([
+      { snap: 'f0', original: pinnedFile },
+      { snap: 'f1', original: plainFile },
+    ]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), 'n3');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [store],
+      steps: [{ i: 0, type: 'rewrite', path: pinnedFile, status: 'done' }, { i: 1, type: 'rewrite', path: plainFile, status: 'done' }],
+    }));
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'partial', 'a pinned target makes the replay PARTIAL, never clean');
+    assert.ok(r.refusedPinned >= 1, `expected refusedPinned >= 1, got ${JSON.stringify(r)}`);
+    assert.strictEqual(fs.readFileSync(pinnedFile, 'utf8'), pinnedBody, 'the pinned file must be byte-untouched');
+    assert.strictEqual(fs.readFileSync(plainFile, 'utf8'), 'GOOD ORIGINAL', 'per-item refusal: the unpinned sibling still restores');
+    assert.strictEqual(fs.existsSync(path.join(txDir, 'journal.json')), true, 'journal kept for a human');
+  } finally { clean(proj); }
+});
+
+test('N3: recoverDangling must not DELETE a pinned file at a create path (no bank, no rm)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const created = path.join(store, 'created-now-pinned.md');
+    const pinnedBody = '---\npinned: true\n---\nsomeone pinned this after the crash';
+    write(created, pinnedBody);
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-n3b');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), 'n3b');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [store],
+      steps: [{ i: 0, type: 'create', path: created, status: 'pending' }],
+    }));
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'partial', 'a pinned create-path is refused, never undone');
+    assert.ok(r.refusedPinned >= 1, `expected refusedPinned >= 1, got ${JSON.stringify(r)}`);
+    assert.strictEqual(fs.readFileSync(created, 'utf8'), pinnedBody, 'the pinned file must still exist, byte-untouched');
+    assert.strictEqual(fs.existsSync(path.join(txDir, 'journal.json')), true, 'journal kept for a human');
+  } finally { clean(proj); }
+});
+
+test('N3 CONTROL: a restore into a NONEXISTENT target (the deleted-file case) is not blocked by the pin check', () => {
+  const { proj, store } = sandbox();
+  try {
+    // isPinned fail-closes (true) on a read error — the pin check must
+    // therefore only run on an EXISTING target, or the R4/TP-3 deleted-file
+    // restore (the ONE damage a delete-phase crash leaves) silently dies.
+    const gone = path.join(store, 'deleted-by-crash.md');
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-n3c');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'THE DELETED BYTES');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: gone }]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), 'n3c');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [store],
+      steps: [{ i: 0, type: 'delete', path: gone, status: 'pending' }],
+    }));
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'rolled-back', `the deleted-file restore must still run clean (got ${JSON.stringify(r)})`);
+    assert.strictEqual(fs.readFileSync(gone, 'utf8'), 'THE DELETED BYTES', 'the deleted file is back');
+  } finally { clean(proj); }
+});
+
 test('recoverDangling still restores a LEGITIMATE global memory store (~/.claude/projects/<slug>/memory) — do not over-block', () => {
   const { proj } = sandbox();
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
