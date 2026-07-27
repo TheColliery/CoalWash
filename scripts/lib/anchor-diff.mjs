@@ -118,7 +118,10 @@ function approvedSince(projectRoot, physTarget, sinceAt) {
     for (const item of listBin(projectRoot, name)) {
       if (!item || item.at < sinceAt || !samePath(item.original, physTarget)) continue;
       const content = restoreFromBin(projectRoot, name, item.id);
-      if (content !== null) texts.push(content);
+      // restoreFromBin hands back BYTES (G3-3). This is an ANALYSIS path — it
+      // scans the text for structured tokens — so it decodes HERE, at the call,
+      // which is where that choice belongs and where it is visible.
+      if (content !== null) texts.push(content.toString('utf8'));
     }
   }
   return texts;

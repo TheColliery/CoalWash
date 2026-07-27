@@ -754,3 +754,37 @@ test('FENCE POLARITY residual: a VISIBLE non-ASCII tail is refused as well — y
   assert.strictEqual(readFrontmatter('\n---\npinned: true\n---\nx').state, 'none', 'leading blank line stays washable');
   assert.strictEqual(readFrontmatter('--- some prose here\nmore').state, 'none', 'ASCII prose tail stays washable');
 });
+
+// ── G3-1: the block now has ONE reader, and the GATE's half must not move ────
+// isPinned stopped running its own regex over the block and now reads the same
+// parse frontmatterKeys does. That refactor is only safe if the inventory is
+// byte-identical: frontmatterKeys feeds checkFidelity, so a key appearing or
+// vanishing here is a false drop or a missed one on every washed file.
+// This is a CHARACTERIZATION test — it passed before the change, and its RED
+// proof is the mutation (routing frontmatterKeys through the loose entries too
+// makes `pinned:true` a key and this goes red).
+test('G3-1: frontmatterKeys inventories exactly the STRICT mapping shape — unchanged by the shared parser', () => {
+  const keys = (inner) => [...frontmatterKeys('---\n' + inner + '\n---\nbody')].sort();
+  assert.deepStrictEqual(keys('pinned:true'), [], 'no space after the colon is NOT a YAML mapping — never was a key, still is not');
+  assert.deepStrictEqual(keys('a:b c: d'), ['a:b c'], 'the lookahead backtracks to the colon that IS followed by space — key is `a:b c`, not `a`');
+  assert.deepStrictEqual(keys('pinned: true'), ['pinned']);
+  assert.deepStrictEqual(keys('"pinned": true'), ['"pinned"'], 'quotes are part of the raw key, as before');
+  assert.deepStrictEqual(keys('pinned:'), ['pinned'], 'a valueless key is still a key');
+  assert.deepStrictEqual(keys('  nested: x'), [], 'indented -> not top level');
+  assert.deepStrictEqual(keys('- item: x'), [], 'a sequence item is not a key');
+  assert.deepStrictEqual(keys('# comment: x'), [], 'a comment is not a key');
+  assert.deepStrictEqual(keys('https://example.com'), [], 'a bare URL is not a key');
+});
+
+// G3-2 at the primitive: `$` means END OF FILE for whole text and END OF THE
+// WINDOW for a prefix somebody else cut. Only the caller knows which it handed
+// over, so the caller declares it — the same "each caller declares its own safe
+// direction" discipline the tri-state itself is built on.
+test('G3-2: a close that relies on end-of-STRING is not a close when the text is a truncated prefix', () => {
+  const whole = '---\npinned: true\n---';       // a real file that ends without a trailing newline
+  assert.strictEqual(readFrontmatter(whole).state, 'closed', 'end of FILE is a legitimate close');
+  assert.strictEqual(readFrontmatter(whole, { truncated: true }).state, 'unverifiable', 'end of the WINDOW proves nothing — the block may continue');
+  const closed = '---\npinned: true\n---\nbody';
+  assert.strictEqual(readFrontmatter(closed, { truncated: true }).state, 'closed', 'a real terminator after the fence still closes, truncated or not');
+  assert.strictEqual(readFrontmatter('no fence here', { truncated: true }).state, 'none', 'truncation never turns a non-fence into a refusal');
+});

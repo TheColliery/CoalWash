@@ -497,7 +497,20 @@ const FM_HEAD_SCAN = 64;
 // direction for a primitive whose `'none'` authorises destruction.
 const FM_TAIL_FENCE = /^[ \t]*$/;      // empty or the ordinary editor artifact = a fence
 const FM_TAIL_VISIBLE = /[\x21-\x7E]/; // printable ASCII, space and tab excluded
-export function readFrontmatter(text) {
+// THE CLOSING FENCE, TWO READINGS — and the difference is WHO GAVE US THE TEXT.
+// `$` in the whole-text form means END OF FILE, which is a legitimate close (a
+// file that ends `\n---` with no trailing newline). When the caller handed us a
+// TRUNCATED PREFIX, the very same `$` means END OF THE WINDOW, and a `\n---`
+// landing on that cut FABRICATES a close: the block "ends" at the window, every
+// key past it is invisible, and `isPinned` returned false for a file whose pin
+// sat one byte further on -> applyPlan deleted it (G3-2, reproduced end to end).
+// apply.mjs's PIN_READ_BYTES comment has always said "a block that does not
+// close within this = unverifiable"; this is the line that makes the code do it.
+// A truncated read therefore requires a REAL line terminator after the fence —
+// end-of-string proves nothing about a string someone else cut.
+const FM_CLOSE = /\r?\n---[ \t]*(?:\r?\n|$)/;
+const FM_CLOSE_TRUNCATED = /\r?\n---[ \t]*\r?\n/;
+export function readFrontmatter(text, { truncated = false } = {}) {
   let s = String(text);
   if (s.charCodeAt(0) === 0xfeff) s = s.slice(1); // UTF-8 BOM: legal signature (exactly one), parse on
   if (s.charCodeAt(0) === 0xfeff) {
@@ -552,9 +565,49 @@ export function readFrontmatter(text) {
   // following `---`; for the bare `---\n` opener this is byte-identical to
   // the old fixed slice(3).
   const bodyStart = open[0].length - (open[0].endsWith('\r\n') ? 2 : 1);
-  const end = /\r?\n---[ \t]*(?:\r?\n|$)/.exec(s.slice(bodyStart));
-  if (!end) return { state: 'unverifiable', block: '', why: 'frontmatter opens but never closes (unparseable)' };
+  const end = (truncated ? FM_CLOSE_TRUNCATED : FM_CLOSE).exec(s.slice(bodyStart));
+  if (!end) return { state: 'unverifiable', block: '', why: truncated ? 'frontmatter opens and does not close inside the read window (unverifiable — the block may continue past it)' : 'frontmatter opens but never closes (unparseable)' };
   return { state: 'closed', block: s.slice(bodyStart, bodyStart + end.index) };
+}
+
+// ── ONE READER FOR THE BLOCK (2026-07-28, G3-1) ────────────────────────────
+// `readFrontmatter` gave every caller the same BLOCK and then each caller ran
+// its own regex over it. `frontmatterKeys` parsed it as key/value lines while
+// `isPinned` (apply.mjs) ran a private /^pinned\s*:\s*true\s*$/m — two readers,
+// one block, OPPOSITE answers, and the answer that loses ends in a DELETE. Six
+// spellings THIS FUNCTION ITSELF counted as a `pinned` key were deletable
+// through the shipped door: `True`, `TRUE`, `"pinned": true`, a trailing
+// `# comment`, YAML 1.1 `yes`, and a quoted `"true"`. The primitive was fixed
+// four times on WHAT PRECEDES the fence; nobody had looked at the predicate
+// reading what the primitive returned.
+//
+// SO THERE IS ONE PARSE PER LINE, AND THE CONSUMERS PROJECT IT — the same
+// ONE-EXTRACTION-TWO-VIEWS shape as tokenLists -> inventory, and for the same
+// reason: a second extraction site is the twin-drift the room has paid for
+// three times, and a sync comment is not a guard.
+//
+// WHY AN ENTRY CARRIES `strict`, and this is the part that is easy to get
+// backwards: MERGING TWO READERS CAN BE LOOSER THAN EITHER ONE. Measured, on a
+// real input — `pinned:true` (no space after the colon) is protected by the
+// retired pin regex and is NOT a key to `frontmatterKeys`, because a YAML
+// mapping needs whitespace or end-of-line after the colon. Handing the pin
+// question straight to the gate's parser would therefore have UNPROTECTED a
+// file that is protected today, while fixing the six spellings. So the strict
+// shape (what the gate inventories, byte-identical to before) and the loose
+// shape (a colon-bearing line a human plainly meant as a key) both come out of
+// this one parse, and each consumer declares which it needs.
+export function frontmatterBlockEntries(block) {
+  const out = [];
+  for (const line of String(block).split(/\r?\n/)) {
+    // The strict form is the pre-existing key regex UNCHANGED (its lookahead
+    // backtracking is load-bearing: `a:b c: d` keys as `a:b c`, not `a`), plus
+    // a value capture that cannot alter where the key match ends.
+    const strict = /^([^\s:#-][^\n]*?)\s*:(?=\s|$)([^\n]*)$/.exec(line);
+    if (strict) { out.push({ key: strict[1], value: strict[2], strict: true }); continue; }
+    const loose = /^([^\s:#-][^\n]*?)\s*:([^\n]*)$/.exec(line);
+    if (loose) out.push({ key: loose[1], value: loose[2], strict: false });
+  }
+  return out;
 }
 
 export function frontmatterKeys(text) {
@@ -565,13 +618,9 @@ export function frontmatterKeys(text) {
   // open question and is NOT decided here; this change only stops a BOM from
   // emptying the inventory of a file that is perfectly readable.
   if (fm.state !== 'closed') return new Set();
-  const block = fm.block;
-  const keys = new Set();
-  for (const line of block.split(/\r?\n/)) {
-    const m = /^([^\s:#-][^\n]*?)\s*:(?=\s|$)/.exec(line);
-    if (m) keys.add(m[1]);
-  }
-  return keys;
+  // STRICT ONLY — the inventory keeps exactly the keys it has always kept. The
+  // loose entries exist for the pin gate, which needs a floor, not a census.
+  return new Set(frontmatterBlockEntries(fm.block).filter((e) => e.strict).map((e) => e.key));
 }
 
 // Extract the full structured-token inventory of a text — PROJECTED from the

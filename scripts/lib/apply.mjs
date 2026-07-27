@@ -54,7 +54,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { checkFidelity, inventoryDropKeys, readFrontmatter } from './fidelity-gate.mjs';
+import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockEntries } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
 import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull } from './config-load.mjs';
@@ -261,14 +261,32 @@ export function sniffUnrewritable(buf) {
 // discipline — "untouchable at all" must not degrade to fail-open on a read
 // error or a frontmatter block we could not fully read.
 const PIN_READ_BYTES = 65536; // covers any sane frontmatter; a block that does not close within this = unverifiable
+// WHAT CLEARS A PIN, and it is an ALLOWLIST because the OTHER answer deletes
+// files. Round 4 fixed the fence by making `'none'` EARNED; this is the same
+// polarity one layer up: `pinned:` present and NOT pinned is earned by one of
+// these three explicit negations, and every other value — `maybe`, `0`, `[]`,
+// empty, or a spelling nobody has thought of — refuses. Three members, checkable
+// by reading them; that is a statement about THIS LIST, not about YAML.
+// THE PRICE, pinned by its own test: a `pinned: n` (YAML 1.1 false) file is
+// refused too. Yield loss, never safety loss — the deliberate direction for a
+// predicate whose `false` authorises destruction.
+const PIN_CLEARED = new Set(['false', 'no', 'off']);
+const unquote = (s) => (s.length > 1 && (s[0] === '"' || s[0] === "'") && s[s.length - 1] === s[0] ? s.slice(1, -1) : s);
+// A YAML comment starts at ` #`; stripping it can only ever REMOVE characters,
+// so it cannot manufacture a member of PIN_CLEARED out of quoted content (an
+// unbalanced quote survives unquote and misses the set).
+const pinValueClears = (raw) => PIN_CLEARED.has(unquote(String(raw).trim().replace(/\s+#.*$/, '').trim()).trim().toLowerCase());
+const pinKey = (k) => unquote(String(k).trim()).trim().toLowerCase() === 'pinned';
 export function isPinned(file) {
   try {
     const fd = fs.openSync(file, 'r');
     let head;
+    let full;
     try {
       const buf = Buffer.alloc(PIN_READ_BYTES);
       const n = fs.readSync(fd, buf, 0, PIN_READ_BYTES, 0);
       head = buf.toString('utf8', 0, n);
+      full = n < PIN_READ_BYTES; // a short read reached EOF; a full one may be a PREFIX
     } finally {
       fs.closeSync(fd);
     }
@@ -282,12 +300,26 @@ export function isPinned(file) {
     // above already promised fail-closed; that line was the one place the code
     // did not do it. Each state's direction is now declared explicitly rather
     // than falling out of a boolean's default branch.
-    const fm = readFrontmatter(head);
+    // `truncated` is the whole of G3-2: `head` is a 64 KiB WINDOW, and until
+    // this argument existed the primitive read the end of that window as a
+    // legitimate end-of-file. A `\n---` landing on the cut therefore fabricated
+    // a close and every key past it — including the pin — went unseen.
+    const fm = readFrontmatter(head, { truncated: !full });
     // Unverifiable = an undecodable head (encoding preamble) OR an opener that
     // does not close inside PIN_READ_BYTES -> refuse to touch.
     if (fm.state === 'unverifiable') return true;
     if (fm.state === 'none') return false; // decodable, and genuinely no frontmatter
-    return /^pinned\s*:\s*true\s*$/m.test(fm.block);
+    // ONE READER (G3-1). This used to be a PRIVATE /^pinned\s*:\s*true\s*$/m
+    // over the block the primitive returned, while fidelity-gate's
+    // frontmatterKeys parsed the SAME block with a different regex — and the
+    // gate counted a `pinned` key in six spellings this predicate called
+    // unpinned, so applyPlan deleted them. The fix is not a cleverer regex (that
+    // would be the sixth patch on this one line); it is that there is now only
+    // one parse of the block, and this caller declares its own safe direction
+    // over the entries — LOOSE ENTRIES INCLUDED, because the retired regex
+    // protected `pinned:true` (no space) that the gate's strict key shape does
+    // not see, and a merge that drops it would be LOOSER than what it replaced.
+    return frontmatterBlockEntries(fm.block).some((e) => pinKey(e.key) && !pinValueClears(e.value));
   } catch {
     return true; // read error on a file we are about to mutate -> refuse (fail-closed)
   }
@@ -920,9 +952,16 @@ export function applyPlan(plan, opts = {}) {
       const binOrigin = plan.origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut';
       for (const a of actionable) {
         if (a.type === 'create') continue; // an addition cut nothing
-        const orig = a.baseBuf.toString('utf8');
-        const cut = a.type === 'delete' ? orig : removedLines(orig, a.content).join('\n');
-        if (!cut) continue;
+        // A DELETE banks the BUFFER, never a decode of it (G3-3). `baseBuf` is
+        // byte-equal to the file on disk BY CONSTRUCTION — the external-writer
+        // guard above aborts the whole transaction unless Buffer.compare(cur,
+        // baseBuf) === 0 — so this is the original bytes, and a .toString('utf8')
+        // here silently replaced every non-UTF-8 byte with U+FFFD in the only
+        // copy the user can recover. A REWRITE banks its removed LINES, which
+        // are text this codebase derived by diffing text; a string is the honest
+        // type there and recordBinItem encodes it once, at the boundary.
+        const cut = a.type === 'delete' ? a.baseBuf : removedLines(a.baseBuf.toString('utf8'), a.content).join('\n');
+        if (!cut.length) continue;
         recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
       }
 
@@ -1177,8 +1216,11 @@ export function recoverDangling(projectRoot, opts = {}) {
         // directory at a create path also lands here — readFileSync throws EISDIR
         // — where it used to be a silently-swallowed rmSync failure reported as a
         // clean rolled-back.)
+        // BYTES, not a decode (G3-3): this is the create-undo's only backup of
+        // a file it is about to remove, so it goes into the bin exactly as it
+        // sits on disk. A directory here still throws EISDIR -> null -> refuse.
         let body = null;
-        try { body = fs.readFileSync(p, 'utf8'); } catch { body = null; }
+        try { body = fs.readFileSync(p); } catch { body = null; }
         // `now` is the run's single reading, never recordBinItem's per-call
         // Date.now() default — see the const at the top of this function.
         if (body === null || !recordBinItem(projectRoot, FAT_BIN_NAME, { content: body, original: p, origin: 'program-cut', now })) { refused++; continue; }

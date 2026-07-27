@@ -222,15 +222,19 @@ export function gaugeLine(g) {
 // The 0-token human recovery lookup (importable, pure read): searches BOTH
 // bins — fat first (the high-churn producer), then the wizard bin
 // (store.old) — and returns the item's content + metadata, or found:false.
-// restoreFromBin's own null-vs-'' distinction carries through: a genuinely
+// restoreFromBin's own null-vs-empty distinction carries through: a genuinely
 // empty stash is a legitimate find.
+// `content` is a BUFFER (G3-3) — the recovery door moves bytes, so
+// `process.stdout.write(r.content)` below pipes the ORIGINAL file, not a UTF-8
+// re-encoding of a lossy decode of it. `bytes` is the real byte count for the
+// same reason, not a re-measured string length.
 export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   const projectRoot = findProjectRoot(cwd, home);
   for (const bin of [FAT_BIN_NAME, STORE_OLD_NAME]) {
     const content = restoreFromBin(projectRoot, bin, id);
     if (content !== null) {
       const item = listBin(projectRoot, bin).find((i) => i && i.id === id) || {};
-      return { found: true, bin, id, original: item.original || null, bytes: Buffer.byteLength(content, 'utf8'), content };
+      return { found: true, bin, id, original: item.original || null, bytes: content.length, content };
     }
   }
   return { found: false, id };

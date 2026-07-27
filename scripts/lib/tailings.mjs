@@ -102,7 +102,8 @@ function saveIndex(dir, index) {
   }
 }
 
-// Record a bin item — `content` (string) is written into the bin verbatim
+// Record a bin item — `content` (a Buffer of the ORIGINAL BYTES, or a string
+// for content this codebase derived as text) is written into the bin verbatim
 // (no ceremony, no ask: "born silent" per the ledger). `original` = the
 // source path it was cut from (advisory metadata only, never dereferenced by
 // this module); `origin` = 'program-cut' (the certain-garbage broom,
@@ -110,18 +111,32 @@ function saveIndex(dir, index) {
 // Returns the item id (also the on-disk filename), or null on any failure —
 // a failed stash must never block the wash it was backing up (fail-silent,
 // the safety net's own failure is not the caller's problem to crash over).
+//
+// ── THE BIN IS A BYTE CHANNEL (2026-07-28, G3-3) ─────────────────────────────
+// It used to be a STRING channel end to end: applyPlan banked
+// `baseBuf.toString('utf8')` and this function wrote it back with
+// writeFileSync(..., 'utf8'). Any byte sequence that is not valid UTF-8 — a
+// CP1252 MEMORY.md, a Notepad "ANSI" save — decoded to U+FFFD on the way in and
+// re-encoded as the replacement character on the way out, so THE RECOVERY NET
+// CORRUPTED THE ONLY COPY IT HELD. Measured: one U+FFFD, byte-identical false,
+// while an ASCII sibling deleted in the SAME applyPlan call round-tripped
+// exactly — which is why nobody saw it. A net that alters what it catches is
+// worse than no net, because the restore LOOKS successful.
+// THE RULE THIS SETTLES, and it is the one to apply at the next such site: a
+// RECOVERY path moves BYTES; an ANALYSIS path may decode to text and must say
+// so at the call. Buffer in, Buffer out, no string hop in between.
 export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now() } = {}) {
   const dir = binDir(projectRoot, name);
   try {
     fs.mkdirSync(dir, { recursive: true });
     ensureSelfIgnore(dir);
     const id = `${now}-${Math.random().toString(36).slice(2, 8)}`;
-    const body = typeof content === 'string' ? content : '';
-    fs.writeFileSync(path.join(dir, id), body, 'utf8');
+    const body = Buffer.isBuffer(content) ? content : Buffer.from(typeof content === 'string' ? content : '', 'utf8');
+    fs.writeFileSync(path.join(dir, id), body); // NO encoding argument: raw bytes
     const index = loadIndex(dir);
     // bytes (0i): the size-cap layer's weight — recorded at birth so the
     // sweep never has to re-stat the common case.
-    index.push({ id, at: now, bytes: Buffer.byteLength(body, 'utf8'), original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' });
+    index.push({ id, at: now, bytes: body.length, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' });
     if (!saveIndex(dir, index)) { try { fs.rmSync(path.join(dir, id), { force: true }); } catch {} return null; }
     return id;
   } catch {
@@ -135,15 +150,22 @@ export function listBin(projectRoot, name) {
   return loadIndex(binDir(projectRoot, name));
 }
 
-// The deliberate walk-in restore door — read one item's content by id.
-// Returns null (not '') on a miss, so a caller can tell "empty file" from
-// "not found" — a restore of a genuinely-empty stash is legitimate.
+// The deliberate walk-in restore door — read one item's BYTES by id. Returns a
+// Buffer, or null (not an empty Buffer) on a miss, so a caller can tell "empty
+// file" from "not found" — a restore of a genuinely-empty stash is legitimate.
 // F1: `id` is USER-supplied (the cli restore subcommand) — the bare-name
 // allowlist rejects any traversal shape (`../x`, absolute, `.`/`..`) as a
 // plain not-found before the path is ever built.
+//
+// A BUFFER, NOT A STRING, and deliberately not both (G3-3): the door that
+// exists to hand back the real bytes cannot be the door that transcodes them.
+// Shipping a string view ALONGSIDE this would recreate the exact defect class
+// being fixed one file over — two readers of one artifact, and the next caller
+// picks the wrong one. A caller that wants text decodes at its own call site
+// and thereby declares that choice (anchor-diff does; the CLI pipes bytes).
 export function restoreFromBin(projectRoot, name, id) {
   if (!isBareId(id)) return null;
-  try { return fs.readFileSync(path.join(binDir(projectRoot, name), id), 'utf8'); }
+  try { return fs.readFileSync(path.join(binDir(projectRoot, name), id)); }
   catch { return null; }
 }
 

@@ -220,7 +220,14 @@ export function readWriteguardSnapshot(projectRoot, snapName, { home } = {}) {
   if (!rows.length) return null;
   rows.sort((a, b) => b.mtimeMs - a.mtimeMs);
   const pick = rows[0];
-  try { return { ...pick, content: fs.readFileSync(pick.snapshotPath, 'utf8') }; }
+  // BYTES (G3-3's twin, same commit — the bins and this door are one concept
+  // with two implementations, and when one learns the other changes or the
+  // "same law" comment is a lie). The snapshot on disk is byte-exact (a
+  // copyFileSync), but reading it back through 'utf8' re-encoded every
+  // non-UTF-8 byte as U+FFFD — so the CLI's own words, "byte-exact original on
+  // stdout", were FALSE for exactly the files this net exists to save. `bytes`
+  // already comes from a stat, so it was right while the content was wrong.
+  try { return { ...pick, content: fs.readFileSync(pick.snapshotPath) }; }
   catch { return null; }
 }
 

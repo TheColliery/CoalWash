@@ -1405,8 +1405,8 @@ test('0h: a committed program-cut plan banks each rewrite\'s REMOVED LINES and e
     const items = listBin(proj, FAT_BIN_NAME);
     assert.strictEqual(items.length, 2, 'one item per cut file; the create banks nothing');
     const byOriginal = new Map(items.map((i) => [path.basename(i.original), i]));
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, byOriginal.get('f1.md').id), 'cut line one\ncut line two', 'the rewrite banks exactly its removed lines');
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, byOriginal.get('f2.md').id), 'whole file to delete', 'the delete banks the whole file');
+    assert.deepStrictEqual(restoreFromBin(proj, FAT_BIN_NAME, byOriginal.get('f1.md').id), Buffer.from('cut line one\ncut line two', 'utf8'), 'the rewrite banks exactly its removed lines');
+    assert.deepStrictEqual(restoreFromBin(proj, FAT_BIN_NAME, byOriginal.get('f2.md').id), Buffer.from('whole file to delete', 'utf8'), 'the delete banks the whole file');
     for (const i of items) assert.strictEqual(i.origin, 'program-cut', 'default origin routes as a program cut');
     assert.strictEqual(listBin(proj, STORE_OLD_NAME).length, 0, 'nothing leaks into the wizard bin');
   } finally { clean(proj); }
@@ -2115,7 +2115,7 @@ test('RUNG-5 §1.1: the create-undo delete BANKS the bytes into the fat bin befo
     const items = listBin(proj, FAT_BIN_NAME);
     assert.strictEqual(items.length, 1, 'the removed bytes were banked BEFORE the rmSync (pre-fix: deleted with no snapshot, no bin entry, no handle)');
     assert.strictEqual(items[0].original, created, 'the bin record names the file it came from');
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, items[0].id), BODY, 'the content restores byte-exact through the shipped door');
+    assert.deepStrictEqual(restoreFromBin(proj, FAT_BIN_NAME, items[0].id), Buffer.from(BODY, 'utf8'), 'the content restores byte-exact through the shipped door');
   } finally { clean(proj); }
 });
 
@@ -2233,4 +2233,165 @@ test('cap-conflict reaches the receipt: an unsatisfiable bin cap (young items al
       assert.deepStrictEqual(r2.binConflicts, [], 'no conflict -> empty, never missing');
     } finally { clean(proj2, home2); }
   } finally { clean(proj, home); }
+});
+
+// ---------------------------------------------------------------------------
+// G3-1 / G3-2 / G3-3 — the round-5 lab findings (2026-07-28)
+// ---------------------------------------------------------------------------
+// Fixtures are written as BYTES on purpose: the whole G3-3 defect lives in
+// bytes that writeFileSync(..., 'utf8') can never produce.
+function pinnedOf(body) {
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwpin-')));
+  try {
+    const f = path.join(proj, 'NOTE.md');
+    fs.writeFileSync(f, Buffer.isBuffer(body) ? body : Buffer.from(body, 'utf8'));
+    return isPinned(f);
+  } finally { clean(proj); }
+}
+const fm = (inner) => '---\n' + inner + '\ntitle: x\n---\n\nbody\n';
+
+// G3-1. isPinned ran its OWN /^pinned\s*:\s*true\s*$/m over the block that
+// readFrontmatter returned, while frontmatterKeys parsed the SAME block with a
+// different regex — two readers, one block, opposite answers. Six spellings the
+// GATE ITSELF counted as a `pinned` key were deletable through the shipped door.
+test('G3-1: every spelling the gate itself counts as a `pinned` key is PINNED — the two readers of one block agree', () => {
+  for (const inner of [
+    'pinned: True', 'pinned: TRUE', '"pinned": true', 'pinned: true # do not delete',
+    'pinned: yes', 'pinned: "true"', 'PINNED: true', "pinned: 'true'",
+  ]) {
+    assert.strictEqual(pinnedOf(fm(inner)), true, `${JSON.stringify(inner)} must be PINNED (the gate counts it as a pinned key)`);
+  }
+});
+
+// THE UNION-LOOSENESS AXIS (coordinator's warning, and it has a live instance):
+// merging two readers can be LOOSER than either one. `pinned:true` — no space
+// after the colon — is protected by the RETIRED regex and is NOT a key to
+// frontmatterKeys, so a naive hand-off to the gate's parser would have made a
+// currently-protected file deletable. The retired predicate is the lower-bound
+// oracle: whatever it protected stays protected.
+test('G3-1: the new reader is never LOOSER than the retired regex — its protected set is a floor', () => {
+  const OLD = /^pinned\s*:\s*true\s*$/m; // the retired predicate, kept HERE as a test oracle only
+  const inners = [
+    'pinned:true', 'pinned : true', 'pinned:\ntrue', 'a:b c: d\npinned: true',
+    'pinned: true', 'pinned:  true  ', 'x: 1\npinned: true\ny: 2',
+  ];
+  for (const inner of inners) {
+    if (!OLD.test(inner)) continue; // only the retired regex's own protected set is asserted
+    assert.strictEqual(pinnedOf(fm(inner)), true, `${JSON.stringify(inner)} was protected by the retired regex and must stay protected`);
+  }
+});
+
+// The PRICE, measured rather than assumed: `not pinned` is now EARNED by one of
+// three explicit negations. Everything else — a value nobody classified — is a
+// pin (fail-safe: yield loss, never safety loss). These stay washable.
+test('G3-1: `not pinned` is earned — no `pinned` key, or an explicit negation, stays washable', () => {
+  for (const inner of [
+    'title: only', 'unpinned: true', 'pinnedBy: alice', 'pinned_at: 2026-07-28',
+    'pinned: false', 'pinned: False', 'pinned: FALSE', 'pinned: no', 'pinned: off',
+    'pinned: "false"', 'pinned: false # was pinned last week',
+    'nested:\n  pinned: true', '- pinned: true', '# pinned: true',
+  ]) {
+    assert.strictEqual(pinnedOf(fm(inner)), false, `${JSON.stringify(inner)} must stay washable — over-pinning is a yield loss that must stay a DECISION`);
+  }
+  assert.strictEqual(pinnedOf('# plain\npinned: true\n'), false, 'a `pinned: true` line in the BODY is not frontmatter — unchanged');
+});
+
+// The ambiguous middle, pinned by its own test so the direction stays visible.
+test('G3-1: a `pinned` key whose value is neither true nor an explicit negation is PINNED (fail-safe)', () => {
+  for (const inner of ['pinned: maybe', 'pinned: 0', 'pinned: 1', 'pinned: []', 'pinned:', 'pinned: n']) {
+    assert.strictEqual(pinnedOf(fm(inner)), true, `${JSON.stringify(inner)} is ambiguous -> refuse to touch`);
+  }
+});
+
+test('G3-1: a pinned-by-spelling file survives a delete through the shipped applyPlan door', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'PINNED.md');
+    fs.writeFileSync(f, Buffer.from(fm('pinned: True'), 'utf8'));
+    const r = apply(planFor(proj, store, [{ type: 'delete', path: f }], { approvedDrops: ['frontmatter-drop:pinned', 'frontmatter-drop:title'] }));
+    assert.strictEqual(r.ok, false, 'the delete must be refused');
+    assert.match(String(r.error), /PIN-protected/, 'refused by the pin gate, by name');
+    assert.ok(fs.existsSync(f), 'the file survives');
+  } finally { clean(proj); }
+});
+
+// G3-2. isPinned decodes a 64 KiB window; readFrontmatter's closing regex ended
+// in `(?:\r?\n|$)` with no /m, so `$` meant END OF THE TRUNCATED PREFIX — a
+// `\n---` landing at the cut FABRICATED a close, the pin past it went unseen and
+// the file was deleted. apply.mjs's own constant already says a block that does
+// not close within the window is unverifiable; the code did not do it.
+test('G3-2: a pin past the 64 KiB read window is PINNED — a window edge is not a close', () => {
+  const PIN_READ_BYTES = 65536;
+  const head = '---\ntitle: big\n';
+  const fence = '\n---';
+  // the byte after the boundary fence is a NON-terminator, so only the
+  // TRUNCATED read can treat that line as a close (via the `$` alternative)
+  const pad = 'x'.repeat(PIN_READ_BYTES - head.length - fence.length);
+  const body = head + pad + fence + 'x\npinned: true\nowner: me\n---\n\nreal body\n';
+  assert.ok(Buffer.byteLength(body, 'utf8') > PIN_READ_BYTES, 'the fixture must actually exceed the window');
+  assert.strictEqual(pinnedOf(body), true, 'the block does not close inside the window -> unverifiable -> refuse to touch');
+});
+
+test('G3-2 CONTROL: the truncation refusal is narrow — big files without that edge stay washable', () => {
+  const big = '---\npinned: false\ntitle: big\n---\n\n' + 'y'.repeat(200000) + '\n';
+  assert.strictEqual(pinnedOf(big), false, 'a >64KiB file whose block closes normally inside the window is untouched by the fix');
+  assert.strictEqual(pinnedOf('z'.repeat(200000)), false, 'a >64KiB file with no frontmatter at all is untouched by the fix');
+  // THE DISCRIMINATING CASE, and without it this control is vacuous: a file
+  // whose block closes at END OF FILE with no trailing newline closes ONLY via
+  // the `$` alternative. It is short, so the read reaches EOF and `$` legitimately
+  // means end-of-file. Get the truncation flag backwards — force it on for every
+  // read — and every no-trailing-newline file silently becomes unwashable.
+  // (Found by mutation: the first two assertions above both survived that
+  // inversion, so they proved nothing about the flag.)
+  assert.strictEqual(pinnedOf('---\npinned: false\ntitle: x\n---'), false, 'a whole file that ENDS on its closing fence still closes — the window rule must not leak onto a complete read');
+});
+
+// G3-3. The recovery bin was a STRING channel (apply banked
+// baseBuf.toString('utf8'), tailings wrote it back with writeFileSync(...,
+// 'utf8')), so a file whose bytes are not valid UTF-8 was banked as mojibake —
+// the undo net corrupting the only copy it holds.
+test('G3-3: a deleted non-UTF-8 file restores from the bin BYTE-IDENTICAL', () => {
+  const { proj, store } = sandbox();
+  try {
+    // 0xE9 is 'e-acute' in CP1252 and is not valid UTF-8. It must sit past
+    // fidelity-gate's 64-char head scan, or isPinned fail-closes on the U+FFFD
+    // and a different gate refuses the delete — hiding the channel under test.
+    const lead = Buffer.from('# note\n' + 'p'.repeat(120) + '\ncaf', 'ascii');
+    const probeBytes = Buffer.concat([lead, Buffer.from([0xe9]), Buffer.from('\nsummary\n', 'ascii')]);
+    const ctrlBytes = Buffer.from('# note\n' + 'p'.repeat(120) + '\ncafe\nsummary\n', 'ascii');
+    const probe = path.join(store, 'ANSI.md');
+    const ctrl = path.join(store, 'ASCII.md');
+    fs.writeFileSync(probe, probeBytes);
+    fs.writeFileSync(ctrl, ctrlBytes);
+    const r = apply(planFor(proj, store, [{ type: 'delete', path: probe }, { type: 'delete', path: ctrl }]));
+    assert.strictEqual(r.ok, true, r.error);
+    const byName = new Map(listBin(proj, FAT_BIN_NAME).map((i) => [path.basename(String(i.original)), i.id]));
+    const got = restoreFromBin(proj, FAT_BIN_NAME, byName.get('ANSI.md'));
+    const gotCtrl = restoreFromBin(proj, FAT_BIN_NAME, byName.get('ASCII.md'));
+    assert.deepStrictEqual(Buffer.from(gotCtrl), ctrlBytes, 'CONTROL: the ASCII sibling deleted in the SAME call round-trips exactly');
+    assert.deepStrictEqual(Buffer.from(got), probeBytes, 'the recovery net must hand back the bytes it was given, not a transcode of them');
+  } finally { clean(proj); }
+});
+
+test('G3-3: recoverDangling banks a non-UTF-8 create-undo BYTE-IDENTICAL too', () => {
+  const { proj, store } = sandbox();
+  try {
+    const created = path.join(store, 'CREATED.md');
+    const bytes = Buffer.concat([Buffer.from('# made\n' + 'q'.repeat(120) + '\ncaf', 'ascii'), Buffer.from([0xe9]), Buffer.from('\n', 'ascii')]);
+    fs.writeFileSync(created, bytes);
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-g33');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), 'g33');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [store],
+      steps: [{ i: 0, type: 'create', path: created, status: 'pending' }],
+    }));
+    const rec = recoverDangling(proj);
+    assert.strictEqual(rec.recovered, 'rolled-back', `the undo runs (got ${JSON.stringify(rec)})`);
+    const items = listBin(proj, FAT_BIN_NAME);
+    assert.strictEqual(items.length, 1, 'the create-undo banked exactly one item');
+    assert.deepStrictEqual(Buffer.from(restoreFromBin(proj, FAT_BIN_NAME, items[0].id)), bytes, 'the create-undo bank is byte-exact');
+  } finally { clean(proj); }
 });

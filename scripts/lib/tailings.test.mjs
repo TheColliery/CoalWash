@@ -14,6 +14,10 @@ import { TIER1_KEEP_ALL_MS, HORIZON_MS } from './retention.mjs';
 function sandbox() {
   return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-proj-')));
 }
+// restoreFromBin hands back BYTES (G3-3). These are POLICY tests — they assert
+// WHICH items survive a sweep, not how they are encoded — so they decode here,
+// explicitly. The byte contract itself is asserted in apply.test.mjs.
+const binText = (p, n, id) => { const b = restoreFromBin(p, n, id); return b === null ? null : b.toString('utf8'); };
 function clean(...dirs) {
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 }
@@ -28,7 +32,7 @@ test('recordBinItem: writes the content verbatim, records it in the index, self-
     assert.strictEqual(list[0].id, id);
     assert.strictEqual(list[0].original, '/some/file.md');
     assert.strictEqual(list[0].origin, 'program-cut', 'the default origin');
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, id), 'cut prose');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'cut prose');
     const gitignore = path.join(txDirFor(proj), FAT_BIN_NAME, '.gitignore');
     assert.ok(fs.existsSync(gitignore), 'the bin dir is self-ignored (never version-controlled, same as the tx dir)');
   } finally { clean(proj); }
@@ -49,7 +53,7 @@ test('recordBinItem: non-string content degrades to an empty stash, never throws
   const proj = sandbox();
   try {
     const id = recordBinItem(proj, FAT_BIN_NAME, { content: undefined });
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, id), '');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), '');
   } finally { clean(proj); }
 });
 
@@ -57,9 +61,9 @@ test('listBin: an empty/never-used bin is []; restoreFromBin on a missing id is 
   const proj = sandbox();
   try {
     assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), []);
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, 'never-existed'), null);
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, ''), null);
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, null), null);
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, 'never-existed'), null);
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, ''), null);
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, null), null);
   } finally { clean(proj); }
 });
 
@@ -71,9 +75,9 @@ test('F1: restoreFromBin rejects every traversal-shaped id as a plain not-found 
     const victim = path.join(txDirFor(proj), 'victim.txt'); // one level above the bin dir
     fs.writeFileSync(victim, 'secret outside the bin', 'utf8');
     for (const evil of ['../victim.txt', '..\\victim.txt', victim, '/etc/passwd', 'C:\\Windows\\win.ini', '.', '..', 'a/b', 'a\\b']) {
-      assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, evil), null, `traversal id ${JSON.stringify(evil)} must be a not-found, never a read`);
+      assert.strictEqual(binText(proj, FAT_BIN_NAME, evil), null, `traversal id ${JSON.stringify(evil)} must be a not-found, never a read`);
     }
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, id), 'legit', 'a legitimate flat id still round-trips');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'legit', 'a legitimate flat id still round-trips');
   } finally { clean(proj); }
 });
 
@@ -128,7 +132,7 @@ test('sweepFatBin: an item inside the 48h keep-all tier survives untouched', () 
     const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'recent cut', now: now - 3600000 }); // 1h old
     const r = sweepFatBin(proj, { now });
     assert.deepStrictEqual(r, { destroyed: 0, kept: 1 });
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, id), 'recent cut', 'still readable after the sweep');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'recent cut', 'still readable after the sweep');
   } finally { clean(proj); }
 });
 
@@ -139,7 +143,7 @@ test('sweepFatBin: an item past the 30-day fat horizon is destroyed — verified
     const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', original: 'notes/old.md', now: now - (HORIZON_MS.fat + 86400000) }); // 31 days old
     const r = sweepFatBin(proj, { now });
     assert.deepStrictEqual(r, { destroyed: 1, kept: 0 });
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, id), null, 'gone');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), null, 'gone');
     assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 0, 'dropped from the index');
     const log = readDeathLog(proj, FAT_BIN_NAME);
     assert.ok(log.includes(id), 'the death certificate names the destroyed id');
@@ -176,7 +180,7 @@ test('sweep: density thinning still applies within a bin — multiple same-day i
     const r = sweepFatBin(proj, { now });
     assert.strictEqual(r.kept, 1, 'same day-slot thins to one survivor');
     const survivors = listBin(proj, FAT_BIN_NAME);
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, survivors[0].id), 'newer-write', 'the newer write in the slot survives');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, survivors[0].id), 'newer-write', 'the newer write in the slot survives');
   } finally { clean(proj); }
 });
 
@@ -193,7 +197,7 @@ test('N2: one wash banking 4 files stays 4/4 recoverable at 49h (the event survi
     const r = sweepFatBin(proj, { now: Date.now() });
     assert.strictEqual(r.destroyed, 0, 'nothing of a lone event is thinned');
     assert.strictEqual(r.kept, 4);
-    ids.forEach((id, i) => assert.ok(restoreFromBin(proj, FAT_BIN_NAME, id) !== null, `file ${i} must still restore`));
+    ids.forEach((id, i) => assert.ok(binText(proj, FAT_BIN_NAME, id) !== null, `file ${i} must still restore`));
   } finally { clean(proj); }
 });
 
@@ -208,8 +212,8 @@ test('N2 MUST-BREAK end-to-end: two washes in one day slot — the older wash di
     const r = sweepFatBin(proj, { now: Date.now() });
     assert.strictEqual(r.destroyed, 2, 'the older EVENT dies whole');
     assert.strictEqual(r.kept, 2);
-    for (const id of wash1) assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, id), null, 'older wash gone (thinned)');
-    for (const id of wash2) assert.ok(restoreFromBin(proj, FAT_BIN_NAME, id) !== null, 'newer wash restores whole');
+    for (const id of wash1) assert.strictEqual(binText(proj, FAT_BIN_NAME, id), null, 'older wash gone (thinned)');
+    for (const id of wash2) assert.ok(binText(proj, FAT_BIN_NAME, id) !== null, 'newer wash restores whole');
   } finally { clean(proj); }
 });
 
@@ -269,10 +273,10 @@ test('P5/P8 end-to-end (own fixture, the lab shape): a 25h-old pre-surgery whole
     // floor -> untouchable (the exact kill the lab measured, now impossible).
     const r = sweepStoreOld(proj, { now, storeBytes: 250 });
     assert.deepStrictEqual(r, { destroyed: 2, kept: 2 }, 'cap satisfied without touching the floor -> no capConflict field at all');
-    assert.strictEqual(restoreFromBin(proj, STORE_OLD_NAME, image), 'W'.repeat(300), 'the 25h pre-surgery image survives AND round-trips byte-exact');
-    assert.strictEqual(restoreFromBin(proj, STORE_OLD_NAME, old3d), 'c'.repeat(200), 'the newest cut survives (retrievability anchor)');
-    assert.strictEqual(restoreFromBin(proj, STORE_OLD_NAME, old7d), null);
-    assert.strictEqual(restoreFromBin(proj, STORE_OLD_NAME, old5d), null);
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, image), 'W'.repeat(300), 'the 25h pre-surgery image survives AND round-trips byte-exact');
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, old3d), 'c'.repeat(200), 'the newest cut survives (retrievability anchor)');
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, old7d), null);
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, old5d), null);
     const log = readDeathLog(proj, STORE_OLD_NAME);
     // The death certificate carries the AXIS and the SOURCE FILENAME — the
     // id->file mapping survives destruction inside the certificate itself
@@ -310,8 +314,8 @@ test('0i: a legacy (pre-0i) index entry without bytes is stat-weighed at sweep t
     // must die even though the index never recorded its weight.
     const r = sweepFatBin(proj, { now, storeBytes: 100 });
     assert.deepStrictEqual(r, { destroyed: 1, kept: 1 });
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, oldId), null, 'the stat-weighed legacy item was evicted');
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, newId), 'y'.repeat(100));
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, oldId), null, 'the stat-weighed legacy item was evicted');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, newId), 'y'.repeat(100));
   } finally { clean(proj); }
 });
 
@@ -327,7 +331,7 @@ test('sweep: a doubt case (a future `at`) is KEPT, never destroyed — the broom
     const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'x', now: now + 86400000 });
     const r = sweepFatBin(proj, { now });
     assert.deepStrictEqual(r, { destroyed: 0, kept: 1 });
-    assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, id), 'x');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'x');
   } finally { clean(proj); }
 });
 
@@ -338,7 +342,7 @@ test('sweep: the two bins are independent — sweeping one never touches the oth
     const oldId = recordBinItem(proj, STORE_OLD_NAME, { content: 'still young for store.old', now: now - 45 * 86400000 });
     recordBinItem(proj, FAT_BIN_NAME, { content: 'irrelevant', now });
     sweepFatBin(proj, { now });
-    assert.strictEqual(restoreFromBin(proj, STORE_OLD_NAME, oldId), 'still young for store.old', 'sweeping the fat bin never touches store.old');
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, oldId), 'still young for store.old', 'sweeping the fat bin never touches store.old');
   } finally { clean(proj); }
 });
 

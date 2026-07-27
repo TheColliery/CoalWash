@@ -259,7 +259,7 @@ test('recovery: listWriteguard returns METADATA only (never content); readWriteg
     assert.strictEqual(list[0].name, name);
     assert.ok(list[0].bytes > 0 && list[0].snapshotPath === snap);
     const got = readWriteguardSnapshot(proj, name, { home });
-    assert.strictEqual(got.content, GOV, 'the recovered bytes are the byte-exact original — code-moved, model-untouched');
+    assert.deepStrictEqual(got.content, Buffer.from(GOV, 'utf8'), 'the recovered bytes are the byte-exact original — code-moved, model-untouched');
   } finally { clean(home, proj); }
 });
 
@@ -308,4 +308,28 @@ test('sweep: no writeguard dir yet, or a malformed session id, never throws', ()
 
 test('SEATBELT_MAX_BYTES is a sane positive placeholder constant', () => {
   assert.ok(Number.isFinite(SEATBELT_MAX_BYTES) && SEATBELT_MAX_BYTES > 1024);
+});
+
+// G3-3's TWIN (2026-07-28). The bins and this door are one concept with two
+// implementations. The snapshot itself was always byte-exact (copyFileSync);
+// the READ-BACK went through 'utf8', so the recovery door re-encoded every
+// non-UTF-8 byte as U+FFFD — while the CLI told the human "byte-exact original
+// on stdout". This is the airbag: the ONLY undo net for a gitignored MEMORY.md.
+test('G3-3 twin: readWriteguardSnapshot returns the ORIGINAL BYTES — a non-UTF-8 file is not transcoded by its own undo net', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-proj-')));
+  try {
+    const f = path.join(proj, 'MEMORY.md');
+    // 0xE9 is 'e-acute' in CP1252 and is not valid UTF-8 — an ANSI-saved note.
+    const bytes = Buffer.concat([Buffer.from('# memory\ncaf', 'ascii'), Buffer.from([0xe9]), Buffer.from('\n', 'ascii')]);
+    fs.writeFileSync(f, bytes);
+    const snapped = snapshotOnFirstWrite(proj, 'sess-g33', f, { home });
+    assert.ok(snapped, `the airbag fired: ${JSON.stringify(snapped)}`);
+    const rows = listWriteguard(proj, { home });
+    assert.strictEqual(rows.length, 1, 'exactly one snapshot');
+    const got = readWriteguardSnapshot(proj, rows[0].name, { home });
+    assert.ok(got, 'the snapshot reads back');
+    assert.deepStrictEqual(Buffer.from(got.content), bytes, 'the undo net hands back the bytes it caught — "byte-exact" must be true, not a claim');
+    assert.strictEqual(got.bytes, bytes.length, 'the reported size is the real byte count');
+  } finally { clean(home, proj); }
 });
