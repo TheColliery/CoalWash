@@ -142,6 +142,13 @@ export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home
 // Read the airbag baseline for the seatbelt's diff. Returns { phys,
 // snapshotPath, orig } or null (no baseline — not guarded, new file, or the
 // airbag was off/failed → the seatbelt stays silent).
+// ANALYSIS PATH, DECLARED — the rule G3-3 set (recovery moves BYTES, analysis
+// may decode to TEXT and must say so at the call). `orig` is decoded on purpose:
+// it exists only to be compared with the current disk through the fidelity gate,
+// and BOTH sides take the same transform, so a lossy decode cannot manufacture a
+// drop. It is never written anywhere and never handed to a human as "the
+// original" — RECOVERY reads the same snapshot through readWriteguardSnapshot
+// below, which returns a Buffer.
 export function readSnapshot(projectRoot, sessionId, touchedPath, { home } = {}) {
   try {
     const phys = isGuardedTarget(touchedPath, { projectRoot, home });

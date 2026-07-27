@@ -274,8 +274,15 @@ export function sniffUnrewritable(buf) {
   // never safety loss, and the user has a way out — convert it to UTF-8 and
   // CoalWash treats it normally — so the message says so rather than reporting
   // a vague "unverifiable" that sounds like CoalWash is confused about its own
-  // state. Deletes are unaffected: they never decode, and the bins now bank the
-  // original bytes.
+  // state.
+  // DELETES DO NOT PASS THROUGH THIS GUARD — nothing is rewritten and the bins
+  // bank the original bytes. They are NOT decode-free, though, and the earlier
+  // wording here ("deletes never decode") was an absolute in a scope paragraph,
+  // which is exactly what stops the next reader looking: `isPinned` decodes a
+  // 64 KiB head on every delete to read the pin. That decode fails CLOSED —
+  // undecodable head, or a block that does not close inside the window, is
+  // `unverifiable` = pinned = refuse — so the delete path is safe by its own
+  // gate, not by never decoding.
   if (!Buffer.from(text, 'utf8').equals(buf)) {
     return 'not valid UTF-8 — a legacy single-byte encoding (CP1252 / Latin-1, e.g. a Notepad "ANSI" save) or another non-UTF-8 encoding: rewriting it would replace the undecodable bytes with U+FFFD and lose them permanently — flagged, not rewritten (convert the file to UTF-8 and CoalWash will wash it normally)';
   }
@@ -304,6 +311,25 @@ const PIN_READ_BYTES = 65536; // covers any sane frontmatter; a block that does 
 // refused too. Yield loss, never safety loss — the deliberate direction for a
 // predicate whose `false` authorises destruction.
 const PIN_CLEARED = new Set(['false', 'no', 'off']);
+// THE FLOOR (round 6). This is the predicate G3-1 retired, and it is here as a
+// CLAUSE rather than as a test oracle because a test cannot protect a file.
+// G3-1 kept it in the suite instead and asserted a universal — "whatever it
+// protected stays protected" — over SEVEN hand-written strings. The universal
+// was false: `\s` spans LINE TERMINATORS and a one-parse-per-LINE reader cannot,
+// so `pinned` + newline + `: true` was PIN-protected before G3-1 and DELETED
+// after it (1458 of the 19683 shapes this regex admits, measured against the
+// pre-fix engine as the control).
+// WHAT IS CLAIMED, AND ITS BOUND: over the block `readFrontmatter` returns, this
+// predicate's verdict is OR'd in, so its protected set is a floor BY
+// CONSTRUCTION — same regex, same input, and a `true` here can never be undone
+// below. That is a statement about THIS clause, not about pin spellings in
+// general, and the per-slot sweep in the suite is what proves the clause is
+// actually wired.
+// WHY THIS IS NOT THE TWO-READER DEFECT COMING BACK: G3-1's bug was two readers
+// disagreeing where the answer that LOSES authorises a delete. This is a
+// monotone widening — it can only ever ADD pins, never remove one — so there is
+// no verdict it can win that costs a file. Do not "simplify" it away.
+const RETIRED_PIN_FLOOR = /^pinned\s*:\s*true\s*$/m;
 const unquote = (s) => (s.length > 1 && (s[0] === '"' || s[0] === "'") && s[s.length - 1] === s[0] ? s.slice(1, -1) : s);
 // A YAML comment starts at ` #`; stripping it can only ever REMOVE characters,
 // so it cannot manufacture a member of PIN_CLEARED out of quoted content (an
@@ -314,12 +340,24 @@ export function isPinned(file) {
   try {
     const fd = fs.openSync(file, 'r');
     let head;
-    let full;
+    let truncated;
     try {
       const buf = Buffer.alloc(PIN_READ_BYTES);
       const n = fs.readSync(fd, buf, 0, PIN_READ_BYTES, 0);
       head = buf.toString('utf8', 0, n);
-      full = n < PIN_READ_BYTES; // a short read reached EOF; a full one may be a PREFIX
+      // COMPLETENESS IS A PROPERTY OF THE FILE, NEVER OF THE READ. This line
+      // used to be `n < PIN_READ_BYTES` — "a short read reached EOF" — which
+      // infers completeness from the byte COUNT, and `read(2)` may legally
+      // return fewer bytes than asked for. #57 FILESYSTEM-SEMANTICS below
+      // already names the mounts where that happens. A short read then looked
+      // exactly like end-of-file, `$` fabricated a close, and G3-2 was open
+      // again on any such mount. `fstat` answers the actual question and is
+      // exact, so it also closes the residual the byte count carried: a file of
+      // EXACTLY PIN_READ_BYTES was treated as truncated, which refused the one
+      // complete shape that closes only via `$` (last bytes = the fence).
+      // Taken AFTER the read on purpose: a concurrent append then shows up as
+      // truncated, which is the safe direction.
+      truncated = fs.fstatSync(fd).size > n;
     } finally {
       fs.closeSync(fd);
     }
@@ -337,7 +375,7 @@ export function isPinned(file) {
     // this argument existed the primitive read the end of that window as a
     // legitimate end-of-file. A `\n---` landing on the cut therefore fabricated
     // a close and every key past it — including the pin — went unseen.
-    const fm = readFrontmatter(head, { truncated: !full });
+    const fm = readFrontmatter(head, { truncated });
     // Unverifiable = an undecodable head (encoding preamble) OR an opener that
     // does not close inside PIN_READ_BYTES -> refuse to touch.
     if (fm.state === 'unverifiable') return true;
@@ -352,6 +390,10 @@ export function isPinned(file) {
     // over the entries — LOOSE ENTRIES INCLUDED, because the retired regex
     // protected `pinned:true` (no space) that the gate's strict key shape does
     // not see, and a merge that drops it would be LOOSER than what it replaced.
+    // That reasoning was right and INCOMPLETE — the loose entry covers what one
+    // LINE can hold, and the retired regex also spanned line terminators. So its
+    // verdict is OR'd in as the floor (see RETIRED_PIN_FLOOR).
+    if (RETIRED_PIN_FLOOR.test(fm.block)) return true;
     return frontmatterBlockEntries(fm.block).some((e) => pinKey(e.key) && !pinValueClears(e.value));
   } catch {
     return true; // read error on a file we are about to mutate -> refuse (fail-closed)

@@ -2267,18 +2267,54 @@ test('G3-1: every spelling the gate itself counts as a `pinned` key is PINNED �
 // merging two readers can be LOOSER than either one. `pinned:true` — no space
 // after the colon — is protected by the RETIRED regex and is NOT a key to
 // frontmatterKeys, so a naive hand-off to the gate's parser would have made a
-// currently-protected file deletable. The retired predicate is the lower-bound
-// oracle: whatever it protected stays protected.
-test('G3-1: the new reader is never LOOSER than the retired regex — its protected set is a floor', () => {
-  const OLD = /^pinned\s*:\s*true\s*$/m; // the retired predicate, kept HERE as a test oracle only
-  const inners = [
-    'pinned:true', 'pinned : true', 'pinned:\ntrue', 'a:b c: d\npinned: true',
-    'pinned: true', 'pinned:  true  ', 'x: 1\npinned: true\ny: 2',
-  ];
-  for (const inner of inners) {
-    if (!OLD.test(inner)) continue; // only the retired regex's own protected set is asserted
-    assert.strictEqual(pinnedOf(fm(inner)), true, `${JSON.stringify(inner)} was protected by the retired regex and must stay protected`);
+// currently-protected file deletable.
+//
+// ROUND 6 — THE ORACLE WAS ONLY EVER A LIST, AND THE LIST MISSED THE DEFECT.
+// This test's name was a universal ("its protected set is a floor") over a body
+// that enumerated SEVEN strings, and the universal was FALSE: `\s` spans LINE
+// TERMINATORS and a one-parse-per-LINE reader cannot, so 1458 of the 19683
+// shapes the retired regex admits lost their protection — `pinned` + newline +
+// `: true` was PIN-protected before G3-1 and was DELETED after it. The floor is
+// now enforced in apply.mjs, so the name is true by construction; this test is
+// what proves that clause is wired, and it sweeps the PARAMETER — every member
+// of JS `\s`, in every slot — instead of members, because four rounds of adding
+// the reported bytes to a fixture is exactly how the fence line rotted.
+test('G3-1: every shape the retired regex protects is still PINNED — the floor swept per slot, not enumerated', () => {
+  const OLD = /^pinned\s*:\s*true\s*$/m; // the retired predicate = the floor's SPECIFICATION
+  // Every member of JS `\s`, built from CODEPOINTS: a `\u` escape written by a
+  // tool has twice landed in this repo as a raw invisible character.
+  const WS = ['', String.fromCharCode(13, 10), ...[
+    0x20, 0x09, 0x0a, 0x0d, 0x0b, 0x0c, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002,
+    0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028,
+    0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+  ].map((c) => String.fromCharCode(c))];
+  let swept = 0;
+  for (let slot = 0; slot < 3; slot++) {
+    for (const w of WS) {
+      const s = [' ', ' ', '']; // one axis at a time: the other two slots stay neutral
+      s[slot] = w;
+      const inner = `pinned${s[0]}:${s[1]}true${s[2]}`;
+      if (!OLD.test(inner)) continue; // the oracle defines the space being asserted
+      swept++;
+      assert.strictEqual(pinnedOf(fm(inner)), true, `${JSON.stringify(inner)} was protected by the retired regex and must stay protected`);
+    }
   }
+  // A sweep that sweeps nothing is a green test that proves nothing.
+  assert.strictEqual(swept, 3 * WS.length, 'every generated shape must be inside the oracle it asserts');
+});
+
+// The shape the regression was MEASURED on, at the door where it costs a file:
+// pre-G3-1 `applyPlan` refused this delete by name, post-G3-1 it returned ok.
+test('G3-1: a `pinned` key split across lines survives a delete through the shipped applyPlan door', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'SPLIT.md');
+    fs.writeFileSync(f, Buffer.from(fm('pinned\n: true'), 'utf8'));
+    const r = apply(planFor(proj, store, [{ type: 'delete', path: f }], { approvedDrops: ['frontmatter-drop:title'] }));
+    assert.strictEqual(r.ok, false, 'the delete must be refused');
+    assert.match(String(r.error), /PIN-protected/, 'refused by the pin gate, by name');
+    assert.ok(fs.existsSync(f), 'the file survives');
+  } finally { clean(proj); }
 });
 
 // The PRICE, measured rather than assumed: `not pinned` is now EARNED by one of
@@ -2344,6 +2380,43 @@ test('G3-2 CONTROL: the truncation refusal is narrow — big files without that 
   // (Found by mutation: the first two assertions above both survived that
   // inversion, so they proved nothing about the flag.)
   assert.strictEqual(pinnedOf('---\npinned: false\ntitle: x\n---'), false, 'a whole file that ENDS on its closing fence still closes — the window rule must not leak onto a complete read');
+});
+
+// ROUND 6 — G3-2 RE-OPENED THROUGH A PARTIAL READ. `full` was derived from the
+// number of bytes READ, and `read(2)` may legally return fewer bytes than asked
+// for; apply.mjs's own #57 FILESYSTEM-SEMANTICS note already names the mounts
+// where that happens. A short read then looked exactly like end-of-file, so the
+// `$` alternative fabricated a close and the pin past it went unseen again.
+test('G3-2: a legal SHORT read cannot fabricate a close — completeness is the FILE SIZE, not the byte count', () => {
+  const CUT = 40000;
+  const head = '---\ntitle: big\n';
+  const fence = '\n---';
+  // 'Z' immediately after the fence is a NON-terminator, so a FULL read finds no
+  // close there and closes later WITH the pin inside; a read that stops ON the
+  // fence ends the string there, where `$` used to mean end-of-file.
+  const body = head + 'x'.repeat(CUT - head.length - fence.length) + fence + 'Z\npinned: true\nowner: me\n---\n\nreal body\n';
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwpin-short-')));
+  const realReadSync = fs.readSync;
+  try {
+    const f = path.join(proj, 'NOTE.md');
+    fs.writeFileSync(f, Buffer.from(body, 'utf8'));
+    assert.strictEqual(isPinned(f), true, 'CONTROL: the file is PINNED on an ordinary full read');
+    fs.readSync = (fd, buf, off, len, pos) => realReadSync(fd, buf, off, Math.min(len, CUT), pos);
+    assert.strictEqual(isPinned(f), true, 'a short read is a PREFIX like any other — it must not be read as end-of-file');
+  } finally { fs.readSync = realReadSync; clean(proj); }
+});
+
+// The residual rc.7 declared in an inline comment and nothing else: a file of
+// EXACTLY the window was treated as truncated, so the one shape that closes only
+// via `$` — a complete file whose last bytes are its closing fence — was refused.
+// Deriving completeness from the file size closes it in the same line.
+test('G3-2 CONTROL: a file of exactly the read window that closes AT EOF stays washable', () => {
+  const PIN_READ_BYTES = 65536;
+  const head = '---\ntitle: x\nk: ';
+  const fence = '\n---';
+  const body = head + 'y'.repeat(PIN_READ_BYTES - head.length - fence.length) + fence;
+  assert.strictEqual(Buffer.byteLength(body, 'utf8'), PIN_READ_BYTES, 'the fixture must be EXACTLY the window');
+  assert.strictEqual(pinnedOf(body), false, 'a full read that reached EOF is not a truncated prefix — the file is complete and unpinned');
 });
 
 // G3-3. The recovery bin was a STRING channel (apply banked
