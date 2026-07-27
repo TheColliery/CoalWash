@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine } from './apply.mjs';
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
-import { HORIZON_MS } from './retention.mjs';
+import { HORIZON_MS, retentionPlan } from './retention.mjs';
 import { recordVerdict } from './caliper.mjs';
 import { ccMemoryDir } from './class-b.mjs';
 
@@ -277,6 +277,47 @@ test('PIN + FENCE SHAPE: trailing space/tab after the opening --- must NOT defea
   } finally { clean(proj); }
 });
 
+// N1 ROUND 3: `[ \t]` was still an ENUMERATION, so station 3 measured the same
+// bypass through NBSP / U+3000 / VT / FF / ZWSP - state 'none' -> isPinned false
+// -> the pinned file deleted, and rewritten on the unattended path. The fix is at
+// the shared primitive again (readFrontmatter's tail classification); this is the
+// end-to-end proof that the CLASS, not the reported byte, is closed.
+// Chars from char codes only - a raw invisible literal in a fixture is silently
+// rewritten by an editor/tool round-trip, and the fixture then passes while
+// testing a byte it no longer contains.
+test('PIN + FENCE SHAPE (round 3): an invisible NON-[ \t] byte after the opening --- must NOT defeat pinned:true', () => {
+  const { proj, store } = sandbox();
+  try {
+    for (const [name, code] of [['NBSP', 0x00a0], ['ZWSP', 0x200b], ['FF', 0x000c]]) {
+      const opener = `---${String.fromCharCode(code)}
+`;
+      const f = path.join(store, `fence3-${name}-pinned.md`);
+      const body = `${opener}pinned: true
+---
+critical directive`;
+      write(f, body);
+      assert.strictEqual(isPinned(f), true, `${name}: an invisible fence tail must fail CLOSED, never read as unpinned`);
+      const del = apply(planFor(proj, store, [{ type: 'delete', path: f }]));
+      assert.strictEqual(del.ok, false, `${name}: the delete must refuse`);
+      assert.ok(del.error.includes('PIN-protected'), `${name}: expected a PIN refusal, got: ${del.error}`);
+      assert.ok(fs.existsSync(f), `${name}: the pinned file must still be on disk`);
+      const rw = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: `${opener}pinned: true
+---
+trimmed` }]));
+      assert.strictEqual(rw.ok, false, `${name}: the rewrite must refuse`);
+      assert.strictEqual(fs.readFileSync(f, 'utf8'), body, `${name}: byte-exact survival`);
+    }
+    // CONTROL - no over-refusal: an invisible tail plus VISIBLE content is prose,
+    // not a fence, and must stay washable (`--- a/file.txt` is the live case).
+    const prose = path.join(store, 'fence3-prose.md');
+    write(prose, `---${String.fromCharCode(0x00a0)}a/file.txt
++++ b/file.txt
+context`);
+    assert.strictEqual(isPinned(prose), false, 'a diff header with an odd space is prose, not a pin');
+    const ok = apply(planFor(proj, store, [{ type: 'delete', path: prose }]));
+    assert.strictEqual(ok.ok, true, `an unpinned prose file must still be washable: ${ok.error}`);
+  } finally { clean(proj); }
+});
 test('sniffUnrewritable: an unclosed fence with a trailing-space opener is still flagged (the third disabled protection)', () => {
   assert.ok(sniffUnrewritable(Buffer.from('--- \nowner: me\nno closing fence\n', 'utf8')), 'trailing space must not hide an unclosed frontmatter');
 });
@@ -551,6 +592,49 @@ test('N3: recoverDangling must not DELETE a pinned file at a create path (no ban
     assert.ok(r.refusedPinned >= 1, `expected refusedPinned >= 1, got ${JSON.stringify(r)}`);
     assert.strictEqual(fs.readFileSync(created, 'utf8'), pinnedBody, 'the pinned file must still exist, byte-untouched');
     assert.strictEqual(fs.existsSync(path.join(txDir, 'journal.json')), true, 'journal kept for a human');
+  } finally { clean(proj); }
+});
+
+// N2 ROUND 3 (station 3): `201dae9` made a shared `at` the EVENT identity for
+// retention thinning and swept ONE of the two recordBinItem call sites.
+// `recoverDangling`'s create-undo bank passes no `now`, so recordBinItem falls
+// back to Date.now() PER ITEM: one recovery that undoes N creates banks N
+// distinct stamps = N events. Thinned past the 48h floor, last-per-day keeps
+// ONE and destroys the rest of the SAME transaction's undo material — exactly
+// the loss the event unit exists to prevent. applyPlan already establishes one
+// `opts.now || Date.now()` per transaction; the recovery twin now does the same.
+test('N2: one recovery banks ONE event — every create it undoes shares a single `at`, so thinning keeps them together', () => {
+  const { proj, store } = sandbox();
+  try {
+    const N = 8;
+    const NOW = 1750000000000 + 3 * 24 * 60 * 60 * 1000; // mid-week, clear of the epoch boundary
+    const created = [];
+    for (let i = 0; i < N; i++) {
+      const f = path.join(store, `recovered-create-${i}.md`);
+      write(f, `orphan body ${i}`);
+      created.push(f);
+    }
+    const txDir = txDirFor(proj);
+    const snapDir = path.join(txDir, 'snap-n2');
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([]));
+    fs.writeFileSync(path.join(snapDir, 'snap.complete'), 'n2');
+    fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({
+      version: 1, status: 'applying', snapDir, roots: [store],
+      steps: created.map((p, i) => ({ i, type: 'create', path: p, status: 'pending' })),
+    }));
+    const r = recoverDangling(proj, { now: NOW });
+    assert.strictEqual(r.recovered, 'rolled-back', `a clean create-undo must roll back: ${JSON.stringify(r)}`);
+    const banked = listBin(proj, FAT_BIN_NAME);
+    assert.strictEqual(banked.length, N, 'every undone create is banked');
+    // THE LOAD-BEARING ASSERT (deterministic in both directions): one recovery
+    // is one transaction, so it reads the clock ONCE.
+    assert.deepStrictEqual([...new Set(banked.map((b) => b.at))], [NOW], `${N} banked items must share one \`at\``);
+    // and the consequence the identity exists for: past the 48h keep-all floor
+    // the day-slot thinner keeps the newest EVENT whole, not one file of it
+    const plan = retentionPlan(banked, NOW + 49 * 60 * 60 * 1000);
+    assert.strictEqual(plan.destroy.length, 0, `one event survives whole; ${plan.destroy.length} of ${N} were destroyed`);
+    assert.strictEqual(plan.keep.length, N);
   } finally { clean(proj); }
 });
 
@@ -1451,6 +1535,19 @@ test('#57: the cross-device archive hop (estate-archive + retier) NEVER uses ren
     const src = fs.readFileSync(path.join(libDir, f), 'utf8');
     assert.ok(!src.includes('renameSync'), `${f} must not rename across a potential device boundary`);
   }
+});
+
+// The event identity is a CALL-SITE contract and it was broken by sweeping ONE
+// of two sites: 201dae9 gave applyPlan's bank the transaction `now` and left
+// the recovery bank on recordBinItem's per-call Date.now() default, which is
+// exactly what made the miss silent (every item still got a plausible stamp).
+// A sync comment is not a guard — pin it where a third bank site would appear.
+test('every production recordBinItem call passes the run\'s shared `now` — the event identity is a call-site contract', () => {
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(libDir, 'apply.mjs'), 'utf8');
+  const calls = src.split(/\r?\n/).filter((l) => /recordBinItem\(/.test(l) && !/^\s*import\b/.test(l));
+  assert.strictEqual(calls.length, 2, `expected both bank sites (applyPlan commit + recoverDangling create-undo), found ${calls.length}`);
+  for (const l of calls) assert.match(l, /\bnow\b/, `a recordBinItem call banking without the run's shared now: ${l.trim()}`);
 });
 
 test('#57 lock: an exclusive-create "win" whose re-read shows a FOREIGN token (a broken-O_EXCL lost race — the SVN BDB-on-NFS shape) DEFERS instead of proceeding', () => {

@@ -1010,6 +1010,14 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 export function recoverDangling(projectRoot, opts = {}) {
   try {
     const home = opts.home || os.homedir();
+    // ONE clock reading for the whole recovery, exactly as applyPlan takes one
+    // for the whole transaction. `at` is the EVENT IDENTITY the retention
+    // thinner groups on (201dae9), so a recovery that undoes N creates must
+    // bank them under ONE stamp or it manufactures N single-item events out of
+    // one transaction — and past the 48h floor last-per-day then keeps one and
+    // destroys the other N-1 pieces of the same undo material. Measured before
+    // the fix: 8 creates banked 8 stamps spread over 32 ms.
+    const now = opts.now || Date.now();
     // THE ANCHOR GATE, ABOVE THE FIRST FILESYSTEM TOUCH. This function restores
     // and deletes; the anchor decides what it is allowed to reach, exactly as it
     // does in applyPlan, and until this call existed it decided NOTHING here. The
@@ -1171,7 +1179,9 @@ export function recoverDangling(projectRoot, opts = {}) {
         // clean rolled-back.)
         let body = null;
         try { body = fs.readFileSync(p, 'utf8'); } catch { body = null; }
-        if (body === null || !recordBinItem(projectRoot, FAT_BIN_NAME, { content: body, original: p, origin: 'program-cut' })) { refused++; continue; }
+        // `now` is the run's single reading, never recordBinItem's per-call
+        // Date.now() default — see the const at the top of this function.
+        if (body === null || !recordBinItem(projectRoot, FAT_BIN_NAME, { content: body, original: p, origin: 'program-cut', now })) { refused++; continue; }
         // Remove p, the spelling that was VALIDATED — not the raw `step.path`.
         // Checking one spelling and acting on another lets the OS re-resolve the
         // path a second time (THE PROVENANCE RULE's fourth clause); the restore

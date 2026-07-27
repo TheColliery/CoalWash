@@ -590,6 +590,59 @@ test('FENCE SHAPE: a lone-CR (classic-Mac) fence head is UNVERIFIABLE, never "no
   assert.strictEqual(readFrontmatter('--- \rpinned: true\r---\rcontent').state, 'unverifiable', 'trailing space + lone CR');
 });
 
+// N1 ROUND 3 — the SAME hole, reopened by every byte the last fix did not list.
+// `[ \t]` was an ENUMERATION, so the next unlisted invisible byte walked back
+// through it. The proof needs no external standard: the SAME byte on the
+// CLOSING fence already answers 'unverifiable', so 'none' at the opener is the
+// primitive contradicting itself — and 'none' is the answer that ends in a
+// delete. The parameter space is therefore the COMPLEMENT of visible content,
+// spelled with Unicode properties, not a longer byte list.
+test('FENCE SHAPE: any invisible NON-[ \t] byte after the opening --- is UNVERIFIABLE, never "none"', () => {
+  // Built from char codes, never raw literals in source: the module under test
+  // states that house rule, and it binds a FIXTURE hardest - an editor or tool
+  // round-trip silently rewrites an invisible literal, and the fixture then
+  // stops testing the byte it names while still passing (measured here: the
+  // first draft of this very test was written with \u escapes and landed as ten
+  // raw control characters).
+  const ch = (c) => String.fromCharCode(c);
+  for (const [name, c] of [
+    // the five measured at station 3
+    ['NBSP U+00A0', 0x00a0],
+    ['IDEOGRAPHIC SPACE U+3000', 0x3000],
+    ['VT U+000B', 0x000b],
+    ['FF U+000C', 0x000c],
+    ['ZWSP U+200B', 0x200b],
+    // and the rest of the CLASS, so the fix cannot be another byte list:
+    // Cc (control), Cf (format) and Zs/White_Space all mean 'no visible glyph'
+    ['NEL U+0085', 0x0085],
+    ['SOFT HYPHEN U+00AD', 0x00ad],
+    ['WORD JOINER U+2060', 0x2060],
+    ['SOH U+0001', 0x0001],
+  ]) {
+    const b = ch(c);
+    assert.strictEqual(
+      readFrontmatter(`---
+pinned: true
+---${b}
+content`).state, 'unverifiable',
+      `${name}: parity anchor - the CLOSING fence already refuses this byte`,
+    );
+    assert.strictEqual(
+      readFrontmatter(`---${b}
+pinned: true
+---
+content`).state, 'unverifiable',
+      `${name}: the opening fence must refuse it too, or the primitive contradicts itself`,
+    );
+  }
+  // a run mixing tolerated and untolerated whitespace is still untolerated - the
+  // tolerance is for the ordinary editor artifact, not for whatever resembles it
+  assert.strictEqual(readFrontmatter(`--- ${ch(0x00a0)}${ch(0x09)}
+pinned: true
+---
+x`).state, 'unverifiable', 'mixed [ \t] + NBSP run');
+});
+
 // ── MULTISET (board disposition 2, 2026-07-27) ─────────────────────────────
 // The old set semantics let occurrence collapse pass silently: `878` stated on
 // three DIFFERENT lines surviving on one reported 0 drops — a token DROPPED,

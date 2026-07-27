@@ -466,6 +466,25 @@ export function evidenceAnchors(text) {
 // good large file on a truncation artefact. A real encoding preamble is at
 // offset 0, so only the head is scanned.
 const FM_HEAD_SCAN = 64;
+// THE FENCE-LINE TAIL — what may follow `---` on the opening fence line.
+// This is a TRI-STATE over the tail, never an allow-list of bytes, because the
+// allow-list is precisely what reopened this hole twice: the original `` grew
+// to `[ \t]` (N1), and NBSP / U+3000 / VT / FF / ZWSP walked straight back
+// through. `\s` is not the fix either — it MISSES U+200B (ZWSP is Cf, not
+// White_Space) and it would swallow the line terminator.
+//   FM_TAIL_FENCE     tail is empty or ASCII horizontal whitespace -> a fence.
+//                     The ordinary editor artifact: two trailing spaces are a
+//                     Markdown hard break, so trim-on-save is commonly off.
+//   FM_TAIL_INVISIBLE tail has NO VISIBLE GLYPH (White_Space | Cf format |
+//                     Cc control) -> the line is indistinguishable from a bare
+//                     fence to the human who wrote it, and this tooling cannot
+//                     say what produced it: "I could not tell" (unverifiable).
+//   neither           tail carries visible content (`--- a/file.txt`, `----`)
+//                     -> genuinely not frontmatter, and must stay washable.
+// CR and LF cannot reach either test — both call sites capture the tail with
+// [^\r\n]* — so Cc carrying them is harmless here.
+const FM_TAIL_FENCE = /^[ \t]*$/;
+const FM_TAIL_INVISIBLE = /^[\p{White_Space}\p{Cf}\p{Cc}]+$/u;
 export function readFrontmatter(text) {
   let s = String(text);
   if (s.charCodeAt(0) === 0xfeff) s = s.slice(1); // UTF-8 BOM: legal signature (exactly one), parse on
@@ -478,29 +497,47 @@ export function readFrontmatter(text) {
   if (head.includes('\u0000') || head.includes('\uFFFD')) {
     return { state: 'unverifiable', block: '', why: 'the head is not decodable UTF-8 text (an encoding preamble — UTF-16/32 BOM, NUL-interleaved, or binary)' };
   }
-  // THE OPENING FENCE, symmetric with the closing fence below (graduation-lab
-  // round 2, N1): the closing fence has tolerated trailing [ \t]* since it was
-  // written and the opener did not, so `--- \n` — ONE invisible byte, which
-  // Markdown editors deliberately preserve (two trailing spaces = a hard
-  // break, so trim-on-save is commonly off for .md) — read as state 'none' =
-  // "genuinely no frontmatter", and one space switched off the pin refusal on
-  // delete, the pin refusal on the unattended rewrite, AND the unclosed-fence
-  // refusal at once. Same class as the encoding preamble above: a lexical NO
-  // on decoded text read as a confident claim about the FILE. The tolerance
-  // is now identical on both fences.
-  const open = /^---[ \t]*\r?\n/.exec(s);
-  if (!open) {
-    // Fence-SHAPED but a line discipline this tooling does not parse: a bare
-    // CR (classic-Mac) line terminator. Every scan in this module splits on
-    // \r?\n, so parsing on would be a guess wearing a parse — "I could not
-    // tell" is not "no" (the tri-state doctrine). Deeper prose starting with
-    // `--- ` plus TEXT (a pasted diff header `--- a/file`) is NOT fence-shaped
-    // and stays 'none' — over-refusing it would make ordinary files unwashable.
-    if (/^---[ \t]*\r/.test(s)) {
-      return { state: 'unverifiable', block: '', why: 'the opening fence line ends in a bare CR (classic-Mac line endings) — a line discipline this tooling cannot faithfully parse' };
-    }
-    return { state: 'none', block: '' };
+  // THE OPENING FENCE — fixed THREE TIMES, and the third fix is the one that
+  // changed the AXIS. `` -> `[ \t]` (N1) closed the reported byte and left the
+  // hole open for every byte nobody had reported yet: station 3 then measured
+  // NBSP, U+3000, VT, FF and ZWSP all still reading state 'none' = "genuinely
+  // no frontmatter", which is what switches off the pin refusal on delete, the
+  // pin refusal on the unattended rewrite, and the unclosed-fence refusal, all
+  // from one invisible byte. Enumerating bytes was the defect; the tail
+  // classification above (FM_TAIL_*) is the fix, and it is stated as the
+  // COMPLEMENT of visible content so an unlisted invisible byte cannot exist.
+  //
+  // The proof needed no external standard, which is why it is trustworthy: the
+  // SAME byte on the CLOSING fence already answered 'unverifiable'. A primitive
+  // that says "cannot tell" at one fence and "no frontmatter" at the other is
+  // wrong at one of them, and 'none' is the answer that ends in a delete.
+  //
+  // THE CLOSING FENCE BELOW DELIBERATELY KEEPS `[ \t]*` AND IS NOT GIVEN THIS
+  // TRI-STATE — do not "finish the symmetry". Its accept-set is already
+  // identical; only its MISS behaviour differs, and that difference is
+  // conservative by construction: an unmatched close either finds a later
+  // `---` (an OVER-inclusive block — more keys inventoried, and isPinned's
+  // /^pinned\s*:\s*true\s*$/m matches anywhere in it, so a pin can only gain)
+  // or finds none and returns 'unverifiable' anyway. There is no reading of a
+  // bad closing fence that yields a permissive answer.
+  const open = /^---([^\r\n]*)\r?\n/.exec(s);
+  // Fence-SHAPED but a line discipline this tooling does not parse: a bare CR
+  // (classic-Mac) line terminator. Every scan in this module splits on \r?\n,
+  // so parsing on would be a guess wearing a parse.
+  const cr = open ? null : /^---([^\r\n]*)\r/.exec(s);
+  const tail = open ? open[1] : (cr ? cr[1] : null);
+  if (tail !== null && !FM_TAIL_FENCE.test(tail)) {
+    // Prose that merely STARTS with three dashes (`--- a/file.txt`, `----`) is
+    // not fence-shaped at all — over-refusing it would make ordinary files
+    // unwashable, which is the R4 lesson (a shape-refusal must not swallow
+    // legal input). Only a tail that a reader cannot SEE is the ambiguous one.
+    if (!FM_TAIL_INVISIBLE.test(tail)) return { state: 'none', block: '' };
+    return { state: 'unverifiable', block: '', why: 'the opening fence line carries an invisible non-whitespace character after --- (no visible glyph) — fence-shaped, but this tooling cannot say whether it is frontmatter' };
   }
+  if (cr) {
+    return { state: 'unverifiable', block: '', why: 'the opening fence line ends in a bare CR (classic-Mac line endings) — a line discipline this tooling cannot faithfully parse' };
+  }
+  if (!open) return { state: 'none', block: '' };
   // Slice from the opener's OWN newline (not past it) so the closing-fence
   // regex, which anchors on a preceding newline, still sees an immediately
   // following `---`; for the bare `---\n` opener this is byte-identical to

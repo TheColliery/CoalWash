@@ -1,8 +1,8 @@
 // writeguard.mjs — the WRITE-PATH SEATBELT + AIRBAG (ruling 0p). The gate
-// follows the KNIFE: CoalWash's zero-fact-loss guarantee is enforced only on
-// CW's own wash today, but the governance store is edited by every hand (main,
-// subs, other tools) — "zero fact loss on CW's knife alone is HALF a
-// constraint". Two advisory-grade nets for those OTHER hands:
+// follows the KNIFE: the fidelity gate blocks a STRUCTURED-token drop only on
+// CoalWash's OWN wash, but the governance store is edited by every hand (main,
+// subs, other tools) — a gate on CW's knife alone is HALF a constraint. Two
+// advisory-grade nets for those OTHER hands:
 //
 //   AIRBAG (PreToolUse, snapshot-on-first-write) — MEMORY.md/CLAUDE.md are
 //   gitignored = zero undo net when any agent misedits them. On the FIRST
