@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { checkFidelity, gateFiles, inventory, frontmatterKeys, readFrontmatter } from './fidelity-gate.mjs';
+import { checkFidelity, gateFiles, inventory, frontmatterKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 
 // Thai fixtures from char codes only — never raw composables/invisibles in source.
 const SARA_AM = String.fromCharCode(0x0e33); // the CORRECT single char
@@ -770,7 +770,17 @@ test('G3-1: frontmatterKeys inventories exactly the STRICT mapping shape — unc
   assert.deepStrictEqual(keys('pinned: true'), ['pinned']);
   assert.deepStrictEqual(keys('"pinned": true'), ['"pinned"'], 'quotes are part of the raw key, as before');
   assert.deepStrictEqual(keys('pinned:'), ['pinned'], 'a valueless key is still a key');
-  assert.deepStrictEqual(keys('  nested: x'), [], 'indented -> not top level');
+  // ROUND 7 — THIS ASSERTION ENCODED THE DEFECT and is corrected by name, not
+  // quietly relaxed. It read `[]` with the reason "indented -> not top level",
+  // which is the exact false premise that let an indented `pinned: true` be
+  // DELETED (G4-2) and the whole indented-key class go uninventoried (G4-3):
+  // COLUMN 0 IS NOT THE DEFINITION OF TOP LEVEL. A block mapping may sit at any
+  // consistent indentation, so a block whose only line is `  nested: x` has its
+  // root column at 2 and `nested` IS its top-level key. The nested case the old
+  // reason meant is still excluded and still tested — one line below, and in
+  // its own G4-3 test, where the parent key makes the nesting real.
+  assert.deepStrictEqual(keys('  nested: x'), ['nested'], 'a uniformly-indented block is a ROOT mapping — its key is top level');
+  assert.deepStrictEqual(keys('parent:\n  nested: x'), ['parent'], 'nesting is relative to the block root: THIS is the case the old assertion meant');
   assert.deepStrictEqual(keys('- item: x'), [], 'a sequence item is not a key');
   assert.deepStrictEqual(keys('# comment: x'), [], 'a comment is not a key');
   assert.deepStrictEqual(keys('https://example.com'), [], 'a bare URL is not a key');
@@ -787,4 +797,155 @@ test('G3-2: a close that relies on end-of-STRING is not a close when the text is
   const closed = '---\npinned: true\n---\nbody';
   assert.strictEqual(readFrontmatter(closed, { truncated: true }).state, 'closed', 'a real terminator after the fence still closes, truncated or not');
   assert.strictEqual(readFrontmatter('no fence here', { truncated: true }).state, 'none', 'truncation never turns a non-fence into a refusal');
+});
+
+// ---------------------------------------------------------------------------
+// G4-3 (round 7) — "TOP LEVEL" IS THE BLOCK'S OWN ROOT COLUMN, NOT COLUMN 0.
+// Both readers of the block anchored on `^[^\s...]`, so ONE leading space made a
+// line stop being an entry at all: the gate inventoried nothing and the pin gate
+// (apply.mjs) saw no pin and deleted the file. A YAML block mapping may sit at
+// any consistent indentation, so a uniformly-indented block IS a root mapping.
+// The discriminator that keeps this from degenerating into "inventory
+// everything" is the nested control: a key indented BELOW a root key must stay
+// out, or the fix over-refuses into uselessness.
+// ---------------------------------------------------------------------------
+const g4keys = (inner) => [...frontmatterKeys('---\n' + inner + '\n---\nbody')].sort();
+
+test('G4-3: a uniformly-indented block is a root mapping — its keys ARE inventoried', () => {
+  assert.deepStrictEqual(g4keys(' alpha: 1\n beta: 2'), ['alpha', 'beta'], 'one leading space is still a root-level block mapping');
+  assert.deepStrictEqual(g4keys('  alpha: 1\n  beta: 2'), ['alpha', 'beta'], 'two spaces likewise');
+  assert.deepStrictEqual(g4keys('# lead comment\n  alpha: 1'), ['alpha'], 'a comment does not set the root column (YAML ignores it for indentation)');
+});
+
+test('G4-3: a key nested UNDER a root key stays excluded — nesting is relative to the block root, not to column 0', () => {
+  assert.deepStrictEqual(g4keys('meta:\n  alpha: 1'), ['meta'], 'the classic nested case is unchanged');
+  assert.deepStrictEqual(g4keys('  meta:\n    alpha: 1'), ['meta'], 'the same nesting, whole block indented');
+  assert.deepStrictEqual(g4keys('title: x\nlist:\n  - a\n  - b\ndesc: |\n  alpha: 1'), ['desc', 'list', 'title'], 'sequence items and block-scalar content are not keys');
+});
+
+// MONOTONE GUARD. Round 5 shipped a regression because a merge was assumed to be
+// a widening and was not measured in both directions. Here the two readings
+// (column 0, and the block's root column) disagree on a mixed-indent block, so
+// the inventory takes the UNION: neither reading may LOSE a key the other saw.
+// Its RED proof is mutation M-U (drop the `|| e.indent === 0` clause).
+test('G4-3: on a mixed-indentation block the inventory is the UNION of both readings, and nothing wider', () => {
+  assert.deepStrictEqual(g4keys('  alpha: 1\npinned: true'), ['alpha', 'pinned'], 'root column 2 sees alpha; the old column-0 anchor saw pinned; keep both');
+  // THE OTHER HALF, and it exists because a mutation found it missing: a key at
+  // a column that is NEITHER the root NOR 0 is in neither reading, so the union
+  // must not sweep it in. Without this line, mutating `top` to a constant `true`
+  // changed NO test result — a flag nobody had exercised on its only
+  // discriminating slice, which is a guard that reads as load-bearing and is not.
+  assert.deepStrictEqual(g4keys('    alpha: 1\n  beta: 2'), ['alpha'], 'column 2 is neither the root (4) nor 0 — in neither reading, so not inventoried');
+});
+
+// ---------------------------------------------------------------------------
+// G4 (round 7) — THE QUESTION IS INVERTED. Not "did we find a pin?" but "can we
+// prove this block is safe to touch?" A block is provably readable only when
+// EVERY line is one of: blank · a comment · a `key:`-shaped line · a sequence
+// item · content indented deeper than the root. Anything else refuses the whole
+// file, because "no marker found" is an answer a wrong parse always produces and
+// "every line accounted for" is not.
+// ---------------------------------------------------------------------------
+test('G4: ordinary frontmatter is provably readable — nested map, sequence, block scalar and comments all understood', () => {
+  for (const inner of [
+    'title: x',
+    'title: x\nnested:\n  a: 1\nlist:\n  - a\n  - b\ndesc: |\n  pinned: true\n  more',
+    ' title: x\n owner: bob',
+    '# note\ntitle: x\n\n# trailing note',
+    '- a\n- b',
+    'title: ' + String.fromCharCode(0x0e01, 0x0e02) + ' (a Thai VALUE is ordinary)',
+    'https://example.com',
+  ]) {
+    assert.strictEqual(frontmatterBlockParse(inner).unreadable, null, `${JSON.stringify(inner)} must stay readable — over-refusal is a yield loss and must stay a DECISION`);
+  }
+  assert.strictEqual(frontmatterBlockParse('').unreadable, null, 'an empty block is trivially readable');
+});
+
+test('G4: a line the block-reader cannot account for refuses the whole block, with a reason', () => {
+  const CH = String.fromCharCode;
+  for (const [label, inner] of [
+    ['a TAB in the indentation (illegal YAML indentation — no column to compute)', CH(9) + 'pinned: true'],
+    ['NBSP used as indentation', CH(160) + 'pinned: true'],
+    ['IDEOGRAPHIC SPACE used as indentation', CH(0x3000) + 'pinned: true'],
+    ['a ZERO WIDTH SPACE glued to the key', CH(0x200b) + 'pinned: true'],
+    ['a flow mapping at the root', '{pinned: true}'],
+    ['a key line shallower than the block root', '  alpha: 1\n%YAML 1.2'],
+    ['a key split across two lines', ' pinned\n : true'],
+    ['a document-end marker inside the block', 'title: x\n...'],
+  ]) {
+    const r = frontmatterBlockParse(inner);
+    assert.ok(r.unreadable, `${label} must refuse: ${JSON.stringify(inner)}`);
+    assert.strictEqual(typeof r.unreadable, 'string', 'the refusal carries a reason a user can act on');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// THE REPLACEMENT ORACLE (round 7). G3-1's oracle was the DISAGREEMENT between
+// two readers of the block; collapsing them to one reader removed it, and round
+// 6 then showed that a hand-written list standing in for it is not an oracle at
+// all ("a test cannot protect a file"). So the expectation here comes from a
+// CONSTRUCTION PLAN: the generator WRITES the block and therefore KNOWS which
+// keys are top level — it never reads one. That is independent of the parser in
+// the only way that matters, and unlike a second parser it cannot drift into
+// agreement with the first.
+//
+// ITS BOUND, STATED SO NOBODY OVERREADS IT: this proves the reader agrees with
+// the CONSTRUCTION, not that either conforms to YAML. If the generator and the
+// parser share a misconception about YAML they are wrong together. The
+// independent check on YAML itself was an external parser (js-yaml) run in the
+// lab; it cannot ship here, because zero-dependency is binding (Phoenix #2).
+// So: this oracle owns the top-level/nested DISCRIMINATION; YAML conformance is
+// owned by a lab run and by the refusal of everything we do not recognise.
+// ---------------------------------------------------------------------------
+test('ORACLE: over 400 generated blocks the reader reports exactly the keys the GENERATOR placed at the root', () => {
+  let s = 20260728 >>> 0;
+  // HIGH bits, not `% n`. The first draft took the low bits of an LCG, whose
+  // low-order period is famously short: `rnd(2)` never returned 0 and the sweep
+  // generated ZERO top-level pins — a fully green run over 400 blocks that
+  // tested nothing. The vacuity assertions at the bottom are what caught it.
+  const rnd = (n) => (((s = (s * 1664525 + 1013904223) >>> 0) >>> 16) % n);
+  const NAMES = ['pinned', 'title', 'owner', 'topic', 'a.b', '$ref', 'my_key', 'version-transition'];
+  let cases = 0, withPin = 0, withDecoy = 0;
+  for (let i = 0; i < 400; i++) {
+    const root = rnd(5);                 // the block's own root column, 0..4
+    const pad = ' '.repeat(root);
+    const lines = [];
+    const planned = new Set();           // GROUND TRUTH: what the generator put at the root
+    let plannedPin = false;
+    if (rnd(3) === 0) lines.push(' '.repeat(rnd(7)) + '# a comment sits at any column');
+    if (rnd(4) === 0) lines.push('');
+    const n = 1 + rnd(4);
+    for (let k = 0; k < n; k++) {
+      const name = NAMES[rnd(NAMES.length)];
+      if (planned.has(name)) continue;   // a duplicate key is a different question
+      const pin = name === 'pinned' && rnd(2) === 0;
+      planned.add(name);
+      if (pin) plannedPin = true;
+      lines.push(pad + name + ': ' + (pin ? 'true' : 'value' + k));
+      // a NESTED child, or a block scalar carrying a DECOY pin — both must be
+      // invisible to both consumers, and both are only ever DEEPER by YAML rule
+      if (rnd(3) === 0) lines.push(pad + '  ' + (rnd(2) ? 'nested' : 'pinned') + ': true');
+      if (rnd(5) === 0) {
+        lines.push(pad + '  - list item');
+        withDecoy++;
+      }
+    }
+    if (rnd(4) === 0) { lines.push(pad + 'desc: |'); planned.add('desc'); lines.push(pad + '  pinned: true'); withDecoy++; }
+    const block = lines.join('\n');
+    const parsed = frontmatterBlockParse(block);
+    assert.strictEqual(parsed.unreadable, null, `the generator only builds readable blocks; got ${parsed.unreadable} for\n${block}`);
+    assert.deepStrictEqual(
+      [...frontmatterKeys('---\n' + block + '\n---\nbody')].sort(), [...planned].sort(),
+      `the inventory must equal the keys the generator placed at column ${root}:\n${block}`,
+    );
+    const readsPinned = parsed.entries.some((e) => e.top && e.key === 'pinned' && e.value.trim() === 'true');
+    assert.strictEqual(readsPinned, plannedPin, `pin verdict must match the plan (root column ${root}):\n${block}`);
+    cases++;
+    if (plannedPin) withPin++;
+  }
+  // A generator that never generated the interesting case is a green test that
+  // proves nothing — vacuity shape (3), which this room has now paid for twice.
+  assert.strictEqual(cases, 400);
+  assert.ok(withPin > 40, `the space must actually contain top-level pins; got ${withPin}`);
+  assert.ok(withDecoy > 40, `and decoys that must NOT count as pins; got ${withDecoy}`);
 });

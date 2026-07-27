@@ -54,7 +54,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockEntries } from './fidelity-gate.mjs';
+import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
 import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull } from './config-load.mjs';
@@ -292,6 +292,15 @@ export function sniffUnrewritable(buf) {
   // unverifiable head means "do not rewrite".
   const fm = readFrontmatter(text);
   if (fm.state === 'unverifiable') return `${fm.why} — flagged, not rewritten`;
+  // ROUND 7. `isPinned` also refuses an unreadable block, but it refuses by
+  // returning PINNED, which aborts the WHOLE plan by design. Routing the
+  // REWRITE path through the per-file flag channel instead keeps one odd file
+  // from making CoalWash unusable on a whole store, and lets the reason name
+  // the user's problem plus the way out rather than a misleading "PIN-protected".
+  const parsed = frontmatterBlockParse(fm.block);
+  if (parsed.unreadable) {
+    return `${parsed.unreadable}: CoalWash cannot prove which frontmatter keys are top-level, so it will not rewrite this file — flagged, not rewritten (put the block on one indentation as plain \`key: value\` lines, or remove the frontmatter, and CoalWash will wash it normally)`;
+  }
   return null;
 }
 
@@ -394,7 +403,17 @@ export function isPinned(file) {
     // LINE can hold, and the retired regex also spanned line terminators. So its
     // verdict is OR'd in as the floor (see RETIRED_PIN_FLOOR).
     if (RETIRED_PIN_FLOOR.test(fm.block)) return true;
-    return frontmatterBlockEntries(fm.block).some((e) => pinKey(e.key) && !pinValueClears(e.value));
+    // ROUND 7 — THE QUESTION IS INVERTED, and that is the whole change. Six
+    // repairs before this one asked "is there a pin?" and answered it more
+    // cleverly each time; the seventh breach (an indented `pinned: true`, read
+    // as no-pin and DELETED) landed anyway, because "no marker found" is the
+    // answer a WRONG PARSE always produces. `unreadable` makes the destroying
+    // branch require a POSITIVE proof instead: every line of the block is
+    // accounted for, or this file is untouchable. A missing marker can be
+    // manufactured by any parse bug; an accounted-for block cannot.
+    const parsed = frontmatterBlockParse(fm.block);
+    if (parsed.unreadable) return true;
+    return parsed.entries.some((e) => e.top && pinKey(e.key) && !pinValueClears(e.value));
   } catch {
     return true; // read error on a file we are about to mutate -> refuse (fail-closed)
   }

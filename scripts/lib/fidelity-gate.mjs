@@ -417,11 +417,19 @@ export function evidenceAnchors(text) {
 // matching only the first `:` collapsed `a:b`/`a:c`/bare `a` all down to
 // `"a"`, so dropping `a:b` while `a` survived passed the gate clean (a second
 // silent miss, closed by widening the capture past an embedded colon to the
-// real separator). Column-0 anchor keeps it TOP-LEVEL ONLY (an indented
+// real separator). ~~Column-0 anchor keeps it TOP-LEVEL ONLY (an indented
 // `  nested: x` line has no non-space char at position 0, so it stays
-// excluded — by design). `#`/`-` are excluded as a first char so a YAML
-// comment or a `- list:` sequence item inside the block is never mistaken
-// for a key.
+// excluded — by design).~~ **RETRACTED 2026-07-28 (round 7, G4-2/G4-3):
+// COLUMN 0 WAS NEVER THE DEFINITION OF TOP LEVEL, and calling it "by design"
+// is what stopped six rounds of readers looking at this line.** A YAML block
+// mapping may sit at any consistent indentation, so one leading space made a
+// real top-level key invisible to BOTH consumers — the gate inventoried
+// nothing, and `isPinned` read a plainly-marked file as unpinned and applyPlan
+// DELETED it. Top level is now the block's OWN root column; the genuinely
+// nested case the sentence above meant is still excluded, by depth relative to
+// that root. See `frontmatterBlockParse`. `#`/`-` are excluded as a first char
+// so a YAML comment or a `- list:` sequence item inside the block is never
+// mistaken for a key.
 // ── THE FRONTMATTER PRIMITIVE (2026-07-27, the encoding-preamble CRITICAL) ──
 // ONE answer to "does this text open with a frontmatter block", for all three
 // callers that used to ask it with their own copy of `/^---\r?\n/`:
@@ -596,18 +604,84 @@ export function readFrontmatter(text, { truncated = false } = {}) {
 // shape (what the gate inventories, byte-identical to before) and the loose
 // shape (a colon-bearing line a human plainly meant as a key) both come out of
 // this one parse, and each consumer declares which it needs.
-export function frontmatterBlockEntries(block) {
-  const out = [];
+// ── ROUND 7: THE QUESTION IS INVERTED ───────────────────────────────────────
+// Rounds 1-6 all asked "is there a pin?" and were repaired by widening what
+// counts as one. **"No marker found" is an answer a wrong parse always
+// produces**; "every line of this block is accounted for" is not. So this
+// reader now returns TWO things — the entries, and whether the block is
+// PROVABLY readable — and the destroying consumer requires the proof.
+//
+// TOP-LEVEL IS THE BLOCK'S OWN ROOT COLUMN, NOT COLUMN 0 (G4-2/G4-3). Both key
+// regexes anchored on `^[^\s...]`, so ONE leading space stopped a line being an
+// entry at all: `frontmatterKeys` inventoried nothing and `isPinned` saw no pin
+// and applyPlan DELETED the file. A YAML block mapping may sit at any
+// consistent indentation, so a uniformly-indented block is a ROOT mapping and
+// its keys are top-level — an independent oracle (js-yaml) reads
+// `" pinned: true"` as `{pinned: true}`, and no shipped document of ours puts a
+// column constraint on the marker. The root column is set by the first
+// non-blank, non-comment line (YAML ignores comments for indentation).
+//
+// WHAT WE UNDERSTAND, AND WHY THAT IS ENOUGH WITHOUT A YAML PARSER: we do not
+// need to know what a line MEANS, only whether it can be a TOP-LEVEL KEY. A
+// block scalar's content, a nested mapping and a sequence item are all required
+// by YAML to be MORE indented than their parent, so nothing at a deeper column
+// can ever be a root key — those lines are understood by position alone. That
+// leaves the root column itself, where every line must be a key, a comment, a
+// sequence item or blank. Anything else refuses.
+//
+// THE PRICE, NAMED AND MEASURED (550 real frontmatter blocks across the flock:
+// 4 refused, all four lab padding fixtures, 0 real class-B files): a flow
+// mapping at the root, a `?` explicit key, a `%` directive, a `...` document
+// end, tab indentation, or a non-ASCII top-level key makes the file
+// UNWASHABLE — flagged with a reason, never deleted and never rewritten. Yield
+// loss, never safety loss, and the user is told how to get the yield back.
+const KEY_STRICT = /^([^\s:#-][^\n]*?)\s*:(?=\s|$)([^\n]*)$/;
+const KEY_LOOSE = /^([^\s:#-][^\n]*?)\s*:([^\n]*)$/;
+const SEQ_ITEM = /^-(?:[ \t][^\n]*)?$/;
+// Show an invisible byte AS a codepoint — the whole value of the message to a
+// user is seeing the character they cannot see in their editor.
+const showLine = (s) => JSON.stringify(String(s).slice(0, 60).replace(/[^\x20-\x7E]/g, (c) => `U+${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`));
+export function frontmatterBlockParse(block) {
+  const entries = [];
+  let root = null;
+  let unreadable = null;
+  const refuse = (why) => { if (!unreadable) unreadable = why; };
   for (const line of String(block).split(/\r?\n/)) {
+    if (!/\S/.test(line)) continue; // blank
+    if (/^[ ]*\t/.test(line)) { refuse(`a TAB in the indentation of ${showLine(line)} — YAML forbids tabs for indentation, so this block has no column to read`); continue; }
+    const indent = /^[ ]*/.exec(line)[0].length;
+    const body = line.slice(indent);
+    if (body[0] === '#') continue; // a comment sits at any column and never sets the root
+    if (root === null) root = indent;
+    if (indent > root) continue; // deeper than the root: nested mapping, sequence item or block-scalar content — cannot be a top-level key
+    if (SEQ_ITEM.test(body)) continue; // the root is a SEQUENCE: it has no top-level mapping keys at all
+    const strict = KEY_STRICT.exec(body);
     // The strict form is the pre-existing key regex UNCHANGED (its lookahead
     // backtracking is load-bearing: `a:b c: d` keys as `a:b c`, not `a`), plus
-    // a value capture that cannot alter where the key match ends.
-    const strict = /^([^\s:#-][^\n]*?)\s*:(?=\s|$)([^\n]*)$/.exec(line);
-    if (strict) { out.push({ key: strict[1], value: strict[2], strict: true }); continue; }
-    const loose = /^([^\s:#-][^\n]*?)\s*:([^\n]*)$/.exec(line);
-    if (loose) out.push({ key: loose[1], value: loose[2], strict: false });
+    // a value capture that cannot alter where the key match ends. It is applied
+    // to the line with its indentation REMOVED, which is byte-identical to the
+    // old behaviour at column 0 and is the whole fix everywhere else.
+    const m = strict || KEY_LOOSE.exec(body);
+    if (!m) { refuse(`CoalWash cannot read ${showLine(line)} as a key, a comment or a list item`); continue; }
+    // THE UNION, and it is deliberate. Round 5 shipped a regression by assuming
+    // a merge was a widening without measuring the other direction. On a
+    // mixed-indentation block the two readings disagree, so BOTH count: the
+    // inventory may never LOSE a key the old column-0 anchor saw.
+    const top = indent === root || indent === 0;
+    if (indent < root) refuse(`the key line ${showLine(line)} is indented LESS than the block's first line — CoalWash cannot tell which column is the document root`);
+    if (top && /[^\x20-\x7E]/.test(m[1])) refuse(`the top-level key in ${showLine(line)} contains a character outside printable ASCII — CoalWash cannot tell whether it is the \`pinned\` marker`);
+    // A key that OPENS with one of YAML's own indicator characters is not a
+    // plain scalar, so this line is not the plain `key: value` we can read:
+    // `{pinned: true}` is a FLOW mapping whose real key is `pinned`, and we
+    // keyed it as `{pinned` and called the file unpinned. The set is closed and
+    // cited (YAML's c-indicator list) rather than fitted to the cases we hit —
+    // `:`/`#`/`-` are already excluded by the key regex above, and the two
+    // QUOTE characters are deliberately kept, because a quoted key is a legal
+    // plain key that `unquote` already reads (`"pinned": true` is PINNED today).
+    if (top && /^[,[\]{}&*!|>%@`?]/.test(m[1])) refuse(`the top-level key in ${showLine(line)} opens with a YAML indicator character — this is flow or explicit-key syntax, not the plain \`key: value\` line CoalWash reads`);
+    entries.push({ key: m[1], value: m[2], strict: !!strict, top });
   }
-  return out;
+  return { entries, unreadable };
 }
 
 export function frontmatterKeys(text) {
@@ -618,9 +692,16 @@ export function frontmatterKeys(text) {
   // open question and is NOT decided here; this change only stops a BOM from
   // emptying the inventory of a file that is perfectly readable.
   if (fm.state !== 'closed') return new Set();
-  // STRICT ONLY — the inventory keeps exactly the keys it has always kept. The
-  // loose entries exist for the pin gate, which needs a floor, not a census.
-  return new Set(frontmatterBlockEntries(fm.block).filter((e) => e.strict).map((e) => e.key));
+  // STRICT ONLY — the inventory keeps exactly the key SHAPE it has always kept.
+  // The loose entries exist for the pin gate, which needs a floor, not a census.
+  //
+  // AND IT DELIBERATELY IGNORES `unreadable`, which is the opposite of what the
+  // destroying consumer does with it — same primitive, two consumers, OPPOSITE
+  // safe directions. `isPinned` refuses an unreadable block because its
+  // permissive answer DELETES a file; an inventory's permissive answer is
+  // reporting FEWER drops, so the safe move here is to keep every key we did
+  // manage to read. Do not "make these consistent".
+  return new Set(frontmatterBlockParse(fm.block).entries.filter((e) => e.strict && e.top).map((e) => e.key));
 }
 
 // Extract the full structured-token inventory of a text — PROJECTED from the

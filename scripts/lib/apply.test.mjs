@@ -2530,3 +2530,100 @@ test('G3-3: recoverDangling banks a non-UTF-8 create-undo BYTE-IDENTICAL too', (
     assert.deepStrictEqual(Buffer.from(restoreFromBin(proj, FAT_BIN_NAME, items[0].id)), bytes, 'the create-undo bank is byte-exact');
   } finally { clean(proj); }
 });
+
+// ---------------------------------------------------------------------------
+// G4-2 (round 7) — THE SLOT BEFORE THE KEY, and the question is now INVERTED.
+// Seven rounds of repair on this primitive all asked "is there a pin?"; the
+// answer "no" is one a wrong parse always produces. The requirement is now
+// "prove this block is safe to touch": every line accounted for, or refuse.
+//
+// MY OWN BLOCK BUILDER, deliberately not the house `fm()`. `fm()` appends a
+// `title: x` at COLUMN 0, so an indented fixture would carry mixed indentation
+// and refuse via the shallower-than-root rule — i.e. it would go green for a
+// reason that has nothing to do with the defect. A fixture that passes for the
+// wrong reason is this room's most expensive recurring mistake.
+const fmBlock = (inner) => '---\n' + inner + '\n---\n\nbody\n';
+
+test('G4-2: an indented `pinned: true` is a TOP-LEVEL pin — no shipped document puts a column constraint on the marker', () => {
+  for (const inner of [
+    ' pinned: true',
+    '  pinned: true',
+    '    pinned: true',
+    ' title: x\n pinned: true',
+    '  pinned: True',
+  ]) {
+    assert.strictEqual(pinnedOf(fmBlock(inner)), true, `${JSON.stringify(inner)} is a root-level mapping key — the block is simply indented`);
+  }
+});
+
+// THE DISCRIMINATOR. Without this the fix degenerates into "refuse anything
+// indented", which is not a fix, it is an outage.
+test('G4-2: a genuinely NESTED pinned key is still washable — indentation is read relative to the block root', () => {
+  for (const inner of [
+    'meta:\n  pinned: true',
+    ' meta:\n   pinned: true',
+    'title: x\ndesc: |\n  pinned: true',
+  ]) {
+    assert.strictEqual(pinnedOf(fmBlock(inner)), false, `${JSON.stringify(inner)} is NOT a top-level pin — over-refusal is a yield loss and must stay a DECISION`);
+  }
+});
+
+test('G4-2: a block CoalWash cannot account for line-by-line is refused — "no marker found" is what a wrong parse always returns', () => {
+  const CH = String.fromCharCode;
+  for (const [label, inner] of [
+    ['TAB indentation (illegal in YAML — there is no column to compute)', CH(9) + 'pinned: true'],
+    ['NBSP as indentation', CH(160) + 'pinned: true'],
+    ['IDEOGRAPHIC SPACE as indentation', CH(0x3000) + 'pinned: true'],
+    ['ZERO WIDTH SPACE glued to the key', CH(0x200b) + 'pinned: true'],
+    ['a flow mapping at the root', '{pinned: true}'],
+    ['a key split across two indented lines', ' pinned\n : true'],
+    ['mixed indentation (a key shallower than the block root)', '  alpha: 1\npinned: true'],
+  ]) {
+    assert.strictEqual(pinnedOf(fmBlock(inner)), true, `${label} must refuse: ${JSON.stringify(inner)}`);
+  }
+});
+
+// THE DOOR. A predicate test proves the predicate; only the shipped applyPlan
+// path proves a file survives. The TWIN is what makes this table mean anything:
+// my own harness once reported every row refusing, which reads as a clean bill
+// of health and was the FIDELITY gate answering, not the pin gate.
+test('G4-2: an indented pin survives a delete through the shipped applyPlan door, and its unpinned twin does not', () => {
+  const { proj, store } = sandbox();
+  try {
+    const pin = path.join(store, 'INDENTED-PIN.md');
+    fs.writeFileSync(pin, Buffer.from(fmBlock('  pinned: true'), 'utf8'));
+    const r = apply(planFor(proj, store, [{ type: 'delete', path: pin }], { approvedDrops: ['frontmatter-key-drop:pinned'] }));
+    assert.strictEqual(r.ok, false, 'the delete must be refused');
+    assert.match(String(r.error), /PIN-protected/, 'refused by the PIN gate by name — not by the fidelity gate');
+    assert.ok(fs.existsSync(pin), 'the file survives');
+
+    const twin = path.join(store, 'INDENTED-PLAIN.md');
+    fs.writeFileSync(twin, Buffer.from(fmBlock('  title: x'), 'utf8'));
+    const t = apply(planFor(proj, store, [{ type: 'delete', path: twin }], { approvedDrops: ['frontmatter-key-drop:title'] }));
+    assert.strictEqual(t.ok, true, `the twin must actually delete, or the row above proves nothing: ${JSON.stringify(t)}`);
+    assert.ok(!fs.existsSync(twin), 'the twin is gone');
+  } finally { clean(proj); }
+});
+
+// A REWRITE gets the honest, actionable flag instead of the pin gate's
+// whole-plan abort: one odd file must not make CoalWash unusable on a store.
+test('G4-2: a rewrite of an unreadable-frontmatter file is FLAGGED with a way out, and the rest of the plan proceeds', () => {
+  const { proj, store } = sandbox();
+  try {
+    const odd = path.join(store, 'ODD.md');
+    fs.writeFileSync(odd, Buffer.from(fmBlock('{pinned: true}'), 'utf8'));
+    const ok = path.join(store, 'OK.md');
+    fs.writeFileSync(ok, Buffer.from(fmBlock('title: x'), 'utf8'));
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: odd, content: fmBlock('{pinned: true}') + 'more\n' },
+      { type: 'rewrite', path: ok, content: fmBlock('title: x') + 'more\n' },
+    ]));
+    assert.strictEqual(r.ok, true, `the readable file still washes: ${JSON.stringify(r)}`);
+    const f = (r.flagged || []).find((x) => String(x.path).endsWith('ODD.md'));
+    assert.ok(f, 'the unreadable file is flagged, not silently rewritten');
+    assert.match(String(f.reason), /frontmatter/i, 'the reason names frontmatter');
+    assert.match(String(f.reason), /CoalWash will wash it normally|wash it normally/, 'the reason tells the user the way out');
+    assert.strictEqual(fs.readFileSync(odd, 'utf8'), fmBlock('{pinned: true}'), 'the unreadable file is untouched');
+    assert.notStrictEqual(fs.readFileSync(ok, 'utf8'), fmBlock('title: x'), 'the readable file was rewritten');
+  } finally { clean(proj); }
+});
