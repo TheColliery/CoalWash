@@ -79,6 +79,7 @@ import { loadKeepsAt, KEEPS_NAME, globalKeepsPath } from './keeps.mjs';
 // (Quick/Force/wizard all apply through here), so wiring it here wires every
 // cut site at once.
 import { sweepFatBin, sweepStoreOld, recordBinItem, FAT_BIN_NAME, STORE_OLD_NAME } from './tailings.mjs';
+import { TIER1_KEEP_ALL_MS } from './retention.mjs'; // the keep-all floor, for the cap-conflict receipt line (never restate the number)
 // 0i V2: the bins' size budget is a multiple of the MEASURED STORE — read
 // from the session gauge's cached verdict (caliper state; zero new I/O
 // beyond one small state read). caliper imports only config-load/jsonc, so
@@ -758,19 +759,33 @@ export function applyPlan(plan, opts = {}) {
       // them here, inside the lock. Fail-silent housekeeping; sweepSnapshots
       // itself protects a dangling txn's snapshot (recovery owns it).
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
-      // ---- bin retention (beta.12 item 4; 0i adds the size cap) — the SAME
-      // piggyback touchpoint: every real wash run is a natural,
-      // already-existing place to age out bin items past their horizon AND
-      // to bind the store-proportional size budget (0h-GUARD: this preflight
-      // is the ONLY sweep site — run-gated, never a clock). storeBytes =
-      // the session gauge's cached measurement (0i V2 — the store, never the
-      // disk); a project never gauged (no cached verdict) sweeps
-      // horizon-only, the keep-on-doubt direction. Both sweeps are already
+      // ---- bin retention (beta.12 item 4; 0i adds the size cap; P5/P8 fix
+      // rebases the budget) — the SAME piggyback touchpoint: every real wash
+      // run is a natural, already-existing place to age out bin items past
+      // their horizon AND to bind the store-proportional size budget
+      // (0h-GUARD: this preflight is the ONLY sweep site — run-gated, never
+      // a clock). storeBytes = the session gauge's cached storeTotalBytes —
+      // the WHOLE measured class-B store, matching retention.mjs's own "the
+      // MEASURED STORE" prose (the old alwaysLoadedBytes base under-sized
+      // the budget by the recall tier the bins actually shadow: the lab's
+      // P5/P8, a 25h-old pre-surgery image destroyed under a ~62x-too-small
+      // cap). Deliberately NO fallback to alwaysLoadedBytes: a state written
+      // before this field existed sweeps horizon-only (keep-on-doubt) and
+      // self-heals at the next SessionStart gauge. Both sweeps are already
       // internally fail-silent (never throw) — no extra guard needed here.
       let storeBytes = 0;
-      try { storeBytes = Number(loadState(projectRoot, home)?.lastVerdict?.alwaysLoadedBytes) || 0; } catch { /* horizon-only */ }
-      sweepFatBin(projectRoot, { storeBytes });
-      sweepStoreOld(projectRoot, { storeBytes });
+      try { storeBytes = Number(loadState(projectRoot, home)?.lastVerdict?.storeTotalBytes) || 0; } catch { /* horizon-only */ }
+      const binSweeps = [
+        [FAT_BIN_NAME, sweepFatBin(projectRoot, { storeBytes })],
+        [STORE_OLD_NAME, sweepStoreOld(projectRoot, { storeBytes })],
+      ];
+      // Unsatisfiable-cap advisory lines for the receipt (the deadLinkLine
+      // shape: program-built, caller-surfaced, never a block) — the one thing
+      // no senior retention system says out loud: "your cap and your keep-all
+      // window contradict; the bin is over budget and nothing young died."
+      const binConflicts = binSweeps
+        .filter(([, r]) => r && r.capConflict)
+        .map(([name, r]) => `retention: ${name} over budget (${r.capConflict.keptBytes}B kept > ${r.capConflict.budgetBytes}B budget) — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor holds and byte pressure may not break it; the bin exceeds its cap until items age past the floor`);
 
       // ---- snapshot BEFORE the first mutation, then the completion marker ----
       fs.mkdirSync(snapDir, { recursive: true });
@@ -917,7 +932,7 @@ export function applyPlan(plan, opts = {}) {
       let deadLinks = [];
       try { deadLinks = deadLinkScan(actionable, physRoots, txDir); } catch { /* advisory only */ }
 
-      return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks) };
+      return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };
     } finally {
       lock.release();
       if (globalLock) globalLock.release();

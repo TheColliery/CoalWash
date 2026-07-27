@@ -154,7 +154,7 @@ test('doubt keeps, never destroys: corrupt and future timestamps are kept (broom
   assert.strictEqual(r.destroy.length, 0);
   assert.strictEqual(r.keep.length, 3);
   // and a non-array input degrades to an empty partition, never a throw
-  assert.deepStrictEqual(retentionPlan(null, now), { keep: [], destroy: [] });
+  assert.deepStrictEqual(retentionPlan(null, now), { keep: [], destroy: [], reasons: new Map(), capConflict: null });
 });
 
 // ---------------------------------------------------------------------------
@@ -163,32 +163,84 @@ test('doubt keeps, never destroys: corrupt and future timestamps are kept (broom
 // Infinity = every test above runs the pre-0i behavior byte-identically.
 // ---------------------------------------------------------------------------
 
-test('0i size-cap: over-budget evicts OLDEST first until under; under-budget touches nothing', () => {
-  const now = T0 + 10 * HOUR;
-  // Four young (tier-1 keep-all) items, 100 bytes each — time layers keep ALL.
-  const four = [0, 1, 2, 3].map((i) => ({ id: `i${i}`, at: T0 + i * HOUR, bytes: 100 }));
-  const under = retentionPlan(four, now, { budgetBytes: 400 });
-  assert.strictEqual(under.destroy.length, 0, 'at/under budget: the cap layer is silent');
+test('0i size-cap (snapper 2-pass): over-budget evicts the OLDEST floor-cleared items first; the 48h keep-all floor is untouchable by byte pressure', () => {
+  const now = T0 + 10 * DAY;
+  // The lab P5/P8 shape, own fixture: TWO under-floor items — 25h (the killed
+  // pre-surgery image's age) and 30h — plus three past-floor items on
+  // distinct days. Two young on purpose: the newest-item retrievability
+  // anchor protects only ONE of them, so if the 30h item survives extreme
+  // pressure it can only be the FLOOR doing it (a single-young fixture cannot
+  // tell the floor from the anchor — measured while proving this test can
+  // fail). 100 bytes each = 500 total.
+  const young25h = { id: 'young-25h', at: now - 25 * HOUR, bytes: 100 };
+  const young30h = { id: 'young-30h', at: now - 30 * HOUR, bytes: 100 };
+  const old3d = { id: 'old-3d', at: now - 3 * DAY, bytes: 100 };
+  const old4d = { id: 'old-4d', at: now - 4 * DAY, bytes: 100 };
+  const old5d = { id: 'old-5d', at: now - 5 * DAY, bytes: 100 };
+  const all = [old5d, old4d, old3d, young30h, young25h];
 
-  const over = retentionPlan(four, now, { budgetBytes: 250 });
-  // 400 -> need <= 250: evict i0 (oldest, -100 => 300), then i1 (-100 => 200).
-  assert.deepStrictEqual(over.destroy.map((s) => s.id).sort(), ['i0', 'i1'], 'oldest evicted first, exactly until under budget');
-  assert.deepStrictEqual(over.keep.map((s) => s.id).sort(), ['i2', 'i3']);
-  // This is the "before items even age" catch: all four were inside the 48h
-  // keep-all tier — only size pressure could thin them.
+  const under = retentionPlan(all, now, { budgetBytes: 500 });
+  assert.strictEqual(under.destroy.length, 0, 'at/under budget: the cap layer is silent');
+  assert.strictEqual(under.capConflict, null, 'no conflict when the cap is satisfied');
+
+  const over = retentionPlan(all, now, { budgetBytes: 350 });
+  // 500 -> need <= 350: size pressure may touch ONLY the floor-cleared items
+  // (old-5d, then old-4d — eviction stops once under budget).
+  assert.deepStrictEqual(over.destroy.map((s) => s.id).sort(), ['old-4d', 'old-5d'], 'oldest floor-cleared evicted first, exactly until under budget');
+  assert.strictEqual(over.reasons.get(old5d), 'size-cap', 'the size axis is named on its own kill');
+  assert.strictEqual(over.capConflict, null, 'the cap was reached without touching the floor — no conflict');
+
+  const crush = retentionPlan(all, now, { budgetBytes: 150 });
+  // 500 -> 150 is unreachable without breaking the floor: every floor-cleared
+  // item dies (200 remain), BOTH young items survive — young-30h is not the
+  // anchor, so only the floor saves it — and the residue is REPORTED.
+  assert.deepStrictEqual(crush.destroy.map((s) => s.id).sort(), ['old-3d', 'old-4d', 'old-5d'], 'pressure consumes every floor-cleared item');
+  assert.ok(crush.keep.some((s) => s.id === 'young-25h') && crush.keep.some((s) => s.id === 'young-30h'), 'the 48h keep-all floor holds against ANY byte pressure — both young items, not just the newest');
+  assert.deepStrictEqual(crush.capConflict, { budgetBytes: 150, keptBytes: 200 }, 'the floor-vs-cap residue is reported, never silently resolved');
+});
+
+test('snapper pass-2 residue: under-floor items alone over the cap = the bin GROWS PAST the cap, destroys nothing young, and REPORTS the conflict', () => {
+  const now = T0 + 10 * DAY;
+  // Every item inside the 48h keep-all floor; total 600 bytes vs a 300 budget.
+  // No senior system says this out loud (they all silently drop data) — CW
+  // reports the unsatisfiable config instead of breaking the floor.
+  const young = [1, 2, 25].map((h) => ({ id: `y${h}`, at: now - h * HOUR, bytes: 200 }));
+  const r = retentionPlan(young, now, { budgetBytes: 300 });
+  assert.strictEqual(r.destroy.length, 0, 'the floor beats the cap — nothing young dies');
+  assert.strictEqual(r.keep.length, 3);
+  assert.deepStrictEqual(r.capConflict, { budgetBytes: 300, keptBytes: 600 }, 'the conflict is REPORTED, never silently resolved by deletion');
+
+  const fits = retentionPlan(young, now, { budgetBytes: 600 });
+  assert.strictEqual(fits.capConflict, null, 'a satisfiable cap reports no conflict');
+});
+
+test('death reasons: every destroyed item names the axis that fired — horizon / density / size-cap', () => {
+  const now = T0 + 40 * DAY;
+  const pastHorizon = { id: 'ph', at: now - 35 * DAY, bytes: 10 }; // > 30d fat horizon
+  const sameDayOld = { id: 'sd-old', at: now - 3 * DAY, bytes: 10 }; // tier-2, same day slot as...
+  const sameDayNew = { id: 'sd-new', at: now - 3 * DAY + HOUR, bytes: 10 }; // ...this newer one
+  const r = retentionPlan([pastHorizon, sameDayOld, sameDayNew], now, {});
+  assert.strictEqual(r.reasons.get(pastHorizon), 'horizon');
+  assert.strictEqual(r.reasons.get(sameDayOld), 'density');
+  assert.ok(r.keep.includes(sameDayNew));
 });
 
 test('0i size-cap: era-preserving phase — the last survivor of an old epoch-week is skipped while thinning multi-item weeks suffices', () => {
-  const now = T0 + 20 * DAY;
-  // One lone item in an old week (tier-3 survivor) + three items in the
-  // current keep-all window. Budget forces eviction; the lone old-era item
-  // must survive phase 1 because the young week has spare density.
-  const oldEra = { id: 'old-era', at: now - 16 * DAY, bytes: 100 }; // sole survivor of its week
-  const young = [0, 1, 2].map((i) => ({ id: `y${i}`, at: now - 2 * HOUR + i * (HOUR / 2), bytes: 100 }));
-  const r = retentionPlan([oldEra, ...young], now, { budgetBytes: 250 });
-  // 400 -> <= 250: phase 1 skips old-era (last of its week), evicts y0 then y1.
-  assert.ok(r.keep.some((s) => s.id === 'old-era'), 'V1: old eras thin but stay recoverable — the era\'s last survivor outranks younger spare density');
-  assert.deepStrictEqual(r.destroy.map((s) => s.id).sort(), ['y0', 'y1']);
+  const WEEK = 7 * DAY;
+  // Anchor the trio INSIDE one epoch week explicitly (deterministic slots —
+  // the tailings epoch-boundary flake lesson): WK = an exact week boundary.
+  const WK = Math.ceil((T0 + 20 * DAY) / WEEK) * WEEK;
+  const now = WK + 6 * DAY;
+  // One lone item in an old week (tier-3 sole survivor) + a trio spread over
+  // three days of the SAME current epoch week, all past the 48h floor (the
+  // floor now shields young items — era mechanics are tested on evictables).
+  const oldEra = { id: 'old-era', at: WK - 10 * DAY, bytes: 100 }; // 16d old, sole survivor of its week
+  const trio = [1, 2, 3].map((d) => ({ id: `t${d}`, at: WK + d * DAY, bytes: 100 })); // 5d/4d/3d old, one per day slot
+  const r = retentionPlan([oldEra, ...trio], now, { budgetBytes: 250 });
+  // 400 -> <= 250: phase 1 skips old-era (last of its week), evicts t1 then t2
+  // from the multi-item week (t3 is the newest evictable, never evicted).
+  assert.ok(r.keep.some((s) => s.id === 'old-era'), 'V1: old eras thin but stay recoverable — the era\'s last survivor outranks spare density elsewhere');
+  assert.deepStrictEqual(r.destroy.map((s) => s.id).sort(), ['t1', 't2']);
 });
 
 test('0i size-cap: the cap is a hard promise — when era protection cannot reach the budget, phase 2 evicts oldest regardless; the newest item overall ALWAYS survives', () => {
@@ -210,19 +262,25 @@ test('0i size-cap: the cap is a hard promise — when era protection cannot reac
   assert.ok(tiny.keep.some((s) => s.id === 'wk-new'), 'the newest overall is never size-evicted');
 });
 
-test('0i size-cap fail direction: weightless (no/zero bytes) and doubt (future at) items are NEVER size-evicted', () => {
-  const now = T0 + 10 * HOUR;
-  const legacy = { id: 'legacy', at: T0, bytes: undefined }; // pre-0i index entry, no weight
-  const zero = { id: 'zero', at: T0 + HOUR, bytes: 0 };
+test('0i size-cap fail direction: weightless (no/zero bytes) and doubt (future at) items are NEVER size-evicted; the unreachable cap is REPORTED', () => {
+  // Everything past the 48h floor (the floor is its own test above), each on
+  // its own day slot so the density axis never fires here.
+  const D = T0 + 10 * DAY; // T0 is a UTC midnight -> D is a day boundary
+  const now = D + 12 * HOUR;
+  const legacy = { id: 'legacy', at: D - 5 * DAY + 6 * HOUR, bytes: undefined }; // pre-0i index entry, no weight
+  const zero = { id: 'zero', at: D - 4 * DAY + 6 * HOUR, bytes: 0 };
+  const heavy = { id: 'heavy', at: D - 3 * DAY + 6 * HOUR, bytes: 400 };
+  const newest = { id: 'newest', at: D - 2 * DAY + 6 * HOUR, bytes: 400 };
   const future = { id: 'future', at: now + DAY, bytes: 500 }; // doubt -> kept by the time layer, ineligible for size eviction
-  const heavy = { id: 'heavy', at: T0 + 2 * HOUR, bytes: 400 };
-  const newest = { id: 'newest', at: T0 + 3 * HOUR, bytes: 400 };
-  const r = retentionPlan([legacy, zero, future, heavy, newest], now, { budgetBytes: 100 });
-  // Only `heavy` is evictable (newest is protected): total 800+500-doubt...
-  // weight sums finite positives = 400+400+500(future counts weight but is
-  // not evictable) — the layer evicts what it MAY until under or exhausted.
-  for (const s of r.destroy) assert.strictEqual(s.id, 'heavy', `only the evictable weighted non-newest item may die (got ${s.id})`);
+  const r = retentionPlan([legacy, zero, heavy, newest, future], now, { budgetBytes: 100 });
+  // Only `heavy` is evictable (newest is protected, legacy/zero weightless,
+  // future doubt) — the layer evicts what it MAY, then reports what it cannot.
+  assert.strictEqual(r.destroy.length, 1, 'exactly one eviction is possible');
+  assert.strictEqual(r.destroy[0].id, 'heavy');
   assert.ok(r.keep.some((s) => s.id === 'legacy') && r.keep.some((s) => s.id === 'zero') && r.keep.some((s) => s.id === 'future'), 'doubt/weightless all survive');
+  // Prometheus lesson inverted: bytes the layer cannot delete (newest + doubt)
+  // keep the bin over an unreachable cap — that is never silent.
+  assert.deepStrictEqual(r.capConflict, { budgetBytes: 100, keptBytes: 900 }, 'an unreachable cap is named, not silently missed');
 });
 
 test('0i: BIN_BUDGET_STORE_MULTIPLE is a positive, sane placeholder constant', () => {

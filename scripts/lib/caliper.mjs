@@ -881,6 +881,7 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
   const breakEvenDays = Number(verdict && verdict.breakEvenDays);
   const hardCeilingTokens = Number(verdict && verdict.hardCeilingTokens);
   const alwaysLoadedBytes = Number(verdict && verdict.alwaysLoadedBytes);
+  const storeTotalBytes = Number(verdict && verdict.storeTotalBytes);
   const rawPaths = (verdict && Array.isArray(verdict.alwaysLoadedPaths)) ? verdict.alwaysLoadedPaths : [];
   proj.lastVerdict = {
     band: String((verdict && verdict.band) || ''),
@@ -901,6 +902,15 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
     // SessionStart, the EXISTING behavior this feature is additive to).
     alwaysLoadedPaths: rawPaths.filter((p) => typeof p === 'string').slice(0, ALWAYS_LOADED_PATHS_CAP),
     alwaysLoadedBytes: Number.isFinite(alwaysLoadedBytes) ? Math.round(alwaysLoadedBytes) : 0,
+    // The WHOLE measured class-B store (measureEntries m.totalBytes: always-
+    // loaded + recall tiers) — the bin-retention budget base (P5/P8 fix: the
+    // bins shadow what washes cut, which is store-wide; the always-loaded
+    // slice under-based the budget by the lab's measured ~62x). Absent on an
+    // old-schema state -> apply's sweep reads 0 -> horizon-only until the
+    // next gauge writes it (keep-on-doubt; no stateSchema bump needed — no
+    // existing field changed meaning, and the absence self-heals in one
+    // SessionStart).
+    storeTotalBytes: Number.isFinite(storeTotalBytes) ? Math.round(storeTotalBytes) : 0,
     at: now,
   };
   return saveState(proj, projectRoot, home);

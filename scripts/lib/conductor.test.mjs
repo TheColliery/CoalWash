@@ -167,6 +167,11 @@ test('SessionStart: OBESE crossing is measured+cached SILENTLY (no ask text any 
     const st = readProjState(home, proj);
     assert.strictEqual(st.lastVerdict.band, 'OBESE');
     assert.strictEqual(st.lastVerdict.overCeiling, true);
+    // P5/P8 wiring pin: the gauge caches the WHOLE measured store (recall
+    // included — seedBigRecall dwarfs the always-loaded slice here) as the
+    // bin-retention budget base; if the conductor stops passing it, the cap
+    // layer goes permanently inert with no other symptom.
+    assert.ok(st.lastVerdict.storeTotalBytes > st.lastVerdict.alwaysLoadedBytes, `storeTotalBytes (${st.lastVerdict.storeTotalBytes}) must include the recall tier beyond alwaysLoadedBytes (${st.lastVerdict.alwaysLoadedBytes})`);
     assert.strictEqual(st.lastCrossing.band, 'OBESE');
     assert.strictEqual(st.lastCrossing.consumed, false);
   } finally { clean(home, proj); }

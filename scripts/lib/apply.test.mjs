@@ -8,6 +8,7 @@ import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDi
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
 import { HORIZON_MS } from './retention.mjs';
+import { recordVerdict } from './caliper.mjs';
 import { ccMemoryDir } from './class-b.mjs';
 
 function sandbox() {
@@ -1898,4 +1899,90 @@ test('RUNG-5 §1.1: a create-undo that CANNOT be banked refuses instead of destr
     assert.strictEqual(fs.existsSync(created), true, 'the file survives — an un-undone create is a mixed state a human can fix; an unrecoverable delete is not');
     assert.strictEqual(fs.existsSync(path.join(txDir, 'journal.json')), true, 'the journal is kept for that human');
   } finally { fs.readFileSync = origRead; clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// P5/P8 retention-budget base (the graduation lab's HIGH): the preflight bin
+// sweep budgets off the MEASURED STORE (lastVerdict.storeTotalBytes), exactly
+// what retention.mjs/tailings.mjs always documented — never the always-loaded
+// slice, whose bytes the recall store (the thing washes actually cut) dwarfs.
+// ---------------------------------------------------------------------------
+
+test('P8 base: the preflight sweep budget rides storeTotalBytes (the measured store), NOT alwaysLoadedBytes', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const now = Date.now();
+    const DAY = 86400000;
+    // Three floor-cleared fat-bin items on distinct days: 300+300+100 = 700 B.
+    const goneA = recordBinItem(proj, FAT_BIN_NAME, { content: 'a'.repeat(300), original: 'a.md', now: now - 7 * DAY });
+    const goneB = recordBinItem(proj, FAT_BIN_NAME, { content: 'b'.repeat(300), original: 'b.md', now: now - 5 * DAY });
+    const stays = recordBinItem(proj, FAT_BIN_NAME, { content: 'c'.repeat(100), original: 'c.md', now: now - 3 * DAY });
+    // The store measured 100 B; the always-loaded slice claims 10 MB. If the
+    // sweep budgeted off alwaysLoadedBytes (the P8 defect, inverted here so a
+    // regression is visible), the 20 MB budget would evict NOTHING.
+    recordVerdict(home, proj, { band: 'LEAN', storeTotalBytes: 100, alwaysLoadedBytes: 10 * 1024 * 1024 }, now);
+    const f1 = path.join(store, 'f1.md');
+    write(f1, 'plain prose\n');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'still plain prose\n' }]), { home });
+    assert.strictEqual(r.ok, true, r.error);
+    // budget = 2 x 100 = 200 B: the two oldest floor-cleared items died.
+    // (The run itself banks the rewrite's removed line as a NEW bin item
+    // post-commit — expected; assert on the seeded ids only.)
+    const remaining = listBin(proj, FAT_BIN_NAME).map((i) => i.id);
+    assert.ok(remaining.includes(stays), 'the newest seeded item survives');
+    assert.ok(!remaining.includes(goneA) && !remaining.includes(goneB), 'the measured-store budget bound: the two oldest floor-cleared items died');
+  } finally { clean(proj, home); }
+});
+
+test('P8 base, legacy state: a lastVerdict WITHOUT storeTotalBytes sweeps horizon-only (keep-on-doubt) — no fallback to the wrong base', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const now = Date.now();
+    const DAY = 86400000;
+    const ids = [7, 5, 3].map((d) => recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(300), now: now - d * DAY }));
+    // Old-code-shaped verdict: only alwaysLoadedBytes (tiny — under the OLD
+    // base this 20 B budget would evict two items). storeTotalBytes absent.
+    recordVerdict(home, proj, { band: 'LEAN', alwaysLoadedBytes: 10 }, now);
+    const f1 = path.join(store, 'f1.md');
+    write(f1, 'plain prose\n');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'still plain prose\n' }]), { home });
+    assert.strictEqual(r.ok, true, r.error);
+    // All three seeded items survive (the run banks its own cut too — ignore it).
+    for (const id of ids) assert.ok(restoreFromBin(proj, FAT_BIN_NAME, id), `${id} survives: no measured store on record -> cap inert -> horizon-only; self-heals at the next gauge`);
+  } finally { clean(proj, home); }
+});
+
+test('cap-conflict reaches the receipt: an unsatisfiable bin cap (young items alone over budget) rides applyPlan\'s return as ONE advisory line', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const now = Date.now();
+    // Two 200 B items ONE HOUR old in store.old — under the 48h keep-all
+    // floor, so byte pressure may not touch them; budget 2 x 100 = 200 < 400.
+    recordBinItem(proj, STORE_OLD_NAME, { content: 'p'.repeat(200), origin: 'wizard-cut', now: now - 3600000 });
+    recordBinItem(proj, STORE_OLD_NAME, { content: 'q'.repeat(200), origin: 'wizard-cut', now: now - 7200000 });
+    recordVerdict(home, proj, { band: 'LEAN', storeTotalBytes: 100 }, now);
+    const f1 = path.join(store, 'f1.md');
+    write(f1, 'plain prose\n');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'still plain prose\n' }]), { home });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.ok(Array.isArray(r.binConflicts), 'the receipt field exists');
+    assert.strictEqual(r.binConflicts.length, 1, 'exactly the conflicted bin reports');
+    assert.ok(/store\.old/.test(r.binConflicts[0]), 'the line names the bin');
+    assert.ok(/48h/.test(r.binConflicts[0]) && /budget/.test(r.binConflicts[0]), 'the line names the floor and the budget — the config conflict is stated, not silently resolved');
+    assert.strictEqual(listBin(proj, STORE_OLD_NAME).length, 2, 'nothing young died for the cap');
+
+    // Control: no bins at all -> empty conflicts array, same field shape.
+    const { proj: proj2, store: store2 } = sandbox();
+    const home2 = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+    try {
+      const f2 = path.join(store2, 'f.md');
+      write(f2, 'plain\n');
+      const r2 = apply(planFor(proj2, store2, [{ type: 'rewrite', path: f2, content: 'plain2\n' }]), { home: home2 });
+      assert.strictEqual(r2.ok, true, r2.error);
+      assert.deepStrictEqual(r2.binConflicts, [], 'no conflict -> empty, never missing');
+    } finally { clean(proj2, home2); }
+  } finally { clean(proj, home); }
 });

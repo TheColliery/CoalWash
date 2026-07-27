@@ -29,15 +29,27 @@
 //             at zero lab cost (the USER's testing ruling: "retention = a
 //             PURE FUNCTION -> hermetic code tests, zero lab tokens").
 //
-// SIZE-CAP ∧ TIME-HORIZON, whichever binds first (0i, MEMORY.md — the
-// journald SystemMaxUse+MaxRetentionSec model; SUPERSEDES this module's
-// original "ZERO size knobs" line): speed is not a property of the bin, it
-// is the USER's behavior — a fixed horizon alone is wrong on the fast-growth
-// regime (ขยะล้น) exactly as a size cap alone is wrong on the slow one
-// (ขยะเน่า). So BOTH limits run on EVERY bin: the horizon ages out the
-// quiet-user case; the size cap density-thins from the OLDEST first when the
-// bin outgrows its budget — catching overflow before items even age. The
-// budget is measured against the STORE's own bytes (0i V2: "ฉันไม่มีวันรู้
+// SIZE-CAP ∧ TIME-HORIZON, with a TIME FLOOR the cap cannot cross (0i +
+// the 2026-07-27 P5/P8 fix — the journald SystemMaxUse+MaxRetentionSec model
+// ordered by snapper's 2-pass cleanup; SUPERSEDES this module's original
+// "ZERO size knobs" line): speed is not a property of the bin, it is the
+// USER's behavior — a fixed horizon alone is wrong on the fast-growth regime
+// (ขยะล้น) exactly as a size cap alone is wrong on the slow one (ขยะเน่า).
+// So BOTH limits run on EVERY bin, snapper-ordered:
+//   pass 1 (time)  — the horizon + density thinning run first, independent
+//                    of any byte pressure (ages out the quiet-user case);
+//   pass 2 (bytes) — size pressure then evicts from the OLDEST, but ONLY
+//                    among items already past the 48h keep-all floor. The
+//                    floor is untouchable by byte pressure (the graduation
+//                    lab's P5/P8: a 25h-old pre-surgery image died under a
+//                    mis-based cap — a keep-all window a size cap can break
+//                    is journald's MaxRetentionSec=0 shape, a time promise
+//                    that exists only in prose). If the under-floor items
+//                    alone exceed the cap, the bin GROWS PAST the cap and
+//                    the conflict is REPORTED (capConflict) — no senior
+//                    system says this out loud; all of them silently drop
+//                    data, and that silence is the one part not to port.
+// The budget is measured against the STORE's own bytes (0i V2: "ฉันไม่มีวันรู้
 // ความจุ SSD ของผู้ใช้" — CW is a guest and can never reference the disk;
 // the one capacity always known is the store measured every session, so the
 // bin — the store's shadow — is capped as a MULTIPLE of it, growable with
@@ -84,9 +96,9 @@ export const BIN_BUDGET_STORE_MULTIPLE = 2;
 const DAY_MS = 86400000;
 const WEEK_MS = 7 * DAY_MS;
 
-// The policy. PURE: (items, now) -> { keep, destroy }; never reads a clock,
-// never touches the filesystem, returns the caller's own item objects
-// partitioned (order preserved within each list).
+// The policy. PURE: (items, now) -> { keep, destroy, reasons, capConflict };
+// never reads a clock, never touches the filesystem, returns the caller's own
+// item objects partitioned (order preserved within each list).
 //   items       [{ at: <birth timestamp ms>, bytes?, ... }] — `at` drives the
 //               time layers; `bytes` (0i) is read ONLY by the size-cap layer;
 //               everything else rides along untouched.
@@ -98,12 +110,25 @@ const WEEK_MS = 7 * DAY_MS;
 //               Default Infinity = the cap layer inert (pre-0i behavior,
 //               byte-identical) — also the fail direction when the store
 //               was never measured (keep, never destroy on a missing base).
+// Returns:
+//   keep / destroy — the caller's items, partitioned.
+//   reasons     Map(destroyed item -> 'horizon' | 'density' | 'size-cap') —
+//               the AXIS that fired, for the death certificate (Prometheus's
+//               "whichever triggers first" resolves silently; ours is named
+//               per kill so "rules say 48h but it died at 25h" is auditable).
+//   capConflict null, or { budgetBytes, keptBytes } when the kept mass still
+//               exceeds the cap after every PERMITTED eviction (the floor +
+//               retrievability/doubt protections outweigh the budget) — the
+//               unsatisfiable-config signal the caller must surface loudly.
 // Slotting is by fixed epoch buckets (floor(at / DAY_MS) days, epoch weeks),
 // deterministic and timezone-free: an item's slot identity never changes as
 // `now` advances, so the survivor of a slot stays the survivor.
 export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBytes = Infinity } = {}) {
   const keep = [];
   const destroy = [];
+  const reasons = new Map(); // destroyed item -> the axis that fired
+  let capConflict = null;
+  const kill = (item, why) => { destroy.push(item); reasons.set(item, why); };
   const tier2 = []; // (48h, 14d]  — last-per-day candidates
   const tier3 = []; // (14d, horizon] — last-per-week candidates
 
@@ -111,7 +136,7 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
     const at = Number(item && item.at);
     if (!Number.isFinite(at) || at > now) { keep.push(item); continue; } // doubt (corrupt/future) -> keep, never destroy
     const age = now - at;
-    if (age > horizonMs) { destroy.push(item); continue; } // nothing outlives its horizon
+    if (age > horizonMs) { kill(item, 'horizon'); continue; } // nothing outlives its horizon
     if (age <= TIER1_KEEP_ALL_MS) { keep.push(item); continue; } // keep-all: full undo depth
     (age <= TIER2_LAST_PER_DAY_MS ? tier2 : tier3).push(item);
   }
@@ -126,10 +151,10 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
       const slot = Math.floor(Number(item.at) / slotMs);
       const cur = bySlot.get(slot);
       if (!cur || Number(item.at) >= Number(cur.at)) {
-        if (cur) destroy.push(cur);
+        if (cur) kill(cur, 'density');
         bySlot.set(slot, item);
       } else {
-        destroy.push(item);
+        kill(item, 'density');
       }
     }
     for (const survivor of bySlot.values()) keep.push(survivor);
@@ -137,11 +162,12 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
   thin(tier2, DAY_MS);
   thin(tier3, WEEK_MS);
 
-  // SIZE-CAP layer (0i — journald SystemMaxUse; runs ALONGSIDE the horizon,
-  // whichever binds first): the time-thinned survivors over budget are
-  // density-thinned FROM THE OLDEST until under — this is what catches the
-  // fast-growth overflow "before items even age" (a heavy loop's items are
-  // all young keep-all; size pressure is the only thing that can bind there).
+  // SIZE-CAP layer — snapper's pass 2 (0i — journald SystemMaxUse for the
+  // budget shape, snapper for the ORDER): the time-thinned survivors over
+  // budget are density-thinned FROM THE OLDEST, but ONLY among items already
+  // past the 48h keep-all FLOOR — byte pressure can never break the keep-all
+  // promise (the P5/P8 fix: a heavy young loop now rides OVER the cap and
+  // reports the conflict, instead of eating its own freshest restore points).
   // Doubt items (corrupt/future `at`) and weightless items (no finite
   // `bytes` — destroying them frees nothing and legacy pre-0i index entries
   // land here) are NEVER size-evicted: keep on doubt, the broom asymmetry.
@@ -150,10 +176,18 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
     let total = 0;
     for (const i of keep) total += weight(i);
     if (total > budgetBytes) {
-      const evictable = keep
+      // Weighted, non-doubt survivors, oldest first (stable: same-ms keeps
+      // append order). The NEWEST of these — whatever its age — anchors
+      // retrievability: the most recent cut ALWAYS survives, so a bin never
+      // self-empties. (When it is young it is floor-protected anyway; the
+      // anchor only bites on an all-old bin.)
+      const weighted = keep
         .filter((i) => Number.isFinite(Number(i && i.at)) && Number(i.at) <= now && weight(i) > 0)
-        .sort((a, b) => Number(a.at) - Number(b.at)); // oldest first (stable: same-ms keeps append order)
-      const newest = evictable[evictable.length - 1]; // the most recent cut ALWAYS survives — a bin never self-empties to zero retrievability
+        .sort((a, b) => Number(a.at) - Number(b.at));
+      const newest = weighted[weighted.length - 1];
+      // THE TIME FLOOR (snapper's min the space pass may not cross, made an
+      // AGE rather than a count): only floor-cleared items are evictable.
+      const evictable = weighted.filter((i) => (now - Number(i.at)) > TIER1_KEEP_ALL_MS);
       const weekOf = (i) => Math.floor(Number(i.at) / WEEK_MS);
       const perWeek = new Map();
       for (const i of evictable) perWeek.set(weekOf(i), (perWeek.get(weekOf(i)) || 0) + 1);
@@ -168,9 +202,10 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
         perWeek.set(weekOf(i), perWeek.get(weekOf(i)) - 1);
         total -= weight(i);
       }
-      // Phase 2 — the cap is a hard promise (journald deletes whole archives
-      // oldest-first when the budget still binds): era protection yields,
-      // oldest goes first, only the newest overall stays untouchable.
+      // Phase 2 — the cap binds as hard as the floor allows (journald deletes
+      // whole archives oldest-first when the budget still binds): era
+      // protection yields, oldest goes first; the retrievability anchor and
+      // everything under the floor stay untouchable.
       for (const i of evictable) {
         if (total <= budgetBytes) break;
         if (i === newest || evicted.has(i)) continue;
@@ -179,11 +214,17 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
       }
       if (evicted.size) {
         for (let k = keep.length - 1; k >= 0; k--) {
-          if (evicted.has(keep[k])) { destroy.push(keep[k]); keep.splice(k, 1); }
+          if (evicted.has(keep[k])) { kill(keep[k], 'size-cap'); keep.splice(k, 1); }
         }
       }
+      // Every PERMITTED eviction done and still over: the cap and the floor
+      // (plus newest/doubt protections) contradict each other. Prometheus
+      // counts bytes it cannot delete and lets a low cap become quietly
+      // unsatisfiable; here the same arithmetic is REPORTED instead — the
+      // bin runs over budget and the caller must say so.
+      if (total > budgetBytes) capConflict = { budgetBytes, keptBytes: total };
     }
   }
 
-  return { keep, destroy };
+  return { keep, destroy, reasons, capConflict };
 }

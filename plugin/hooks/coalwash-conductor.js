@@ -240,6 +240,7 @@ async function handleSessionStart(input) {
       perDay, breakEvenDays, floorUnmeasured,
       hardCeilingTokens: verdict.hardCeilingTokens,
       alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
+      storeTotalBytes: m.totalBytes, // the WHOLE measured store — the bin-retention budget base (P5/P8)
     }, now);
     // Uniform once-per-crossing arming on the band itself — no more
     // reason-based carve for externalize (beta.10's old F1 rule): Stop now
@@ -349,6 +350,7 @@ async function handleStop(input) {
           overCeiling: gv.verdict.over, econLatched: gv.verdict.econLatched,
           perDay: gv.perDay, breakEvenDays: gv.breakEvenDays, floorUnmeasured: gv.floorUnmeasured,
           hardCeilingTokens: gv.verdict.hardCeilingTokens, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
+          storeTotalBytes: m.totalBytes, // same base as SessionStart (P5/P8)
         }, now);
         caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens, session: input && input.session_id });
         proj = caliper.loadState(projectRoot, home); // re-read what we just (maybe) armed

@@ -20,11 +20,18 @@
 //             economics). origin 'wizard-cut'. Still two bins, not three —
 //             the origin tag distinguishes per-cut records from whole-store
 //             images WITHIN the wizard bin.
-// SIZE-CAP ∧ TIME-HORIZON (0i): every sweep below applies BOTH limits,
-// whichever binds first — the horizon (per-bin, above) plus a size budget of
-// BIN_BUDGET_STORE_MULTIPLE x the MEASURED STORE's bytes (never the disk —
-// 0i V2; callers pass `storeBytes` from the session gauge; absent/zero =
-// the cap layer inert, horizon-only, the keep-on-doubt direction).
+// SIZE-CAP ∧ TIME-HORIZON, floor-ordered (0i + the P5/P8 fix): every sweep
+// below applies BOTH limits — the horizon (per-bin, above) plus a size budget
+// of BIN_BUDGET_STORE_MULTIPLE x the MEASURED STORE's bytes (never the disk —
+// 0i V2; callers pass `storeBytes` = the session gauge's storeTotalBytes,
+// the WHOLE measured class-B store: the bin shadows what washes actually cut,
+// which is recall-tier-dominated — the always-loaded slice is the wrong base
+// by the lab's measured ~62x; absent/zero = the cap layer inert, horizon-only,
+// the keep-on-doubt direction). The 48h keep-all floor is untouchable by byte
+// pressure (snapper 2-pass); a bin whose young items alone exceed the cap
+// grows past it and the conflict is REPORTED — in the sweep's return
+// (capConflict, only present when live) and as a cap-conflict line in the
+// death log, never resolved by silently breaking the floor.
 //
 // PULL-ONLY CONTAINMENT: `listBin`/`restoreFromBin` are the ONLY discovery
 // surface, and nothing calls them automatically — a snapshot re-entering the
@@ -43,7 +50,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { txDirFor, ensureSelfIgnore } from './apply.mjs';
-import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE } from './retention.mjs';
+import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
 
 export const FAT_BIN_NAME = 'fat-bin';
 export const STORE_OLD_NAME = 'store.old';
@@ -159,7 +166,7 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
       try { item.bytes = fs.statSync(path.join(dir, item.id)).size; } catch { /* weightless -> never size-evicted */ }
     }
   }
-  const { keep, destroy } = retentionPlan(index, now, { horizonMs, budgetBytes });
+  const { keep, destroy, reasons, capConflict } = retentionPlan(index, now, { horizonMs, budgetBytes });
   const survivors = [...keep];
   const cert = [];
   for (const item of destroy) {
@@ -167,16 +174,37 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
     try { fs.rmSync(p, { force: true }); } catch { /* leftover dust waits for the next pass */ }
     if (!fs.existsSync(p)) {
       const ageDays = Math.round((now - item.at) / 86400000);
-      cert.push(`${new Date(now).toISOString()} destroyed ${item.id} (age ${ageDays}d)`);
+      // name/age/rule — the full certificate this module's header always
+      // promised (the P8 audit finding: the old line carried only id+age
+      // while the id->file mapping died in the SAME operation, leaving a
+      // human unable to say WHAT was destroyed or WHY). The source filename
+      // and the axis that fired now live in the certificate itself, so they
+      // survive the index entry's deletion.
+      const rule = reasons.get(item) || 'horizon';
+      const orig = (typeof item.original === 'string' && item.original) ? item.original : '-';
+      cert.push(`${new Date(now).toISOString()} destroyed ${item.id} (age ${ageDays}d, rule ${rule}) original ${orig}`);
     } else {
       survivors.push(item); // unverifiable death -> never claimed, kept for the next pass
     }
+  }
+  // The unsatisfiable-cap audit line (retention.mjs capConflict): the floor +
+  // retrievability/doubt protections outweigh the byte budget, so the bin is
+  // deliberately over cap this run. Logged here (the bin's own audit trail)
+  // AND surfaced on the sweep's return for the caller's receipt — a config
+  // conflict resolved by silence is the senior-domain failure not to port.
+  if (capConflict) {
+    cert.push(`${new Date(now).toISOString()} cap-conflict kept ${capConflict.keptBytes}B > budget ${capConflict.budgetBytes}B — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor (+ newest/doubt protections) exceeds the cap; bin over budget this run, nothing young destroyed`);
   }
   if (cert.length) {
     try { fs.mkdirSync(dir, { recursive: true }); fs.appendFileSync(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n', 'utf8'); } catch { /* the certificate is a record, not a gate */ }
   }
   saveIndex(dir, survivors);
-  return { destroyed: index.length - survivors.length, kept: survivors.length };
+  // capConflict only present when live: existing callers/tests deepStrictEqual
+  // the two-field shape, and an always-null third field would churn every one
+  // for no information (ponytail: additive-when-present).
+  const out = { destroyed: index.length - survivors.length, kept: survivors.length };
+  if (capConflict) out.capConflict = capConflict;
+  return out;
 }
 
 // storeBytes (0i) -> the bin's size budget: BIN_BUDGET_STORE_MULTIPLE x the

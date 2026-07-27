@@ -136,14 +136,21 @@ test('sweepFatBin: an item past the 30-day fat horizon is destroyed — verified
   const proj = sandbox();
   try {
     const now = Date.now();
-    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', now: now - (HORIZON_MS.fat + 86400000) }); // 31 days old
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', original: 'notes/old.md', now: now - (HORIZON_MS.fat + 86400000) }); // 31 days old
     const r = sweepFatBin(proj, { now });
     assert.deepStrictEqual(r, { destroyed: 1, kept: 0 });
     assert.strictEqual(restoreFromBin(proj, FAT_BIN_NAME, id), null, 'gone');
     assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 0, 'dropped from the index');
     const log = readDeathLog(proj, FAT_BIN_NAME);
     assert.ok(log.includes(id), 'the death certificate names the destroyed id');
-    assert.ok(/age 31d/.test(log), log);
+    // name/age/rule — the full certificate this module's own header always
+    // promised; the AXIS that fired and the SOURCE FILENAME both survive the
+    // index entry's deletion (the lab P8 audit-trail finding).
+    assert.ok(/age 31d, rule horizon\) original notes\/old\.md/.test(log), log);
+    // A legacy item with no recorded original still certifies (placeholder '-').
+    const id2 = recordBinItem(proj, FAT_BIN_NAME, { content: 'anon', now: now - (HORIZON_MS.fat + 86400000) });
+    sweepFatBin(proj, { now });
+    assert.ok(new RegExp(`destroyed ${id2} \\(age 31d, rule horizon\\) original -`).test(readDeathLog(proj, FAT_BIN_NAME)), 'no recorded source degrades to "-", never a crash');
   } finally { clean(proj); }
 });
 
@@ -188,24 +195,56 @@ test('0i: recordBinItem records the item\'s byte weight at birth', () => {
   } finally { clean(proj); }
 });
 
-test('0i: a bin over its store-proportional budget is density-thinned from the OLDEST until under — young keep-all items included ("before items even age"), death-certified', () => {
+test('0i + snapper floor: a bin whose UNDER-FLOOR items alone exceed the cap keeps ALL of them, grows past the cap, and reports the conflict (loud, in-return AND in the log)', () => {
   const proj = sandbox();
   try {
     // Pinned mid-week (~87h past the weekly epoch): wall-clock here flakes for
-    // ~4h after every weekly boundary — weekOf() regroups the 1-4h-old items
-    // across it, shifting WHICH two evict (counts hold, identities don't).
+    // ~4h after every weekly boundary — weekOf() regroups items across it.
     const now = 1750000000000;
-    // Four young items (all inside the 48h keep-all tier), 100 bytes each.
+    // Four young items (all inside the 48h keep-all floor), 100 bytes each.
     const ids = [4, 3, 2, 1].map((h) => recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(100), now: now - h * 3600000 }));
-    // storeBytes 100 -> budget 200 (2x): 400 bytes must thin to <= 200 ->
-    // the two OLDEST die (ids[0] = 4h old, ids[1] = 3h old).
+    // storeBytes 100 -> budget 200 (2x): 400 bytes over a 200 budget, but the
+    // 48h keep-all floor is untouchable by byte pressure (the lab P5 kill,
+    // inverted) -> nothing dies; the unsatisfiable cap is REPORTED.
     const r = sweepFatBin(proj, { now, storeBytes: 100 });
-    assert.deepStrictEqual(r, { destroyed: 2, kept: 2 });
+    assert.deepStrictEqual(r, { destroyed: 0, kept: 4, capConflict: { budgetBytes: 200, keptBytes: 400 } });
     const remaining = listBin(proj, FAT_BIN_NAME).map((i) => i.id);
-    assert.ok(!remaining.includes(ids[0]) && !remaining.includes(ids[1]), 'the two oldest were evicted');
-    assert.ok(remaining.includes(ids[2]) && remaining.includes(ids[3]), 'the newer two survive');
+    for (const id of ids) assert.ok(remaining.includes(id), `${id} survives under the floor`);
     const log = readDeathLog(proj, FAT_BIN_NAME);
-    assert.ok(log.includes(ids[0]) && log.includes(ids[1]), 'size-cap destruction is death-certified like any other');
+    assert.ok(/cap-conflict/.test(log), 'the conflict lands in the audit log too');
+    assert.ok(log.includes('400') && log.includes('200'), 'the audit line names kept vs budget bytes');
+    assert.ok(!/destroyed \S+ \(age/.test(log), 'no death certificate — nothing died');
+  } finally { clean(proj); }
+});
+
+test('P5/P8 end-to-end (own fixture, the lab shape): a 25h-old pre-surgery whole-store image SURVIVES a size-bound sweep; only floor-cleared items die, each certified with rule + original filename', () => {
+  const proj = sandbox();
+  try {
+    const now = 1750000000000; // pinned mid-week (epoch-flake lesson)
+    const DAY = 86400000;
+    // store.old: the wizard bin. One 25h-old whole-store image (the P8
+    // victim's age) + three older per-cut records on distinct days.
+    const image = recordBinItem(proj, STORE_OLD_NAME, { content: 'W'.repeat(300), original: 'STORE-IMAGE.md', origin: 'wizard-cut', now: now - 25 * 3600000 });
+    const old7d = recordBinItem(proj, STORE_OLD_NAME, { content: 'a'.repeat(200), original: 'seven.md', origin: 'wizard-cut', now: now - 7 * DAY });
+    const old5d = recordBinItem(proj, STORE_OLD_NAME, { content: 'b'.repeat(200), original: 'five.md', origin: 'wizard-cut', now: now - 5 * DAY });
+    const old3d = recordBinItem(proj, STORE_OLD_NAME, { content: 'c'.repeat(200), original: 'three.md', origin: 'wizard-cut', now: now - 3 * DAY });
+    // storeBytes 250 -> budget 500; bin holds 900. Size pressure evicts the
+    // floor-cleared OLDEST first (7d -> 700, then 5d -> 500 = under budget,
+    // stop); 3d survives because pressure stopped; the 25h image is under the
+    // floor -> untouchable (the exact kill the lab measured, now impossible).
+    const r = sweepStoreOld(proj, { now, storeBytes: 250 });
+    assert.deepStrictEqual(r, { destroyed: 2, kept: 2 }, 'cap satisfied without touching the floor -> no capConflict field at all');
+    assert.strictEqual(restoreFromBin(proj, STORE_OLD_NAME, image), 'W'.repeat(300), 'the 25h pre-surgery image survives AND round-trips byte-exact');
+    assert.strictEqual(restoreFromBin(proj, STORE_OLD_NAME, old3d), 'c'.repeat(200), 'the newest cut survives (retrievability anchor)');
+    assert.strictEqual(restoreFromBin(proj, STORE_OLD_NAME, old7d), null);
+    assert.strictEqual(restoreFromBin(proj, STORE_OLD_NAME, old5d), null);
+    const log = readDeathLog(proj, STORE_OLD_NAME);
+    // The death certificate carries the AXIS and the SOURCE FILENAME — the
+    // id->file mapping survives destruction inside the certificate itself
+    // (the lab's P8 audit-trail finding: "no filename, no rule").
+    assert.ok(new RegExp(`destroyed ${old7d} \\(age 7d, rule size-cap\\) original seven\\.md`).test(log), log);
+    assert.ok(new RegExp(`destroyed ${old5d} \\(age 5d, rule size-cap\\) original five\\.md`).test(log), log);
+    assert.ok(!log.includes(image), 'the image was never destroyed — no certificate for it');
   } finally { clean(proj); }
 });
 
@@ -223,8 +262,11 @@ test('0i: a legacy (pre-0i) index entry without bytes is stat-weighed at sweep t
   const proj = sandbox();
   try {
     const now = Date.now();
-    const oldId = recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(300), now: now - 7200000 });
-    const newId = recordBinItem(proj, FAT_BIN_NAME, { content: 'y'.repeat(100), now: now - 3600000 });
+    const DAY = 86400000;
+    // Both PAST the 48h floor (size pressure only reaches floor-cleared
+    // items now) and exactly a day apart -> always distinct day slots.
+    const oldId = recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(300), now: now - 4 * DAY });
+    const newId = recordBinItem(proj, FAT_BIN_NAME, { content: 'y'.repeat(100), now: now - 3 * DAY });
     // Strip the bytes fields — the pre-0i index shape.
     const dir = path.join(txDirFor(proj), FAT_BIN_NAME);
     const idx = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).map(({ bytes, ...rest }) => rest);
