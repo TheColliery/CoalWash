@@ -92,11 +92,23 @@ test('a dropped frontmatter key fails; value edits alone do not (the semantic la
   assert.strictEqual(checkFidelity(ORIG, valueEdit).pass, true);
 });
 
-test('deduplicating a REPEATED mention of the same value is legitimate compaction (set semantics)', () => {
+test('SUPERSEDED by MULTISET (board disposition 2): deduplicating repeated mentions now FLAGS, approvable by name', () => {
+  // This test used to assert pass===true under the original set semantics —
+  // "deduplicating a REPEATED mention is legitimate compaction". The board
+  // overturned that premise: the gate cannot tell an information-free repeat
+  // from an information-bearing one, so a mention collapse is REPORTED and
+  // adjudicated (same `${type}:${value}` approval key — no new grammar).
   const orig = 'See [[x]] here and [[x]] there, v1.2.3 twice: v1.2.3, dated 2026-01-01 and 2026-01-01.';
   const next = 'See [[x]] once, v1.2.3 once, dated 2026-01-01.';
   const r = checkFidelity(orig, next);
-  assert.strictEqual(r.pass, true);
+  assert.strictEqual(r.pass, false, 'a mention collapse is a reported drop, not a silent pass');
+  for (const [type, value] of [['wikilink-drop', 'x'], ['version-drop', 'v1.2.3'], ['date-drop', '2026-01-01']]) {
+    const d = r.drops.find((x) => x.type === type && x.value === value);
+    assert.deepStrictEqual(d && d.occurrences, { orig: 2, kept: 1 }, `${type}:${value} carries honest mention counts`);
+  }
+  // and the adjudication channel clears it with the existing key shape
+  const approved = new Set(r.drops.map((d) => `${d.type}:${d.value}`));
+  assert.ok(approved.has('wikilink-drop:x'), 'approval key unchanged');
 });
 
 test('reordering/regrouping (defrag) with full inventory passes', () => {
@@ -576,6 +588,52 @@ test('FENCE SHAPE: a lone-CR (classic-Mac) fence head is UNVERIFIABLE, never "no
   // "I could not tell" is not "no" (the tri-state doctrine).
   assert.strictEqual(readFrontmatter('---\rpinned: true\r---\rcontent').state, 'unverifiable');
   assert.strictEqual(readFrontmatter('--- \rpinned: true\r---\rcontent').state, 'unverifiable', 'trailing space + lone CR');
+});
+
+// ── MULTISET (board disposition 2, 2026-07-27) ─────────────────────────────
+// The old set semantics let occurrence collapse pass silently: `878` stated on
+// three DIFFERENT lines surviving on one reported 0 drops — a token DROPPED,
+// inside the gate's existing promise. Occurrences are counted once per
+// DISTINCT line, so an exact-duplicate-line cut (the broom's own charter:
+// an identical line survives, information-free BY SPEC) stays green by
+// construction while cross-line collapse goes red.
+test('MULTISET: occurrence collapse across DISTINCT lines is a drop (878 x3 -> x1)', () => {
+  const orig = 'run A: pass 878 today\nrun B: baseline 878 noted\nrun C: retest 878 again\n';
+  const next = 'run A: pass 878 today\n';
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false, 'collapsing 3 mentions to 1 must not pass silently');
+  const d = r.drops.find((x) => x.type === 'number-drop' && x.value === '878');
+  assert.ok(d, `expected an occurrence-grade number-drop for 878, got ${JSON.stringify(r.drops)}`);
+  assert.deepStrictEqual(d.occurrences, { orig: 3, kept: 1 }, 'the record names the honest mention counts');
+  // the full-drop shape is unchanged (no occurrences field on a vanished value)
+  const gone = checkFidelity(orig, 'no numbers left\n');
+  assert.ok(gone.drops.some((x) => x.type === 'number-drop' && x.value === '878' && !x.occurrences), 'a vanished value stays the plain full drop');
+});
+
+test('MULTISET controls: an exact-duplicate LINE cut, and a value MOVED between lines, both stay green', () => {
+  // dup-line cut — Quick's charter: an identical line survives
+  const dupOrig = 'alpha [[Target]] 42%\nalpha [[Target]] 42%\nother line\n';
+  const dupNext = 'alpha [[Target]] 42%\nother line\n';
+  const dup = checkFidelity(dupOrig, dupNext);
+  assert.strictEqual(dup.pass, true, `removing an exact duplicate line is information-free BY SPEC: ${JSON.stringify(dup.drops)}`);
+  // a value moved to a differently-worded line keeps its occurrence
+  const move = checkFidelity('the run scored 64.6% on retry\n', '64.6% (retry score)\n');
+  assert.strictEqual(move.pass, true, `a moved value is not an occurrence drop: ${JSON.stringify(move.drops)}`);
+  // an md-link restyled to a bare link is ONE occurrence on both sides (the
+  // extractor overlap must not double-count `[t](url)` as link+bare)
+  const restyle = checkFidelity('see [docs](https://example.com/a) here\n', 'see https://example.com/a here\n');
+  assert.strictEqual(restyle.pass, true, `a link restyle must not double-count: ${JSON.stringify(restyle.drops)}`);
+});
+
+test('MULTISET spans the single-line classes: a wikilink mentioned on two lines surviving on one is a drop', () => {
+  const orig = 'see [[Alpha]] here\nand [[Alpha]] again elsewhere\n';
+  const next = 'see [[Alpha]] here\n';
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false);
+  const d = r.drops.find((x) => x.type === 'wikilink-drop' && x.value === 'Alpha');
+  assert.deepStrictEqual(d && d.occurrences, { orig: 2, kept: 1 });
+  // approval key stays `${type}:${value}` — the wizard/RE-TIER channels need
+  // no new grammar (an occurrence drop is approvable under the same name)
 });
 
 test('FENCE SHAPE controls: what must NOT become frontmatter (no over-refusal)', () => {

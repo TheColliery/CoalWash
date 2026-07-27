@@ -1,6 +1,16 @@
 // fidelity-gate.mjs — THE load-bearing module: the mechanical, deterministic
-// floor of the zero-fact-loss guarantee (blueprint §14.8, proven live: this
-// exact diff caught 2 silent link-drops + 1 self-inventory undercount).
+// floor of the fidelity claim (blueprint §14.8, proven live: this exact diff
+// caught 2 silent link-drops + 1 self-inventory undercount).
+//
+// WHAT THE GATE PROVES: every structured token that went in came out — at
+// VALUE grain (a vanished value is a drop) and at MENTION grain (a value
+// surviving on fewer distinct lines than it occupied is a drop; multiset,
+// board disposition 2 2026-07-27). WHAT IT CANNOT SEE: surviving values
+// TRADING PLACES — `pass 878 / fail 0` rewritten as `pass 0 / fail 878`
+// reports 0 drops, because a positionless compare has no notion of which
+// surviving token was bound to which. Re-pairing/value-swaps are the SEMANTIC
+// layer's charter (references/method.md §4's outsider จี้), never this
+// gate's — so do not skip the human read on a wash because "the gate passed".
 //
 // Contract: diff orig-vs-new inventories of STRUCTURED tokens — [[wikilinks]]
 // (keyed by TARGET, so a display-text edit is not a drop), dates (canonicalized
@@ -15,9 +25,14 @@
 // integers of 2+ digits — a lone digit is excluded as prose noise;
 // dates/versions/links are masked out first so their digits stay the more
 // precise category's job, not double-counted here). ANY drop = FAIL
-// with the exact list. Set semantics (distinct values): deduplicating a
-// REPEATED mention of one value is legitimate compaction; losing a VALUE
-// entirely is a drop.
+// with the exact list. Multiset-over-distinct-lines semantics (board
+// disposition 2 — supersedes the original "set semantics" paragraph): losing
+// a VALUE entirely is a drop, and a value surviving on FEWER DISTINCT LINES
+// than it occupied is a drop too (occurrence collapse — `878`x3 -> x1 passed
+// the old set diff silently). Removing an EXACT-duplicate line stays free BY
+// CONSTRUCTION: occurrences are counted once per distinct line, which is the
+// mechanical broom's own dup-cut spec (an identical line survives, so the
+// removal is information-free).
 //
 // Class 9 — number-precision (beta.12, twice-justified: M29 "exact 44,192
 // survives only as rounded 44k" + M12 "exact 64.6%" -> ~65%): a dropped exact
@@ -186,6 +201,17 @@ function matchSet(text, re, group = 0) {
   return out;
 }
 
+// Every OCCURRENCE, in order (the multiset layer's primitive; matchSet above
+// stays the set layer's). One extraction keying shared by both layers — two
+// implementations of one keying would be the twin-drift shape (R2/R3).
+function matchList(text, re, group = 0) {
+  const out = [];
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) out.push(m[group]);
+  return out;
+}
+
 // Blank out every match of `re` (same-length spaces, so nothing merges across
 // the gap) — used to remove already-precisely-tracked spans (dates/versions/
 // links) from the text BEFORE the generic number scan, so their digits are not
@@ -206,15 +232,74 @@ function maskOut(text, res) {
 // "43%" registers as itself, not ALSO as a redundant bare "43"; "0.92" is not
 // ALSO a redundant bare "92". Order: magnitude (~Nk) > percent > ratio >
 // decimal > bare integer (2+ digits only — a lone digit is prose noise).
-function numberTokens(text) {
+// LIST form (every occurrence) — the ONE scan both layers project from:
+// `numberTokens` (set) and the multiset layer's counts.
+function numberScanList(text) {
   let working = maskOut(text, [ISO_DATE_RE, DMY_DATE_RE, VERSION_RE, V_SHORT_VERSION_RE, MDLINK_DEST_RE, AUTOLINK_RE, BAREURL_RE]);
-  const out = new Set();
+  const out = [];
   // Comma-grouped first (most specific), keyed comma-less — see COMMA_NUM_RE.
-  for (const v of matchSet(working, COMMA_NUM_RE, 0)) out.add(v.replace(/,/g, ''));
+  for (const v of matchList(working, COMMA_NUM_RE, 0)) out.push(v.replace(/,/g, ''));
   working = maskOut(working, [COMMA_NUM_RE]);
   for (const re of [MAGNITUDE_RE, PERCENT_RE, RATIO_RE, DECIMAL_RE, INTEGER_RE]) {
-    for (const v of matchSet(working, re, 0)) out.add(v);
+    out.push(...matchList(working, re, 0));
     working = maskOut(working, [re]);
+  }
+  return out;
+}
+function numberTokens(text) {
+  return new Set(numberScanList(text));
+}
+
+// Per-class OCCURRENCE lists — the multiset layer's extraction, sharing every
+// regex and every keying rule (wikilink target-only, date canonicalization,
+// comma-less number keys, quoted-text keys) with the set inventory below.
+// Overlapping extractors are CHAINED WITH MASKING here (versions: whole-run
+// before v-short; links: md-dest before autolink before bare) because one
+// physical token matched by two patterns must count ONCE — a set dedups that
+// for free, a count does not (an md-link restyled to a bare link would
+// otherwise read 2 -> 1 = a false occurrence drop on a legitimate restyle).
+// Set-projection is unchanged: masking removes only spans the earlier pattern
+// already claimed, so new Set(list) equals the old union-of-matchSets.
+function tokenLists(s) {
+  const versions = matchList(s, VERSION_RE, 0);
+  const vMasked = maskOut(s, [VERSION_RE]);
+  versions.push(...matchList(vMasked, V_SHORT_VERSION_RE, 0));
+  const links = matchList(s, MDLINK_DEST_RE, 1);
+  let lMasked = maskOut(s, [MDLINK_DEST_RE]);
+  links.push(...matchList(lMasked, AUTOLINK_RE, 1));
+  lMasked = maskOut(lMasked, [AUTOLINK_RE]);
+  links.push(...matchList(lMasked, BAREURL_RE, 0));
+  return {
+    wikilinks: matchList(s, WIKILINK_RE, 1).map((v) => v.split('|')[0].trim()),
+    dates: [...matchList(s, ISO_DATE_RE, 0), ...matchList(s, DMY_DATE_RE, 0)].map(canonDate),
+    versions,
+    links,
+    codespans: matchList(s, CODESPAN_RE, 1),
+    quotes: [...matchList(s, CURLY_QUOTE_RE, 1), ...matchList(s, STRAIGHT_QUOTE_RE, 1)],
+    numbers: numberScanList(s),
+  };
+}
+
+// The multiset layer's text: DISTINCT lines only, first-occurrence order.
+// Counting occurrences per distinct line is what makes an exact-duplicate-line
+// cut (the broom's own charter: an identical line survives, information-free
+// BY SPEC) free BY CONSTRUCTION, while a value collapsing across DIFFERENT
+// lines is a genuine occurrence drop. Only the single-line token classes are
+// counted this way — the block-level classes (fencedLines, frontmatter) are
+// excluded because deduplicating lines would corrupt their parsers (two
+// identical ``` lines are an opener AND a closer).
+function distinctLineText(text) {
+  const seen = new Set();
+  for (const line of String(text).split(/\r?\n/)) seen.add(line);
+  return [...seen].join('\n');
+}
+function occurrenceCounts(text) {
+  const lists = tokenLists(distinctLineText(text));
+  const out = {};
+  for (const [cls, list] of Object.entries(lists)) {
+    const m = new Map();
+    for (const v of list) m.set(v, (m.get(v) || 0) + 1);
+    out[cls] = m;
   }
   return out;
 }
@@ -443,29 +528,26 @@ export function frontmatterKeys(text) {
   return keys;
 }
 
-// Extract the full structured-token inventory of a text.
+// Extract the full structured-token inventory of a text — PROJECTED from the
+// same tokenLists extraction the multiset layer counts. ONE extraction, two
+// views (set here, occurrence counts there): a keying rule (wikilink
+// target-only, date canonicalization, comma-less number keys) lives in
+// tokenLists and cannot diverge between the layers — a second extraction site
+// would be the twin-drift shape (R2/R3), and a sync comment is not a guard.
+// The masked chaining inside tokenLists is set-projection-neutral (its header
+// says why), so this projection equals the old union-of-matchSets.
 export function inventory(text) {
   const s = String(text);
-  // Wikilinks key on the TARGET only ([[Target|Display]] -> Target): editing the
-  // display text is not a fact drop, so it must not fail the gate.
-  const wikilinks = new Set();
-  for (const v of matchSet(s, WIKILINK_RE, 1)) wikilinks.add(v.split('|')[0].trim());
-  const dates = new Set([...matchSet(s, ISO_DATE_RE), ...matchSet(s, DMY_DATE_RE)].map(canonDate));
-  const links = new Set([
-    ...matchSet(s, MDLINK_DEST_RE, 1),
-    ...matchSet(s, AUTOLINK_RE, 1),
-    ...matchSet(s, BAREURL_RE, 0),
-  ]);
-  const quotes = new Set([...matchSet(s, CURLY_QUOTE_RE, 1), ...matchSet(s, STRAIGHT_QUOTE_RE, 1)]);
+  const lists = tokenLists(s);
   return {
-    wikilinks,
-    dates,
-    versions: new Set([...matchSet(s, VERSION_RE), ...matchSet(s, V_SHORT_VERSION_RE)]),
-    links,
+    wikilinks: new Set(lists.wikilinks),
+    dates: new Set(lists.dates),
+    versions: new Set(lists.versions),
+    links: new Set(lists.links),
     frontmatter: frontmatterKeys(s),
-    codespans: matchSet(s, CODESPAN_RE, 1),
-    quotes,
-    numbers: numberTokens(s),
+    codespans: new Set(lists.codespans),
+    quotes: new Set(lists.quotes),
+    numbers: new Set(lists.numbers),
     fencedLines: fencedLines(s),
   };
 }
@@ -525,6 +607,42 @@ export function checkFidelity(origText, newText) {
     const survivor = roundedSurvivor(v, ni.numbers);
     drops.push(survivor ? { type: 'number-precision', value: v, survivor } : { type: 'number-drop', value: v });
   }
+  // ── THE MULTISET LAYER (board disposition 2, 2026-07-27) ──────────────────
+  // A value that SURVIVES but on fewer DISTINCT lines than it occupied is a
+  // reported drop too: `878` stated on 3 lines surviving on 1 passed the old
+  // set diff silently — a token dropped inside the gate's existing promise.
+  // The entry reuses the SAME type and therefore the SAME approval key
+  // (`number-drop:878`) — the wizard/RE-TIER channels need no new grammar,
+  // and approving a full drop of a value also approves its occurrence drop
+  // (strictly fewer bytes lost than approved = the safe direction). Counted
+  // once per distinct line, so the broom's exact-duplicate-line cut is free
+  // BY CONSTRUCTION; emitted only when the value survives on BOTH sides
+  // (kept > 0) — a vanished value is the set layer's plain full drop above.
+  {
+    const oc = occurrenceCounts(orig);
+    const nc = occurrenceCounts(next);
+    const occDrop = (cls, type) => {
+      for (const [v, co] of oc[cls]) {
+        if (co < 2) continue; // one mention cannot collapse
+        const ck = nc[cls].get(v) || 0;
+        // kept>0 only: a vanished value is the set layer's full drop above.
+        // The set-membership guard covers the one edge where the deduped text
+        // and the full text can disagree (a multi-line md-link whose second
+        // half sat on a duplicated line) — conservative-miss, never a double
+        // or contradictory entry.
+        if (ck > 0 && ck < co && oi[cls].has(v) && ni[cls].has(v)) {
+          drops.push({ type, value: v, occurrences: { orig: co, kept: ck } });
+        }
+      }
+    };
+    occDrop('wikilinks', 'wikilink-drop');
+    occDrop('dates', 'date-drop');
+    occDrop('versions', 'version-drop');
+    occDrop('links', 'link-drop');
+    occDrop('codespans', 'codespan-drop');
+    occDrop('quotes', 'quote-drop');
+    occDrop('numbers', 'number-drop');
+  }
   // Class 10 — evidence anchors: an orig evidence token near a proof-marker
   // must not vanish (set semantics: moved elsewhere = kept) while its marker
   // still stands in the new text. Marker gone too = a whole-claim cut, which
@@ -562,21 +680,25 @@ export function checkFidelity(origText, newText) {
   const midBom = String.fromCharCode(0xfeff);
   if (next.slice(1).includes(midBom) && !orig.slice(1).includes(midBom)) drops.push({ type: 'bom-introduced', value: 'U+FEFF mid-string (zero-width no-break space)' });
 
+  // counts report DISTINCT VALUES (orig/kept) — an occurrence-grade entry
+  // (value still present, fewer mentions) must not subtract from `kept`, so
+  // the filter excludes entries carrying `occurrences`.
+  const fullDrops = (...types) => drops.filter((d) => types.includes(d.type) && !d.occurrences).length;
   return {
     pass: drops.length === 0,
     drops,
     warnings,
     counts: {
-      wikilinks: { orig: oi.wikilinks.size, kept: oi.wikilinks.size - drops.filter((d) => d.type === 'wikilink-drop').length },
-      dates: { orig: oi.dates.size, kept: oi.dates.size - drops.filter((d) => d.type === 'date-drop').length },
-      versions: { orig: oi.versions.size, kept: oi.versions.size - drops.filter((d) => d.type === 'version-drop').length },
-      links: { orig: oi.links.size, kept: oi.links.size - drops.filter((d) => d.type === 'link-drop').length },
-      frontmatter: { orig: oi.frontmatter.size, kept: oi.frontmatter.size - drops.filter((d) => d.type === 'frontmatter-key-drop').length },
-      codespans: { orig: oi.codespans.size, kept: oi.codespans.size - drops.filter((d) => d.type === 'codespan-drop').length },
-      quotes: { orig: oi.quotes.size, kept: oi.quotes.size - drops.filter((d) => d.type === 'quote-drop').length },
-      numbers: { orig: oi.numbers.size, kept: oi.numbers.size - drops.filter((d) => d.type === 'number-drop' || d.type === 'number-precision').length },
-      fencedLines: { orig: oi.fencedLines.size, kept: oi.fencedLines.size - drops.filter((d) => d.type === 'fenced-line-drop').length },
-      evidenceAnchors: { orig: evOrig.size, kept: evOrig.size - drops.filter((d) => d.type === 'evidence-anchor-drop').length },
+      wikilinks: { orig: oi.wikilinks.size, kept: oi.wikilinks.size - fullDrops('wikilink-drop') },
+      dates: { orig: oi.dates.size, kept: oi.dates.size - fullDrops('date-drop') },
+      versions: { orig: oi.versions.size, kept: oi.versions.size - fullDrops('version-drop') },
+      links: { orig: oi.links.size, kept: oi.links.size - fullDrops('link-drop') },
+      frontmatter: { orig: oi.frontmatter.size, kept: oi.frontmatter.size - fullDrops('frontmatter-key-drop') },
+      codespans: { orig: oi.codespans.size, kept: oi.codespans.size - fullDrops('codespan-drop') },
+      quotes: { orig: oi.quotes.size, kept: oi.quotes.size - fullDrops('quote-drop') },
+      numbers: { orig: oi.numbers.size, kept: oi.numbers.size - fullDrops('number-drop', 'number-precision') },
+      fencedLines: { orig: oi.fencedLines.size, kept: oi.fencedLines.size - fullDrops('fenced-line-drop') },
+      evidenceAnchors: { orig: evOrig.size, kept: evOrig.size - fullDrops('evidence-anchor-drop') },
     },
   };
 }

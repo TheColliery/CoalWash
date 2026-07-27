@@ -707,7 +707,7 @@ export function applyPlan(plan, opts = {}) {
       if (a.type !== 'rewrite') continue;
       const orig = typeof a.expectedOrig === 'string' ? a.expectedOrig : a.origBuf.toString('utf8');
       for (const d of checkFidelity(orig, a.content).drops) {
-        if (!approvedDrops.has(`${d.type}:${d.value}`)) unapproved.push(`${a.phys} — ${d.type}: ${d.value}${d.survivor ? ` (survives only as ${d.survivor})` : ''}`);
+        if (!approvedDrops.has(`${d.type}:${d.value}`)) unapproved.push(`${a.phys} — ${d.type}: ${d.value}${d.survivor ? ` (survives only as ${d.survivor})` : ''}${d.occurrences ? ` (${d.occurrences.orig} mention(s) -> ${d.occurrences.kept}; the value itself survives)` : ''}`);
       }
     }
     // H3: a DELETE (or a merge = delete-src + rewrite-dst) also drops the removed
