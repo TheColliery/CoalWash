@@ -288,7 +288,11 @@ test('PIN + FENCE SHAPE: trailing space/tab after the opening --- must NOT defea
 test('PIN + FENCE SHAPE (round 3): an invisible NON-[ \t] byte after the opening --- must NOT defeat pinned:true', () => {
   const { proj, store } = sandbox();
   try {
-    for (const [name, code] of [['NBSP', 0x00a0], ['ZWSP', 0x200b], ['FF', 0x000c]]) {
+    // NBSP/ZWSP/FF = the round-3 report; HANGUL FILLER + BRAILLE BLANK = two of
+    // station 3's ten, which are NOT White_Space/Cf/Cc and so walked through
+    // the round-3 fix. Both classes now refuse for the same reason: 'none' is
+    // earned by a printable-ASCII glyph, never fallen into.
+    for (const [name, code] of [['NBSP', 0x00a0], ['ZWSP', 0x200b], ['FF', 0x000c], ['HANGUL FILLER', 0x3164], ['BRAILLE BLANK', 0x2800]]) {
       const opener = `---${String.fromCharCode(code)}
 `;
       const f = path.join(store, `fence3-${name}-pinned.md`);
@@ -1547,7 +1551,14 @@ test('every production recordBinItem call passes the run\'s shared `now` — the
   const src = fs.readFileSync(path.join(libDir, 'apply.mjs'), 'utf8');
   const calls = src.split(/\r?\n/).filter((l) => /recordBinItem\(/.test(l) && !/^\s*import\b/.test(l));
   assert.strictEqual(calls.length, 2, `expected both bank sites (applyPlan commit + recoverDangling create-undo), found ${calls.length}`);
-  for (const l of calls) assert.match(l, /\bnow\b/, `a recordBinItem call banking without the run's shared now: ${l.trim()}`);
+  for (const l of calls) {
+    // Match the shorthand PROPERTY `now` in the options object, which is the
+    // defect's own vocabulary. A bare /\bnow\b/ was too weak: it is satisfied
+    // by `Date.now()` — the very fallback this test forbids — and by the word
+    // appearing in a trailing comment.
+    const code = l.replace(/\/\/.*$/, '');
+    assert.match(code, /[,{]\s*now\s*[,}]/, `a recordBinItem call banking without the run's shared now: ${l.trim()}`);
+  }
 });
 
 test('#57 lock: an exclusive-create "win" whose re-read shows a FOREIGN token (a broken-O_EXCL lost race — the SVN BDB-on-NFS shape) DEFERS instead of proceeding', () => {

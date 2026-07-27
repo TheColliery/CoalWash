@@ -618,6 +618,19 @@ test('FENCE SHAPE: any invisible NON-[ \t] byte after the opening --- is UNVERIF
     ['SOFT HYPHEN U+00AD', 0x00ad],
     ['WORD JOINER U+2060', 0x2060],
     ['SOH U+0001', 0x0001],
+    // ROUND 4 - station 3's ten, and NOT ONE of them is White_Space, Cf or
+    // Cc. That is the point: the round-3 fix was a fourth ENUMERATION, and
+    // these walked through it exactly as NBSP walked through `[ @BS@t]`.
+    ['COMBINING GRAPHEME JOINER U+034F', 0x034f],
+    ['HANGUL FILLER U+3164', 0x3164],
+    ['HANGUL CHOSEONG FILLER U+115F', 0x115f],
+    ['HANGUL JUNGSEONG FILLER U+1160', 0x1160],
+    ['VARIATION SELECTOR-16 U+FE0F', 0xfe0f],
+    ['KHMER VOWEL INHERENT AQ U+17B4', 0x17b4],
+    ['MONGOLIAN FREE VARIATION SELECTOR ONE U+180B', 0x180b],
+    ['HALFWIDTH HANGUL FILLER U+FFA0', 0xffa0],
+    ['BRAILLE PATTERN BLANK U+2800', 0x2800],
+    ['COMBINING TILDE U+0303', 0x0303],
   ]) {
     const b = ch(c);
     assert.strictEqual(
@@ -702,4 +715,42 @@ test('FENCE SHAPE controls: what must NOT become frontmatter (no over-refusal)',
   // the third consequence: an unclosed fence whose OPENER carries trailing
   // whitespace is still "opens but never closes" = unverifiable, not 'none'
   assert.strictEqual(readFrontmatter('--- \nkey: v\nnever closes').state, 'unverifiable');
+});
+// ROUND 4 - THE RULING: the defect was never the list, it was the POLARITY.
+// `'none'` is the answer that ends in a DELETE, and it was the FALLTHROUGH, so
+// every codepoint nobody had classified landed on the dangerous side by
+// default - which is why one line took four repairs. `'none'` must now be
+// EARNED by proving a visible glyph; everything else refuses. This test states
+// the contract as a SWEEP rather than a list, because a list is exactly the
+// thing that has failed four times.
+test('FENCE POLARITY: no codepoint above ASCII can reach the deleting answer (BMP sweep, not an enumeration)', () => {
+  const leaks = [];
+  for (let cp = 0xa0; cp <= 0xffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue; // lone surrogate is not a character
+    if (readFrontmatter('---' + String.fromCharCode(cp) + '\npinned: true\n---\nx').state === 'none') {
+      leaks.push('U+' + cp.toString(16).toUpperCase().padStart(4, '0'));
+      if (leaks.length > 12) break;
+    }
+  }
+  assert.deepStrictEqual(leaks, [], `a fence tail must EARN 'none'; these reached it: ${leaks.join(' ')}`);
+  // an astral codepoint arrives as two surrogate code units, neither of which
+  // is printable ASCII, so it takes the refusing branch by the same rule
+  assert.strictEqual(readFrontmatter('---\u{1F600}\npinned: true\n---\nx').state, 'unverifiable', 'astral tail refuses');
+});
+
+// THE PRICE OF THE POLARITY, PINNED SO IT IS A DECISION AND NOT A SURPRISE:
+// a tail of legitimately VISIBLE non-ASCII prose is now refused too. That is a
+// YIELD loss (the file is not washed), never a SAFETY loss (it is not deleted
+// either), and it is the honest cost of an allowlist whose every member can be
+// pointed at. Do not 'fix' this by widening to a Unicode category: U+3164
+// HANGUL FILLER is `Lo`, exactly like ordinary Hangul, and renders as nothing.
+test('FENCE POLARITY residual: a VISIBLE non-ASCII tail is refused as well — yield lost, safety kept', () => {
+  assert.strictEqual(readFrontmatter('---\u0E01\nkey: v\n---\nx').state, 'unverifiable', 'Thai tail: refused, not washed');
+  assert.strictEqual(readFrontmatter('---\u6F22\nkey: v\n---\nx').state, 'unverifiable', 'CJK tail: refused, not washed');
+  // and the ASCII controls that MUST stay washable are unaffected
+  assert.strictEqual(readFrontmatter('--- a/file.txt\n+++ b\nctx').state, 'none', 'pasted diff header stays washable');
+  assert.strictEqual(readFrontmatter('----\nprose').state, 'none', 'thematic break stays washable');
+  assert.strictEqual(readFrontmatter('Title\n---\nbody').state, 'none', 'setext heading stays washable');
+  assert.strictEqual(readFrontmatter('\n---\npinned: true\n---\nx').state, 'none', 'leading blank line stays washable');
+  assert.strictEqual(readFrontmatter('--- some prose here\nmore').state, 'none', 'ASCII prose tail stays washable');
 });

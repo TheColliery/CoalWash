@@ -467,24 +467,36 @@ export function evidenceAnchors(text) {
 // offset 0, so only the head is scanned.
 const FM_HEAD_SCAN = 64;
 // THE FENCE-LINE TAIL — what may follow `---` on the opening fence line.
-// This is a TRI-STATE over the tail, never an allow-list of bytes, because the
-// allow-list is precisely what reopened this hole twice: the original `` grew
-// to `[ \t]` (N1), and NBSP / U+3000 / VT / FF / ZWSP walked straight back
-// through. `\s` is not the fix either — it MISSES U+200B (ZWSP is Cf, not
-// White_Space) and it would swallow the line terminator.
-//   FM_TAIL_FENCE     tail is empty or ASCII horizontal whitespace -> a fence.
-//                     The ordinary editor artifact: two trailing spaces are a
-//                     Markdown hard break, so trim-on-save is commonly off.
-//   FM_TAIL_INVISIBLE tail has NO VISIBLE GLYPH (White_Space | Cf format |
-//                     Cc control) -> the line is indistinguishable from a bare
-//                     fence to the human who wrote it, and this tooling cannot
-//                     say what produced it: "I could not tell" (unverifiable).
-//   neither           tail carries visible content (`--- a/file.txt`, `----`)
-//                     -> genuinely not frontmatter, and must stay washable.
-// CR and LF cannot reach either test — both call sites capture the tail with
-// [^\r\n]* — so Cc carrying them is harmless here.
-const FM_TAIL_FENCE = /^[ \t]*$/;
-const FM_TAIL_INVISIBLE = /^[\p{White_Space}\p{Cf}\p{Cc}]+$/u;
+//
+// THIS LINE HAS NOW BEEN REPAIRED FOUR TIMES, and the first three failed the
+// SAME way: each ENUMERATED what was allowed to be ignored (`` -> `[ \t]` ->
+// White_Space|Cf|Cc), which left `'none'` — the answer that ends in a DELETE —
+// as the FALLTHROUGH. Any codepoint nobody had classified therefore landed on
+// the destroying side automatically. Station 3 walked ten more through the
+// third list (U+3164 HANGUL FILLER, U+2800 BRAILLE PATTERN BLANK, U+FE0F
+// VS-16, U+034F CGJ, combining marks…), and not one of them is White_Space,
+// Cf or Cc.
+//
+// SO THE FIX IS THE POLARITY, NOT A LONGER LIST. `'none'` must be EARNED: a
+// tail yields it only by containing a printable-ASCII glyph. Everything else —
+// invisible, unassigned, non-ASCII, or a codepoint no standard has classified
+// yet — takes the refusing branch. That is a property of the 94-member
+// ALLOWLIST below, checkable by reading it; it is NOT a claim about Unicode
+// coverage. The previous version of this comment made exactly that claim
+// ("an unlisted invisible byte cannot exist") and it was false within a day.
+//
+// REJECTED, recorded so nobody re-derives it: `\p{Default_Ignorable_Code_Point}`
+// is the closest real property and covers only 8 of station 3's 10 (U+2800 and
+// combining marks are not default-ignorable) — a fifth list with a residual.
+// `\p{Mn}` / `\p{Lo}` swallow real letters (U+3164 is `Lo`, exactly like
+// ordinary Hangul, and renders as nothing).
+//
+// THE PRICE, NAMED AND PINNED BY A TEST: a tail of legitimately VISIBLE
+// non-ASCII prose is refused too. That is a YIELD loss (the file is not
+// washed), never a SAFETY loss (it is not deleted either) — the deliberate
+// direction for a primitive whose `'none'` authorises destruction.
+const FM_TAIL_FENCE = /^[ \t]*$/;      // empty or the ordinary editor artifact = a fence
+const FM_TAIL_VISIBLE = /[\x21-\x7E]/; // printable ASCII, space and tab excluded
 export function readFrontmatter(text) {
   let s = String(text);
   if (s.charCodeAt(0) === 0xfeff) s = s.slice(1); // UTF-8 BOM: legal signature (exactly one), parse on
@@ -497,15 +509,13 @@ export function readFrontmatter(text) {
   if (head.includes('\u0000') || head.includes('\uFFFD')) {
     return { state: 'unverifiable', block: '', why: 'the head is not decodable UTF-8 text (an encoding preamble — UTF-16/32 BOM, NUL-interleaved, or binary)' };
   }
-  // THE OPENING FENCE — fixed THREE TIMES, and the third fix is the one that
-  // changed the AXIS. `` -> `[ \t]` (N1) closed the reported byte and left the
-  // hole open for every byte nobody had reported yet: station 3 then measured
-  // NBSP, U+3000, VT, FF and ZWSP all still reading state 'none' = "genuinely
-  // no frontmatter", which is what switches off the pin refusal on delete, the
-  // pin refusal on the unattended rewrite, and the unclosed-fence refusal, all
-  // from one invisible byte. Enumerating bytes was the defect; the tail
-  // classification above (FM_TAIL_*) is the fix, and it is stated as the
-  // COMPLEMENT of visible content so an unlisted invisible byte cannot exist.
+  // THE OPENING FENCE — fixed FOUR TIMES. Each repair before this one closed
+  // the reported characters and left the hole open for the ones nobody had
+  // reported: one invisible byte in the tail switches off the pin refusal on
+  // delete, the pin refusal on the unattended rewrite, and the unclosed-fence
+  // refusal, all at once. The defect was never WHICH bytes were listed — it
+  // was that `'none'` (which authorises a delete) was the FALLTHROUGH. The
+  // tail classification above inverts that: see FM_TAIL_VISIBLE.
   //
   // The proof needed no external standard, which is why it is trustworthy: the
   // SAME byte on the CLOSING fence already answered 'unverifiable'. A primitive
@@ -527,12 +537,11 @@ export function readFrontmatter(text) {
   const cr = open ? null : /^---([^\r\n]*)\r/.exec(s);
   const tail = open ? open[1] : (cr ? cr[1] : null);
   if (tail !== null && !FM_TAIL_FENCE.test(tail)) {
-    // Prose that merely STARTS with three dashes (`--- a/file.txt`, `----`) is
-    // not fence-shaped at all — over-refusing it would make ordinary files
-    // unwashable, which is the R4 lesson (a shape-refusal must not swallow
-    // legal input). Only a tail that a reader cannot SEE is the ambiguous one.
-    if (!FM_TAIL_INVISIBLE.test(tail)) return { state: 'none', block: '' };
-    return { state: 'unverifiable', block: '', why: 'the opening fence line carries an invisible non-whitespace character after --- (no visible glyph) — fence-shaped, but this tooling cannot say whether it is frontmatter' };
+    // EARN 'none', never fall through to it: prose that merely starts with
+    // three dashes (`--- a/file.txt`, `----`) proves itself by carrying a
+    // printable-ASCII glyph, and stays washable. Anything else is refused.
+    if (FM_TAIL_VISIBLE.test(tail)) return { state: 'none', block: '' };
+    return { state: 'unverifiable', block: '', why: 'the opening fence line carries no printable-ASCII glyph after --- — fence-shaped, and this tooling cannot say whether it is frontmatter' };
   }
   if (cr) {
     return { state: 'unverifiable', block: '', why: 'the opening fence line ends in a bare CR (classic-Mac line endings) — a line discipline this tooling cannot faithfully parse' };
