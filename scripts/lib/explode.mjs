@@ -706,8 +706,13 @@ export function reduceFile(src, opts = {}) {
       const cut = cutSet.has(unitType(obj, typeField));
       if (!dryRun) {
         fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
-        tmpPath = `${outPath}.${process.pid}.tmp`;
-        out = fs.openSync(tmpPath, 'wx'); // per-pid temp, O_EXCL: a fresh inode, or EEXIST-fail-closed — never write THROUGH a pre-existing alias (hardlink/symlink) planted at tmpPath; the final path is never opened 'w'
+        // OWNERSHIP, NOT DETECTION: `tmpPath` is the finally's reap target, so it is assigned only
+        // AFTER the exclusive create RETURNS. Assigning it first made a non-null `tmpPath` mean
+        // "a temp path was computed"; it now means "we created this file, so we may delete it".
+        // See the reap comment in the finally for the measured defect this closes.
+        const candidate = `${outPath}.${process.pid}.tmp`;
+        out = fs.openSync(candidate, 'wx'); // per-pid temp, O_EXCL: a fresh inode, or EEXIST-fail-closed — never write THROUGH a pre-existing alias (hardlink/symlink) planted at tmpPath; the final path is never opened 'w'
+        tmpPath = candidate; // created by US → the reaper owns it
         if (!cut) writeFull(out, buf); // kept → byte-exact whole file; cut → empty (writeFull loops short writes)
         fs.fsyncSync(out);
         fs.closeSync(out); out = null;
@@ -819,8 +824,12 @@ export function reduceFile(src, opts = {}) {
     if (!dryRun) {
       if (offset === 0) {
         fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
-        tmpPath = `${outPath}.${process.pid}.tmp`;
-        out = fs.openSync(tmpPath, 'wx'); // O_EXCL fresh inode (source-sacred by construction — same class as the json-single temp + the manifest); wave-1 rename breaks any hardlink at outPath before a resume ever appends
+        // OWNERSHIP-AFTER-CREATE (same rule as the json-single site above): the reap target is set
+        // only once the exclusive create has succeeded, so the finally can never unlink a file the
+        // engine did not make.
+        const candidate = `${outPath}.${process.pid}.tmp`;
+        out = fs.openSync(candidate, 'wx'); // O_EXCL fresh inode (source-sacred by construction — same class as the json-single temp + the manifest); wave-1 rename breaks any hardlink at outPath before a resume ever appends
+        tmpPath = candidate; // created by US → the reaper owns it
         if (struct.bomLen) { writeFull(out, readRange(fd, 0, struct.bomLen)); outLen = struct.bomLen; } // BOM is structural — always preserved (writeFull loops short writes)
       } else {
         // Resume: append to the published outPath. The `committed === curOutSize` guard above makes this
@@ -980,8 +989,16 @@ export function reduceFile(src, opts = {}) {
     // happy path both are already null (fd closed, temp renamed) → this is inert. #7: a temp orphaned
     // between write and rename is reaped here. (A DIFFERENT-pid stale temp is deliberately NOT swept —
     // it may belong to a live process; the CoalWash lock prevents concurrent same-outPath runs.)
+    //
+    // THE REAP TARGET IS AN OWNERSHIP CLAIM, NOT A COMPUTED PATH (lab-grad2 N4, measured). This
+    // comment used to read "already renamed away, or never created" — a TWO-case comment for a
+    // THREE-case reality, and the third case is CREATED BY SOMEBODY ELSE. `tmpPath` was assigned
+    // before the O_EXCL open, so a user file planted at `<outPath>.<pid>.tmp` made the open throw
+    // EEXIST (the guard working) and then this line DELETED that file: never created by us, never
+    // snapshotted, no bin, no recovery path. Both assignments now happen AFTER the create returns,
+    // so reaching this line with a non-null `tmpPath` PROVES the engine made the file.
     if (out !== null) { try { fs.closeSync(out); } catch { /* already closed on the happy path */ } }
-    if (tmpPath) { try { fs.unlinkSync(tmpPath); } catch { /* already renamed away, or never created */ } }
+    if (tmpPath) { try { fs.unlinkSync(tmpPath); } catch { /* already renamed away by the atomic publish */ } }
     try { fs.closeSync(fd); } catch { /* already closed */ }
   }
 }
@@ -1274,6 +1291,16 @@ export function snapshotSource(src, snapshotDir) {
     const manifestPath = path.join(snapshotDir, SNAPSHOT_MANIFEST);
     const row = `${JSON.stringify({ original: src, sha256: sha, bytes, at: new Date().toISOString(), deduped })}\n`;
     const manifestTmp = `${manifestPath}.${process.pid}.tmp`;
+    // OWNERSHIP-AFTER-CREATE + AN HONEST RETURN (lab-grad2 N5 — the same reaper defect as reduceFile's,
+    // and this was its worst instance). The finally used to `existsSync → unlink` the temp path
+    // unconditionally, so a user file planted at `<store>/manifest.jsonl.<pid>.tmp` was DELETED by the
+    // cleanup after `wx` had correctly refused to write through it — and the function still returned a
+    // bare `{ok:true}`. Deleting a file with no snapshot and no bin is the furnace with no stop on the
+    // way (house rule 2026-07-27: bins are not the furnace, but past the bin IS), and reporting success
+    // over it is the same class as a rollback claiming clean over a partial.
+    // `manifestOwned` is set only once `wx` has returned, so the reap can only ever remove our own inode.
+    let manifestOwned = null;
+    let manifestSkipped = false;
     try {
       let existing = '';
       try { existing = fs.readFileSync(manifestPath, 'utf8'); } catch { /* absent → start fresh */ }
@@ -1283,11 +1310,16 @@ export function snapshotSource(src, snapshotDir) {
       // output write already uses (one-flock with writeFull). wx = O_EXCL: fresh inode, or EEXIST → caught → the
       // manifest is skipped (never write through an aliased src).
       const fd = fs.openSync(manifestTmp, 'wx');
+      manifestOwned = manifestTmp; // wx returned → this inode is ours → the reaper may remove it
       try { writeFull(fd, Buffer.from(existing + row, 'utf8')); } finally { fs.closeSync(fd); }
       fs.renameSync(manifestTmp, manifestPath); // atomic: the fresh inode replaces any aliased manifest entry
-    } catch { /* manifest is an aid, not a gate — any failure skips it, NEVER writes through src's inode */ }
-    finally { try { if (fs.existsSync(manifestTmp)) fs.unlinkSync(manifestTmp); } catch { /* best-effort reap of a mid-write temp so a stale one never blocks the next same-pid O_EXCL */ } }
-    return { ok: true, sha256: sha, snapshotPath, deduped, bytes };
+      manifestOwned = null; // renamed away — nothing left to reap
+    } catch { manifestSkipped = true; /* manifest is an aid, not a gate — any failure skips it, NEVER writes through src's inode */ }
+    finally { if (manifestOwned) { try { fs.unlinkSync(manifestOwned); } catch { /* best-effort reap of a mid-write temp so a stale one never blocks the next same-pid O_EXCL */ } } }
+    // The snapshot itself STANDS on a skipped manifest — the blob is the undo net, the manifest is an
+    // audit aid (that split is deliberate and unchanged). What changes is that the skip is SAID: a
+    // caller can no longer read an unqualified ok:true as "the audit row landed".
+    return { ok: true, sha256: sha, snapshotPath, deduped, bytes, manifestSkipped };
   } catch (e) { return { ok: false, reason: e.message }; }
 }
 
@@ -1354,6 +1386,13 @@ export function restoreFromSnapshot(ref, toPath, opts) {
   // rename — toPath is NEVER touched until the bytes are proven AND the clobber/alias guards pass. A mismatch
   // or a refused destination leaves toPath (incl. a toPath===src) byte-intact.
   const tmpPath = `${toPath}.${process.pid}.tmp`;
+  // OWNERSHIP-AFTER-CREATE (the reduceFile/manifest reaper class, FOUND HERE BY GREPPING every
+  // predictable temp rather than by a report — this site was not in the finding). It matters most
+  // here: this is the RECOVERY path, so the failure mode was the undo net destroying a bystander
+  // while restoring. `tmpOwned` is set only once COPYFILE_EXCL has returned; the outer catch reaps
+  // that, never the bare path. Note the EEXIST case is exactly the one the comment below calls
+  // "fails the restore loudly" — it must fail loudly WITHOUT deleting whatever caused the EEXIST.
+  let tmpOwned = null;
   try {
     fs.mkdirSync(path.dirname(path.resolve(toPath)), { recursive: true });
     // COPYFILE_EXCL = the O_EXCL half of the temp→rename idiom this file already uses at its two
@@ -1366,6 +1405,7 @@ export function restoreFromSnapshot(ref, toPath, opts) {
     // instead of being silently reused; that matches the manifest writer's documented choice NOT to
     // unlink-then-create, which would reopen the very race EXCL closes.
     fs.copyFileSync(blob, tmpPath, fs.constants.COPYFILE_EXCL);
+    tmpOwned = tmpPath; // EXCL returned → this inode is ours → the catch may reap it
     const got = sha256File(tmpPath);
     if (got !== expect) {
       try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
@@ -1410,7 +1450,9 @@ export function restoreFromSnapshot(ref, toPath, opts) {
     fs.renameSync(tmpPath, toPath); // atomic publish — only content-verified, destination-guarded bytes land here
     return { ok: true, sha256: got, verified: true };
   } catch (e) {
-    try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+    // ONLY our own inode. The EEXIST that lands here is precisely the case where the temp path
+    // holds somebody ELSE's file — reaping the bare path would delete it while refusing to write it.
+    if (tmpOwned) { try { fs.unlinkSync(tmpOwned); } catch { /* best effort */ } }
     return { ok: false, verified: false, reason: `restore write failed: ${e.message}` };
   }
 }

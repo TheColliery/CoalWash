@@ -2198,3 +2198,121 @@ test('RUNG5 A6 PRIMARY UNDO: restoring a snapshot back OVER its own source succe
     assert.strictEqual(fs.readFileSync(src, 'utf8'), 'CORRUPTED-AGAIN', 'a refused restore leaves the destination untouched');
   } finally { rm(dir); }
 });
+
+// ---------------------------------------------------------------------------
+// THE TEMP REAPER OWNS ONLY WHAT IT CREATED (lab-grad2 N4/N5, and two more of
+// the same class found by grepping every predictable temp in the file).
+//
+// Every write site here opens a per-pid temp with O_EXCL precisely so it never
+// writes THROUGH a pre-existing alias. That guard works. Then the cleanup path
+// deletes the thing the guard just refused to touch — a file the engine did not
+// create, never snapshotted, and has no recovery path for. The comment at the
+// reduceFile finally said "already renamed away, or never created": a two-case
+// comment for a three-case reality, and the third case is "created by somebody
+// else".
+//
+// House rule this violates (2026-07-27): bins are not the furnace, but past the
+// bin IS the furnace. A delete that never passed a bin and has no snapshot is
+// the furnace with no stop on the way, which is the shape that rule forbids.
+//
+// The fix is ownership, not detection: assign the reap variable only AFTER the
+// exclusive create returns, so a non-null reap target PROVES we made it. That
+// removes the precondition instead of arguing with the primitive.
+// ---------------------------------------------------------------------------
+
+const REAPER_VICTIM = 'PRECIOUS-USER-BYTES-THE-ENGINE-NEVER-MADE\n';
+
+test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 sites, incl. the recovery path)', () => {
+  const dir = tmp();
+  try {
+    const survived = (p) => fs.existsSync(p) && fs.readFileSync(p, 'utf8') === REAPER_VICTIM;
+    const ndjson = buildJsonl(Array.from({ length: 30 }, (_, i) => ({ type: i % 3 ? 'user' : 'mode', i }))).buf;
+    const breaches = [];
+
+    // SITE 1 — reduceFile, ndjson wave-1 temp.
+    {
+      const d = path.join(dir, 's1'); fs.mkdirSync(d);
+      const src = path.join(d, 's.jsonl'); fs.writeFileSync(src, ndjson);
+      const outPath = path.join(d, 'o.jsonl');
+      const victim = `${outPath}.${process.pid}.tmp`;
+      fs.writeFileSync(victim, REAPER_VICTIM);
+      const r = reduceFile(src, { cutTypes: ['mode'], outPath, snapshotDir: path.join(d, 'store') });
+      assert.strictEqual(r.ok, false, 'site 1: O_EXCL refuses to write through the planted file');
+      if (!survived(victim)) breaches.push('site 1 (reduceFile ndjson wave-1)');
+    }
+    // SITE 2 — reduceFile, json-single temp.
+    {
+      const d = path.join(dir, 's2'); fs.mkdirSync(d);
+      // PRETTY-PRINTED on purpose: a single-LINE JSON object is discovered as one-line ndjson and
+      // never reaches the json-single writer at all. The mutation battery caught that — the first
+      // version of this leg read as covering site 2 while exercising site 1's code path.
+      const src = path.join(d, 's.json'); fs.writeFileSync(src, JSON.stringify({ type: 'mode', a: 1 }, null, 2));
+      const outPath = path.join(d, 'o.json');
+      const victim = `${outPath}.${process.pid}.tmp`;
+      fs.writeFileSync(victim, REAPER_VICTIM);
+      const r = reduceFile(src, { cutTypes: ['mode'], outPath, snapshotDir: path.join(d, 'store') });
+      assert.strictEqual(r.ok, false, 'site 2: O_EXCL refuses to write through the planted file');
+      if (!survived(victim)) breaches.push('site 2 (reduceFile json-single)');
+    }
+    // SITE 3 — snapshotSource, manifest temp. The WORST one: it reaped and still
+    // returned ok:true, so nothing in the return told a caller anything happened.
+    {
+      const d = path.join(dir, 's3'); fs.mkdirSync(d);
+      const src = path.join(d, 's.jsonl'); fs.writeFileSync(src, ndjson);
+      const store = path.join(d, 'store'); fs.mkdirSync(store);
+      const victim = path.join(store, `${SNAPSHOT_MANIFEST}.${process.pid}.tmp`);
+      fs.writeFileSync(victim, REAPER_VICTIM);
+      const r = snapshotSource(src, store);
+      if (!survived(victim)) breaches.push('site 3 (snapshotSource manifest)');
+      // The snapshot itself legitimately still succeeds — the manifest is an aid,
+      // not a gate — but a skipped audit row must be SURFACED, never implied by an
+      // unqualified ok:true over an unclean state.
+      assert.strictEqual(r.ok, true, 'site 3: the blob is written, so the snapshot stands');
+      if (r.manifestSkipped !== true) {
+        breaches.push('site 3 SURFACING (ok:true over a skipped audit row said nothing — the rollback-claims-clean-over-partial class)');
+      }
+    }
+    // SITE 4 — restoreFromSnapshot's temp. NOT named in the finding; found by
+    // grepping every predictable temp. It is on the RECOVERY path, i.e. the undo
+    // net destroying a bystander while restoring.
+    {
+      const d = path.join(dir, 's4'); fs.mkdirSync(d);
+      const src = path.join(d, 's.jsonl'); fs.writeFileSync(src, ndjson);
+      const store = path.join(d, 'store'); fs.mkdirSync(store);
+      const snap = snapshotSource(src, store);
+      assert.strictEqual(snap.ok, true, 'site 4 setup: snapshot taken');
+      const toPath = path.join(d, 'restored.jsonl');
+      const victim = `${toPath}.${process.pid}.tmp`;
+      fs.writeFileSync(victim, REAPER_VICTIM);
+      const r = restoreFromSnapshot(snap.snapshotPath, toPath, {});
+      assert.strictEqual(r.ok, false, 'site 4: EXCL refuses the planted temp');
+      if (!survived(victim)) breaches.push('site 4 (restoreFromSnapshot, RECOVERY path)');
+    }
+
+    assert.deepStrictEqual(breaches, [],
+      `the engine DELETED a file it never created (no snapshot, no bin, no recovery) at:\n  ${breaches.join('\n  ')}`);
+  } finally { rm(dir); }
+});
+
+// THE CONTROL, and it is not optional: "never unlink anything" would pass the
+// test above while leaking a temp on every failed run. A temp the engine DID
+// create must still be reaped.
+test('the temp reaper STILL reaps a temp the engine DID create (the fix must not become a leak)', () => {
+  const dir = tmp();
+  try {
+    const src = path.join(dir, 's.jsonl');
+    fs.writeFileSync(src, buildJsonl(Array.from({ length: 30 }, (_, i) => ({ type: i % 3 ? 'user' : 'mode', i }))).buf);
+    const outPath = path.join(dir, 'sub', 'o.jsonl');
+
+    // Force a failure AFTER the engine has created its own temp: a snapshotDir that
+    // cannot be created makes the reduce fail downstream of the wave-1 temp open.
+    const blocker = path.join(dir, 'blocker'); fs.writeFileSync(blocker, 'x');
+    const r = reduceFile(src, { cutTypes: ['mode'], outPath, snapshotDir: path.join(blocker, 'store') });
+    assert.strictEqual(r.ok, false, 'the run fails (snapshotDir is under a regular file)');
+
+    const stray = fs.existsSync(path.dirname(outPath))
+      ? fs.readdirSync(path.dirname(outPath)).filter((f) => f.endsWith('.tmp'))
+      : [];
+    assert.deepStrictEqual(stray, [], 'no orphan temp is left behind by a failed run');
+  } finally { rm(dir); }
+});
