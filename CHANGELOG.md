@@ -4,6 +4,8 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.2.0-rc.8] - 2026-07-28
+
 ### Security
 
 - **MEDIUM (round-6 station 3, G3-1 follow-through) - the lower-bound ORACLE was only ever a LIST, and it missed a live REGRESSION: a shape that was PIN-protected before G3-1 was DELETED after it.** The retired predicate `/^pinned\s*:\s*true\s*$/m` was kept in the SUITE carrying the universal *"whatever it protected must still be protected"* - over a body that enumerated SEVEN strings. **`\s` spans LINE TERMINATORS and a one-parse-per-LINE reader cannot**, so `pinned` + a newline + `: true` silently lost its protection. Measured with the pre-fix engine as the control: **1458 of the 19683 shapes the retired regex admits were unprotected, against 0 before**, and at the shipped `applyPlan` door that shape went from *PIN-protected, refuse to touch* to a completed delete.
