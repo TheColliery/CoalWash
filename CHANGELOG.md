@@ -2,7 +2,9 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [0.2.0-rc.6] - 2026-07-27
+
+> Step-release (USER decision 2026-07-27, "ไปทีละสเต็ป"): shipped with two backend systems **not yet lab-tested on this build** — the recovery layer (bins / restore / estate-restore round-trips) and the in-flight write-path guard (airbag/seatbelt). The destruction lanes below carry their own per-fix reproduction evidence; the full graduation labtest runs separately and gates the NEXT step, not this one.
 
 ### Added
 - **Class-A ULTRA at-rest reduce engine landed in source — `scripts/lib/explode.mjs` (main destruction engine) + `scripts/lib/detonate.mjs` (input-verify gate + survey census).** Byte-exact streaming reduce of a `.jsonl` transcript larger than memory: explode on a DISCOVERED boundary, hard-cut exactly the caller's `cutTypes`, reproduce every survivor's source bytes verbatim, snapshot-backed, source never mutated (the reduction writes a separate slim copy). Graduation record: **A2** dry-run parity · **A3** real-corpus run — byte-exact output, census correct, cost-bounded, source verified untouched · **A4** deterministic across runs, and the factory `CLAUDE_DEFAULT_CUT_TYPES` re-scoped to the proven-lossless pair `{custom-title, mode}` (a census measured `last-prompt` as the SOLE copy of a user prompt 64% of the time and `queue-operation` as only conditionally content-free, ~4% carrying payload — neither is safe to cut sight-unseen; cutting more is done deliberately per file via an explicit `cutTypes` derived from the survey's `freeFormCount`). **Honest yield:** the engine ALONE reduces ~4.76% at the type level — the 94.8% figure from the original prototype required a future agent-side semantic layer that is not built. **Not user-facing yet:** nothing in the SKILL flow invokes it and it is deliberately excluded from the shipped `plugin/` dist (named `UNWIRED_ENGINE` exclusion in `scripts/build-plugin.mjs`); it ships when the class-A SKILL surface wires it.
