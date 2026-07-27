@@ -1424,9 +1424,16 @@ test('0p seatbelt: a non-class-B (source) PostToolUse edit is SILENT — the che
 test('0p writeGuard config: snapshot-only keeps the airbag but silences the advisory; off disables both', () => {
   const { home, proj } = sandbox();
   try {
+    // WAVE-2 R2: writeGuard's schema default IS the safest tier ('on'), so a
+    // PROJECT-ONLY value can no longer weaken it at all (that was the hole) --
+    // this test is about the DISTINCT BEHAVIOR of each tier, not about
+    // escalation, so it opts in at the GLOBAL layer once (the genuine
+    // "configured system-wide" case) and lets the project move freely at or
+    // below that floor for the rest of the test.
+    writeGlobalCfg(home, { writeGuard: 'off', updateMode: 'off' });
     const gov = path.join(proj, 'MEMORY.md');
     // snapshot-only: airbag snapshots, seatbelt silent.
-    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ writeGuard: 'snapshot-only', updateMode: 'off' }), 'utf8');
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ writeGuard: 'snapshot-only' }), 'utf8');
     fs.writeFileSync(gov, GOV_BODY, 'utf8');
     run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 'so', tool_input: { file_path: gov } });
     assert.ok(fs.existsSync(path.join(wgDir(proj), 'so')), 'snapshot-only still snapshots (airbag on)');
@@ -1437,7 +1444,7 @@ test('0p writeGuard config: snapshot-only keeps the airbag but silences the advi
 
     // off: no snapshot at all.
     clean(wgDir(proj));
-    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ writeGuard: 'off', updateMode: 'off' }), 'utf8');
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ writeGuard: 'off' }), 'utf8');
     fs.writeFileSync(gov, GOV_BODY, 'utf8');
     const r2 = run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 'off1', tool_input: { file_path: gov } });
     assertGraceful(r2);

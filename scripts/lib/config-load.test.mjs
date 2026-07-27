@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull } from './config-load.mjs';
+import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, mergeSafety } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -16,6 +16,29 @@ function sandbox() {
 function clean(...dirs) {
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 }
+
+// WAVE-2 R2: a missing global config is not "no constraint" -- it is the
+// schema default, and the schema default for writeGuard IS the safe position
+// ('on'). No global file exists at all (the common case: most users never
+// write one) is the exact scenario an untrusted cloned repo's project config
+// is written to defeat.
+test('mergeSafety: NO global at all + project sets writeGuard weaker than the schema default -> clamped to the default, never the project value', () => {
+  const merged = mergeSafety({}, { writeGuard: 'off' });
+  assert.strictEqual(merged.writeGuard, 'on', 'a cloned repo with no global config must not be able to disable the undo net for gitignored governance files');
+});
+
+test('mergeSafety: NO global + project sets updateMode weaker (auto) than the schema default (ask) -> clamped to the default', () => {
+  const merged = mergeSafety({}, { updateMode: 'auto' });
+  assert.strictEqual(merged.updateMode, 'ask', 'a cloned repo with no global config must not be able to turn on standing-consent self-update checks');
+});
+
+test('mergeSafety: NO global + project moves SAFER than the schema default -> project value stands, the clamp never over-tightens', () => {
+  // coalwashMode default is 'auto' (the weakest end of its own order) -- a
+  // project asking for the SAFER 'off' with no global present must be honored,
+  // proving the fix clamps only the weakening direction, not every deviation.
+  assert.strictEqual(mergeSafety({}, { coalwashMode: 'off' }).coalwashMode, 'off');
+  assert.strictEqual(mergeSafety({}, { writeGuard: 'on' }).writeGuard, 'on', 'matching the default exactly must never be rejected');
+});
 
 test('globalConfigPath honors an explicit home', () => {
   const { home, proj } = sandbox();

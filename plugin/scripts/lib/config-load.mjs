@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { parseJsonc } from './jsonc.mjs';
+import { CONFIG_SCHEMA } from './config-schema.mjs';
 
 // The ONE dir CoalWash writes to. Must agree with claudeBaseDirs() below or the dir
 // the code actually writes to ends up outside the guarded set — which is exactly what
@@ -258,20 +259,30 @@ const SAFER_ENUM = {
 };
 const SAFER_TRUE = ['localOnly']; // a bool whose SAFE value is true (privacy opt-in)
 
+// WAVE-2 R2 (2026-07-27): a missing global is NOT "no constraint" -- it is the
+// schema's declared default, which IS the user's stance until they say
+// otherwise. The prior comment here ("if global uses the factory default,
+// the project is free to set anything") was the bug: a cloned repo's project
+// config is untrusted PRECISELY in the common case where the user never wrote
+// a global config at all, and that was exactly the case with zero protection.
+// This map is the schema DEFAULT per key, used as the effective global value
+// whenever no real global value was set -- never a second, independently
+// maintained "what's safe" table.
+const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def]));
+
 export function mergeSafety(global, project) {
   const out = { ...global, ...project };
   for (const [key, order] of Object.entries(SAFER_ENUM)) {
-    // Only constrain against an EXPLICIT global choice; if global uses the factory
-    // default (key absent) the project is free to set anything.
-    if (project[key] === undefined || global[key] === undefined) continue;
+    if (project[key] === undefined) continue; // nothing the project asked to change
+    const globalVal = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
     // CASE-FOLD to match the schema's case-insensitive enum (config-schema.mjs
     // validates/normalizes via toLowerCase). Comparing raw case let a project
     // 'AUTO'/'Off' miss the lookup (indexOf -> -1) and fall through to the
     // shallow-merge (project wins), re-enabling a globally-off skill (H5).
-    const gi = order.indexOf(String(global[key]).toLowerCase());
+    const gi = order.indexOf(String(globalVal).toLowerCase());
     const pi = order.indexOf(String(project[key]).toLowerCase());
     if (gi === -1 || pi === -1) continue; // genuinely unknown value: leave the shallow-merge result (schema clamps it downstream)
-    out[key] = pi <= gi ? project[key] : global[key]; // project may not move PAST global toward the weaker end
+    out[key] = pi <= gi ? project[key] : globalVal; // project may not move PAST the (real-or-default) global toward the weaker end
   }
   for (const key of SAFER_TRUE) {
     if (global[key] === true) out[key] = true; // a project cannot turn OFF a global privacy opt-in
