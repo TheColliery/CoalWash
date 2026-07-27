@@ -181,10 +181,12 @@ test('sweep: density thinning still applies within a bin — multiple same-day i
 });
 
 // ---------------------------------------------------------------------------
-// 0i SIZE-CAP ∧ TIME-HORIZON, whichever binds first — the sweep's second
+// 0i SIZE-CAP ∧ TIME-HORIZON, floor-ordered (3ded5ec) — the sweep's second
 // limit: budget = BIN_BUDGET_STORE_MULTIPLE x opts.storeBytes (the measured
-// store, never the disk). No storeBytes = the cap inert (horizon-only, the
-// exact pre-0i behavior every sweep test above already pins).
+// store, never the disk). Byte pressure evicts only past the 48h keep-all
+// floor; an under-floor bin over cap rides over it and reports (capConflict
+// + a cap-conflict death-log line). No storeBytes = the cap inert
+// (horizon-only, the exact pre-0i behavior every sweep test above already pins).
 // ---------------------------------------------------------------------------
 
 test('0i: recordBinItem records the item\'s byte weight at birth', () => {

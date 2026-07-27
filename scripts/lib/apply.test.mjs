@@ -186,6 +186,23 @@ test('PIN + BOM: a UTF-8 BOM in front of the fence must NOT defeat pinned:true (
   } finally { clean(proj); }
 });
 
+test('PIN + DOUBLE BOM: two U+FEFF in front of the fence must NOT defeat pinned:true (the station-3 residual — one strip is legal, the residue is a preamble)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'bom2-pinned.md');
+    const body = '---\npinned: true\n---\ncritical directive';
+    const bytes = Buffer.concat([BOM8, BOM8, Buffer.from(body, 'utf8')]);
+    writeBytes(f, bytes);
+    assert.strictEqual(isPinned(f), true, 'a double BOM must fail CLOSED (unverifiable), not read as unpinned');
+    const del = apply(planFor(proj, store, [{ type: 'delete', path: f }]));
+    assert.strictEqual(del.ok, false);
+    assert.ok(del.error.includes('PIN-protected'), `expected a PIN refusal, got: ${del.error}`);
+    assert.strictEqual(Buffer.compare(fs.readFileSync(f), bytes), 0, 'byte-exact survival, both BOMs included');
+    // and the rewrite sniff takes its own declared direction: flagged, not rewritten
+    assert.ok(sniffUnrewritable(bytes), 'a double-BOM head is unverifiable -> the rewrite is flagged');
+  } finally { clean(proj); }
+});
+
 test('PIN + UTF-16LE: a frontmatter this engine cannot decode is UNVERIFIABLE, so it refuses (fail-closed)', () => {
   const { proj, store } = sandbox();
   try {

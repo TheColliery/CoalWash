@@ -363,11 +363,17 @@ export function evidenceAnchors(text) {
 //   'unverifiable' — the head is not decodable UTF-8 text (an encoding
 //                    preamble), OR it opens and never closes in the text given.
 //
-// A leading U+FEFF is STRIPPED rather than refused: a UTF-8 BOM is a legal
+// ONE leading U+FEFF is STRIPPED rather than refused: a UTF-8 BOM is a legal
 // signature and the file is fully decodable, so the honest answer is to parse
 // it — which makes the pin promise TRUE for those files instead of merely
 // refusing to work on them. Undecodable encodings cannot be parsed at all and
-// take the fail-closed branch.
+// take the fail-closed branch. A SECOND U+FEFF still at the head after that
+// one legal strip is not a signature — Unicode defines exactly one, at offset
+// 0 — it is a re-encode artifact whose reading is ambiguous (junk signature
+// vs deliberate ZWNBSP content), i.e. the tri-state's "I could not tell":
+// unverifiable, never 'none' (station-3 measured 'none' deleting a
+// double-BOM'd pinned file through applyPlan). Position 0 ONLY — a ZWNBSP
+// deeper in the head is legal content and must not join the refuse set.
 //
 // SCAN WINDOW, and why it is small: `isPinned` decodes a 64 KB byte window, so
 // a multi-byte character straddling that boundary decodes to U+FFFD at the END
@@ -377,7 +383,10 @@ export function evidenceAnchors(text) {
 const FM_HEAD_SCAN = 64;
 export function readFrontmatter(text) {
   let s = String(text);
-  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1); // UTF-8 BOM: legal signature, parse on
+  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1); // UTF-8 BOM: legal signature (exactly one), parse on
+  if (s.charCodeAt(0) === 0xfeff) {
+    return { state: 'unverifiable', block: '', why: 'a second U+FEFF after the legal BOM strip — an encoding preamble (double-encode artifact), not readable frontmatter' };
+  }
   const head = s.slice(0, FM_HEAD_SCAN);
   // NUL = UTF-16/32 interleaving (or binary); U+FFFD = bytes that were not
   // valid UTF-8 (a UTF-16/32 BOM decodes to replacement characters).

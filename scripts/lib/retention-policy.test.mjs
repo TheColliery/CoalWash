@@ -158,9 +158,11 @@ test('doubt keeps, never destroys: corrupt and future timestamps are kept (broom
 });
 
 // ---------------------------------------------------------------------------
-// 0i SIZE-CAP layer — journald SystemMaxUse beside MaxRetentionSec: BOTH
-// limits on every bin, whichever binds first. Default budget (omitted) =
-// Infinity = every test above runs the pre-0i behavior byte-identically.
+// 0i SIZE-CAP layer — journald SystemMaxUse beside MaxRetentionSec, snapper-
+// ORDERED (3ded5ec): both limits on every bin, but byte pressure binds ONLY
+// past the 48h keep-all floor — under-floor mass over the cap is kept and
+// REPORTED (capConflict), never evicted. Default budget (omitted) = Infinity
+// = every test above runs the pre-0i behavior byte-identically.
 // ---------------------------------------------------------------------------
 
 test('0i size-cap (snapper 2-pass): over-budget evicts the OLDEST floor-cleared items first; the 48h keep-all floor is untouchable by byte pressure', () => {

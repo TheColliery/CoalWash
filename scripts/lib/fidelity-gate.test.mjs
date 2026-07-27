@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { checkFidelity, gateFiles, inventory, frontmatterKeys } from './fidelity-gate.mjs';
+import { checkFidelity, gateFiles, inventory, frontmatterKeys, readFrontmatter } from './fidelity-gate.mjs';
 
 // Thai fixtures from char codes only — never raw composables/invisibles in source.
 const SARA_AM = String.fromCharCode(0x0e33); // the CORRECT single char
@@ -525,4 +525,19 @@ test('frontmatterKeys reads through a UTF-8 BOM — a BOM must not empty the inv
 test('frontmatterKeys on an UNDECODABLE head yields no keys and does not throw (state is unverifiable, not closed)', () => {
   const u16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('---\nowner: me\n---\nbody', 'utf16le')]).toString('utf8');
   assert.deepStrictEqual([...frontmatterKeys(u16)], []);
+});
+
+// One legal strip, then a residual U+FEFF at the head is an ENCODING PREAMBLE
+// (a double-encode artifact), not a second signature — the tri-state doctrine's
+// "I could not tell" case, never 'none' (which reads as unpinned = deletable;
+// station-3 ran that delete on rc.6+fix bytes and it succeeded).
+test('DOUBLE BOM: a residual U+FEFF after the one legal strip is unverifiable, never "none"', () => {
+  const BOM = String.fromCharCode(0xfeff);
+  const body = '---\npinned: true\n---\nbody';
+  assert.strictEqual(readFrontmatter(BOM + body).state, 'closed', 'control: ONE BOM is a legal signature — stripped and parsed');
+  assert.strictEqual(readFrontmatter(BOM + BOM + body).state, 'unverifiable', 'two BOMs: the residue is a preamble, refuse to claim "no frontmatter"');
+  assert.strictEqual(readFrontmatter(BOM + BOM + BOM + body).state, 'unverifiable', 'any N>=2 collapses to the same answer');
+  // A mid-content ZWNBSP (same code point, NOT at the head) is legal text and
+  // must not be dragged into the refuse set — position 0 only.
+  assert.strictEqual(readFrontmatter(BOM + '---\nowner: a' + BOM + 'b\n---\nx').state, 'closed', 'ZWNBSP inside content is content, not a preamble');
 });
