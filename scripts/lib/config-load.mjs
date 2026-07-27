@@ -275,14 +275,29 @@ export function mergeSafety(global, project) {
   for (const [key, order] of Object.entries(SAFER_ENUM)) {
     if (project[key] === undefined) continue; // nothing the project asked to change
     const globalVal = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
-    // CASE-FOLD to match the schema's case-insensitive enum (config-schema.mjs
-    // validates/normalizes via toLowerCase). Comparing raw case let a project
-    // 'AUTO'/'Off' miss the lookup (indexOf -> -1) and fall through to the
-    // shallow-merge (project wins), re-enabling a globally-off skill (H5).
-    const gi = order.indexOf(String(globalVal).toLowerCase());
+    // CASE-FOLD to match the schema's case-insensitive enum. Comparing raw
+    // case let a project 'AUTO' miss the lookup (indexOf -> -1) and fall
+    // through to the shallow-merge (project wins), re-enabling a globally-off
+    // skill (H5).
+    let gi = order.indexOf(String(globalVal).toLowerCase());
     const pi = order.indexOf(String(project[key]).toLowerCase());
-    if (gi === -1 || pi === -1) continue; // genuinely unknown value: leave the shallow-merge result (schema clamps it downstream)
-    out[key] = pi <= gi ? project[key] : globalVal; // project may not move PAST the (real-or-default) global toward the weaker end
+    // An unreadable GLOBAL stance reads as the schema default (the WAVE-2 R2
+    // rule extended from absent to invalid — the user's position cannot be
+    // read, and the declared default IS their position until they say
+    // otherwise); index 0 is the unreachable-by-construction last resort
+    // (every SCHEMA_DEFAULT is a member of its own order).
+    if (gi === -1) gi = order.indexOf(String(SCHEMA_DEFAULT[key]).toLowerCase());
+    if (gi === -1) gi = 0;
+    // K1 (graduation-lab round 2): an INVALID project value gets NO say —
+    // the old `continue` here left the shallow-merge result (project wins)
+    // for the downstream clamp to land on the SCHEMA DEFAULT, so a global
+    // `off` was defeated by every junk value (`'nope'`, null, {}, ' auto '):
+    // escalation by being wrong. Junk = treated as absent = the effective
+    // global stands. And the resolved value is stored CANONICAL (order[i],
+    // lowercase) — the old code compared the folded spelling but stored the
+    // RAW one ('Off'), leaving a trap for any consumer that does not
+    // normalize (check one spelling, act on that same spelling).
+    out[key] = order[pi !== -1 && pi <= gi ? pi : gi];
   }
   for (const key of SAFER_TRUE) {
     if (global[key] === true) out[key] = true; // a project cannot turn OFF a global privacy opt-in

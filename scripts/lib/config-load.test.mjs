@@ -40,6 +40,41 @@ test('mergeSafety: NO global + project moves SAFER than the schema default -> pr
   assert.strictEqual(mergeSafety({}, { writeGuard: 'on' }).writeGuard, 'on', 'matching the default exactly must never be rejected');
 });
 
+// K1 (graduation-lab round 2): an INVALID project value ESCALATED. The old
+// unknown-value branch was `continue` — "leave the shallow-merge result
+// (schema clamps it downstream)" — but the shallow merge is project-wins and
+// the downstream clamp lands on the SCHEMA DEFAULT, not on the global's
+// stance: global `coalwashMode:'off'` + project `'nope'` resolved ACTIVE
+// ('auto'). An invalid project value now gets NO say: the effective global
+// (real, else the schema default) stands, stored CANONICAL.
+test('K1: an invalid project value must not displace a global off (the escalation-by-junk hole)', () => {
+  for (const junk of ['nope', ' auto ', null, 0, true, {}, [], 42]) {
+    const merged = mergeSafety({ coalwashMode: 'off' }, { coalwashMode: junk });
+    assert.strictEqual(merged.coalwashMode, 'off',
+      `project ${JSON.stringify(junk)} must not defeat a global off (got ${JSON.stringify(merged.coalwashMode)})`);
+  }
+  // same hole on updateMode: global 'off' + junk must stay 'off', never the
+  // schema default 'ask' (standing-consent update checks re-enabled by junk)
+  assert.strictEqual(mergeSafety({ updateMode: 'off' }, { updateMode: 'garbage' }).updateMode, 'off');
+});
+
+test('K1: an invalid project value with NO global lands on the schema default CANONICALLY (no stance to defend, none invented)', () => {
+  assert.strictEqual(mergeSafety({}, { coalwashMode: 'nope' }).coalwashMode, 'auto', 'no global stance -> the schema default, by the clamp itself, not by downstream luck');
+  assert.strictEqual(mergeSafety({}, { writeGuard: [] }).writeGuard, 'on');
+});
+
+test('K1: a CASE VARIANT of a valid value resolves CANONICAL at the merge layer — check one spelling, act on that same spelling', () => {
+  // 'Off' case-folds to a valid value and wins the safer-compare, but the old
+  // code stored the RAW string — every clampedRead consumer normalizes, so
+  // the end-to-end blast was merge-layer-only; canonical storage removes the
+  // trap for any future raw-compare consumer.
+  assert.strictEqual(mergeSafety({ coalwashMode: 'off' }, { coalwashMode: 'Off' }).coalwashMode, 'off');
+  assert.strictEqual(mergeSafety({}, { coalwashMode: 'MANUAL' }).coalwashMode, 'manual');
+  // an INVALID-cased GLOBAL is defended too: its stance reads as its folded
+  // self, and the stored result is canonical
+  assert.strictEqual(mergeSafety({ coalwashMode: 'OFF' }, { coalwashMode: 'auto' }).coalwashMode, 'off', 'a raw-cased global stance still clamps the project escalation');
+});
+
 test('globalConfigPath honors an explicit home', () => {
   const { home, proj } = sandbox();
   try {
