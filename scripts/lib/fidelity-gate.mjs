@@ -345,16 +345,34 @@ function parseNumToken(tok) {
 // unrelated number ("43k" never claims 44,192). >= 2 significant digits on
 // the ORIG side per the class definition (a 1-digit token has no precision
 // to launder). Returns the surviving form, or null.
-function roundedSurvivor(origTok, nextTokens) {
+//
+// THE CANDIDATES ARRIVE PRE-PARSED (#36): this used to take the raw token set
+// and run parseNumToken once per dropped x candidate pair — O(drops x
+// candidates) regex parses, measured 15.4 s on a 1 MB drop-heavy file while
+// the no-drop path stayed linear. Every second of gate time sits inside
+// applyPlan's window between the staging read and the external-writer
+// compare, so gate time is EXPOSURE (a wider interleave window), not just
+// latency. checkFidelity now parses the surviving candidates ONCE and hands
+// each drop the parsed list, split by kind: iteration order within a kind is
+// the inventory's insertion order, and cross-kind candidates never matched
+// anyway (c.kind !== o.kind), so the FIRST qualifying survivor — the shipped
+// tie-break, pinned by its own control test — is unchanged.
+function roundedSurvivor(origTok, candsByKind) {
   const o = parseNumToken(origTok);
   if ((o.kind !== 'percent' && o.kind !== 'plain') || o.sig < 2) return null;
-  for (const cand of nextTokens) {
-    const c = parseNumToken(cand);
-    if (c.kind !== o.kind) continue;
+  for (const c of candsByKind[o.kind]) {
     if (!(c.ulp > o.ulp)) continue; // must be strictly coarser
-    if (Math.abs(o.value - c.value) < c.ulp) return cand;
+    if (Math.abs(o.value - c.value) < c.ulp) return c.tok;
   }
   return null;
+}
+function parseSurvivorCands(nextTokens) {
+  const byKind = { percent: [], plain: [] };
+  for (const tok of nextTokens) {
+    const c = parseNumToken(tok);
+    if (c.kind === 'percent' || c.kind === 'plain') byKind[c.kind].push({ tok, value: c.value, ulp: c.ulp });
+  }
+  return byKind;
 }
 
 // ---------------------------------------------------------------------------
@@ -816,9 +834,10 @@ export function checkFidelity(origText, newText) {
   // class-9 'number-precision' shape (survivor named, approval key stays the
   // orig token: "number-precision:<value>"); a vanished value stays the plain
   // class-8 'number-drop'. One entry per dropped value, never both.
+  const survivorCands = parseSurvivorCands(ni.numbers); // parsed ONCE per gate call — see roundedSurvivor's #36 note
   for (const v of oi.numbers) {
     if (ni.numbers.has(v)) continue;
-    const survivor = roundedSurvivor(v, ni.numbers);
+    const survivor = roundedSurvivor(v, survivorCands);
     drops.push(survivor ? { type: 'number-precision', value: v, survivor } : { type: 'number-drop', value: v });
   }
   // ── THE MULTISET LAYER (board disposition 2, 2026-07-27) ──────────────────
@@ -867,12 +886,30 @@ export function checkFidelity(origText, newText) {
   // "its" claim across a rewrite is not mechanically decidable; under-flagging
   // an orphaned proof would be the unsafe direction (broom asymmetry).
   const evOrig = evidenceAnchors(orig);
+  // #36's SECOND term (controlled-pair proven: swapping `verified` for a
+  // non-marker word collapsed 721 ms -> 48 ms at 512 KB): `next.includes(tok)`
+  // is a full-text scan and ran once per surviving evidence token, so a
+  // marker-heavy file — our own MEMORY.md house style — paid O(tokens x text).
+  // Extract next's OWN evidence tokens once: an extraction MATCH is a
+  // substring by construction, so set membership short-circuits the scan with
+  // the identical branch outcome. THE RESIDUAL, named: a genuinely ABSENT
+  // token still pays one full `includes` (the exact-substring semantics —
+  // a token surviving INSIDE a longer word is kept today and must stay kept),
+  // so a plan dropping thousands of anchors at once still scales with
+  // drops x text; that plan is refused wholesale anyway. `markerAlive`
+  // depends only on the MARKER string, so it is memoized per distinct marker
+  // instead of re-scanning the full text per dropped token.
+  const nextEvTokens = new Set([...matchSet(next, ISSUE_REF_RE), ...matchSet(next, HEX_ID_RE), ...matchSet(next, FILE_REF_RE)]);
+  const markerMemo = new Map();
+  const markerAliveFor = (marker) => {
+    if (!markerMemo.has(marker)) {
+      markerMemo.set(marker, /^100%$/i.test(marker) ? next.includes('100%') : new RegExp(`\\b${marker}\\b`, 'i').test(next));
+    }
+    return markerMemo.get(marker);
+  };
   for (const [tok, marker] of evOrig) {
-    if (next.includes(tok)) continue;
-    const markerAlive = /^100%$/i.test(marker)
-      ? next.includes('100%')
-      : new RegExp(`\\b${marker}\\b`, 'i').test(next);
-    if (markerAlive) drops.push({ type: 'evidence-anchor-drop', value: tok, marker });
+    if (nextEvTokens.has(tok) || next.includes(tok)) continue;
+    if (markerAliveFor(marker)) drops.push({ type: 'evidence-anchor-drop', value: tok, marker });
   }
   const warnings = [];
 

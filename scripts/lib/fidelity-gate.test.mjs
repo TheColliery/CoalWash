@@ -1016,6 +1016,83 @@ test('KEY-LINE COST: a 60 KiB pathological line parses in bounded time (was ~5.4
   }
 });
 
+// ---------------------------------------------------------------------------
+// GATE COST ON THE DROPS PATH (#36). `roundedSurvivor` parsed every surviving
+// candidate once per dropped number — O(drops x candidates) regex parses; the
+// reviewer's curve: 128 KB 0.28 s -> 1.04 MB 15.4 s (2x input = ~4x time), on
+// the no-drop path linear. Every second of gate time sits inside applyPlan's
+// window between the staging read and the external-writer compare, so gate
+// time is exposure, not just latency. The candidates are now parsed ONCE per
+// checkFidelity call; the bound below is ~10x the fixed cost and ~2x under
+// the measured quadratic at this size, so it only trips if the quadratic
+// returns. Semantics are pinned by the survivor-order control underneath and
+// by the old-vs-new corpus differential recorded in the CHANGELOG.
+// ---------------------------------------------------------------------------
+function dropHeavyPair(targetBytes) {
+  // ~64-byte lines, one distinct number each; next keeps alternate lines, so
+  // half the numbers DROP and half survive as candidates. The numbers are ODD
+  // (no trailing zeros -> ulp 1 for every token) so NO candidate is ever
+  // "strictly coarser" and every dropped number scans the WHOLE candidate set
+  // — the worst shape. (A first fixture used consecutive integers; their
+  // trailing-zero ulps let the very first candidate match, the loop
+  // short-circuited, and the quadratic never fired — a green perf test that
+  // measured nothing.)
+  const lines = [];
+  for (let i = 0; lines.length * 64 < targetBytes; i++) {
+    lines.push(`metric entry ${1111111 + 2 * i} holds steady across the window`);
+  }
+  const next = lines.filter((_, i) => i % 2 === 0);
+  return { orig: lines.join('\n'), next: next.join('\n') };
+}
+test('GATE COST: a drop-heavy 512 KB pair gates in bounded time (was ~4.8 s quadratic at this size)', () => {
+  const { orig, next } = dropHeavyPair(512 * 1024);
+  const t0 = process.hrtime.bigint();
+  const r = checkFidelity(orig, next);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(r.drops.length > 1000, `the fixture must actually be drop-heavy; got ${r.drops.length}`);
+  assert.ok(ms < 2000, `gating ${orig.length} chars with ${r.drops.length} drops took ${ms.toFixed(0)}ms — the quadratic is back`);
+});
+
+// The SECOND quadratic term in the same function (found while closing #36,
+// controlled-pair proven: `verified` -> `notedxx` collapses 721 ms -> 48 ms at
+// 512 KB): the evidence-anchor loop ran `next.includes(tok)` — a full-text
+// scan — once per SURVIVING orig evidence token. Our own MEMORY.md house style
+// is exactly this marker-heavy shape. The fix: extract next's own evidence
+// tokens ONCE; extraction-match implies substring, so set membership
+// short-circuits the scan without changing any branch outcome. THE NAMED
+// RESIDUAL: a GENUINELY ABSENT token still pays one full `includes` scan (the
+// exact-substring semantics require it), so a file dropping thousands of
+// evidence anchors at once still scales super-linearly — that plan is about
+// to be refused wholesale anyway, and the honest bound is stated rather than
+// papered over.
+test('GATE COST: a marker-heavy LOW-DROP 1 MB pair gates in bounded time (the typical wash shape — most tokens survive)', () => {
+  const lines = [];
+  for (let i = 0; lines.length * 80 < 1024 * 1024; i++) {
+    lines.push(`finding ${i} verified in commit abc${(1000000 + i).toString(16)}def against results-${i}.md`);
+  }
+  const orig = lines.join('\n');
+  const next = lines.filter((_, k) => k % 16 !== 15).join('\n'); // ~6% dropped, 94% survive
+  const t0 = process.hrtime.bigint();
+  const r = checkFidelity(orig, next);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(r.drops.length > 100, `the fixture must still drop something; got ${r.drops.length}`);
+  assert.ok(ms < 2000, `gating 1 MB marker-heavy with ${r.drops.length} drops took ${ms.toFixed(0)}ms — the surviving-token scan is back`);
+});
+
+test('GATE COST control: the FIRST coarser survivor in inventory order is still the one named — the tie-break is pinned', () => {
+  // 44192 drops; two candidates both qualify as strictly-coarser matches
+  // (44.19k and 44000: |44192-44190|=2 < 100? no — 44.19k ulp=10, |44192-44190|=2 <10 yes;
+  // 44000 ulp=1000, |44192-44000|=192 < 1000 yes). Inventory order = extraction
+  // order (magnitude before bare integer), so 44.19k must be the named survivor
+  // — an "optimization" that reorders candidates changes receipts and fails here.
+  const orig = 'exact 44192 measured';
+  const next = 'rounded 44.19k and 44000 both mentioned';
+  const r = checkFidelity(orig, next);
+  const p = r.drops.find((d) => d.type === 'number-precision' && d.value === '44192');
+  assert.ok(p, `44192 must be a number-precision drop: ${JSON.stringify(r.drops)}`);
+  assert.strictEqual(p.survivor, '44.19k', 'the first qualifying candidate in inventory order is the named survivor');
+});
+
 // THE RETIRED REGEXES ARE THE ORACLE — test-local copies of the exact retired
 // spec, run on SHORT bodies where their quadratic cost is invisible. The rule
 // is round 6's, in its legitimate role: generate the space the OLD parser
