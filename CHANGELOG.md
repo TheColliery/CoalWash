@@ -4,6 +4,10 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed
+
+- **The pin gate now has TWO TIERS, and only a MARKER pin aborts the plan (rc.9 station-3 MED: one ordinary `---`-rule document in a DELETE plan aborted the ENTIRE plan, with an error claiming `pinned: true` about a file that carries no pin).** `pinVerdict` reports WHY a file refuses: a pin actually READ (`pinned: true` via the floor or a parsed entry) is a **marker** — a plan naming such a file violated an explicit user marker, so the plan is malformed and is still refused WHOLE, unchanged. A refusal from **incapacity** (unverifiable head, unreadable block, read error — including the `---`-as-horizontal-RULE shape every measured rc.9 refusal was) is CoalWash's own limitation, not the plan's fault: that file is now refused **PER-FILE** on the flag channel — untouched, named in `flagged[]` with the real reason and the way out — and the rest of the plan proceeds, exactly like the rewrite path's sniff channel. The refused file itself is equally safe on both tiers; the tier only decides whether the REST of the plan is trusted. Covers the >64 KiB edge too (a block closing past the pin window is incapacity, not a marker). `isPinned`'s boolean is a projection of the verdict — every existing caller's decisions are byte-identical. Mutation-proven in both directions: removing the per-file channel reddens the tier-2 tests; demoting either marker site (floor / parsed entry) reddens the tier-1 whole-abort control. This supersedes rc.9's *"a DELETE of such a file is refused by the pin gate, which aborts the plan by design"* — the abort was never the design's point; the FILE surviving was.
+
 ## [0.2.0-rc.9] - 2026-07-28
 
 ### Security

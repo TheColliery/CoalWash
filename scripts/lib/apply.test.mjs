@@ -196,7 +196,10 @@ test('PIN + DOUBLE BOM: two U+FEFF in front of the fence must NOT defeat pinned:
     assert.strictEqual(isPinned(f), true, 'a double BOM must fail CLOSED (unverifiable), not read as unpinned');
     const del = apply(planFor(proj, store, [{ type: 'delete', path: f }]));
     assert.strictEqual(del.ok, false);
-    assert.ok(del.error.includes('PIN-protected'), `expected a PIN refusal, got: ${del.error}`);
+    // Two-tier gate (rc.10): unverifiable is INCAPACITY, not a read marker — the
+    // refusal is per-file on the flag channel (for this one-action plan: nothing
+    // applied), never the plan-fatal PIN-protected claim the engine cannot prove.
+    assert.ok((del.flagged || []).some((x) => x.path === f), `the refusal names the file on the flag channel: ${JSON.stringify(del)}`);
     assert.strictEqual(Buffer.compare(fs.readFileSync(f), bytes), 0, 'byte-exact survival, both BOMs included');
     // and the rewrite sniff takes its own declared direction: flagged, not rewritten
     assert.ok(sniffUnrewritable(bytes), 'a double-BOM head is unverifiable -> the rewrite is flagged');
@@ -213,7 +216,9 @@ test('PIN + UTF-16LE: a frontmatter this engine cannot decode is UNVERIFIABLE, s
     assert.strictEqual(isPinned(f), true, 'an undecodable head must fail CLOSED, not read as unpinned');
     const del = apply(planFor(proj, store, [{ type: 'delete', path: f }]));
     assert.strictEqual(del.ok, false);
-    assert.ok(del.error.includes('PIN-protected'), `expected a PIN refusal, got: ${del.error}`);
+    // Two-tier gate (rc.10): an undecodable head is INCAPACITY — per-file flag,
+    // not the plan-fatal PIN-protected claim (the engine read no marker here).
+    assert.ok((del.flagged || []).some((x) => x.path === f), `the refusal names the file on the flag channel: ${JSON.stringify(del)}`);
     assert.strictEqual(Buffer.compare(fs.readFileSync(f), u16), 0);
   } finally { clean(proj); }
 });
@@ -303,7 +308,10 @@ critical directive`;
       assert.strictEqual(isPinned(f), true, `${name}: an invisible fence tail must fail CLOSED, never read as unpinned`);
       const del = apply(planFor(proj, store, [{ type: 'delete', path: f }]));
       assert.strictEqual(del.ok, false, `${name}: the delete must refuse`);
-      assert.ok(del.error.includes('PIN-protected'), `${name}: expected a PIN refusal, got: ${del.error}`);
+      // Two-tier gate (rc.10): an unverifiable fence is INCAPACITY — the delete
+      // refuses per-file on the flag channel; no PIN-protected claim is made,
+      // because the engine could not read a marker (that inability IS the refusal).
+      assert.ok((del.flagged || []).some((x) => x.path === f), `${name}: the refusal names the file on the flag channel`);
       assert.ok(fs.existsSync(f), `${name}: the pinned file must still be on disk`);
       const rw = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: `${opener}pinned: true
 ---
@@ -2607,6 +2615,107 @@ test('G4-2: an indented pin survives a delete through the shipped applyPlan door
 
 // A REWRITE gets the honest, actionable flag instead of the pin gate's
 // whole-plan abort: one odd file must not make CoalWash unusable on a store.
+// ---------------------------------------------------------------------------
+// THE PIN GATE'S TWO TIERS (rc.9 station-3 MED: "a DELETE plan containing an
+// unprovable file aborts entirely"). A MARKER pin (`pinned: true` actually read)
+// in a plan is a plan-generation violation of an explicit user marker — the plan
+// is malformed, distrust ALL of it (whole-plan abort, unchanged). An UNPROVABLE
+// file (frontmatter this tooling cannot read) is CoalWash's own incapacity, not
+// the plan's fault — that file is refused PER-FILE (untouched, flagged with the
+// way out) and the rest of the plan proceeds, exactly like the rewrite path's
+// sniff channel. Either way the refused file itself is never touched.
+// ---------------------------------------------------------------------------
+
+test('pin gate tier 2: an UNPROVABLE-frontmatter DELETE is refused per-file — the rest of the delete plan still executes', () => {
+  const { proj, store } = sandbox();
+  try {
+    // The class users actually hit (WAVE-9 histogram): `---` used as a markdown
+    // RULE with colon-less prose before the next `---` — unreadable, NOT pinned.
+    const odd = path.join(store, 'RULE.md');
+    fs.writeFileSync(odd, Buffer.from('---\nJust prose with no colon here\n---\n\nbody\n', 'utf8'));
+    const dup = path.join(store, 'DUP.md');
+    fs.writeFileSync(dup, Buffer.from('plain junk line to delete\n', 'utf8'));
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: odd },
+      { type: 'delete', path: dup },
+    ]));
+    assert.strictEqual(r.ok, true, `the readable delete still executes: ${JSON.stringify(r)}`);
+    assert.strictEqual(r.applied, 1, 'exactly the readable delete applied');
+    assert.strictEqual(fs.existsSync(dup), false, 'the ordinary file was deleted');
+    assert.strictEqual(fs.existsSync(odd), true, 'the unprovable file is untouched');
+    const f = (r.flagged || []).find((x) => String(x.path).endsWith('RULE.md'));
+    assert.ok(f, 'the unprovable file is flagged by name');
+    assert.match(String(f.reason), /frontmatter|top-level/i, 'the reason names the frontmatter incapacity');
+    assert.ok(!/pinned: true/.test(String(f.reason)), 'the reason must NOT claim the file carries pinned: true — it does not');
+  } finally { clean(proj); }
+});
+
+test('pin gate tier 1 CONTROL: a MARKER-pinned delete still aborts the WHOLE plan — nothing else executes', () => {
+  // Two spellings on purpose — `pinned: true` proves the FLOOR's marker tier,
+  // `pinned: True` (outside the floor regex, read by the entries parser) proves
+  // the parsed-entry marker tier. Each `marker: true` site must be load-bearing.
+  for (const spelling of ['pinned: true', 'pinned: True']) {
+    const { proj, store } = sandbox();
+    try {
+      const pin = path.join(store, 'PINNED.md');
+      fs.writeFileSync(pin, Buffer.from(fmBlock(spelling), 'utf8'));
+      const dup = path.join(store, 'DUP.md');
+      fs.writeFileSync(dup, Buffer.from('plain junk line to delete\n', 'utf8'));
+      const r = apply(planFor(proj, store, [
+        { type: 'delete', path: pin },
+        { type: 'delete', path: dup },
+      ]));
+      assert.strictEqual(r.ok, false, `${spelling}: a plan naming a marker-pinned file is malformed — refuse it whole`);
+      assert.match(String(r.error), /PIN-protected/, `${spelling}: refused by the pin gate, by name`);
+      assert.strictEqual(fs.existsSync(pin), true, `${spelling}: the pinned file survives`);
+      assert.strictEqual(fs.existsSync(dup), true, `${spelling}: the OTHER file survives too — the whole plan is distrusted`);
+    } finally { clean(proj); }
+  }
+});
+
+test('pin gate tier 2: a plan of ONLY unprovable deletes applies nothing, keeps every file, and names each refusal', () => {
+  const { proj, store } = sandbox();
+  try {
+    const a1 = path.join(store, 'R1.md');
+    const a2 = path.join(store, 'R2.md');
+    fs.writeFileSync(a1, Buffer.from('---\nprose line one no colon\n---\nbody\n', 'utf8'));
+    fs.writeFileSync(a2, Buffer.from('---\nprose line two no colon\n---\nbody\n', 'utf8'));
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: a1 },
+      { type: 'delete', path: a2 },
+    ]));
+    assert.strictEqual(r.ok, false, 'nothing applied');
+    assert.strictEqual(fs.existsSync(a1), true, 'file one untouched');
+    assert.strictEqual(fs.existsSync(a2), true, 'file two untouched');
+    assert.strictEqual((r.flagged || []).length, 2, 'both refusals named');
+  } finally { clean(proj); }
+});
+
+// The >64 KiB edge: sniffUnrewritable reads the FULL text (block closes, parses
+// clean) so the rewrite is NOT sniff-flagged, but isPinned's 64 KiB window
+// cannot see the close -> unverifiable. That is incapacity, not a marker — it
+// must take the per-file channel, not abort the plan.
+test('pin gate tier 2: a frontmatter block closing past the 64 KiB pin window is refused per-file, not plan-fatal', () => {
+  const { proj, store } = sandbox();
+  try {
+    const big = path.join(store, 'BIG.md');
+    let block = '';
+    for (let i = 0; block.length < 70000; i++) block += `k${i}: v\n`;
+    fs.writeFileSync(big, Buffer.from('---\n' + block + '---\nbody\n', 'utf8'));
+    const fresh = path.join(store, 'NEW.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: big, content: 'washed\n' },
+      { type: 'create', path: fresh, content: 'new note\n' },
+    ]));
+    assert.strictEqual(r.ok, true, `the create still executes: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.strictEqual(r.applied, 1, 'exactly the create applied');
+    assert.strictEqual(fs.readFileSync(fresh, 'utf8'), 'new note\n');
+    assert.match(fs.readFileSync(big, 'utf8').slice(0, 4), /^---/, 'the big file is untouched');
+    const f = (r.flagged || []).find((x) => String(x.path).endsWith('BIG.md'));
+    assert.ok(f, 'the window-unverifiable file is flagged, not plan-fatal');
+  } finally { clean(proj); }
+});
+
 test('G4-2: a rewrite of an unreadable-frontmatter file is FLAGGED with a way out, and the rest of the plan proceeds', () => {
   const { proj, store } = sandbox();
   try {

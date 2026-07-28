@@ -292,11 +292,12 @@ export function sniffUnrewritable(buf) {
   // unverifiable head means "do not rewrite".
   const fm = readFrontmatter(text);
   if (fm.state === 'unverifiable') return `${fm.why} — flagged, not rewritten`;
-  // ROUND 7. `isPinned` also refuses an unreadable block, but it refuses by
-  // returning PINNED, which aborts the WHOLE plan by design. Routing the
-  // REWRITE path through the per-file flag channel instead keeps one odd file
-  // from making CoalWash unusable on a whole store, and lets the reason name
-  // the user's problem plus the way out rather than a misleading "PIN-protected".
+  // ROUND 7 (amended rc.10). `pinVerdict` also refuses an unreadable block —
+  // since the two-tier gate, per-file there too (incapacity never aborts the
+  // plan any more; only a MARKER pin does). This sniff stays the rewrite
+  // path's FIRST refusal because it reads the FULL text (the pin window is
+  // 64 KiB) and its reason names the user's problem plus the way out rather
+  // than a pin-shaped message.
   const parsed = frontmatterBlockParse(fm.block);
   if (parsed.unreadable) {
     return `${parsed.unreadable}: CoalWash cannot prove which frontmatter keys are top-level, so it will not rewrite this file — flagged, not rewritten (put the block on one indentation as plain \`key: value\` lines, or remove the frontmatter, and CoalWash will wash it normally)`;
@@ -345,7 +346,21 @@ const unquote = (s) => (s.length > 1 && (s[0] === '"' || s[0] === "'") && s[s.le
 // unbalanced quote survives unquote and misses the set).
 const pinValueClears = (raw) => PIN_CLEARED.has(unquote(String(raw).trim().replace(/\s+#.*$/, '').trim()).trim().toLowerCase());
 const pinKey = (k) => unquote(String(k).trim()).trim().toLowerCase() === 'pinned';
-export function isPinned(file) {
+// THE VERDICT CARRIES ITS TIER (rc.9 station-3 MED — the whole-plan DELETE
+// abort). `pinned` is the boolean every caller always had; `marker` says WHY:
+//   marker: true  — a pin was actually READ (`pinned: true` via the floor or a
+//                   parsed entry). A plan naming such a file violated an
+//                   explicit user marker -> the plan is malformed, distrust it
+//                   whole (applyPlan aborts, unchanged behaviour).
+//   marker: false — refusal from INCAPACITY (unverifiable head, unreadable
+//                   block, read error). That is CoalWash's own limitation, not
+//                   the plan's fault -> applyPlan refuses that file PER-FILE
+//                   (untouched, flagged with the way out) and the rest of the
+//                   plan proceeds — the same channel sniffUnrewritable gives
+//                   rewrites. The refused file itself is equally safe on both
+//                   tiers; the tier only decides whether the REST of the plan
+//                   is trusted.
+function pinVerdict(file) {
   try {
     const fd = fs.openSync(file, 'r');
     let head;
@@ -387,8 +402,8 @@ export function isPinned(file) {
     const fm = readFrontmatter(head, { truncated });
     // Unverifiable = an undecodable head (encoding preamble) OR an opener that
     // does not close inside PIN_READ_BYTES -> refuse to touch.
-    if (fm.state === 'unverifiable') return true;
-    if (fm.state === 'none') return false; // decodable, and genuinely no frontmatter
+    if (fm.state === 'unverifiable') return { pinned: true, marker: false, why: fm.why || 'frontmatter unverifiable inside the pin read window' };
+    if (fm.state === 'none') return { pinned: false, marker: false }; // decodable, and genuinely no frontmatter
     // ONE READER (G3-1). This used to be a PRIVATE /^pinned\s*:\s*true\s*$/m
     // over the block the primitive returned, while fidelity-gate's
     // frontmatterKeys parsed the SAME block with a different regex — and the
@@ -402,7 +417,7 @@ export function isPinned(file) {
     // That reasoning was right and INCOMPLETE — the loose entry covers what one
     // LINE can hold, and the retired regex also spanned line terminators. So its
     // verdict is OR'd in as the floor (see RETIRED_PIN_FLOOR).
-    if (RETIRED_PIN_FLOOR.test(fm.block)) return true;
+    if (RETIRED_PIN_FLOOR.test(fm.block)) return { pinned: true, marker: true };
     // ROUND 7 — THE QUESTION IS INVERTED, and that is the whole change. Six
     // repairs before this one asked "is there a pin?" and answered it more
     // cleverly each time; the seventh breach (an indented `pinned: true`, read
@@ -432,11 +447,18 @@ export function isPinned(file) {
     // block can only be manufactured by a wrong LINE BASIS, and that is the one
     // residual, named rather than implied.
     const parsed = frontmatterBlockParse(fm.block);
-    if (parsed.unreadable) return true;
-    return parsed.entries.some((e) => e.top && pinKey(e.key) && !pinValueClears(e.value));
+    if (parsed.unreadable) return { pinned: true, marker: false, why: parsed.unreadable };
+    return parsed.entries.some((e) => e.top && pinKey(e.key) && !pinValueClears(e.value))
+      ? { pinned: true, marker: true }
+      : { pinned: false, marker: false };
   } catch {
-    return true; // read error on a file we are about to mutate -> refuse (fail-closed)
+    // read error on a file we are about to mutate -> refuse (fail-closed);
+    // incapacity, not a marker read.
+    return { pinned: true, marker: false, why: 'read error while checking the pin (fail-closed)' };
   }
+}
+export function isPinned(file) {
+  return pinVerdict(file).pinned; // the boolean every existing caller keeps — decisions byte-identical
 }
 
 // ---------------------------------------------------------------------------
@@ -775,9 +797,32 @@ export function applyPlan(plan, opts = {}) {
     // actions[] because the adjudicated plan put it there, and that IS the
     // authorization (no separate approval flag to check). UNDO — the
     // snapshot + whole-run rollback below — is where safety lives instead.
-    const pinned = actionable.filter((a) => a.type !== 'create' && isPinned(a.phys));
-    if (pinned.length) {
-      return { ok: false, error: `PIN-protected (pinned: true) — refuse to touch: ${pinned.map((p) => p.phys).join(', ')}` };
+    // TWO TIERS (see pinVerdict's header). A MARKER pin in the plan = the plan
+    // violated an explicit user marker -> malformed, abort it WHOLE (including
+    // any unprovables — a distrusted plan gets nothing). Incapacity (marker:
+    // false — unverifiable/unreadable/read-error) = ours, not the plan's ->
+    // per-file refusal on the flag channel, the rest proceeds. Before rc.10 a
+    // single ordinary `---`-rule document in a DELETE plan aborted the whole
+    // plan with a message claiming `pinned: true` about a file carrying no pin.
+    const markerPinned = [];
+    const unprovable = new Set();
+    for (const a of actionable) {
+      if (a.type === 'create') continue;
+      const v = pinVerdict(a.phys);
+      if (!v.pinned) continue;
+      if (v.marker) { markerPinned.push(a); continue; }
+      unprovable.add(a);
+      flagged.push({
+        path: a.phys,
+        reason: `${v.why}: CoalWash cannot prove this file is safe to touch — ${a.type} refused, file left untouched (fix the frontmatter and CoalWash will handle it normally)`,
+      });
+    }
+    if (markerPinned.length) {
+      return { ok: false, error: `PIN-protected (pinned: true) — refuse to touch: ${markerPinned.map((p) => p.phys).join(', ')}` };
+    }
+    if (unprovable.size) actionable = actionable.filter((a) => !unprovable.has(a));
+    if (!actionable.length) {
+      return { ok: false, flagged, error: `every action was refused (un-rewritable or frontmatter-unprovable) — nothing applied: ${flagged.map((f) => f.path).join(', ')}` };
     }
 
     // ---- KEEPS-GATE (beta.12 — closes the r3 "laundering channel": an
