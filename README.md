@@ -107,6 +107,24 @@ claude plugin install coalwash@coalwash
 > [!TIP]
 > Install **globally** — CoalWash is a maintenance utility you want available everywhere, and it still operates per-project, per-session. A project config can tune or shut it off locally.
 
+## Commands
+
+On Claude Code the plugin ships the three `/coalwash…` commands; a file-copy install carries the skill and the engine only, so `/coalwash` and the CLI rows are the doors there. `scripts/lib/cli.mjs` is relative to the install root — on a plugin install, let the agent resolve it.
+
+| Command | What it does |
+|---|---|
+| `/coalwash` | The wizard — the manual door, openable on any store, no BMI needed: four choices (fat only · fat + reorganize muscle · ULTRA · ULTRA + RE-TIER), a cost estimate, then start or cancel |
+| `/coalwash:stats` | This project's band, Memory-BMI, fat reading, lean floor, pending ask, sub-spawn bill and last run, plus the read-only class-A estate report. Measures, changes nothing |
+| `/coalwash:update` | Checks for a newer CoalWash and offers the update command — never applies one itself |
+| `node scripts/lib/cli.mjs gauge` | The one-shot gauge behind `/coalwash:stats` — discover, measure, band verdict, break-even. `--json` for the raw record |
+| `node scripts/lib/cli.mjs restore <id> > recovered.md` | Pulls one binned cut back to stdout, byte-exact — never re-typed from memory, never written back into the store. Ask the agent to list the bin for the id |
+| `node scripts/lib/cli.mjs writeguard-list` | Lists this session's write-guard (airbag) snapshots — metadata only, no content |
+| `node scripts/lib/cli.mjs writeguard-restore <snapName> > <file>` | Writes one airbag snapshot's byte-exact original to stdout — redirect it over the file it came from |
+| `node scripts/lib/cli.mjs estate-search <query>` | Searches the ULTRA dig-index of archived transcripts without unpacking them |
+| `node scripts/lib/cli.mjs estate-restore <sessionId>` | Round-trips one archived transcript back byte-exact, into a scratch dir — never the live tree |
+
+The remaining subcommands (`estate`, `estate-scan`, `estate-run`, `retier-scan`, `retier-run`, `dig-gauge`, `anchor-diff`) are steps the skill runs for you: the read-only ones inside `/coalwash:stats`, and `estate-run`/`retier-run` inside the wizard, behind its cost estimate and your start/cancel. `node scripts/lib/cli.mjs` with no argument prints the full usage.
+
 ## 🔧 Configure
 
 Every tool in the series supports two config levels — a global `~/.claude/.coalwash.json` and a per-project `.coalwash.json` override (project wins) — so a globally-installed skill can be tuned or **shut off per project** (`coalwashMode: "off"` is the off-switch) — a skill you don't need in a given project stops loading (and burning tokens) there. The main keys:
@@ -136,7 +154,18 @@ CoalWash's claims are measured, not asserted, by fixture-based benchmarks with a
 
 ## 🧭 Part of TheColliery
 
-CoalWash is the **memory-maintenance** member of the mining series, alongside [CoalMine](https://github.com/HetCreep/CoalMine) (quality canaries), [CoalTipple](https://github.com/TheColliery/CoalTipple) (model/effort routing), [CoalBoard](https://github.com/TheColliery/CoalBoard) (consensus & debate), [CoalHearth](https://github.com/TheColliery/CoalHearth) (session warm-resume), [CoalFace](https://github.com/TheColliery/CoalFace) (fan-out discipline), and [CoalLedger](https://github.com/TheColliery/CoalLedger) (docs health). Install one, it stands alone; install all, they compose without conflict (CoalWash defrags CoalHearth's memory; an interrupted apply recovers from its own write-ahead journal, or keeps that journal for you and says so — CoalHearth-side recognition is planned, not yet shipped). Shared doctrine: Phoenix-13 hooks (zero-dependency, no network, fail-silent), single-source-of-truth config schemas, consent-gated spend, and a strict no-overkill discipline. Series doctrine: [`TheColliery/.github`](https://github.com/TheColliery).
+CoalWash is the **memory-maintenance** member of the mining series:
+
+- [CoalMine](https://github.com/HetCreep/CoalMine) — quality canaries
+- [CoalTipple](https://github.com/TheColliery/CoalTipple) — model/effort routing
+- [CoalBoard](https://github.com/TheColliery/CoalBoard) — consensus & debate
+- [CoalHearth](https://github.com/TheColliery/CoalHearth) — session warm-resume
+- [CoalFace](https://github.com/TheColliery/CoalFace) — fan-out discipline
+- [CoalLedger](https://github.com/TheColliery/CoalLedger) — docs health
+
+Install one, it stands alone; install all, they compose without conflict (CoalWash skips any session CoalHearth's in-progress journal names, so a live handoff is never archived; an interrupted apply recovers from its own write-ahead journal, or keeps that journal for you and says so — CoalHearth-side recognition is planned, not yet shipped).
+
+Shared doctrine: Phoenix-13 hooks (zero-dependency, no network, fail-silent), single-source-of-truth config schemas, consent-gated spend, and a strict no-overkill discipline. Series doctrine: [`TheColliery/.github`](https://github.com/TheColliery).
 
 Zero-dependency, offline, no API keys.
 
