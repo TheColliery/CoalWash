@@ -406,11 +406,31 @@ export function isPinned(file) {
     // ROUND 7 — THE QUESTION IS INVERTED, and that is the whole change. Six
     // repairs before this one asked "is there a pin?" and answered it more
     // cleverly each time; the seventh breach (an indented `pinned: true`, read
-    // as no-pin and DELETED) landed anyway, because "no marker found" is the
-    // answer a WRONG PARSE always produces. `unreadable` makes the destroying
+    // as no-pin and DELETED) landed anyway. `unreadable` makes the destroying
     // branch require a POSITIVE proof instead: every line of the block is
-    // accounted for, or this file is untouchable. A missing marker can be
-    // manufactured by any parse bug; an accounted-for block cannot.
+    // accounted for, or this file is untouchable.
+    //
+    // WHAT THAT BUYS, AND EXACTLY WHERE IT STOPS — station 3 found the edge and
+    // it is worth more than the slogan. The claim holds against every way a line
+    // can be MIS-CLASSIFIED: a wrong verdict about a line we HAVE cannot
+    // manufacture "accounted for", it can only break it, which is the safe side.
+    // **It is bounded by the line-splitting it counts over.** The reader splits
+    // on `/\r?\n/`, and YAML 1.2 also breaks on a LONE CR (`b-break ::= CRLF |
+    // CR | LF`) — so a mixed-ending block is joined into FEWER lines than the
+    // author wrote, each joined line still matches the key regex, and every line
+    // of a WRONG BASIS is faithfully accounted for. Measured through this door:
+    // `  title: x<CR>  pinned: true` is a top-level pin by YAML and is DELETED —
+    // identically on rc.8 and here, i.e. PRE-EXISTING and NOT closed by round 7.
+    // MED, not HIGH: a CR-only file is already refused at the fence, so it takes
+    // a MIXED-ending file, which ordinary editors do not produce.
+    // The cure already exists ~80 lines from the split, with its own reasoning:
+    // `readFrontmatter`'s `cr` branch calls bare CR "a line discipline this
+    // tooling cannot faithfully parse". DOCKETED, deliberately not done here —
+    // re-plumbing the splitter in the same commit that changed the question is
+    // the move that let one line rot through six rounds.
+    // A missing marker can be manufactured by a parse bug; an accounted-for
+    // block can only be manufactured by a wrong LINE BASIS, and that is the one
+    // residual, named rather than implied.
     const parsed = frontmatterBlockParse(fm.block);
     if (parsed.unreadable) return true;
     return parsed.entries.some((e) => e.top && pinKey(e.key) && !pinValueClears(e.value));

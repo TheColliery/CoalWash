@@ -646,6 +646,18 @@ export function frontmatterBlockParse(block) {
   let root = null;
   let unreadable = null;
   const refuse = (why) => { if (!unreadable) unreadable = why; };
+  // ⚠ THE LINE BASIS IS THIS FUNCTION'S ONE RESIDUAL, and every claim below is
+  // relative to it. YAML 1.2 breaks on a LONE CR too (`b-break ::= CRLF | CR |
+  // LF`); this split does not, so a MIXED-ending block is joined into fewer
+  // lines than the author wrote — each joined line still matches the key regex,
+  // so the block reports fully accounted for over a WRONG BASIS. Measured
+  // through the shipped delete door: `  title: x<CR>  pinned: true` is a
+  // top-level pin by YAML and is deleted — identically on rc.8, so this is
+  // PRE-EXISTING and round 7 did not close it. MED: a CR-only file is already
+  // refused at the fence (`readFrontmatter`'s `cr` branch, ~80 lines up, which
+  // already calls bare CR "a line discipline this tooling cannot faithfully
+  // parse"), so it takes a mixed-ending file, which ordinary editors do not
+  // produce. DOCKETED. Whoever closes it fixes it HERE, not in a caller.
   for (const line of String(block).split(/\r?\n/)) {
     if (!/\S/.test(line)) continue; // blank
     if (/^[ ]*\t/.test(line)) { refuse(`a TAB in the indentation of ${showLine(line)} — YAML forbids tabs for indentation, so this block has no column to read`); continue; }

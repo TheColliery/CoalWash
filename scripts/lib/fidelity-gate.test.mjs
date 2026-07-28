@@ -889,13 +889,20 @@ test('G4: a line the block-reader cannot account for refuses the whole block, wi
 // the only way that matters, and unlike a second parser it cannot drift into
 // agreement with the first.
 //
-// ITS BOUND, STATED SO NOBODY OVERREADS IT: this proves the reader agrees with
-// the CONSTRUCTION, not that either conforms to YAML. If the generator and the
-// parser share a misconception about YAML they are wrong together. The
-// independent check on YAML itself was an external parser (js-yaml) run in the
-// lab; it cannot ship here, because zero-dependency is binding (Phoenix #2).
-// So: this oracle owns the top-level/nested DISCRIMINATION; YAML conformance is
-// owned by a lab run and by the refusal of everything we do not recognise.
+// ITS BOUND — THREE THINGS IT DOES NOT COVER, listed because the first version
+// of this paragraph named only the first and that is how a bound becomes a
+// slogan:
+//   1. YAML CONFORMANCE. It proves the reader agrees with the CONSTRUCTION; if
+//      generator and parser share a misconception they are wrong together. The
+//      independent check was an external parser (js-yaml) run in the LAB — it
+//      cannot ship, zero-dependency is binding (Phoenix #2).
+//   2. THE PIN VALUE SEMANTICS. See the ⚠ below: the pin reading here is a
+//      deliberately dumb third implementation, and 54 of the 400 blocks
+//      disagree with the shipped `isPinned` by design.
+//   3. THE LINE BASIS. Every block is joined with `\n`, so the lone-CR gap
+//      documented at `frontmatterBlockParse`'s split is invisible to this
+//      generator — it cannot fail on a residual it never emits.
+// So: this oracle owns the top-level/nested DISCRIMINATION and nothing else.
 // ---------------------------------------------------------------------------
 test('ORACLE: over 400 generated blocks the reader reports exactly the keys the GENERATOR placed at the root', () => {
   let s = 20260728 >>> 0;
@@ -938,8 +945,20 @@ test('ORACLE: over 400 generated blocks the reader reports exactly the keys the 
       [...frontmatterKeys('---\n' + block + '\n---\nbody')].sort(), [...planned].sort(),
       `the inventory must equal the keys the generator placed at column ${root}:\n${block}`,
     );
+    // ⚠ THIS IS DELIBERATELY *NOT* `isPinned`, AND THE ASSERT BELOW SAYS SO.
+    // It is a THIRD, deliberately dumb reading of a pin — no `pinKey`, no
+    // `pinValueClears`, no `unquote`, no `RETIRED_PIN_FLOOR` — because the axis
+    // under test here is PLACEMENT (is this key at the root?), not the value
+    // semantics that `apply.mjs` owns. Measured: **54 of these 400 blocks
+    // disagree with the shipped predicate** — a generated `pinned: value0` is
+    // PINNED by the product (an unrecognised value is fail-safe) and unpinned by
+    // this line. That direction is safe and there is no live hole, but the
+    // mismatch must be NAMED here, because the obvious "improvement" — swapping
+    // in the real `isPinned` — goes RED on those 54 and reads as a product bug.
+    // IT IS NOT. If you make that swap, the fixture's value pool is what needs
+    // changing, never `PIN_CLEARED`.
     const readsPinned = parsed.entries.some((e) => e.top && e.key === 'pinned' && e.value.trim() === 'true');
-    assert.strictEqual(readsPinned, plannedPin, `pin verdict must match the plan (root column ${root}):\n${block}`);
+    assert.strictEqual(readsPinned, plannedPin, `the ROOT-COLUMN placement of a literal \`pinned: true\` must match the plan — this is not the shipped isPinned verdict (root column ${root}):\n${block}`);
     cases++;
     if (plannedPin) withPin++;
   }
