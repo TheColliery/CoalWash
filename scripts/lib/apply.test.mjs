@@ -2616,6 +2616,58 @@ test('G4-2: an indented pin survives a delete through the shipped applyPlan door
 // A REWRITE gets the honest, actionable flag instead of the pin gate's
 // whole-plan abort: one odd file must not make CoalWash unusable on a store.
 // ---------------------------------------------------------------------------
+// THE LINE BASIS AT THE DOORS (rc.9 station-3 MED — WAVE-9's measured repro).
+// `---\n  title: x<CR>  pinned: true\n---` is a top-level pin by YAML 1.2
+// (lone CR is a b-break) and was DELETED ok:true through the shipped door on
+// rc.8 AND rc.9, because split(/\r?\n/) joined the two author-lines into one.
+// Its G4-3 twin: a rewrite stripping the hidden `pinned` reported 0 drops.
+// The fix lives at frontmatterBlockParse (the split's owner): a bare-CR block
+// is unreadable -> the pin gate refuses the delete per-file, the sniff flags
+// the rewrite. A CR-ONLY file was already refused at the fence; these fixtures
+// are MIXED-ending on purpose (LF fences, a lone CR inside the block).
+// ---------------------------------------------------------------------------
+const MIXED_CR_PIN = () => '---\n  title: x' + String.fromCharCode(13) + '  pinned: true\n---\n\nbody\n';
+
+test('LINE BASIS: a lone CR cannot hide a top-level pin from isPinned', () => {
+  assert.strictEqual(pinnedOf(MIXED_CR_PIN()), true, 'a mixed-ending block must fail CLOSED — YAML reads a pin here');
+});
+
+test('LINE BASIS: the delete door refuses the mixed-ending file per-file — the hidden pin survives', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MIXED.md');
+    fs.writeFileSync(f, Buffer.from(MIXED_CR_PIN(), 'utf8'));
+    const dup = path.join(store, 'DUP.md');
+    fs.writeFileSync(dup, Buffer.from('plain junk line to delete\n', 'utf8'));
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: f },
+      { type: 'delete', path: dup },
+    ], { approvedDrops: ['frontmatter-key-drop:title'] }));
+    assert.strictEqual(fs.existsSync(f), true, 'the hidden-pin file survives');
+    assert.ok((r.flagged || []).some((x) => x.path === f), `refused per-file, by name: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.strictEqual(r.ok, true, 'the rest of the plan still executes');
+    assert.strictEqual(fs.existsSync(dup), false, 'the ordinary delete still landed');
+  } finally { clean(proj); }
+});
+
+test('LINE BASIS: the rewrite sniff flags the mixed-ending file — the G4-3 silent hidden-pin strip is gone', () => {
+  const buf = Buffer.from(MIXED_CR_PIN(), 'utf8');
+  const why = sniffUnrewritable(buf);
+  assert.ok(why, 'a mixed-ending frontmatter block must be flagged, not rewritten');
+  assert.match(String(why), /CR|line/i, 'the reason names the line-discipline problem');
+});
+
+test('LINE BASIS controls: CRLF files are untouched in both directions, and a body-only lone CR does not refuse', () => {
+  const CR = String.fromCharCode(13);
+  // CRLF pinned -> still pinned; CRLF unpinned -> still washable.
+  assert.strictEqual(pinnedOf(`---${CR}\npinned: true${CR}\n---${CR}\nbody`), true, 'CRLF pin still reads');
+  assert.strictEqual(pinnedOf(`---${CR}\ntitle: x${CR}\n---${CR}\nbody`), false, 'CRLF unpinned still washable');
+  // A lone CR in the BODY (past the closing fence) is content, not a basis
+  // problem — the rewrite is not refused for it.
+  assert.strictEqual(sniffUnrewritable(Buffer.from(`---\ntitle: x\n---\nbody line a${CR}body line b\n`, 'utf8')), null, 'a body-only lone CR must not flag the file');
+});
+
+// ---------------------------------------------------------------------------
 // THE PIN GATE'S TWO TIERS (rc.9 station-3 MED: "a DELETE plan containing an
 // unprovable file aborts entirely"). A MARKER pin (`pinned: true` actually read)
 // in a plan is a plan-generation violation of an explicit user marker — the plan

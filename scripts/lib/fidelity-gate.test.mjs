@@ -899,9 +899,10 @@ test('G4: a line the block-reader cannot account for refuses the whole block, wi
 //   2. THE PIN VALUE SEMANTICS. See the ⚠ below: the pin reading here is a
 //      deliberately dumb third implementation, and 54 of the 400 blocks
 //      disagree with the shipped `isPinned` by design.
-//   3. THE LINE BASIS. Every block is joined with `\n`, so the lone-CR gap
-//      documented at `frontmatterBlockParse`'s split is invisible to this
-//      generator — it cannot fail on a residual it never emits.
+//   3. THE LINE BASIS. Every block is joined with `\n`, so the bare-CR
+//      refusal at `frontmatterBlockParse`'s split (the closed round-7
+//      residual) is invisible to this generator — it cannot exercise a
+//      shape it never emits; the LINE BASIS tests below own that axis.
 // So: this oracle owns the top-level/nested DISCRIMINATION and nothing else.
 // ---------------------------------------------------------------------------
 test('ORACLE: over 400 generated blocks the reader reports exactly the keys the GENERATOR placed at the root', () => {
@@ -967,4 +968,40 @@ test('ORACLE: over 400 generated blocks the reader reports exactly the keys the 
   assert.strictEqual(cases, 400);
   assert.ok(withPin > 40, `the space must actually contain top-level pins; got ${withPin}`);
   assert.ok(withDecoy > 40, `and decoys that must NOT count as pins; got ${withDecoy}`);
+});
+
+// ---------------------------------------------------------------------------
+// THE LINE BASIS (rc.9 station-3 MED, the round-7 residual closed). "Every line
+// accounted for" inherits the correctness of the LINE SPLIT it counts over:
+// `split(/\r?\n/)` does not break on a lone CR, YAML 1.2 does (`b-break ::=
+// CRLF | CR | LF`), so a MIXED-ending block joined `  title: x<CR>  pinned:
+// true` into ONE line and reported it fully accounted for over a WRONG BASIS —
+// and the hidden top-level pin was deletable. The fix is AT the split's owner:
+// a block containing a bare CR refuses as unreadable (the same reason string
+// discipline as readFrontmatter's `cr` fence branch), because no per-line
+// verdict can be trusted when the lines themselves are mis-cut.
+// ---------------------------------------------------------------------------
+test('LINE BASIS: a block containing a bare CR refuses — the split basis cannot be trusted', () => {
+  const CR = String.fromCharCode(13);
+  for (const [label, block] of [
+    ['the measured shape: a lone CR hiding a top-level pin', `  title: x${CR}  pinned: true`],
+    ['a lone CR mid-value', `title: a${CR}b: c`],
+    ['a lone CR at block end', `title: x${CR}`],
+  ]) {
+    const r = frontmatterBlockParse(block);
+    assert.ok(r.unreadable, `${label} must refuse: ${JSON.stringify(block)}`);
+    assert.match(String(r.unreadable), /CR|line/i, 'the reason names the line-discipline problem');
+  }
+});
+
+test('LINE BASIS controls: CRLF and LF blocks are unaffected, and the inventory on a refused block is unchanged', () => {
+  const CR = String.fromCharCode(13);
+  // CRLF pairs are a legal break for both YAML and the splitter — never refused.
+  assert.strictEqual(frontmatterBlockParse(`title: x${CR}\npinned: true`).unreadable, null, 'a CRLF block stays readable');
+  assert.strictEqual(frontmatterBlockParse('title: x\npinned: true').unreadable, null, 'an LF block stays readable');
+  // The inventory (frontmatterKeys ignores `unreadable` by contract) keeps
+  // exactly what it always read on the joined basis — the fix adds the refusal,
+  // it does not change the entries.
+  const doc = `---\n  title: x${CR}  pinned: true\n---\nbody`;
+  assert.deepStrictEqual([...frontmatterKeys(doc)], ['title'], 'inventory byte-identical to the pre-fix joined-basis reading');
 });

@@ -646,18 +646,21 @@ export function frontmatterBlockParse(block) {
   let root = null;
   let unreadable = null;
   const refuse = (why) => { if (!unreadable) unreadable = why; };
-  // ⚠ THE LINE BASIS IS THIS FUNCTION'S ONE RESIDUAL, and every claim below is
-  // relative to it. YAML 1.2 breaks on a LONE CR too (`b-break ::= CRLF | CR |
-  // LF`); this split does not, so a MIXED-ending block is joined into fewer
-  // lines than the author wrote — each joined line still matches the key regex,
-  // so the block reports fully accounted for over a WRONG BASIS. Measured
-  // through the shipped delete door: `  title: x<CR>  pinned: true` is a
-  // top-level pin by YAML and is deleted — identically on rc.8, so this is
-  // PRE-EXISTING and round 7 did not close it. MED: a CR-only file is already
-  // refused at the fence (`readFrontmatter`'s `cr` branch, ~80 lines up, which
-  // already calls bare CR "a line discipline this tooling cannot faithfully
-  // parse"), so it takes a mixed-ending file, which ordinary editors do not
-  // produce. DOCKETED. Whoever closes it fixes it HERE, not in a caller.
+  // THE LINE BASIS (round-7 residual, CLOSED). "Every line accounted for"
+  // inherits the correctness of this split, and YAML 1.2 breaks on a LONE CR
+  // too (`b-break ::= CRLF | CR | LF`) while `/\r?\n/` does not — so a
+  // MIXED-ending block was joined into fewer lines than the author wrote, each
+  // joined line still matched a key regex, and `  title: x<CR>  pinned: true`
+  // — a top-level pin by YAML — was deleted through the shipped door. A bare
+  // CR therefore refuses the BLOCK, the same discipline (and for the same
+  // reason) as `readFrontmatter`'s `cr` fence branch: no per-line verdict can
+  // be trusted when the lines themselves are mis-cut. Fixed HERE, at the
+  // split's owner, never in a caller. The ENTRIES still parse on the joined
+  // basis below — the inventory's permissive consumer keeps what it always
+  // read (byte-identical), only the readability proof changes.
+  if (/\r(?!\n)/.test(String(block))) {
+    refuse('the block contains a bare CR line break (mixed line endings) — a line discipline this tooling cannot faithfully parse, so no per-line reading of this block can be trusted');
+  }
   for (const line of String(block).split(/\r?\n/)) {
     if (!/\S/.test(line)) continue; // blank
     if (/^[ ]*\t/.test(line)) { refuse(`a TAB in the indentation of ${showLine(line)} — YAML forbids tabs for indentation, so this block has no column to read`); continue; }
