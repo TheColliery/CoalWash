@@ -10,35 +10,8 @@ LAB-ARCHIVE.md
 # machine-local agent-org process (supplier branches / assembly line) - not part of the shipped skill
 ASSEMBLY-LINE.md
 
-# Dependencies / build cruft
-node_modules/
-
-# Runtime transaction dir (lock + WAL journal + snapshots, created inside a target project at run-time, never committed)
-.claude/coalwash/
-
 # Generated SkillSpector scan reports (provenance recorded in SECURITY.md; the raw report is not shipped)
 skillspector-*
-
-# OS / editor cruft
-.DS_Store
-Thumbs.db
-*.log
-*.swp
-
-# editor / env / tmp (preventive)
-.vscode/
-.idea/
-.env
-.env.*
-*.tmp
-
-# Class-A ULTRA engine (scripts/lib/{explode,detonate}.mjs + tests) is deliberately NOT listed here.
-# It was parked under this block as an ungraduated prototype; since the graduation landing (A1-A5) it
-# is TRACKED SOURCE, gated by the suite like any other lib. It is kept out of the shipped plugin/ dist
-# by the named UNWIRED_ENGINE exclusion in scripts/build-plugin.mjs (enforced in both directions by
-# verify.mjs), NOT by this file — and it ships once the class-A SKILL surface wires it. Re-adding it
-# here would change nothing in git (the files are tracked) while hiding them from ripgrep and
-# re-implying "never ship".
 
 # IC lab scratch — throwaway prototypes/notes, never committed (this is the guard that still serves)
 work/
@@ -49,11 +22,6 @@ work/
 # was already fenced, and `git check-ignore` on the DIRECTORY agreed while the FILES were exposed.
 # Check the file, never the directory.
 docs/
-
-# Board reports — audit output lands INSIDE the scanned part by rule, but it is process, not
-# product. Same add -A leak class as docs/ above; caught by station 3 the same day the docs/
-# fence went in (an unfenced .coalboard/ would stage the board verdict into this PUBLIC repo).
-.coalboard/
 
 # Caretaker benches — git worktrees nested inside this repo (machine-local, never shipped).
 # MUST stay ignored: an un-ignored nested checkout would be committed whole into a PUBLIC repo.
