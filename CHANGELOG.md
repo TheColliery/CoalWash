@@ -4,6 +4,8 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.2.0-rc.9] - 2026-07-28
+
 ### Security
 
 - **HIGH (round-7 lab, G4-2) - the SEVENTH breach of the pin promise, and it is the slot BEFORE the key: an indented `pinned: true` was read as UNPINNED and the file was DELETED.** Every earlier repair swept the three slots *inside* `pinned : true $`; nobody had looked at the one in front of it. Both key regexes anchor on `^([^\s:#-]...)`, so ONE leading space stops the line being an entry at all, and the round-6 floor `/^pinned\s*:\s*true\s*$/m` does not fire either because its `^` is a line anchor. **Both readers agreed, and both disagreed with the author** - an independent YAML parser reads `" pinned: true"` as a top-level `{pinned: true}`, because a block mapping may sit at any consistent indentation. Measured through the shipped `applyPlan` door: one space, two spaces or a tab before the marker, file gone, `ok: true`. **No shipped document of ours places a column constraint on the marker** (README, SECURITY.md and SKILL.md all say a file marked `pinned: true` is never touched); that promise is now true.
