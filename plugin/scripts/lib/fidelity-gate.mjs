@@ -635,8 +635,32 @@ export function readFrontmatter(text, { truncated = false } = {}) {
 // end, tab indentation, or a non-ASCII top-level key makes the file
 // UNWASHABLE — flagged with a reason, never deleted and never rewritten. Yield
 // loss, never safety loss, and the user is told how to get the yield back.
-const KEY_STRICT = /^([^\s:#-][^\n]*?)\s*:(?=\s|$)([^\n]*)$/;
-const KEY_LOOSE = /^([^\s:#-][^\n]*?)\s*:([^\n]*)$/;
+// THE KEY-LINE PARSE IS A SCAN, NOT THE RETIRED REGEX PAIR (rc.9 station-3
+// LOW: quadratic backtracking). The retired forms —
+//   KEY_STRICT /^([^\s:#-][^\n]*?)\s*:(?=\s|$)([^\n]*)$/
+//   KEY_LOOSE  /^([^\s:#-][^\n]*?)\s*:([^\n]*)$/
+// — re-scanned the whitespace run once per lazy start position, so a line of
+// `a` + 60 KiB of spaces cost ~5.4 s, and round 7 doubled the exposure by
+// parsing in sniffUnrewritable as well as isPinned. The scan below matches the
+// SAME language exactly (the retired regexes stay in the suite as the
+// equivalence ORACLE): the separator is the FIRST `:` followed by whitespace
+// or end-of-string (the lazy quantifier's leftmost preference), else — the
+// loose tier — the first `:` anywhere; the key is everything before it with
+// trailing whitespace removed (`\s` and String.prototype.trimEnd strip the
+// IDENTICAL set: ECMA-262 WhiteSpace + LineTerminator), which also preserves
+// the load-bearing embedded-colon behaviour: `a:b c: d` keys as `a:b c`,
+// never `a`. First-char class unchanged — `#`/`-` excluded so a YAML comment
+// or a `- list:` sequence item is never mistaken for a key.
+const KEY_FIRST_CHAR = /^[^\s:#-]/;
+const KEY_SEP_STRICT = /:(?=\s|$)/; // one-char lookahead, no backtracking state
+function keyLineParse(body) {
+  if (!KEY_FIRST_CHAR.test(body)) return null;
+  const sm = KEY_SEP_STRICT.exec(body);
+  if (sm) return { key: body.slice(0, sm.index).trimEnd(), value: body.slice(sm.index + 1), strict: true };
+  const li = body.indexOf(':');
+  if (li === -1) return null;
+  return { key: body.slice(0, li).trimEnd(), value: body.slice(li + 1), strict: false };
+}
 const SEQ_ITEM = /^-(?:[ \t][^\n]*)?$/;
 // Show an invisible byte AS a codepoint — the whole value of the message to a
 // user is seeing the character they cannot see in their editor.
@@ -670,13 +694,12 @@ export function frontmatterBlockParse(block) {
     if (root === null) root = indent;
     if (indent > root) continue; // deeper than the root: nested mapping, sequence item or block-scalar content — cannot be a top-level key
     if (SEQ_ITEM.test(body)) continue; // the root is a SEQUENCE: it has no top-level mapping keys at all
-    const strict = KEY_STRICT.exec(body);
-    // The strict form is the pre-existing key regex UNCHANGED (its lookahead
-    // backtracking is load-bearing: `a:b c: d` keys as `a:b c`, not `a`), plus
-    // a value capture that cannot alter where the key match ends. It is applied
-    // to the line with its indentation REMOVED, which is byte-identical to the
-    // old behaviour at column 0 and is the whole fix everywhere else.
-    const m = strict || KEY_LOOSE.exec(body);
+    // The scan preserves the retired regexes' language exactly (see
+    // keyLineParse's header; the retired pair is the suite's equivalence
+    // oracle). It is applied to the line with its indentation REMOVED, which
+    // is byte-identical to the old behaviour at column 0 and is the whole fix
+    // everywhere else.
+    const m = keyLineParse(body);
     if (!m) { refuse(`CoalWash cannot read ${showLine(line)} as a key, a comment or a list item`); continue; }
     // THE UNION, and it is deliberate. Round 5 shipped a regression by assuming
     // a merge was a widening without measuring the other direction. On a
@@ -684,7 +707,7 @@ export function frontmatterBlockParse(block) {
     // inventory may never LOSE a key the old column-0 anchor saw.
     const top = indent === root || indent === 0;
     if (indent < root) refuse(`the key line ${showLine(line)} is indented LESS than the block's first line — CoalWash cannot tell which column is the document root`);
-    if (top && /[^\x20-\x7E]/.test(m[1])) refuse(`the top-level key in ${showLine(line)} contains a character outside printable ASCII — CoalWash cannot tell whether it is the \`pinned\` marker`);
+    if (top && /[^\x20-\x7E]/.test(m.key)) refuse(`the top-level key in ${showLine(line)} contains a character outside printable ASCII — CoalWash cannot tell whether it is the \`pinned\` marker`);
     // A key that OPENS with one of YAML's own indicator characters is not a
     // plain scalar, so this line is not the plain `key: value` we can read:
     // `{pinned: true}` is a FLOW mapping whose real key is `pinned`, and we
@@ -693,8 +716,8 @@ export function frontmatterBlockParse(block) {
     // `:`/`#`/`-` are already excluded by the key regex above, and the two
     // QUOTE characters are deliberately kept, because a quoted key is a legal
     // plain key that `unquote` already reads (`"pinned": true` is PINNED today).
-    if (top && /^[,[\]{}&*!|>%@`?]/.test(m[1])) refuse(`the top-level key in ${showLine(line)} opens with a YAML indicator character — this is flow or explicit-key syntax, not the plain \`key: value\` line CoalWash reads`);
-    entries.push({ key: m[1], value: m[2], strict: !!strict, top });
+    if (top && /^[,[\]{}&*!|>%@`?]/.test(m.key)) refuse(`the top-level key in ${showLine(line)} opens with a YAML indicator character — this is flow or explicit-key syntax, not the plain \`key: value\` line CoalWash reads`);
+    entries.push({ key: m.key, value: m.value, strict: m.strict, top });
   }
   return { entries, unreadable };
 }

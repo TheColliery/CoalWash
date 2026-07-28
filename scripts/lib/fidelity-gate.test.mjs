@@ -994,6 +994,78 @@ test('LINE BASIS: a block containing a bare CR refuses — the split basis canno
   }
 });
 
+// ---------------------------------------------------------------------------
+// KEY-LINE PARSE COST (rc.9 station-3 LOW). The retired KEY_STRICT/KEY_LOOSE
+// regexes re-scanned the whitespace run once per lazy start position, so one
+// line of `a` + 60 KiB of spaces cost ~5.4 s (quadratic) — and round 7 doubled
+// the EXPOSURE by calling the parser from sniffUnrewritable too. The scan
+// replacement is linear; the bound below is ~1000x the fixed cost and ~4x
+// under the measured quadratic, so it can only trip if the quadratic returns.
+// Semantics are pinned by the RETIRED-REGEX ORACLE test underneath, not here.
+// ---------------------------------------------------------------------------
+test('KEY-LINE COST: a 60 KiB pathological line parses in bounded time (was ~5.4 s quadratic)', () => {
+  const shapes = [
+    'a' + ' '.repeat(61440),          // no colon at all — both retired regexes went quadratic
+    'a' + ' '.repeat(61440) + ':x',   // a colon that fails the strict lookahead — strict went quadratic
+  ];
+  for (const line of shapes) {
+    const t0 = process.hrtime.bigint();
+    frontmatterBlockParse(line);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    assert.ok(ms < 1500, `parsing ${line.length} chars took ${ms.toFixed(0)}ms — the quadratic is back`);
+  }
+});
+
+// THE RETIRED REGEXES ARE THE ORACLE — test-local copies of the exact retired
+// spec, run on SHORT bodies where their quadratic cost is invisible. The rule
+// is round 6's, in its legitimate role: generate the space the OLD parser
+// admitted and demand the NEW one answers identically — match/no-match, key,
+// value, and strict tier, every body. (This oracle is a SPEC for equivalence,
+// not a safety floor — the floor lives in apply.mjs; do not move this into
+// the engine.) BOUND: the oracle covers the per-LINE language only; the block
+// layer above it (root column, CR refusal, indicators) has its own tests.
+test('KEY-LINE ORACLE: the scan parser answers exactly like the retired KEY_STRICT/KEY_LOOSE on every enumerated shape', () => {
+  const OLD_STRICT = /^([^\s:#-][^\n]*?)\s*:(?=\s|$)([^\n]*)$/; // retired spec, verbatim
+  const OLD_LOOSE = /^([^\s:#-][^\n]*?)\s*:([^\n]*)$/;          // retired spec, verbatim
+  const CR = String.fromCharCode(13);
+  const NBSP = String.fromCharCode(0xa0);
+  const bodies = [
+    'a: b', 'a:b', 'a :b', 'a : b', 'a  : b', 'a\t: b', 'a:', 'a: ', 'a',
+    'a:b c: d', 'a:b: c', 'a :x b: c', 'a b:c d: e', 'key  : v',
+    ':leading', '#comment: x', '- item: x', ' indented: x',
+    'a' + CR + ': v', 'a' + CR + ':b', 'title: x' + CR + '  pinned: true',
+    'k' + NBSP + ': v', NBSP + 'k: v', 'k: v' + NBSP, 'k' + NBSP + 'x: v',
+    'https://example.com', 'a: b: c', 'a::b', 'a:: b', '\u0e01\u0e02: thai key', 'e\u00e9: v',
+    'a ' + ' '.repeat(40) + ': v', 'a' + ' '.repeat(40) + ':x',
+    'a:\tb', 'a\t\t: b', 'x'.repeat(200) + ': v', 'k:' + CR, 'k: v' + CR,
+  ];
+  let strictHits = 0, looseOnly = 0, misses = 0;
+  for (const body of bodies) {
+    const os = OLD_STRICT.exec(body);
+    const ol = os || OLD_LOOSE.exec(body);
+    const parsed = frontmatterBlockParse(body);
+    // Project the single-line parse back out of the block reader: exactly one
+    // non-blank line, no comment/seq/indent interference for these bodies is
+    // NOT guaranteed (some ARE comments/seq/indented) — so compare through the
+    // entries the block reader emits, which is the shipped surface.
+    const entry = parsed.entries.length === 1 ? parsed.entries[0] : null;
+    if (ol && !/^[#\-\s]/.test(body[0]) && body.trim()) {
+      assert.ok(entry, `old parser matched ${JSON.stringify(body)} — the scan must too`);
+      assert.strictEqual(entry.key, ol[1], `key must match the retired spec for ${JSON.stringify(body)}`);
+      assert.strictEqual(entry.value, ol[2], `value must match the retired spec for ${JSON.stringify(body)}`);
+      assert.strictEqual(entry.strict, !!os, `strict tier must match the retired spec for ${JSON.stringify(body)}`);
+      if (os) strictHits++; else looseOnly++;
+    } else if (!ol && !/^[#\-\s]/.test(body[0] || '#') && body.trim()) {
+      assert.strictEqual(entry, null, `old parser refused ${JSON.stringify(body)} — the scan must too`);
+      misses++;
+    }
+  }
+  // Vacuity: the enumeration must actually exercise all three answer classes.
+  assert.ok(strictHits >= 10, `strict matches exercised: ${strictHits}`);
+  assert.ok(looseOnly >= 3, `loose-only matches exercised: ${looseOnly}`);
+  assert.ok(misses >= 2, `refusals exercised: ${misses}`);
+});
+
 test('LINE BASIS controls: CRLF and LF blocks are unaffected, and the inventory on a refused block is unchanged', () => {
   const CR = String.fromCharCode(13);
   // CRLF pairs are a legal break for both YAML and the splitter — never refused.
