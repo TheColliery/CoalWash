@@ -80,6 +80,14 @@ import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn } from './class
 // accretion ~1-3%/session = months-per-fire on a healthy store.
 export const CEILING_BMI = 1.5;
 export const CEILING_REARM_BMI = 1.2;
+// 0r "WALL -> floor-relative": the same GC-anchor family as CEILING_BMI
+// (V8/Java major-GC fire at 1.5-2x heap growth) but the HIGH edge -- the WALL
+// is the outer, rarely-touched line (unlike OBESE's frequent low-edge arm),
+// so it earns the more permissive end of the same range. Config key
+// `fatMultiple`; schema min sits strictly above CEILING_BMI (the
+// blueprint's ordering-clamp: the wall must never fire before OBESE arms,
+// or OBESE gets swallowed).
+export const FAT_MULTIPLE_DEFAULT = 2.0;
 // Floor-sanity lower bound ("<~10KB no-measure", the beta.6 floor-guard
 // family's other half — sanitizeLeanFloor below already guards the UPPER
 // bound): a floor this small can't support a trustworthy RATIO — a trivial
@@ -240,6 +248,7 @@ export function bandVerdict({
   leanFloorTokens = 0,
   capacityTokens = CAPACITY_TOKENS,
   fullPercent = 6,
+  fatMultiple = FAT_MULTIPLE_DEFAULT,
   indexBytes = 0,
   indexLines = 0,
   wasOver = false,
@@ -247,16 +256,27 @@ export function bandVerdict({
   wasEconLatched = false,
   floorProvisional = false,
 } = {}) {
+  // 0r "the WALL TRACKS the lean MEAT floor, growable, clamped at the hard
+  // ceiling": with a stamped (measurable) floor the WALL is
+  // fatMultiple x leanFloor -- a legitimately-grown muscle store raises its
+  // own wall right along with it -- clamped at the TRUE capacity ceiling
+  // (the raw context window, "ssd-full"), never the small fullPercent%
+  // number (that was the pre-0r static wall this fix retires). No stamped
+  // floor yet -> the growth needs a MEASURED floor to track, so this stays
+  // the pre-0r legacy heuristic (fullPercent x capacity) unchanged.
   const hardCeilingTokens = Math.round(capacityTokens * (fullPercent / 100));
+  const measurable = leanFloorTokens >= FLOOR_MIN_TOKENS;
+  const wallTokens = measurable
+    ? Math.min(fatMultiple * leanFloorTokens, capacityTokens)
+    : hardCeilingTokens;
   const capHit =
-    footprintTokens >= hardCeilingTokens ||
+    footprintTokens >= wallTokens ||
     indexBytes >= CC_INDEX_CAP_BYTES ||
     indexLines >= CC_INDEX_CAP_LINES;
   // Fractal BMI (the INFECTION AUDIT's superseding ruling): the floor must
   // itself be large enough to trust a ratio against (FLOOR_MIN_TOKENS) —
   // below that, or with no floor stamped yet, bmi collapses to null exactly
   // like the pre-floor bootstrap case always has.
-  const measurable = leanFloorTokens >= FLOOR_MIN_TOKENS;
   const bmi = measurable ? footprintTokens / leanFloorTokens : null;
   // Schmitt-trigger hysteresis: once armed (over), BMI must fall to the LOW
   // mark to disarm; once disarmed, BMI must reach the HIGH mark to arm again.
@@ -273,8 +293,8 @@ export function bandVerdict({
     // wall-only heuristic — it correctly drove the first real clean
     // (beta.6). The ceiling (and with it the economic FULL, Q1) wakes up
     // only once a full clean stamps a measurable floor.
-    if (capHit) return { band: 'FULL', reason: 'absolute-cap', bmi, over: false, econLatched: false, hardCeilingTokens };
-    return { band: 'LEAN', reason: leanFloorTokens > 0 ? 'floor-too-small' : 'no-floor-yet', bmi, over: false, econLatched: false, hardCeilingTokens };
+    if (capHit) return { band: 'FULL', reason: 'absolute-cap', bmi, over: false, econLatched: false, hardCeilingTokens: wallTokens };
+    return { band: 'LEAN', reason: leanFloorTokens > 0 ? 'floor-too-small' : 'no-floor-yet', bmi, over: false, econLatched: false, hardCeilingTokens: wallTokens };
   }
 
   // Post-floor: the machine's WALL is the one PERSON-independent capacity
@@ -288,13 +308,13 @@ export function bandVerdict({
   // cannot drop the band out of FULL — same no-flap rule, Q2).
   if (capHit) {
     return over || floorProvisional
-      ? { band: 'FULL', reason: 'absolute-cap', bmi, over, econLatched: econFull, hardCeilingTokens }
-      : { band: 'FULL', reason: 'externalize', bmi, over, econLatched: false, hardCeilingTokens };
+      ? { band: 'FULL', reason: 'absolute-cap', bmi, over, econLatched: econFull, hardCeilingTokens: wallTokens }
+      : { band: 'FULL', reason: 'externalize', bmi, over, econLatched: false, hardCeilingTokens: wallTokens };
   }
-  if (econFull) return { band: 'FULL', reason: 'economic', bmi, over, econLatched: true, hardCeilingTokens };
+  if (econFull) return { band: 'FULL', reason: 'economic', bmi, over, econLatched: true, hardCeilingTokens: wallTokens };
   return over
-    ? { band: 'OBESE', reason: 'bmi', bmi, over, econLatched: false, hardCeilingTokens }
-    : { band: 'LEAN', reason: 'bmi', bmi, over, econLatched: false, hardCeilingTokens };
+    ? { band: 'OBESE', reason: 'bmi', bmi, over, econLatched: false, hardCeilingTokens: wallTokens }
+    : { band: 'LEAN', reason: 'bmi', bmi, over, econLatched: false, hardCeilingTokens: wallTokens };
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +376,7 @@ export function sessionsPerDay(stamps, now = Date.now()) {
 // over its inputs) — discovery (class-b.mjs) and state persistence
 // (recordVerdict/recordCrossing) stay the CALLER's job, the same module
 // boundaries as before.
-export function gaugeVerdict({ measure, rawLeanFloorTokens, fullPercent = 6, wasOver = false, wasEconLatched = false, floorProvisional = false, stamps } = {}) {
+export function gaugeVerdict({ measure, rawLeanFloorTokens, fullPercent = 6, fatMultiple = FAT_MULTIPLE_DEFAULT, wasOver = false, wasEconLatched = false, floorProvisional = false, stamps } = {}) {
   const leanFloorTokens = sanitizeLeanFloor(rawLeanFloorTokens, measure.alwaysLoaded.tokensEst);
   // Q4: economics FIRST — pure arithmetic, ~free, and the band needs it.
   const econ = breakEven({
@@ -369,6 +389,7 @@ export function gaugeVerdict({ measure, rawLeanFloorTokens, fullPercent = 6, was
     footprintTokens: measure.alwaysLoaded.tokensEst,
     leanFloorTokens,
     fullPercent,
+    fatMultiple,
     indexBytes: measure.index.bytes,
     indexLines: measure.index.lines,
     wasOver,
@@ -501,7 +522,12 @@ function readStateFile(p) {
 // below. migrateProjSchema() applies the reset lazily on every read; saveState
 // stamps the current schema on every write. (task #13's LOCATION relocation is
 // NOT a schema change — no field's meaning changed — so STATE_SCHEMA stays 1; the
-// location move is its own read-old/write-new mechanism, orthogonal to this reset.)
+// location move is its own read-old/write-new mechanism, orthogonal to this reset.
+// 0r's growable WALL is ALSO not a schema change: the only persisted field it
+// touches is lastVerdict.hardCeilingTokens, a pure per-gauge DISPLAY cache
+// (ask.mjs's force/externalize templates) that is never read back as a decision
+// input and is overwritten fresh at the very next SessionStart/Stop gauge under
+// the running code — no cross-version staleness for a bump to guard against.)
 export const STATE_SCHEMA = 1;
 // VERSION-SENSITIVE — reset when the stored schema is stale. Their meaning
 // changed across versions, so a value an older version wrote is not trustworthy

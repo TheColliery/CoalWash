@@ -107,6 +107,7 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const projectRoot = findProjectRoot(cwd, home);
   const cfg = loadMergedConfig({ cwd, home });
   const fullPercent = clampedRead(cfg, 'fullPercent');
+  const fatMultiple = clampedRead(cfg, 'fatMultiple');
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
   const disc = discoverClassB({ projectRoot, home, managedPaths });
@@ -138,6 +139,7 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
     footprintTokens: m.alwaysLoaded.tokensEst,
     leanFloorTokens,
     fullPercent,
+    fatMultiple,
     indexBytes: m.index.bytes,
     indexLines: m.index.lines,
     wasOver,

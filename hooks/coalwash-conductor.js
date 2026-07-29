@@ -44,9 +44,10 @@
 // OBESE < FULL. OBESE = the hysteresis-gated BMI ceiling armed but carry <
 // wash (auto-Quick-silent); FULL = the ceiling armed AND
 // breakEven.economical (Q1: FULL ⊂ OBESE), LATCHED per episode (Q2 —
-// cleared by the LEAN reset); the WALL (fullPercent x capacity) keeps its
-// three roles (Q3): pre-floor bootstrap cap, wash-first when armed,
-// externalize when ~all-muscle. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
+// cleared by the LEAN reset); the WALL (0r: fatMultiple x the stamped lean
+// floor once measurable, clamped at true capacity — fullPercent x capacity
+// only pre-floor) keeps its three roles (Q3): pre-floor bootstrap cap,
+// wash-first when armed, externalize when ~all-muscle. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
 // A DICTATOR"): every FULL crossing force-runs the FREE Quick pass under
 // the same standing consent as OBESE's auto-Quick — no economic proof
 // needed for the free tier (the break-even proof governs the PAID wizard;
@@ -157,6 +158,7 @@ async function handleSessionStart(input) {
   if (mode === 'off') return; // fully silent
   const language = clampedRead(cfg, 'language');
   const fullPercent = clampedRead(cfg, 'fullPercent');
+  const fatMultiple = clampedRead(cfg, 'fatMultiple');
 
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
@@ -221,7 +223,7 @@ async function handleSessionStart(input) {
     // place (0g Q4: economics now run BEFORE the band, because the band IS
     // the break-even) — see caliper.mjs for why this is factored out rather
     // than re-derived by hand at a second call site.
-    const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: floorInfo.floorTokens, floorProvisional: floorInfo.provisional, fullPercent, wasOver, wasEconLatched, stamps: proj.stamps });
+    const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: floorInfo.floorTokens, floorProvisional: floorInfo.provisional, fullPercent, fatMultiple, wasOver, wasEconLatched, stamps: proj.stamps });
     const { verdict, fatTokens, economical, perDay, breakEvenDays, floorUnmeasured } = gv;
 
     // WARP-HOLE (beta.13 item 3): the always-loaded path list + byte total —
@@ -308,6 +310,7 @@ async function handleStop(input) {
   // is read-tolerated and ignored, see config-schema.mjs RETIRED_KEYS).
   if (clampedRead(cfg, 'coalwashMode') === 'off') return; // fully silent
   const fullPercent = clampedRead(cfg, 'fullPercent');
+  const fatMultiple = clampedRead(cfg, 'fatMultiple');
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
   const home = os.homedir();
@@ -343,7 +346,7 @@ async function handleStop(input) {
         // store that only grew past FLOOR_MIN mid-session (was too tiny to
         // stamp at SessionStart, spiked before this Stop).
         const floorInfo = caliper.ensureProvisionalFloor(home, projectRoot, m.alwaysLoaded.tokensEst, now);
-        const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: floorInfo.floorTokens, floorProvisional: floorInfo.provisional, fullPercent, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps });
+        const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: floorInfo.floorTokens, floorProvisional: floorInfo.provisional, fullPercent, fatMultiple, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps });
         const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
         caliper.recordVerdict(home, projectRoot, {
           band: gv.verdict.band, reason: gv.verdict.reason, economical: gv.economical, fatTokens: gv.fatTokens,

@@ -58,6 +58,21 @@ test('clampedRead: valid passes through, invalid degrades to the default', () =>
   assert.strictEqual(clampedRead({ updateCheckDays: 0 }, 'updateCheckDays'), 14, 'updateCheckDays:0 must NOT mean nag-every-session');
 });
 
+// 0r: fatMultiple — the growable absolute-cap wall multiplier. Its min bound
+// sits strictly above caliper.mjs's CEILING_BMI (1.5) — the ordering-clamp
+// the docket owes: a value at/under CEILING_BMI would fire the wall before
+// OBESE even arms, swallowing the OBESE band entirely.
+test('0r fatMultiple: default 2.0, clamps below the ordering floor above CEILING_BMI (1.5), and a bare boolean/string degrades safely', () => {
+  const spec = CONFIG_SCHEMA.find((s) => s.key === 'fatMultiple');
+  assert.strictEqual(spec.def, 2.0);
+  assert.ok(spec.min > 1.5, 'the ordering-clamp: fatMultiple must stay above OBESE\'s CEILING_BMI');
+  assert.strictEqual(clampedRead({ fatMultiple: 1.7 }, 'fatMultiple'), 1.7, 'a value above the ordering floor passes through');
+  assert.strictEqual(clampedRead({ fatMultiple: 1.5 }, 'fatMultiple'), spec.def, 'AT CEILING_BMI clamps to the safe default — never lets the wall swallow OBESE');
+  assert.strictEqual(clampedRead({ fatMultiple: 1.3 }, 'fatMultiple'), spec.def, 'below CEILING_BMI clamps to the safe default');
+  assert.strictEqual(clampedRead({ fatMultiple: 'lots' }, 'fatMultiple'), spec.def);
+  assert.strictEqual(clampedRead({}, 'fatMultiple'), spec.def);
+});
+
 test('clampedRead normalizes enum case and clamps unknown enum values', () => {
   assert.strictEqual(clampedRead({ coalwashMode: 'OFF' }, 'coalwashMode'), 'off');
   assert.strictEqual(clampedRead({ coalwashMode: 'sideways' }, 'coalwashMode'), 'auto');

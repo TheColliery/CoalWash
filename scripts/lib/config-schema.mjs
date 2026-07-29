@@ -20,7 +20,17 @@
 export const CONFIG_SCHEMA = [
   { key: 'coalwashMode', type: 'enum', values: ['auto', 'manual', 'off'], def: 'auto', help: 'Master switch: auto = session-start gauge + band nudges; manual = /coalwash only (gauge silent); off = fully silent' },
   { key: 'language', type: 'enum', values: ['auto', 'th', 'en', 'ja', 'zh', 'es'], def: 'auto', help: 'Language override for prompts and nudges (auto, th, en, ja, zh, es)' },
-  { key: 'fullPercent', type: 'number', min: 1, max: 50, def: 6, help: 'Hard ceiling as % of platform context capacity — the FULL band absolute clamp; raising it = consciously carrying more overhead (default: 6)' },
+  { key: 'fullPercent', type: 'number', min: 1, max: 50, def: 6, help: 'Legacy pre-floor heuristic ONLY — used while no lean floor has been stamped yet (0r retired it as the overhead dial; fatMultiple is the growable wall a stamped floor rides). Raising it = consciously carrying more overhead before the first clean (default: 6)' },
+  // 0r "WALL -> floor-relative": once a floor is stamped, the absolute-cap
+  // wall is fatMultiple x leanFloor (clamped at the true capacity ceiling),
+  // never the static fullPercent x capacity number — a legitimately-grown
+  // muscle store raises its own wall instead of false-FULLing forever.
+  // min sits STRICTLY above CEILING_BMI (caliper.mjs, 1.5) — the blueprint's
+  // ordering-clamp: the wall must never fire before OBESE arms (which would
+  // swallow OBESE). Default 2.0 = the same V8/Java GC-anchor family
+  // (1.5-2x heap growth) CEILING_BMI is drawn from, taking the HIGH edge
+  // since the wall is the outer, rarely-touched line.
+  { key: 'fatMultiple', type: 'number', min: 1.6, max: 10, def: 2.0, help: 'Growable absolute-cap wall = fatMultiple x the stamped lean floor, clamped at true capacity — must stay above the OBESE BMI ceiling (1.5) or the wall fires first and swallows OBESE (default: 2.0)' },
   // targetPercent has NO band-math consumer post-band-collapse: the anti-flap job
   // moved to caliper.mjs's BMI Schmitt trigger (CEILING_BMI/CEILING_REARM_BMI). It
   // survives as AGENT guidance for the wash clean-to depth (references/method.md §3);

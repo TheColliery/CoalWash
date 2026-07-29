@@ -156,8 +156,9 @@ test('SessionStart: OBESE crossing is measured+cached SILENTLY (no ask text any 
   try {
     muteUpdate(home);
     // footprint ~= (60080 + 0)/4 = 15020 tok; floor 10000 -> bmi 1.502 (>= 1.5,
-    // ceiling arms), well under the 36000 hard cap; the big recall store keeps
-    // carry < wash (0g) so the band is OBESE, not economically FULL.
+    // ceiling arms), well under the wall (fatMultiple(2.0) x floor = 20000);
+    // the big recall store keeps carry < wash (0g) so the band is OBESE, not
+    // economically FULL.
     const mem = seedClassB(home, proj, { claudeMdBytes: 60080, indexBytes: 0 });
     seedBigRecall(mem);
     seedState(home, proj, { leanFloorTokens: 10000 });
@@ -195,8 +196,13 @@ test('SessionStart: FULL via the absolute index cap fires even with no floor mea
 test('SessionStart: FULL with the break-even in favor caches economical:true + the payback numbers for Stop', () => {
   const { home, proj } = sandbox();
   try {
-    muteUpdate(home);
-    // floor 20000; footprint 36200 (>= the 36000 hard cap AND bmi 1.81 >= 1.5) -> FULL/absolute-cap.
+    // 0r: the wall is now fatMultiple x leanFloor once a floor is measurable —
+    // fatMultiple:1.8 keeps this fixture's wall at the SAME 36000 tok the
+    // original static wall gave (20000 x 1.8), so this test still pins the
+    // capHit+economical interaction it always did, unrelated to the growable-
+    // wall fix itself (that fix is covered by its own dedicated tests).
+    muteUpdate(home, { fatMultiple: 1.8 });
+    // floor 20000; footprint 36200 (>= the 36000 wall AND bmi 1.81 >= 1.5) -> FULL/absolute-cap.
     // fat 16200/day (1 stamp -> sessionsPerDay=1); runCost = max(36200,36200)*3 = 108600;
     // horizonCarry = 16200*14 = 226800 > 108600 -> economical.
     seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
@@ -218,7 +224,7 @@ test('SessionStart: FULL with the break-even in favor caches economical:true + t
 test('SessionStart: FULL band but break-even NOT in favor caches economical:false (force stays disarmed downstream)', () => {
   const { home, proj } = sandbox();
   try {
-    muteUpdate(home);
+    muteUpdate(home, { fatMultiple: 1.8 }); // 0r: keeps this fixture's wall at 36000 (20000 x 1.8), see the test above
     // Same FULL-band footprint as the armed case, but a huge recall store
     // inflates the run cost (3x total) far past the 14-day carry.
     const mem = seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
@@ -237,11 +243,13 @@ test('SessionStart: FULL(externalize) is cached (reason + hardCeilingTokens) and
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // footprint 36200 tok; floor 36000 -> bmi ~1.0056 (well under 1.5, NOT
-    // armed) but the footprint clears the hard ceiling (36000 = 6% of
-    // CAPACITY_TOKENS) -> externalize.
-    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
-    seedState(home, proj, { leanFloorTokens: 36000 });
+    // 0r: post-floor the wall is fatMultiple x leanFloor clamped at the TRUE
+    // capacity ceiling (caliper.mjs CAPACITY_TOKENS = 600000 tok) — so
+    // un-armed capHit now needs a floor near capacity itself. footprint
+    // 600200 tok; floor 600000 -> bmi ~1.0003 (well under 1.5, NOT armed) but
+    // the footprint clears the capacity clamp -> externalize.
+    seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 600000 });
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'externalize is information, delivered by Stop, never printed at SessionStart');
@@ -488,7 +496,7 @@ test('0f: FULL force-run marks quickTried too (Force always runs Quick) — the 
 test('round trip: a FULL force-run followed by a FULL plateau (still over cap, quickTried set) arms an escalation crossing the following Stop delivers as the wizard ask — proves FLOW 1 end-to-end through two real SessionStarts', () => {
   const { home, proj } = sandbox();
   try {
-    muteUpdate(home);
+    muteUpdate(home, { fatMultiple: 1.8 }); // 0r: keeps this fixture's wall at 36000 (20000 x 1.8)
     // Same economical FULL/absolute-cap fixture as the existing 'round trip:
     // a FULL-economical SessionStart...' test below.
     seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
@@ -638,17 +646,48 @@ test('0j round trip: growth-since-install arms the economic FULL through the pro
   } finally { clean(home, proj); }
 });
 
-test('0j round trip: an already-over-wall store on day one still routes FULL/absolute-cap AND gets the provisional floor (BMI live in parallel)', () => {
+// 0r RED-FIRST PROOF (the live bug, MEMORY.md 2026-07-30: "the umbrella store,
+// ~51.6k tok muscle vs a ~36k wall, 2 zero-cut force receipts"): a day-one
+// store's provisional floor stamps to ITS OWN footprint (fat ~0 by
+// construction — 0j), so a fixture merely over the OLD static
+// fullPercent x capacity wall used to force-run FOREVER on pure muscle with
+// nothing to cut. Before the 0r fix this exact fixture (no seedState, floor
+// auto-stamps = footprint) fired FULL/absolute-cap; after the fix the wall
+// tracks the floor, so a fat-~0 day-one store reads LEAN, silent — no force
+// loop on legitimate muscle.
+test('0r (the live bug, fixed): a day-one store over the OLD static wall, with the provisional floor absorbing it (fat ~0), reads LEAN — no force loop on pure muscle', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 }); // fp 36200 >= the 36000 wall
+    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 }); // fp 36200, over the RETIRED 36000 static wall
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    const st = readProjState(home, proj);
+    assert.strictEqual(st.leanFloorTokens, 36200, 'the provisional floor stamps to the day-one footprint itself');
+    assert.strictEqual(st.leanFloorProvisional, true);
+    assert.strictEqual(st.lastVerdict.band, 'LEAN', '0r: fat ~0 against the provisional floor -> not a capacity emergency');
+    assert.strictEqual(st.lastCrossing, undefined, 'LEAN arms no crossing -> no force, no ask, no receipt');
+
+    const rp = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(rp);
+    assert.strictEqual(rp.stdout, '', 'silent — the exact zero-cut force loop the live bug produced is gone');
+  } finally { clean(home, proj); }
+});
+
+test('0j round trip: a day-one store AT THE TRUE CAPACITY CLAMP still routes FULL/absolute-cap (a provisional baseline can never certify externalize)', () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    // 0r: un-armed capHit only happens at the raw capacity clamp now — a
+    // day-one footprint genuinely AT that clamp still needs the provisional-
+    // floor-never-externalizes rule (0j), so this pins that shape directly.
+    seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 }); // fp 600200 >= CAPACITY_TOKENS
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     const st = readProjState(home, proj);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.reason, 'absolute-cap', '0j: never externalize off a provisional baseline — pre-existing fat may be baked in');
-    assert.strictEqual(st.leanFloorTokens, 36200, 'the provisional floor stamps IN PARALLEL with the wall verdict');
+    assert.strictEqual(st.leanFloorTokens, 600200, 'the provisional floor stamps IN PARALLEL with the wall verdict');
     assert.strictEqual(st.leanFloorProvisional, true);
     assert.strictEqual(st.lastVerdict.floorUnmeasured, false, 'BMI/economics live against the day-one baseline (fat-since-install ~0)');
     assert.strictEqual(st.lastVerdict.economical, false, 'the break-even proof is fresh-false here — and per 0m it no longer matters to the force leg (the free tier needs no proof)');
@@ -690,15 +729,18 @@ test('rc.2 cross-version un-strand: an OLD-state chronically-FULL store carrying
 // less than OBESE.
 // ---------------------------------------------------------------------------
 
-test('0m round trip (the user\'s live scenario): day-one over-wall → provisional floor → forceAuto (NOT an ask) → quickTried → still-over re-gauge → wizardEscalation → shrink under wall → silence', () => {
+test('0m round trip (the user\'s live scenario, at true capacity): day-one over the TRUE capacity clamp → provisional floor → forceAuto (NOT an ask) → quickTried → still-over re-gauge → wizardEscalation → shrink under wall → silence', () => {
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // Day one: a fresh, never-seen store already over the 36000-tok wall.
-    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 }); // fp 36200
+    // 0r: un-armed capHit only fires at the TRUE capacity clamp now (see the
+    // dedicated 0r/0j tests above) — day-one over the OLD static wall alone
+    // (fat ~0) is LEAN post-fix, covered by its own test. This walk needs a
+    // store genuinely AT capacity to still exercise the force->escalation flow.
+    seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 }); // fp 600200
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st1 = readProjState(home, proj);
-    assert.strictEqual(st1.leanFloorTokens, 36200, 'provisional floor stamped');
+    assert.strictEqual(st1.leanFloorTokens, 600200, 'provisional floor stamped');
     assert.strictEqual(st1.lastVerdict.reason, 'absolute-cap');
     assert.strictEqual(st1.lastVerdict.economical, false, 'no fresh break-even proof — irrelevant to force per 0m');
 
@@ -708,8 +750,8 @@ test('0m round trip (the user\'s live scenario): day-one over-wall → provision
     assertGraceful(rp1);
     const reason1 = parseBlock(rp1.stdout);
     assert.ok(reason1.includes('over the capacity wall'), reason1);
-    assert.ok(reason1.includes('store ~36200 tok'), 'names the footprint');
-    assert.ok(reason1.includes('~36000 tok wall'), 'names the wall');
+    assert.ok(reason1.includes('store ~600200 tok'), 'names the footprint');
+    assert.ok(reason1.includes('~600000 tok wall'), 'names the wall');
     assert.ok(reason1.includes('non-optional at FULL'), reason1);
     assert.ok(!reason1.includes('question tool'), 'force, not an ask — the day-one bug pinned dead');
     assert.ok(!reason1.includes('undefined') && !reason1.includes('null') && !reason1.includes('NaN'), reason1);
@@ -1134,7 +1176,7 @@ test('Stop: coalwashMode=off silences even a pending crossing (the master switch
 test('round trip: a FULL-economical SessionStart records a crossing the following Stop reads and force-fires on', () => {
   const { home, proj } = sandbox();
   try {
-    muteUpdate(home);
+    muteUpdate(home, { fatMultiple: 1.8 }); // 0r: keeps this fixture's wall at 36000 (20000 x 1.8)
     seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 }); // same economical FULL fixture as above
     seedState(home, proj, { leanFloorTokens: 20000 });
     const rs = run(proj, home, { hook_event_name: 'SessionStart' });
@@ -1218,8 +1260,10 @@ test('round trip: an externalize-FULL SessionStart arms a crossing the following
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    seedClassB(home, proj, { claudeMdBytes: 144800, indexBytes: 0 });
-    seedState(home, proj, { leanFloorTokens: 36000 });
+    // 0r: un-armed capHit now only fires at the TRUE capacity clamp (see the
+    // SessionStart externalize test above) — a floor near CAPACITY_TOKENS pins it.
+    seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 });
+    seedState(home, proj, { leanFloorTokens: 600000 });
     const rs = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(rs);
     assert.strictEqual(rs.stdout, '');

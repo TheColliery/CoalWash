@@ -9,10 +9,18 @@
   // a locked value pins user-facing prose (technical terms stay verbatim).
   "language": "auto",
 
-  // Hard ceiling as % of platform context capacity (the FULL band's absolute
-  // clamp). Raising it = consciously choosing to carry more memory overhead
-  // ("buying a bigger SSD") — the agent never raises it for you.
+  // Legacy pre-floor heuristic ONLY — the absolute-cap threshold before any
+  // lean floor has been measured (0r retired this as the overhead dial once a
+  // floor exists; see fatMultiple below). Raising it = consciously choosing to
+  // carry more memory overhead before the first clean ("buying a bigger SSD").
   "fullPercent": 6,
+
+  // 0r: once a lean floor is measured, the absolute-cap wall is
+  // fatMultiple x leanFloor (clamped at true capacity) — a legitimately-grown
+  // muscle store raises its own wall instead of false-firing against a fixed
+  // % of capacity. Must stay above the OBESE BMI ceiling (1.5, caliper.mjs
+  // CEILING_BMI) or the wall would fire before OBESE arms.
+  "fatMultiple": 2.0,
 
   // Clean-to depth target as % of capacity (below fullPercent). Agent guidance
   // for the wash's clean-to depth (references/method.md §3) — NOT the anti-flap

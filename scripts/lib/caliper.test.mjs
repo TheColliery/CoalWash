@@ -13,6 +13,7 @@ import {
   updateStampPath, oldUpdateStampPath, readUpdateStamp, writeUpdateStamp,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
   CEILING_BMI, CEILING_REARM_BMI, FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
+  FAT_MULTIPLE_DEFAULT,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
 } from './caliper.mjs';
 import { discoverClassB } from './class-b.mjs';
@@ -216,12 +217,47 @@ test('growable-full (b): a bootstrap store (no floor, ~44k) still verdicts FULL 
   assert.strictEqual(v.reason, 'absolute-cap');
 });
 
-test('growable-full (c): post-floor, all-muscle, over the hard cap -> the externalize variant (never "wash harder" on muscle)', () => {
-  const ceiling = Math.round(CAPACITY_TOKENS * 6 / 100);
-  const v = bandVerdict({ footprintTokens: ceiling + 200, leanFloorTokens: ceiling });
+// 0r "WALL -> floor-relative": the pre-0r static wall (fullPercent x
+// capacity) false-FULLed on legitimate muscle growth once the floor itself
+// outgrew the small fullPercent% slice of capacity (the live bug: a
+// ~51.6k-tok muscle store vs a ~36k-tok static wall). This is the RED-FIRST
+// proof — before the fix this exact fixture (floor === the static wall,
+// footprint 200 tok over it, fat ~200 tok) hit capHit and returned
+// FULL/externalize forever; the growable wall (fatMultiple x leanFloor)
+// fixes it because the wall now rides the floor.
+test('0r: a muscle store past the OLD static wall, with the floor stamped and fat small, is NOT absolute-cap (LEAN/OBESE per fat as usual)', () => {
+  const staticWall = Math.round(CAPACITY_TOKENS * 6 / 100);
+  const v = bandVerdict({ footprintTokens: staticWall + 200, leanFloorTokens: staticWall, fullPercent: 6 });
+  assert.strictEqual(v.band, 'LEAN', 'over the retired static wall, but fat ~200 tok never trips the growable wall');
+  assert.notStrictEqual(v.reason, 'externalize', 'a wash cannot help muscle -- but this store was never actually capacity-bound');
+});
+
+test('0r: no stamped floor -> legacy behavior unchanged (the growth needs a MEASURED floor to track)', () => {
+  const staticWall = Math.round(CAPACITY_TOKENS * 6 / 100);
+  const v = bandVerdict({ footprintTokens: staticWall + 200, leanFloorTokens: 0, fullPercent: 6 });
+  assert.strictEqual(v.band, 'FULL', 'pre-floor bootstrap still fires the plain fullPercent x capacity heuristic');
+  assert.strictEqual(v.reason, 'absolute-cap');
+});
+
+test('growable-full (c): post-floor, ~all-muscle, AT THE TRUE CAPACITY CLAMP -> the externalize variant (never "wash harder" on muscle)', () => {
+  // 0r: post-floor the wall is fatMultiple x leanFloor, clamped at the TRUE
+  // capacity ceiling (the raw context window) -- so the only way to still
+  // hit capHit while ~all-muscle is a floor big enough that fatMultiple x
+  // floor itself exceeds capacity, forcing the clamp down to capacityTokens.
+  const floor = CAPACITY_TOKENS;
+  const v = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor });
   assert.strictEqual(v.band, 'FULL');
   assert.strictEqual(v.reason, 'externalize');
   assert.strictEqual(v.over, false, 'externalize means the ceiling itself is NOT armed — ~all muscle');
+  assert.strictEqual(v.hardCeilingTokens, CAPACITY_TOKENS, 'the reported wall is the raw capacity clamp, not fatMultiple x floor');
+});
+
+test('0r: the capacity clamp still fires at true capacity even with a LOW fatMultiple (the clamp, not the multiple, is the binding line here)', () => {
+  const floor = CAPACITY_TOKENS;
+  const v = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor, fatMultiple: 1.7 });
+  assert.strictEqual(v.band, 'FULL');
+  assert.strictEqual(v.reason, 'externalize');
+  assert.strictEqual(v.hardCeilingTokens, CAPACITY_TOKENS);
 });
 
 test('growable-full: a large legitimate floor still ARMS the ceiling once BMI itself reaches it, at realistic scale (never a flat token budget)', () => {
@@ -745,17 +781,16 @@ test('gaugeVerdict: LEAN never computes payback numbers (matches the pre-refacto
 });
 
 test('gaugeVerdict: FULL+economical computes the payback numbers and arms economical:true; OBESE computes payback but never arms economical', () => {
-  // floor 20000; footprint 36200 (>= the 36000 hard cap at fullPercent=6 of
-  // CAPACITY_TOKENS AND bmi 1.81 >= 1.5) -> FULL/absolute-cap, same fixture
-  // shape as the conductor's own economical-FULL test.
-  const measure = { alwaysLoaded: { tokensEst: 36200, bytes: 144800 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 36200 };
+  // 0r: floor 10000; footprint 20200 (>= the growable wall fatMultiple(2.0) x
+  // floor = 20000, AND bmi 2.02 >= 1.5) -> FULL/absolute-cap.
+  const measure = { alwaysLoaded: { tokensEst: 20200, bytes: 80800 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 20200 };
   // No stamps (< 2 -> sessionsPerDay's own bootstrap default of 1/day) —
   // matches the conductor's own economical-FULL fixture ("1 stamp -> sessionsPerDay=1").
-  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 20000, fullPercent: 6 });
+  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 10000, fullPercent: 6 });
   assert.strictEqual(gv.verdict.band, 'FULL');
   assert.strictEqual(gv.verdict.reason, 'absolute-cap');
   assert.strictEqual(gv.economical, true);
-  assert.strictEqual(gv.fatTokens, 16200);
+  assert.strictEqual(gv.fatTokens, 10200);
   assert.ok(gv.perDay > 0);
   assert.ok(Number.isFinite(gv.breakEvenDays));
 
@@ -773,8 +808,11 @@ test('gaugeVerdict: FULL+economical computes the payback numbers and arms econom
 });
 
 test('gaugeVerdict: FULL(externalize) never computes payback numbers (a wash cannot help ~all-muscle over capacity)', () => {
-  const measure = { alwaysLoaded: { tokensEst: 36200, bytes: 144800 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 36200 };
-  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 36000, fullPercent: 6 });
+  // 0r: post-floor the wall clamps at TRUE capacity, so ~all-muscle-over-cap
+  // now needs a floor near capacityTokens itself (fatMultiple x floor would
+  // otherwise clear the wall long before this store gets anywhere near it).
+  const measure = { alwaysLoaded: { tokensEst: CAPACITY_TOKENS + 200, bytes: (CAPACITY_TOKENS + 200) * 4 }, index: { bytes: 0, lines: 0 }, totalTokensEst: CAPACITY_TOKENS + 200 };
+  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: CAPACITY_TOKENS, fullPercent: 6 });
   assert.strictEqual(gv.verdict.band, 'FULL');
   assert.strictEqual(gv.verdict.reason, 'externalize');
   assert.strictEqual(gv.economical, false);
@@ -853,18 +891,25 @@ test('0g Q2: the latch falls with the ceiling — LEAN (the episode reset) clear
 });
 
 test('0g Q3: capHit+over stays FULL/absolute-cap (wash-first) and still carries the latch when the economic condition holds', () => {
-  const v = bandVerdict({ footprintTokens: 36200, leanFloorTokens: 20000, fullPercent: 6, economical: true });
+  // 0r: floor 10000, growable wall = fatMultiple(2.0) x floor = 20000.
+  const floor = 10000;
+  const wall = floor * FAT_MULTIPLE_DEFAULT;
+  const v = bandVerdict({ footprintTokens: wall + 200, leanFloorTokens: floor, economical: true });
   assert.strictEqual(v.band, 'FULL');
   assert.strictEqual(v.reason, 'absolute-cap', 'the wall keeps reason-precedence over economic');
   assert.strictEqual(v.econLatched, true, 'the episode latch still sets — shrinking back under the wall mid-episode must not drop the band');
   // ...and the follow-on session under the wall rides the latch into FULL/economic.
-  const after = bandVerdict({ footprintTokens: 35000, leanFloorTokens: 20000, fullPercent: 6, wasOver: true, economical: false, wasEconLatched: true });
+  const after = bandVerdict({ footprintTokens: wall - 1000, leanFloorTokens: floor, wasOver: true, economical: false, wasEconLatched: true });
   assert.strictEqual(after.band, 'FULL');
   assert.strictEqual(after.reason, 'economic');
 });
 
 test('0g Q3: externalize (capHit while un-armed, ~all-muscle) never latches, even against a mistakenly-true economical', () => {
-  const v = bandVerdict({ footprintTokens: 36200, leanFloorTokens: 36000, fullPercent: 6, economical: true });
+  // 0r: un-armed capHit now only happens at the TRUE capacity clamp (a
+  // floor near capacityTokens itself — fatMultiple x floor would clear the
+  // wall long before bmi could stay under CEILING_BMI at any smaller floor).
+  const floor = CAPACITY_TOKENS;
+  const v = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor, economical: true });
   assert.strictEqual(v.band, 'FULL');
   assert.strictEqual(v.reason, 'externalize');
   assert.strictEqual(v.econLatched, false);
@@ -985,11 +1030,14 @@ test('0j: a footprint under FLOOR_MIN_TOKENS stamps nothing — the tiny-store g
 
 test('0j bandVerdict: capHit with a PROVISIONAL floor stays FULL/absolute-cap (wash first) — a provisional baseline can never certify externalize', () => {
   // Day-one over-wall store: floor = footprint (provisional), bmi 1.0, un-armed.
-  const v = bandVerdict({ footprintTokens: 36200, leanFloorTokens: 36200, fullPercent: 6, floorProvisional: true });
+  // 0r: un-armed capHit only happens at the TRUE capacity clamp now (see the
+  // externalize test above) — floor = CAPACITY_TOKENS pins that same shape.
+  const floor = CAPACITY_TOKENS;
+  const v = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor, floorProvisional: true });
   assert.strictEqual(v.band, 'FULL');
   assert.strictEqual(v.reason, 'absolute-cap', '0j: pre-existing fat may be baked into the provisional baseline — never diagnose "all muscle" from it');
   // The identical numbers with a REAL floor = the all-muscle externalize case (0g Q3, unchanged).
-  const real = bandVerdict({ footprintTokens: 36200, leanFloorTokens: 36200, fullPercent: 6, floorProvisional: false });
+  const real = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor, floorProvisional: false });
   assert.strictEqual(real.reason, 'externalize');
 });
 

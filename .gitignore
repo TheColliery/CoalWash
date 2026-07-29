@@ -7,6 +7,10 @@ AGENTS.md
 COALWASH_BLUEPRINT.md
 SENIOR-INCIDENT-AUDIT.md
 LAB-ARCHIVE.md
+# Manual pre-edit backups of the above (beside-the-file, hand-deleted at round close —
+# NOT a scratchpad copy, see room MEMORY 2026-07-29). The exact-name entries above do
+# not glob-match a "*.pre-edit.md" sibling; checked with `git check-ignore -v`, not assumed.
+*.pre-edit.md
 # machine-local agent-org process (supplier branches / assembly line) - not part of the shipped skill
 ASSEMBLY-LINE.md
 
