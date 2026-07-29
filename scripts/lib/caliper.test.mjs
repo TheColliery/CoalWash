@@ -191,6 +191,25 @@ test('bandVerdict absolute-cap arms FULL regardless of floor: hard ceiling, inde
   assert.strictEqual(lines.band, 'FULL');
 });
 
+// 0r station-3 catch (MED-B): the two index-cap cases above both use
+// leanFloorTokens:10 (< FLOOR_MIN_TOKENS), so they only ever exercise the
+// PRE-FLOOR (bmi===null) branch -- they say nothing about the index legs
+// POST-floor, where capHit's OTHER two terms (the growable fatMultiple x
+// floor leg) are also live. capHit is a three-term OR; the index legs fire
+// INDEPENDENTLY of the floor/wall math entirely, so a real (non-provisional),
+// small, well-under-CEILING_BMI floor still routes FULL/externalize the
+// instant an index cap clears -- 0r's floor-leg fix changes nothing here.
+test('0r/MED-B: an index-cap capHit fires POST-floor too, independent of the growable fatMultiple x floor leg (un-armed -> externalize)', () => {
+  const floor = 10000; // real, measurable, far below fatMultiple x floor (20000)
+  const bytes = bandVerdict({ footprintTokens: 10100, leanFloorTokens: floor, indexBytes: CC_INDEX_CAP_BYTES });
+  assert.strictEqual(bytes.band, 'FULL');
+  assert.strictEqual(bytes.reason, 'externalize', 'bmi ~1.01 stays far under CEILING_BMI -- un-armed, so the index leg alone routes externalize, not absolute-cap');
+  assert.strictEqual(bytes.over, false);
+  const lines = bandVerdict({ footprintTokens: 10100, leanFloorTokens: floor, indexLines: CC_INDEX_CAP_LINES });
+  assert.strictEqual(lines.band, 'FULL');
+  assert.strictEqual(lines.reason, 'externalize');
+});
+
 test('a raised fullPercent raises the hard ceiling (buying a bigger SSD)', () => {
   const ceiling = Math.round(CAPACITY_TOKENS * 6 / 100);
   const before = bandVerdict({ footprintTokens: ceiling, leanFloorTokens: 0, fullPercent: 6 });
@@ -258,6 +277,20 @@ test('0r: the capacity clamp still fires at true capacity even with a LOW fatMul
   assert.strictEqual(v.band, 'FULL');
   assert.strictEqual(v.reason, 'externalize');
   assert.strictEqual(v.hardCeilingTokens, CAPACITY_TOKENS);
+});
+
+// 0r/MED-D: the wall does not ONLY move up (the headline case) — for a SMALL
+// floor (fatMultiple x floor < the old static 36000-tok wall, i.e. floor <
+// 18000 at the default fatMultiple 2.0), it moves DOWN too, so FULL now fires
+// EARLIER on a fresh/small-floor project than the old static wall ever did.
+// Declared as a real behaviour WIDENING (CHANGELOG ### Changed), not a bug.
+test('0r/MED-D: a SMALL floor moves the wall DOWN too — FULL fires earlier than the old static wall (a fresh/small-floor project escalates sooner)', () => {
+  const floor = 3000;
+  const footprint = 7000; // bmi 2.33 (armed), old static wall 36000 -> old: OBESE only
+  const v = bandVerdict({ footprintTokens: footprint, leanFloorTokens: floor });
+  assert.strictEqual(v.band, 'FULL', '0r: the growable wall (2.0 x 3000 = 6000) is BELOW 7000 -- this used to be OBESE under the static 36000-tok wall');
+  assert.strictEqual(v.reason, 'absolute-cap');
+  assert.strictEqual(v.over, true, 'armed (bmi 2.33 >= CEILING_BMI) -- the wash-first diagnosis, never externalize, on a real small floor');
 });
 
 test('growable-full: a large legitimate floor still ARMS the ceiling once BMI itself reaches it, at realistic scale (never a flat token budget)', () => {
