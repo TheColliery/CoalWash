@@ -2,7 +2,9 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [0.2.0] - 2026-07-30
+
+> The 0.2.0 STABLE release — folds the 0.2.0-rc.1..rc.9 line plus the growable-wall caliper batch (docket 0r, labtest-PASSED) below. First stable of the 0.2.0 series; the rc HOLD was lifted by the USER 2026-07-30 (labtest = the ship gate, passed).
 
 ### Added
 
