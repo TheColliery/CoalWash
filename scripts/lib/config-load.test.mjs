@@ -329,6 +329,19 @@ test('W2-5: a relative CLAUDE_CONFIG_DIR is rejected -- claudeBaseDirs falls bac
   }
 });
 
+test('W2-5/LOW: a DRIVE-RELATIVE entry (isAbsolute()===true, no drive/UNC root) is rejected on win32 -- resolution still depends on the current drive', { skip: process.platform !== 'win32' && 'win32-only shape' }, () => {
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const { home } = sandbox();
+    try {
+      process.env.CLAUDE_CONFIG_DIR = '/repo'; // isAbsolute() is true here, but there is no drive letter
+      assert.deepStrictEqual(claudeBaseDirs(home), [path.join(home, '.claude')], 'a drive-relative entry must not survive -- path.resolve("/repo") depends on the CURRENT drive');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+  }
+});
+
 test('W2-5: an ABSOLUTE CLAUDE_CONFIG_DIR entry still passes through unchanged (only relative shapes are refused)', () => {
   const prev = process.env.CLAUDE_CONFIG_DIR;
   try {
@@ -354,7 +367,13 @@ test('W2-5: CLAUDE_CONFIG_DIR="." pointed at the project root no longer collapse
       fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ coalwashMode: 'auto' }));
       process.env.CLAUDE_CONFIG_DIR = '.';
       process.chdir(proj);
-      assert.notStrictEqual(globalConfigPath(home), path.join(proj, '.coalwash.json'), 'global must not resolve onto the project file');
+      // LOW (re-inspect 2026-07-30): a raw string compare only proves the two
+      // SPELLINGS differ, not that they point at different FILES (a symlink,
+      // case-folding, or a trailing-slash difference could make two distinct
+      // strings resolve to the same physical file). Both files already exist
+      // at this point, so resolve the real filesystem identity of each and
+      // compare THAT.
+      assert.notStrictEqual(fs.realpathSync.native(globalConfigPath(home)), fs.realpathSync.native(path.join(proj, '.coalwash.json')), 'global must not resolve onto the project file');
       const cfg = loadMergedConfig({ cwd: proj, home });
       assert.strictEqual(cfg.coalwashMode, 'off', 'the global off-switch must still clamp the project value');
     } finally { process.chdir(cwdWas); clean(home, proj); }

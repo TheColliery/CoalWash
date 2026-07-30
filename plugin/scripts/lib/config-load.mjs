@@ -35,7 +35,20 @@ export function claudeBaseDirs(home = os.homedir()) {
   // refusal belongs on the INPUT (node/runtime.md's own rule): reject a
   // non-absolute entry and fall through to the fixed default below, same as
   // an absent override.
-  const fromEnv = (c || '').split(',').map((s) => s.trim()).filter(Boolean).filter((p) => path.isAbsolute(p));
+  // LOW (re-inspect 2026-07-30): bare path.isAbsolute() is NOT enough on
+  // win32 -- `/repo` and `\repo` both read isAbsolute()===true yet have NO
+  // drive/UNC root (path.parse().root is just "/" or "\\", length 1), so
+  // they are DRIVE-RELATIVE: path.resolve() prepends whatever the CURRENT
+  // drive happens to be, the exact same "depends on transient process
+  // state" instability this filter exists to remove. `path.parse(p).root`
+  // length > 1 on win32 requires an actual drive letter (`C:\`) or a UNC
+  // share (`\\server\share\`), either of which resolves identically no
+  // matter what the current drive is. POSIX has no such distinction (its
+  // one-and-only root IS the stable, fully-qualified form), so this extra
+  // check is win32-only -- gating it globally would wrongly reject a
+  // perfectly good `/home/user/.claude` on Linux/macOS.
+  const isStableAbsolute = (p) => path.isAbsolute(p) && (process.platform !== 'win32' || path.parse(p).root.length > 1);
+  const fromEnv = (c || '').split(',').map((s) => s.trim()).filter(Boolean).filter(isStableAbsolute);
   return fromEnv.length ? fromEnv : [path.join(home, '.claude')];
 }
 
@@ -293,20 +306,48 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 // task #22 (W2-1 HIGH, blind-wave W2 batch): mergeSafety's top-level
 // `{...global, ...project}` never looked INSIDE an object-typed schema key
 // (`estate`, `retier`) -- a project config could set `estate.deleteCold:
-// true` and `estate.purgeAfterDays: 1` wholesale, defeating a global
-// `deleteCold:false` (the sole gate on archive-then-DELETE for live
-// transcripts, estate-archive.mjs's `!c.cfg.deleteCold` check) with zero
+// true` wholesale, defeating a global `deleteCold:false` with zero
 // resistance -- the enum/bool clamps above never fire on a field one level
 // deeper. SAFER_OBJECT_BOOL names the sub-keys that need the SAME
 // safer-value-wins clamp (a boolean gating an outward action is an enum of
 // two, hooks-safety.md §9); every OTHER sub-key of these objects stays
 // plain project-wins, same discipline as every top-level non-safety key.
-// `estate.purgeAfterDays` is DELIBERATELY NOT listed here (a named decline,
-// not an oversight): it only paces WHEN a session is labelled "cold"
-// (report-only by itself, estate-archive.mjs:608) -- it cannot cause a
-// deletion without deleteCold also being true, so clamping a numeric that is
-// already gated by a boolean this rule DOES clamp is the over-hardening §9's
-// own numeric-declined precedent already rejects for the same shape.
+//
+// CORRECTED (re-inspect 2026-07-30 -- the original comment here overstated
+// what deleteCold gates): `estate.deleteCold` is NOT the sole gate on file
+// removal in the estate tier. It gates exactly one transition -- whether a
+// COLD session (older than `purgeAfterDays`) is archived-then-DELETED
+// automatically, versus staying report-only for a human to run the
+// first-party purge command. The WARM band (older than `compressAfterDays`,
+// estate-archive.mjs's own header comment) ALREADY archives-then-removes
+// the ORIGINAL file UNCONDITIONALLY -- no consent gate at all, by design,
+// even under the factory default -- because it is copy-VERIFY-then-delete
+// (byte-compared before the original goes) and fully restorable. That is
+// the real line: `deleteCold` changes the SHAPE of consent (unlocks a class
+// of automatic, not-easily-undone action that otherwise needs a human to
+// run the purge command by hand); `purgeAfterDays`/`compressAfterDays` only
+// move the EDGE of a mechanism that was already running, already safe, and
+// already consent-free before this fix existed. Widening or narrowing that
+// edge is not the same kind of escalation `estate.deleteCold` is -- which is
+// why only the boolean is clamped here.
+//
+// `estate.purgeAfterDays` is DELIBERATELY NOT listed below (a named decline,
+// not an oversight, and NOT because "deleteCold already gates it" -- that
+// claim is false, per the WARM-band reasoning above). The real reason: (1)
+// the action it paces (WARM's archive-then-remove-original) was never
+// consent-gated to begin with, so a project shifting its boundary is not
+// unlocking a new capability the way a `deleteCold` escalation would; (2) a
+// SENTINEL HAZARD makes it unsafe to clamp with the ordered-list mechanism
+// this file already has: `0` means "never becomes cold" (estate-archive.mjs
+// resolveEstateCfg's own comment) -- the WIDEST possible WARM window, since
+// nothing ever graduates out of WARM's unconditional archive-then-delete
+// into COLD's report-only rest state -- yet `0` sits at the schema's
+// numeric FLOOR, where an ordinary safer-index clamp would read it as the
+// SAFEST value. Safety here is not monotone in the raw number (narrowest,
+// safest WARM window sits NEAR `compressAfterDays`; it widens again toward
+// either extreme), so SAFER_ENUM's ordered-list pattern cannot be reused
+// as-is. Left as a named, flagged decline rather than force-fit a clamp
+// shape that would silently mis-rank the sentinel.
 const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
 const OBJECT_SCHEMA_KEYS = CONFIG_SCHEMA.filter((s) => s.type === 'object').map((s) => s.key);
 
