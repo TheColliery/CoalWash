@@ -31,7 +31,7 @@
 // the main engine already holds the safety floor (source-sacred / no-torn / byte-exact).
 import fs from 'node:fs';
 import path from 'node:path';
-import { discoverStructure, reduceToCompletion, collidesWithSource, scanWave, physicalForCreate, isContainedIn, containment, lineText, CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
+import { discoverStructure, reduceToCompletion, collidesWithSource, scanWave, physicalForCreate, containment, lineText, CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, CHUNK, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from './explode.mjs';
 
 // The long-string boundary for the advisory free-form flag (config key `freeStringMaxChars`, default 80).
 // A string whose UTF-8 BYTE length exceeds this, anywhere in a unit, is a mechanical "possible ore" signal
