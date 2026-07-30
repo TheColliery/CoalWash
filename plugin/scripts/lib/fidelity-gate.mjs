@@ -233,7 +233,8 @@ function maskOut(text, res) {
 // ALSO a redundant bare "92". Order: magnitude (~Nk) > percent > ratio >
 // decimal > bare integer (2+ digits only — a lone digit is prose noise).
 // LIST form (every occurrence) — the ONE scan both layers project from:
-// `numberTokens` (set) and the multiset layer's counts.
+// `inventory()`'s `new Set(lists.numbers)` (set) and the multiset layer's
+// counts, both reading this same list via `tokenLists`/`occurrenceCounts`.
 function numberScanList(text) {
   let working = maskOut(text, [ISO_DATE_RE, DMY_DATE_RE, VERSION_RE, V_SHORT_VERSION_RE, MDLINK_DEST_RE, AUTOLINK_RE, BAREURL_RE]);
   const out = [];
@@ -245,9 +246,6 @@ function numberScanList(text) {
     working = maskOut(working, [re]);
   }
   return out;
-}
-function numberTokens(text) {
-  return new Set(numberScanList(text));
 }
 
 // Per-class OCCURRENCE lists — the multiset layer's extraction, sharing every

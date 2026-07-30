@@ -2,6 +2,12 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Fixed
+
+- **Removed `numberTokens`, a dead function in `fidelity-gate.mjs` (CodeQL `js/unused-local-variable`, alerts #29/#30, NOTE, pre-existing 2026-07-27) — an orphan left behind by the SET→MULTISET refactor (`1578eca`).** It wrapped `numberScanList` in a `Set` for the old set-only number inventory; the multiset refactor moved that projection inline (`inventory()`'s `new Set(lists.numbers)`) and never removed the now-unreachable wrapper. Zero call sites anywhere in source, dist, or tests (verified by grep across the repo before deleting — not a specimen: no comment or test names it as a deliberate oracle/reference implementation, unlike this file's genuinely-kept contrast fixtures). The stale comment above it, which had claimed the set layer projects "via `numberTokens`", is corrected to name the real path. Source-only change; `plugin/` dist rebuilt to match.
+
 ## [0.2.0] - 2026-07-30
 
 > The 0.2.0 STABLE release — folds the 0.2.0-rc.1..rc.9 line plus the growable-wall caliper batch (docket 0r, labtest-PASSED) below. First stable of the 0.2.0 series; the rc HOLD was lifted by the USER 2026-07-30 (labtest = the ship gate, passed).
