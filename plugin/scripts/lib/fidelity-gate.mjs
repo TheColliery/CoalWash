@@ -1,3 +1,7 @@
+// ponytail: 967 lines at declaration — THE load-bearing gate module: extraction
+// regexes, set/multiset projections, inventory, checkFidelity, gateFiles are
+// ONE gate; splitting it scatters the primitives a single fidelity claim
+// depends on across files and breaks that cohesion.
 // fidelity-gate.mjs — THE load-bearing module: the mechanical, deterministic
 // floor of the fidelity claim (blueprint §14.8, proven live: this exact diff
 // caught 2 silent link-drops + 1 self-inventory undercount).
