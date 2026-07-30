@@ -81,6 +81,76 @@ test('recordBinItem: CROSS-PROCESS — concurrent workers writing the SAME bin n
   } finally { clean(dir); }
 });
 
+// grad6 F1 (inspect findings-back on 7d57d4c): a lock ORPHANED by a crashed
+// holder used to inherit acquireLock's 30-minute default staleness window
+// (sized for the tx-dir lock, a big rare transaction) even though this lock's
+// own critical section is sub-millisecond — every recordBinItem call for up
+// to 30 minutes burned its whole retry budget and returned null. The bin
+// lock now uses its own short staleness window; a lock older than it must be
+// reclaimed almost immediately, not after exhausting the retry budget.
+test('grad6 F1: an orphaned lock OLDER than the bin\'s own (short) staleness window is reclaimed quickly, not after burning the whole retry budget', () => {
+  const proj = sandbox();
+  try {
+    const dir = path.join(txDirFor(proj), FAT_BIN_NAME);
+    fs.mkdirSync(dir, { recursive: true });
+    const lockPath = path.join(dir, '.bin.lock');
+    fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'dead', pid: 999999, at: Date.now(), token: 'dead:999999:0' }));
+    const oldMtime = new Date(Date.now() - 6000); // 6s old — older than the bin's 5s staleness window
+    fs.utimesSync(lockPath, oldMtime, oldMtime);
+    const t0 = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'a cut that must be banked', original: '/f.md' });
+    const ms = Date.now() - t0;
+    assert.ok(id, 'a lock older than the bin\'s own staleness window must be reclaimed, not return null');
+    assert.ok(ms < 500, `reclaiming a stale orphan took ${ms}ms — expected a near-immediate steal, not the ~600ms full retry budget`);
+    assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 1);
+  } finally { clean(proj); }
+});
+
+// grad6 F2 (inspect findings-back): the measured ceiling is 4x10/8x10
+// lossless, 16x10 = 146/160 landing with 14 clean refusals. This pins the
+// INVARIANT the ceiling must hold at heavier load — never lossless-ness
+// itself (that would re-break the moment machine load shifts the exact
+// count) — every successful attempt (non-null id) has exactly one blob and
+// one catalogue entry; a refusal (null) leaves nothing behind either. Silent
+// loss would mean a blob or catalogue entry existing with NO successful
+// attempt behind it, or a successful attempt with nothing on disk.
+test('grad6 F2: at heavier load (16x10=160) some attempts cleanly REFUSE, but the catalogue/blobs never diverge from what actually succeeded', async () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-f2-')));
+  try {
+    const proj = path.join(dir, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const engineUrl = new URL('./tailings.mjs', import.meta.url).href;
+    const workerPath = path.join(dir, 'worker-f2.mjs');
+    fs.writeFileSync(workerPath,
+      `import { recordBinItem } from ${JSON.stringify(engineUrl)};\n` +
+      `const [,, projectRoot, countStr] = process.argv;\n` +
+      `let ok = 0;\n` +
+      `for (let i = 0; i < Number(countStr); i++) { const id = recordBinItem(projectRoot, 'fat-bin', { content: 'item-' + process.pid + '-' + i, original: '/f' + i + '.md' }); if (id !== null) ok++; }\n` +
+      `process.stdout.write(String(ok));\n`);
+    const WORKERS = 16;
+    const PER_WORKER = 10;
+    const runKid = () => new Promise((resolve) => {
+      const c = spawn(process.execPath, [workerPath, proj, String(PER_WORKER)]);
+      let o = '', e = '';
+      c.stdout.on('data', (d) => (o += d));
+      c.stderr.on('data', (d) => (e += d));
+      c.on('close', (code) => resolve({ code, o: o.trim(), e: e.trim() }));
+    });
+    const results = await Promise.all(Array.from({ length: WORKERS }, runKid));
+    let successfulAttempts = 0;
+    for (const r of results) {
+      assert.strictEqual(r.code, 0, `a worker crashed (exit ${r.code}), stderr: ${r.e.slice(0, 200)}`);
+      successfulAttempts += Number(r.o) || 0;
+    }
+    const index = listBin(proj, FAT_BIN_NAME);
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    const onDisk = fs.readdirSync(binPath).filter((f) => f !== 'index.json' && f !== 'index.json.tmp' && f !== '.gitignore' && f !== '.bin.lock');
+    assert.ok(successfulAttempts > 0 && successfulAttempts <= WORKERS * PER_WORKER, `sanity: ${successfulAttempts} successes out of ${WORKERS * PER_WORKER} attempted`);
+    assert.strictEqual(onDisk.length, successfulAttempts, 'every successful attempt must have exactly one blob — a refusal must leave nothing behind');
+    assert.strictEqual(index.length, onDisk.length, 'the catalogue must never diverge from the blobs, even when some attempts refuse');
+  } finally { clean(dir); }
+});
+
 test('recordBinItem: origin defaults to program-cut; wizard-cut is honored when passed; any other value falls back to program-cut', () => {
   const proj = sandbox();
   try {

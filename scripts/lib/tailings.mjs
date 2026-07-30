@@ -57,6 +57,17 @@ export const STORE_OLD_NAME = 'store.old';
 const INDEX_NAME = 'index.json'; // per-bin manifest: [{id, at, bytes, original, origin}]
 const DEATH_LOG_NAME = 'death.log'; // append-only death certificates, one line per destroyed item
 const BIN_LOCK_NAME = '.bin.lock'; // per-bin (not per-tx) exclusive lock — see recordBinItem
+// F1 (inspect findings-back on 7d57d4c): acquireLock's DEFAULT staleMs
+// (apply.mjs's LOCK_STALE_MS, 30 minutes) is sized for the tx-dir lock — a
+// big, deliberate transaction that may legitimately run for a while. This
+// lock's own critical section is a single index read + one blob write,
+// normally sub-millisecond; inheriting the 30-minute default meant a lock
+// ORPHANED by a crashed holder stayed unreclaimable for up to 30 minutes,
+// during which every recordBinItem call burned its whole retry budget
+// (measured ~606ms) and returned null. A much shorter, honestly-sized
+// staleness window lets a genuinely orphaned lock be reclaimed almost
+// immediately instead.
+const BIN_LOCK_STALE_MS = 5000;
 
 function binDir(projectRoot, name) {
   return path.join(txDirFor(projectRoot), name);
@@ -149,8 +160,28 @@ function saveIndex(dir, index) {
 // attempts so it can never hang) brings real concurrent bursts back to
 // lossless while keeping the same fail-closed shape: still bounded, still
 // returns null (never throws) if truly exhausted.
+//
+// THE MEASURED CEILING (F2, inspect findings-back): 4x10 and 8x10 concurrent
+// workers are lossless (every item catalogued). At 16x10 = 160, the ceiling
+// is reached: 146/160 land (catalogued === blobs, still consistent) and 14
+// cleanly REFUSE (return null, nothing written — never a silent undercount).
+// This is the intended shape, not a bug to chase further: past this load the
+// honest degrade is a VISIBLE null the caller must handle (apply.mjs now
+// flags it — see the H-bin-stash note there), not a race to make the retry
+// budget cover arbitrary concurrency. Raising the attempt cap trades latency
+// for a higher ceiling; it does not change the shape.
 function sleepMs(ms) {
-  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SharedArrayBuffer -> no wait, just retry immediately */ }
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    // F3: no SharedArrayBuffer/Atomics.wait on this runtime (dead on any
+    // supported Node version today, but the fallback must still BACK OFF —
+    // silently retrying immediately turns a bounded, jittered wait into a
+    // busy-spin loop, the opposite of what this function exists to do). A
+    // bounded spin on a monotonic clock still costs CPU but genuinely waits.
+    const until = Date.now() + ms;
+    while (Date.now() < until) { /* bounded busy-wait — no sync sleep primitive available */ }
+  }
 }
 export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now() } = {}) {
   const dir = binDir(projectRoot, name);
@@ -160,7 +191,7 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     ensureSelfIgnore(dir);
     for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
       if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
-      lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now });
+      lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now, staleMs: BIN_LOCK_STALE_MS });
     }
     if (!lock.acquired) return null;
     const id = `${now}-${Math.random().toString(36).slice(2, 8)}`;

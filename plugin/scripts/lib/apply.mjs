@@ -1146,8 +1146,13 @@ export function applyPlan(plan, opts = {}) {
       // Content = the gated baseline (baseBuf — what the plan was derived
       // from AND byte-verified on disk at mutation time by the external-
       // writer guard): a delete banks the whole file, a rewrite banks its
-      // removed lines (nothing removed = nothing banked). recordBinItem is
-      // fail-silent by contract — a stash failure never un-commits the run.
+      // removed lines (nothing removed = nothing banked). A bin-stash failure
+      // never un-commits the run (the mutation above already landed) — but it
+      // must never be SILENT either (F1, inspect findings-back on 7d57d4c):
+      // recordBinItem's own retry can still exhaust (heavy contention, or a
+      // lock genuinely still held) and return null, and this loop used to
+      // discard that return outright — the cut would land on disk with NO
+      // recovery copy and NO report line, indistinguishable from a clean run.
       const binName = plan.origin === 'wizard-cut' ? STORE_OLD_NAME : FAT_BIN_NAME;
       const binOrigin = plan.origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut';
       for (const a of actionable) {
@@ -1162,7 +1167,13 @@ export function applyPlan(plan, opts = {}) {
         // type there and recordBinItem encodes it once, at the boundary.
         const cut = a.type === 'delete' ? a.baseBuf : removedLines(a.baseBuf.toString('utf8'), a.content).join('\n');
         if (!cut.length) continue;
-        recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
+        const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
+        if (binId === null) {
+          flagged.push({
+            path: a.phys,
+            reason: 'bin-stash failed (the file mutation already succeeded — only the RECOVERY COPY is missing): recordBinItem could not acquire its per-bin lock in time, so this cut has no entry in the bin and cannot be pulled back via cli.mjs restore',
+          });
+        }
       }
 
       // ---- wikilink-orphan advisory (post-commit, advisory ONLY — see the

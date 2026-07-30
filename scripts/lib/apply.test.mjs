@@ -854,6 +854,28 @@ test('grad6 §1b control: an UNRELATED rewrite (content does NOT contain the exc
   } finally { clean(proj); }
 });
 
+// grad6 F1 (inspect findings-back on 7d57d4c): recordBinItem's own retry can
+// still exhaust under real contention (or a genuinely-held lock) and return
+// null — the caller used to discard that return outright, so the mutation
+// landed on disk with NO recovery copy and NO report line, indistinguishable
+// from a clean run. Reproduced by pre-holding the fat-bin's lock with a
+// FRESH (non-stale) fake session right before the delete, so applyPlan's own
+// bin-stash step cannot acquire it within its retry budget.
+test('grad6 F1: a bin-stash failure is a VISIBLE flag, never silent — the mutation itself still succeeds', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    write(A, 'plain content, no structured tokens');
+    const binDir = path.join(txDirFor(proj), 'fat-bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other-live-session', pid: 424242, at: Date.now(), token: 'other-live-session:424242:0' }));
+    const r = apply(planFor(proj, store, [{ type: 'delete', path: A }]));
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(fs.existsSync(A), false, 'the delete itself must still succeed even when the bin-stash cannot');
+    assert.ok((r.flagged || []).some((f) => /bin-stash failed/.test(f.reason)), `a bin-stash failure must be flagged, not silent: ${JSON.stringify(r.flagged)}`);
+  } finally { clean(proj); }
+});
+
 test('H3: a plain delete of a token-bearing file passes ONLY with an explicit approvedDrops (caller declares external safety)', () => {
   const { proj, store } = sandbox();
   try {
