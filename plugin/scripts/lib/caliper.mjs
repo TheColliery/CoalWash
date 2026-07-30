@@ -524,10 +524,22 @@ function readStateFile(p) {
 // NOT a schema change — no field's meaning changed — so STATE_SCHEMA stays 1; the
 // location move is its own read-old/write-new mechanism, orthogonal to this reset.
 // 0r's growable WALL is ALSO not a schema change: the only persisted field it
-// touches is lastVerdict.hardCeilingTokens, a pure per-gauge DISPLAY cache
-// (ask.mjs's force/externalize templates) that is never read back as a decision
-// input and is overwritten fresh at the very next SessionStart/Stop gauge under
-// the running code — no cross-version staleness for a bump to guard against.)
+// touches is lastVerdict.hardCeilingTokens, a pure per-gauge DISPLAY number
+// (ask.mjs's force/externalize headline text). Scoped claim, corrected by
+// labtest G1 2026-07-30: hardCeilingTokens ITSELF never gates a decision —
+// unlike its sibling lastVerdict.reason, which IS a live Stop-path branch
+// input (conductor.js:379/389 pick the template on it) — hardCeilingTokens
+// only decorates whichever message the OTHER fields already selected. It is
+// NOT guaranteed fresh on every Stop call, though: the Stop handler's
+// re-gauge sits inside `if (!crossing)` (conductor.js:323), so a Stop call
+// with an ALREADY-PENDING crossing skips re-gauging and renders the CACHED
+// value verbatim — a number a pre-0r version wrote (or a poisoned one) can
+// surface once more before self-healing. Worst cross-version case: ONE stale
+// informational number in a force/externalize message (the wall figure
+// shown may be wrong); which branch fires and whether force runs is
+// unaffected (neither depends on hardCeilingTokens), and the next
+// SessionStart re-gauges unconditionally and corrects it. No bump: a
+// single-turn cosmetic line, never a decision made on stale data.)
 export const STATE_SCHEMA = 1;
 // VERSION-SENSITIVE — reset when the stored schema is stale. Their meaning
 // changed across versions, so a value an older version wrote is not trustworthy
