@@ -127,7 +127,7 @@ The remaining subcommands (`estate`, `estate-scan`, `estate-run`, `retier-scan`,
 
 ## 🔧 Configure
 
-Every tool in the series supports two config levels — a global `~/.claude/.coalwash.json` and a per-project `.coalwash.json` override (project wins) — so a globally-installed skill can be tuned or **shut off per project** (`coalwashMode: "off"` is the off-switch) — a skill you don't need in a given project stops loading (and burning tokens) there. The main keys:
+Every tool in the series supports two config levels — a global `~/.claude/.coalwash.json` and a per-project `.coalwash.json` override — so a globally-installed skill can be tuned or **shut off per project** (`coalwashMode: "off"` is the off-switch) — a skill you don't need in a given project stops loading (and burning tokens) there. **Project wins, except for a handful of safety keys** (`coalwashMode`, `updateMode`, `writeGuard`, `localOnly`, `estate.deleteCold`) — a cloned project's config may only make those *quieter*, never weaken a deliberate global choice or an unreadable one; every other key is plain project-wins. The main keys:
 
 | Key | Default | What it does |
 |---|---|---|

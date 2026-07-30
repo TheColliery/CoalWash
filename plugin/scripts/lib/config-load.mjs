@@ -28,7 +28,14 @@ export function claudeBaseDir(home = os.homedir()) {
 // code's own `.split(',')` asserts it does, so the guard matches the parse.
 export function claudeBaseDirs(home = os.homedir()) {
   const c = process.env.CLAUDE_CONFIG_DIR;
-  const fromEnv = (c || '').split(',').map((s) => s.trim()).filter(Boolean);
+  // W2-5 (task #22): a RELATIVE entry resolves against process.cwd() at READ
+  // time, not set time -- if cwd happens to be the project root (an ordinary
+  // hook invocation), globalConfigPath collapses onto projectConfigPath and
+  // mergeSafety's whole trust boundary becomes a self-compare no-op. A shape
+  // refusal belongs on the INPUT (node/runtime.md's own rule): reject a
+  // non-absolute entry and fall through to the fixed default below, same as
+  // an absent override.
+  const fromEnv = (c || '').split(',').map((s) => s.trim()).filter(Boolean).filter((p) => path.isAbsolute(p));
   return fromEnv.length ? fromEnv : [path.join(home, '.claude')];
 }
 
@@ -229,14 +236,27 @@ function decodeConfigText(buf) {
   return buf.toString('utf8'); // no BOM, no NUL: UTF-8, the common case
 }
 
+// W2-3 (task #22): distinguishes "no file" (a real position -- the user never
+// configured this layer, so the schema default IS their stance) from "a file
+// EXISTS but this process could not read/decode/parse it" (an UNKNOWN
+// position). The old code returned a bare {} for both, so a corrupted GLOBAL
+// file read identically to an absent one -- if the user had an explicit
+// `coalwashMode: "off"` and the file later got mangled (a botched edit, a
+// crash mid-write), the kill switch silently reverted to the schema default
+// ("auto"), a fail-OPEN on the one channel meant to fail closed. `unreadable`
+// is true only when `pathExists` confirms the file is there and reading it
+// still failed; callers decide what "unknown" means for their own keys
+// (mergeSafety below assumes the SAFEST stance, never the schema default).
 function readJsonc(file) {
+  const existed = pathExists(file);
   try {
     let content = decodeConfigText(fs.readFileSync(file)); // raw bytes -> encoding-sniffed text
     if (content.charCodeAt(0) === 0xfeff) content = content.slice(1); // strip any residual BOM char
     const parsed = parseJsonc(content); // proto-pollution-guarded parse
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return { data: parsed, unreadable: false };
+    return { data: {}, unreadable: existed }; // wrong shape (array/null/scalar) on an EXISTING file
   } catch {
-    return {};
+    return { data: {}, unreadable: existed };
   }
 }
 
@@ -270,9 +290,75 @@ const SAFER_TRUE = ['localOnly']; // a bool whose SAFE value is true (privacy op
 // maintained "what's safe" table.
 const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def]));
 
-export function mergeSafety(global, project) {
+// task #22 (W2-1 HIGH, blind-wave W2 batch): mergeSafety's top-level
+// `{...global, ...project}` never looked INSIDE an object-typed schema key
+// (`estate`, `retier`) -- a project config could set `estate.deleteCold:
+// true` and `estate.purgeAfterDays: 1` wholesale, defeating a global
+// `deleteCold:false` (the sole gate on archive-then-DELETE for live
+// transcripts, estate-archive.mjs's `!c.cfg.deleteCold` check) with zero
+// resistance -- the enum/bool clamps above never fire on a field one level
+// deeper. SAFER_OBJECT_BOOL names the sub-keys that need the SAME
+// safer-value-wins clamp (a boolean gating an outward action is an enum of
+// two, hooks-safety.md §9); every OTHER sub-key of these objects stays
+// plain project-wins, same discipline as every top-level non-safety key.
+// `estate.purgeAfterDays` is DELIBERATELY NOT listed here (a named decline,
+// not an oversight): it only paces WHEN a session is labelled "cold"
+// (report-only by itself, estate-archive.mjs:608) -- it cannot cause a
+// deletion without deleteCold also being true, so clamping a numeric that is
+// already gated by a boolean this rule DOES clamp is the over-hardening §9's
+// own numeric-declined precedent already rejects for the same shape.
+const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
+const OBJECT_SCHEMA_KEYS = CONFIG_SCHEMA.filter((s) => s.type === 'object').map((s) => s.key);
+
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+// Per-sub-key merge for ONE object-typed config key (never a wholesale
+// project-replaces-the-whole-object, W2-2): a project setting even ONE
+// sub-key used to discard every OTHER sub-key the user's global config had
+// customized, silently clobbered to whatever the schema default fills in
+// downstream. One level of recursion only -- a NESTED block a project also
+// touches (e.g. `estate.digCrush`) may still wholesale-replace at that
+// inner level; none of its fields are consent/spend/outward-bearing, so the
+// residual is a minor correctness case, not a security one, and recursing
+// further would be the over-hardening skill-authoring.md §2 warns against.
+function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
+  const g = isPlainObject(globalObj) ? globalObj : {};
+  const p = isPlainObject(projectObj) ? projectObj : {};
+  const merged = { ...g, ...p };
+  const bools = SAFER_OBJECT_BOOL[key];
+  if (bools) {
+    for (const [subKey, safeValue] of Object.entries(bools)) {
+      // effective global stance for this sub-key: explicit value, else the
+      // schema default -- UNLESS the whole global file is unreadable (W2-3),
+      // in which case assume the SAFEST value, never the schema default.
+      const gv = globalUnreadable ? safeValue : (g[subKey] === undefined ? safeValue : g[subKey]);
+      const pv = p[subKey];
+      // pv undefined -> nothing the project asked to change, effective global
+      // stands. pv === safeValue -> quieten, always allowed. Anything else
+      // (the escalated value, OR junk -- K1's "junk gets no say") only wins
+      // if the effective global itself already holds it.
+      merged[subKey] = pv === undefined ? gv : (pv === safeValue ? safeValue : gv);
+    }
+  }
+  return merged;
+}
+
+export function mergeSafety(global, project, { globalUnreadable = false } = {}) {
   const out = { ...global, ...project };
+  for (const key of OBJECT_SCHEMA_KEYS) {
+    if (global[key] !== undefined || project[key] !== undefined) {
+      out[key] = mergeObjectKey(key, global[key], project[key], globalUnreadable);
+    }
+  }
   for (const [key, order] of Object.entries(SAFER_ENUM)) {
+    // W2-3: the whole global file was unreadable -- the user's real stance
+    // is UNKNOWN, not absent. Assume the SAFEST index unconditionally
+    // (index 0 can never be escalated past), regardless of what the project
+    // asks -- never the schema default, which can be weaker than what the
+    // user actually had set before the file broke.
+    if (globalUnreadable) { out[key] = order[0]; continue; }
     if (project[key] === undefined) continue; // nothing the project asked to change
     const globalVal = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
     // CASE-FOLD to match the schema's case-insensitive enum. Comparing raw
@@ -281,11 +367,14 @@ export function mergeSafety(global, project) {
     // skill (H5).
     let gi = order.indexOf(String(globalVal).toLowerCase());
     const pi = order.indexOf(String(project[key]).toLowerCase());
-    // An unreadable GLOBAL stance reads as the schema default (the WAVE-2 R2
-    // rule extended from absent to invalid — the user's position cannot be
-    // read, and the declared default IS their position until they say
-    // otherwise); index 0 is the unreachable-by-construction last resort
-    // (every SCHEMA_DEFAULT is a member of its own order).
+    // An unreadable GLOBAL VALUE (parsed fine, but this one key's value is
+    // invalid) reads as the schema default (the WAVE-2 R2 rule extended from
+    // absent to invalid — the user's position cannot be read, and the
+    // declared default IS their position until they say otherwise); index 0
+    // is the unreachable-by-construction last resort (every SCHEMA_DEFAULT
+    // is a member of its own order). This is distinct from `globalUnreadable`
+    // above (the whole FILE was unreadable) -- there, even the default is
+    // too permissive to trust, so the safest index wins unconditionally.
     if (gi === -1) gi = order.indexOf(String(SCHEMA_DEFAULT[key]).toLowerCase());
     if (gi === -1) gi = 0;
     // K1 (graduation-lab round 2): an INVALID project value gets NO say —
@@ -300,13 +389,16 @@ export function mergeSafety(global, project) {
     out[key] = order[pi !== -1 && pi <= gi ? pi : gi];
   }
   for (const key of SAFER_TRUE) {
-    if (global[key] === true) out[key] = true; // a project cannot turn OFF a global privacy opt-in
+    // a project cannot turn OFF a global privacy opt-in; an unreadable
+    // global (W2-3) assumes the safe value (true) unconditionally, same
+    // rule as the enum loop above.
+    if (globalUnreadable || global[key] === true) out[key] = true;
   }
   return out;
 }
 
 export function loadMergedConfig({ cwd = process.cwd(), home = os.homedir() } = {}) {
-  const global = readJsonc(globalConfigPath(home));
-  const project = readJsonc(projectConfigPath(cwd, home));
-  return mergeSafety(global, project);
+  const g = readJsonc(globalConfigPath(home));
+  const p = readJsonc(projectConfigPath(cwd, home));
+  return mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable });
 }

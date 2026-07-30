@@ -120,16 +120,55 @@ test('a .git marker also roots the project', () => {
   } finally { clean(home, proj); }
 });
 
-test('corrupt, BOM-prefixed, or missing config degrades to {} (never throws)', () => {
+test('BOM-prefixed config degrades cleanly; a genuinely MISSING config is {} (never throws)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), String.fromCharCode(0xfeff) + '{ "fullPercent": 9 }');
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).fullPercent, 9, 'BOM stripped');
+    fs.rmSync(path.join(home, '.claude', '.coalwash.json'));
+    assert.deepStrictEqual(loadMergedConfig({ cwd: proj, home }), {}, 'a genuinely absent global is a real position (schema default), not "unknown"');
+  } finally { clean(home, proj); }
+});
+
+// W2-3 (task #22, blind-wave W2): a global file that EXISTS but fails to
+// read/decode/parse is an UNKNOWN stance, not an absent one -- the old code
+// collapsed both to {} and let a corrupted kill switch silently revert to
+// the schema default ("auto"), which can be WEAKER than whatever the user
+// had actually set. Moved out of the old combined test above (which
+// asserted the bug's own shape as "expected") into its own red-first case.
+test('W2-3: a PRESENT-but-corrupt global config assumes the SAFEST stance on every safety key, never the schema default (the kill switch cannot silently revert to "auto")', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
     fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), '{ not json');
-    assert.deepStrictEqual(loadMergedConfig({ cwd: proj, home }), {});
-    fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), String.fromCharCode(0xfeff) + '{ "fullPercent": 9 }');
-    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).fullPercent, 9, 'BOM stripped');
-    fs.rmSync(path.join(home, '.claude', '.coalwash.json'));
-    assert.deepStrictEqual(loadMergedConfig({ cwd: proj, home }), {});
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.coalwashMode, 'off', 'schema default is "auto" -- the safest index must win instead');
+    assert.strictEqual(cfg.updateMode, 'off', 'schema default is "ask" -- the safest index must win instead');
+    assert.strictEqual(cfg.writeGuard, 'on', 'writeGuard\'s safest end is "on" (matches its own default here, still must not regress)');
+    assert.strictEqual(cfg.localOnly, true, 'privacy opt-in assumed on an unreadable global');
+  } finally { clean(home, proj); }
+});
+
+test('W2-3: an unreadable global still cannot be ESCALATED past by a project value (the project gets no more say than usual)', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj, {}, { coalwashMode: 'auto', updateMode: 'auto', writeGuard: 'off', localOnly: false });
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), '{ broken'); // overwrite with corrupt bytes
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.coalwashMode, 'off');
+    assert.strictEqual(cfg.updateMode, 'off');
+    assert.strictEqual(cfg.writeGuard, 'on');
+    assert.strictEqual(cfg.localOnly, true);
+  } finally { clean(home, proj); }
+});
+
+test('W2-3: a MISSING global (never written at all) is unaffected -- unreadable only fires when the file EXISTS', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ coalwashMode: 'auto' }));
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.coalwashMode, 'auto', 'no global file at all -> the project value is honored (schema default "auto" imposes no constraint here)');
   } finally { clean(home, proj); }
 });
 
@@ -193,6 +232,135 @@ test('monotonic: a project cannot make updateMode LOUDER (off -> auto blocked); 
     writeCfgs(s2.home, s2.proj, { updateMode: 'ask' }, { updateMode: 'off' });
     assert.strictEqual(loadMergedConfig({ cwd: s2.proj, home: s2.home }).updateMode, 'off', 'quieter is always allowed');
   } finally { clean(s2.home, s2.proj); }
+});
+
+// --- task #22 (W2-1 HIGH): object-typed keys get the SAME safer-value-wins
+//     clamp one level deep, and the merge itself is per-sub-key (W2-2) ---
+test('W2-1 HIGH: a project cannot flip estate.deleteCold false->true (the archive-then-DELETE gate for live transcripts)', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj,
+      { estate: { deleteCold: false, purgeAfterDays: 3650, compressAfterDays: 365 } },
+      { estate: { deleteCold: true, purgeAfterDays: 1, compressAfterDays: 1 } });
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.estate.deleteCold, false, 'the clone-borne project value must not win');
+  } finally { clean(home, proj); }
+});
+
+test('W2-1: a global deleteCold:true (a real, deliberate opt-in) is honored -- the clamp blocks ESCALATION, not the user\'s own choice', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj, { estate: { deleteCold: true } }, {});
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).estate.deleteCold, true);
+  } finally { clean(home, proj); }
+});
+
+test('W2-1: a project MAY quieten deleteCold true->false (turning it off is always allowed)', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj, { estate: { deleteCold: true } }, { estate: { deleteCold: false } });
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).estate.deleteCold, false);
+  } finally { clean(home, proj); }
+});
+
+test('W2-1: NO global config at all -- the schema default (false) still blocks a project deleteCold:true', () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-home-'))); // no .claude dir at all
+  try {
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ estate: { deleteCold: true } }));
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).estate.deleteCold, false);
+  } finally { clean(home, proj); }
+});
+
+test('W2-1: a junk deleteCold value gets no say -- the effective global stands (K1\'s own rule, one level deeper)', () => {
+  const { home, proj } = sandbox();
+  try {
+    for (const junk of ['true', 1, 'yes', null, {}]) {
+      writeCfgs(home, proj, { estate: { deleteCold: false } }, { estate: { deleteCold: junk } });
+      assert.strictEqual(loadMergedConfig({ cwd: proj, home }).estate.deleteCold, false, `junk ${JSON.stringify(junk)} must not escalate`);
+    }
+  } finally { clean(home, proj); }
+});
+
+test('W2-2: a project touching ONE estate sub-key no longer clobbers the user\'s OTHER global sub-keys to schema defaults', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj,
+      { estate: { deleteCold: false, purgeAfterDays: 3650, compressAfterDays: 365, archiveDir: 'D:/my-archive' } },
+      { estate: { indexEnabled: false } });
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.estate.purgeAfterDays, 3650, 'global sub-key must survive a partial project override');
+    assert.strictEqual(cfg.estate.compressAfterDays, 365);
+    assert.strictEqual(cfg.estate.archiveDir, 'D:/my-archive');
+    assert.strictEqual(cfg.estate.indexEnabled, false, 'the project\'s own touched sub-key still wins');
+  } finally { clean(home, proj); }
+});
+
+test('W2-2: the same one-level merge applies to `retier` too (no consent sub-keys there, plain project-wins per sub-key)', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj, { retier: { targetTokens: 6250, armPct: 50 } }, { retier: { headroomPct: 5 } });
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.retier.targetTokens, 6250, 'global sub-key survives');
+    assert.strictEqual(cfg.retier.armPct, 50);
+    assert.strictEqual(cfg.retier.headroomPct, 5, 'project sub-key wins on its own key');
+  } finally { clean(home, proj); }
+});
+
+test('mergeSafety: object-key merge tolerates a non-object/malformed value on either side without throwing', () => {
+  assert.doesNotThrow(() => mergeSafety({ estate: 'not an object' }, { estate: { deleteCold: true } }));
+  assert.doesNotThrow(() => mergeSafety({ estate: { deleteCold: false } }, { estate: null }));
+  assert.doesNotThrow(() => mergeSafety({ estate: [1, 2] }, {}));
+  const merged = mergeSafety({ estate: 'not an object' }, { estate: { deleteCold: true } });
+  assert.strictEqual(merged.estate.deleteCold, false, 'a malformed global counts as absent -> schema default (false) still holds');
+});
+
+// --- W2-5: a RELATIVE CLAUDE_CONFIG_DIR must never collapse global onto project ---
+test('W2-5: a relative CLAUDE_CONFIG_DIR is rejected -- claudeBaseDirs falls back to the fixed ~/.claude default', () => {
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    process.env.CLAUDE_CONFIG_DIR = '.';
+    const { home } = sandbox();
+    try {
+      assert.deepStrictEqual(claudeBaseDirs(home), [path.join(home, '.claude')], 'a relative entry must not survive into the base-dir list');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+  }
+});
+
+test('W2-5: an ABSOLUTE CLAUDE_CONFIG_DIR entry still passes through unchanged (only relative shapes are refused)', () => {
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const { home } = sandbox();
+    try {
+      const abs = path.join(home, 'alt-config');
+      process.env.CLAUDE_CONFIG_DIR = abs;
+      assert.deepStrictEqual(claudeBaseDirs(home), [abs]);
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+  }
+});
+
+test('W2-5: CLAUDE_CONFIG_DIR="." pointed at the project root no longer collapses global==project (mergeSafety keeps its trust boundary)', () => {
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  const cwdWas = process.cwd();
+  try {
+    const { home, proj } = sandbox();
+    try {
+      fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+      fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ coalwashMode: 'off' }));
+      fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ coalwashMode: 'auto' }));
+      process.env.CLAUDE_CONFIG_DIR = '.';
+      process.chdir(proj);
+      assert.notStrictEqual(globalConfigPath(home), path.join(proj, '.coalwash.json'), 'global must not resolve onto the project file');
+      const cfg = loadMergedConfig({ cwd: proj, home });
+      assert.strictEqual(cfg.coalwashMode, 'off', 'the global off-switch must still clamp the project value');
+    } finally { process.chdir(cwdWas); clean(home, proj); }
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+  }
 });
 
 // --- H5: the safe-merge compare must be case-INSENSITIVE (the schema is) ---
