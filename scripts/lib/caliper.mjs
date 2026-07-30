@@ -528,7 +528,9 @@ function readStateFile(p) {
 // (ask.mjs's force/externalize headline text). Scoped claim, corrected by
 // labtest G1 2026-07-30: hardCeilingTokens ITSELF never gates a decision —
 // unlike its sibling lastVerdict.reason, which IS a live Stop-path branch
-// input (conductor.js:379/389 pick the template on it) — hardCeilingTokens
+// input (the ask templates branch on it directly -- externalizeAdvisory's
+// own crossing check -- and via forceAuto's `reason` param, which ask.mjs
+// branches on for its absolute-cap headline) -- hardCeilingTokens itself
 // only decorates whichever message the OTHER fields already selected. It is
 // NOT guaranteed fresh on every Stop call, though: the Stop handler's
 // re-gauge sits inside `if (!crossing)` (conductor.js:323), so a Stop call
