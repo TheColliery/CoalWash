@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import {
   FAT_BIN_NAME, STORE_OLD_NAME,
   recordBinItem, listBin, restoreFromBin,
@@ -36,6 +37,39 @@ test('recordBinItem: writes the content verbatim, records it in the index, self-
     const gitignore = path.join(txDirFor(proj), FAT_BIN_NAME, '.gitignore');
     assert.ok(fs.existsSync(gitignore), 'the bin dir is self-ignored (never version-controlled, same as the tx dir)');
   } finally { clean(proj); }
+});
+
+// grad6 (relayed W1-F4, confirmed here with real OS processes before the fix
+// landed — 4 workers x 10 items measured 16 catalogued vs 31 actual blobs
+// against an expected 40 of each): the in-process test above cannot reach the
+// real read-modify-write race between the shared index.json and the fixed
+// tmp filename — that needs genuinely concurrent OS processes, the same
+// reason explode.test.mjs's own "#1 CROSS-PROCESS" test spawns real workers
+// rather than simulating concurrency in one event loop.
+test('recordBinItem: CROSS-PROCESS — concurrent workers writing the SAME bin never lose or undercount an item', async () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-xproc-')));
+  try {
+    const proj = path.join(dir, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const engineUrl = new URL('./tailings.mjs', import.meta.url).href;
+    const workerPath = path.join(dir, 'worker.mjs');
+    fs.writeFileSync(workerPath,
+      `import { recordBinItem } from ${JSON.stringify(engineUrl)};\n` +
+      `const [,, projectRoot, countStr] = process.argv;\n` +
+      `for (let i = 0; i < Number(countStr); i++) recordBinItem(projectRoot, 'fat-bin', { content: 'item-' + process.pid + '-' + i, original: '/f' + i + '.md' });\n`);
+    const WORKERS = 4;
+    const PER_WORKER = 10;
+    const runKid = () => new Promise((resolve) => {
+      const c = spawn(process.execPath, [workerPath, proj, String(PER_WORKER)]);
+      c.on('close', () => resolve());
+    });
+    await Promise.all(Array.from({ length: WORKERS }, runKid));
+    const index = listBin(proj, FAT_BIN_NAME);
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    const onDisk = fs.readdirSync(binPath).filter((f) => f !== 'index.json' && f !== 'index.json.tmp' && f !== '.gitignore' && f !== '.bin.lock');
+    assert.strictEqual(onDisk.length, WORKERS * PER_WORKER, 'every blob must land on disk');
+    assert.strictEqual(index.length, onDisk.length, 'the catalogue must never undercount the actual blobs written');
+  } finally { clean(dir); }
 });
 
 test('recordBinItem: origin defaults to program-cut; wizard-cut is honored when passed; any other value falls back to program-cut', () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { checkFidelity, gateFiles, inventory, frontmatterKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
+import { checkFidelity, gateFiles, inventory, inventoryDropKeys, frontmatterKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 
 // Thai fixtures from char codes only — never raw composables/invisibles in source.
 const SARA_AM = String.fromCharCode(0x0e33); // the CORRECT single char
@@ -90,6 +90,45 @@ test('a dropped frontmatter key fails; value edits alone do not (the semantic la
   assert.deepStrictEqual(checkFidelity(ORIG, noKey).drops, [{ type: 'frontmatter-key-drop', value: 'topic' }]);
   const valueEdit = ORIG.replace('topic: routing', 'topic: model-routing');
   assert.strictEqual(checkFidelity(ORIG, valueEdit).pass, true);
+});
+
+// grad6 §3 (CoalBoard verdict, cw-lab-grad6): `frontmatterKeys` used to return
+// an empty Set for BOTH 'none' (genuinely no frontmatter) and 'unverifiable'
+// (could not tell) — so a real block this reader could not parse inventoried
+// as zero keys, and deleting it read identically to a file with no
+// frontmatter at all. `checkFidelity` must ABSTAIN instead: an incomplete
+// census on either side is itself a reported drop, never a silent pass.
+// RAIL: `pinVerdict`/`isPinned` (the destroying consumer) stay untouched —
+// its fail-closed-on-unverifiable behavior is deliberately the OPPOSITE
+// polarity of this OBSERVING consumer, per the comment at frontmatterCensus.
+test('grad6 §3: an UNVERIFIABLE original frontmatter (double-BOM fence) that loses its keys ABSTAINS, never silently passes', () => {
+  const BOM = String.fromCharCode(0xfeff);
+  const orig = BOM + BOM + '---\npinned: true\ntopic: routing\nowner: me\n---\nbody unchanged here';
+  assert.strictEqual(readFrontmatter(orig).state, 'unverifiable', 'setup sanity: double-BOM refuses closed, not none');
+  const next = 'body unchanged here'; // the whole frontmatter block -- 3 real keys -- is simply gone
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false, 'an incomplete original census must not certify a clean drop of its own frontmatter');
+  assert.ok(
+    r.drops.some((d) => d.type === 'frontmatter-inventory-incomplete' && d.value === 'orig'),
+    `expected frontmatter-inventory-incomplete:orig, got ${JSON.stringify(r.drops)}`
+  );
+});
+
+test('grad6 §3: frontmatterIncomplete is false on ordinary closed/none states — no over-refusal', () => {
+  assert.strictEqual(inventory(ORIG).frontmatterIncomplete, false, 'a real closed block is not incomplete');
+  assert.strictEqual(inventory('# just a heading, no frontmatter at all').frontmatterIncomplete, false, 'genuinely no frontmatter is not incomplete');
+  const cleanNext = ORIG.replace(
+    'Some verbose filler that a compaction would rightly trim away, at length, twice over.',
+    'Filler trimmed.'
+  );
+  assert.strictEqual(checkFidelity(ORIG, cleanNext).pass, true, 'an ordinary clean compaction on a real closed block still passes — the abstain never fires on a certifiable census');
+});
+
+test('grad6 §3: inventoryDropKeys signals the incomplete census as its own approvable key', () => {
+  const BOM = String.fromCharCode(0xfeff);
+  const orig = BOM + BOM + '---\nowner: me\n---\nbody';
+  const keys = inventoryDropKeys(orig);
+  assert.ok(keys.has('frontmatter-inventory-incomplete:unverifiable'), `expected the synthetic key, got ${[...keys]}`);
 });
 
 test('SUPERSEDED by MULTISET (board disposition 2): deduplicating repeated mentions now FLAGS, approvable by name', () => {
@@ -1091,6 +1130,33 @@ test('GATE COST control: the FIRST coarser survivor in inventory order is still 
   const p = r.drops.find((d) => d.type === 'number-precision' && d.value === '44192');
   assert.ok(p, `44192 must be a number-precision drop: ${JSON.stringify(r.drops)}`);
   assert.strictEqual(p.survivor, '44.19k', 'the first qualifying candidate in inventory order is the named survivor');
+});
+
+// grad6 #6 (CoalBoard verdict — regression pair, live since 82c239a hoisted
+// `next.includes(tok)` per-token scans into ONE unbounded FILE_REF_RE pass
+// over the whole `next` string): the two GATE COST tests above are VACUOUS
+// for this specific regex because every one of their fixtures contains a
+// literal `.md` (or a real extension), which lets `[\w.-]*\.(?:ext)\b`
+// resolve on the first backtrack — a fixture with NO valid extension anywhere
+// forces the full backtrack per restart point instead, which is the shape
+// that actually reproduces the cost (measured on the unfixed engine: ~5.6s at
+// 256 KiB — Phoenix #3's PostToolUse seatbelt budget is 100ms).
+test('GATE COST: an unbroken [\\w.-] run with NO valid file extension gates in bounded time (grad6 #6)', () => {
+  const next = ('a'.repeat(9) + '.').repeat(Math.floor((256 * 1024) / 10));
+  const t0 = process.hrtime.bigint();
+  checkFidelity('proven at commit c19e528b', next);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(ms < 1000, `gating a ${next.length}-char extension-less run took ${ms.toFixed(0)}ms — FILE_REF_RE's quadratic is back`);
+});
+
+// Same fix, correctness control: an ordinary short filename reference must
+// still anchor exactly as before -- the bound only changes cost on a run far
+// longer than any real filename ever is, never the ordinary case.
+test('GATE COST control: an ordinary filename evidence anchor is unaffected by the run-length bound', () => {
+  const orig = 'Fix verified against #2014 and the scan.ps1 output.';
+  const next = 'Fix verified against the reported issue and the scanner output.';
+  const ev = checkFidelity(orig, next).drops.filter((d) => d.type === 'evidence-anchor-drop');
+  assert.deepStrictEqual(ev.map((d) => d.value).sort(), ['#2014', 'scan.ps1']);
 });
 
 // THE RETIRED REGEXES ARE THE ORACLE — test-local copies of the exact retired

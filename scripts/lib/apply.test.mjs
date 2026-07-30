@@ -806,6 +806,54 @@ test('H3: the SAME merge PASSES when the destination KEEPS the deleted file\'s t
   } finally { clean(proj); }
 });
 
+// grad6 §1b (round-6 CoalBoard verdict, reproduced against blob ecc33101 —
+// unchanged since round 5): a merge is delete(src) + rewrite(dst, dst+src) as
+// two INDEPENDENT actions; nothing in the schema links them. Before this fix,
+// an INCAPACITY refusal on the delete half (per-file, not a whole-plan marker
+// abort) left the paired rewrite untouched, so dst absorbed src's content
+// while src itself survived — two copies of the same text, ok:true.
+test('grad6 §1b: a merge stays ATOMIC — an incapacity refusal on the delete-half excludes the paired rewrite too, never 2 copies', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    const B = path.join(store, 'b.md');
+    // an opened-but-never-closed fence is UNVERIFIABLE (incapacity), not a
+    // marker read — no BOM/encoding tricks needed, so the raw bytes equal the
+    // logical text exactly (the merge-pair detector compares against origBuf).
+    const srcText = '---\ncritical: true\nnever closes\nSee [[keep-me]] and 42 issues.';
+    write(A, srcText);
+    write(B, 'Base B.');
+    assert.strictEqual(isPinned(A), true, 'setup sanity: an unclosed fence fails CLOSED (incapacity)');
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: A },
+      { type: 'rewrite', path: B, content: 'Base B, merged.\n' + srcText },
+    ]));
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(fs.existsSync(A), true, 'the source must SURVIVE untouched (incapacity refusal)');
+    assert.strictEqual(fs.readFileSync(B, 'utf8'), 'Base B.', 'the destination must NOT be rewritten — else 2 copies of the same content would exist');
+    assert.ok((r.flagged || []).some((f) => f.path === A), 'the delete is flagged (incapacity)');
+    assert.ok((r.flagged || []).some((f) => f.path === B && /merge-pair/.test(f.reason)), `the paired rewrite must be flagged as excluded too: ${JSON.stringify(r.flagged)}`);
+  } finally { clean(proj); }
+});
+
+test('grad6 §1b control: an UNRELATED rewrite (content does NOT contain the excluded delete\'s text) still applies normally', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    const B = path.join(store, 'b.md');
+    const srcText = '---\ncritical: true\nnever closes\nSee [[keep-me]] and 42 issues.';
+    write(A, srcText);
+    write(B, 'Base B.');
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: A },
+      { type: 'rewrite', path: B, content: 'Base B, edited — completely unrelated to A.' },
+    ]));
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(fs.existsSync(A), true, 'A is still refused (incapacity) on its own merits');
+    assert.strictEqual(fs.readFileSync(B, 'utf8'), 'Base B, edited — completely unrelated to A.', 'an unrelated rewrite must not be swept up by the merge-pair guard');
+  } finally { clean(proj); }
+});
+
 test('H3: a plain delete of a token-bearing file passes ONLY with an explicit approvedDrops (caller declares external safety)', () => {
   const { proj, store } = sandbox();
   try {

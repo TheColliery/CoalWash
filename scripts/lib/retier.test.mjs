@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   OVERFLOW_BASENAME, resolveRetierCfg, envelopeFor, envelopeBand,
   RETIER_TREATMENTS, classifyRetier, assertTreatmentAllowed,
-  planIndexDemotion, unreferencedTopics,
+  planIndexDemotion, unreferencedTopics, collectStores,
   extractClaims, reconcileClaims, topAnchors, probeAnchors,
   moveVerify, rollbackFromSnapshot, retierScan, retierScanLines,
   runRetier, runRetierReport,
@@ -543,6 +543,44 @@ test('helpers: moveVerify passes a verbatim move and fails a lossy one; unrefere
   };
   const all = 'the index mentions (ref.md) but never the other\nplain\nplain';
   assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), ['orphan-zzz.md']);
+});
+
+// grad6 W2-F1 (CoalBoard verdict): the reference census used to be byte-exact
+// case-sensitive, so a wikilink written `[[API]]` against a topic file
+// `api.md` counted as ZERO references (3 characters of case) and the file
+// was archived out from under a link that still resolves on every filesystem
+// this ships on (Windows/macOS are both case-insensitive).
+test('grad6 W2-F1: unreferencedTopics is case-folded — a case-different reference still counts as live (never archived)', () => {
+  const store = {
+    topics: [{ path: '/s/api.md', basename: 'api.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'the notes say [[API]] matters\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    [],
+    'a case-different [[API]] reference must still count — api.md is not unreferenced'
+  );
+});
+
+// grad6 W2-F2 (CoalBoard verdict): collectStores classified `.md` byte-exact,
+// so a referrer file saved as NOTES.MD (a case-preserving editor, or a tool
+// that writes uppercase extensions) fell into others[] instead of topics[] —
+// its text never reached allTextConcat, so anything it linked read as
+// unreferenced and got archived. path.extname(...).toLowerCase() matches the
+// convention classifyRetier already uses for the identical reason.
+test('grad6 W2-F2: collectStores classifies a case-variant .md extension as a topic, so its text reaches the reference census', () => {
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-w2f2-')));
+  const roleDir = path.join(proj, '.claude', 'agent-memory', 'tester');
+  fs.mkdirSync(roleDir, { recursive: true });
+  fs.writeFileSync(path.join(roleDir, 'MEMORY.md'), '# index\n[[api]]\n');
+  fs.writeFileSync(path.join(roleDir, 'api.md'), 'the api topic');
+  fs.writeFileSync(path.join(roleDir, 'NOTES.MD'), 'see [[api]] for details');
+  const stores = collectStores({ projectRoot: proj, home: proj });
+  const store = stores.find((s) => s.label === 'agent:tester');
+  assert.ok(store, 'the agent:tester store must be discovered');
+  const names = store.topics.map((t) => t.basename).sort();
+  assert.deepStrictEqual(names, ['NOTES.MD', 'api.md'], 'the uppercase-extension file must classify as a topic, not silently drop to others[]');
+  fs.rmSync(proj, { recursive: true, force: true });
 });
 
 test('platform gate (armor #2): a non-Claude-Code home → retierScan refuses + runRetier no-ops (conservative flag); with ~/.claude the gate keys CC — detectPlatform, not a hardcode', () => {

@@ -49,13 +49,14 @@
 // leftover dust waits for the next pass, never a false "destroyed").
 import fs from 'node:fs';
 import path from 'node:path';
-import { txDirFor, ensureSelfIgnore } from './apply.mjs';
+import { txDirFor, ensureSelfIgnore, acquireLock } from './apply.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
 
 export const FAT_BIN_NAME = 'fat-bin';
 export const STORE_OLD_NAME = 'store.old';
 const INDEX_NAME = 'index.json'; // per-bin manifest: [{id, at, bytes, original, origin}]
 const DEATH_LOG_NAME = 'death.log'; // append-only death certificates, one line per destroyed item
+const BIN_LOCK_NAME = '.bin.lock'; // per-bin (not per-tx) exclusive lock — see recordBinItem
 
 function binDir(projectRoot, name) {
   return path.join(txDirFor(projectRoot), name);
@@ -125,11 +126,43 @@ function saveIndex(dir, index) {
 // THE RULE THIS SETTLES, and it is the one to apply at the next such site: a
 // RECOVERY path moves BYTES; an ANALYSIS path may decode to text and must say
 // so at the call. Buffer in, Buffer out, no string hop in between.
+// grad6 (relayed W1-F4, verified here with real concurrent child processes
+// before fixing — 4 workers x 10 items each: catalogue had 16 entries against
+// 31 actual blob files, expected 40 of each): this was a classic read-modify-
+// write race — loadIndex/saveIndex re-read the WHOLE index, append one item,
+// and write it back with a FIXED tmp filename. Two concurrent callers (a
+// CoalFace-fanned-out wash, or two hooks firing near-simultaneously) can both
+// read the SAME stale index, and whichever renames last silently discards
+// the other's entry — the blob still lands on disk (its id is unique), so
+// the catalogue UNDERCOUNTS real files rather than losing them outright.
+// Fix: an exclusive per-bin lock (acquireLock, already used the identical way
+// at applyPlan's tx-dir lock) around the whole read-modify-write section —
+// including the blob write, so a deferred acquire leaves NOTHING behind
+// rather than an uncatalogued orphan blob (consistency restored: measured
+// catalogue === actual blob count on every re-run after this fix). A single
+// attempt with NO retry (this codebase's existing lock convention, e.g.
+// applyPlan) was tried first and measured TOO LOSSY here — recordBinItem is
+// called far more densely than an applyPlan transaction (many stashes in one
+// wash), and one attempt alone dropped 34 of 40 items to contention, which is
+// a functional regression, not the occasional acceptable null the fail-silent
+// contract describes. A short BOUNDED retry (a few ms of spin-wait, capped
+// attempts so it can never hang) brings real concurrent bursts back to
+// lossless while keeping the same fail-closed shape: still bounded, still
+// returns null (never throws) if truly exhausted.
+function sleepMs(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SharedArrayBuffer -> no wait, just retry immediately */ }
+}
 export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now() } = {}) {
   const dir = binDir(projectRoot, name);
+  let lock;
   try {
     fs.mkdirSync(dir, { recursive: true });
     ensureSelfIgnore(dir);
+    for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
+      if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
+      lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now });
+    }
+    if (!lock.acquired) return null;
     const id = `${now}-${Math.random().toString(36).slice(2, 8)}`;
     const body = Buffer.isBuffer(content) ? content : Buffer.from(typeof content === 'string' ? content : '', 'utf8');
     fs.writeFileSync(path.join(dir, id), body); // NO encoding argument: raw bytes
@@ -141,6 +174,8 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     return id;
   } catch {
     return null;
+  } finally {
+    if (lock && lock.acquired) lock.release();
   }
 }
 

@@ -195,8 +195,16 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
     for (const d of names) {
       if (!d.isFile()) continue; // a symlink Dirent reports its own type — never followed
       const p = path.join(phys, d.name);
-      if (d.name === 'MEMORY.md') continue;
-      if (d.name.endsWith('.md')) {
+      // grad6 W2-F2 (CoalBoard verdict): both checks below were byte-exact,
+      // so a case-variant filename (a referrer stored as NOTES.MD, or the
+      // index itself saved as Memory.md by a case-preserving editor) fell
+      // through to the wrong branch -- NOTES.MD classified as a non-topic
+      // (`others[]`), its text never reaching `allTextConcat`'s reference
+      // census below, so a topic it still links stood "unreferenced" and got
+      // archived out from under a live link. Fold case on both, matching the
+      // convention `classifyRetier` above already uses for the same reason.
+      if (d.name.toLowerCase() === 'memory.md') continue;
+      if (path.extname(d.name).toLowerCase() === '.md') {
         const text = readOrNull(p);
         if (text === null) continue;
         let st = null;
@@ -288,11 +296,21 @@ export function planIndexDemotion(indexText, env) {
   };
 }
 
+// grad6 W2-F1 (CoalBoard verdict): case-folded — a wikilink written as
+// `[[API]]` against a topic file `api.md` used to count as ZERO references
+// (3 characters of case turned a live link into "unreferenced"), and the
+// filesystems this ships on (Windows/macOS) are themselves case-insensitive,
+// so the reference genuinely resolves even though the bytes differ. Folding
+// here is the SAME direction the module already commits to below ("a false
+// 'referenced' keeps the file in place — the safe fail direction"); this is
+// that same asymmetry applied to case instead of to a coincidental substring.
 function countOccurrences(hay, needle) {
   if (!needle) return 0;
+  const h = hay.toLowerCase();
+  const n2 = needle.toLowerCase();
   let n = 0;
-  let i = hay.indexOf(needle);
-  while (i !== -1) { n++; i = hay.indexOf(needle, i + needle.length); }
+  let i = h.indexOf(n2);
+  while (i !== -1) { n++; i = h.indexOf(n2, i + n2.length); }
   return n;
 }
 
@@ -311,7 +329,7 @@ export function unreferencedTopics(store, allTextConcat) {
     const ownStem = countOccurrences(t.text, stem);
     const allBase = countOccurrences(allTextConcat, t.basename);
     const allStem = countOccurrences(allTextConcat, stem);
-    if (allBase > ownBase || allStem > ownStem) continue; // referenced elsewhere -> stays
+    if (allBase > ownBase || allStem > ownStem) continue; // referenced elsewhere (case-insensitive) -> stays
     out.push(t);
   }
   out.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.basename < b.basename ? -1 : 1));

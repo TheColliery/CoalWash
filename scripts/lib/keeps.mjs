@@ -76,13 +76,30 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
     const raw = rawKeepsOrNull(file);
     if (raw && typeof raw === 'object' && !Array.isArray(raw) && Number(raw.v) > KEEPS_SCHEMA_V) return false; // read-only to us
     ensureDir();
-    const keeps = loadKeepsFrom(file).filter((k) => k.target !== target);
+    const existing = loadKeepsFrom(file);
+    const prior = existing.find((k) => k.target === target);
+    const keeps = existing.filter((k) => k.target !== target);
+    // grad6 W3-K2 (CoalBoard verdict): this used to REBUILD the entry from
+    // only THIS call's arguments -- a human re-affirming an already-enforced
+    // keep (e.g. just bumping `reason`/`date`, the common re-review case)
+    // without re-typing `anchor`/`anchorFile` silently dropped them, downgrading
+    // the keep from mechanically ENFORCED (applyPlan's KEEPS-GATE) to merely
+    // advisory, with no flag raised — the exact opposite of what a re-review
+    // is supposed to do. Fix: preserve the PRIOR entry's anchor/anchorFile
+    // whenever this call doesn't supply its own (a real, non-empty new value
+    // still overrides — an intentional update, not a downgrade). There is no
+    // way to distinguish "didn't pass one" from "wants it cleared" at this
+    // call shape, so the safe direction is to never let re-affirming silently
+    // weaken protection; explicitly clearing an anchor is a different, not-yet-
+    // built feature, not this fix's job.
+    const mergedAnchor = (typeof anchor === 'string' && anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);
+    const mergedAnchorFile = (typeof anchorFile === 'string' && anchorFile) ? anchorFile : (prior && typeof prior.anchorFile === 'string' ? prior.anchorFile : undefined);
     keeps.push({
       target,
       reason: String(reason || ''),
       date: date || new Date().toISOString().slice(0, 10),
-      ...(typeof anchor === 'string' && anchor ? { anchor } : {}),
-      ...(typeof anchorFile === 'string' && anchorFile ? { anchorFile } : {}),
+      ...(mergedAnchor ? { anchor: mergedAnchor } : {}),
+      ...(mergedAnchorFile ? { anchorFile: mergedAnchorFile } : {}),
     });
     const tmp = file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), 'utf8');

@@ -391,6 +391,34 @@ const CLAIM_MARKER_RE = /\b(?:proven|verified|measured|confirmed)\b|\b100%/gi;
 const ISSUE_REF_RE = /#\d+\b/g;
 const HEX_ID_RE = /\b[0-9a-f]{7,40}\b/g;
 const FILE_REF_RE = /\b[\w][\w.-]*\.(?:md|mjs|cjs|js|json|jsonc|ps1|txt|yml|yaml|log|py|ts|sh)\b/g;
+
+// grad6 #6 (CoalBoard verdict, regression pair): FILE_REF_RE's `[\w.-]*\.(?:ext)`
+// overlaps the literal dot with the character class walking up to it, so an
+// unbroken run with NO valid trailing extension backtracks per restart point
+// -- measured ~5.6s at 256 KiB of periodic non-matching dots, ~55x over the
+// 100ms Phoenix #3 seatbelt budget. `evidenceAnchors` above never hits this
+// (it only ever regexes a <=~400-char marker window); the one unbounded
+// caller is `nextEvTokens` in checkFidelity below, which must scan the WHOLE
+// `next` text (a surviving token can relocate anywhere), so it cannot borrow
+// that window. Fix: [\w.-] never matches a newline or any separator, so a
+// non-backtracking character-class split (no overlap, no ambiguity, strictly
+// linear) yields exactly the runs FILE_REF_RE could ever see as one
+// contiguous candidate -- matching each run separately is behavior-identical
+// to matching the whole string for any real filename token. Capping a run's
+// length before the regex runs bounds the pathological per-run cost to
+// O(cap) instead of O(run length); no real filename comes remotely close to
+// the cap, so ordinary content is unaffected.
+const FILE_REF_RUN_CAP = 256;
+function matchFileRefs(s) {
+  const out = new Set();
+  const runs = s.match(/[\w.-]+/g);
+  if (!runs) return out;
+  for (const run of runs) {
+    const slice = run.length > FILE_REF_RUN_CAP ? run.slice(0, FILE_REF_RUN_CAP) : run;
+    for (const v of matchSet(slice, FILE_REF_RE)) out.add(v);
+  }
+  return out;
+}
 // "Near" = within this many chars of the marker, clamped to the marker's own
 // line on both sides (evidence on another line belongs to another claim).
 // Birth certificate: the M27 incident's citation sat ~40 chars from its claim;
@@ -742,14 +770,24 @@ export function frontmatterBlockParse(block) {
   return { entries, unreadable };
 }
 
-export function frontmatterKeys(text) {
+// grad6 §3 (2026-07-30): the open question this file's own comment used to
+// defer is now decided. 'none' and 'unverifiable' both project an EMPTY key
+// set (unchanged), but they are not the same fact: 'none' is a CONFIRMED
+// zero (there genuinely is no frontmatter block); 'unverifiable' is a
+// REFUSAL to look (an encoding artifact, an invisible fence byte, an
+// unclosed block) that happens to render as the same empty Set. Measured
+// live: a fence carrying one NBSP or U+2028 makes `readFrontmatter` refuse,
+// the census reports 0 keys for a block that (to a human, or a looser
+// parse) plainly has some, and a driven edit that deletes 3 real keys
+// through that fence reports `pass:true, 0 drops` — a gate certifying
+// completeness it never had. `incomplete` carries the distinction forward
+// so a caller can refuse to CERTIFY rather than silently agree with a
+// census it cannot trust; `frontmatterKeys` keeps returning a bare Set
+// (no signature change for its one caller's Set-shaped slot below), so the
+// incompleteness rides `inventory()`'s own `frontmatterIncomplete` field.
+function frontmatterCensus(text) {
   const fm = readFrontmatter(text);
-  // 'none' and 'unverifiable' both yield no keys — UNCHANGED semantics for the
-  // unverifiable case on purpose. Whether an un-inventoriable frontmatter should
-  // make the GATE refuse (rather than silently inventory nothing) is a separate
-  // open question and is NOT decided here; this change only stops a BOM from
-  // emptying the inventory of a file that is perfectly readable.
-  if (fm.state !== 'closed') return new Set();
+  if (fm.state !== 'closed') return { keys: new Set(), incomplete: fm.state === 'unverifiable' };
   // STRICT ONLY — the inventory keeps exactly the key SHAPE it has always kept.
   // The loose entries exist for the pin gate, which needs a floor, not a census.
   //
@@ -759,7 +797,13 @@ export function frontmatterKeys(text) {
   // permissive answer DELETES a file; an inventory's permissive answer is
   // reporting FEWER drops, so the safe move here is to keep every key we did
   // manage to read. Do not "make these consistent".
-  return new Set(frontmatterBlockParse(fm.block).entries.filter((e) => e.strict && e.top).map((e) => e.key));
+  return {
+    keys: new Set(frontmatterBlockParse(fm.block).entries.filter((e) => e.strict && e.top).map((e) => e.key)),
+    incomplete: false,
+  };
+}
+export function frontmatterKeys(text) {
+  return frontmatterCensus(text).keys;
 }
 
 // Extract the full structured-token inventory of a text — PROJECTED from the
@@ -773,12 +817,17 @@ export function frontmatterKeys(text) {
 export function inventory(text) {
   const s = String(text);
   const lists = tokenLists(s);
+  const fmCensus = frontmatterCensus(s);
   return {
     wikilinks: new Set(lists.wikilinks),
     dates: new Set(lists.dates),
     versions: new Set(lists.versions),
     links: new Set(lists.links),
-    frontmatter: frontmatterKeys(s),
+    frontmatter: fmCensus.keys,
+    // grad6 §3: true when the frontmatter census could not be certified
+    // complete (readFrontmatter's 'unverifiable') — checkFidelity below
+    // refuses to report `pass:true` on an incomplete census either side.
+    frontmatterIncomplete: fmCensus.incomplete,
     codespans: new Set(lists.codespans),
     quotes: new Set(lists.quotes),
     numbers: new Set(lists.numbers),
@@ -805,6 +854,12 @@ export function inventoryDropKeys(text) {
   add(inv.quotes, 'quote-drop');
   add(inv.numbers, 'number-drop');
   add(inv.fencedLines, 'fenced-line-drop');
+  // grad6 §3: a vanishing file whose frontmatter census was UNVERIFIABLE
+  // must not report "0 frontmatter keys dropped" as if it had none — the
+  // synthetic key rides the SAME approvedDrops channel as every other drop
+  // (apply.mjs's H3 delete-gate), so it fails toward "needs approval",
+  // never silence.
+  if (inv.frontmatterIncomplete) keys.add('frontmatter-inventory-incomplete:unverifiable');
   return keys;
 }
 
@@ -823,6 +878,16 @@ export function checkFidelity(origText, newText) {
   const ni = inventory(next);
 
   const drops = [
+    // grad6 §3: an UNCERTIFIABLE frontmatter census on either side means
+    // this gate cannot answer "were any keys dropped" at all -- reporting
+    // pass:true would be certifying a completeness it does not have. This
+    // is the abstain, not a real content drop; it rides the same drops[]
+    // channel (and the same approvedDrops escape hatch) as everything else,
+    // deliberately -- no new block tier, the existing per-drop approval
+    // mechanism already does exactly "refuse unless a human names it".
+    ...(oi.frontmatterIncomplete || ni.frontmatterIncomplete
+      ? [{ type: 'frontmatter-inventory-incomplete', value: oi.frontmatterIncomplete && ni.frontmatterIncomplete ? 'both' : (oi.frontmatterIncomplete ? 'orig' : 'next') }]
+      : []),
     ...diffDrops(oi.wikilinks, ni.wikilinks, 'wikilink-drop'),
     ...diffDrops(oi.dates, ni.dates, 'date-drop'),
     ...diffDrops(oi.versions, ni.versions, 'version-drop'),
@@ -901,7 +966,7 @@ export function checkFidelity(origText, newText) {
   // drops x text; that plan is refused wholesale anyway. `markerAlive`
   // depends only on the MARKER string, so it is memoized per distinct marker
   // instead of re-scanning the full text per dropped token.
-  const nextEvTokens = new Set([...matchSet(next, ISSUE_REF_RE), ...matchSet(next, HEX_ID_RE), ...matchSet(next, FILE_REF_RE)]);
+  const nextEvTokens = new Set([...matchSet(next, ISSUE_REF_RE), ...matchSet(next, HEX_ID_RE), ...matchFileRefs(next)]);
   const markerMemo = new Map();
   const markerAliveFor = (marker) => {
     if (!markerMemo.has(marker)) {

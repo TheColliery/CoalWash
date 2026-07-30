@@ -360,6 +360,21 @@ const pinKey = (k) => unquote(String(k).trim()).trim().toLowerCase() === 'pinned
 //                   rewrites. The refused file itself is equally safe on both
 //                   tiers; the tier only decides whether the REST of the plan
 //                   is trusted.
+//
+// CORRECTED (grad6 §1c, round-6 CoalBoard verdict): each bullet above is true
+// on its own, but read together they read as if the two `marker: true` paths
+// (the RETIRED_PIN_FLOOR regex and the parsed-entry check) are the COMMON
+// outcome for anything pin-shaped, with incapacity as the exception. Measured
+// the other way: a 63-cell battery (spelling variants x junk-shapes of
+// "something pin-like") landed 42 of 63 on INCAPACITY, not the marker path,
+// BECAUSE `parsed.unreadable` (the incapacity check, just below) runs BEFORE
+// the parsed-entry check and intercepts anything the block-reader cannot
+// fully account for -- which is most real-world junk. So "via the floor or a
+// parsed entry" is a NARROW, exact-conforming trigger (the whole frontmatter
+// block must be cleanly, completely parseable), not a broad catch for
+// anything that merely resembles a pin; the common case for messy/malformed
+// content is the gentler per-file incapacity refusal below, not a whole-plan
+// abort.
 function pinVerdict(file) {
   try {
     const fd = fs.openSync(file, 'r');
@@ -813,6 +828,40 @@ export function applyPlan(plan, opts = {}) {
       return { ok: false, error: `PIN-protected (pinned: true) — refuse to touch: ${markerPinned.map((p) => p.phys).join(', ')}` };
     }
     if (unprovable.size) actionable = actionable.filter((a) => !unprovable.has(a));
+    // grad6 §1b (round-6 CoalBoard verdict): a MERGE is delete(src) +
+    // rewrite(dst, dst+src) as two INDEPENDENT actions in one plan — nothing
+    // in the schema links them. When the delete half above is excluded for
+    // INCAPACITY (per-file, not a whole-plan marker abort) while its paired
+    // rewrite is untouched, the rewrite still lands: dst gains src's content,
+    // but src itself survives (refused, not deleted) — two copies of the same
+    // text, reported ok:true, on a tool whose product is de-duplication.
+    // Detect the pairing the only way available without a schema change,
+    // reusing the KEEPS-GATE's own technique a few lines below (a substring
+    // survival check): a rewrite whose CONTENT still contains an excluded
+    // delete's ORIGINAL bytes is presumed to be that delete's merge target,
+    // and is excluded in the SAME pass — scoped to just the matched pair,
+    // never the whole plan (every other per-file gate in this function
+    // already fails this way; a merge is not special-cased to fail harder).
+    if (unprovable.size) {
+      const excludedDeleteTexts = [...unprovable]
+        .filter((a) => a.type === 'delete' && a.origBuf)
+        .map((a) => a.origBuf.toString('utf8'))
+        .filter((t) => t.trim().length > 0); // an empty/whitespace body would match every rewrite — unsafe to pair on
+      if (excludedDeleteTexts.length) {
+        const pairedOut = new Set();
+        for (const a of actionable) {
+          if (a.type === 'delete' || typeof a.content !== 'string') continue;
+          if (excludedDeleteTexts.some((t) => a.content.includes(t))) {
+            pairedOut.add(a);
+            flagged.push({
+              path: a.phys,
+              reason: 'merge-pair exclusion: this rewrite absorbs a file the plan could not safely delete (frontmatter-unprovable) — both halves of the merge are excluded together so the source is never left duplicated',
+            });
+          }
+        }
+        if (pairedOut.size) actionable = actionable.filter((a) => !pairedOut.has(a));
+      }
+    }
     if (!actionable.length) {
       return { ok: false, flagged, error: `every action was refused (un-rewritable or frontmatter-unprovable) — nothing applied: ${flagged.map((f) => f.path).join(', ')}` };
     }

@@ -35,12 +35,23 @@ function ktok(n) {
 // stays the opt-in PULL surface (/stats or the wizard, never advertised).
 export function oneLineResult(opts) {
   const { cutTokens, cutPercent } = opts || {};
-  // Clamped, never null: a nonsensical negative cut renders as a clean zero
-  // rather than a garbled line — the old code returned null here, and silence
-  // is exactly what the กฎเหล็ก forbids.
-  const cut = Math.max(0, Math.round(Number(cutTokens) || 0));
+  const raw = Math.round(Number(cutTokens) || 0);
+  // grad6 R1-R5 (CoalBoard verdict): this used to clamp a negative cut to a
+  // CLEAN ZERO (`Math.max(0, ...)`) rather than return null — correct, per
+  // the กฎเหล็ก above (never silence). But clamping all the way to zero
+  // means a run that GREW the store (cutTokens < 0, e.g. new content added
+  // faster than anything was cut) prints the IDENTICAL line a genuine no-op
+  // clean prints — "cut ~0 tok (−0%)" either way, so growth is
+  // indistinguishable from a working, quiet autopilot. Never let a negative
+  // delta collapse into the same zero a real zero produces: report growth
+  // explicitly, using the same "+"/no-sign convention buildReceipt already
+  // uses for a store that grew (see the `pct <= 0 ? '' : '+'` line above).
+  if (raw < 0) {
+    const grownPct = Number.isFinite(cutPercent) ? Math.abs(Math.round(cutPercent)) : 0;
+    return `[CoalWash] grew ~${ktok(-raw)} tok (+${grownPct}%)`;
+  }
   const pct = Number.isFinite(cutPercent) ? Math.max(0, Math.round(cutPercent)) : 0;
-  return `[CoalWash] cut ~${ktok(cut)} tok (−${pct}%)`;
+  return `[CoalWash] cut ~${ktok(raw)} tok (−${pct}%)`;
 }
 
 // r = {

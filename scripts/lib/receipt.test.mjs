@@ -92,10 +92,28 @@ test('oneLineResult: cuts fat, one line, exactly TWO numbers, no box-art/receipt
 // happened, so the zero line IS the proof of life.
 test('oneLineResult: EVERY run speaks — a zero cut prints the same one-line receipt, never null (no silent runs)', () => {
   assert.strictEqual(oneLineResult({ cutTokens: 0, cutPercent: 0 }), '[CoalWash] cut ~0 tok (−0%)');
-  assert.strictEqual(oneLineResult({ cutTokens: -5 }), '[CoalWash] cut ~0 tok (−0%)', 'a nonsensical negative cut clamps to a clean zero, never a garbled line');
   assert.strictEqual(oneLineResult(), '[CoalWash] cut ~0 tok (−0%)', 'missing input still speaks, never throws');
   assert.doesNotThrow(() => oneLineResult(null));
   assert.strictEqual(oneLineResult(null), '[CoalWash] cut ~0 tok (−0%)');
+});
+
+// grad6 R1-R5 (CoalBoard verdict): a negative cutTokens means the store GREW
+// -- this test used to assert the old clamp-to-zero bug ("a nonsensical
+// negative cut clamps to a clean zero, never a garbled line") as EXPECTED
+// behavior, which is the exact defect: it made growth print byte-identical
+// to a genuine no-op clean. Corrected to assert the real fix: growth speaks
+// as growth, never silently as a clean zero.
+test('oneLineResult: a store that GREW (negative cutTokens) reports growth explicitly — never the same line a clean zero prints', () => {
+  assert.strictEqual(
+    oneLineResult({ cutTokens: -5 }),
+    '[CoalWash] grew ~5 tok (+0%)',
+    'growth must not read identically to a clean no-op'
+  );
+  assert.notStrictEqual(oneLineResult({ cutTokens: -5 }), oneLineResult({ cutTokens: 0, cutPercent: 0 }), 'growth and a real no-op must never collapse to the same line');
+  // the ordinary correlated case: a caller passes a negative percent ALONGSIDE
+  // the negative token delta (both legs of the same growth) -- the sign is
+  // normalized to a "+" magnitude, matching buildReceipt's own convention.
+  assert.strictEqual(oneLineResult({ cutTokens: -12345, cutPercent: -23.7 }), '[CoalWash] grew ~12.3k tok (+24%)');
 });
 
 test('oneLineResult: one template for every path — Auto-Quick, Force-Quick and the Full Pass differ ONLY in the numbers', () => {

@@ -183,3 +183,36 @@ test('recordKeep persists the beta.12 enforcement handle (anchor + anchorFile); 
     assert.ok(!('anchor' in plain) && !('anchorFile' in plain), 'no undefined-field pollution on the pre-beta.12 shape');
   } finally { clean(proj); }
 });
+
+// grad6 W3-K2 (CoalBoard verdict): re-affirming an already-enforced keep
+// (bumping just reason/date, the ordinary re-review shape) used to REBUILD
+// the entry from only this call's own arguments -- omitting anchor/anchorFile
+// silently downgraded it from mechanically ENFORCED to merely advisory, with
+// no flag anywhere. Driven exactly as the wave drove it: record with an
+// anchor, re-affirm without one, and the anchor must SURVIVE.
+test('recordKeep: re-affirming WITHOUT anchor/anchorFile preserves the prior enforcement handle (never a silent downgrade)', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first adjudication', anchor: 'the exact protected span', anchorFile: 'C:/store/f.md' });
+    const reAffirmed = recordKeep(proj, { target: 'f.md:clause', reason: 'second look, still load-bearing', date: '2026-08-01' });
+    assert.strictEqual(reAffirmed, true);
+    const keeps = loadKeeps(proj);
+    assert.strictEqual(keeps.length, 1);
+    const entry = keeps[0];
+    assert.strictEqual(entry.reason, 'second look, still load-bearing', 'the new reason/date must land');
+    assert.strictEqual(entry.date, '2026-08-01');
+    assert.strictEqual(entry.anchor, 'the exact protected span', 'the anchor must survive a re-affirm that did not supply one');
+    assert.strictEqual(entry.anchorFile, 'C:/store/f.md', 'the anchorFile must survive too');
+  } finally { clean(proj); }
+});
+
+test('recordKeep: a re-affirm that DOES supply a new anchor overrides (an intentional update, not a downgrade)', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span', anchorFile: 'C:/store/f.md' });
+    recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: 'new span', anchorFile: 'C:/store/f2.md' });
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+    assert.strictEqual(entry.anchor, 'new span');
+    assert.strictEqual(entry.anchorFile, 'C:/store/f2.md');
+  } finally { clean(proj); }
+});
