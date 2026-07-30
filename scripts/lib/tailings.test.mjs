@@ -59,11 +59,20 @@ test('recordBinItem: CROSS-PROCESS — concurrent workers writing the SAME bin n
       `for (let i = 0; i < Number(countStr); i++) recordBinItem(projectRoot, 'fat-bin', { content: 'item-' + process.pid + '-' + i, original: '/f' + i + '.md' });\n`);
     const WORKERS = 4;
     const PER_WORKER = 10;
+    // rot-canary (self-found, session end): mirror explode.test.mjs's own
+    // "#1 CROSS-PROCESS" precedent exactly — capture the exit code + stderr so
+    // a worker CRASH surfaces as its own assertion, not a confusing item-count
+    // mismatch with no diagnostic behind it.
     const runKid = () => new Promise((resolve) => {
       const c = spawn(process.execPath, [workerPath, proj, String(PER_WORKER)]);
-      c.on('close', () => resolve());
+      let e = '';
+      c.stderr.on('data', (d) => (e += d));
+      c.on('close', (code) => resolve({ code, e: e.trim() }));
     });
-    await Promise.all(Array.from({ length: WORKERS }, runKid));
+    const results = await Promise.all(Array.from({ length: WORKERS }, runKid));
+    for (const r of results) {
+      assert.strictEqual(r.code, 0, `a worker crashed (exit ${r.code}), stderr: ${r.e.slice(0, 200)}`);
+    }
     const index = listBin(proj, FAT_BIN_NAME);
     const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
     const onDisk = fs.readdirSync(binPath).filter((f) => f !== 'index.json' && f !== 'index.json.tmp' && f !== '.gitignore' && f !== '.bin.lock');
