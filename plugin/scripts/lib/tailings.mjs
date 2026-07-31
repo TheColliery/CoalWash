@@ -67,6 +67,20 @@ const BIN_LOCK_NAME = '.bin.lock'; // per-bin (not per-tx) exclusive lock — se
 // (measured ~606ms) and returned null. A much shorter, honestly-sized
 // staleness window lets a genuinely orphaned lock be reclaimed almost
 // immediately instead.
+//
+// THE NUMBER'S OWN TRADE (WAVE-16 finding, main's ruling: 5000 stands, the
+// comment gains the honest basis): a stale window has two customers pulling
+// opposite ways — shortening it buys AVAILABILITY (an orphan reclaims
+// sooner) and SPENDS SAFETY (a merely-STALLED live holder gets robbed
+// sooner, reopening the exact read-modify-write race this lock exists to
+// close). This 5000ms is sized from the HAPPY path: the critical section's
+// measured hold time is 12-25ms even for a 20 MiB blob — a ~200x margin on
+// local NTFS. The UNHAPPY path is where the number could still bite and is
+// NOT quantified here: apply.mjs's own #57 FILESYSTEM-SEMANTICS header
+// already admits network/cloud-synced mounts, where a write+fsync taking
+// past 5s is not exotic. Before raising or lowering this constant, re-derive
+// the happy-path hold time on the target filesystem, and treat an
+// unquantified network/cloud mount as the open question, not a solved one.
 const BIN_LOCK_STALE_MS = 5000;
 
 function binDir(projectRoot, name) {
