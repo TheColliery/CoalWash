@@ -161,26 +161,39 @@ function saveIndex(dir, index) {
 // lossless while keeping the same fail-closed shape: still bounded, still
 // returns null (never throws) if truly exhausted.
 //
-// THE MEASURED CEILING (F2, inspect findings-back): 4x10 and 8x10 concurrent
-// workers are lossless (every item catalogued). At 16x10 = 160, the ceiling
-// is reached: 146/160 land (catalogued === blobs, still consistent) and 14
-// cleanly REFUSE (return null, nothing written — never a silent undercount).
-// This is the intended shape, not a bug to chase further: past this load the
-// honest degrade is a VISIBLE null the caller must handle (apply.mjs now
-// flags it — see the H-bin-stash note there), not a race to make the retry
-// budget cover arbitrary concurrency. Raising the attempt cap trades latency
-// for a higher ceiling; it does not change the shape.
+// THE MEASURED CEILING (F2, inspect findings-back): the invariant is
+// `successful attempts === blobs === catalogued` at EVERY load, never a
+// silent undercount — a refusal (null) leaves nothing behind. That invariant
+// is what the test pins. The exact lossless threshold is a MACHINE-DEPENDENT
+// property, not a fact about this code: on the box this comment was written,
+// 4x10/8x10 concurrent workers came back lossless and 16x10=160 landed
+// 146 with 14 clean refusals; on a different box under different load
+// (WAVE-16, inspect findings-back) 8x10 already lost one to a single
+// refusal. Do not read a specific count here as a spec — the room's own
+// "never pin a machine-dependent count in a test" rule applies to a comment
+// too, and a number this unstable is not safe to state without saying where
+// it came from. Past whatever the local ceiling is, the honest degrade is a
+// VISIBLE null the caller must handle (apply.mjs flags it — see the
+// bin-stash note there), not a race to make the retry budget cover
+// arbitrary concurrency. Raising the attempt cap trades latency for a
+// higher ceiling; it does not change the shape.
 function sleepMs(ms) {
   try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   } catch {
-    // F3: no SharedArrayBuffer/Atomics.wait on this runtime (dead on any
-    // supported Node version today, but the fallback must still BACK OFF —
-    // silently retrying immediately turns a bounded, jittered wait into a
-    // busy-spin loop, the opposite of what this function exists to do). A
-    // bounded spin on a monotonic clock still costs CPU but genuinely waits.
-    const until = Date.now() + ms;
-    while (Date.now() < until) { /* bounded busy-wait — no sync sleep primitive available */ }
+    // F3/WAVE-16 finding 4: no SharedArrayBuffer/Atomics.wait on this runtime
+    // (dead on any supported Node version today, but the fallback must still
+    // BACK OFF — silently retrying immediately turns a bounded, jittered
+    // wait into a busy-spin loop, the opposite of what this function exists
+    // to do). process.hrtime.bigint() is the MONOTONIC clock (apply.mjs's
+    // own ownerToken already uses and documents it as such, two lines away
+    // from this module's only other clock read) — Date.now() is wall-clock
+    // and can step backward (NTP correction, a manual clock change), which
+    // would silently extend a "bounded" wait by the size of the step. A
+    // bounded spin on the monotonic clock still costs CPU but genuinely
+    // waits, and now actually has the property this comment claims.
+    const untilNs = process.hrtime.bigint() + BigInt(ms) * 1000000n;
+    while (process.hrtime.bigint() < untilNs) { /* bounded busy-wait — no sync sleep primitive available */ }
   }
 }
 export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now() } = {}) {

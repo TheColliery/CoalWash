@@ -20,9 +20,10 @@ import {
 } from './retier.mjs';
 import { tokensEst } from './caliper.mjs';
 import { restoreSession, ESTATE_INDEX_NAME } from './estate-archive.mjs';
-import { acquireLock, globalLockPath } from './apply.mjs';
+import { acquireLock, globalLockPath, txDirFor } from './apply.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 import { CONFIG_SCHEMA, clampedRead } from './config-schema.mjs';
+import { STORE_OLD_NAME } from './tailings.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR;
 
@@ -214,6 +215,31 @@ test('table: machine-parsed + vendor artifacts in a store dir are reported skip/
     assert.strictEqual(res.ok, true, runRetierReport(res));
     assert.strictEqual(fs.readFileSync(statePath, 'utf8'), stateOrig, 'machine-parsed byte-identical after the run');
     assert.strictEqual(fs.readFileSync(jsonlPath, 'utf8'), jsonlOrig, 'vendor artifact byte-identical after the run');
+  } finally { clean(home, proj); }
+});
+
+// WAVE-16 finding 2 (inspect findings-back on 7d57d4c/247a768/9e9ddde): F1's
+// bin-stash-failure flag rides applyPlan's `flagged[]`, but runRetier's own
+// success return silently dropped it — a bin-stash failure on the wizard
+// choice-4 muscle-reorg path (the higher-stakes one, banking to store.old)
+// was invisible end to end even though the agent-facing method.md path
+// already sees the raw result JSON. Forced by pre-holding the store.old
+// bin's lock with a fresh (non-stale) fake session right before the run, so
+// applyPlan's own recordBinItem call for the demoted zeta-old.md cannot
+// acquire it within its retry budget.
+test('grad6 WAVE-16 finding 2: a bin-stash failure on the RE-TIER path is now threaded through runRetier and rendered by runRetierReport', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    seedMainStore(home, proj); // zeta-old.md is unreferenced -> demoted -> deleted -> wizard-cut bin-stash
+    const binDir = path.join(txDirFor(proj), STORE_OLD_NAME);
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other-live-session', pid: 654321, at: now, token: 'other-live-session:654321:0' }));
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(Array.isArray(res.flagged), 'runRetier\'s success return must expose flagged');
+    assert.ok(res.flagged.some((f) => /bin-stash failed/.test(f.reason)), `the bin-stash failure must be flagged: ${JSON.stringify(res.flagged)}`);
+    assert.match(runRetierReport(res), /FLAGGED .*bin-stash failed/, 'runRetierReport must render the flagged bin-stash failure, not drop it silently');
   } finally { clean(home, proj); }
 });
 

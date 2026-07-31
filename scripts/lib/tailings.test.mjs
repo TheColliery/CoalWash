@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   FAT_BIN_NAME, STORE_OLD_NAME,
   recordBinItem, listBin, restoreFromBin,
@@ -106,15 +106,19 @@ test('grad6 F1: an orphaned lock OLDER than the bin\'s own (short) staleness win
   } finally { clean(proj); }
 });
 
-// grad6 F2 (inspect findings-back): the measured ceiling is 4x10/8x10
-// lossless, 16x10 = 146/160 landing with 14 clean refusals. This pins the
-// INVARIANT the ceiling must hold at heavier load — never lossless-ness
-// itself (that would re-break the moment machine load shifts the exact
-// count) — every successful attempt (non-null id) has exactly one blob and
-// one catalogue entry; a refusal (null) leaves nothing behind either. Silent
-// loss would mean a blob or catalogue entry existing with NO successful
-// attempt behind it, or a successful attempt with nothing on disk.
-test('grad6 F2: at heavier load (16x10=160) some attempts cleanly REFUSE, but the catalogue/blobs never diverge from what actually succeeded', async () => {
+// grad6 F2 (inspect findings-back), NAME corrected per WAVE-16 finding 6: the
+// prior name asserted "some attempts cleanly REFUSE" over a body that only
+// ever checked `successfulAttempts > 0 && <= 160` — a 160/160 fully-lossless
+// run would have PASSED that body while contradicting its own name (this
+// room's #1 recurring test-naming class: read every test name as a claim,
+// then check the body actually enforces it). The body was always right; only
+// the name overreached. This pins the INVARIANT at heavier load — never
+// lossless-ness itself, which is a machine-dependent property (WAVE-16
+// measured 8x10 already losing one refusal on a different box) — every
+// successful attempt (non-null id) has exactly one blob and one catalogue
+// entry; a refusal (null) leaves nothing behind either. A refusal is
+// PERMITTED at this load, never REQUIRED by this test.
+test('grad6 F2: at heavier load (16x10=160) the catalogue/blobs never diverge from whatever actually succeeded (a clean refusal is allowed, never required)', async () => {
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-f2-')));
   try {
     const proj = path.join(dir, 'proj');
@@ -148,6 +152,42 @@ test('grad6 F2: at heavier load (16x10=160) some attempts cleanly REFUSE, but th
     assert.ok(successfulAttempts > 0 && successfulAttempts <= WORKERS * PER_WORKER, `sanity: ${successfulAttempts} successes out of ${WORKERS * PER_WORKER} attempted`);
     assert.strictEqual(onDisk.length, successfulAttempts, 'every successful attempt must have exactly one blob — a refusal must leave nothing behind');
     assert.strictEqual(index.length, onDisk.length, 'the catalogue must never diverge from the blobs, even when some attempts refuse');
+  } finally { clean(dir); }
+});
+
+// grad6 WAVE-16 finding 4: sleepMs's no-SharedArrayBuffer fallback used
+// Date.now() (wall-clock) although the comment claimed a "monotonic clock" —
+// process.hrtime.bigint() is the actual monotonic primitive (apply.mjs's own
+// ownerToken already uses and documents it as such). FREEZING Date.now()
+// discriminates the two cleanly: the OLD `while (Date.now() < until)` loop
+// never advances past a frozen clock and spins FOREVER; the fixed
+// hrtime-based loop is entirely unaffected by Date.now and completes
+// normally. Forced via the same SharedArrayBuffer-delete technique F3's own
+// reproduction used, then a genuinely contended call so at least one
+// fallback wait actually runs.
+test('grad6 WAVE-16 finding 4: sleepMs\'s fallback uses the MONOTONIC clock — freezing Date.now() must not hang it', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-f4-')));
+  try {
+    const proj = path.join(dir, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const engineUrl = new URL('./tailings.mjs', import.meta.url).href;
+    const workerPath = path.join(dir, 'worker-f4.mjs');
+    fs.writeFileSync(workerPath,
+      `delete globalThis.SharedArrayBuffer;\n` + // force the no-SAB fallback branch, before the engine loads
+      `Date.now = () => 1700000000000;\n` + // FROZEN wall-clock — never advances
+      `const { recordBinItem } = await import(${JSON.stringify(engineUrl)});\n` +
+      `const id = recordBinItem(process.argv[2], 'fat-bin', { content: 'x', original: '/f.md' });\n` +
+      `process.stdout.write(JSON.stringify({ id }));\n`);
+    // a fresh (real-mtime) fake lock so the retry loop genuinely contends —
+    // the frozen `now` (1700000000000, far in the past of the real mtime)
+    // reads as "not stale" every attempt, forcing the full retry+sleep ladder.
+    const binDir = path.join(txDirFor(proj), FAT_BIN_NAME);
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other', pid: 1, at: Date.now(), token: 'other:1:0' }));
+    const r = spawnSync(process.execPath, [workerPath, proj], { encoding: 'utf8', timeout: 5000 });
+    assert.strictEqual(r.signal, null, `a frozen Date.now() must not hang the fallback wait (killed by ${r.signal} after the 5s timeout)`);
+    assert.strictEqual(r.status, 0, `worker crashed: ${r.stderr}`);
+    assert.deepStrictEqual(JSON.parse(r.stdout), { id: null }, 'the contended, never-staling lock must exhaust the retry budget and return null (not hang, not falsely succeed)');
   } finally { clean(dir); }
 });
 

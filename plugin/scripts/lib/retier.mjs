@@ -203,6 +203,16 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
       // census below, so a topic it still links stood "unreferenced" and got
       // archived out from under a live link. Fold case on both, matching the
       // convention `classifyRetier` above already uses for the same reason.
+      //
+      // WAVE-16 finding 3 (inspect findings-back): this fix also moves any
+      // .MD-uppercase file from `others[]` (immune -- text-less, never a
+      // demote/archive candidate) INTO `topics[]` (archive-candidate, subject
+      // to `unreferencedTopics` below). That widening is the correct call --
+      // `classifyRetier` above already answers 'class-b-topic' for such a
+      // file on both engines, so the pre-fix immunity was accidental, not a
+      // deliberate exemption -- but it IS an observable behaviour change in
+      // the destructive direction, and it belongs on the record here rather
+      // than only in the census-fix rationale above.
       if (d.name.toLowerCase() === 'memory.md') continue;
       if (path.extname(d.name).toLowerCase() === '.md') {
         const text = readOrNull(p);
@@ -930,6 +940,14 @@ export function runRetier({
       archiveDir,
       indexRows: rows,
       kept,
+      // WAVE-16 finding 2 (inspect findings-back on 7d57d4c/247a768/9e9ddde):
+      // applyPlan's own `flagged[]` (per-file refusals — e.g. a bin-stash
+      // failure per F1) was silently dropped on this success return, making
+      // that visibility fix invisible on the wizard choice-4 muscle-reorg
+      // path (the higher-stakes one, banking to store.old) even though the
+      // main agent-driven path already sees it (method.md prints the whole
+      // result JSON). Threaded through so runRetierReport can render it.
+      flagged: r.flagged || [],
       stores: over.map(({ st, p }) => ({
         label: st.label,
         movedLines: p.hop1.movedLines.length,
@@ -958,5 +976,9 @@ export function runRetierReport(res) {
   }
   lines.push(`  undo: snapshot ${res.snapshotDir} · archived topics restore via cli.mjs estate-restore <retier-id> (${res.indexRows} dig row(s) appended)`);
   for (const k of res.kept) lines.push(`  KEPT ${k.path}: ${k.reason}`);
+  // WAVE-16 finding 2: render applyPlan's per-file refusals here too — the
+  // same reason KEPT is rendered above (a per-file exclusion the operator
+  // needs to see), never silently dropped now that it is threaded through.
+  for (const f of res.flagged || []) lines.push(`  FLAGGED ${f.path}: ${f.reason}`);
   return lines.join('\n');
 }
