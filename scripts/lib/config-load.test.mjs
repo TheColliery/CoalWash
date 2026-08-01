@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety } from './config-load.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -783,163 +783,97 @@ test('R4/TP-1 [SECURITY]: an unresolvable BASE must REFUSE, not switch the guard
   }
 });
 
-// DEMAND-2 (the #36 twin-pair brief): `volumeCaseFolds` ships ONE baked-in miss
-// direction, and that is only defensible while every caller is REFUSE-polarity.
-// class-A refused to inherit this default for exactly that reason: it carries BOTH
-// polarities on one primitive, so its probe takes the direction as a REQUIRED
-// per-call-site argument. This file needs no such parameter — but the reason is a
-// FACT ABOUT THE CALLER SET, and a fact about the caller set rots the moment
-// someone adds a caller. The brief demanded that argument exist "as a TEST, not a
-// comment"; this is it. It does not judge polarity (no test can read intent) — it
-// pins the SET, so a new reader of the fold decision cannot arrive unnoticed.
-//
-// If this goes RED you have added a caller. Decide its polarity explicitly: a
-// REFUSE caller joins the allowlist below with a one-line reason; a PERMIT caller
-// means the single default is no longer defensible and this file needs class-A's
-// required-argument shape, not a new allowlist entry.
-//
-// SCOPE, fixed at assembly (main, 2026-08-01): a "caller" here means a file that
-// genuinely IMPORTS the binding, never one that merely CONTAINS the same text. The
-// first version of this scan matched on bare name presence and false-alarmed on
-// `explode.mjs`, which independently defines its OWN local `volumeCaseFolds` under
-// the same conventional name (it cannot import this file at all — see class-A's
-// own header) and therefore inherits nothing from this file's default. See
-// `importsFromConfigLoad`'s own comment for the full finding and why this scoping
-// makes a cross-lane false alarm through this mechanism structurally impossible,
-// not merely fixed for this one file.
-// STRIP-COMMENTS, ONE FUNCTION, used by every scan below. Station-3 findings-back
-// (F2): the consumer scan stripped comments before matching but the staleness scan
-// read the RAW file, so a call site removed while its POLARITY COMMENT survives
-// (the comment above `samePathForKeep` names `volumeCaseFolds` in prose) stayed
-// "not stale" forever — a comment defeated an assertion whose whole job is to
-// detect a real removal. Both scans now share one definition of "reads the code",
-// so they cannot drift into disagreeing about the same file.
-const stripComments = (s) => s.replace(/^[ \t]*\/\/.*$/gm, '');
-// Call-SITE count, not a boolean "does it appear" — F1: the boolean form is blind
-// to a SECOND call site inside a file that is already allowlisted, which is
-// exactly the shape a builder is most likely to add next (the allowlisted file is
-// the one already known to touch the symbol). Counting and pinning the number
-// makes a silent second call site a mismatch, not a pass.
-const callSites = (body, sym) => (stripComments(body).match(new RegExp(`${sym}\\s*\\(`, 'g')) || []).length;
-// GENUINE IMPORT, not a bare-name mention — assembly finding (main, 2026-08-01):
-// class-A's `explode.mjs` independently DEFINES its own LOCAL `volumeCaseFolds`
-// (it cannot import config-load.mjs at all — that engine must load in isolation
-// and is excluded from the shipped dist, per its own header) sharing this file's
-// convention NAME by deliberate room design, not by reading this file's export.
-// A bare `\bsym\b` scan cannot tell "imports and calls MY function" from "defines
-// its OWN same-named one" — it matched explode.mjs's declaration + its own two
-// internal calls and reported a false consumer, on a file this reach guard has no
-// business tracking (there is no fold-decision inherited from THIS file to track).
-// The fix is the SAME class as F1/F2: narrow what counts as "reads the code" to
-// what the guard's own promise actually needs — genuinely importing the binding,
-// never a name coincidence. `containment()` REQUIRES `foldOnMiss` as a non-default
-// argument at every one of class-A's OWN call sites (verified: `containment(childPhys,
-// basePhys, foldOnMiss)`, no default value) — that file polices its own callers'
-// polarity already, by a DIFFERENT and stronger mechanism (a required parameter),
-// and does not need or want an entry in THIS file's allowlist for a function it
-// never reads. Scanning by import also makes a cross-lane false alarm STRUCTURALLY
-// unreachable for any future case, not just this one: class-A is architecturally
-// barred from importing config-load.mjs at all (per its own design), so no file in
-// that engine can ever be a genuine consumer through this mechanism — the check
-// below will correctly stay silent about it forever, not merely this round.
-const IMPORT_CLAUSE_RE = /import\s*\{([^}]*)\}\s*from\s*['"][^'"]*config-load\.mjs['"]/;
-const importsFromConfigLoad = (body, sym) => {
-  const m = stripComments(body).match(IMPORT_CLAUSE_RE);
-  return !!m && new RegExp(`\\b${sym}\\b`).test(m[1]);
-};
-
-test('DEMAND-2/polarity-reach: the case-fold probe has exactly ONE INTERNAL caller inside config-load.mjs, and every consumer OUTSIDE it — including a second call site inside an already-allowlisted file — is tracked by name and by COUNT', () => {
-  const libDir = path.dirname(fileURLToPath(import.meta.url));
-  const src = fs.readFileSync(path.join(libDir, 'config-load.mjs'), 'utf8');
-
-  // NON-VACUITY FIRST: prove the scanner can see the things it is about to count.
-  // A scan that silently matches nothing passes every assertion below.
-  assert.ok(src.includes('function volumeCaseFolds'), 'scanner sanity: the probe declaration must be visible in the source it just read');
-  assert.ok(src.includes('export function pathWithin'), 'scanner sanity: the exported compare must be visible too');
-
-  // (1) THE PROBE HAS ONE INTERNAL CALLER, scoped to THIS FILE — not a claim about
-  // every reader anywhere (apply.mjs is a second reader BY DESIGN, tracked in part
-  // 2 below; this scope was previously left implicit in the test's own name, which
-  // read as a global claim it was never true of).
-  const probeCalls = callSites(src, 'volumeCaseFolds') - 1; // -1 = the declaration itself
-  assert.strictEqual(probeCalls, 1,
-    `config-load.mjs must have exactly ONE internal caller of the case-fold probe (pathWithin's norm); found ${probeCalls}. ` +
-    'Each caller inherits the MISS->fold fallback, which is safe only at a REFUSE-polarity gate.');
-
-  // (2) THE CROSS-MODULE CONSUMER SET, for the compare AND for the probe itself,
-  // BY CALL-SITE COUNT. Scanning only `pathWithin` would have been a hole I walked
-  // straight into: this unit exports `volumeCaseFolds` for apply.mjs's KEEPS-GATE,
-  // and a pathWithin-only scan stays green while a second module reads the fold
-  // decision directly. Both names are tracked, each with its own stated-polarity
-  // allowlist AND its own audited call count — a silent THIRD call site inside
-  // apply.mjs is exactly as much a new, unaudited reader as a new file would be.
-  // Tests are excluded deliberately (a test asserting on a primitive is not a
-  // caller whose polarity matters), and so is this module's own file.
-  //
-  // BOUND (F6): scan roots are scripts/lib and hooks — scripts/*.mjs entry points
-  // (verify.mjs, build-plugin.mjs, test.mjs) are OUT OF SCOPE by design. None of
-  // them call either symbol; verify.mjs's only hit for either name is a LIBS
-  // roster STRING (the filename `config-load.mjs`), never a call, so extending the
-  // scan there would add scope with nothing to catch.
-  const roots = [libDir, path.join(libDir, '..', '..', 'hooks')];
-  const ALLOWED = {
-    // name -> { file: { calls, reason } } — reason states why it is safe under the
-    // MISS->fold default; calls is the audited count, re-affirmed by hand whenever
-    // it changes (never widened silently by a passing scan).
-    pathWithin: {},
-    volumeCaseFolds: {
-      'apply.mjs': {
-        calls: 2,
-        reason: 'KEEPS-GATE samePathForKeep — a MATCH makes a pinned keep BIND and EXCLUDE the action, so folding more refuses more (REFUSE-polarity)',
-      },
-    },
-  };
-  const consumers = [];
-  let filesScanned = 0;
-  for (const dir of roots) {
-    if (!fs.existsSync(dir)) continue;
-    for (const name of fs.readdirSync(dir)) {
-      if (!/\.(mjs|js)$/.test(name)) continue;
-      if (name.endsWith('.test.mjs') || name === 'config-load.mjs') continue;
-      filesScanned++;
-      const body = fs.readFileSync(path.join(dir, name), 'utf8');
-      for (const sym of ['pathWithin', 'volumeCaseFolds']) {
-        // GENUINE IMPORT gates every check below (see importsFromConfigLoad's own
-        // comment) — a same-named LOCAL declaration with no import (a bare value
-        // reference, a re-declaration, class-A's own independent probe) is not a
-        // reader of THIS file's fold decision and must not be treated as one. This
-        // is still not call-site-only: an imported binding taken as a VALUE
-        // (assigned, passed onward) without an immediate call still counts here,
-        // because it genuinely is this file's export, not a coincidence.
-        if (!importsFromConfigLoad(body, sym)) continue;
-        const entry = ALLOWED[sym][name];
-        if (!entry) { consumers.push(`${name} reads ${sym} (no allowlist entry)`); continue; }
-        // NARROW second, only for an ALREADY-allowlisted file: the audited COUNT is
-        // a call-site count (what `entry.calls` was reviewed against), so a silent
-        // additional call site inside a known file is compared the same way (F1).
-        const n = callSites(body, sym);
-        if (n !== entry.calls) {
-          consumers.push(`${name} reads ${sym} at ${n} call site(s), audited count is ${entry.calls} — ` +
-            `a ${n > entry.calls ? 'NEW, unaudited' : 'REMOVED (stale-count)'} call site`);
-        }
-      }
+// REQUIRED-PARAMETER REACH (CoalBoard ruling 2026-08-01,
+// CW-POLARITY-REACH-BOARD-2026-08-01.md — replaces `DEMAND-2/polarity-reach`,
+// deleted here after FOUR fix rounds in one day: af17017 -> 174f330 revert ->
+// 1d191b4 -> 925b2f2 -> 5098a95). The deleted guard scanned SOURCE TEXT for
+// readers of `volumeCaseFolds` and pinned an allowlist of who was safe under
+// its old implicit default. A board of four blind lenses each found, by a
+// different method, a shape the scan could not see: a namespace import, a
+// second import line, a dynamic import, a re-export hop, a CJS `require`, and
+// a count-preserving polarity flip that left `consumers = []` while inverting
+// a REFUSE compare into an unconditional PERMIT. Detection cannot close that
+// space; `volumeCaseFolds`'s `foldOnMiss` parameter now has NO DEFAULT, so
+// every caller must declare its polarity at the call site or the language
+// itself refuses to answer — a property these tests prove holds across every
+// shape the board named, not merely a direct call written by hand.
+test('RED-FIRST/required-foldOnMiss: a direct call omitting the polarity argument THROWS, never falls back to a plausible-looking answer', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-REQFOLD-'));
+  try {
+    assert.throws(() => volumeCaseFolds(dir), TypeError, 'an omitted foldOnMiss must throw, not fall back to a hidden default');
+    for (const bad of [undefined, null, 'true', 1, 0, {}, []]) {
+      assert.throws(() => volumeCaseFolds(dir, bad), TypeError, `a non-boolean foldOnMiss (${JSON.stringify(bad)}) must throw`);
     }
-  }
-  assert.ok(filesScanned > 5, `scanner sanity: expected to scan the engine, only saw ${filesScanned} files`);
-  // and the allowlist is not a rubber stamp: every entry must still be a real
-  // reader (by call-site count, same shared strip as above — F2), so a stale
-  // exemption cannot sit here silently licensing a module that stopped using the
-  // symbol and merely kept a comment naming it (and would license it again if the
-  // real call ever came back without anyone re-affirming the count).
-  for (const [sym, files] of Object.entries(ALLOWED)) {
-    for (const [f, entry] of Object.entries(files)) {
-      const p = path.join(libDir, f);
-      const body = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
-      assert.ok(importsFromConfigLoad(body, sym), `stale allowlist entry: ${f} is exempted for ${sym} (audited at ${entry.calls} call site(s)) but no longer IMPORTS it (a comment naming it, or an unrelated local declaration, does not count) — remove the exemption`);
-    }
-  }
-  assert.deepStrictEqual(consumers, [],
-    `the fold decision's consumer set changed: ${consumers.join(', ')}. ` +
-    'Establish the new/changed site\'s polarity before re-affirming ALLOWED with its count — the probe fails toward FOLDING, which refuses more ' +
-    '(safe at a REFUSE gate) and permits more (a BYPASS at a PERMIT gate, the direction of R2\'s HIGH).');
+    // the throw is a CONTRACT violation, not a permanent refusal to ever answer —
+    // a caller that does declare its polarity still gets a real measurement.
+    assert.strictEqual(typeof volumeCaseFolds(dir, true), 'boolean', 'a caller that declares its polarity still gets a real answer');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('RED-FIRST/required-foldOnMiss: the throw survives a NAMESPACE import (import * as) — the exact shape show-me proved invisible to the deleted scan', async () => {
+  const mod = await import('./config-load.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-REQFOLD-NS-'));
+  try {
+    assert.throws(() => mod.volumeCaseFolds(dir), TypeError,
+      'a namespace-style consumer must hit the SAME check — there is only one function object, however it was obtained, and the check lives inside it');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('RED-FIRST/required-foldOnMiss: the throw survives a RE-EXPORT HOP — an intermediate file cannot launder a caller past the check', async () => {
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  const hopPath = path.join(libDir, `.cw-reexport-hop-${process.pid}.mjs`);
+  fs.writeFileSync(hopPath, `export { volumeCaseFolds } from './config-load.mjs';\n`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-REQFOLD-HOP-'));
+  try {
+    const hop = await import(pathToFileURL(hopPath).href);
+    assert.throws(() => hop.volumeCaseFolds(dir), TypeError,
+      're-exporting the symbol re-exports the SAME function object — an extra layer of indirection cannot route a caller around a required-argument check');
+  } finally { fs.rmSync(hopPath, { force: true }); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('RED-FIRST/required-foldOnMiss: the throw survives require(esm) from CJS — empirical\'s finding that the conductor (hooks/, CJS) is a real, unflagged reach path', (t) => {
+  // CAPABILITY PROBE, never assumed: require(esm) is unflagged on Node
+  // 20.19/22.12/23.0+; the CI matrix is [22, 24] and both should carry it, but a
+  // capability this version-sensitive is proven, not read off a changelog.
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  const probePath = path.join(libDir, `.cw-reqfold-probe-${process.pid}.cjs`);
+  fs.writeFileSync(probePath, `try { require(${JSON.stringify(path.join(libDir, 'config-load.mjs'))}); console.log('CAP-OK'); } catch (e) { console.log('CAP-ABSENT:' + e.code); }\n`);
+  let capLine;
+  try { capLine = execSync(`node "${probePath}"`, { encoding: 'utf8' }).trim(); }
+  finally { fs.rmSync(probePath, { force: true }); }
+  if (capLine !== 'CAP-OK') { t.skip(`require(esm) unavailable on this runtime (${capLine}) — capability proven absent, not assumed`); return; }
+
+  const cjsPath = path.join(libDir, `.cw-reqfold-cjs-${process.pid}.cjs`);
+  fs.writeFileSync(cjsPath,
+    `const { volumeCaseFolds } = require(${JSON.stringify(path.join(libDir, 'config-load.mjs'))});\n` +
+    `try { volumeCaseFolds(require('os').tmpdir()); console.log('NO-THROW'); }\n` +
+    `catch (e) { console.log(e instanceof TypeError ? 'THREW-TYPEERROR' : 'THREW-OTHER:' + e.constructor.name); }\n`);
+  try {
+    const out = execSync(`node "${cjsPath}"`, { encoding: 'utf8' }).trim();
+    assert.strictEqual(out, 'THREW-TYPEERROR',
+      'require(esm) from a CJS caller (the conductor\'s own module system) must reach the SAME check — the module system a caller uses cannot bypass a runtime argument validation');
+  } finally { fs.rmSync(cjsPath, { force: true }); }
+});
+
+test('RED-FIRST/required-foldOnMiss: a MISS answer is caller-specific, never cached across DIFFERENT declared polarities for the SAME path', () => {
+  // A purely-numeric basename has no case-bearing character to flip -> a genuine
+  // MISS (flipCase returns null for it). This is the cache-poisoning bug the
+  // required-parameter design itself introduces if the miss branch is cached
+  // keyed on path alone: a REFUSE caller probing this path first would silently
+  // hand its own `true` back to a LATER caller that declared `false` for the
+  // identical path — leaking one caller's polarity into another's answer through
+  // the shared cache, defeating the whole point of making the argument required.
+  // Not hypothetical: class-A's OWN volumeCaseFolds already avoids this by never
+  // caching either of its miss branches; this fixes the SAME gap here.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-REQFOLD-CACHE-'));
+  try {
+    const noCaseDir = path.join(root, '12345');
+    fs.mkdirSync(noCaseDir);
+    const first = volumeCaseFolds(noCaseDir, true);
+    const second = volumeCaseFolds(noCaseDir, false);
+    assert.strictEqual(first, true, 'the first caller declared REFUSE (true) and must get it back');
+    assert.strictEqual(second, false,
+      'a SECOND caller declaring the OPPOSITE polarity for the SAME path must get ITS OWN declared answer back — a cache keyed on path alone would return the first caller\'s true here instead');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+

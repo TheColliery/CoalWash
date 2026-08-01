@@ -59,21 +59,30 @@ export function claudeBaseDirs(home = os.homedir()) {
 // NTFS directory can be flipped case-SENSITIVE per-directory since Windows 10 1803
 // with no admin rights required). See `volumeCaseFolds` below for the probe itself,
 // its documented fallback direction, and its known forgeability bound.
-// Deliberate twin of explode.mjs's `isContainedIn`. BOTH HALVES ARE NOW CONVERTED
-// and they land as a PAIR (TWIN-DRIFT LAW) — the class-A half at `ebc8f60`, this
-// half here. The previous version of this comment declared the drift as permanent
-// and deliberate; that was true only for the window in which one half was landed
-// alone, and landing one half alone is exactly what turned CI red and forced the
-// `174f330` revert. Do not re-create that state: a change to the fold rule on
-// either side changes both, in the same landing.
-// THE TWIN IS NOT A COPY, and must never be "unified" into one. class-A carries
-// BOTH containment polarities on one primitive, so its probe takes the fallback
-// direction as a REQUIRED per-call-site argument; this file has no PERMIT-polarity
-// caller (pinned by test below) and ships one REFUSE-shaped default. The engines
-// stay separate bodies because class-A is EXCLUDED from the shipped dist and must
-// load standalone, so importing either from the other would break the plugin —
-// which is why the agreement is enforced by `twin-pin.test.mjs` instead, including
-// a row over a genuinely case-SENSITIVE directory that this pair added.
+// Deliberate twin of explode.mjs's `isContainedIn`. THE TWIN IS NOT A COPY, and
+// must never be "unified" into one — class-A is EXCLUDED from the shipped dist
+// and must load standalone, so importing either engine from the other would
+// break the plugin. Both engines now take their `foldOnMiss` as a REQUIRED
+// per-call-site argument (CoalBoard ruling, 2026-08-01) rather than one baked-in
+// default — class-A's `containment` because it genuinely carries BOTH
+// containment polarities on one primitive; this file's `volumeCaseFolds`
+// because a required parameter with no default is what a board found FOUR
+// text-scanning fix rounds could not deliver (see `volumeCaseFolds`'s own
+// header for the finding and why this file stops at "required", never adopting
+// class-A's three-value 'unknown' shape — this file has no live PERMIT caller
+// to need it).
+//
+// WHETHER "BOTH HALVES ARE CONVERTED" DEPENDS ON WHICH TREE IS READING THIS —
+// name the branch, never assert it as a global fact. On `main`, once both lanes
+// are merged, both engines are converted. On the `class-b` lane's OWN checkout,
+// `explode.mjs` is whatever `class-a` last landed; a caretaker on this lane MUST
+// re-derive the other side's state (`git show origin/class-a:...`) rather than
+// trust a comment here — a prior version of this exact paragraph stated
+// "BOTH HALVES ARE NOW CONVERTED" unconditionally and that was FALSE the moment
+// it was read from `class-b`'s own tree, which never received class-A's commits.
+// Agreement between the two is enforced by `twin-pin.test.mjs` at ASSEMBLY (a
+// station-5-only gate, unrunnable meaningfully from either lane alone), never by
+// a claim in this comment.
 // Both arguments MUST already be canonical (a canonicalOrNull result). That used to
 // be true only because every caller happened to do it — "it happens to be called
 // correctly" is the same shape that produced the R4 escape, so it is now ENFORCED
@@ -217,28 +226,73 @@ function flipCase(s) {
 // function's own REFUSE-polarity callers; it is NOT a property the pair shares, and
 // a future PERMIT caller HERE would still need the opposite default plus the
 // forgeability treatment, not merely a flipped boolean.
-// EXPORTED for apply.mjs's KEEPS-GATE (`samePathForKeep`), the second REFUSE-polarity
-// consumer of this probe — see `DEMAND-2/polarity-reach` in config-load.test.mjs,
-// which pins the consumer SET so a PERMIT-polarity reader cannot arrive unnoticed.
-// Any new consumer must state its polarity before it is added to that allowlist:
-// this probe fails toward FOLDING, which refuses more (safe at a REFUSE gate) and
-// permits more (a bypass at a PERMIT gate).
-export function volumeCaseFolds(dirPhys) {
+// `foldOnMiss` IS REQUIRED AND HAS NO DEFAULT — CoalBoard ruling 2026-08-01
+// (`CW-POLARITY-REACH-BOARD-2026-08-01.md`), replacing `DEMAND-2/polarity-reach`
+// (config-load.test.mjs, four fix rounds in one day, deleted in the same commit as
+// this change). That guard scanned SOURCE TEXT for readers of this function and
+// pinned an allowlist of who was safe to call it with the old implicit default —
+// a scan is a DETECTED property, defeatable by any shape it did not enumerate
+// (a namespace import, a second import line, a dynamic import, a re-export hop, a
+// CJS `require`, a polarity-preserving rewrite that keeps the same call COUNT).
+// Four of those were proven to defeat it, blind, in one board round. A REQUIRED
+// parameter with no default makes reach STRUCTURAL instead of detected: every
+// caller, however it obtained this function reference, must supply a real
+// boolean at the call site or the language itself refuses to answer — verified
+// below by throwing, never by returning a plausible-looking value a careless
+// caller's `? :` could silently misread. EXACTLY class-A's own shape
+// (`explode.mjs`'s `volumeCaseFolds(anchorPhys, foldOnMiss)` / `containment`),
+// adapted to this file's return type: class-A's `containment` returns a
+// three-value STRING ('inside'/'outside'/'unknown') because it has genuine
+// live callers of BOTH polarities that must each interpret an unknown answer
+// correctly; this file has never had — and does not now gain — a live
+// PERMIT-polarity caller (this function's only 3 call sites, all REFUSE, are
+// listed below), so there is no safe boolean to fall back to on a bad argument.
+// A boolean silently coerced through truthy/falsy `? :` cannot represent
+// "unknown" the way a compared string can, so this file THROWS instead of
+// inventing a three-state contract nothing here needs — least mechanism for
+// the polarity this file actually has, not a copy of class-A's for its own sake.
+//
+// THE THREE CALL SITES, their polarity, and why each is REFUSE:
+//   `pathWithin`'s `norm`, below — its only 2 callers, `touchesClaudeBase` and
+//     `findProjectRoot`'s `isBase`, are REFUSE (folding more only ever refuses
+//     more / narrows a project-root anchor, never widens one).
+//   `apply.mjs`'s `samePathForKeep` (2 call sites) — a MATCH makes a pinned
+//     keep BIND and EXCLUDE the action, so folding more only ever refuses more.
+// `pathWithin` itself is NOT threaded a `foldOnMiss` parameter (unlike class-A's
+// `isUnder`, which threads `containment`'s): it has no live caller that needs
+// anything but REFUSE, so adding API surface for a polarity nobody uses would be
+// exactly the over-hardening skill-authoring.md §2 forbids. If a PERMIT-polarity
+// consumer of path containment is ever needed here, it earns its own function
+// when it exists, matching this file's own YAGNI precedent everywhere else.
+export function volumeCaseFolds(dirPhys, foldOnMiss) {
+  if (typeof foldOnMiss !== 'boolean') {
+    throw new TypeError(`volumeCaseFolds: foldOnMiss is REQUIRED, no default — every caller must declare its polarity explicitly (REFUSE callers pass true; a future PERMIT caller must pass false and read the forgeability note above first). Got ${JSON.stringify(foldOnMiss)}.`);
+  }
   if (CASE_FOLD_CACHE.has(dirPhys)) return CASE_FOLD_CACHE.get(dirPhys);
   let st;
-  try { st = fs.statSync(dirPhys, { bigint: true }); } catch { return true; } // OUTER stat: a real probe MISS -> fold (REFUSE-polarity safe default, see above); NOT cached — a transient stat failure must not freeze a wrong answer for the process lifetime
+  try { st = fs.statSync(dirPhys, { bigint: true }); } catch { return foldOnMiss; } // OUTER stat: a real probe MISS -> the caller's own declared direction. NEVER cached (see below) — a transient stat failure must not freeze a wrong answer for the process lifetime.
   const parent = path.dirname(dirPhys);
   const flipped = parent === dirPhys ? null : flipCase(path.basename(dirPhys));
+  // MISS (root, or no case-bearing char) -> the caller's declared direction,
+  // returned DIRECTLY, bypassing the cache below on purpose. This branch's
+  // answer now IS `foldOnMiss` itself — a value that can differ PER CALLER for
+  // the identical `dirPhys` (the whole point of making it a required argument).
+  // The cache is keyed on `dirPhys` alone; caching a miss answer would let
+  // whichever caller happened to probe this path FIRST silently overwrite every
+  // later caller's own declared polarity for the same path — a cross-caller
+  // leak through the cache that would defeat the required parameter as
+  // thoroughly as the implicit default it replaces. A genuinely MEASURED answer
+  // below has no such dependency (the volume's real case-sensitivity does not
+  // depend on who is asking) and is cached exactly as before. Matches class-A's
+  // own `volumeCaseFolds`, which does not cache either of its miss branches for
+  // the identical reason.
+  if (flipped === null) return foldOnMiss;
   let folds;
-  if (flipped === null) {
-    folds = true; // probe miss (root, or no case-bearing char) -> fold (see above)
-  } else {
-    try {
-      const flippedSt = fs.statSync(path.join(parent, flipped), { bigint: true });
-      folds = flippedSt.dev === st.dev && flippedSt.ino === st.ino;
-    } catch {
-      folds = false; // INNER stat: NOT a miss — the probe SUCCEEDED. The flipped spelling does not resolve, so the directory is genuinely case-SENSITIVE. Opposite direction to the outer catch above, deliberately.
-    }
+  try {
+    const flippedSt = fs.statSync(path.join(parent, flipped), { bigint: true });
+    folds = flippedSt.dev === st.dev && flippedSt.ino === st.ino;
+  } catch {
+    folds = false; // INNER stat: NOT a miss — the probe SUCCEEDED. The flipped spelling does not resolve, so the directory is genuinely case-SENSITIVE. Opposite direction to the outer catch above, deliberately.
   }
   CASE_FOLD_CACHE.set(dirPhys, folds);
   return folds;
@@ -246,7 +300,9 @@ export function volumeCaseFolds(dirPhys) {
 export function pathWithin(childPhys, basePhys) {
   if (!childPhys || !basePhys) return false; // fail-closed
   if (!isCanonicalShape(childPhys) || !isCanonicalShape(basePhys)) return false; // fail-closed: caller must canonicalize
-  const norm = (s) => (volumeCaseFolds(basePhys) ? s.toLowerCase() : s);
+  // REFUSE-polarity, explicit — see volumeCaseFolds's own header for why this is
+  // hardcoded here rather than threaded as a parameter of pathWithin itself.
+  const norm = (s) => (volumeCaseFolds(basePhys, true) ? s.toLowerCase() : s);
   const c = norm(childPhys);
   const b = norm(basePhys);
   return c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
