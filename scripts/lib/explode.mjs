@@ -214,6 +214,14 @@ function flipCase(s) {
 // probed first and misapply it to every other directory on the drive). A MISS is never
 // cached: its value depends on the CALLER's `foldOnMiss`, so caching one would let the
 // first caller's polarity freeze a wrong answer for the other one, process-wide.
+//
+// SUSPECTED, NOT CONFIRMED, RECORDED WITH ITS POLARITY: a MEASURED answer is never
+// re-probed, so a directory whose case-sensitivity setting is toggled MID-PROCESS keeps
+// its first reading. The direction matters and does not need re-deriving: a stale
+// `folds:true` read by a PERMIT-polarity caller is an exposure in EXACTLY the direction
+// this unit closed (over-folding admits a case-variant sibling); a stale `folds:false`
+// there is safe (it only ever over-refuses). Both engines in this repo are short-lived
+// CLI processes and this is unreached in practice — recorded as a bound, not fixed.
 function volumeCaseFolds(anchorPhys, foldOnMiss) {
   if (CASE_FOLD_CACHE.has(anchorPhys)) return CASE_FOLD_CACHE.get(anchorPhys);
   let st;
