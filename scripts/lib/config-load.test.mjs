@@ -797,6 +797,16 @@ test('R4/TP-1 [SECURITY]: an unresolvable BASE must REFUSE, not switch the guard
 // REFUSE caller joins the allowlist below with a one-line reason; a PERMIT caller
 // means the single default is no longer defensible and this file needs class-A's
 // required-argument shape, not a new allowlist entry.
+//
+// SCOPE, fixed at assembly (main, 2026-08-01): a "caller" here means a file that
+// genuinely IMPORTS the binding, never one that merely CONTAINS the same text. The
+// first version of this scan matched on bare name presence and false-alarmed on
+// `explode.mjs`, which independently defines its OWN local `volumeCaseFolds` under
+// the same conventional name (it cannot import this file at all — see class-A's
+// own header) and therefore inherits nothing from this file's default. See
+// `importsFromConfigLoad`'s own comment for the full finding and why this scoping
+// makes a cross-lane false alarm through this mechanism structurally impossible,
+// not merely fixed for this one file.
 // STRIP-COMMENTS, ONE FUNCTION, used by every scan below. Station-3 findings-back
 // (F2): the consumer scan stripped comments before matching but the staleness scan
 // read the RAW file, so a call site removed while its POLARITY COMMENT survives
@@ -811,6 +821,32 @@ const stripComments = (s) => s.replace(/^[ \t]*\/\/.*$/gm, '');
 // the one already known to touch the symbol). Counting and pinning the number
 // makes a silent second call site a mismatch, not a pass.
 const callSites = (body, sym) => (stripComments(body).match(new RegExp(`${sym}\\s*\\(`, 'g')) || []).length;
+// GENUINE IMPORT, not a bare-name mention — assembly finding (main, 2026-08-01):
+// class-A's `explode.mjs` independently DEFINES its own LOCAL `volumeCaseFolds`
+// (it cannot import config-load.mjs at all — that engine must load in isolation
+// and is excluded from the shipped dist, per its own header) sharing this file's
+// convention NAME by deliberate room design, not by reading this file's export.
+// A bare `\bsym\b` scan cannot tell "imports and calls MY function" from "defines
+// its OWN same-named one" — it matched explode.mjs's declaration + its own two
+// internal calls and reported a false consumer, on a file this reach guard has no
+// business tracking (there is no fold-decision inherited from THIS file to track).
+// The fix is the SAME class as F1/F2: narrow what counts as "reads the code" to
+// what the guard's own promise actually needs — genuinely importing the binding,
+// never a name coincidence. `containment()` REQUIRES `foldOnMiss` as a non-default
+// argument at every one of class-A's OWN call sites (verified: `containment(childPhys,
+// basePhys, foldOnMiss)`, no default value) — that file polices its own callers'
+// polarity already, by a DIFFERENT and stronger mechanism (a required parameter),
+// and does not need or want an entry in THIS file's allowlist for a function it
+// never reads. Scanning by import also makes a cross-lane false alarm STRUCTURALLY
+// unreachable for any future case, not just this one: class-A is architecturally
+// barred from importing config-load.mjs at all (per its own design), so no file in
+// that engine can ever be a genuine consumer through this mechanism — the check
+// below will correctly stay silent about it forever, not merely this round.
+const IMPORT_CLAUSE_RE = /import\s*\{([^}]*)\}\s*from\s*['"][^'"]*config-load\.mjs['"]/;
+const importsFromConfigLoad = (body, sym) => {
+  const m = stripComments(body).match(IMPORT_CLAUSE_RE);
+  return !!m && new RegExp(`\\b${sym}\\b`).test(m[1]);
+};
 
 test('DEMAND-2/polarity-reach: the case-fold probe has exactly ONE INTERNAL caller inside config-load.mjs, and every consumer OUTSIDE it — including a second call site inside an already-allowlisted file — is tracked by name and by COUNT', () => {
   const libDir = path.dirname(fileURLToPath(import.meta.url));
@@ -867,14 +903,15 @@ test('DEMAND-2/polarity-reach: the case-fold probe has exactly ONE INTERNAL call
       if (name.endsWith('.test.mjs') || name === 'config-load.mjs') continue;
       filesScanned++;
       const body = fs.readFileSync(path.join(dir, name), 'utf8');
-      const stripped = stripComments(body);
       for (const sym of ['pathWithin', 'volumeCaseFolds']) {
-        // BROAD first: any mention at all (declaration, import, reference, call —
-        // not just a call site) marks a file as a consumer worth reviewing. A
-        // call-site-only check here would miss a symbol taken as a VALUE (assigned,
-        // passed to another function) rather than invoked directly at the read
-        // site — narrower than the property this scan exists to guard.
-        if (!new RegExp(`\\b${sym}\\b`).test(stripped)) continue;
+        // GENUINE IMPORT gates every check below (see importsFromConfigLoad's own
+        // comment) — a same-named LOCAL declaration with no import (a bare value
+        // reference, a re-declaration, class-A's own independent probe) is not a
+        // reader of THIS file's fold decision and must not be treated as one. This
+        // is still not call-site-only: an imported binding taken as a VALUE
+        // (assigned, passed onward) without an immediate call still counts here,
+        // because it genuinely is this file's export, not a coincidence.
+        if (!importsFromConfigLoad(body, sym)) continue;
         const entry = ALLOWED[sym][name];
         if (!entry) { consumers.push(`${name} reads ${sym} (no allowlist entry)`); continue; }
         // NARROW second, only for an ALREADY-allowlisted file: the audited COUNT is
@@ -897,8 +934,8 @@ test('DEMAND-2/polarity-reach: the case-fold probe has exactly ONE INTERNAL call
   for (const [sym, files] of Object.entries(ALLOWED)) {
     for (const [f, entry] of Object.entries(files)) {
       const p = path.join(libDir, f);
-      const n = fs.existsSync(p) ? callSites(fs.readFileSync(p, 'utf8'), sym) : 0;
-      assert.ok(n > 0, `stale allowlist entry: ${f} is exempted for ${sym} (audited at ${entry.calls} call site(s)) but no longer reads it (a comment naming it does not count) — remove the exemption`);
+      const body = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+      assert.ok(importsFromConfigLoad(body, sym), `stale allowlist entry: ${f} is exempted for ${sym} (audited at ${entry.calls} call site(s)) but no longer IMPORTS it (a comment naming it, or an unrelated local declaration, does not count) — remove the exemption`);
     }
   }
   assert.deepStrictEqual(consumers, [],
