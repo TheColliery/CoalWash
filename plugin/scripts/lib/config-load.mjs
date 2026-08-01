@@ -52,24 +52,158 @@ export function claudeBaseDirs(home = os.homedir()) {
   return fromEnv.length ? fromEnv : [path.join(home, '.claude')];
 }
 
-// Same-or-nested containment on PHYSICAL paths, case-folded on win32 (realpath does
-// NOT normalize case or drive-letter case on Windows). Deliberate twin of
-// explode.mjs's `isContainedIn` (which documents the same win32 caveat): that module
-// is the class-A engine and is EXCLUDED from the shipped dist, so importing it here
-// would break the plugin. Named divergence, not drift — keep the two in step.
+// Same-or-nested containment on PHYSICAL paths, case-folded per a real probe of the
+// case behaviour of the directory it's checked against — never `process.platform`
+// (node/runtime.md §4: case-insensitivity is a property of the volume, not the
+// platform; macOS APFS is POSIX *and* case-insensitive by default, and a Windows
+// NTFS directory can be flipped case-SENSITIVE per-directory since Windows 10 1803
+// with no admin rights required). See `volumeCaseFolds` below for the probe itself,
+// its documented fallback direction, and its known forgeability bound.
+// Deliberate twin of explode.mjs's `isContainedIn` — ⚠️ NO LONGER IN STEP: this
+// primitive was converted to the real probe above; `isContainedIn` was DELIBERATELY
+// NOT converted in the same change (main's scope ruling — a sweep of this pattern
+// across five sites is its own reviewed unit) and still folds on
+// `process.platform === 'win32'`. The two now answer differently on a genuinely
+// case-sensitive Windows directory — see the KNOWN, DECLARED TWIN DRIFT note in
+// `twin-pin.test.mjs` for the measured detail; that module is the class-A engine
+// and is EXCLUDED from the shipped dist, so importing it here would break the
+// plugin, which is also why the drift cannot be closed by importing one from the
+// other.
 // Both arguments MUST already be canonical (a canonicalOrNull result). That used to
 // be true only because every caller happened to do it — "it happens to be called
 // correctly" is the same shape that produced the R4 escape, so it is now ENFORCED
 // rather than assumed: a non-canonical argument fails CLOSED instead of being
 // silently lexically compared. The check is free (no syscall) and idempotent on a
-// real canonical path, which is always absolute and already normalized.
+// real canonical path, which is always absolute and already normalized — though
+// "canonical" here is a SHAPE check, not proof the argument was realpath-derived;
+// see `findProjectRoot`'s `isBase` for a caller where that distinction matters.
 export function isCanonicalShape(p) {
   return typeof p === 'string' && !!p && path.isAbsolute(p) && path.resolve(p) === p;
+}
+
+// Does the directory CONTAINING `dirPhys` (its parent) fold the case of its own
+// entries — i.e. would a differently-cased sibling of `dirPhys` collide with it?
+// Measured, not assumed: flip the case of `dirPhys`'s own basename and stat the
+// flipped spelling in that same parent; if it resolves to the SAME file (device +
+// inode), the parent folds. Read-only (no write, no temp file, no cleanup race) so
+// the primitive stays safe to call on a path we merely have READ access to, which
+// containment checks routinely do.
+// BOUND: this measures the PARENT's own setting, which is right for the
+// base-vs-sibling shape `pathWithin` compares — it is NOT a claim about the whole
+// volume or about a child directory nested deeper than `dirPhys` itself, since
+// Windows sets case-sensitivity per directory and a deeper child could disagree
+// with its own parent.
+//
+// CACHED PER ROOT PATH, NEVER PER DEVICE. Windows 10 1803+ sets case-sensitivity
+// PER-DIRECTORY — two directories on the SAME device can disagree. A device-keyed
+// cache would learn from whichever directory happened to probe first and silently
+// misapply that answer to every other directory sharing the drive. Caching per
+// exact `dirPhys` string keeps each root's answer correctly isolated; repeat
+// callers on the SAME root (the common case — `touchesClaudeBase` re-checking one
+// claudeBaseDir many times) still hit the cache.
+const CASE_FOLD_CACHE = new Map();
+// THE CLAIM THIS FUNCTION MAKES IS BOUNDED, NOT UNIVERSAL — read this before
+// changing the round-trip check below. JS's Unicode case mapping and a volume's
+// own on-disk case-fold table are DIFFERENT FUNCTIONS: they agree on the ordinary
+// case (plain ASCII letters, and most single-codepoint accented letters), and they
+// are KNOWN to disagree by at least two distinct, unrelated mechanisms —
+//   EXPANSION:  `ß`.toUpperCase() === 'SS' (one codepoint becomes two)
+//   SINGLETON/COMPATIBILITY REMAP: U+212A KELVIN SIGN, U+1E9E LATIN CAPITAL SHARP
+//     S, U+212B ANGSTROM SIGN all case-map onto an ordinary letter under JS's
+//     Unicode rules, which NTFS's per-codepoint upcase table does not honour —
+//     the discriminator is the CODEPOINT, not the accent: plain `Å` (U+00C5)
+//     folds correctly here, `Å` ANGSTROM (U+212B) does not.
+// We do not own the OS's case table, cannot enumerate every place it disagrees
+// with JS, and a third mechanism almost certainly exists — an absolute claim of
+// completeness here is UNFALSIFIABLE in the wrong direction: it can only ever be
+// proven wrong by the next codepoint, never proven right. So this function makes
+// no such claim. What IS true, and checked below rather than assumed: a character
+// whose flip does not round-trip back to itself through its own opposite is
+// refused (treated as a probe MISS) rather than guessed at.
+function flipCase(s) {
+  let out = '';
+  let sawCaseChar = false;
+  for (const ch of s) {
+    const up = ch.toUpperCase();
+    const down = ch.toLowerCase();
+    if (up === down) { out += ch; continue; } // no case to flip (digit, symbol, many scripts)
+    // ROUND-TRIP CHECK, per character, not per whole string: `ch` must return to
+    // itself by going through its OWN opposite. This is what actually catches
+    // BOTH known mechanisms with one condition — an expansion changes what comes
+    // back (`ß`.toLowerCase().toUpperCase() → 'SS'.toLowerCase() → 'ss' ≠ 'ß'),
+    // and a singleton remap does too (KELVIN SIGN's lowercase is ordinary 'k',
+    // whose uppercase is ordinary 'K', which is not the Kelvin sign) — verified
+    // against the room's own ordinary-name regression set (`plain`, `Mixed123`,
+    // `dot.name-x_y`, `.claude`, `ALLCAPS`) before shipping: none of them miss.
+    if (!(ch === up ? down.toUpperCase() === ch : up.toLowerCase() === ch)) return null;
+    sawCaseChar = true;
+    out += ch === up ? down : up;
+  }
+  return sawCaseChar ? out : null;
+}
+// A probe MISS (no case-bearing character in the basename to flip, `flipCase`
+// refusing an unstable character per its own bounded comment, `dirPhys` is a
+// filesystem root with no parent, or the stat itself fails) falls back to the
+// FOLDING answer, never the exact-match one.
+//
+// THAT FALLBACK IS A KNOWN, NAMED WRONG ANSWER IN ONE DIRECTION — say so plainly,
+// not just "safe default": on a directory that is genuinely case-SENSITIVE, the
+// true answer is `folds:false`, and MISS→fold answers `true`. That is WRONG. It is
+// the correct TRADE for both callers this file ships today: of `pathWithin`'s two
+// call sites below, `touchesClaudeBase` is a real trust boundary (REFUSE-polarity —
+// folding MORE only ever REFUSES more, fail closed) and `findProjectRoot`'s `isBase`
+// is declared non-security (state hygiene only, see its own comment). Folding LESS
+// on a directory that actually folds would MISS a same-file match and fail OPEN,
+// which is the direction that matters for a REFUSE caller. A future PERMIT-polarity
+// caller of this exported function would need the OPPOSITE fallback, and must also
+// read the forgeability note below before relying on it — this fallback choice does
+// not by itself close that gap.
+//
+// FORGEABILITY, BOUNDED THE SAME WAY: a junction/hardlink planted by anyone who can
+// write to `dirPhys`'s PARENT (no admin needed) can make the flipped spelling
+// resolve to the same file, pushing the probe toward `folds:true` even on a
+// genuinely case-sensitive directory — `touchesClaudeBase`'s REFUSE-polarity stays
+// safe either way (forcing `folds:true` only refuses more). Forcing the OPPOSITE
+// (`folds:false` on a directory that truly folds) via a plant is not possible
+// through THIS mechanism, because a junction can only make a stat that would
+// otherwise fail SUCCEED, never the reverse — but that is a claim about junctions,
+// not a claim that `folds:false` can never arise wrongly by any means: the
+// JS-vs-OS case-mapping mismatch this file already bounds above (`flipCase`'s own
+// comment) is a SEPARATE, non-forgery route to exactly that wrong answer, which is
+// why it is routed to MISS instead of trusted. A future PERMIT-polarity caller
+// inherits both exposures and must treat the probe as untrusted input, not merely
+// pick an "opposite default" — and that caller is not hypothetical in general:
+// explode.mjs's `isContainedIn` (this primitive's unconverted twin, see the header
+// above) documents ITSELF as "PERMIT-POLARITY ONLY" with a LIVE consumer (the
+// snapshot-ref store-boundary check) that requires containment to be TRUE before
+// proceeding. That twin still folds on `process.platform`, not this probe, so
+// today's forgeability exposure is this function's own risk only — but it is
+// exactly the shape a converted twin would inherit, which is why the divergence
+// note points here.
+function volumeCaseFolds(dirPhys) {
+  if (CASE_FOLD_CACHE.has(dirPhys)) return CASE_FOLD_CACHE.get(dirPhys);
+  let st;
+  try { st = fs.statSync(dirPhys, { bigint: true }); } catch { return true; } // probe miss -> fold (REFUSE-polarity safe default, see above); NOT cached — a transient stat failure must not freeze a wrong answer for the process lifetime
+  const parent = path.dirname(dirPhys);
+  const flipped = parent === dirPhys ? null : flipCase(path.basename(dirPhys));
+  let folds;
+  if (flipped === null) {
+    folds = true; // probe miss (root, or no case-bearing char) -> fold (see above)
+  } else {
+    try {
+      const flippedSt = fs.statSync(path.join(parent, flipped), { bigint: true });
+      folds = flippedSt.dev === st.dev && flippedSt.ino === st.ino;
+    } catch {
+      folds = false; // the flipped spelling does not resolve at all -> case-sensitive volume
+    }
+  }
+  CASE_FOLD_CACHE.set(dirPhys, folds);
+  return folds;
 }
 export function pathWithin(childPhys, basePhys) {
   if (!childPhys || !basePhys) return false; // fail-closed
   if (!isCanonicalShape(childPhys) || !isCanonicalShape(basePhys)) return false; // fail-closed: caller must canonicalize
-  const norm = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
+  const norm = (s) => (volumeCaseFolds(basePhys) ? s.toLowerCase() : s);
   const c = norm(childPhys);
   const b = norm(basePhys);
   return c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
@@ -210,7 +344,22 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
   let dir = physicalDir(startDir);
   const homeAbs = physicalDir(home);
   const bases = claudeBaseDirs(home).map(physicalDir);
-  const isBase = (d) => bases.some((b) => pathWithin(d, b) && pathWithin(b, d)); // same dir, case-folded
+  // "same dir, case-folded" is now TWO rules, not one: `norm` in `pathWithin`
+  // keys the fold decision on its OWN `basePhys` argument, so `pathWithin(d, b)`
+  // and `pathWithin(b, d)` may each fold differently, since the two calls hand
+  // different anchors (b, then d) to the probe — impossible before this fix, when
+  // one platform-wide rule governed both calls.
+  // NOT bounded to a future edge case — `d` and `b` are NOT always `.native`-derived
+  // today. `physicalDir` (both are built from it, directly or via `path.dirname`)
+  // falls back to a bare lexical `path.resolve` whenever the path does not exist yet
+  // — the ordinary case on a fresh install with no `~/.claude` yet (this file's own
+  // `touchesClaudeBase` comment names exactly that scenario). `isCanonicalShape`
+  // passes a lexical resolve too (it checks SHAPE — absolute and idempotent under
+  // `path.resolve` — never that it was realpath-derived), so `pathWithin` proceeds
+  // rather than refusing. State hygiene either way, not a security check — but a
+  // future edit that starts trusting this comment's canonicalization claim inherits
+  // a wrong assumption, so it is corrected rather than merely narrowed.
+  const isBase = (d) => bases.some((b) => pathWithin(d, b) && pathWithin(b, d));
   while (true) {
     if (!isBase(dir) && ROOT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))) return dir;
     if (dir === homeAbs) return startDir;

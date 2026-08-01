@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, mergeSafety } from './config-load.mjs';
+import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -598,6 +598,122 @@ test('R3/TP-1: touchesClaudeBase treats an UNCANONICALIZABLE path as touching �
     assert.strictEqual(touchesClaudeBase(path.join(proj, 'nope', 'gone'), home), true, 'unresolvable => refuse (a false here would restore the fail-open)');
     assert.strictEqual(touchesClaudeBase(proj, home), false, 'a real project dir still passes');
   } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// node/runtime.md §4: case-folding is a VOLUME property, never a platform
+// assumption. pathWithin's `norm` folded on `process.platform === 'win32'`
+// unconditionally -- wrong in BOTH directions (a case-sensitive Windows
+// volume folds when it must not; a case-insensitive macOS/Linux volume does
+// not fold when it must). This proves the win32-wrong-direction half on a
+// REAL per-directory case-sensitive folder (Windows 10 1803+ / Win11 support
+// this without admin via fsutil, no mock, no injected platform param).
+// ---------------------------------------------------------------------------
+
+// Attempts to build two genuinely DISTINCT sibling directories that differ
+// only by case (Config / config) on a case-sensitive folder. Returns
+// { upper, lower } on success, or null if this box/volume cannot produce one
+// (older Windows without per-directory case-sensitivity support, or a volume
+// that silently collapsed the two names into one directory) -- the single
+// capability probe the caller's ONE t.skip decision is based on, never
+// process.platform.
+function tryBuildCaseSensitiveSiblings() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-CASESENSE-'));
+  if (process.platform === 'win32') {
+    try { execSync(`fsutil.exe file setCaseSensitiveInfo "${root}" enable`, { stdio: 'ignore' }); }
+    catch { fs.rmSync(root, { recursive: true, force: true }); return null; }
+  }
+  const upper = path.join(root, 'Config');
+  const lower = path.join(root, 'config');
+  fs.mkdirSync(upper);
+  try { fs.mkdirSync(lower); } catch { fs.rmSync(root, { recursive: true, force: true }); return null; }
+  const su = fs.statSync(upper, { bigint: true });
+  const sl = fs.statSync(lower, { bigint: true });
+  if (su.dev === sl.dev && su.ino === sl.ino) { fs.rmSync(root, { recursive: true, force: true }); return null; }
+  return { root, upper, lower };
+}
+
+test('RED-FIRST/capability-not-platform-name: pathWithin must not fold two genuinely DISTINCT case-variant directories into "contained" on a case-sensitive volume', (t) => {
+  const built = tryBuildCaseSensitiveSiblings();
+  if (!built) { t.skip('this box/volume cannot produce a real per-directory case-sensitive folder (fsutil unsupported, or the volume collapsed Config/config into one dir)'); return; }
+  const { root, upper, lower } = built;
+  try {
+    const upperPhys = canonicalOrNull(upper);
+    const lowerPhys = canonicalOrNull(lower);
+    assert.notStrictEqual(upperPhys, lowerPhys, 'sanity: Config and config are two real, distinct directories on this volume');
+    // node/runtime.md §4's exact failure: `norm` keyed on process.platform===
+    // 'win32' (always true here) lowercases BOTH sides regardless of what the
+    // volume actually does, so a genuinely distinct sibling that merely
+    // case-varies compares EQUAL to the trusted base -- a containment
+    // BYPASS for any PERMIT-polarity caller of this exported primitive, and
+    // an unnecessary over-refusal for the REFUSE-polarity caller it has today.
+    assert.strictEqual(pathWithin(lowerPhys, upperPhys), false,
+      'a distinct sibling directory that only case-varies must NOT read as contained -- platform-keyed folding on a case-sensitive volume wrongly says yes');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// RE-INSPECT R2: Unicode case mapping is NOT an involution (flip-twice != identity).
+// `ß`.toUpperCase() === 'SS' (a TWO-character expansion) -- so the naive per-char
+// flip built for the fold probe manufactures a spelling ('STRASSE') the OS's own
+// case-folding rule would never produce for 'Straße' (NTFS's per-codepoint upcase
+// table leaves ß as ß; the real case-variant is 'STRAßE', confirmed against a real
+// directory below). No fsutil, no forgery, no write access needed -- this reproduces
+// on the box's ORDINARY default volume, because the bug is in the JS mapping, not
+// in any volume behavior.
+test('RE-INSPECT/R2: a non-involutive Unicode case flip (eszett) must not report a CONFIDENT wrong fold answer', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-CASEFOLD-'));
+  try {
+    const straDir = path.join(root, 'Straße'); // "Straße"
+    fs.mkdirSync(straDir);
+    // Capability probe (never process.platform): does THIS parent actually fold
+    // ordinary ASCII case for a sibling? If not, the "correct" answer below isn't
+    // well-defined on this box/volume -- skip visibly rather than assume.
+    fs.mkdirSync(path.join(root, 'Config'));
+    let parentFolds;
+    try { fs.realpathSync.native(path.join(root, 'config')); parentFolds = true; }
+    catch { parentFolds = false; }
+    if (!parentFolds) { t.skip('this parent directory does not fold ASCII case at all -- the expected answer below is undefined here'); return; }
+    // The OS's OWN case-variant of "Straße" keeps eszett verbatim and only flips
+    // the ASCII letters -- confirm it really does resolve to the SAME entry before
+    // asserting anything about it.
+    const basePhys = canonicalOrNull(straDir);
+    const osVariant = path.join(root, 'STRAßE'); // OS-recognized variant: eszett kept
+    assert.strictEqual(canonicalOrNull(osVariant), basePhys, 'sanity: the OS itself treats STRAßE as the same directory as Straße');
+    // Hand-build a canonical-SHAPED (but not realpath-derived) spelling of that same
+    // OS-recognized variant, matching how a non-existent-path caller (physicalDir's
+    // lexical fallback, R1) can hand pathWithin a case-variant string that never
+    // went through realpathSync -- this is what actually exercises `norm`, since
+    // canonicalOrNull on an EXISTING path would normalize the case away first.
+    const variantPhys = basePhys.slice(0, basePhys.length - 'Straße'.length) + 'STRAßE';
+    assert.strictEqual(pathWithin(variantPhys, basePhys), true,
+      'a directory that genuinely folds case must read its own OS-recognized case-variant spelling as the SAME path -- a non-involutive flip (ß -> SS) manufactures a spelling the OS never produces, misses it, and confidently reports "case-sensitive" (folds:false) here instead of falling back to the safe default');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// RE-INSPECT R3-1: a SECOND, distinct mechanism -- Unicode SINGLETON/COMPATIBILITY
+// remap. `ß`->`SS` is an EXPANSION (length changes); U+212A KELVIN SIGN is the
+// opposite shape: it maps onto an ordinary ASCII twin ('K'/'k') that NTFS's own
+// upcase table does NOT recognize as the same character at all (Kelvin is its own
+// distinct codepoint on disk). Same symptom (a confidently WRONG fold answer), two
+// unrelated causes -- proves the earlier length/case-insensitive-equality guard
+// (R2) was still incomplete, since a singleton remap changes neither length nor
+// JS's own notion of case-insensitive equality.
+test('RE-INSPECT/R3-1: a singleton/compatibility Unicode remap (Kelvin sign) must not report a CONFIDENT wrong fold answer either', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-CASEFOLD-KELVIN-'));
+  try {
+    const kelvinDir = path.join(root, 'NKx'); // "N" + KELVIN SIGN + "x"
+    fs.mkdirSync(kelvinDir);
+    const basePhys = canonicalOrNull(kelvinDir);
+    // The OS's OWN case-variant: it folds the ordinary ASCII letters (N/n, x/X) but
+    // leaves the Kelvin sign untouched, since it is not one of the case pairs NTFS's
+    // upcase table knows about -- confirm this really is the same entry before
+    // asserting anything about it.
+    const osVariant = path.join(root, 'nKX');
+    assert.strictEqual(canonicalOrNull(osVariant), basePhys, 'sanity: the OS itself treats n-KELVIN-X as the same directory as N-KELVIN-x (the ordinary letters fold; the Kelvin sign is untouched either way)');
+    const variantPhys = basePhys.slice(0, basePhys.length - 'NKx'.length) + 'nKX';
+    assert.strictEqual(pathWithin(variantPhys, basePhys), true,
+      'a directory whose parent folds ASCII case must read its own OS-recognized variant as the SAME path -- a singleton/compatibility remap (Kelvin sign treated by JS as a case-pair of ordinary K) manufactures a spelling the OS never produces for this codepoint, misses it, and confidently reports "case-sensitive" here instead of falling back to the safe default');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('R3/LOW: claudeBaseDir agrees with claudeBaseDirs when CLAUDE_CONFIG_DIR has a leading empty entry (the dir the code WRITES to must be in the guarded set)', () => {
