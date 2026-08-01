@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine } from './apply.mjs';
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
@@ -2856,5 +2857,77 @@ test('G4-2: a rewrite of an unreadable-frontmatter file is FLAGGED with a way ou
     assert.match(String(f.reason), /CoalWash will wash it normally|wash it normally/, 'the reason tells the user the way out');
     assert.strictEqual(fs.readFileSync(odd, 'utf8'), fmBlock('{pinned: true}'), 'the unreadable file is untouched');
     assert.notStrictEqual(fs.readFileSync(ok, 'utf8'), fmBlock('title: x'), 'the readable file was rewritten');
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// DEMAND-10 (#36 twin-pair brief): the KEEPS-GATE decided whether a pinned keep
+// BINDS the action about to delete or rewrite its file by folding case on
+// `process.platform === 'win32'` — the platform-name rule this whole unit retires.
+//
+// TWO WRONG ANSWERS, opposite volumes, and only one is reproducible on any single
+// box, which is why the evidence for this fix is split:
+//   case-INSENSITIVE and NOT win32 (macOS APFS, the default there): the old rule
+//     did NOT fold, so a keep recorded as `Memory.md` failed to bind an action on
+//     `memory.md` — the SAME file — and the pinned file was deleted anyway. That is
+//     the BYPASS direction. It cannot be built on win32; the macOS CI leg owns it.
+//   case-SENSITIVE and win32 (an fsutil-enabled NTFS directory): the old rule DID
+//     fold, so a keep on `Memory.md` wrongly bound an action on a GENUINELY
+//     DIFFERENT `memory.md` and excluded it. Over-refusal, not loss — but still a
+//     wrong answer, and it is the half THIS box can express. That is what follows.
+//
+// CAPABILITY-PROBED, never platform-gated: the requirement is an outcome (two
+// same-name different-case files that are genuinely distinct inodes). {bigint:true}
+// is load-bearing — NTFS 64-bit File IDs exceed 2^53, so a default `ino` is a
+// rounded double and two distinct files can compare EQUAL, silently vacuating the
+// whole proof (the room paid for that once already, blind wave R1/TP-1).
+function caseSensitiveStore(proj) {
+  const store = path.join(proj, 'cs-store');
+  fs.mkdirSync(store, { recursive: true });
+  try { execSync(`fsutil file setCaseSensitiveInfo "${store}" enable`, { stdio: 'ignore' }); } catch { /* not win32, or refused — the inode check below is the verdict */ }
+  try {
+    const lo = path.join(store, 'probe.md');
+    const up = path.join(store, 'Probe.md');
+    fs.writeFileSync(lo, 'a');
+    fs.writeFileSync(up, 'b'); // on a FOLDING volume this OVERWRITES lo instead of creating a sibling
+    const a = fs.statSync(lo, { bigint: true });
+    const b = fs.statSync(up, { bigint: true });
+    fs.rmSync(lo, { force: true });
+    fs.rmSync(up, { force: true });
+    return a.ino === b.ino ? null : store;
+  } catch { return null; }
+}
+
+test('DEMAND-10/keeps-gate: on a genuinely case-SENSITIVE directory a keep anchored to Memory.md must NOT bind an action on the DIFFERENT file memory.md (the old platform-name fold said it did)', (t) => {
+  const { proj } = sandbox();
+  try {
+    const store = caseSensitiveStore(proj);
+    if (!store) { t.skip('no case-sensitive directory can be built here (capability proven absent by distinct-inode check, not assumed)'); return; }
+
+    const pinned = path.join(store, 'Memory.md');   // the keep's file
+    const other = path.join(store, 'memory.md');    // a DIFFERENT file, same name folded
+    write(pinned, 'The pinned clause: never trust a raw floor value.');
+    write(other, 'unrelated content the plan legitimately rewrites');
+    recordKeep(proj, { target: 'Memory.md:pinned', reason: 'user-adjudicated', anchor: 'never trust a raw floor value', anchorFile: pinned });
+
+    // The plan rewrites ONLY `memory.md`, which no keep names. It must apply.
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: other, content: 'rewritten' },
+    ]));
+
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1,
+      'the keep names a DIFFERENT file on this volume, so it must not bind — the old win32 fold matched them and excluded a legitimate action');
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'rewritten');
+    assert.ok(!r.flagged.some((f) => /keep enforcement/.test(f.reason)), 'no keep should have been enforced against an unrelated file');
+
+    // NON-VACUITY: the gate is still live on this volume — the SAME plan against the
+    // keep's ACTUAL file, erasing its anchor, is still excluded. Without this the
+    // assertions above would also pass if the KEEPS-GATE had simply stopped working.
+    const r2 = apply(planFor(proj, store, [
+      { type: 'rewrite', path: pinned, content: 'The pinned clause: (compressed).' },
+    ]));
+    assert.ok(r2.flagged.some((f) => /keep enforcement/.test(f.reason)),
+      'control: erasing the anchor in the keep\'s OWN file must still be excluded, or this test proves nothing');
   } finally { clean(proj); }
 });

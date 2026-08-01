@@ -76,8 +76,29 @@ test('recordBinItem: CROSS-PROCESS — concurrent workers writing the SAME bin n
     const index = listBin(proj, FAT_BIN_NAME);
     const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
     const onDisk = fs.readdirSync(binPath).filter((f) => f !== 'index.json' && f !== 'index.json.tmp' && f !== '.gitignore' && f !== '.bin.lock');
-    assert.strictEqual(onDisk.length, WORKERS * PER_WORKER, 'every blob must land on disk');
+    // grad6 F2's RULING, RETRO-APPLIED (demand 5 of the #36 twin-pair brief).
+    // This line used to be `strictEqual(onDisk.length, WORKERS * PER_WORKER)` — the
+    // LOSSLESS count, which is a property of the MACHINE, not of the code: 40/40 on a
+    // developer box, 37 measured on a 2-core CI runner, and it is exactly what turned
+    // ubuntu-22 red on `af17017`. The same day it was written, F2's own new test hit
+    // this and pinned the INVARIANT instead; the ruling was never carried back here.
+    //
+    // The invariant is the line below and it always held, including at 37: whatever
+    // number of items survive contention, the CATALOGUE and the BLOBS agree. A
+    // refusal under contention is ALLOWED (bounded retry, by design); silent LOSS —
+    // a blob with no index row, or a row with no blob — is not.
+    //
+    // Two bounds keep this from passing vacuously now that the exact count is gone:
+    // never MORE than were attempted (that would mean duplication), and never zero
+    // (that would mean the workers did nothing and every assertion below is empty).
+    assert.ok(onDisk.length > 0 && onDisk.length <= WORKERS * PER_WORKER,
+      `expected 1..${WORKERS * PER_WORKER} blobs on disk, got ${onDisk.length} — zero means the workers never ran, more than attempted means duplication`);
     assert.strictEqual(index.length, onDisk.length, 'the catalogue must never undercount the actual blobs written');
+    // NAMED RESIDUAL, not built here: the workers discard `recordBinItem`'s return, so
+    // this test cannot assert the STRONGEST form (catalogued === blobs === SUCCESSFUL
+    // attempts) the way F2's own test does — it would need each worker to report its
+    // success count back over stdout or an exit code. What is pinned here is the
+    // consistency invariant; the accounting invariant lives in F2's test.
   } finally { clean(dir); }
 });
 
