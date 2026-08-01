@@ -106,6 +106,17 @@ export function isCanonicalShape(p) {
 // exact `dirPhys` string keeps each root's answer correctly isolated; repeat
 // callers on the SAME root (the common case — `touchesClaudeBase` re-checking one
 // claudeBaseDir many times) still hit the cache.
+//
+// SUSPECTED, NOT CONFIRMED, RECORDED WITH ITS POLARITY (station-3 findings-back,
+// F4 — the mirror of explode.mjs's own identical note on its copy of this cache):
+// a MEASURED answer is never re-probed, so a directory whose case-sensitivity is
+// toggled MID-PROCESS keeps its first reading. This file's callers are ALL
+// REFUSE-polarity (`touchesClaudeBase`, `isBase`, and apply.mjs's KEEPS-GATE), so
+// the direction is the mirror of explode.mjs's PERMIT-polarity note: a stale
+// cached `folds:true` only ever OVER-refuses (safe); a stale cached `folds:false`
+// UNDER-folds, which is the fail-OPEN direction at a REFUSE gate. Every engine in
+// this repo is a short-lived CLI process and this is unreached in practice —
+// recorded as a bound, not fixed, matching the sibling file's own treatment.
 const CASE_FOLD_CACHE = new Map();
 // THE CLAIM THIS FUNCTION MAKES IS BOUNDED, NOT UNIVERSAL — read this before
 // changing the round-trip check below. JS's Unicode case mapping and a volume's

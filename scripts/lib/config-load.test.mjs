@@ -797,7 +797,22 @@ test('R4/TP-1 [SECURITY]: an unresolvable BASE must REFUSE, not switch the guard
 // REFUSE caller joins the allowlist below with a one-line reason; a PERMIT caller
 // means the single default is no longer defensible and this file needs class-A's
 // required-argument shape, not a new allowlist entry.
-test('DEMAND-2/polarity-reach: the case-fold probe has exactly ONE reader, and pathWithin has no consumer outside this module (a PERMIT-polarity caller cannot arrive silently)', () => {
+// STRIP-COMMENTS, ONE FUNCTION, used by every scan below. Station-3 findings-back
+// (F2): the consumer scan stripped comments before matching but the staleness scan
+// read the RAW file, so a call site removed while its POLARITY COMMENT survives
+// (the comment above `samePathForKeep` names `volumeCaseFolds` in prose) stayed
+// "not stale" forever — a comment defeated an assertion whose whole job is to
+// detect a real removal. Both scans now share one definition of "reads the code",
+// so they cannot drift into disagreeing about the same file.
+const stripComments = (s) => s.replace(/^[ \t]*\/\/.*$/gm, '');
+// Call-SITE count, not a boolean "does it appear" — F1: the boolean form is blind
+// to a SECOND call site inside a file that is already allowlisted, which is
+// exactly the shape a builder is most likely to add next (the allowlisted file is
+// the one already known to touch the symbol). Counting and pinning the number
+// makes a silent second call site a mismatch, not a pass.
+const callSites = (body, sym) => (stripComments(body).match(new RegExp(`${sym}\\s*\\(`, 'g')) || []).length;
+
+test('DEMAND-2/polarity-reach: the case-fold probe has exactly ONE INTERNAL caller inside config-load.mjs, and every consumer OUTSIDE it — including a second call site inside an already-allowlisted file — is tracked by name and by COUNT', () => {
   const libDir = path.dirname(fileURLToPath(import.meta.url));
   const src = fs.readFileSync(path.join(libDir, 'config-load.mjs'), 'utf8');
 
@@ -806,27 +821,41 @@ test('DEMAND-2/polarity-reach: the case-fold probe has exactly ONE reader, and p
   assert.ok(src.includes('function volumeCaseFolds'), 'scanner sanity: the probe declaration must be visible in the source it just read');
   assert.ok(src.includes('export function pathWithin'), 'scanner sanity: the exported compare must be visible too');
 
-  // (1) THE PROBE HAS ONE READER. Strip comments first — this file documents the
-  // probe heavily and every mention in prose would otherwise count as a call.
-  const code = src.replace(/^[ \t]*\/\/.*$/gm, '');
-  const probeCalls = (code.match(/volumeCaseFolds\s*\(/g) || []).length - 1; // -1 = the declaration itself
+  // (1) THE PROBE HAS ONE INTERNAL CALLER, scoped to THIS FILE — not a claim about
+  // every reader anywhere (apply.mjs is a second reader BY DESIGN, tracked in part
+  // 2 below; this scope was previously left implicit in the test's own name, which
+  // read as a global claim it was never true of).
+  const probeCalls = callSites(src, 'volumeCaseFolds') - 1; // -1 = the declaration itself
   assert.strictEqual(probeCalls, 1,
-    `the case-fold probe must have exactly ONE caller (pathWithin's norm); found ${probeCalls}. ` +
+    `config-load.mjs must have exactly ONE internal caller of the case-fold probe (pathWithin's norm); found ${probeCalls}. ` +
     'Each caller inherits the MISS->fold fallback, which is safe only at a REFUSE-polarity gate.');
 
-  // (2) THE CROSS-MODULE CONSUMER SET, for the compare AND for the probe itself.
-  // Scanning only `pathWithin` would have been a hole I walked straight into: this
-  // unit exports `volumeCaseFolds` for apply.mjs's KEEPS-GATE, and a pathWithin-only
-  // scan stays green while a second module reads the fold decision directly. Both
-  // names are tracked, each with its own stated-polarity allowlist.
-  // Tests are excluded deliberately (a test asserting on a primitive is not a caller
-  // whose polarity matters), and so is this module's own file.
+  // (2) THE CROSS-MODULE CONSUMER SET, for the compare AND for the probe itself,
+  // BY CALL-SITE COUNT. Scanning only `pathWithin` would have been a hole I walked
+  // straight into: this unit exports `volumeCaseFolds` for apply.mjs's KEEPS-GATE,
+  // and a pathWithin-only scan stays green while a second module reads the fold
+  // decision directly. Both names are tracked, each with its own stated-polarity
+  // allowlist AND its own audited call count — a silent THIRD call site inside
+  // apply.mjs is exactly as much a new, unaudited reader as a new file would be.
+  // Tests are excluded deliberately (a test asserting on a primitive is not a
+  // caller whose polarity matters), and so is this module's own file.
+  //
+  // BOUND (F6): scan roots are scripts/lib and hooks — scripts/*.mjs entry points
+  // (verify.mjs, build-plugin.mjs, test.mjs) are OUT OF SCOPE by design. None of
+  // them call either symbol; verify.mjs's only hit for either name is a LIBS
+  // roster STRING (the filename `config-load.mjs`), never a call, so extending the
+  // scan there would add scope with nothing to catch.
   const roots = [libDir, path.join(libDir, '..', '..', 'hooks')];
   const ALLOWED = {
-    // name -> { file: why it is safe under the MISS->fold default }
+    // name -> { file: { calls, reason } } — reason states why it is safe under the
+    // MISS->fold default; calls is the audited count, re-affirmed by hand whenever
+    // it changes (never widened silently by a passing scan).
     pathWithin: {},
     volumeCaseFolds: {
-      'apply.mjs': 'KEEPS-GATE samePathForKeep — a MATCH makes a pinned keep BIND and EXCLUDE the action, so folding more refuses more (REFUSE-polarity)',
+      'apply.mjs': {
+        calls: 2,
+        reason: 'KEEPS-GATE samePathForKeep — a MATCH makes a pinned keep BIND and EXCLUDE the action, so folding more refuses more (REFUSE-polarity)',
+      },
     },
   };
   const consumers = [];
@@ -837,25 +866,43 @@ test('DEMAND-2/polarity-reach: the case-fold probe has exactly ONE reader, and p
       if (!/\.(mjs|js)$/.test(name)) continue;
       if (name.endsWith('.test.mjs') || name === 'config-load.mjs') continue;
       filesScanned++;
-      const body = fs.readFileSync(path.join(dir, name), 'utf8').replace(/^[ \t]*\/\/.*$/gm, '');
+      const body = fs.readFileSync(path.join(dir, name), 'utf8');
+      const stripped = stripComments(body);
       for (const sym of ['pathWithin', 'volumeCaseFolds']) {
-        if (new RegExp(`\\b${sym}\\b`).test(body) && !ALLOWED[sym][name]) consumers.push(`${name} reads ${sym}`);
+        // BROAD first: any mention at all (declaration, import, reference, call —
+        // not just a call site) marks a file as a consumer worth reviewing. A
+        // call-site-only check here would miss a symbol taken as a VALUE (assigned,
+        // passed to another function) rather than invoked directly at the read
+        // site — narrower than the property this scan exists to guard.
+        if (!new RegExp(`\\b${sym}\\b`).test(stripped)) continue;
+        const entry = ALLOWED[sym][name];
+        if (!entry) { consumers.push(`${name} reads ${sym} (no allowlist entry)`); continue; }
+        // NARROW second, only for an ALREADY-allowlisted file: the audited COUNT is
+        // a call-site count (what `entry.calls` was reviewed against), so a silent
+        // additional call site inside a known file is compared the same way (F1).
+        const n = callSites(body, sym);
+        if (n !== entry.calls) {
+          consumers.push(`${name} reads ${sym} at ${n} call site(s), audited count is ${entry.calls} — ` +
+            `a ${n > entry.calls ? 'NEW, unaudited' : 'REMOVED (stale-count)'} call site`);
+        }
       }
     }
   }
   assert.ok(filesScanned > 5, `scanner sanity: expected to scan the engine, only saw ${filesScanned} files`);
-  // and the allowlist is not a rubber stamp: every entry must still be a real reader,
-  // so a stale exemption cannot sit here silently licensing a module that stopped
-  // using the symbol (and would license it again if it ever came back).
+  // and the allowlist is not a rubber stamp: every entry must still be a real
+  // reader (by call-site count, same shared strip as above — F2), so a stale
+  // exemption cannot sit here silently licensing a module that stopped using the
+  // symbol and merely kept a comment naming it (and would license it again if the
+  // real call ever came back without anyone re-affirming the count).
   for (const [sym, files] of Object.entries(ALLOWED)) {
-    for (const f of Object.keys(files)) {
+    for (const [f, entry] of Object.entries(files)) {
       const p = path.join(libDir, f);
-      assert.ok(fs.existsSync(p) && new RegExp(`\\b${sym}\\b`).test(fs.readFileSync(p, 'utf8')),
-        `stale allowlist entry: ${f} is exempted for ${sym} but no longer reads it — remove the exemption`);
+      const n = fs.existsSync(p) ? callSites(fs.readFileSync(p, 'utf8'), sym) : 0;
+      assert.ok(n > 0, `stale allowlist entry: ${f} is exempted for ${sym} (audited at ${entry.calls} call site(s)) but no longer reads it (a comment naming it does not count) — remove the exemption`);
     }
   }
   assert.deepStrictEqual(consumers, [],
-    `a new module reads the fold decision: ${consumers.join(', ')}. ` +
-    'Establish its polarity before adding it to ALLOWED — the probe fails toward FOLDING, which refuses more ' +
+    `the fold decision's consumer set changed: ${consumers.join(', ')}. ` +
+    'Establish the new/changed site\'s polarity before re-affirming ALLOWED with its count — the probe fails toward FOLDING, which refuses more ' +
     '(safe at a REFUSE gate) and permits more (a BYPASS at a PERMIT gate, the direction of R2\'s HIGH).');
 });
