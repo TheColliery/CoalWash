@@ -92,43 +92,7 @@ test('TWIN-PIN: physicalForCreate behaves IDENTICALLY in class-b.mjs and explode
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-// ⚠️ KNOWN, DECLARED TWIN DRIFT (2026-07-31), per this file's own header rule ("if
-// a future change makes the twins legitimately diverge in BEHAVIOUR, that is a
-// decision to make in the open — change this table and say why in the same
-// commit"). `config-load.mjs`'s `pathWithin` now case-folds via a real capability
-// probe (flip a basename's case, stat it, compare device+inode) instead of
-// `process.platform === 'win32'`. `explode.mjs`'s `isContainedIn` still folds on
-// `process.platform === 'win32'` — it was DELIBERATELY NOT converted in the same
-// change (main's scope ruling: a sweep of this pattern across five sites is its
-// own reviewed unit, not folded into this fix).
-//
-// THE TEST BELOW IS GREEN ONLY BECAUSE `buildCases`' fixture directory is
-// case-INSENSITIVE on this box, which is where every input in its table lands.
-// Measured directly on a real per-directory case-sensitive folder (`fsutil.exe
-// file setCaseSensitiveInfo <dir> enable`, no admin, Win10 1803+/Win11): the twins
-// DIVERGE — `pathWithin` correctly returns `false` for two genuinely distinct
-// case-variant siblings, `isContainedIn` still returns `true`. This test's table
-// does not build such a directory, so it cannot see that divergence; it is not
-// vacuous for the case IT covers (case-variance on an ordinary volume), but it is
-// blind to the one this note exists to name.
-//
-// `explode.mjs:141` (`containment()`, which `isContainedIn` wraps) is THE PINNED
-// TWIN this gate holds against `pathWithin` — not one of several same-pattern
-// sites awaiting an eventual sweep. Converting it is main's call; until then this
-// paragraph is the record that the two sides now answer differently on a
-// case-sensitive Windows directory, and why this gate does not currently catch it.
-//
-// THE STAKE, STATED RATHER THAN LEFT HYPOTHETICAL: `isContainedIn` documents ITSELF
-// (`explode.mjs:148`) as "PERMIT-POLARITY ONLY" — containment TRUE is required to
-// PROCEED — and it has a LIVE consumer at `explode.mjs:1366` (the snapshot-ref
-// store-boundary check: an out-of-store ref is refused UNLESS containment reads
-// true). That is exactly the polarity where over-folding is the BYPASS direction —
-// a case-sensitive Windows directory folding when it must not could let a ref that
-// is genuinely OUTSIDE the store read as contained. `pathWithin` itself has no
-// PERMIT-polarity caller today, so this divergence is not yet reachable through
-// `config-load.mjs` — but it is already live through the unconverted twin this note
-// names, which is what sets the priority for the deferred sweep main scoped out.
-test('TWIN-PIN: the case-folding containment compare behaves IDENTICALLY on a case-INSENSITIVE volume (KNOWN divergence on a case-sensitive one — see the note above)', () => {
+test('TWIN-PIN: the case-folding containment compare behaves IDENTICALLY (config-load pathWithin vs explode isContainedIn)', () => {
   const { root, dir, cases } = buildCases();
   try {
     const base = ponClassB(dir); // canonical, as both are contracted to receive
