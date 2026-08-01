@@ -324,3 +324,123 @@ test('TWIN-PIN: the source-sacred doors (detonate gate 4 / snapshotSource) agree
       `no row was ALLOWED (${seen.map(([l, v]) => `${l}=${v}`).join(', ')}) — a door that refuses everything proves nothing`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// ---------------------------------------------------------------------------
+// THE CASE-FOLD PROBE TWIN — and the row that closes THIS GATE'S OWN DEFECT.
+//
+// WHY THIS ROW EXISTS. The drift that reverted `main` at `174f330` was caught by CI
+// (macos-latest node 22) and NOT by this file, although this file is the gate whose
+// entire job is catching exactly that. The reason is above: `buildCases()` builds an
+// ordinary tmpdir, and on an ordinary tmpdir a platform rule and a volume probe give
+// the SAME answer — so the table could not express the disagreement. A gate that
+// cannot see the drift it exists for is the defect, not the drift.
+//
+// It is ALSO the price of duplication. class-A cannot import config-load.mjs (that
+// chain pulls jsonc + config-schema, and the class-A engine must load in isolation
+// and is excluded from the shipped dist), so the case-fold probe exists TWICE. A
+// duplicated probe owes a pin over the probe itself — and, exactly as with the
+// source-sacred door pair above, it is pinned through the two PUBLIC doors that
+// carry it rather than by importing a private helper: `pathWithin` (class-B) and
+// `isContainedIn` (class-A).
+//
+// CAPABILITY-PROBED, NEVER PLATFORM-GATED. Gating on `process.platform` would be the
+// defect under test. The requirement is an OUTCOME — two same-name different-case
+// directories that are genuinely distinct inodes — built with `fsutil file
+// setCaseSensitiveInfo` on win32 (per-directory since 10 1803, no admin) or by plain
+// mkdir on a case-sensitive POSIX volume. Absent, the caller skips VISIBLY.
+//
+// COVERAGE BOUND, because this row does NOT catch every one-sided state. It builds a
+// case-SENSITIVE directory, so it has teeth exactly where one can be built (an
+// fsutil-enabled NTFS directory, ext4) and SKIPS on a case-INSENSITIVE volume —
+// which is macOS APFS by default, the very leg where the `af17017` drift was caught.
+// The mirror-image drift there (a case-INSENSITIVE volume whose twins disagree) is
+// caught by the ordinary-tmpdir row above once both twins probe, since that tmpdir IS
+// the folding volume. Note the two states emit the SAME shape (`pathWithin=true
+// isContainedIn=false`) for OPPOSITE reasons, so read the assertion message against
+// the directory the row actually built, never as a general diagnosis.
+function caseSensitiveDir() {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-CASE-')));
+  const holder = path.join(root, 'holder');
+  fs.mkdirSync(holder);
+  try { execSync(`fsutil file setCaseSensitiveInfo "${holder}" enable`, { stdio: 'ignore' }); } catch { /* not win32, or refused — the inode check below is the real verdict */ }
+  try {
+    const lower = path.join(holder, 'store');
+    const upper = path.join(holder, 'Store');
+    fs.mkdirSync(lower);
+    fs.mkdirSync(upper); // on a FOLDING volume this throws EEXIST — capability absent
+    const a = fs.statSync(lower, { bigint: true });
+    const b = fs.statSync(upper, { bigint: true });
+    if (a.ino === b.ino) { fs.rmSync(root, { recursive: true, force: true }); return null; }
+    return { root, holder, lower, upper };
+  } catch { fs.rmSync(root, { recursive: true, force: true }); return null; }
+}
+
+test('TWIN-PIN: the case-fold PROBE agrees across the twins on a genuinely case-SENSITIVE directory (the row the ordinary tmpdir table structurally cannot express)', (t) => {
+  const cs = caseSensitiveDir();
+  if (!cs) { t.skip('no case-sensitive directory can be built here (capability proven absent by distinct-inode check, not assumed)'); return; }
+  try {
+    const child = path.join(cs.upper, 'blob'); // physically in `Store/`, NOT in `store/`
+    fs.mkdirSync(child);
+    const base = cs.lower;                      // the declared store, a DISTINCT inode
+
+    const a = pathWithin(child, base);
+    const b = isContainedIn(child, base);
+
+    // (1) THE ABSOLUTE HALF, ASSERTED UNCONDITIONALLY AND FIRST. `Store/blob` is a
+    // DISTINCT inode from `store/` here, so it is NOT contained. This binds the class-A
+    // side on its own, needs no cooperation from the other lane, and CANNOT be switched
+    // off by the conditional below — a class-A regression to the platform rule reddens
+    // here whatever config-load is doing. It is also the half a pure equality check
+    // structurally cannot make: two sides weakened IN STEP (what a "consistency fix"
+    // produces) agree with each other and are both wrong.
+    assert.strictEqual(b, false,
+      'explode isContainedIn admitted a case-variant SIBLING directory as contained. That is the ' +
+      'PERMIT-polarity bypass measured end-to-end through restoreFromSnapshot: attacker-chosen ' +
+      'bytes published from a directory the caller never declared.');
+
+    // and the same directory still resolves a genuine child, so `false` above is a
+    // verdict rather than this compare's only answer.
+    const real = path.join(base, 'inner');
+    fs.mkdirSync(real);
+    assert.strictEqual(isContainedIn(real, base), true, 'a genuine child of the declared store IS contained');
+
+    // (2) THE TWIN HALF — a CROSS-LANE invariant, and this file is checked out on a
+    // single lane. Whether config-load has been converted is MEASURED, never assumed:
+    // this directory does not fold, so a `pathWithin` still answering `true` for the
+    // case-variant is still keying on `process.platform`.
+    //
+    // THE SKIP IS A DECLARED CROSS-LANE DEPENDENCY, NOT A DORMANT TEST, and the
+    // difference is that it EXPIRES BY ITSELF. It is reachable only while the class-B
+    // half is unlanded; the moment `af17017` re-lands, this measurement flips and the
+    // equality below becomes a hard, permanent assertion with no further edit — nobody
+    // has to remember to re-arm it. It also cannot hide a class-A regression, because
+    // (1) above already ran unconditionally. TWIN-DRIFT LAW: the pair lands together,
+    // so the pair GATE arms together with it, at the assembly — which is where
+    // MEMORY.md already scopes this whole file ("twin-pin is a STATION-5-ONLY gate").
+    //
+    // BOUND, stated because the skip condition is genuinely ambiguous: `a === true`
+    // cannot tell "class-B not landed yet" from "class-B landed and was later
+    // REGRESSED to the platform rule" — both spell the same measurement, so a
+    // regression on that lane would read here as a pending landing and skip. This row
+    // is therefore NOT the class-B side's guard and must not be cited as one; that
+    // side is guarded on its own lane by config-load.test.mjs's capability tests
+    // (`RED-FIRST/capability-not-platform-name`, `RE-INSPECT/R2`). What this row owns
+    // is the class-A half (asserted unconditionally above) and the CROSS check once
+    // both halves are present.
+    //
+    // PROVEN, not asserted — all three states measured on this box before landing:
+    // unlanded → skips with this reason; `af17017` applied → arms and passes 7/7 with
+    // ZERO skips and no edit; armed + class-A reverted to the platform rule → RED.
+    if (a === true) {
+      t.skip('class-B half NOT LANDED: config-load pathWithin still folds on a case-SENSITIVE directory ' +
+             '(measured pathWithin=true where the volume gives genuinely distinct inodes), i.e. still ' +
+             'platform-keyed. The class-A side was asserted correct UNCONDITIONALLY above. Re-land the ' +
+             'class-B half (af17017) and this row arms itself into a hard equality assertion.');
+      return;
+    }
+    assert.strictEqual(a, b,
+      `TWIN DRIFT on a case-SENSITIVE directory: config-load pathWithin=${a} vs explode isContainedIn=${b}. ` +
+      'Both twins are capability-converted, so a disagreement here is real drift, not a pending landing.');
+    assert.strictEqual(pathWithin(real, base), true, 'a genuine child of the declared store IS contained (twin)');
+  } finally { fs.rmSync(cs.root, { recursive: true, force: true }); }
+});

@@ -9,11 +9,13 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn, execSync } from 'node:child_process';
 import {
   discoverStructure, reduceFile, reduceToCompletion,
   snapshotSource, restoreFromSnapshot, sha256File, collidesWithSource,
   CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, isContainedIn, physicalForCreate,
+  containment,
 } from './explode.mjs';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'cwx-')); }
@@ -2315,4 +2317,108 @@ test('the temp reaper STILL reaps a temp the engine DID create (the fix must not
       : [];
     assert.deepStrictEqual(stray, [], 'no orphan temp is left behind by a failed run');
   } finally { rm(dir); }
+});
+
+// ---------------------------------------------------------------------------
+// CASE-FOLD CAPABILITY: the containment primitives fold by a real probe of the
+// directory, never by `process.platform`.
+//
+// THE FIXTURE IS THE POINT. Every assertion below needs a directory whose case
+// behaviour DISAGREES with what `process.platform` would have claimed, because on
+// an ordinary tmpdir the old rule and the probe give the same answer and the test
+// would pass on both engines — vacuous. On Windows that directory is built with
+// `fsutil file setCaseSensitiveInfo` (per-directory since 10 1803, no admin); on a
+// case-sensitive POSIX volume an ordinary mkdir already is one.
+//
+// CAPABILITY-PROBED, NEVER PLATFORM-GATED — gating this on `process.platform` would
+// be the exact defect under test. The probe is the OUTCOME we need: two same-name
+// different-case directories that are genuinely DISTINCT inodes. If that cannot be
+// built here, the capability is proven absent and the caller skips VISIBLY.
+function caseSensitiveDir() {
+  const root = fs.realpathSync.native(tmp());
+  const holder = path.join(root, 'holder');
+  fs.mkdirSync(holder);
+  try { execSync(`fsutil file setCaseSensitiveInfo "${holder}" enable`, { stdio: 'ignore' }); } catch { /* not win32, or refused — the inode check below is the real verdict */ }
+  try {
+    const lower = path.join(holder, 'store');
+    const upper = path.join(holder, 'Store');
+    fs.mkdirSync(lower);
+    fs.mkdirSync(upper); // on a FOLDING volume this throws EEXIST — capability absent
+    const a = fs.statSync(lower, { bigint: true });
+    const b = fs.statSync(upper, { bigint: true });
+    if (a.ino === b.ino) { rm(root); return null; } // same file: the volume folded them
+    return { root, holder, lower, upper };
+  } catch { rm(root); return null; }
+}
+
+test('CASE-FOLD: a genuinely case-sensitive directory is NOT folded — the store-boundary check refuses a case-variant sibling (was a live inject/exfil)', (t) => {
+  const cs = caseSensitiveDir();
+  if (!cs) { t.skip('no case-sensitive directory can be built here (capability proven absent by distinct-inode check, not assumed)'); return; }
+  try {
+    // The attacker owns `Store/` — a DIFFERENT directory from the declared store `store/`
+    // — and plants a self-consistent content-addressed blob in it: the basename IS the
+    // sha256 of its own bytes, so the content-address verification cannot separate them.
+    // The ONLY thing standing between the caller and attacker-chosen bytes is the
+    // store-boundary containment check, and folding case dissolves it.
+    const evil = Buffer.from('ATTACKER-CHOSEN BYTES\n');
+    const sha = crypto.createHash('sha256').update(evil).digest('hex');
+    fs.writeFileSync(path.join(cs.upper, sha), evil);
+    const toPath = path.join(cs.root, 'restored.out');
+
+    const r = restoreFromSnapshot(path.join(cs.upper, sha), toPath, { snapshotDir: cs.lower });
+    assert.strictEqual(r.ok, false,
+      'a blob living in a case-variant SIBLING of the declared store must NOT restore. ' +
+      'Measured on the pre-fix engine: ok:true, verified:true, and the attacker bytes landed on disk.');
+    assert.strictEqual(fs.existsSync(toPath), false, 'nothing may be published when the ref escapes the store');
+    assert.match(r.reason, /escapes the store/);
+
+    // NOT VACUOUS, and this is the half that catches an over-refusing "fix": a
+    // genuinely in-store blob must still restore on this same directory.
+    const good = Buffer.from('legitimate\n');
+    const gsha = crypto.createHash('sha256').update(good).digest('hex');
+    fs.writeFileSync(path.join(cs.lower, gsha), good);
+    const okPath = path.join(cs.root, 'good.out');
+    const r2 = restoreFromSnapshot(gsha, okPath, { snapshotDir: cs.lower });
+    assert.strictEqual(r2.ok, true, `an in-store blob must still restore (got ${r2.reason})`);
+    assert.strictEqual(fs.readFileSync(okPath, 'utf8'), 'legitimate\n');
+  } finally { rm(cs.root); }
+});
+
+test('CASE-FOLD: PERMIT and REFUSE take OPPOSITE miss directions, and an OMITTED direction refuses at BOTH', () => {
+  // Demand 2 of the twin unit: the per-call-site derivation must exist as a TEST, not
+  // as a comment. A probe MISS is forced with a basename carrying NO case-bearing
+  // character (miss mode 3) — no filesystem trickery needed, and it is the one miss
+  // mode reachable portably.
+  const root = fs.realpathSync.native(tmp());
+  try {
+    const base = path.join(root, '2026');   // digits only: flipCase finds nothing to flip -> MISS
+    fs.mkdirSync(base);
+    const child = path.join(base, 'x');
+    fs.mkdirSync(child);
+
+    // Sanity: this really IS a miss, not an accident of the fixture — a name WITH a
+    // case-bearing character on the same volume measures instead of missing.
+    assert.strictEqual(containment(child, base, true), 'inside', 'sanity: the real child is inside either way');
+
+    // The discriminator: a case-variant child. Under fold-on-miss it reads inside;
+    // under no-fold-on-miss it reads outside. Same inputs, opposite answers, and the
+    // ONLY difference is the direction the CALLER supplied.
+    const variant = child.toUpperCase();
+    assert.strictEqual(containment(variant, base, true), 'inside',
+      'REFUSE-polarity passes true: a miss FOLDS, so a case-variant reads inside and the guard over-REFUSES (safe)');
+    assert.strictEqual(containment(variant, base, false), 'outside',
+      'PERMIT-polarity passes false: a miss does NOT fold, so a case-variant is not proven inside and the guard refuses (safe)');
+
+    // isContainedIn is the PERMIT projection and must carry the PERMIT direction —
+    // NOT inherit the REFUSE sites' default. This is the assertion that goes red if
+    // someone "simplifies" the two defaults back into one.
+    assert.strictEqual(isContainedIn(variant, base), false,
+      'isContainedIn is PERMIT-polarity: an unproven case-variant must not be admitted');
+
+    // A FORGOTTEN direction must fail CLOSED at BOTH polarities, not silently pick one.
+    assert.strictEqual(containment(child, base), 'unknown', 'an omitted foldOnMiss answers unknown');
+    assert.strictEqual(containment(child, base, 'true'), 'unknown', 'a non-boolean foldOnMiss answers unknown');
+    assert.notStrictEqual(containment(child, base), 'outside', 'unknown REFUSES at a `!== outside` guard');
+    assert.notStrictEqual(containment(child, base), 'inside', 'unknown REFUSES at an `=== inside` guard');
+  } finally { rm(root); }
 });
