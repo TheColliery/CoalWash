@@ -887,11 +887,13 @@ export function applyPlan(plan, opts = {}) {
       // `process.platform === 'win32'` — the exact defect the #36 pair retires
       // (node/runtime.md §4: case-insensitivity is a property of the VOLUME).
       //
-      // POLARITY, because the direction is what makes the probe's default correct
-      // here: a MATCH makes the keep bind, which EXCLUDES the action — protective.
+      // POLARITY, because the direction is what makes the `true` passed below
+      // correct here: a MATCH makes the keep bind, which EXCLUDES the action — protective.
       // A MISS makes the keep silently fail to bind and the delete/rewrite proceeds.
       // So folding MORE refuses more (safe) and folding LESS is the bypass, which is
-      // REFUSE-polarity, which is what `volumeCaseFolds` is defaulted for. The live
+      // REFUSE-polarity — passed EXPLICITLY below (`foldOnMiss` is a required
+      // argument of `volumeCaseFolds`, no default; CoalBoard ruling 2026-08-01
+      // replaced the text-scanning reach guard that used to police this). The live
       // bug being closed: on macOS APFS (case-INSENSITIVE and not win32) a keep
       // recorded as `Memory.md` did not bind an action on `memory.md`, so a user's
       // pinned keep quietly protected nothing.
@@ -906,7 +908,7 @@ export function applyPlan(plan, opts = {}) {
       const samePathForKeep = (a, b) => {
         const pa = physOf(a), pb = physOf(b);
         if (pa === pb) return true;
-        return (volumeCaseFolds(pa) || volumeCaseFolds(pb)) && pa.toLowerCase() === pb.toLowerCase();
+        return (volumeCaseFolds(pa, true) || volumeCaseFolds(pb, true)) && pa.toLowerCase() === pb.toLowerCase();
       };
       let keeps = [];
       try {

@@ -2931,3 +2931,61 @@ test('DEMAND-10/keeps-gate: on a genuinely case-SENSITIVE directory a keep ancho
       'control: erasing the anchor in the keep\'s OWN file must still be excluded, or this test proves nothing');
   } finally { clean(proj); }
 });
+
+// DEMAND-10 POSITIVE (station-3 RE-INSPECT on `9e01a54`): the test above pins
+// the NEGATIVE half (a case-variant keep must not bind an unrelated file). The
+// ordinary functional suite that caught the adversary's exact bypass mutation
+// (`samePathForKeep` rewritten to unconditional PERMIT) only reaches
+// `samePathForKeep`'s fold clause through THAT negative test — every OTHER
+// KEEPS-GATE fixture in this file uses the identical path string for the
+// action and the keep, so `pa === pb` short-circuits before the fold clause
+// ever runs. Nothing pinned the POSITIVE behaviour this unit exists to add:
+// that a keep recorded with a DIFFERENT-CASE spelling than the file's real
+// on-disk name must still BIND. The reviewer named the shape, reasoned from
+// source, not measured; it does not hold exactly as first stated (see below)
+// but holds in a corrected, EMPIRICALLY VERIFIED form.
+//
+// THE CORRECTED MECHANISM, verified with a throwaway script before writing
+// this test: a case-variant of an EXISTING file does NOT reach the fold
+// clause on a FOLDING volume, because `canonicalOrNull` itself resolves both
+// spellings to the identical on-disk casing via the OS's own case-insensitive
+// lookup — `pa === pb` fires first (confirmed: canonicalOrNull('MEMORY.MD')
+// and canonicalOrNull('Memory.md') for the SAME real file returned the exact
+// same string on this box's ordinary tmpdir). The fold clause is reached only
+// when the KEEP's recorded spelling does NOT resolve to anything at all —
+// which happens on a genuinely case-SENSITIVE directory when the recorded
+// case differs from the one real file's actual name. There,
+// `canonicalOrNull(recordedSpelling)` returns null (verified), `physOf` falls
+// back to a lexical, case-preserving `path.resolve`, and `volumeCaseFolds` on
+// THAT unresolvable path takes its OUTER-stat MISS branch — returning the
+// caller's own declared `true` (REFUSE-safe: when a spelling can't be
+// resolved at all, default toward treating it as the SAME location, so the
+// keep still protects). This is a genuine MISS answering the caller's
+// declared direction, not a real folding measurement — the directory itself
+// is still case-sensitive throughout.
+test('DEMAND-10/keeps-gate POSITIVE: a keep recorded with a spelling that does NOT resolve on a case-SENSITIVE directory still BINDS the real file (the fold clause reached via a MISS, not a real fold)', (t) => {
+  const { proj } = sandbox();
+  try {
+    const store = caseSensitiveStore(proj);
+    if (!store) { t.skip('no case-sensitive directory can be built here (capability proven absent by distinct-inode check, not assumed)'); return; }
+
+    const real = path.join(store, 'memory.md'); // the ONLY spelling that exists on disk
+    write(real, 'The pinned clause: never trust a raw floor value.');
+    const recordedVariant = path.join(store, 'Memory.md'); // the keep names a DIFFERENT case; this path resolves to NOTHING
+    assert.strictEqual(fs.existsSync(recordedVariant), false, 'non-vacuity: the recorded spelling must genuinely not exist, or this test is not exercising the miss path');
+    recordKeep(proj, { target: 'memory.md:pinned', reason: 'user-adjudicated', anchor: 'never trust a raw floor value', anchorFile: recordedVariant });
+
+    // This plan has exactly ONE action and it must be EXCLUDED — matching the
+    // sibling control two tests above (`r2`), applyPlan reports `ok:false`
+    // ("every action was excluded ... nothing applied") when nothing survives
+    // to apply, not `ok:true, applied:0`. The keep-enforcement flag, not `ok`,
+    // is what proves the BIND happened rather than some other refusal.
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: real, content: 'The pinned clause: (compressed).' },
+    ]));
+
+    assert.ok(r.flagged.some((f) => /keep enforcement/.test(f.reason)),
+      `the keep must still BIND despite its recorded spelling not resolving on this volume — a keep whose exact case falls out of sync with the real file must not silently stop protecting it (got: ${r.error})`);
+    assert.strictEqual(fs.readFileSync(real, 'utf8'), 'The pinned clause: never trust a raw floor value.', 'file left untouched');
+  } finally { clean(proj); }
+});
