@@ -190,17 +190,17 @@ function flipCase(s) {
 // stat failure above. Every one of them falls back to the FOLDING answer, never
 // the exact-match one.
 //
-// THAT FALLBACK IS A KNOWN, NAMED WRONG ANSWER IN ONE DIRECTION — say so plainly,
-// not just "safe default": on a directory that is genuinely case-SENSITIVE, the
-// true answer is `folds:false`, and MISS→fold answers `true`. That is WRONG. It is
-// the correct TRADE for both callers this file ships today: of `pathWithin`'s two
-// call sites below, `touchesClaudeBase` is a real trust boundary (REFUSE-polarity —
+// A MISS ANSWERING `foldOnMiss` IS A KNOWN, NAMED WRONG ANSWER IN ONE DIRECTION —
+// say so plainly, not just "safe": on a directory that is genuinely case-SENSITIVE,
+// the true answer is `folds:false`; a REFUSE caller passing `true` gets `folds:true`
+// on a miss, which is WRONG but the correct TRADE for what today's two callers of
+// `pathWithin` need — `touchesClaudeBase` is a real trust boundary (REFUSE-polarity:
 // folding MORE only ever REFUSES more, fail closed) and `findProjectRoot`'s `isBase`
 // is declared non-security (state hygiene only, see its own comment). Folding LESS
 // on a directory that actually folds would MISS a same-file match and fail OPEN,
-// which is the direction that matters for a REFUSE caller. A future PERMIT-polarity
-// caller of this exported function would need the OPPOSITE fallback, and must also
-// read the forgeability note below before relying on it — this fallback choice does
+// which is the direction that matters for a REFUSE caller. A PERMIT-polarity caller
+// would pass `false` and needs the OPPOSITE trade, and must also read the
+// forgeability note below before relying on it — passing the opposite boolean does
 // not by itself close that gap.
 //
 // FORGEABILITY, BOUNDED THE SAME WAY: a junction/hardlink planted by anyone who can
@@ -215,17 +215,17 @@ function flipCase(s) {
 // JS-vs-OS case-mapping mismatch this file already bounds above (`flipCase`'s own
 // comment) is a SEPARATE, non-forgery route to exactly that wrong answer, which is
 // why it is routed to MISS instead of trusted. A future PERMIT-polarity caller
-// inherits both exposures and must treat the probe as untrusted input, not merely
-// pick an "opposite default" — and that caller is not hypothetical in general:
-// explode.mjs's `isContainedIn` documents ITSELF as "PERMIT-POLARITY ONLY" with a
-// LIVE consumer (the snapshot-ref store-boundary check) that requires containment
-// to be TRUE before proceeding. That twin is now capability-probed too (`ebc8f60`),
-// and it did NOT inherit this function's default: it takes the miss direction as a
-// REQUIRED argument and answers 'unknown' — refusing at BOTH polarities — when the
-// caller does not supply one. So the exposure described above is bounded to THIS
-// function's own REFUSE-polarity callers; it is NOT a property the pair shares, and
-// a future PERMIT caller HERE would still need the opposite default plus the
-// forgeability treatment, not merely a flipped boolean.
+// (passing `false`) inherits both exposures and must treat the probe as untrusted
+// input, not merely pass the opposite boolean — and that caller is not hypothetical
+// in general: explode.mjs's `isContainedIn` documents ITSELF as "PERMIT-POLARITY
+// ONLY" with a LIVE consumer (the snapshot-ref store-boundary check) that requires
+// containment to be TRUE before proceeding. That twin is capability-probed too
+// (`ebc8f60`) and takes the miss direction as its OWN required argument, answering
+// 'unknown' — refusing at BOTH polarities — when its caller supplies none. So the
+// exposure described above is bounded to THIS function's own REFUSE-polarity
+// callers; it is NOT a property the pair shares, and a future PERMIT caller HERE
+// would still need the forgeability treatment on top of passing `false`, not merely
+// the flipped boolean by itself.
 // `foldOnMiss` IS REQUIRED AND HAS NO DEFAULT — CoalBoard ruling 2026-08-01
 // (`CW-POLARITY-REACH-BOARD-2026-08-01.md`), replacing `DEMAND-2/polarity-reach`
 // (config-load.test.mjs, four fix rounds in one day, deleted in the same commit as
@@ -253,9 +253,16 @@ function flipCase(s) {
 // the polarity this file actually has, not a copy of class-A's for its own sake.
 //
 // THE THREE CALL SITES, their polarity, and why each is REFUSE:
-//   `pathWithin`'s `norm`, below — its only 2 callers, `touchesClaudeBase` and
-//     `findProjectRoot`'s `isBase`, are REFUSE (folding more only ever refuses
-//     more / narrows a project-root anchor, never widens one).
+//   `pathWithin`'s `norm`, below — its only 2 callers, `touchesClaudeBase` (a
+//     real trust boundary) and `findProjectRoot`'s `isBase` (declared
+//     non-security), are REFUSE. NOT because folding more narrows `isBase`'s
+//     own root selection — it does not: `isBase(dir)=true` skips `dir`'s own
+//     marker check and keeps climbing (`findProjectRoot`'s while-loop), which
+//     can select a WIDER root than `dir` when a marker exists further up, so
+//     folding more can widen the picked anchor at THIS function alone. The
+//     safety is `applyPlan`'s `touchesClaudeBase` refusing any anchor that
+//     touches config territory, in either direction, at the actual trust
+//     boundary — a check `isBase` does not perform and does not need to.
 //   `apply.mjs`'s `samePathForKeep` (2 call sites) — a MATCH makes a pinned
 //     keep BIND and EXCLUDE the action, so folding more only ever refuses more.
 // `pathWithin` itself is NOT threaded a `foldOnMiss` parameter (unlike class-A's

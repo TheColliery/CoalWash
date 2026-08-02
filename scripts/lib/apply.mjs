@@ -887,8 +887,8 @@ export function applyPlan(plan, opts = {}) {
       // `process.platform === 'win32'` — the exact defect the #36 pair retires
       // (node/runtime.md §4: case-insensitivity is a property of the VOLUME).
       //
-      // POLARITY, because the direction is what makes the probe's default correct
-      // here: a MATCH makes the keep bind, which EXCLUDES the action — protective.
+      // POLARITY, because the direction is what makes the `true` passed below
+      // correct here: a MATCH makes the keep bind, which EXCLUDES the action — protective.
       // A MISS makes the keep silently fail to bind and the delete/rewrite proceeds.
       // So folding MORE refuses more (safe) and folding LESS is the bypass, which is
       // REFUSE-polarity — passed EXPLICITLY below (`foldOnMiss` is a required
