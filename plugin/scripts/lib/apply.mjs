@@ -57,7 +57,7 @@ import os from 'node:os';
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds } from './config-load.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -882,9 +882,33 @@ export function applyPlan(plan, opts = {}) {
     const txDir = opts.txDir || txDirFor(projectRoot);
     {
       const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
-      const foldPath = (p) => {
-        const phys = physicalOrNull(p) || path.resolve(String(p));
-        return process.platform === 'win32' ? phys.toLowerCase() : phys;
+      // #36 demand 10: this compare decides whether a pinned keep BINDS the action
+      // about to delete or rewrite the file it names, and it used to fold case on
+      // `process.platform === 'win32'` — the exact defect the #36 pair retires
+      // (node/runtime.md §4: case-insensitivity is a property of the VOLUME).
+      //
+      // POLARITY, because the direction is what makes the `true` passed below
+      // correct here: a MATCH makes the keep bind, which EXCLUDES the action — protective.
+      // A MISS makes the keep silently fail to bind and the delete/rewrite proceeds.
+      // So folding MORE refuses more (safe) and folding LESS is the bypass, which is
+      // REFUSE-polarity — passed EXPLICITLY below (`foldOnMiss` is a required
+      // argument of `volumeCaseFolds`, no default; CoalBoard ruling 2026-08-01
+      // replaced the text-scanning reach guard that used to police this). The live
+      // bug being closed: on macOS APFS (case-INSENSITIVE and not win32) a keep
+      // recorded as `Memory.md` did not bind an action on `memory.md`, so a user's
+      // pinned keep quietly protected nothing.
+      //
+      // PAIRWISE, not a unary fold, and deliberately so: Windows sets case
+      // sensitivity PER DIRECTORY, so the two sides can legitimately disagree. A
+      // unary `foldPath` applied to each side independently would fold one and not
+      // the other and turn a genuine match into a miss — the bypass again, by a
+      // different route. Folding when EITHER side's directory folds is the
+      // over-folding (safe) resolution of that disagreement.
+      const physOf = (p) => physicalOrNull(p) || path.resolve(String(p));
+      const samePathForKeep = (a, b) => {
+        const pa = physOf(a), pb = physOf(b);
+        if (pa === pb) return true;
+        return (volumeCaseFolds(pa, true) || volumeCaseFolds(pb, true)) && pa.toLowerCase() === pb.toLowerCase();
       };
       let keeps = [];
       try {
@@ -901,10 +925,10 @@ export function applyPlan(plan, opts = {}) {
         const survives = (anchor) => postTexts.some((t) => t.includes(anchor)) || normTexts.some((t) => t.includes(norm(anchor)));
         const excluded = new Set();
         for (const k of keeps) {
-          const kf = foldPath(k.anchorFile);
+          const kf = k.anchorFile;
           for (const a of actionable) {
             if (a.type === 'create' || excluded.has(a)) continue; // a create is never "the keep's file"
-            if (foldPath(a.phys) !== kf) continue;
+            if (!samePathForKeep(a.phys, kf)) continue;
             if (survives(k.anchor)) continue;
             excluded.add(a);
             // 80 chars = display truncation only (keeps the flag line one-line

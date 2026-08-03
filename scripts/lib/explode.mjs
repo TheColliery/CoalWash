@@ -120,6 +120,127 @@ export function physicalForCreate(p) {
     cur = parent;
   }
 }
+// ---------------------------------------------------------------------------
+// CASE-FOLD CAPABILITY PROBE — case-insensitivity is a property of the VOLUME (in
+// fact of the DIRECTORY), never of `process.platform` (node/runtime.md §4). macOS
+// APFS is POSIX *and* case-insensitive by default; an NTFS directory can be flipped
+// case-SENSITIVE per-directory since Windows 10 1803 with `fsutil file
+// setCaseSensitiveInfo`, no admin rights. So `process.platform === 'win32'` is wrong
+// in BOTH directions, and the wrong direction is not cosmetic — see the measured
+// bypass in the `foldOnMiss` note below.
+//
+// TWIN, DECLARED: config-load.mjs keeps a private `volumeCaseFolds` of the same
+// shape. This is a DUPLICATE and not an import, because config-load.mjs pulls in
+// jsonc.mjs + config-schema.mjs and this engine must load in isolation (the break
+// harness), and because this engine is excluded from the shipped dist. The price of
+// duplicating rather than importing is a twin-pin row over THE PROBE ITSELF, which
+// is paid in twin-pin.test.mjs. The convergence that would remove the duplicate — a
+// node-builtins-only leaf module both sides import — is recommended and NOT built
+// here: it needs config-load.mjs (another lane) plus a LIBS-roster and dist-shape
+// decision, none of which are this lane's to make.
+const CASE_FOLD_CACHE = new Map();
+// BOUNDED CLAIM, NAMING ITS OWN FALSIFIER — read before touching the round-trip test.
+// JS's Unicode case mapping and a volume's on-disk case table are DIFFERENT FUNCTIONS.
+// They agree on the ordinary case and are KNOWN to disagree by at least two unrelated
+// mechanisms: EXPANSION (`ß`.toUpperCase() === 'SS', one codepoint becomes two) and
+// SINGLETON/COMPATIBILITY REMAP (U+212A KELVIN SIGN, U+1E9E, U+212B ANGSTROM,
+// U+2126 OHM case-map onto ordinary letters NTFS's upcase table does not equate — the
+// discriminator is the CODEPOINT, not the accent: plain `Å` U+00C5 folds correctly,
+// ANGSTROM U+212B does not). A third mechanism almost certainly exists. We do not own
+// the OS's table and cannot enumerate it, so this function claims NO completeness: an
+// absolute here can only ever be falsified by the next codepoint, never proven right.
+// What is CHECKED rather than assumed: a character whose flip does not round-trip back
+// to itself through its own opposite is refused, routing the whole basename to a MISS.
+function flipCase(s) {
+  let out = '';
+  let sawCaseChar = false;
+  for (const ch of s) {
+    const up = ch.toUpperCase();
+    const down = ch.toLowerCase();
+    if (up === down) { out += ch; continue; } // no case to flip (digit, symbol, many scripts)
+    if (!(ch === up ? down.toUpperCase() === ch : up.toLowerCase() === ch)) return null;
+    sawCaseChar = true;
+    out += ch === up ? down : up;
+  }
+  return sawCaseChar ? out : null;
+}
+// Does the directory CONTAINING `anchorPhys` fold the case of its own entries — i.e.
+// could a differently-cased sibling spelling denote the SAME file? Measured, not
+// assumed: flip the case of `anchorPhys`'s own basename, stat the flipped spelling in
+// that same parent, compare device+inode. READ-ONLY (no write, no temp, no cleanup
+// race), so the primitive stays safe on a path we merely have READ access to.
+//
+// BOUND: this measures the PARENT's setting, which is the right question for the
+// base-vs-sibling shape a containment compare makes. It is NOT a claim about the whole
+// volume, nor about a directory nested deeper than `anchorPhys` — Windows sets this
+// per-directory and a deeper child may disagree with its own parent.
+//
+// FOUR MISS MODES, and exactly one measured-sensitive mode. THE DISTINCTION IS THE
+// WHOLE POINT and stating it loosely has already misled a reader: a MISS is
+// (1) the OUTER stat of `anchorPhys` failing, (2) `anchorPhys` being a filesystem root
+// with no parent, (3) no case-bearing character in the basename, (4) `flipCase`
+// refusing an unstable character. The INNER stat of the flipped spelling throwing is
+// NOT a miss — it is the MEASUREMENT that the directory is case-SENSITIVE, and it is
+// the ordinary result on ext4. Folding those two together produces the false story
+// "on Linux the probe misses and falls back to folding", which is not what this code
+// does in either branch.
+//
+// THE MISS DIRECTION IS THE CALLER'S, NEVER THIS FUNCTION'S — there is no default, and
+// that is deliberate. A miss fallback is a WRONG ANSWER in one direction, and WHICH
+// direction is safe is decided by the calling guard's polarity, so a single baked-in
+// default is guaranteed wrong at half the call sites:
+//   REFUSE-polarity (contained ⇒ refuse): over-folding refuses MORE ⇒ pass true.
+//   PERMIT-polarity (contained ⇒ proceed): over-folding permits MORE ⇒ pass false.
+// Measured, not reasoned: with the old platform rule, on an `fsutil`-enabled
+// case-sensitive directory holding genuinely distinct `store/` and `Store/` inodes,
+// `restoreFromSnapshot` published ATTACKER-CHOSEN bytes to its toPath with
+// `ok:true, verified:true` from a blob living in `Store/` while the caller had declared
+// `store/` — the store-boundary check at the PERMIT site folded them into one. That is
+// the inject/exfil vector this file's own BREAK 2 comment claims to have closed,
+// re-opened along the case axis.
+//
+// FORGEABILITY, BOUNDED: anyone who can write to `anchorPhys`'s PARENT can plant a
+// junction/hardlink at the flipped spelling (no admin) and push the probe toward
+// `folds:true`. That is safe at a REFUSE caller (folding more only refuses more) and is
+// an EXPOSURE at a PERMIT caller, which must treat this answer as untrusted input
+// rather than assume the opposite default rescues it. The reverse forgery is not
+// available through junctions (a plant can only make a failing stat succeed), but that
+// is a claim about junctions and NOT a claim that a wrong `folds:false` cannot arise at
+// all — the JS-vs-OS mapping mismatch bounded above is a separate, non-forgery route to
+// exactly that, which is why it is routed to MISS instead of trusted.
+//
+// CACHES MEASURED ANSWERS ONLY, keyed on the exact path — never on `st.dev` (Windows
+// sets this per-directory, so a device-keyed cache would learn from whichever directory
+// probed first and misapply it to every other directory on the drive). A MISS is never
+// cached: its value depends on the CALLER's `foldOnMiss`, so caching one would let the
+// first caller's polarity freeze a wrong answer for the other one, process-wide.
+//
+// SUSPECTED, NOT CONFIRMED, RECORDED WITH ITS POLARITY: a MEASURED answer is never
+// re-probed, so a directory whose case-sensitivity setting is toggled MID-PROCESS keeps
+// its first reading. The direction matters and does not need re-deriving: a stale
+// `folds:true` read by a PERMIT-polarity caller is an exposure in EXACTLY the direction
+// this unit closed (over-folding admits a case-variant sibling); a stale `folds:false`
+// there is safe (it only ever over-refuses). Both engines in this repo are short-lived
+// CLI processes and this is unreached in practice — recorded as a bound, not fixed.
+function volumeCaseFolds(anchorPhys, foldOnMiss) {
+  if (CASE_FOLD_CACHE.has(anchorPhys)) return CASE_FOLD_CACHE.get(anchorPhys);
+  let st;
+  try { st = fs.statSync(anchorPhys, { bigint: true }); } catch { return foldOnMiss; } // miss (1)
+  const parent = path.dirname(anchorPhys);
+  const flipped = parent === anchorPhys ? null : flipCase(path.basename(anchorPhys)); // miss (2)/(3)/(4)
+  if (flipped === null) return foldOnMiss;
+  let folds;
+  try {
+    const flippedSt = fs.statSync(path.join(parent, flipped), { bigint: true });
+    folds = flippedSt.dev === st.dev && flippedSt.ino === st.ino;
+  } catch {
+    folds = false; // MEASURED case-sensitive (the flipped spelling is not the same file) — NOT a miss
+  }
+  CASE_FOLD_CACHE.set(anchorPhys, folds);
+  return folds;
+}
+// ---------------------------------------------------------------------------
+
 // THE THREE-STATE CONTAINMENT ANSWER — 'inside' | 'outside' | 'unknown'.
 //
 // WHY THIS EXISTS (rung-5 §1.2, a CLASS not an instance): the old boolean conflated "provably
@@ -136,22 +257,38 @@ export function physicalForCreate(p) {
 // then say what "unknown" means for its own direction:
 //   contained == PERMITTED  → require 'inside'   (`isContainedIn`, unchanged semantics)
 //   contained == REFUSE     → require 'outside'  (`!== 'outside'` refuses inside AND unknown)
-export function containment(childPhys, basePhys) {
+//
+// `foldOnMiss` IS REQUIRED AND HAS NO DEFAULT — see `volumeCaseFolds` above for why a
+// single baked-in default is guaranteed wrong at half the call sites. An OMITTED or
+// non-boolean argument answers 'unknown', which REFUSES at both polarities
+// (`!== 'outside'` refuses it; `=== 'inside'` refuses it) — so forgetting the argument
+// fails CLOSED everywhere instead of silently inheriting the wrong direction. A plain
+// `foldOnMiss = false` default would have failed OPEN at every REFUSE site.
+export function containment(childPhys, basePhys, foldOnMiss) {
+  if (typeof foldOnMiss !== 'boolean') return 'unknown';
   if (!childPhys || !basePhys) return 'unknown';
-  const norm = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
+  const folds = volumeCaseFolds(basePhys, foldOnMiss); // anchored on the BASE — the twin anchors there too
+  const norm = (s) => (folds ? s.toLowerCase() : s);
   const c = norm(childPhys);
   const b = norm(basePhys);
   return (c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep)) ? 'inside' : 'outside';
 }
 // Is `childPhys` the same as, or nested under, `basePhys`? Both args are PHYSICAL paths
-// (realpath'd or physicalForCreate'd). win32 case-folds (realpath does NOT normalize case on
-// Windows). PERMIT-POLARITY ONLY: unknown answers false, which is fail-closed *for a caller that
+// (realpath'd or physicalForCreate'd). Case-folding is decided by a real probe of the base's
+// own directory, never by `process.platform` — see `volumeCaseFolds` above.
+// PERMIT-POLARITY ONLY: unknown answers false, which is fail-closed *for a caller that
 // requires containment to proceed* — never use this at a guard where containment means REFUSE;
-// use `containment(...) !== 'outside'` there. Behaviour is byte-identical to the pre-tri-state
-// version, so the class-b twin-pin gate is unaffected.
+// use `containment(..., true) !== 'outside'` there.
+// THE MISS DIRECTION IS `false` (do NOT fold) AND IT IS NOT INHERITED FROM THE REFUSE SITES:
+// at a PERMIT gate, folding a case-variant that the volume treats as a DISTINCT file turns
+// "prove this is inside my store" into "permit a sibling directory I do not own" — measured as a
+// live inject/exfil through `restoreFromSnapshot` (see `volumeCaseFolds`). Under-folding here
+// costs at most a false REFUSAL of a legitimate case-variant ref, which is recoverable; the other
+// direction publishes attacker-chosen bytes. The per-site derivation is pinned as a TEST in
+// explode.test.mjs ('PERMIT vs REFUSE take OPPOSITE miss directions'), not left as this comment.
 // EXPORTED so detonate.mjs reuses the identical containment primitive for its FIX 1 belt.
 export function isContainedIn(childPhys, basePhys) {
-  return containment(childPhys, basePhys) === 'inside';
+  return containment(childPhys, basePhys, false) === 'inside';
 }
 // Does `candidate` resolve to the SAME physical file as `src` by any route a lexical
 // path.resolve compare misses? TWO complementary checks (verified on win32):
@@ -169,7 +306,19 @@ export function collidesWithSource(candidate, src, srcFd) {
   const srcPhys = physicalOrNull(src);
   const candPhys = physicalForCreate(candidate);
   if (srcPhys && candPhys) {
-    const norm = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
+    // CONVERTED with the containment primitives, not left on `process.platform` — demand 3 of the
+    // twin unit: leaving this folding by PLATFORM while gate-4's belts fold by VOLUME is mixed
+    // variants on two sides of one gate sequence, the exact bug class the header above already
+    // names for `.native`-vs-plain. REFUSE-polarity (a match REFUSES the candidate), so a probe
+    // MISS folds — over-folding reports a collision that is not one and costs a false refusal,
+    // while under-folding MISSES a real case-variant alias and lets outPath truncate the source.
+    // Anchored on `srcPhys`: the question is whether a differently-cased candidate name can denote
+    // THIS file, which is its own parent directory's setting.
+    // NOT merely a win32 fix — this closes a LIVE miss on macOS APFS, which is case-insensitive
+    // and NOT win32, so the old rule did not fold there and a case-variant outPath aliasing the
+    // source went undetected on the very platform whose default volume folds.
+    const folds = volumeCaseFolds(srcPhys, true);
+    const norm = (s) => (folds ? s.toLowerCase() : s);
     if (norm(srcPhys) === norm(candPhys)) return 'resolves to the source (case-variant / drive-case / symlink / same path)';
   }
   // dev+ino hardlink check — realpath is BLIND to a hardlink (distinct name AND distinct realpath, one inode).
@@ -602,7 +751,7 @@ export function reduceFile(src, opts = {}) {
       // the old `isContainedIn(...)` folded that unknown into false == ALLOW (rung-5 §1.2).
       if (snapshotDir) {
         const snapReal = physicalForCreate(snapshotDir);
-        if (containment(physicalForCreate(outPath), snapReal) !== 'outside' || containment(physicalForCreate(`${outPath}.${process.pid}.tmp`), snapReal) !== 'outside') {
+        if (containment(physicalForCreate(outPath), snapReal, true) !== 'outside' || containment(physicalForCreate(`${outPath}.${process.pid}.tmp`), snapReal, true) !== 'outside') { // REFUSE-polarity: a probe MISS folds (over-refuses)
           return fail(`outPath must not resolve inside the snapshot store (${snapshotDir}), and must be resolvable enough to prove it — it would overwrite a recovery blob or manifest`);
         }
         // FIX 1 (source-sacred): src must not resolve INSIDE snapshotDir either. snapshotSource appends
@@ -610,7 +759,7 @@ export function reduceFile(src, opts = {}) {
         // (basename manifest.jsonl with snapshotDir == dirname(src)) or a blob path gets CORRUPTED by that
         // recovery write. The guard asymmetry only checked outPath; mirror it to src — REFUSE-polarity,
         // so unknown refuses (this is the site whose "fail-closed" comment was false before §1.2).
-        if (containment(physicalOrNull(src), snapReal) !== 'outside') {
+        if (containment(physicalOrNull(src), snapReal, true) !== 'outside') { // REFUSE-polarity: a probe MISS folds (over-refuses)
           return fail(`src must not resolve inside the snapshot store (${snapshotDir}) — snapshotSource writes the manifest/blobs there and would corrupt the source`);
         }
         // FIX 1-R2 (source-sacred, the ALIAS the FIX 1 path-guard above misses): the path-containment
@@ -1203,7 +1352,7 @@ export function snapshotSource(src, snapshotDir) {
     // containment check closes the LITERAL src-inside-store route an alias defense cannot (a same path is not
     // an alias). REFUSE-POLARITY: 'unknown' refuses too — this comment used to say "Fail-closed" while the
     // boolean form let an unresolvable src through (rung-5 §1.2, the third false claim in this file).
-    if (containment(physicalOrNull(src), physicalForCreate(snapshotDir)) !== 'outside') {
+    if (containment(physicalOrNull(src), physicalForCreate(snapshotDir), true) !== 'outside') { // REFUSE-polarity: a probe MISS folds (over-refuses)
       return { ok: false, reason: `src resolves inside the snapshot store (${snapshotDir}) — snapshotSource writes the manifest/blobs there and would corrupt the source (refused)` };
     }
     const sha = sha256File(src);

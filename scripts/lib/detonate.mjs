@@ -413,11 +413,23 @@ function ancestorIsDir(p) {
 // MIXED VARIANTS ON TWO SIDES OF ONE COMPARE IS THE BUG CLASS — keep every
 // canonicalizer in this engine on `.native` so both sides always agree.
 function realOrNull(p) { try { return fs.realpathSync.native(p); } catch { return null; } }
-function isUnder(childReal, baseReal) {
-  if (!childReal || !baseReal) return false;
-  const norm = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
-  const c = norm(childReal), b = norm(baseReal);
-  return c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
+// DELEGATES to explode's `containment` rather than re-deriving the compare — this used to be a
+// fourth hand-rolled copy of the same expression, folding on `process.platform` while the gate-4
+// belts twenty lines below folded by VOLUME: mixed variants on two sides of ONE gate sequence,
+// which is the bug class the `.native` comment above already names. `containment(...) === 'inside'`
+// is semantically identical to the old body (a null side answered false, and answers 'unknown'
+// here, which is likewise not 'inside') — only the fold SOURCE changes.
+//
+// ⚠️ THIS HELPER CARRIES BOTH POLARITIES, which is why `foldOnMiss` is a REQUIRED parameter here
+// and not a constant. It is not a second copy of the PERMIT site:
+//   gate 1 storeRoot (below, and survey's twin) — `!isUnder(src, storeRoot)` REFUSES, so
+//     containment must be TRUE to proceed = PERMIT-polarity = miss must NOT fold. Over-folding
+//     would admit a src living in a case-variant SIBLING of the declared store root.
+//   gate 4 inode-less belt — `isUnder(a,b) && isUnder(b,a)` means SAME DIR, which REFUSES =
+//     REFUSE-polarity = miss folds.
+// One function, opposite safe directions, so a single baked-in default is wrong at one of them.
+function isUnder(childReal, baseReal, foldOnMiss) {
+  return containment(childReal, baseReal, foldOnMiss) === 'inside';
 }
 
 // The detonator. `src` = the class-A file. `request` = the caller's INTENT (what they want cut + where):
@@ -473,7 +485,7 @@ export function detonate(src, request = {}, opts = {}) {
     // RESIDUAL, UNCHANGED AND STILL PATH-BASED: this containment check realpaths a PATH, so it keeps
     // its own check-then-reopen window (a realpath cannot be taken through an fd portably). The fd
     // above removed the size/isFile half of the race; this half stays, with the honest limit above.
-    if (storeRoot != null && !isUnder(realOrNull(src), realOrNull(storeRoot))) {
+    if (storeRoot != null && !isUnder(realOrNull(src), realOrNull(storeRoot), false)) { // PERMIT-polarity: must PROVE inside, so a probe MISS must NOT fold
       try { fs.closeSync(fd); } catch { /* best effort */ }
       return refuse('file', `src does not resolve inside the expected store root (${storeRoot})`);
     }
@@ -534,7 +546,7 @@ export function detonate(src, request = {}, opts = {}) {
         if (stat.ino === 0) {
           const srcDir = realOrNull(path.dirname(src));
           const outDir = realOrNull(path.dirname(outPath));
-          if (srcDir && outDir && isUnder(outDir, srcDir) && isUnder(srcDir, outDir)) {
+          if (srcDir && outDir && isUnder(outDir, srcDir, true) && isUnder(srcDir, outDir, true)) { // REFUSE-polarity (same-dir refuses): a probe MISS folds
             return refuse('path', 'cannot verify non-alias on an inode-less volume — refusing a same-directory outPath (fail-closed)');
           }
         }
@@ -584,7 +596,7 @@ export function detonate(src, request = {}, opts = {}) {
         // CONFIDENT lexical path where physicalOrNull returns null — and at a REFUSE-polarity
         // guard that converts a refusal into a possible allow. Same class as the bug this
         // fix closed, one level up: a confident wrong answer, not an unknown.
-        if (containment(physicalForCreate(src), physicalForCreate(snapshotDir)) !== 'outside') {
+        if (containment(physicalForCreate(src), physicalForCreate(snapshotDir), true) !== 'outside') { // REFUSE-polarity: a probe MISS folds (over-refuses)
           return refuse('path', `src must not resolve inside the snapshot store (${snapshotDir}), and must be resolvable enough to prove it — snapshotSource writes the manifest/blobs there and would corrupt the source`);
         }
         // FIX 1-R2 belt (source-sacred, the ALIAS the path-guard above misses — mirrors reduceFile's floor):
@@ -602,7 +614,7 @@ export function detonate(src, request = {}, opts = {}) {
         // never exploitable). Mirror the floor here so the belt refuses BEFORE triggering (triggered:false); the
         // floor stays the load-bearing guard. (Same-dir temp is covered transitively — if outPath is not inside,
         // its sibling temp isn't either.)
-        if (containment(physicalForCreate(outPath), physicalForCreate(snapshotDir)) !== 'outside') { // REFUSE-polarity: unknown refuses (§1.2)
+        if (containment(physicalForCreate(outPath), physicalForCreate(snapshotDir), true) !== 'outside') { // REFUSE-polarity: unknown refuses (§1.2); a probe MISS folds (over-refuses)
           return refuse('path', 'outPath must not resolve inside the snapshot store, and must be resolvable enough to prove it — it would overwrite a recovery blob or manifest');
         }
         // gate 5: PARAMS (finite budgets at/above the memory floor; a fresh detonation carries NO mid-stream
@@ -735,7 +747,7 @@ export function survey(src, opts = {}) {
     if (!stat.isFile()) { try { fs.closeSync(fd); } catch { /* best effort */ } return refuse('file', 'src is not a regular file (directory / device / socket refused)'); }
     // Residual (unchanged, path-based — see detonate's gate 1): realpath needs a path, so this half
     // keeps its window.
-    if (storeRoot != null && !isUnder(realOrNull(src), realOrNull(storeRoot))) {
+    if (storeRoot != null && !isUnder(realOrNull(src), realOrNull(storeRoot), false)) { // PERMIT-polarity: must PROVE inside, so a probe MISS must NOT fold
       try { fs.closeSync(fd); } catch { /* best effort */ }
       return refuse('file', `src does not resolve inside the expected store root (${storeRoot})`);
     }
