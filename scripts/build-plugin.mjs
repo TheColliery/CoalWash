@@ -41,6 +41,13 @@ const isTest = (p) => /\.test\.[cm]?js$/.test(p);
 // This is a NAMED, deliberate divergence from "the dist carries all of scripts/lib", not an oversight.
 // REVISIT at the class-A skill-wiring release: wire the SKILL surface, delete this block, rebuild —
 // the engine then ships together with the caller that makes it reachable.
+//
+// LANDING PRECONDITION (rung-2 F2 — the full boundary + the 7-fix kill-list live TODAY in
+// scripts/lib/explode.mjs, restoreFromSnapshot's STEP 2 header comment, NOT yet in SECURITY.md):
+// explode.mjs may leave this list ONLY once EITHER per-tenant manifests exist (F2 closed in code) OR
+// that boundary is COPIED into shipped SECURITY.md (F2 closed by disclosure, still to be written) — a
+// co-tenant with manifest write access can forge ownership of any blob in a shared snapshotDir today,
+// and nothing here enforces isolation.
 const UNWIRED_ENGINE = [
   path.join('scripts', 'lib', 'explode.mjs'),
   path.join('scripts', 'lib', 'detonate.mjs'),
