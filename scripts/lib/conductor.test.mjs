@@ -492,7 +492,7 @@ test('0f: FULL persisting after a force-run already ran Quick this episode escal
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
-    assert.ok(reason.includes('survived the automatic Quick pass this episode'), reason);
+    assert.ok(reason.includes('no cutter for this class of fat'), reason);
     assert.ok(reason.includes('certain fat (~900 tok'), reason);
     assert.ok(reason.includes('measured'), 'the ask names the fat as MEASURED certain fat (task #4), never a floor inference');
     assert.ok(reason.includes('question tool'), 'a REAL ask — the semantic escalation needs consent');
@@ -549,7 +549,7 @@ test('round trip: a FULL force-run followed by a FULL plateau (still over cap, q
     const rp2 = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(rp2);
     const reason2 = parseBlock(rp2.stdout);
-    assert.ok(reason2.includes('survived the automatic Quick pass this episode'), reason2);
+    assert.ok(reason2.includes('no cutter for this class of fat'), reason2);
     assert.ok(!reason2.includes('standing config authorizes'), 'no more silent auto-force-loop — this is a real ask now');
   } finally { clean(home, proj); }
 });
@@ -817,7 +817,7 @@ test('0m round trip (the user\'s live scenario, at true capacity): over the TRUE
     const rp2 = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(rp2);
     const reason2 = parseBlock(rp2.stdout);
-    assert.ok(reason2.includes('survived the automatic Quick pass'), reason2);
+    assert.ok(reason2.includes('no cutter for this class of fat'), reason2);
     assert.ok(reason2.includes('question tool'), 'the wizard ask is the ONE ask in the system');
 
     // (g) The store shrinks under everything (as if the wizard cleaned it):
@@ -959,7 +959,7 @@ test('rc.2 LONG SESSION (grown): fat grows PAST lastEscalationFat within ONE ses
     assertGraceful(r);
     const reason = parseBlock(r.stdout);
     assert.ok(reason.includes('question tool'), 'the wizard ask fired mid-session on fat growth: ' + reason);
-    assert.ok(reason.includes('survived the automatic Quick pass'), reason);
+    assert.ok(reason.includes('no cutter for this class of fat'), reason);
     const st = readProjState(home, proj);
     assert.ok(st.lastEscalationFat > 28200, 'the escalation re-armed at the NEW higher fat (branch 3 fired in the Stop path), not the seeded level');
     assert.strictEqual(st.lastCrossing.escalation, true, 'a wizard-escalation crossing (0f), armed + consumed the same turn');

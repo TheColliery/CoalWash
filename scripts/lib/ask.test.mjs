@@ -154,9 +154,9 @@ test('obeseAutoQuick: carries the payback line when breakEven is supplied; malfo
 
 test('wizardEscalation: a REAL two-button ask (question tool present) — names the mechanical pass already ran, the wizard heavy tier, and never auto-runs', () => {
   const r = wizardEscalation({ fatTokens: 900 });
-  assert.ok(r.includes('survived the automatic Quick pass'), r); // task #4: the headline is the MEASURED residue, not a wall claim
+  assert.ok(r.includes('no cutter for this class of fat'), r); // task #4: the headline is the MEASURED residue, not a wall claim
   assert.ok(r.includes('certain fat (~900 tok, measured'), r);
-  assert.ok(r.includes('needs semantic judgment'), r);
+  assert.ok(r.includes('a human or the wizard'), r);
   assert.ok(r.includes('question tool'), 'the semantic escalation is a real ask, unlike obeseAutoQuick/forceAuto');
   assert.ok(r.includes('ทำ'), r);
   assert.ok(r.includes('/coalwash'), r);
