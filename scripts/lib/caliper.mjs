@@ -1007,7 +1007,7 @@ export function sanitizeLeanFloor(rawLeanFloorTokens, footprintTokens) {
 // band-collapse: the snooze mechanism this cache used to sit beside is GONE
 // (MEMORY.md — a time-based throttle is banned; the ceiling's own hysteresis,
 // `overCeiling` below, is the anti-flapping guard now) and the payload grows
-// two payback fields (`perDay`/`breakEvenDays`/`floorUnmeasured`) so the Stop
+// two payback fields (`perDay`/`breakEvenDays`) so the Stop
 // hook can show break-even numbers without re-measuring the store (Phoenix
 // #3). SessionStart already computes the ceiling verdict; recordVerdict
 // stores just enough of it so the Stop conductor branch (no discovery/
@@ -1027,7 +1027,7 @@ export function sanitizeLeanFloor(rawLeanFloorTokens, footprintTokens) {
 // cached the same way — read back as `wasEconLatched` — and, like
 // `overCeiling`, is simply OVERWRITTEN fresh each gauge (LEAN computes it
 // false, so the LEAN reset clears it with no special code);
-// `perDay`/`breakEvenDays`/`floorUnmeasured` (breakEven()'s output,
+// `perDay`/`breakEvenDays` (breakEven()'s output,
 // optional) back the Stop hook's payback line on ANY ask, not just FULL's.
 export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
   const proj = loadState(projectRoot, home);
