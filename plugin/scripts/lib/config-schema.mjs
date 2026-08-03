@@ -27,14 +27,24 @@ export const CONFIG_SCHEMA = [
   // and muscle are measured from content at every gauge instead. Both keys
   // are read-tolerated and ignored (the earlier forceMode precedent) rather
   // than removed from the schema, so an existing project config with either
-  // key set still validates and simply has no effect. See caliper.mjs's own
-  // header for the current wall (real capacityTokens + the CC index caps).
+  // key set still validates and simply has no effect — kept, not removed,
+  // because removing a shipped config key would be a breaking change. See
+  // caliper.mjs's own header for the current wall (real capacityTokens + the
+  // CC index caps).
+  // fatMultiple's own min/max are unchanged HISTORY: `min` was once required
+  // strictly above `CEILING_BMI` (the ordering-clamp that kept this wall from
+  // firing before OBESE could even arm) — caliper.mjs's own `CEILING_BMI`/
+  // `CEILING_REARM_BMI` now carry that file's `LEGACY (task #4)` marker, so
+  // the clamp no longer constrains anything live either.
   { key: 'fatMultiple', type: 'number', min: 1.6, max: 10, def: 2.0, help: 'RETIRED as a band input by task #4 (2026-08-03) — read-tolerated and ignored; the wall is now the real capacity ceiling plus the CC index caps, with no floor to scale. Kept in the schema only so an existing config value degrades quietly rather than failing validation (default: 2.0)' },
-  // targetPercent has NO band-math consumer post-band-collapse: the anti-flap job
-  // moved to caliper.mjs's BMI Schmitt trigger (CEILING_BMI/CEILING_REARM_BMI). It
-  // survives as AGENT guidance for the wash clean-to depth (references/method.md §3);
-  // kept, not removed (removing a shipped config key would be a breaking change).
-  { key: 'targetPercent', type: 'number', min: 0.5, max: 49, def: 3, help: 'Clean-to depth target as % of capacity, below fullPercent — agent guidance for the wash (references/method.md §3); the anti-flap job now lives in caliper.mjs\'s BMI hysteresis, so no band-math reads this key today (default: 3)' },
+  // targetPercent has NO band-math consumer post-band-collapse. Anti-flap now
+  // lives in caliper.mjs's FAT Schmitt trigger (FAT_ARM_TOKENS/
+  // FAT_REARM_TOKENS) — an unrelated axis this key never fed, and NOT
+  // caliper.mjs's `CEILING_BMI`/`CEILING_REARM_BMI`, which now carry that
+  // file's own `LEGACY (task #4)` marker. It survives as AGENT guidance for
+  // the wash clean-to depth (references/method.md §3); kept, not removed
+  // (removing a shipped config key would be a breaking change).
+  { key: 'targetPercent', type: 'number', min: 0.5, max: 49, def: 3, help: 'Clean-to depth target as % of capacity — agent guidance for the wash (references/method.md §3); no band-math reads this key today (default: 3)' },
   { key: 'fileMaxSizeKb', type: 'int', min: 1, max: 1024, def: 25, help: 'Per-file size cap in KB before a class-B file is flagged oversize (default: 25 — the CC memory-index cap class)' },
   { key: 'quickVsFull', type: 'enum', values: ['quick', 'full'], def: 'quick', help: 'Default run tier: quick = free mechanical pass; full = paid semantic pass (always a separate consent; default: quick)' },
   { key: 'localOnly', type: 'bool', def: false, help: "Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config (default: false)" },

@@ -47,7 +47,9 @@
 // armed AND BOTH break-evens hold (2a certain fat + 2b the RE-TIER envelope's
 // demotable muscle — the wizard tier is "Fat + reorganize muscle", both
 // halves must pay), LATCHED per episode (Q2 — cleared by the LEAN reset,
-// which is now CONTINUOUS: Quick removes the fat the gauge measures); the
+// which is now CONTINUOUS: whatever actually cuts the fat — a hand edit,
+// the wizard, never Quick itself, which has no cutter — drops the next
+// gauge's re-measured fat under the disarm mark); the
 // WALL is the REAL capacity line only (capacityTokens + the CC index caps):
 // wash-first when armed, externalize when ~all-muscle. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
 // A DICTATOR"): every FULL crossing force-runs the FREE Quick pass under

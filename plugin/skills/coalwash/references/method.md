@@ -58,17 +58,17 @@ console.log(JSON.stringify({ verified: v.verified.length, rejected: v.rejected, 
 
 Report ONE line only when `drift` (onlyInParcel) is non-empty — "parcel drift: the platform loads X the adapter doesn't list" (adapter rot / a new platform surface → flag for the adapter update). Silent when clean. `notSeen` is informational (recall-store entries are expected-absent and already excluded). **Honest limits (verbatim class from the ledger):** L2 costs agent tokens — L1 stays the every-session path on CC; a platform whose parcel blocks carry no path labels degrades to fuzzy content-match = propose-only, the human confirms; recall-store coverage still rides the parcel's own pointer. L2 feeds MEASUREMENT only — it never feeds the knife (capture-all → filter order law); fail direction = undercount (unseen = unmeasured = uncut, safe).
 
-## 1. Quick tier — the deterministic op list
+## 1. Quick tier — the mechanical op list (AGENT-RUN — no cutter exists in code)
 
-Mechanical only; each op is definable without judgment. Compute the new text per file, then gate + apply (below).
+Mechanical only; each op is definable without judgment — but **every row below is something YOU, the agent, compute and edit by hand.** No code in this engine dedups, collapses whitespace, or rebuilds an index. The only CODE presence in this tier is `mechFatFromText` (`caliper.mjs`, §0 above): it MEASURES exact-duplicate lines and excess blank runs to drive the band verdict, and it never edits a file. Broom.mjs once carried two real text-mutators (an exact-residue sweep, an empty-table strip); both were retired to flag-only 2026-07-24, safety-over-yield — a false auto-cut was judged worse than no auto-cut, and no replacement cutter was built. Compute the new text per file yourself, then gate + apply (below) exactly as if the wizard's insider had proposed it.
 
-| Op | Definition |
-|---|---|
-| exact-dedup | Byte-identical repeated paragraph/block within one file → keep the first occurrence. NOT near-duplicates (that is Full). |
-| dead-link fix | A `[[target]]` whose target file no longer exists in the store → FLAG it. A repoint (changing the link value) mechanically registers as a wikilink-drop at the gate — carry it in the plan's `approvedDrops` as a named drop; never silently drop or rewrite a link. |
-| whitespace | Collapse 3+ blank lines to 2; strip trailing spaces. Never touch content lines. |
-| index rebuild | Regenerate the memory index's entry list to match the files actually present (missing entry → add; entry for a deleted file → remove). Keep the index's own prose untouched. |
-| oversize / stale | A file past `fileMaxSizeKb`, or TTL-stale by its own dates → FLAG ONLY (a Full candidate), never rewritten by Quick. |
+| Op | Run by | Definition |
+|---|---|---|
+| exact-dedup | agent | Byte-identical repeated paragraph/block within one file → keep the first occurrence. NOT near-duplicates (that is Full). `mechFatFromText` already told you the token count if this is why the band armed — cut to that number, don't re-count by eye. |
+| dead-link fix | agent (flag), code (post-delete advisory) | A `[[target]]` whose target file no longer exists in the store → FLAG it. A repoint (changing the link value) mechanically registers as a wikilink-drop at the gate — carry it in the plan's `approvedDrops` as a named drop; never silently drop or rewrite a link. `apply.mjs`'s `deadLinkLine` additionally surfaces a receipt advisory automatically whenever your plan deletes a topic file another survivor still references — that one line is real code, everything else in this row is you. |
+| whitespace | agent | Collapse 3+ blank lines to 2; strip trailing spaces. Never touch content lines. |
+| index rebuild | agent | Regenerate the memory index's entry list to match the files actually present (missing entry → add; entry for a deleted file → remove). Keep the index's own prose untouched. |
+| oversize / stale | agent | A file past `fileMaxSizeKb`, or TTL-stale by its own dates → FLAG ONLY (a Full candidate), never rewritten by Quick. `fileMaxSizeKb` is a config threshold with no code reader today — apply it by eye. |
 
 Encoding is load-bearing: preserve the file's line endings, UTF-8 no-BOM, never decompose Thai U+0E33 — the gate trips on introduced corruption, but do not rely on tripping it.
 

@@ -106,8 +106,11 @@ export const FAT_MULTIPLE_DEFAULT = 2.0;
 // deliberately reuses REGAUGE_DELTA_TOKENS' own "a REAL content change" scale
 // (~500 tok ~ a genuine MEMORY.md crystallize append): certain fat below the
 // scale of one real append is noise the sweep should not churn on. Re-arm at
-// 200 keeps the Schmitt's dead zone (auto-Quick removes what it measures, so
-// a completed pass lands well under the re-arm mark by construction).
+// 200 keeps the Schmitt's dead zone (a 40% margin below the 500-tok arm
+// mark — standard hysteresis sizing, not a claim that any pass reaches it
+// automatically: the mechanical tier has no cutter for this fat class, see
+// method.md §1; the dead zone only clears when someone — agent, human, or
+// the wizard — actually edits the file down).
 export const FAT_ARM_TOKENS = 500;
 export const FAT_REARM_TOKENS = 200;
 // mechFatFromText's substance threshold: a trimmed line must carry at least
@@ -362,8 +365,10 @@ export function bandVerdict({
   // proof OR the per-episode latch). `economical` here is the CALLER's
   // combined proof — task #4 condition 2: BOTH break-evens (certain fat AND
   // demotable muscle) must hold; gaugeVerdict ANDs them before this call.
-  // The latch's escape is continuous now: Quick removes the certain fat it
-  // measures, fat falls under FAT_REARM_TOKENS, LEAN writes the latch false.
+  // The latch's escape is continuous now: whatever actually cuts the
+  // certain fat (a hand edit, the wizard — Quick itself has no cutter for
+  // this class, see method.md §1) drops the re-measured fat under
+  // FAT_REARM_TOKENS, and the next LEAN gauge writes the latch false.
   const econFull = over && (economical || wasEconLatched);
   // hardCeilingTokens: the display "wall" — the real capacity line when that
   // is what fired, else the 1:1 fat line (muscle + arm mark), which moves
