@@ -828,17 +828,28 @@ test('RED-FIRST/required-foldOnMiss: the throw survives a NAMESPACE import (impo
 const rmBestEffort = (p, opts) => { try { fs.rmSync(p, { force: true, ...opts }); } catch { /* transient AV hold; per-pid temp, next run uses a fresh name */ } };
 
 test('RED-FIRST/required-foldOnMiss: the throw survives a RE-EXPORT HOP — an intermediate file cannot launder a caller past the check', async () => {
-  // The hop file must sit BESIDE config-load.mjs — its re-export specifier is
-  // relative ('./config-load.mjs'), which is the realistic shape of a hop.
+  // The hop's re-export specifier must be RELATIVE — the realistic shape of a
+  // hop — but the hop file itself lives in an OS tmpdir, never beside
+  // config-load.mjs in scripts/lib/: a real per-pid .mjs sitting in that
+  // directory is exactly what root-provenance.test.mjs's CONFORMANCE walk
+  // enumerates (readdir over scripts/lib/*.mjs), and a cross-process race
+  // between that walk's read and this test's cleanup produced a real gate
+  // ENOENT (2026-08-03) — the class this rewrite closes structurally rather
+  // than by naming convention alone. A relative specifier works from ANY
+  // directory; only the specifier's PATH needs to point back at the real
+  // file, not the hop's own location.
   const libDir = path.dirname(fileURLToPath(import.meta.url));
-  const hopPath = path.join(libDir, `.cw-reexport-hop-${process.pid}.mjs`);
-  fs.writeFileSync(hopPath, `export { volumeCaseFolds } from './config-load.mjs';\n`);
+  const hopDir = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-REQFOLD-HOPDIR-'));
+  const hopPath = path.join(hopDir, 'hop.mjs');
+  const rel = path.relative(hopDir, path.join(libDir, 'config-load.mjs')).split(path.sep).join('/');
+  const specifier = rel.startsWith('.') ? rel : `./${rel}`;
+  fs.writeFileSync(hopPath, `export { volumeCaseFolds } from ${JSON.stringify(specifier)};\n`);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-REQFOLD-HOP-'));
   try {
     const hop = await import(pathToFileURL(hopPath).href);
     assert.throws(() => hop.volumeCaseFolds(dir), TypeError,
       're-exporting the symbol re-exports the SAME function object — an extra layer of indirection cannot route a caller around a required-argument check');
-  } finally { rmBestEffort(hopPath); rmBestEffort(dir, { recursive: true }); }
+  } finally { rmBestEffort(hopDir, { recursive: true }); rmBestEffort(dir, { recursive: true }); }
 });
 
 test('RED-FIRST/required-foldOnMiss: the throw survives require(esm) from CJS — empirical\'s finding that the conductor (hooks/, CJS) is a real, unflagged reach path', (t) => {

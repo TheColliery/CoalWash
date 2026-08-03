@@ -89,10 +89,33 @@ function splitArgs(s) {
 }
 
 // Every `containedIn(...)` CALL in the engine, with its root argument.
+//
+// TOCTOU note (2026-08-03): this is a readdir-then-read walk over a live
+// directory another test FILE writes real per-pid temp fixtures into
+// (config-load.test.mjs's re-export-hop test needs its hop file to sit
+// beside config-load.mjs for a realistic relative specifier). node --test
+// runs different test files as concurrent processes, so a name this walk
+// enumerates can vanish (the other file's own `finally` cleanup) before this
+// walk reads it — a real cross-process race, not a hypothetical one (forced
+// deterministically and confirmed before this fix landed). Two guards, for
+// two different futures: (1) a dot-prefixed name is this repo's own
+// established convention for a non-product per-pid temp fixture (see
+// `.cw-reqfold-probe-*`, `.cw-reexport-hop-*`) — excluded from the scan
+// outright, so the common case never reaches the race window at all; (2) a
+// vanished-between-readdir-and-read entry (any name, not just a dotfile —
+// the class this walk must survive even if a future fixture breaks the
+// naming convention) is skipped, never a crash — a file that disappeared
+// mid-scan was never a stable product source to begin with.
 function collectCallSites() {
   const sites = [];
-  for (const f of fs.readdirSync(LIB).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs'))) {
-    const src = fs.readFileSync(path.join(LIB, f), 'utf8');
+  for (const f of fs.readdirSync(LIB).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs') && !n.startsWith('.'))) {
+    let src;
+    try {
+      src = fs.readFileSync(path.join(LIB, f), 'utf8');
+    } catch (e) {
+      if (e && e.code === 'ENOENT') continue; // vanished between readdir and read — not a stable source, skip it
+      throw e;
+    }
     const lines = src.split(/\r?\n/);
     lines.forEach((line, i) => {
       if (/function\s+(is)?[cC]ontainedIn\s*\(/.test(line)) return; // the definition itself
