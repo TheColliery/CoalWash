@@ -38,9 +38,9 @@ The conductor measures at session start; the CLI gauge reports the band (`cli.mj
 
 ## The run pipeline (every `/coalwash` run — ordered; mechanics in method)
 
-0. **Preflight (code):** `recoverDangling` (a dangling prior run rolls back FIRST — **or does not**: `recovered: 'partial'`, or `'none'` carrying an `error`, means UNRESOLVED, journal + snapshot deliberately kept for a human → report that line and STOP; a new run writes its own journal at the same path and would overwrite it) → gauge (method §0). Manual run on a LEAN store → "LEAN — nothing to clean", stop. **Parcel drift-check (method §0b):** report ONE drift line only when the adapter missed a surface the parcel shows, else silent; an unknown platform → propose your parcel-observed candidates → code verifies → the HUMAN confirms before any measurement is trusted; still never auto-delete.
+0. **Preflight (code):** `recoverDangling` (a dangling prior run rolls back FIRST — **or does not**: `recovered: 'partial'`, or `'none'` carrying an `error`, means UNRESOLVED, journal + snapshot deliberately kept for a human → report that line and STOP; a new run writes its own journal at the same path and would overwrite it) → gauge (method §0). Manual run on a LEAN store → "LEAN — nothing to clean", stop. **This LEAN-stop fires when the pipeline itself is entered** (an ambient nudge, or the wizard's own "start" press) — it never gates the wizard's numberless entry MENU, which stays openable on any band, LEAN included (`neutralScan` never calls this). **Parcel drift-check (method §0b):** report ONE drift line only when the adapter missed a surface the parcel shows, else silent; an unknown platform → propose your parcel-observed candidates → code verifies → the HUMAN confirms before any measurement is trusted; still never auto-delete.
 1. **Quick (default tier, ~free, mechanical):** tier from `quickVsFull` (def `quick`) unless the user names one; `localOnly` always forces Quick-only. Deterministic edits only (method §1). Gate every rewrite (`gateFiles`) → `applyPlan` (rewrites only, no deletes) → receipt. Band cleared → done.
-2. **Full (paid semantic — ALWAYS a SEPARATE consent naming the store path + measured size; blocked by `localOnly`):** spawn ONE **zero-context** outsider (method §2) that only FLAGS by the rubric, skipping targets already in `keeps.json`. **YOU adjudicate every flag into one of three outcomes: delete · shrink (right-size wording, the fact/link/number/strength survive verbatim) · stand** — never auto-accept; a stand appends to `keeps.json`. Before applying any **merge or shrink**, run the before-vs-after claim-strength diff (method §4); `localOnly`/hookless → flag for manual instead.
+2. **Full (paid semantic — ALWAYS a SEPARATE consent naming the store path + measured size; blocked by `localOnly`; satisfied by the wizard's own bill+start for wizard-tier runs, or by the `wizardEscalation` ask for an ambient crossing — never a third, undefined gate):** spawn ONE **zero-context** outsider (method §2) that only FLAGS by the rubric, skipping targets already in `keeps.json`. **YOU adjudicate every flag into one of three outcomes: delete · shrink (right-size wording, the fact/link/number/strength survive verbatim) · stand** — never auto-accept; a stand appends to `keeps.json`. Before applying any **merge or shrink**, run the before-vs-after claim-strength diff (method §4); `localOnly`/hookless → flag for manual instead.
 3. **Fidelity gate (code, the floor):** `gateFiles` on every rewrite/merge — ANY structured-token drop **blocks the apply** until restored, or until the plan names that exact drop in `approvedDrops` (method §4). Nothing drops silently.
 4. **Delete authorization:** a delete/merge IN the plan is its own authorization — `apply.mjs` needs no approval flag. Safety is UNDO.
 5. **Apply (code, transactional):** `applyPlan` — snapshot verified-at-creation before the first mutation → external-writer re-read (any foreign change aborts + rolls back) → atomic writes → verify → **deletes LAST** → commit → bin population by the plan's `origin` (method §5/§8). Any failure before commit restores the snapshot. `deferred: true` → lock held: say so, stop.
@@ -58,6 +58,23 @@ Retention is dual-limit (age ∧ size — the 48h keep-all floor beats byte pres
 
 Advisory nets for every OTHER hand editing a class-B governance/memory file (main + subs — tool hooks fire in subs). **Airbag** (PreToolUse): the first write to a guarded file each session ms-copies it into the sandbox — the undo net for the gitignored `MEMORY.md`/`CLAUDE.md`. **Seatbelt** (PostToolUse): if that edit dropped a structured token, ONE FYI line names it and points at the snapshot — **advisory only, never a block, never `{decision:'block'}`** (a deliberate delete is legitimate; an ambient gate has no `approvedDrops` channel). Clean edits are silent. Recover the snapshot the same restore-by-reference way — **code moves the byte-exact original, never re-type it** (`cli.mjs writeguard-restore <snapName> > <file>`). Config `writeGuard`: `on` (default) · `snapshot-only` (undo net, no advisory) · `off`. Not a bin (0h-GUARD — no sweep; prior sessions' snapshots are cleaned at the next SessionStart, event-gated).
 
+## Consent ledger — every human-decision point, system-wide (count this, not prose)
+
+| # | Gate | Trigger |
+|---|---|---|
+| 1 | `wizardEscalation` ask (below) | FULL, still over after this episode's forced Quick |
+| 2 | Wizard entry choice (1–4) | manual `/coalwash` |
+| 3 | Background toggle | wizard choice 2/4, spawn-capable, not `localOnly` |
+| 4 | Wizard bill start/cancel — this IS the Full-tier separate consent for wizard-tier runs | after the choice + toggle |
+| 5 | Insider adjudication (accept/shrink/reject) per flag | every outsider flag |
+| 6 | Unverifiable contradiction → human, change nothing | adjudication finds an unverifiable contradiction |
+| 7 | Unknown-platform parcel candidates → human confirms | preflight finds an unmapped platform |
+| 8 | `estate.deleteCold: true` config | before ULTRA's COLD archive-then-delete |
+| 9 | CoalFace hand-off offer (ONCE) | choice-4 ③ past both size ∧ count gates |
+| 10 | dig-gauge CRUSHING → ULTRA offer (ONCE, never blocks) | before a raw transcript dig |
+
+**Standing consent — NOT a gate, no ask:** `obeseAutoQuick` (OBESE, no ask) · `forceAuto` (every FULL crossing, no off switch) · `externalizeAdvisory` (information only, never asks or forces).
+
 ## Asks (Stop hook — CODE-built templates, `ask.mjs`)
 
 You never compose ask prose or invent a rationale — render exactly the template's two-button question or one-line directive (the why: `ask.mjs` header).
@@ -65,7 +82,7 @@ You never compose ask prose or invent a rationale — render exactly the templat
 - **SessionStart only MEASURES** (caches the verdict + arms/clears the once-per-crossing edge); the **`Stop` hook is the sole delivery surface** — a `{decision:'block', reason}` blocking channel (rot-canary's), enforced, not an ignorable context line.
 - **Answer-first, always:** answer the user's actual message for this turn FIRST; the ask/directive rides at the END of your response, never preempts the prompt (once it resolves, return to that answer).
 - **`obeseAutoQuick`** — the OBESE default, NO ask (standing config): run Quick NOW, push `oneLineResult` only; marks the episode "Quick tried"; re-arms on the next genuinely new wave of fat past a growth watermark, not on an unchanged plateau.
-- **`wizardEscalation`** — the **ONE ask site in the system**: FULL still over after its forced Quick already ran this episode → a run/later opening the wizard's semantic tier; re-arms only on fat GROWTH, never a timer. OBESE never reaches it.
+- **`wizardEscalation`** — the **ONE ask site in the system**: FULL still over after its forced Quick already ran this episode → a run/later that on "run" enters the run pipeline's Full step (step 2) DIRECTLY — never the `/coalwash` 4-choice menu; re-arms only on fat GROWTH, never a timer. OBESE never reaches it.
 - **`forceAuto`** — every FULL crossing (`economic` and `absolute-cap`) force-runs Quick under the same standing consent, **non-optional, NO off switch** (the only full stop is `coalwashMode: off`); numbers shown every fire. Do NOT add a force toggle.
 - **`externalizeAdvisory`** — FULL(externalize) is pure information: never an ask, never a force (a wash cannot shrink muscle).
 - A crossing is **consumed the instant it surfaces** — there is no silent FULL branch (post-force the receipt is FULL's surfacing).
