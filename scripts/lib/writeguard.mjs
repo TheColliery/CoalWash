@@ -39,6 +39,7 @@
 // fidelity-gate.mjs (zero-dep).
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { physicalOrNull, containedIn } from './class-b.mjs';
 import { claudeBaseDir } from './config-load.mjs';
 import { gateFiles } from './fidelity-gate.mjs';
@@ -69,12 +70,22 @@ function sanitizeSession(sessionId) {
 function sessionDir(projectRoot, sessionId) {
   return path.join(writeguardRoot(projectRoot), sanitizeSession(sessionId));
 }
-// djb2 — a tiny deterministic hash so two distinct governance paths never
-// collide on a snapshot filename (basename alone can; the hash disambiguates).
+// grad7 ruling Root C (F3, worse than named): the OLD djb2 hash below was a
+// 32-bit, path-only, deliberately-invertible checksum. A round-8 worker
+// constructed a REAL collision between two distinct governed files (two
+// role directories both ending `MEMORY.md`) in 4.4M brute-force tries — a
+// plain for-loop, no cryptographic effort. sha256 of the full physical path
+// closes that SPECIFIC attack (brute-forcing a 256-bit collision is not a
+// for-loop), but per the ruling's own model (explode.mjs's snapshotSource:
+// "content-addressed dedup MUST VERIFY the existing blob really belongs to
+// it before trusting it") a stronger hash alone is still trust-by-name. The
+// sidecar below (`recordOrigPath`/`verifyOrigPath`) is the verification: it
+// answers "does the snapshot AT this name actually belong to THIS phys",
+// which no hash strength alone can — two independently-CORRECT hashes could
+// still theoretically collide, and a future weakening of the hash function
+// must not silently reopen this.
 function hash(s) {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-  return h.toString(36);
+  return crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 }
 function snapName(phys) {
   const base = path.basename(phys).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 80);
@@ -119,6 +130,43 @@ export function isGuardedTarget(touchedPath, { projectRoot, home } = {}) {
   return null;
 }
 
+// IDENTITY SIDECAR — the content-verify-before-trust the ruling names.
+// `fs.existsSync(snap)` alone answers "is there a file at this NAME", never
+// "does it belong to THIS phys" — the two differ exactly when snapName's
+// hash collides across two DIFFERENT physical paths (closed for a brute-
+// force attacker by the sha256 upgrade above; this sidecar is the
+// independent, non-hash-strength-dependent check, same "verify, don't
+// trust the name" discipline as explode.mjs's own blob dedup). Plain text,
+// same directory, written in the SAME call that creates the snapshot — no
+// concurrent-writer race beyond what the snapshot file itself already has.
+function origPathSidecar(snap) { return `${snap}.origpath`; }
+function recordOrigPath(snap, phys) {
+  fs.writeFileSync(origPathSidecar(snap), phys, 'utf8');
+}
+// Returns true (verified match), false (a DIFFERENT phys owns this name —
+// the collision case), or null (no sidecar — a pre-fix legacy snapshot;
+// cannot confirm either way, so the caller treats it the same as false:
+// never assume identity that was never recorded).
+function verifyOrigPath(snap, phys) {
+  try { return fs.readFileSync(origPathSidecar(snap), 'utf8') === phys; }
+  catch { return null; }
+}
+// Walk the disambiguation chain for `phys` inside `dir`: the FIRST candidate
+// that is either (a) verified as already belonging to phys, or (b) does not
+// exist at all yet, is the correct slot. A genuine collision (or a legacy
+// snapshot with no sidecar) is never reused — it is skipped to the next
+// candidate, so two distinct files sharing snapName's hash each still get
+// their own real, independently-verifiable snapshot.
+function resolveSnapPath(dir, phys) {
+  const base = snapName(phys);
+  for (let n = 0; ; n++) {
+    const candidate = path.join(dir, n === 0 ? base : `${base}-${n}`);
+    if (!fs.existsSync(candidate)) return { path: candidate, existing: false };
+    if (verifyOrigPath(candidate, phys) === true) return { path: candidate, existing: true };
+    // occupied by something else (collision or legacy, unverifiable) — try the next slot
+  }
+}
+
 // AIRBAG — snapshot-on-FIRST-write per file per session. Returns the snapshot
 // path (or the existing one), or null (not guarded / new file with no orig /
 // guard failure). Fail-silent: the airbag's own failure never blocks the write.
@@ -128,13 +176,14 @@ export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home
     if (!phys) return null;
     if (!fs.existsSync(phys)) return null; // a Write CREATING a new file: no orig to snapshot
     const dir = sessionDir(projectRoot, sessionId);
-    const snap = path.join(dir, snapName(phys));
-    if (fs.existsSync(snap)) return snap; // FIRST-write only — already snapshotted this session
+    const { path: snap, existing } = resolveSnapPath(dir, phys);
+    if (existing) return snap; // FIRST-write only, VERIFIED as this file's own baseline — already snapshotted this session
     fs.mkdirSync(dir, { recursive: true });
     selfIgnore(txDir(projectRoot));
     selfIgnore(writeguardRoot(projectRoot));
     selfIgnore(dir);
     fs.copyFileSync(phys, snap); // the ms-copy
+    recordOrigPath(snap, phys);
     return snap;
   } catch { return null; }
 }
@@ -153,8 +202,8 @@ export function readSnapshot(projectRoot, sessionId, touchedPath, { home } = {})
   try {
     const phys = isGuardedTarget(touchedPath, { projectRoot, home });
     if (!phys) return null;
-    const snap = path.join(sessionDir(projectRoot, sessionId), snapName(phys));
-    if (!fs.existsSync(snap)) return null;
+    const { path: snap, existing } = resolveSnapPath(sessionDir(projectRoot, sessionId), phys);
+    if (!existing) return null;
     return { phys, snapshotPath: snap, orig: fs.readFileSync(snap, 'utf8') };
   } catch { return null; }
 }
@@ -200,7 +249,7 @@ export function listWriteguard(projectRoot, { home: _home } = {}) {
       let st; try { st = fs.statSync(sdir); } catch { continue; }
       if (!st.isDirectory()) continue;
       for (const name of fs.readdirSync(sdir)) {
-        if (name === '.gitignore') continue;
+        if (name === '.gitignore' || name.endsWith('.origpath')) continue; // sidecars are identity metadata, never a listable/restorable snapshot
         try {
           const p = path.join(sdir, name);
           const fst = fs.statSync(p);

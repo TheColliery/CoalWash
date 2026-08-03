@@ -104,6 +104,69 @@ test('airbag: snapshots a guarded file ONCE per session; the 2nd write to the sa
   } finally { clean(home, proj); }
 });
 
+// grad7 ruling Root C (F3, worse than named): the OLD `snapName` keyed
+// purely on a 32-bit path hash, so `fs.existsSync(snap)` alone was trusted
+// as "already snapshotted this session" — a round-8 worker CONSTRUCTED a
+// real collision (two distinct governed files, same derived name) in 4.4M
+// brute-force tries. Fixed by (1) sha256 instead of djb2 (closes the
+// SPECIFIC brute-force attack) and (2) an identity sidecar verified before
+// ANY existing slot is trusted (closes the general "believe the name"
+// class, independent of hash strength). This test proves (2) directly —
+// simulating a collision by planting a foreign occupant at the real derived
+// slot, which is the state ANY successful hash collision would produce,
+// without needing to actually break sha256 to prove the verification fires.
+test('RED-FIRST/root-C: a foreign occupant at the derived snapshot slot (the state a hash collision produces) is NEVER trusted as this file\'s own baseline', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const trueOrig = GOV + '\nTHE TRUE ORIGINAL — this must survive, byte-exact.';
+    fs.writeFileSync(gov, trueOrig, 'utf8');
+    // Establish the REAL slot production code derives for `gov`, then wipe it
+    // to simulate "before any snapshot exists" — production computes the path,
+    // the test only ever reads it back, never precomputes the hash itself.
+    const realSnap = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.ok(realSnap && fs.existsSync(realSnap));
+    fs.rmSync(realSnap, { force: true });
+    fs.rmSync(`${realSnap}.origpath`, { force: true });
+    assert.strictEqual(fs.existsSync(realSnap), false, 'setup: slot genuinely empty now');
+
+    // Plant a FOREIGN occupant at that exact slot — content that belongs to a
+    // DIFFERENT file, with a sidecar naming that different file's own path
+    // (the collision shape: this slot's name matches `gov`'s derived name,
+    // but the content and recorded identity are someone else's).
+    const victimPath = path.join(proj, 'AGENTS.md');
+    fs.writeFileSync(realSnap, 'FOREIGN CONTENT — belongs to a different file entirely', 'utf8');
+    fs.writeFileSync(`${realSnap}.origpath`, victimPath, 'utf8');
+
+    // The real write we care about: gov's snapshot is requested again in the
+    // SAME session. Pre-fix code would see `fs.existsSync(snap)` true and
+    // return the foreign occupant's path as if it were gov's own baseline —
+    // the seatbelt would then diff gov's real edits against SOMEONE ELSE's
+    // original, comparing apples to oranges (or worse, silently "matching").
+    const snap2 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.ok(snap2, 'a fresh snapshot must still be taken for gov');
+    assert.notStrictEqual(snap2, realSnap, 'must NOT reuse the foreign-occupied slot — a disambiguated new slot is required');
+    assert.strictEqual(fs.readFileSync(snap2, 'utf8'), trueOrig, 'the NEW snapshot must hold GOV\'s own true original, never the foreign content');
+    assert.strictEqual(fs.readFileSync(`${snap2}.origpath`, 'utf8'), gov, 'the new slot\'s sidecar correctly identifies gov as its owner');
+    // The foreign occupant is left completely untouched — never overwritten,
+    // never treated as reclaimable.
+    assert.strictEqual(fs.readFileSync(realSnap, 'utf8'), 'FOREIGN CONTENT — belongs to a different file entirely', 'the foreign occupant must survive untouched');
+  } finally { clean(home, proj); }
+});
+
+test('RED-FIRST/root-C control: a REAL same-session re-write of the SAME file still hits the fast path (no spurious disambiguation)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, GOV, 'utf8');
+    const snap1 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    fs.writeFileSync(gov, GOV + '\nedited', 'utf8'); // a real subsequent edit
+    const snap2 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.strictEqual(snap2, snap1, 'the identity-verified fast path still returns the SAME slot for the SAME file — no unnecessary disambiguation');
+    assert.strictEqual(fs.readFileSync(snap1, 'utf8'), GOV, 'baseline is still the untouched first-write orig');
+  } finally { clean(home, proj); }
+});
+
 test('airbag: a source-code write / a not-yet-existing file / a non-guarded path all snapshot NOTHING', () => {
   const { home, proj } = sandbox();
   try {

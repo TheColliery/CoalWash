@@ -124,6 +124,42 @@ test('grad6 §3: frontmatterIncomplete is false on ordinary closed/none states �
   assert.strictEqual(checkFidelity(ORIG, cleanNext).pass, true, 'an ordinary clean compaction on a real closed block still passes — the abstain never fires on a certifiable census');
 });
 
+test('RED-FIRST/root-A-block-layer: a CLOSED block containing one unreadable (TAB-indented) key line must abstain — a key that line represents can be silently dropped with NO diff signal otherwise', () => {
+  // The fence is fine (state:'closed'); ONE line inside the block is TAB-indented,
+  // which frontmatterBlockParse refuses (YAML forbids tabs for indentation) and
+  // therefore never adds to `entries` in EITHER reading — so an ordinary
+  // frontmatter-key-drop diff sees the identical (missing) key on both sides and
+  // reports nothing. `incomplete` is the ONLY signal available for this class.
+  const tab = String.fromCharCode(9);
+  const orig = ['---', 'topic: routing', `${tab}pinned: true`, '---', '# Notes', 'body unchanged'].join('\n');
+  assert.strictEqual(readFrontmatter(orig).state, 'closed', 'setup sanity: the fence itself is fine, only a line inside is bad');
+  assert.ok(frontmatterBlockParse(readFrontmatter(orig).block).unreadable, 'setup sanity: the TAB line makes the block unreadable at the parser level');
+
+  // The real external edit: the TAB-indented pinned:true line is genuinely
+  // deleted (matches F1's own reproduction — an agent's direct Edit/Write,
+  // watched by writeguard's seatbelt, not applyPlan's own rewrite path).
+  const next = ['---', 'topic: routing', '---', '# Notes', 'body unchanged'].join('\n');
+
+  assert.strictEqual(inventory(orig).frontmatterIncomplete, true, 'the block-layer abstain must fire on the ORIGINAL side');
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false, 'a census that could not read every line must not certify this drop as clean');
+  assert.ok(
+    r.drops.some((d) => d.type === 'frontmatter-inventory-incomplete' && (d.value === 'orig' || d.value === 'both')),
+    `expected frontmatter-inventory-incomplete on the orig side, got ${JSON.stringify(r.drops)}`
+  );
+});
+
+test('RED-FIRST/root-A-block-layer control: the SAME shape with a fully readable block never abstains — the fix does not over-refuse', () => {
+  const orig = ['---', 'topic: routing', 'pinned: true', '---', '# Notes', 'body unchanged'].join('\n');
+  assert.strictEqual(frontmatterBlockParse(readFrontmatter(orig).block).unreadable, null, 'setup sanity: nothing unreadable here');
+  const next = ['---', 'topic: routing', '---', '# Notes', 'body unchanged'].join('\n'); // a REAL, catchable key drop
+  assert.strictEqual(inventory(orig).frontmatterIncomplete, false, 'a fully-readable block is never incomplete');
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false, 'the drop is still caught — by the ordinary frontmatter-key-drop path, not the abstain');
+  assert.ok(r.drops.some((d) => d.type === 'frontmatter-key-drop' && d.value === 'pinned'), `expected an ordinary frontmatter-key-drop, got ${JSON.stringify(r.drops)}`);
+  assert.ok(!r.drops.some((d) => d.type === 'frontmatter-inventory-incomplete'), 'no abstain fired — the readable-block path never needed one');
+});
+
 test('grad6 §3: inventoryDropKeys signals the incomplete census as its own approvable key', () => {
   const BOM = String.fromCharCode(0xfeff);
   const orig = BOM + BOM + '---\nowner: me\n---\nbody';

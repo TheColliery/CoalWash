@@ -855,6 +855,105 @@ test('grad6 §1b control: an UNRELATED rewrite (content does NOT contain the exc
   } finally { clean(proj); }
 });
 
+// grad7 ruling Root B (2026-07-31, sharpened by grad8's round-8 reproduction,
+// 2026-08-03): the merge-pair check above was byte-exact-whole-file ONLY —
+// round 8's coordinator personally reproduced this exact CRLF-normalize
+// transform as a live bypass (ok:true, source survives, TWO copies, no flag).
+// Fixed by reusing the KEEPS-GATE's whitespace-normalized survival check
+// (`textSurvives`, module scope) instead of a raw `.includes()`.
+test('RED-FIRST/root-B-crlf: a merge that CRLF-normalizes the absorbed text while merging is still caught — the bypass round 8 reproduced', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    const B = path.join(store, 'b.md');
+    const srcText = '---\r\ncritical: true\r\nnever closes\r\nSee [[keep-me]] and 42 issues.';
+    write(A, srcText);
+    write(B, 'Base B.');
+    assert.strictEqual(isPinned(A), true, 'setup sanity: an unclosed fence fails CLOSED (incapacity)');
+    // The merge NORMALIZES line endings while absorbing — a real editorial
+    // shape (an editor/agent re-saving with LF), not an attack.
+    const normalized = srcText.replace(/\r\n/g, '\n');
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: A },
+      { type: 'rewrite', path: B, content: 'Base B, merged.\n' + normalized },
+    ]));
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(fs.existsSync(A), true, 'the source must SURVIVE untouched (incapacity refusal)');
+    assert.strictEqual(fs.readFileSync(B, 'utf8'), 'Base B.', 'the destination must NOT be rewritten — the old byte-exact check let this land as ok:true with two copies');
+    assert.ok((r.flagged || []).some((f) => f.path === B && /merge-pair/.test(f.reason)), `the CRLF-normalized paired rewrite must be flagged as excluded: ${JSON.stringify(r.flagged)}`);
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/root-B-reindent: a merge that re-indents the absorbed text is still caught — pure whitespace reshaping, no content lost', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    const B = path.join(store, 'b.md');
+    const srcText = '---\ncritical: true\nnever closes\nSee [[keep-me]] and 42 issues.';
+    write(A, srcText);
+    write(B, 'Base B.');
+    // Re-indented: every line gets a leading tab, a real "absorbed as a
+    // blockquote/nested section" editorial shape.
+    const reindented = srcText.split('\n').map((l) => `\t${l}`).join('\n');
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: A },
+      { type: 'rewrite', path: B, content: 'Base B, merged.\n' + reindented },
+    ]));
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(fs.existsSync(A), true, 'the source must SURVIVE untouched (incapacity refusal)');
+    assert.strictEqual(fs.readFileSync(B, 'utf8'), 'Base B.', 'the re-indented paired rewrite must be excluded too');
+    assert.ok((r.flagged || []).some((f) => f.path === B && /merge-pair/.test(f.reason)), `expected a merge-pair flag: ${JSON.stringify(r.flagged)}`);
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/root-B-reindent control: an UNRELATED re-indented rewrite (no shared content) still applies normally — the normalized check does not over-refuse', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    const B = path.join(store, 'b.md');
+    const srcText = '---\ncritical: true\nnever closes\nSee [[keep-me]] and 42 issues.';
+    write(A, srcText);
+    write(B, 'Base B.');
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: A },
+      { type: 'rewrite', path: B, content: '\tBase B, re-indented but completely unrelated to A.' },
+    ]));
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(B, 'utf8'), '\tBase B, re-indented but completely unrelated to A.', 'an unrelated re-indented rewrite must not be swept up');
+  } finally { clean(proj); }
+});
+
+// HONEST RESIDUAL, named not silently claimed closed: a transform that
+// genuinely REMOVES content (not just reshapes whitespace) cannot be caught
+// by any substring-survival check, normalized or not — this is the fix's
+// stated limit (see textSurvives's own header comment). Round 8 reproduced
+// frontmatter-strip-before-absorb and section-reorder as bypasses; this test
+// proves — not assumes — that the whitespace-normalized fix does NOT close
+// them, so nobody later claims it silently does.
+test('KNOWN RESIDUAL, not fixed by this round: a merge that drops the absorbed frontmatter block still bypasses the merge-pair guard', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    const B = path.join(store, 'b.md');
+    const srcText = '---\ncritical: true\nnever closes\nSee [[keep-me]] and 42 issues.';
+    write(A, srcText);
+    write(B, 'Base B.');
+    // Absorbs only the BODY, genuinely drops the frontmatter block — content
+    // loss, not whitespace reshaping; no substring check of any shape can
+    // tell this apart from "legitimately never included it".
+    const bodyOnly = 'See [[keep-me]] and 42 issues.';
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: A },
+      { type: 'rewrite', path: B, content: 'Base B, merged.\n' + bodyOnly },
+    ]));
+    // Documents the CURRENT (still-open) behavior — a content-shape gap this
+    // fix wave named but did not close (see the grad7 ruling's own preferred
+    // fix: a real merge-relationship field in the plan schema).
+    assert.strictEqual(r.ok, true, 'residual: this transform still bypasses the guard (ok:true) — content loss, not whitespace, needs a schema-level fix per the ruling');
+  } finally { clean(proj); }
+});
+
+
 // grad6 F1 (inspect findings-back on 7d57d4c): recordBinItem's own retry can
 // still exhaust under real contention (or a genuinely-held lock) and return
 // null — the caller used to discard that return outright, so the mutation

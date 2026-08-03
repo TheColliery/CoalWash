@@ -92,8 +92,18 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
     // call shape, so the safe direction is to never let re-affirming silently
     // weaken protection; explicitly clearing an anchor is a different, not-yet-
     // built feature, not this fix's job.
-    const mergedAnchor = (typeof anchor === 'string' && anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);
-    const mergedAnchorFile = (typeof anchorFile === 'string' && anchorFile) ? anchorFile : (prior && typeof prior.anchorFile === 'string' ? prior.anchorFile : undefined);
+    // grad7 ruling Root E / grad8 F4: the ORIGINAL grad6 fix checked truthiness
+    // (`anchor` alone), which a whitespace-only string satisfies ('' is falsy,
+    // ' ' is not) — a re-affirm call passing anchor:' ' silently OVERWROTE a
+    // real 15+ char protected span with a single space, while the KEEPS-GATE
+    // downstream (apply.mjs) still reads the entry as "enforced" (anchor is a
+    // non-empty string) and its own survival check (`content.includes(' ')`)
+    // is trivially true for nearly any rewrite — the keep stops protecting
+    // anything without ever LOOKING broken. A real new value must carry real
+    // content, not just pass `typeof === 'string' && truthy`.
+    const hasRealContent = (v) => typeof v === 'string' && v.trim().length > 0;
+    const mergedAnchor = hasRealContent(anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);
+    const mergedAnchorFile = hasRealContent(anchorFile) ? anchorFile : (prior && typeof prior.anchorFile === 'string' ? prior.anchorFile : undefined);
     keeps.push({
       target,
       reason: String(reason || ''),

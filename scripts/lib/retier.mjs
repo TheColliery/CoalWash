@@ -903,6 +903,11 @@ export function runRetier({
         ok: false,
         rolledBack: failed === 0 ? true : 'partial',
         error: `top-anchor survival probe THREW (${e.message}) — run rolled back${failed ? ` (${failed} restore failure(s) — check snapshot ${r.snapshotDir})` : ''}`,
+        // grad7 ruling Root D: applyPlan's own per-file refusals (e.g. a
+        // bin-stash failure) describe what happened during the now-rolled-
+        // back apply — real diagnostic context, not something the rollback
+        // erases. Both rollback-failure returns below used to drop it.
+        flagged: r.flagged || [],
       };
     }
     if (misses.length) {
@@ -916,6 +921,7 @@ export function runRetier({
         rolledBack: failed === 0 ? true : 'partial',
         anchorMisses: misses,
         error: `top-anchor survival probe FAILED (${misses.length} of ${anchors.length} anchors unresolved) — run rolled back${failed ? ` (${failed} restore failure(s) — check snapshot ${r.snapshotDir})` : ''}`,
+        flagged: r.flagged || [], // grad7 ruling Root D — see the sibling throw-path return above
       };
     }
 
@@ -939,6 +945,18 @@ export function runRetier({
       // main agent-driven path already sees it (method.md prints the whole
       // result JSON). Threaded through so runRetierReport can render it.
       flagged: r.flagged || [],
+      // grad7 ruling Root D: three SIBLINGS of `flagged` on applyPlan's own
+      // return object (apply.mjs:1235) were dropped the exact same way —
+      // the WAVE-16 fix threaded ONE field off a multi-field object and
+      // never checked whether the object had others. `deadLinks`/
+      // `deadLinkLine` mirror receipt.mjs's own field (the main apply path
+      // already renders `deadLinkLine`); `binConflicts` is threaded here
+      // for data completeness even though NO consumer in this codebase
+      // renders it today (receipt.mjs doesn't either — a wider, separate
+      // gap, reported not fixed here; see the room MEMORY.md entry).
+      deadLinks: r.deadLinks || [],
+      deadLinkLine: r.deadLinkLine || null,
+      binConflicts: r.binConflicts || [],
       stores: over.map(({ st, p }) => ({
         label: st.label,
         movedLines: p.hop1.movedLines.length,
@@ -957,7 +975,15 @@ export function runRetierReport(res) {
   if (!res) return '[CoalWash] RE-TIER: no result';
   if (res.refused) return `[CoalWash] RE-TIER refused: ${res.reason}`;
   if (res.deferred) return `[CoalWash] RE-TIER deferred: ${res.error || 'lock held'} — nothing touched`;
-  if (!res.ok) return `[CoalWash] RE-TIER failed: ${res.error}${res.rolledBack ? ` (rolled back: ${res.rolledBack})` : ''}`;
+  if (!res.ok) {
+    // grad7 ruling Root D: `flagged` describes the now-rolled-back apply's
+    // OWN per-file refusals (e.g. a bin-stash failure) — real diagnostic
+    // context for a failed run, not something the rollback should also
+    // erase from the operator's view.
+    const base = `[CoalWash] RE-TIER failed: ${res.error}${res.rolledBack ? ` (rolled back: ${res.rolledBack})` : ''}`;
+    const flaggedLines = (res.flagged || []).map((f) => `\n  FLAGGED ${f.path}: ${f.reason}`).join('');
+    return base + flaggedLines;
+  }
   const lines = [];
   const moved = res.stores.reduce((n, s) => n + s.movedLines, 0);
   const arch = res.stores.reduce((n, s) => n + s.topicsArchived, 0);
@@ -971,5 +997,10 @@ export function runRetierReport(res) {
   // same reason KEPT is rendered above (a per-file exclusion the operator
   // needs to see), never silently dropped now that it is threaded through.
   for (const f of res.flagged || []) lines.push(`  FLAGGED ${f.path}: ${f.reason}`);
+  // grad7 ruling Root D: deadLinkLine is applyPlan's own one-line advisory
+  // (already formatted — see apply.mjs's deadLinkLine), mirroring exactly
+  // how receipt.mjs already renders it on the main apply path. It was
+  // threaded onto the return object above but never reached this renderer.
+  if (res.deadLinkLine) lines.push(`  ${res.deadLinkLine}`);
   return lines.join('\n');
 }

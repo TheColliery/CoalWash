@@ -163,6 +163,29 @@ function removedLines(origText, newText) {
   return String(origText).split(/\r?\n/).filter((l) => l.trim() && !next.has(l));
 }
 
+// SHARED whitespace-normalized substring survival — grad7 ruling Root B: the
+// merge-pair content-containment check (below, in applyPlan) reused this
+// technique via a comment ("reusing the KEEPS-GATE's own technique") but the
+// KEEPS-GATE's own `norm` was a LOCAL const the merge-pair block never saw —
+// the author believed they had copied it; two divergent copies of one
+// intended helper is the exact twin-drift shape this file's own case-fold
+// primitives were already fixed for (see config-load.mjs). Hoisted to module
+// scope so there is now ONE function, not a belief that two matched.
+// Collapses all whitespace runs (incl. line-ending differences: CRLF vs LF,
+// re-indentation) to a single space — survives the transforms round-8 named
+// (CRLF-normalize, re-indent). Does NOT survive a transform that removes
+// content outright (frontmatter-strip-before-absorb, section-reorder that
+// drops a section) — those are content changes, not whitespace reshaping,
+// and no substring check of any shape can distinguish "reshaped" from
+// "shortened" without a real diff; named as the fix's honest limit, not
+// silently claimed closed.
+const normWhitespace = (s) => String(s).replace(/\s+/g, ' ').trim();
+function textSurvives(needle, haystacks) {
+  if (haystacks.some((t) => t.includes(needle))) return true;
+  const normNeedle = normWhitespace(needle);
+  return haystacks.some((t) => normWhitespace(t).includes(normNeedle));
+}
+
 // ---------------------------------------------------------------------------
 // wikilink-orphan advisory (post-apply, NEVER a block) — the git
 // filter-branch cross-reference lesson: RE-TIER's unreferencedTopics() keeps
@@ -836,11 +859,13 @@ export function applyPlan(plan, opts = {}) {
     // but src itself survives (refused, not deleted) — two copies of the same
     // text, reported ok:true, on a tool whose product is de-duplication.
     // Detect the pairing the only way available without a schema change,
-    // reusing the KEEPS-GATE's own technique a few lines below (a substring
-    // survival check): a rewrite whose CONTENT still contains an excluded
-    // delete's ORIGINAL bytes is presumed to be that delete's merge target,
-    // and is excluded in the SAME pass — scoped to just the matched pair,
-    // never the whole plan (every other per-file gate in this function
+    // reusing the KEEPS-GATE's shared `textSurvives` helper (module scope,
+    // above): a rewrite whose CONTENT still contains an excluded delete's
+    // ORIGINAL bytes — exact, or whitespace-normalized (survives CRLF
+    // normalization and re-indentation; see textSurvives's own header for
+    // what it does NOT survive) — is presumed to be that delete's merge
+    // target, and is excluded in the SAME pass — scoped to just the matched
+    // pair, never the whole plan (every other per-file gate in this function
     // already fails this way; a merge is not special-cased to fail harder).
     if (unprovable.size) {
       const excludedDeleteTexts = [...unprovable]
@@ -851,7 +876,7 @@ export function applyPlan(plan, opts = {}) {
         const pairedOut = new Set();
         for (const a of actionable) {
           if (a.type === 'delete' || typeof a.content !== 'string') continue;
-          if (excludedDeleteTexts.some((t) => a.content.includes(t))) {
+          if (excludedDeleteTexts.some((t) => textSurvives(t, [a.content]))) {
             pairedOut.add(a);
             flagged.push({
               path: a.phys,
@@ -881,7 +906,6 @@ export function applyPlan(plan, opts = {}) {
     // zero behavior change for existing stores.
     const txDir = opts.txDir || txDirFor(projectRoot);
     {
-      const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
       // #36 demand 10: this compare decides whether a pinned keep BINDS the action
       // about to delete or rewrite the file it names, and it used to fold case on
       // `process.platform === 'win32'` — the exact defect the #36 pair retires
@@ -921,8 +945,10 @@ export function applyPlan(plan, opts = {}) {
       // `actionable`, so this terminates in <= actions.length passes.
       while (keeps.length) {
         const postTexts = actionable.filter((a) => a.type !== 'delete').map((a) => a.content);
-        const normTexts = postTexts.map(norm);
-        const survives = (anchor) => postTexts.some((t) => t.includes(anchor)) || normTexts.some((t) => t.includes(norm(anchor)));
+        // grad7 ruling Root B/twin-drift: the module-level `textSurvives` above
+        // is the SAME helper the merge-pair check now calls — one function, not
+        // a belief that two hand-copies matched.
+        const survives = (anchor) => textSurvives(anchor, postTexts);
         const excluded = new Set();
         for (const k of keeps) {
           const kf = k.anchorFile;

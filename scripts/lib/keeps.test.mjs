@@ -216,3 +216,30 @@ test('recordKeep: a re-affirm that DOES supply a new anchor overrides (an intent
     assert.strictEqual(entry.anchorFile, 'C:/store/f2.md');
   } finally { clean(proj); }
 });
+
+// grad7 ruling Root E / grad8 F4: the truthiness check ("anchor" alone) a
+// whitespace-only string satisfies -- silently degrading a real, enforced
+// keep to a single space with NO error and no visible sign anything broke
+// (the KEEPS-GATE still reads anchor as present, so the entry still LOOKS
+// enforced right up until it protects nothing).
+test('RED-FIRST/root-E: a re-affirm passing a WHITESPACE-ONLY anchor does NOT overwrite the prior real anchor — real content is required to count as an intentional update', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first adjudication', anchor: 'the exact protected span, fifteen-plus real characters', anchorFile: 'C:/store/f.md' });
+    const r = recordKeep(proj, { target: 'f.md:clause', reason: 'accidental blank re-affirm', anchor: ' ', anchorFile: 'C:/store/f.md' });
+    assert.strictEqual(r, true, 'the write itself still succeeds (this is a merge decision, not a failure)');
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+    assert.strictEqual(entry.anchor, 'the exact protected span, fifteen-plus real characters', 'a whitespace-only anchor must NOT replace the prior real one');
+    assert.strictEqual(entry.reason, 'accidental blank re-affirm', 'non-anchor fields still update normally — only the content-empty anchor is refused');
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/root-E control: a re-affirm with a REAL (non-whitespace) new anchor still overrides normally — the fix does not over-refuse legitimate updates', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span', anchorFile: 'C:/store/f.md' });
+    recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: '  new span with real content  ', anchorFile: 'C:/store/f2.md' });
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+    assert.strictEqual(entry.anchor, '  new span with real content  ', 'a real (surrounding-whitespace-only, not content-only) anchor still overrides — only a PURELY whitespace value is refused');
+  } finally { clean(proj); }
+});

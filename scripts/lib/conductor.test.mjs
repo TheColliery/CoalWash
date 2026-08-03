@@ -1463,7 +1463,11 @@ test('0p airbag: PreToolUse Edit on a class-B file snapshots it once, silently (
     const r = run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 'sess-1', tool_input: { file_path: gov } });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'the airbag is write-only — nothing on stdout');
-    const snaps = fs.readdirSync(path.join(wgDir(proj), 'sess-1')).filter((n) => n !== '.gitignore');
+    // grad7 ruling Root C: a real snapshot is now accompanied by an identity
+    // sidecar (`<name>.origpath`, see writeguard.mjs) — a real file on disk,
+    // by design, but never a second SNAPSHOT; filtered here the same way
+    // production's own listWriteguard() filters it.
+    const snaps = fs.readdirSync(path.join(wgDir(proj), 'sess-1')).filter((n) => n !== '.gitignore' && !n.endsWith('.origpath'));
     assert.strictEqual(snaps.length, 1, 'one snapshot taken');
     assert.strictEqual(fs.readFileSync(path.join(wgDir(proj), 'sess-1', snaps[0]), 'utf8'), GOV_BODY, 'byte-exact orig');
   } finally { clean(home, proj); }

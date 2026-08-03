@@ -791,15 +791,27 @@ function frontmatterCensus(text) {
   // STRICT ONLY — the inventory keeps exactly the key SHAPE it has always kept.
   // The loose entries exist for the pin gate, which needs a floor, not a census.
   //
-  // AND IT DELIBERATELY IGNORES `unreadable`, which is the opposite of what the
-  // destroying consumer does with it — same primitive, two consumers, OPPOSITE
-  // safe directions. `isPinned` refuses an unreadable block because its
-  // permissive answer DELETES a file; an inventory's permissive answer is
-  // reporting FEWER drops, so the safe move here is to keep every key we did
-  // manage to read. Do not "make these consistent".
+  // TWO DIFFERENT QUESTIONS, both answered, never conflated (round-8 finding:
+  // an earlier version of this comment answered only the first and called the
+  // second "deliberate," which let a reader cite it to argue away a real bug):
+  // (1) which keys do we KEEP? every one `frontmatterBlockParse` could read,
+  //     same permissive direction as ever — `isPinned` refuses an unreadable
+  //     block because its permissive answer DELETES a file; an inventory's
+  //     permissive answer only under-reports drops, so keeping what we could
+  //     read is still the safe move here, unchanged.
+  // (2) can we CERTIFY that set is the WHOLE set? `unreadable` answers that
+  //     one, and this function now reports it (`incomplete: !!parsed.unreadable`)
+  //     instead of hardcoding `false` — a block containing even one unreadable
+  //     line (a bad TAB indent, an ambiguous column, a stray non-ASCII top-level
+  //     key) means the entries above are a LOWER bound, not a census, and the
+  //     `frontmatterIncomplete` flag downstream (`inventory`, `checkFidelity`)
+  //     exists precisely to stop this function's own permissiveness from being
+  //     read as completeness. "Keep what we can read" and "claim we read
+  //     everything" are not the same sentence — do not re-merge them.
+  const parsed = frontmatterBlockParse(fm.block);
   return {
-    keys: new Set(frontmatterBlockParse(fm.block).entries.filter((e) => e.strict && e.top).map((e) => e.key)),
-    incomplete: false,
+    keys: new Set(parsed.entries.filter((e) => e.strict && e.top).map((e) => e.key)),
+    incomplete: !!parsed.unreadable,
   };
 }
 export function frontmatterKeys(text) {

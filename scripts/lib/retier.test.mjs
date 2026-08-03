@@ -243,6 +243,28 @@ test('grad6 WAVE-16 finding 2: a bin-stash failure on the RE-TIER path is now th
   } finally { clean(home, proj); }
 });
 
+// grad7 ruling Root D: `flagged` was the ONE field WAVE-16 threaded off
+// applyPlan's real multi-field success return (apply.mjs:1235 —
+// flagged/deadLinks/deadLinkLine/binConflicts). Three siblings were still
+// silently dropped on the exact same object. This asserts the OBJECT SHAPE
+// itself — the property existing (even as an empty array/null) is what
+// distinguishes "threaded, currently empty" from "dropped entirely", which
+// is the precise bug: pre-fix these keys are `undefined` (absent), not `[]`.
+test('RED-FIRST/root-D-success-shape: runRetier\'s success return exposes ALL of applyPlan\'s sibling fields, not just flagged', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    seedMainStore(home, proj);
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(Object.prototype.hasOwnProperty.call(res, 'deadLinks'), 'deadLinks must be threaded (pre-fix: property absent entirely, not just empty)');
+    assert.ok(Array.isArray(res.deadLinks), `deadLinks must be an array: ${JSON.stringify(res.deadLinks)}`);
+    assert.ok(Object.prototype.hasOwnProperty.call(res, 'deadLinkLine'), 'deadLinkLine must be threaded');
+    assert.ok(Object.prototype.hasOwnProperty.call(res, 'binConflicts'), 'binConflicts must be threaded');
+    assert.ok(Array.isArray(res.binConflicts), `binConflicts must be an array: ${JSON.stringify(res.binConflicts)}`);
+  } finally { clean(home, proj); }
+});
+
 // ---------------------------------------------------------------------------
 // 2b. WEAR-CAMPAIGN ROUND 1 regression traps (#2 classify · #3 index-off strand · #4 pin)
 // ---------------------------------------------------------------------------
@@ -848,6 +870,37 @@ test('BREAK-3h genuine miss (index ON): a probe anchor surviving in NEITHER a ke
     assert.ok(Array.isArray(res.anchorMisses) && res.anchorMisses.some((m) => m.token === 'split anchor'), `the real miss is the multi-word "split anchor" (got ${JSON.stringify((res.anchorMisses || []).map((m) => m.token))})`);
     assert.strictEqual(fs.readFileSync(path.join(dir, 'topic-a.md'), 'utf8'), aOrig, 'rollback restores topic-a byte-exact');
     assert.strictEqual(fs.readFileSync(path.join(dir, 'topic-b.md'), 'utf8'), bOrig, 'rollback restores topic-b byte-exact');
+  } finally { clean(home, proj); }
+});
+
+// grad7 ruling Root D (2026-07-31, sharpened by grad8's round-8 relay,
+// 2026-08-03): the WAVE-16 fix threaded applyPlan's `flagged[]` onto
+// runRetier's SUCCESS return only — the object's OWN two rollback-failure
+// returns (the anchor-probe-throws branch and the anchor-miss branch above)
+// dropped it just the same, even though `r` (the successful applyPlan call
+// that precedes both) already carries real per-file refusal data describing
+// what happened during the now-undone apply. Reusing BREAK-3h's exact
+// genuine-miss fixture (the rollback path this test needs is hard to force
+// any other way) — this test only ADDS the flagged-shape assertion.
+test('RED-FIRST/root-D: a rollback-failure return still exposes `flagged` — the same object shape WAVE-16 already granted the success path', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex());
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index.\n');
+    let a = '# topicA\n\n';
+    for (let i = 0; i < 20; i++) a += `- [[a${i}]] co-anchor\n- [[a${i}]] again\n`;
+    a += '- [[split anchor]] here\n- [[split anchor]] again\n';
+    write(path.join(dir, 'topic-a.md'), a);
+    let b = '# topicB\n\n';
+    for (let i = 0; i < 20; i++) b += `- [[b${i}]] co-anchor\n- [[b${i}]] again\n`;
+    b += '- [[split anchor]] once\n';
+    write(path.join(dir, 'topic-b.md'), b);
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: true }), now });
+    assert.strictEqual(res.ok, false, 'setup sanity: the same genuine top-anchor miss as BREAK-3h');
+    assert.ok(res.rolledBack, runRetierReport(res));
+    assert.ok(Array.isArray(res.flagged), `a rollback-failure return must still expose flagged (even if empty) — the object shape WAVE-16 already granted the success path; got ${JSON.stringify(res.flagged)}`);
   } finally { clean(home, proj); }
 });
 
