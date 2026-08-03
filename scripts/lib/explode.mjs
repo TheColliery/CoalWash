@@ -1574,6 +1574,13 @@ function existsPopulated(p) {
 //       does not collapse them — `collidesWithSource`'s own comment already says realpath "is blind to a
 //       hardlink"). A hardlinked alias of the true original, or the original renamed/moved on the SAME
 //       volume, confirms via dev+ino even though its realpath string differs from the row's.
+//       WHAT THIS LEG OPENS, not just what it closes (INSPECT MED-LOW, unnamed before this): dev+ino
+//       is recorded at SNAPSHOT time and compared against a stat taken at RESTORE time — an inode
+//       REUSED between those two moments grants ownership to a genuinely different file. Bounded, not
+//       ignored: under F2's own threat model the attacker can forge a row outright, so this adds
+//       nothing there; without store write they would additionally need inode-reassignment control
+//       PLUS the row's exact values. Not a blocker — but a residual worth naming rather than a leg
+//       worth dropping (dropping it reopens the F3 hardlink/alias case this fix exists to close).
 // Both are recomputed fresh at restore time from the CALLER's declared `original` — the manifest row
 // carries its OWN canonical + dev/ino, captured once at snapshot time — and a match on EITHER mechanism
 // confirms. Neither can MERGE two genuinely different originals (rung-2 F3 rail 1): two distinct real
@@ -1591,27 +1598,48 @@ function existsPopulated(p) {
 // signal — no mechanism here, or plausible without a rename/move-tracking log this file does not keep,
 // can recover it. Named, not built: out of scope for "canonicalize the compare."
 //
-// STEP 2 (F2, HIGH) — NOT CLOSED, AND NOT PATCHABLE AT THIS LAYER: `manifest.jsonl` is a single shared,
-// unauthenticated append-only file — ANY caller with write access to `snapshotDir` (the SAME trust level
-// already required to enumerate it) can `appendFileSync` a row claiming ANY `original` for ANY real
-// hash, and this check — or any check built from what the manifest itself records — cannot distinguish
-// that forged row from an honest second caller's legitimate dedup row (MEASURED: `scratchpad/
-// cw-lab-rung2-r2/w1/attack3-manifest-path.mjs` §3e, a self-appended forged row restores with
-// `ok:true` and the victim's real content). Closing this needs either a WRITER-IDENTITY / signing scheme
-// this engine has never had (no caller/session/tenant identity is threaded through any function in this
-// file), or a STORE-FORMAT change (per-tenant manifests, each writable only by its own tenant via OS
-// permissions — which then needs a caller-supplied, verified tenant identity to know which one to trust,
-// the same missing infrastructure). The only presently-available closure is DEPLOYMENT-side: per-tenant
-// isolated `snapshotDir`s, so no shared manifest for a co-tenant to write into exists in the first place —
-// the same defense-in-depth this room's own lab already named. This is a design decision, not a bug fix;
-// it returns to main rather than being decided here.
+// STEP 2 (F2, HIGH) — THE STORE'S THREAT MODEL, STATED AS A BOUNDARY, NOT A FOOTNOTE. A reviewer
+// tried to refute "not patchable at this layer" and could not: it enumerated SEVEN candidate fixes at
+// this layer and killed all seven with reasons (a disk cross-check — the attacker just declares their
+// own real file · blob-hash-equals-current-content — defeats the product, a restore exists BECAUSE the
+// original is gone · file uid/ACL — no per-row provenance, meaningless on win32, a shared store shares
+// the file · a hash-chained/append-only manifest — the chain is computable from PUBLIC data, only a
+// KEYED MAC resists forgery · blob metadata — the blob is genuine and victim-written, it says nothing
+// about who may restore it · refusing ambiguous same-sha rows — breaks the legitimate dedup case
+// (rot-canary self-catch: NOT F3 rail-1, which tests non-merge of DIFFERENT files — the real dedup
+// control is `attack3-manifest-path.mjs` §3d, two distinct originals sharing one deduped blob, both
+// restoring correctly) and the attacker has write access anyway · per-tenant isolation — this IS the
+// deployment-side answer below, not a code fix). The gap is AUTHENTICATION, and authentication needs a
+// secret or a trust boundary this store does not have.
 //
-// BOUND, stated per the lab's own framing: this closes the CARETAKER-DISCIPLINE failure mode (the
-// realistic one the lab called "arguably worse than an attacker scenario") and forces a determined
-// attacker's read of the manifest into an EXPLICIT, code-visible claim instead of a silent enumeration —
-// it is not a substitute for per-tenant isolated `snapshotDir`s, which remains the caller/deployment-side
-// defense in depth this same finding also names, AND remains the only closure for F2 above. Both layers
-// hold at once, by design.
+// THE BOUNDARY, stated plainly for whoever is reading this to understand what the store actually
+// promises:
+//   1. THE STORE IS TRUSTED-TENANT-ONLY. Any principal with write access to `snapshotDir`'s manifest
+//      can forge a row claiming ownership of any blob in that store (MEASURED: `scratchpad/
+//      cw-lab-rung2-r2/w1/attack3-manifest-path.mjs` §3e, AND re-verified against a SCHEMA-AWARE
+//      forgery that also fabricates matching `originalCanonical`/`originalDev`/`originalIno` — both
+//      leak the victim's content, `ok:true`). This is not a bug awaiting a fix; it is the boundary.
+//   2. THE MITIGATION IS ISOLATION, and it is the OPERATOR's to arrange, not the engine's to enforce —
+//      a `snapshotDir` per trust domain, so no shared manifest for a co-tenant to write into exists in
+//      the first place.
+//   3. WHAT OWNERSHIP CHECKING DOES BUY, so this is never read as "the check is worthless": it closes
+//      the CARETAKER-DISCIPLINE failure mode — the realistic one, and the one the lab actually
+//      reproduced first (an ordinary, non-adversarial "recover everything visible in a shared store"
+//      script) — and it forces a DETERMINED attacker's read of the manifest into an EXPLICIT,
+//      code-visible forged claim instead of a silent, undetectable enumeration. Both layers (the check
+//      here, and per-tenant isolation) hold at once, by design; neither substitutes for the other.
+//
+// REJECTED, so it is on record as weighed rather than invented after the fact: WRITER-IDENTITY /
+// signing infrastructure for manifest rows. This is real key-management infrastructure this codebase
+// has never had (no caller/session/tenant identity is threaded through any function in this file),
+// built for a threat that isolation already answers — over-build.
+//
+// LANDING PRECONDITION: this engine is UNWIRED in the shipped `plugin/` dist today (see the
+// UNWIRED_ENGINE mechanism in `scripts/build-plugin.mjs`), which is the only reason F2 is a landing
+// precondition rather than an already-shipped incident. THIS ENGINE MUST NOT BE WIRED INTO DIST until
+// EITHER per-tenant manifests exist (closing F2 in code) OR the three-point boundary above is in the
+// SHIPPED `SECURITY.md` text (closing F2 by disclosure) — the wiring decision is where that choice
+// gets made, not here.
 //
 // COST, inheriting a PRE-EXISTING accepted precedent, not a new one: a restore now ALWAYS reads the whole
 // manifest (was: only when `snapshotDir` given) — O(M) in its row count, the same order as
@@ -1683,9 +1711,11 @@ export function restoreFromSnapshot(ref, toPath, opts) {
     // a plain copyFileSync both overwrites an existing file AND follows a symlink planted at the
     // destination — so anyone able to write toPath's directory could aim the restored bytes
     // somewhere else, on the undo net itself. EXCL makes the temp a fresh inode or nothing.
-    // A stale same-pid temp from a crash now fails the restore loudly (EEXIST -> the catch below)
-    // instead of being silently reused; that matches the manifest writer's documented choice NOT to
-    // unlink-then-create, which would reopen the very race EXCL closes.
+    // A stale temp at THIS EXACT random suffix (vanishingly unlikely, but not the point) fails the
+    // restore loudly (EEXIST -> the catch below) instead of being silently reused; that matches the
+    // manifest writer's documented choice NOT to unlink-then-create, which would reopen the very race
+    // EXCL closes. (rung-2 findings-back item 3: this was the 5th of 5 "per-pid"/"same-pid" comments
+    // in the file, the one the previous sweep of 4 missed — the pattern was the finding, not the line.)
     fs.copyFileSync(blob, tmpPath, fs.constants.COPYFILE_EXCL);
     tmpOwned = tmpPath; // EXCL returned → this inode is ours → the catch may reap it
     const got = sha256File(tmpPath);
