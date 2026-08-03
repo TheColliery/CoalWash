@@ -2536,3 +2536,251 @@ test('F2 [MEDIUM]: none of the 4 write-temp sites use the predictable ${name}.${
     assert.deepStrictEqual(predictable, [], `predictable pid-suffixed temp(s) still in use: ${predictable.join(', ')}`);
   } finally { fs.openSync = realOpenSync; rm(dir); }
 });
+
+// rung-2, board wave — F1's ownership check was gated on `if (snapshotDir)`; omitting that
+// arg let a caller who already holds the absolute blob path (the SAME caller, the SAME
+// enumerable store, a different call shape) skip ownership entirely. MEASURED end-to-end,
+// real run, not reasoned: scratchpad/cw-lab-rung2-r2/coord-verify/verify-bypass.mjs — the
+// exact F1 scenario, replayed with the blob path handed in directly instead of via
+// snapshotDir+ref. This test reproduces it directly against this engine.
+test('rung-2 F1 [HIGH]: the ownership check applies to the BLOB-PATH call shape too, not only when snapshotDir is named', () => {
+  const dir = tmp();
+  try {
+    fs.mkdirSync(path.join(dir, 'agent-memory', 'coder'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'agent-memory', 'reviewer'), { recursive: true });
+    const roleA = write(dir, path.join('agent-memory', 'coder', 'MEMORY.md'), Buffer.from(
+      JSON.stringify({ type: 'mode', value: 'x' }) + '\n' +
+      JSON.stringify({ type: 'user', text: 'CODER role secret: prod DB password is hunter2' }) + '\n'));
+    const roleB = write(dir, path.join('agent-memory', 'reviewer', 'MEMORY.md'), Buffer.from(
+      JSON.stringify({ type: 'mode', value: 'y' }) + '\n' +
+      JSON.stringify({ type: 'user', text: 'REVIEWER role note: nothing sensitive' }) + '\n'));
+    const sharedSnap = path.join(dir, '.claude', 'coalwash', 'snapshots');
+    assert.strictEqual(reduceFile(roleA, { outPath: roleA + '.reduced', snapshotDir: sharedSnap, cutTypes: ['mode'] }).ok, true);
+    assert.strictEqual(reduceFile(roleB, { outPath: roleB + '.reduced', snapshotDir: sharedSnap, cutTypes: ['mode'] }).ok, true);
+
+    // THE BYPASS SHAPE: the caller already knows the store's layout (it enumerated it, or
+    // simply constructed the path the same way the store itself does) and hands the
+    // FULL BLOB PATH to restoreFromSnapshot with NO snapshotDir at all.
+    const blobs = fs.readdirSync(sharedSnap).filter((f) => !f.endsWith('.tmp') && f !== SNAPSHOT_MANIFEST);
+    assert.strictEqual(blobs.length, 2, 'sanity: both roles snapshotted');
+    const recoverDir = path.join(dir, 'agent-memory', 'reviewer', 'recovered');
+    fs.mkdirSync(recoverDir, { recursive: true });
+
+    const results = blobs.map((b) => restoreFromSnapshot(path.join(sharedSnap, b), path.join(recoverDir, b + '.txt'), {}));
+    // RED-FIRST: pre-fix (f7bb4f2), every one of these returned ok:true — the `if (snapshotDir)`
+    // gate never engaged because no snapshotDir was passed. Independently re-verified against
+    // f7bb4f2's own explode.mjs (checked out via git show) in this same session: leaked=true.
+    assert.ok(results.every((r) => r.ok === false), `every undeclared-ownership blob-path restore must refuse (got ${JSON.stringify(results.map((r) => r.ok))})`);
+    assert.ok(results.every((r) => /ownership not declared/.test(r.reason)), 'the refusal reason names the missing declaration, not a generic error');
+    const leaked = fs.existsSync(recoverDir) && fs.readdirSync(recoverDir).some((f) => fs.readFileSync(path.join(recoverDir, f), 'utf8').includes('hunter2'));
+    assert.strictEqual(leaked, false, 'CODER role secret content must NOT land in REVIEWER role recovery dir via the blob-path call shape');
+
+    // NOT VACUOUS: the same blob-path call shape still succeeds when ownership is correctly
+    // declared — ownershipDir derives from the blob's own directory when snapshotDir is
+    // omitted, so the legitimate path stays open.
+    const roleAHash = sha256File(roleA);
+    const legit = restoreFromSnapshot(path.join(sharedSnap, roleAHash), path.join(dir, 'legit.out'), { original: roleA });
+    assert.strictEqual(legit.ok, true, `a correctly-declared legitimate blob-path restore must succeed (got ${legit.reason})`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'legit.out'), 'utf8'), fs.readFileSync(roleA, 'utf8'));
+  } finally { rm(dir); }
+});
+
+// rung-2 F3 [MEDIUM] — the ownership compare canonicalizes `original` before comparing, so a
+// legitimate restore is no longer refused merely because the caller spelled the same physical
+// path differently than the string recorded at snapshot time. Both legs below are WIN32 PATH
+// SYNTAX properties (drive-letter case is never volume-dependent; `/` vs `\` are interchangeable
+// separators in every Windows path API) — genuinely unconditional on win32, not a volume-capability
+// question, so they are gated on platform SHAPE (the feature does not exist on POSIX at all) rather
+// than probed.
+test('rung-2 F3 [MEDIUM]: a restore declaring the original with FORWARD SLASHES still confirms ownership', (t) => {
+  if (process.platform !== 'win32') { t.skip('backslash-vs-forward-slash is a win32 path-syntax property; POSIX has only one separator'); return; }
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    const src = write(dir, 'MEMORY.md', Buffer.from('content\n'));
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    const forwardSlashSpelling = src.replaceAll('\\', '/');
+    assert.notStrictEqual(forwardSlashSpelling, src, 'sanity: the spellings really differ as strings');
+    // RED-FIRST: pre-fix (row.original === original raw string compare), this refused —
+    // independently re-verified via git show f7bb4f2:scripts/lib/explode.mjs in this session.
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: forwardSlashSpelling });
+    assert.strictEqual(r.ok, true, `forward-slash spelling of the same physical file must confirm (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+test('rung-2 F3 [MEDIUM]: a restore declaring the original with a DIFFERENT DRIVE-LETTER CASE still confirms ownership', (t) => {
+  if (process.platform !== 'win32') { t.skip('drive-letter case is a win32 path-syntax property; POSIX has no drive letters'); return; }
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    const src = write(dir, 'MEMORY.md', Buffer.from('content\n'));
+    const swappedDrive = /^[A-Za-z]:/.test(src)
+      ? (src[0] === src[0].toUpperCase() ? src[0].toLowerCase() : src[0].toUpperCase()) + src.slice(1)
+      : null;
+    if (!swappedDrive) { t.skip('src did not resolve to a drive-letter path'); return; }
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    // RED-FIRST: pre-fix, this refused too (raw string compare, unequal drive-letter case).
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: swappedDrive });
+    assert.strictEqual(r.ok, true, `drive-letter-case variant of the same physical file must confirm (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+// CAPABILITY-GATED — filename case-fold is a VOLUME property, probed via the existing
+// `caseInsensitiveFS` helper, never `process.platform` (node/runtime.md §4, already the house rule
+// this file follows everywhere else).
+test('rung-2 F3 [MEDIUM]: a restore declaring the original with a different FILENAME CASE confirms ownership, on a volume that actually folds', (t) => {
+  const dir = tmp();
+  try {
+    if (!caseInsensitiveFS(dir)) { t.skip('this volume does not fold filename case — capability proven absent, not assumed'); return; }
+    const store = path.join(dir, 'store');
+    const src = write(dir, 'MEMORY.md', Buffer.from('content\n'));
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    const upperSpelling = src.toUpperCase();
+    assert.notStrictEqual(upperSpelling, src, 'sanity: the spellings really differ as strings');
+    assert.strictEqual(fs.existsSync(upperSpelling), true, 'sanity: the folding volume really resolves the uppercase spelling to the same file');
+    // RED-FIRST: pre-fix, this refused (raw string compare) — the anti-data-loss mechanism
+    // refusing on exactly the case difference a case-insensitive volume treats as the same file.
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: upperSpelling });
+    assert.strictEqual(r.ok, true, `case-variant spelling of the same physical file must confirm on a folding volume (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+// F3 rail 1 — canonicalization must not MERGE two genuinely different originals. Proved on the
+// SHARPEST fixture available: two case-VARIANT directories that are genuinely distinct inodes
+// (caseSensitiveDir(), the same builder R3/CASE-FOLD already use), each holding a DIFFERENT real
+// file. If canonicalization could ever collapse two distinct paths to one string, this is where
+// it would happen — two spellings that differ ONLY by case, on a volume that treats case as
+// significant.
+test('rung-2 F3 rail 1: canonicalization does not merge two genuinely different originals', (t) => {
+  const cs = caseSensitiveDir();
+  if (!cs) { t.skip('no case-sensitive directory can be built here (capability proven absent by distinct-inode check, not assumed)'); return; }
+  try {
+    const fileLower = path.join(cs.lower, 'MEMORY.md');
+    const fileUpper = path.join(cs.upper, 'MEMORY.md'); // same basename, DIFFERENT parent dir (case-variant, genuinely distinct inode)
+    fs.writeFileSync(fileLower, 'lower-store content — role A');
+    fs.writeFileSync(fileUpper, 'upper-store content — role B'); // different bytes -> different sha, but exercises the SAME canonicalization code path
+    assert.notStrictEqual(fs.statSync(fileLower, { bigint: true }).ino, fs.statSync(fileUpper, { bigint: true }).ino, 'sanity: genuinely distinct files');
+
+    const canonLower = physicalForCreate(fileLower);
+    const canonUpper = physicalForCreate(fileUpper);
+    assert.notStrictEqual(canonLower, canonUpper, 'two genuinely different originals must canonicalize to two DIFFERENT strings — a merge here would let a restore for one file confirm ownership of the other');
+
+    // End-to-end: a snapshot of fileLower, restored while declaring fileUpper's spelling, must
+    // still refuse — proving the MERGE never happens through the real restoreFromSnapshot path,
+    // not just at the canonicalization primitive in isolation.
+    const store = path.join(cs.root, 'store');
+    const snap = snapshotSource(fileLower, store);
+    assert.strictEqual(snap.ok, true);
+    const r = restoreFromSnapshot(snap.sha256, path.join(cs.root, 'out.txt'), { snapshotDir: store, original: fileUpper });
+    assert.strictEqual(r.ok, false, 'declaring the WRONG (case-variant, genuinely different) file as the original must still refuse — canonicalization must not collapse two distinct files into one confirmed identity');
+    assert.match(r.reason, /ownership unconfirmed/);
+  } finally { rm(cs.root); }
+});
+
+// CAPABILITY-GATED — an 8.3 short-name alias of the same file, confirmed real by `cmd` (the
+// SAME probe R3/TP-3 already uses), must still confirm ownership via realpath.native expansion.
+test('rung-2 F3 [MEDIUM]: a restore declaring the original via its 8.3 SHORT-NAME alias still confirms ownership', (t) => {
+  if (process.platform !== 'win32') { t.skip('8.3 is a win32 form'); return; }
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-F3-8DOT3-')));
+  try {
+    const longDirName = path.join(dir, 'AGENT-MEMORY-CODER-LONGNAME-DIRECTORY');
+    fs.mkdirSync(longDirName, { recursive: true });
+    const src = path.join(longDirName, 'MEMORY.md');
+    fs.writeFileSync(src, 'content\n');
+    let shortDir;
+    shortDir = execSync(`cmd /c for %I in ("${longDirName}") do @echo %~sI`, { encoding: 'utf8' }).trim();
+    if (shortDir === longDirName) { t.skip('8.3 creation disabled on this volume'); return; }
+    const shortSrc = path.join(shortDir, path.basename(src));
+
+    const store = path.join(dir, 'store');
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    // RED-FIRST: pre-fix (raw string compare, or even plain realpathSync which does not
+    // expand 8.3 — see node/runtime.md §4), this refused.
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: shortSrc });
+    assert.strictEqual(r.ok, true, `an 8.3 short-name alias of the same physical file must confirm (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+// CAPABILITY-GATED — a hardlink alias, which `physicalForCreate`'s realpath-string mechanism
+// CANNOT close on its own (collidesWithSource's own comment: "realpath is blind to a hardlink") —
+// this is the case the dev+ino fallback mechanism exists for specifically.
+test('rung-2 F3 [MEDIUM]: a restore declaring a HARDLINK ALIAS of the original confirms via dev+ino, not realpath alone', (t) => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    const src = write(dir, 'MEMORY.md', Buffer.from('content\n'));
+    const alias = path.join(dir, 'HardlinkAlias.md');
+    try {
+      fs.linkSync(src, alias);
+    } catch (e) {
+      t.skip(`cannot create a hardlink here (${e.code}) — capability genuinely absent, not assumed`);
+      return;
+    }
+    // Sanity: realpath alone does NOT merge the two names (the mechanism this test exists to
+    // prove is insufficient by itself — dev+ino is the one that closes it).
+    assert.notStrictEqual(fs.realpathSync.native(src), fs.realpathSync.native(alias), 'sanity: realpath keeps hardlinked names as distinct strings (measured this session — probe-hardlink.mjs)');
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    // RED-FIRST: pre-fix (raw string compare) AND a realpath-only fix (had one been built
+    // instead of the dev+ino fallback) would both refuse this — the alias's realpath string
+    // genuinely differs from src's.
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: alias });
+    assert.strictEqual(r.ok, true, `a hardlink alias of the same physical file must confirm via dev+ino (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+// LEGACY MIGRATION — a manifest row written before this fix (no originalCanonical/originalDev/
+// originalIno fields at all) falls back to the OLD exact-string compare for THAT row only. This
+// pins the migration behaviour explicitly: an exact match still confirms (backward compat for a
+// manifest that outlives a code upgrade mid-batch), and a spelling variant against a LEGACY row
+// does NOT confirm (the canonical fallback is per-row, not a blanket amnesty).
+test('rung-2 F3: a pre-fix (legacy-shaped) manifest row still confirms an EXACT match, and does not gain the new tolerance', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    fs.mkdirSync(store, { recursive: true });
+    const src = write(dir, 'MEMORY.md', Buffer.from('legacy content\n'));
+    const sha = sha256File(src);
+    fs.writeFileSync(path.join(store, sha), fs.readFileSync(src)); // hand-place the blob (no snapshotSource — no manifest row yet)
+    const legacyRow = `${JSON.stringify({ original: src, sha256: sha, bytes: fs.statSync(src).size, at: new Date().toISOString(), deduped: false })}\n`; // OLD shape: no originalCanonical/originalDev/originalIno
+    fs.writeFileSync(path.join(store, SNAPSHOT_MANIFEST), legacyRow);
+
+    const exact = restoreFromSnapshot(sha, path.join(dir, 'out-exact.txt'), { snapshotDir: store, original: src });
+    assert.strictEqual(exact.ok, true, `an exact-string match against a legacy row must still confirm (got ${exact.reason})`);
+
+    if (caseInsensitiveFS(dir)) {
+      const variant = restoreFromSnapshot(sha, path.join(dir, 'out-variant.txt'), { snapshotDir: store, original: src.toUpperCase() });
+      assert.strictEqual(variant.ok, false, 'a spelling VARIANT against a legacy (no-canonical-field) row must NOT confirm — the legacy fallback is exact-string only, not a blanket tolerance upgrade');
+    }
+  } finally { rm(dir); }
+});
+
+// rot-canary self-catch (this dispatch): the SAME fallback must also cover a row where
+// canonicalization was ATTEMPTED at snapshot time but genuinely FAILED (`originalCanonical:
+// null`, not `undefined`) — a narrow race (src vanishing between the hash read and the
+// canonicalization call), but a real one: without this leg, such a row is confirmable by
+// NOTHING, not even its own exact original spelling, which the OLD raw-string-compare code
+// never had a problem with. `row.originalCanonical == null` (loose) covers both undefined
+// (legacy row) and null (failed-canonicalization row) with one condition.
+test('rung-2 F3 [self-catch]: a row whose canonicalization genuinely FAILED at snapshot time (null, not undefined) still confirms an exact match', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    fs.mkdirSync(store, { recursive: true });
+    const src = write(dir, 'MEMORY.md', Buffer.from('race-condition content\n'));
+    const sha = sha256File(src);
+    fs.writeFileSync(path.join(store, sha), fs.readFileSync(src));
+    // NEW-shaped row, but every identity field is explicitly null (as if physicalForCreate and
+    // the stat both failed at write time) — distinct from the legacy test above, which omits
+    // the fields entirely (undefined).
+    const failedCanonRow = `${JSON.stringify({ original: src, originalCanonical: null, originalDev: null, originalIno: null, sha256: sha, bytes: fs.statSync(src).size, at: new Date().toISOString(), deduped: false })}\n`;
+    fs.writeFileSync(path.join(store, SNAPSHOT_MANIFEST), failedCanonRow);
+
+    const exact = restoreFromSnapshot(sha, path.join(dir, 'out.txt'), { snapshotDir: store, original: src });
+    assert.strictEqual(exact.ok, true, `an exact match against a row with explicitly-null (not undefined) canonical fields must still confirm — a write-time canonicalization failure must not make the row permanently unconfirmable (got ${exact.reason})`);
+  } finally { rm(dir); }
+});

@@ -1154,8 +1154,11 @@ export function reduceFile(src, opts = {}) {
     // Non-throwing cleanup (each op is individually caught so the finally can never mask the return):
     // close the output fd and remove the unpublished temp if a throw left them behind. On the
     // happy path both are already null (fd closed, temp renamed) → this is inert. #7: a temp orphaned
-    // between write and rename is reaped here. (A DIFFERENT-pid stale temp is deliberately NOT swept —
-    // it may belong to a live process; the CoalWash lock prevents concurrent same-outPath runs.)
+    // between write and rename is reaped here. (A stale temp from an EARLIER crashed run is not swept
+    // here — this cleanup only knows and reaps the ONE randomly-suffixed `tmpPath` this call itself
+    // created; a leftover from a prior run carries a DIFFERENT random suffix and is simply invisible
+    // to this reap, not deliberately spared. The CoalWash lock prevents a concurrent same-outPath run
+    // from existing at all.)
     //
     // THE REAP TARGET IS AN OWNERSHIP CLAIM, NOT A COMPUTED PATH (lab-grad2 N4, measured). This
     // comment used to read "already renamed away, or never created" — a TWO-case comment for a
@@ -1403,9 +1406,10 @@ export function snapshotSource(src, snapshotDir) {
       // check and falls straight into this branch, which is the write.
       // COPYFILE_EXCL alone is NOT the fix here (unlike the restore temp): dedup REQUIRES overwriting
       // a wrong-hash blob, and EXCL would refuse that. So use the manifest writer's idiom instead —
-      // an O_EXCL fresh inode at a per-pid temp, then an atomic rename that REPLACES the directory
-      // entry (rename does not follow a link at the destination). A stale same-pid temp fails the
-      // snapshot loudly, which is rail 5 behaving correctly: no snapshot, no destroy.
+      // an O_EXCL fresh inode at an unpredictable temp (see below), then an atomic rename that
+      // REPLACES the directory entry (rename does not follow a link at the destination). A stale
+      // temp at THIS suffix fails the snapshot loudly, which is rail 5 behaving correctly: no
+      // snapshot, no destroy.
       // UNPREDICTABLE temp name, not `<blob>.<pid>.tmp`. A pid is guessable and observable, so a
       // per-pid temp path can be PRE-PLACED by anyone able to write the store — and the lab reports
       // that on win32 a DANGLING symlink sitting there defeats COPYFILE_EXCL/`wx` (the existence
@@ -1437,7 +1441,7 @@ export function snapshotSource(src, snapshotDir) {
     // The source inode is NEVER opened for write; the only read of an aliased existing manifest reads src
     // bytes into `existing` = harmless (the garbage lands in the manifest-aid, never src). Any failure skips
     // the manifest (it is an aid, not a gate). Do NOT unlink-then-create on EEXIST — that reintroduces the
-    // race wx closes; a stale .pid.tmp from a crash simply skips the manifest that run (acceptable for an aid).
+    // race wx closes; a stale unpredictable-suffix temp from a crash simply skips the manifest that run (acceptable for an aid).
     //
     // GRADUATION-RECORD RESIDUAL (cost, KNOWN + ACCEPTED — a class-a-ultra prototype note): this read-whole +
     // rewrite + rename is O(M) in the manifest's current row count, so N snapshots to ONE shared store cost
@@ -1456,7 +1460,21 @@ export function snapshotSource(src, snapshotDir) {
     // not per row), or shard the manifest per run — a store-lifecycle change, never an inline per-snapshot swap
     // that trades this safety for speed. Under-fix over reopening a source-corruption hole.
     const manifestPath = path.join(snapshotDir, SNAPSHOT_MANIFEST);
-    const row = `${JSON.stringify({ original: src, sha256: sha, bytes, at: new Date().toISOString(), deduped })}\n`;
+    // rung-2 F3 — captured ONCE, at snapshot time, so a later restore's ownership check has something
+    // canonical to compare against without re-deriving it from a possibly-since-moved/deleted `src`.
+    // `originalCanonical` closes spelling drift (case/slash/8.3/UNC/trailing-separator); `originalDev`/
+    // `originalIno` close what realpath cannot (a hardlink alias, a same-volume rename) — see the
+    // OWNERSHIP comment on `restoreFromSnapshot` for the full mechanism + named residuals. Neither can
+    // fail this write: `physicalForCreate` returns null rather than throwing, and the stat is try/caught.
+    const originalCanonical = physicalForCreate(src);
+    let originalDev = null;
+    let originalIno = null;
+    try {
+      const st = fs.statSync(src, { bigint: true });
+      originalDev = st.dev.toString();
+      originalIno = st.ino.toString();
+    } catch { /* src unreadable at snapshot time -> dev/ino fallback unavailable; canonical string may still help */ }
+    const row = `${JSON.stringify({ original: src, originalCanonical, originalDev, originalIno, sha256: sha, bytes, at: new Date().toISOString(), deduped })}\n`;
     // F2 [MEDIUM, rung-2 R1 lab] — UNPREDICTABLE temp name, matching the blob temp above (see its own
     // comment for the full reasoning): the old `${manifestPath}.${pid}.tmp` was a guessable/observable
     // pre-placement target, one of the 4 sites that still used it while only the blob temp had this fix.
@@ -1485,7 +1503,7 @@ export function snapshotSource(src, snapshotDir) {
       fs.renameSync(manifestTmp, manifestPath); // atomic: the fresh inode replaces any aliased manifest entry
       manifestOwned = null; // renamed away — nothing left to reap
     } catch { manifestSkipped = true; /* manifest is an aid, not a gate — any failure skips it, NEVER writes through src's inode */ }
-    finally { if (manifestOwned) { try { fs.unlinkSync(manifestOwned); } catch { /* best-effort reap of a mid-write temp so a stale one never blocks the next same-pid O_EXCL */ } } }
+    finally { if (manifestOwned) { try { fs.unlinkSync(manifestOwned); } catch { /* best-effort reap of a mid-write temp — pure hygiene: each call's fresh random suffix can never collide with a later call's O_EXCL regardless */ } } }
     // The snapshot itself STANDS on a skipped manifest — the blob is the undo net, the manifest is an
     // audit aid (that split is deliberate and unchanged). What changes is that the skip is SAID: a
     // caller can no longer read an unqualified ok:true as "the audit row landed".
@@ -1512,7 +1530,7 @@ function existsPopulated(p) {
 // caller declares one; the intrinsic clobber refusal is the load-bearing default guard. Restoring to a
 // fresh/empty scratch/target path is unaffected; overwriting a populated file is opt-in via force.
 //
-// OWNERSHIP (rung-2 F1, HIGH — the PRIMITIVE must not lean on a caller's guard, the same posture
+// OWNERSHIP (rung-2, HIGH — the PRIMITIVE must not lean on a caller's guard, the same posture
 // `snapshotSource`'s own L1 self-guard above already takes). The hash check proves BYTE-INTEGRITY —
 // this blob really is the bytes named by its hash. It proves NOTHING about AUTHORIZATION: the store
 // directory is directly enumerable (`readdirSync` lists every hash, no manifest read required) and,
@@ -1522,36 +1540,85 @@ function existsPopulated(p) {
 // directory — no malice required, only the caretaker discipline a shared store invites (`scratchpad/
 // cw-lab-rung2-r1/coord-verify/verify-crosstenant.mjs`, real run).
 //
-// `original` (REQUIRED whenever `snapshotDir` is given) is the fix: the caller must ASSERT which source
-// path it believes this blob is a snapshot OF, and the assertion is checked against the manifest row
-// `snapshotSource` wrote for that hash — a mismatch, or a manifest that cannot confirm it (absent /
-// unreadable / no matching row), REFUSES. This converts "restore any blob you can see" into "prove you
-// know what this blob is for" — a caller that cannot or does not know is refused rather than served
-// silently, and a caller that DOES know has to say so in code that is now auditable, not an implicit
-// enumeration. `original` is checked ONLY when `snapshotDir` is given: the explicit-blob-path mode (no
-// store context) is not an enumerable shared space and is already fully secured by the hash check above.
+// `original` is REQUIRED — UNCONDITIONALLY, not gated on whether the caller passed `snapshotDir`. An
+// earlier version of this comment claimed the explicit-blob-path mode "is not an enumerable shared space
+// and is already fully secured by the hash check" — MEASURED FALSE (`scratchpad/cw-lab-rung2-r2/
+// coord-verify/verify-bypass.mjs`, real run): the SAME caller, handing this function the absolute blob
+// path it already holds instead of naming the directory separately, is not an attack technique — it is
+// the identical call with a different, equally natural shape, and it walked straight past the `if
+// (snapshotDir)` gate. The gate is gone; `ownershipDir` (below) is `snapshotDir` when the caller named
+// one, else the directory the blob physically lives in (`blob` has already passed `existsSync` by this
+// point, so its `dirname` always resolves) — ONE code path, not two.
 //
-// WHY NOT REQUIRE IT UNCONDITIONALLY, AND WHY THE MANIFEST BECOMES LOAD-BEARING HERE ONLY: the manifest
-// is deliberately "an aid, not a gate" for RECOVERABILITY (`snapshotSource`'s own comment — the blob
-// alone is rail 5's undo net; a skipped manifest write must never make a byte-exact blob unrestorable).
-// That invariant is NOT reopened: an `original`-less caller (the whole existing call surface before this
-// fix) is completely unaffected, because ownership is asserted, never inferred — omitting `original` when
-// `snapshotDir` is absent still restores exactly as before. The manifest becomes load-bearing ONLY for
-// the NEW, additive ownership question, and only when a caller opts into asking it by declaring
-// `original` — never for the pre-existing byte-recovery guarantee.
+// The caller must ASSERT which source path it believes this blob is a snapshot OF, checked against the
+// manifest row `snapshotSource` wrote for that hash — an unconfirmed assertion, or a manifest that cannot
+// confirm it (absent / unreadable / no matching row), REFUSES. This converts "restore any blob you can
+// reach" into "prove you know what this blob is for."
+//
+// CANONICALIZED, not raw string equality (rung-2 F3). `row.original === original` refused the SAME
+// physical file on a case difference, a drive-letter-case difference, forward slashes, a trailing
+// separator, a `\\?\` prefix, or a confirmed-real 8.3 alias — the anti-data-loss mechanism refusing in
+// exactly the situations that produce data loss. Two independent, ALREADY-ESTABLISHED mechanisms in this
+// file close it, matched to what each can and cannot do:
+//   (1) REALPATH STRING (`physicalForCreate`, not the stricter `physicalOrNull`): closes every spelling
+//       variant above. `physicalForCreate` is used here — not the exists-or-null primitive — because a
+//       restore target commonly does NOT exist (the file is gone; that is the reason someone is
+//       restoring it) and an unresolvable side must fail closed, never throw, never fall back to a
+//       lexical compare (rung-2 F3 rail 2). `physicalForCreate` realpaths the deepest EXISTING ancestor
+//       and reattaches a missing tail LITERALLY — so a gone file whose PARENT still exists still gets its
+//       directory portion normalized, and an entirely unresolvable path (parent gone too, or a win32
+//       device/UNC shape) returns null, which this check treats as unconfirmable, never as a match.
+//   (2) DEV+INO (`{bigint:true}`, the SAME NTFS-64-bit-safe idiom `collidesWithSource` already uses for
+//       exactly this reason): closes what (1) CANNOT — MEASURED, not assumed (a hardlink alias and a
+//       same-volume rename/move both keep the SAME inode; realpath resolves each NAME independently and
+//       does not collapse them — `collidesWithSource`'s own comment already says realpath "is blind to a
+//       hardlink"). A hardlinked alias of the true original, or the original renamed/moved on the SAME
+//       volume, confirms via dev+ino even though its realpath string differs from the row's.
+// Both are recomputed fresh at restore time from the CALLER's declared `original` — the manifest row
+// carries its OWN canonical + dev/ino, captured once at snapshot time — and a match on EITHER mechanism
+// confirms. Neither can MERGE two genuinely different originals (rung-2 F3 rail 1): two distinct real
+// files canonicalize to two distinct realpath strings (MEASURED — `scratchpad/…/probe-canon.mjs`, no
+// collision across upper/lower/forward-slash spellings of one file vs a second, different file in the
+// same directory) and two distinct files never share a device+inode pair by construction. A LEGACY row
+// written before this fix (no `originalCanonical` field at all) falls back to the OLD exact-string
+// compare for THAT row only — a real migration concern for a manifest that outlives a code upgrade
+// mid-batch, not a new merge risk (still exact equality, nothing new to collide).
+//
+// NAMED RESIDUAL, NOT CLOSED: "source renamed" / "workspace moved" is closed ONLY when the file still
+// exists at the NEW location on the SAME volume (dev+ino survives a same-volume rename) and the caller
+// declares that new location. A CROSS-VOLUME move (a new inode by construction) or a fully DELETED file
+// declared under a spelling that differs from the one recorded at snapshot time has no available identity
+// signal — no mechanism here, or plausible without a rename/move-tracking log this file does not keep,
+// can recover it. Named, not built: out of scope for "canonicalize the compare."
+//
+// STEP 2 (F2, HIGH) — NOT CLOSED, AND NOT PATCHABLE AT THIS LAYER: `manifest.jsonl` is a single shared,
+// unauthenticated append-only file — ANY caller with write access to `snapshotDir` (the SAME trust level
+// already required to enumerate it) can `appendFileSync` a row claiming ANY `original` for ANY real
+// hash, and this check — or any check built from what the manifest itself records — cannot distinguish
+// that forged row from an honest second caller's legitimate dedup row (MEASURED: `scratchpad/
+// cw-lab-rung2-r2/w1/attack3-manifest-path.mjs` §3e, a self-appended forged row restores with
+// `ok:true` and the victim's real content). Closing this needs either a WRITER-IDENTITY / signing scheme
+// this engine has never had (no caller/session/tenant identity is threaded through any function in this
+// file), or a STORE-FORMAT change (per-tenant manifests, each writable only by its own tenant via OS
+// permissions — which then needs a caller-supplied, verified tenant identity to know which one to trust,
+// the same missing infrastructure). The only presently-available closure is DEPLOYMENT-side: per-tenant
+// isolated `snapshotDir`s, so no shared manifest for a co-tenant to write into exists in the first place —
+// the same defense-in-depth this room's own lab already named. This is a design decision, not a bug fix;
+// it returns to main rather than being decided here.
 //
 // BOUND, stated per the lab's own framing: this closes the CARETAKER-DISCIPLINE failure mode (the
 // realistic one the lab called "arguably worse than an attacker scenario") and forces a determined
 // attacker's read of the manifest into an EXPLICIT, code-visible claim instead of a silent enumeration —
 // it is not a substitute for per-tenant isolated `snapshotDir`s, which remains the caller/deployment-side
-// defense in depth this same finding also names. Both layers hold at once, by design.
+// defense in depth this same finding also names, AND remains the only closure for F2 above. Both layers
+// hold at once, by design.
 //
-// COST, inheriting a PRE-EXISTING accepted precedent, not a new one: a restore with `snapshotDir` given
-// now reads the whole manifest — O(M) in its row count, the same order as `snapshotSource`'s own
-// already-accepted O(N²) manifest-write cost (see its comment: "the real ULTRA/estate caller's store is
-// per-batch/short-lived, few snapshots per run, the row count never reaches the knee"). The same
-// reasoning covers this read; a long-lived shared store hitting that knee is the pre-existing upgrade
-// trigger, not a new one this check introduces.
+// COST, inheriting a PRE-EXISTING accepted precedent, not a new one: a restore now ALWAYS reads the whole
+// manifest (was: only when `snapshotDir` given) — O(M) in its row count, the same order as
+// `snapshotSource`'s own already-accepted O(N²) manifest-write cost (see its comment: "the real
+// ULTRA/estate caller's store is per-batch/short-lived, few snapshots per run, the row count never
+// reaches the knee"). The same reasoning covers this read; a long-lived shared store hitting that knee is
+// the pre-existing upgrade trigger, not a new one this check introduces.
 export function restoreFromSnapshot(ref, toPath, opts) {
   // `= {}` only defaults `undefined`, so an explicit null third argument threw on
   // destructuring — the one caller shape that crashed a primitive whose own contract
@@ -1662,32 +1729,60 @@ export function restoreFromSnapshot(ref, toPath, opts) {
       try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
       return { ok: false, verified: false, reason: `toPath exists and is non-empty — refusing to overwrite it without force:true (a restore never silently clobbers a populated destination, incl. the live source)` };
     }
-    // (c) OWNERSHIP (rung-2 F1, see the function header) — ONLY when `snapshotDir` names a shared,
-    // enumerable store. The caller must ASSERT `original` (the source path it believes this blob came
-    // from) and the manifest must CONFIRM it; either the assertion is missing or the manifest cannot
-    // confirm it, and both refuse. Placed LAST, after every existing guard: a ref that was already going
-    // to be refused (bad shape, traversal, hash mismatch, alias, clobber) keeps its own, more specific
-    // reason — this only additionally gates restores that would otherwise have SUCCEEDED.
-    if (snapshotDir) {
-      if (typeof original !== 'string' || !original) {
-        try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
-        return { ok: false, verified: false, reason: `ownership not declared: opts.original is required when snapshotDir is given — the store is a shared, enumerable content-address space, and a restore must assert which source it believes this blob is a snapshot of (refused, never served on a bare hash discovery)` };
+    // (c) OWNERSHIP (rung-2, see the function header) — UNCONDITIONAL, not gated on whether the caller
+    // named `snapshotDir`. The blob has already passed existsSync above, so `path.dirname(blob)` always
+    // resolves to a real directory even when the caller handed over a bare path — `ownershipDir` is
+    // that directory when no `snapshotDir` was given, else `snapshotDir` itself; ONE code path either
+    // way. The caller must ASSERT `original` (the source path it believes this blob came from) and the
+    // manifest must CONFIRM it via a CANONICALIZED compare (rung-2 F3, see the function header); either
+    // the assertion is missing or the manifest cannot confirm it, and both refuse. Placed LAST, after
+    // every existing guard: a ref that was already going to be refused (bad shape, traversal, hash
+    // mismatch, alias, clobber) keeps its own, more specific reason — this only additionally gates
+    // restores that would otherwise have SUCCEEDED.
+    const ownershipDir = snapshotDir || path.dirname(blob);
+    if (typeof original !== 'string' || !original) {
+      try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+      return { ok: false, verified: false, reason: `ownership not declared: opts.original is required — the store is a shared, enumerable content-address space (directly, or via its own directory), and a restore must assert which source it believes this blob is a snapshot of (refused, never served on a bare hash discovery)` };
+    }
+    // rung-2 F3 rail 2: unresolvable fails CLOSED (declaredCanonical/declaredDev/declaredIno stay null,
+    // never a lexical fallback) — the declared original may legitimately be GONE (that is the point of
+    // a restore), so `physicalForCreate` degrades gracefully rather than `physicalOrNull`'s hard refuse.
+    const declaredCanonical = physicalForCreate(original);
+    let declaredDev = null;
+    let declaredIno = null;
+    try {
+      const dst = fs.statSync(original, { bigint: true });
+      declaredDev = dst.dev.toString();
+      declaredIno = dst.ino.toString();
+    } catch { /* declared original does not exist (or is unreadable) at restore time -> dev/ino unavailable */ }
+    const manifestPath = path.join(ownershipDir, SNAPSHOT_MANIFEST);
+    let manifestText = null;
+    try { manifestText = fs.readFileSync(manifestPath, 'utf8'); } catch { /* absent/unreadable -> cannot confirm */ }
+    let confirmed = false;
+    if (manifestText !== null) {
+      for (const line of manifestText.split('\n')) {
+        if (!line) continue;
+        let row; try { row = JSON.parse(line); } catch { continue; } // a malformed row confirms nothing, never crashes the restore
+        if (!row || row.sha256 !== expect) continue;
+        const canonMatch = row.originalCanonical != null && declaredCanonical != null && row.originalCanonical === declaredCanonical;
+        const devinoMatch = row.originalDev != null && row.originalIno != null && declaredDev != null && declaredIno != null && row.originalDev === declaredDev && row.originalIno === declaredIno;
+        // rot-canary self-catch: fall back to the OLD exact-string compare whenever the row has NO
+        // usable canonical identity to compare against — either a row written before this fix
+        // (`originalCanonical === undefined`, the key never existed) OR a row where snapshot-time
+        // canonicalization genuinely FAILED (`originalCanonical === null`, `physicalForCreate`
+        // returned null for `src` at snapshot time — a narrow race, src vanishing between the hash
+        // read and the canonicalization call). Without this second leg, such a row is confirmable by
+        // NOTHING — not canonical (never captured), not dev/ino (also failed, or absent) — even for
+        // its own exact original spelling, which is a genuine AVAILABILITY regression vs the OLD
+        // code (a bare string compare that never depended on canonicalization succeeding at all).
+        // Still exact equality either way, no new merge risk.
+        const legacyExactMatch = row.originalCanonical == null && row.original === original;
+        if (canonMatch || devinoMatch || legacyExactMatch) { confirmed = true; break; }
       }
-      const manifestPath = path.join(snapshotDir, SNAPSHOT_MANIFEST);
-      let manifestText = null;
-      try { manifestText = fs.readFileSync(manifestPath, 'utf8'); } catch { /* absent/unreadable -> cannot confirm */ }
-      let confirmed = false;
-      if (manifestText !== null) {
-        for (const line of manifestText.split('\n')) {
-          if (!line) continue;
-          let row; try { row = JSON.parse(line); } catch { continue; } // a malformed row confirms nothing, never crashes the restore
-          if (row && row.sha256 === expect && row.original === original) { confirmed = true; break; }
-        }
-      }
-      if (!confirmed) {
-        try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
-        return { ok: false, verified: false, reason: `ownership unconfirmed: the store's manifest does not record '${original}' as the source of this blob (sha256 ${expect}) — refused (the manifest is absent, unreadable, or has no matching row)` };
-      }
+    }
+    if (!confirmed) {
+      try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+      return { ok: false, verified: false, reason: `ownership unconfirmed: the store's manifest does not record '${original}' as the source of this blob (sha256 ${expect}) — refused (the manifest is absent, unreadable, or has no matching row)` };
     }
     fs.renameSync(tmpPath, toPath); // atomic publish — only content-verified, destination-guarded, OWNERSHIP-confirmed bytes land here
     return { ok: true, sha256: got, verified: true };
