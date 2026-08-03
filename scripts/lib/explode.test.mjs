@@ -412,7 +412,7 @@ test('snapshot is byte-exact and recovery restores the original byte-for-byte', 
     assert.ok(fs.readFileSync(snap.snapshotPath).equals(buf), 'the snapshot blob is byte-exact');
     // recover to a fresh path
     const restored = path.join(dir, 'restored.jsonl');
-    const res = restoreFromSnapshot(snap.sha256, restored, { snapshotDir: snapDir });
+    const res = restoreFromSnapshot(snap.sha256, restored, { snapshotDir: snapDir, original: src });
     assert.strictEqual(res.ok, true);
     assert.ok(fs.readFileSync(restored).equals(buf), 'restore is byte-identical to the original');
   } finally { rm(dir); }
@@ -747,7 +747,7 @@ test('WAVE-7 L3-A (BREAK 2): a non-hash-named ref is REFUSED (never published un
     const snapDir = path.join(dir, 'snap');
     const src = write(dir, 's.jsonl', buildJsonl(CLAUDEISH).buf);
     const snap = snapshotSource(src, snapDir);
-    const r2 = restoreFromSnapshot(snap.sha256, path.join(dir, 'r2.out'), { snapshotDir: snapDir });
+    const r2 = restoreFromSnapshot(snap.sha256, path.join(dir, 'r2.out'), { snapshotDir: snapDir, original: src });
     assert.strictEqual(r2.ok, true, 'a sha-named blob restore succeeds');
     assert.strictEqual(r2.verified, true, 'a sha-named blob restore IS hash-verified');
     assert.ok(fs.readFileSync(path.join(dir, 'r2.out')).equals(buildJsonl(CLAUDEISH).buf), 'and is byte-exact');
@@ -949,7 +949,7 @@ test('L1 (WAVE-6, restore DESTINATION): a FOREIGN but hash-VALID ref restored to
     assert.strictEqual(sha256File(src), before, 'the source is byte-identical — the restore-destination guard held');
     // and the same restore to a SCRATCH toPath (not src) is still allowed + verified
     const scratch = path.join(dir, 'scratch.out');
-    const ok = restoreFromSnapshot(fsnap.sha256, scratch, { snapshotDir: snapDir, src });
+    const ok = restoreFromSnapshot(fsnap.sha256, scratch, { snapshotDir: snapDir, src, original: foreign });
     assert.strictEqual(ok.ok, true, 'restoring to a scratch path (not the protected src) still works');
     assert.strictEqual(ok.verified, true);
   } finally { rm(dir); }
@@ -1141,7 +1141,7 @@ test('#r3-2: restoreFromSnapshot FAILS CLOSED when snapshotDir is unresolvable (
     const s = write(dir, 's.jsonl', buildJsonl(CLAUDEISH).buf);
     const snap = snapshotSource(s, realStore);
     const restored = path.join(dir, 'restored.jsonl');
-    const r3 = restoreFromSnapshot(snap.sha256, restored, { snapshotDir: realStore });
+    const r3 = restoreFromSnapshot(snap.sha256, restored, { snapshotDir: realStore, original: s });
     assert.strictEqual(r3.ok, true, 'a legit in-store ref still restores');
     assert.ok(fs.readFileSync(restored).equals(buildJsonl(CLAUDEISH).buf), 'byte-exact');
   } finally { rm(dir); }
@@ -1363,7 +1363,7 @@ test('L3#1 (WAVE-5 restore fail-OPEN) — an ABSOLUTE ref OUTSIDE the declared s
     const snap = snapshotSource(src, snapDir);
     assert.strictEqual(snap.ok, true);
     assert.ok(path.isAbsolute(snap.snapshotPath) && snap.snapshotPath.startsWith(snapDir), 'the snapshot blob path is absolute + inside the store');
-    const r2 = restoreFromSnapshot(snap.snapshotPath, path.join(dir, 'ok.out'), { snapshotDir: snapDir });
+    const r2 = restoreFromSnapshot(snap.snapshotPath, path.join(dir, 'ok.out'), { snapshotDir: snapDir, original: src });
     assert.strictEqual(r2.ok, true, 'an absolute ref INSIDE the store still restores');
     assert.strictEqual(r2.verified, true, 'and is hash-verified (basename is the sha)');
   } finally { rm(dir); }
@@ -1402,12 +1402,12 @@ test('WAVE-7 L1 (BREAK 1): restoreFromSnapshot INTRINSICALLY refuses to clobber 
     assert.strictEqual(sha256File(src), before, 'source byte-identical — the intrinsic guard held with NO opt-in context');
     // (b) a FRESH scratch dest is unaffected (no false-refuse) and IS verified
     const fresh = path.join(dir, 'fresh.out');
-    const rFresh = restoreFromSnapshot(fsnap.sha256, fresh, { snapshotDir: snapDir });
+    const rFresh = restoreFromSnapshot(fsnap.sha256, fresh, { snapshotDir: snapDir, original: foreign });
     assert.strictEqual(rFresh.ok, true, 'restoring to a fresh path still works (the guard bites only a populated dest)');
     assert.strictEqual(rFresh.verified, true);
     // (c) force:true is the explicit override (calibrated, not lock-tight)
     const populated = write(dir, 'populated.out', Buffer.from('stale bytes to be replaced'));
-    const rForce = restoreFromSnapshot(fsnap.sha256, populated, { snapshotDir: snapDir, force: true });
+    const rForce = restoreFromSnapshot(fsnap.sha256, populated, { snapshotDir: snapDir, force: true, original: foreign });
     assert.strictEqual(rForce.ok, true, 'force:true overrides the clobber guard for an intentional overwrite');
     assert.ok(fs.readFileSync(populated).equals(fs.readFileSync(foreign)), 'and publishes the verified bytes');
   } finally { rm(dir); }
@@ -2089,7 +2089,7 @@ test('R3/TP-3: a SHORT-NAME snapshot store cannot slip past store containment �
 
     // and the recovery blob still restores byte-exact
     const out = path.join(dir, 'restored.jsonl');
-    const r = restoreFromSnapshot(snap.sha256, out, { snapshotDir: store });
+    const r = restoreFromSnapshot(snap.sha256, out, { snapshotDir: store, original: src });
     assert.strictEqual(r.ok, true, `restore still works: ${r.reason || ''}`);
     assert.strictEqual(sha256File(out), snap.sha256, 'recovery blob byte-exact — the undo net is available');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -2187,7 +2187,7 @@ test('RUNG5 A6 PRIMARY UNDO: restoring a snapshot back OVER its own source succe
     const snap = snapshotSource(src, store);
     fs.writeFileSync(src, 'CORRUPTED-BY-A-BAD-RUN'); // the disaster the undo net exists for
 
-    const r = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src, force: true });
+    const r = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src, force: true, original: src });
     assert.strictEqual(r.ok, true,
       'the PRIMARY undo must work. Pre-fix the src-alias branch fired unconditionally, so a caller who declared src (being explicit about what it protects) and set force:true was refused — by a message telling them to pass force:true, which they had already passed');
     assert.strictEqual(fs.readFileSync(src, 'utf8'), 'GOOD-ORIGINAL', 'the source really is restored');
@@ -2224,8 +2224,18 @@ test('RUNG5 A6 PRIMARY UNDO: restoring a snapshot back OVER its own source succe
 
 const REAPER_VICTIM = 'PRECIOUS-USER-BYTES-THE-ENGINE-NEVER-MADE\n';
 
-test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 sites, incl. the recovery path)', () => {
+test('the temp reaper NEVER deletes a file the engine did not create (4 sites, incl. the recovery path)', () => {
   const dir = tmp();
+  // F2 [MEDIUM, rung-2 R1 lab]: all 4 temps below are now UNPREDICTABLE (crypto.randomBytes(12)),
+  // which is the whole point — it removes the PRECONDITION this test's own collision technique
+  // relies on (pre-placing a file at a path the caller can guess in advance). To still exercise the
+  // reaper-ownership invariant under a real collision, `crypto.randomBytes` is stubbed to a FIXED
+  // value for the duration of this test ONLY (the file's own established convention — see the
+  // `real...`-backup stubs elsewhere in this suite) so the resulting temp path is predictable HERE,
+  // by the test, without reopening the predictability hole in the shipped engine.
+  const FIXED_SUFFIX = '0102030405060708090a0b0c'; // crypto.randomBytes(12).toString('hex') of a fixed buffer
+  const realRandomBytes = crypto.randomBytes;
+  crypto.randomBytes = (n) => (n === 12 ? Buffer.from(FIXED_SUFFIX, 'hex') : realRandomBytes(n));
   try {
     const survived = (p) => fs.existsSync(p) && fs.readFileSync(p, 'utf8') === REAPER_VICTIM;
     const ndjson = buildJsonl(Array.from({ length: 30 }, (_, i) => ({ type: i % 3 ? 'user' : 'mode', i }))).buf;
@@ -2236,7 +2246,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
       const d = path.join(dir, 's1'); fs.mkdirSync(d);
       const src = path.join(d, 's.jsonl'); fs.writeFileSync(src, ndjson);
       const outPath = path.join(d, 'o.jsonl');
-      const victim = `${outPath}.${process.pid}.tmp`;
+      const victim = `${outPath}.${FIXED_SUFFIX}.tmp`;
       fs.writeFileSync(victim, REAPER_VICTIM);
       const r = reduceFile(src, { cutTypes: ['mode'], outPath, snapshotDir: path.join(d, 'store') });
       assert.strictEqual(r.ok, false, 'site 1: O_EXCL refuses to write through the planted file');
@@ -2250,7 +2260,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
       // version of this leg read as covering site 2 while exercising site 1's code path.
       const src = path.join(d, 's.json'); fs.writeFileSync(src, JSON.stringify({ type: 'mode', a: 1 }, null, 2));
       const outPath = path.join(d, 'o.json');
-      const victim = `${outPath}.${process.pid}.tmp`;
+      const victim = `${outPath}.${FIXED_SUFFIX}.tmp`;
       fs.writeFileSync(victim, REAPER_VICTIM);
       const r = reduceFile(src, { cutTypes: ['mode'], outPath, snapshotDir: path.join(d, 'store') });
       assert.strictEqual(r.ok, false, 'site 2: O_EXCL refuses to write through the planted file');
@@ -2262,7 +2272,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
       const d = path.join(dir, 's3'); fs.mkdirSync(d);
       const src = path.join(d, 's.jsonl'); fs.writeFileSync(src, ndjson);
       const store = path.join(d, 'store'); fs.mkdirSync(store);
-      const victim = path.join(store, `${SNAPSHOT_MANIFEST}.${process.pid}.tmp`);
+      const victim = path.join(store, `${SNAPSHOT_MANIFEST}.${FIXED_SUFFIX}.tmp`);
       fs.writeFileSync(victim, REAPER_VICTIM);
       const r = snapshotSource(src, store);
       if (!survived(victim)) breaches.push('site 3 (snapshotSource manifest)');
@@ -2284,7 +2294,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
       const snap = snapshotSource(src, store);
       assert.strictEqual(snap.ok, true, 'site 4 setup: snapshot taken');
       const toPath = path.join(d, 'restored.jsonl');
-      const victim = `${toPath}.${process.pid}.tmp`;
+      const victim = `${toPath}.${FIXED_SUFFIX}.tmp`;
       fs.writeFileSync(victim, REAPER_VICTIM);
       const r = restoreFromSnapshot(snap.snapshotPath, toPath, {});
       assert.strictEqual(r.ok, false, 'site 4: EXCL refuses the planted temp');
@@ -2293,7 +2303,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
 
     assert.deepStrictEqual(breaches, [],
       `the engine DELETED a file it never created (no snapshot, no bin, no recovery) at:\n  ${breaches.join('\n  ')}`);
-  } finally { rm(dir); }
+  } finally { crypto.randomBytes = realRandomBytes; rm(dir); }
 });
 
 // THE CONTROL, and it is not optional: "never unlink anything" would pass the
@@ -2373,12 +2383,16 @@ test('CASE-FOLD: a genuinely case-sensitive directory is NOT folded — the stor
     assert.match(r.reason, /escapes the store/);
 
     // NOT VACUOUS, and this is the half that catches an over-refusing "fix": a
-    // genuinely in-store blob must still restore on this same directory.
-    const good = Buffer.from('legitimate\n');
-    const gsha = crypto.createHash('sha256').update(good).digest('hex');
-    fs.writeFileSync(path.join(cs.lower, gsha), good);
+    // genuinely in-store blob must still restore on this same directory. Taken through
+    // `snapshotSource` (not a raw blob write) so it also has the manifest row the F1
+    // ownership check (see restoreFromSnapshot's header) now requires — the realistic
+    // shape, since every real snapshot in this engine is created that way.
+    const goodSrc = path.join(cs.root, 'good-src.txt');
+    fs.writeFileSync(goodSrc, 'legitimate\n');
+    const goodSnap = snapshotSource(goodSrc, cs.lower);
+    assert.strictEqual(goodSnap.ok, true, 'sanity: the control snapshot itself succeeds');
     const okPath = path.join(cs.root, 'good.out');
-    const r2 = restoreFromSnapshot(gsha, okPath, { snapshotDir: cs.lower });
+    const r2 = restoreFromSnapshot(goodSnap.sha256, okPath, { snapshotDir: cs.lower, original: goodSrc });
     assert.strictEqual(r2.ok, true, `an in-store blob must still restore (got ${r2.reason})`);
     assert.strictEqual(fs.readFileSync(okPath, 'utf8'), 'legitimate\n');
   } finally { rm(cs.root); }
@@ -2421,4 +2435,104 @@ test('CASE-FOLD: PERMIT and REFUSE take OPPOSITE miss directions, and an OMITTED
     assert.notStrictEqual(containment(child, base), 'outside', 'unknown REFUSES at a `!== outside` guard');
     assert.notStrictEqual(containment(child, base), 'inside', 'unknown REFUSES at an `=== inside` guard');
   } finally { rm(root); }
+});
+
+// ---------------------------------------------------------------------------
+// F1 [HIGH, rung-2 R1 lab] — the content-addressed snapshot store had no ownership check.
+// The blob store is directly enumerable (readdirSync lists every hash, no manifest read
+// needed) and restoreFromSnapshot verified byte-integrity but never checked that `ref`
+// came from a file the restoring caller owns. MEASURED end-to-end, real run, not reasoned:
+// scratchpad/cw-lab-rung2-r1/coord-verify/verify-crosstenant.mjs — an ORDINARY, non-
+// adversarial "recover everything visible in the shared undo-net store" caretaker script
+// (not an attacker fixture) landed CODER role's secret content in REVIEWER role's own
+// recovery directory. This test reproduces that exact scenario directly against this
+// engine (not the frozen lab copy) and pins BOTH directions: the leak refused, and a
+// correctly-declared legitimate restore unaffected.
+test('F1 [HIGH]: a shared snapshotDir cannot be blindly recovered from — ownership must be declared and confirmed against the manifest', () => {
+  const dir = tmp();
+  try {
+    fs.mkdirSync(path.join(dir, 'agent-memory', 'coder'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'agent-memory', 'reviewer'), { recursive: true });
+    const roleA = write(dir, path.join('agent-memory', 'coder', 'MEMORY.md'), Buffer.from(
+      JSON.stringify({ type: 'mode', value: 'x' }) + '\n' +
+      JSON.stringify({ type: 'user', text: 'CODER role secret: prod DB password is hunter2' }) + '\n'));
+    const roleB = write(dir, path.join('agent-memory', 'reviewer', 'MEMORY.md'), Buffer.from(
+      JSON.stringify({ type: 'mode', value: 'y' }) + '\n' +
+      JSON.stringify({ type: 'user', text: 'REVIEWER role note: nothing sensitive' }) + '\n'));
+    // A plausible, UNREMARKABLE wiring choice — one shared snapshotDir per project, not an
+    // adversarial setup.
+    const sharedSnap = path.join(dir, '.claude', 'coalwash', 'snapshots');
+
+    const resA = reduceFile(roleA, { outPath: roleA + '.reduced', snapshotDir: sharedSnap, cutTypes: ['mode'] });
+    const resB = reduceFile(roleB, { outPath: roleB + '.reduced', snapshotDir: sharedSnap, cutTypes: ['mode'] });
+    assert.strictEqual(resA.ok, true);
+    assert.strictEqual(resB.ok, true);
+
+    // The REVIEWER's own recovery tooling discovers a hash by LISTING the shared store — no
+    // manifest read, no declared original. The exact shape of the lab's caretaker script.
+    const blobs = fs.readdirSync(sharedSnap).filter((f) => !f.endsWith('.tmp') && f !== 'manifest.jsonl');
+    assert.strictEqual(blobs.length, 2, 'sanity: both roles snapshotted');
+    const recoverDir = path.join(dir, 'agent-memory', 'reviewer', 'recovered');
+    fs.mkdirSync(recoverDir, { recursive: true });
+
+    const results = blobs.map((b) => restoreFromSnapshot(b, path.join(recoverDir, b + '.txt'), { snapshotDir: sharedSnap }));
+    // RED-FIRST: pre-fix, every one of these returned ok:true and the loop below found the
+    // secret. Post-fix, EVERY bare-hash-discovery restore is refused — ownership undeclared.
+    assert.ok(results.every((r) => r.ok === false), `every undeclared-ownership restore must refuse (got ${JSON.stringify(results.map((r) => r.ok))})`);
+    assert.ok(results.every((r) => /ownership not declared/.test(r.reason)), 'the refusal reason names the missing declaration, not a generic error');
+    const leaked = fs.existsSync(recoverDir) && fs.readdirSync(recoverDir).some((f) => fs.readFileSync(path.join(recoverDir, f), 'utf8').includes('hunter2'));
+    assert.strictEqual(leaked, false, 'CODER role secret content must NOT land in REVIEWER role recovery dir');
+
+    // NOT VACUOUS (a fix that just refuses everything proves nothing): the SAME blob restores
+    // when the caller correctly declares what it believes the original is, and the manifest
+    // confirms it — the legitimate, single-tenant restore path is unaffected. (roleA's own
+    // hash, resolved directly so the test doesn't assume array order from readdirSync.)
+    const roleAHash = sha256File(roleA);
+    assert.ok(blobs.includes(roleAHash), 'sanity: roleA really is one of the discovered blobs');
+    const legit = restoreFromSnapshot(roleAHash, path.join(dir, 'legit.out'), { snapshotDir: sharedSnap, original: roleA });
+    assert.strictEqual(legit.ok, true, `a correctly-declared legitimate restore must succeed (got ${legit.reason})`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'legit.out'), 'utf8'), fs.readFileSync(roleA, 'utf8'));
+
+    // IMPERSONATION: a caller that has READ the manifest and deliberately claims the WRONG
+    // original for a blob it does not own must still be refused — ownership is CONFIRMED
+    // against the manifest, never merely asserted.
+    const roleBHash = sha256File(roleB);
+    const impersonate = restoreFromSnapshot(roleBHash, path.join(dir, 'impersonate.out'), { snapshotDir: sharedSnap, original: roleA });
+    assert.strictEqual(impersonate.ok, false, 'a false ownership claim (right hash, wrong declared original) must be refused, not merely trusted');
+    assert.match(impersonate.reason, /ownership unconfirmed/);
+  } finally { rm(dir); }
+});
+
+// F2 [MEDIUM, rung-2 R1 lab]: STRUCTURAL proof of unpredictability (independent of the reaper
+// test's stubbed-collision technique above). Watches the directory DURING each write and asserts
+// the in-flight temp basename is never the OLD `${name}.${pid}.tmp` form at any of the 4 sites —
+// pinning the property the fix claims, not just its downstream effect.
+test('F2 [MEDIUM]: none of the 4 write-temp sites use the predictable ${name}.${pid}.tmp form', () => {
+  const dir = tmp();
+  const pidPattern = new RegExp(`\.${process.pid}\.tmp$`);
+  const seenTmp = [];
+  const realOpenSync = fs.openSync;
+  fs.openSync = (p, ...rest) => {
+    if (typeof p === 'string' && p.endsWith('.tmp')) seenTmp.push(path.basename(p));
+    return realOpenSync(p, ...rest);
+  };
+  try {
+    const ndjson = buildJsonl(Array.from({ length: 10 }, (_, i) => ({ type: i % 2 ? 'user' : 'mode', i }))).buf;
+    // site 1 (ndjson wave-1) + site 3 (manifest, via snapshotSource inside reduceFile)
+    const src1 = write(dir, 's1.jsonl', ndjson);
+    const store = path.join(dir, 'store');
+    const r1 = reduceFile(src1, { cutTypes: ['mode'], outPath: path.join(dir, 'o1.jsonl'), snapshotDir: store });
+    assert.strictEqual(r1.ok, true);
+    // site 2 (json-single)
+    const src2 = write(dir, 's2.json', JSON.stringify({ type: 'mode', a: 1 }));
+    const r2 = reduceFile(src2, { cutTypes: ['mode'], outPath: path.join(dir, 'o2.json'), snapshotDir: store });
+    assert.strictEqual(r2.ok, true);
+    // site 4 (restore)
+    const r4 = restoreFromSnapshot(r1.snapshotPath, path.join(dir, 'restored.jsonl'), { snapshotDir: store, original: src1 });
+    assert.strictEqual(r4.ok, true);
+
+    assert.ok(seenTmp.length >= 4, `sanity: at least 4 temps observed (got ${seenTmp.length}: ${seenTmp.join(', ')})`);
+    const predictable = seenTmp.filter((t) => pidPattern.test(t));
+    assert.deepStrictEqual(predictable, [], `predictable pid-suffixed temp(s) still in use: ${predictable.join(', ')}`);
+  } finally { fs.openSync = realOpenSync; rm(dir); }
 });

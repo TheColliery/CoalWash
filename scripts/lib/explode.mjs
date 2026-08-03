@@ -54,7 +54,7 @@
 // this engine. dryRun (no outPath) measures only. An outPath that aims at the
 // source by ANY route (case-variant / drive-case / symlink / hardlink) is refused
 // fail-closed BEFORE any write (collidesWithSource) — never a silent truncate-then-
-// ok:true; and the slim copy is written to a per-pid temp + atomic-renamed, so the
+// ok:true; and the slim copy is written to an unpredictable temp + atomic-renamed, so the
 // final path is never opened 'w'.
 //
 // NO ACTIVE-SESSION GUARD (by design, incomplete-by-design rail 1): this engine
@@ -727,22 +727,40 @@ export function reduceFile(src, opts = {}) {
   if (typeof maxBytes !== 'number' || !(maxBytes >= 1)) return fail(`maxBytes must be a number >= 1 (got a ${typeof maxBytes})`);
   let fd;
   try { fd = fs.openSync(src, 'r'); } catch (e) { return fail(`cannot open source: ${e.message}`); }
-  // #1/#7: the output fd + its per-pid temp are tracked at FUNCTION scope so the single catch/finally
+  // #1/#7: the output fd + its unpredictable temp are tracked at FUNCTION scope so the single catch/finally
   // below closes the fd and removes the unpublished temp on ANY throw — the documented exports never
   // propagate a raw fs error; they always return { ok:false }. The happy path nulls both once consumed
   // (fd closed, temp renamed), so the finally is a pure safety net that fires only on the throw path.
   let out = null;
   let tmpPath = null;
+  // F2 [MEDIUM, rung-2 R1 lab] — UNPREDICTABLE temp name, not `${outPath}.${pid}.tmp`. This is the
+  // SAME fix `snapshotSource`'s blob temp already carries (see its own comment for the full
+  // reasoning): a pid is guessable/observable, so a per-pid temp path can be PRE-PLACED by anyone
+  // able to write the destination directory. Lab W2 attacked all 5 structurally-identical
+  // `O_EXCL`-guarded write-temp sites in this file; only the blob temp had this fix, and the other
+  // 4 (this one, the json-single output temp, the ndjson-output temp, and restoreFromSnapshot's own
+  // temp) still used the predictable form. All 5 held under attack ON THIS BOX only because
+  // file-symlink creation is EPERM here without Developer Mode — the SAME limitation the blob
+  // temp's own comment already names as unconfirmed, not refuted. If that deeper claim is ever true
+  // on some box, it was true at all 4 unfixed sites, not just the one that had been fixed — closed
+  // here at all 4, one flock. Random naming removes the PRECONDITION (an attacker cannot pre-place
+  // at a path it cannot predict) rather than arguing about EXCL semantics; EXCL stays as the second
+  // belt (cross-nature: one guard defeats prediction, the other defeats a race).
+  // ONE suffix, generated ONCE per call (not per wave): wave-1 is the only wave that ever creates
+  // this temp (a resume wave appends to the already-published outPath, see below), and the SAME
+  // string must be used by the pre-flight collision/containment checks below AND the actual write —
+  // checking one candidate and writing a DIFFERENT one would validate a string that is never used.
+  const tmpSuffix = dryRun ? '' : crypto.randomBytes(12).toString('hex');
   try {
     // Refuse to write the slim copy over the SOURCE by ANY route a lexical
     // path.resolve compare misses (case-variant on a case-insensitive FS, c:/C:
     // drive-case, symlink, or a hardlink) — the wave-1 'w' open would TRUNCATE the
     // source BEFORE it is read, and the old lexical guard silently returned ok:true
     // after destroying it. Fail-closed, BOTH sides realpath'd (series hard-won rule)
-    // + a dev/ino check realpath cannot do. Also guards the per-pid temp so IT can
+    // + a dev/ino check realpath cannot do. Also guards the unpredictable temp so IT can
     // never alias the source either.
     if (!dryRun) {
-      const detail = collidesWithSource(outPath, src, fd) || collidesWithSource(`${outPath}.${process.pid}.tmp`, src, fd);
+      const detail = collidesWithSource(outPath, src, fd) || collidesWithSource(`${outPath}.${tmpSuffix}.tmp`, src, fd);
       if (detail) return fail(`outPath must differ from the source: ${detail} — writing over it would truncate the source before reading (in-place replace is the destruction ladder's gated step)`);
       // #6: the slim copy (and its temp) must never land INSIDE the snapshot store — writing over
       // manifest.jsonl or a content-addressed blob would corrupt the rail-5 recovery net the cut
@@ -751,7 +769,7 @@ export function reduceFile(src, opts = {}) {
       // the old `isContainedIn(...)` folded that unknown into false == ALLOW (rung-5 §1.2).
       if (snapshotDir) {
         const snapReal = physicalForCreate(snapshotDir);
-        if (containment(physicalForCreate(outPath), snapReal, true) !== 'outside' || containment(physicalForCreate(`${outPath}.${process.pid}.tmp`), snapReal, true) !== 'outside') { // REFUSE-polarity: a probe MISS folds (over-refuses)
+        if (containment(physicalForCreate(outPath), snapReal, true) !== 'outside' || containment(physicalForCreate(`${outPath}.${tmpSuffix}.tmp`), snapReal, true) !== 'outside') { // REFUSE-polarity: a probe MISS folds (over-refuses)
           return fail(`outPath must not resolve inside the snapshot store (${snapshotDir}), and must be resolvable enough to prove it — it would overwrite a recovery blob or manifest`);
         }
         // FIX 1 (source-sacred): src must not resolve INSIDE snapshotDir either. snapshotSource appends
@@ -859,8 +877,8 @@ export function reduceFile(src, opts = {}) {
         // AFTER the exclusive create RETURNS. Assigning it first made a non-null `tmpPath` mean
         // "a temp path was computed"; it now means "we created this file, so we may delete it".
         // See the reap comment in the finally for the measured defect this closes.
-        const candidate = `${outPath}.${process.pid}.tmp`;
-        out = fs.openSync(candidate, 'wx'); // per-pid temp, O_EXCL: a fresh inode, or EEXIST-fail-closed — never write THROUGH a pre-existing alias (hardlink/symlink) planted at tmpPath; the final path is never opened 'w'
+        const candidate = `${outPath}.${tmpSuffix}.tmp`;
+        out = fs.openSync(candidate, 'wx'); // unpredictable temp, O_EXCL: a fresh inode, or EEXIST-fail-closed — never write THROUGH a pre-existing alias (hardlink/symlink) planted at tmpPath; the final path is never opened 'w'
         tmpPath = candidate; // created by US → the reaper owns it
         if (!cut) writeFull(out, buf); // kept → byte-exact whole file; cut → empty (writeFull loops short writes)
         fs.fsyncSync(out);
@@ -966,7 +984,7 @@ export function reduceFile(src, opts = {}) {
       }
     }
 
-    // Write setup: wave 1 → per-pid TEMP (atomic-renamed to outPath at wave end, so
+    // Write setup: wave 1 → an unpredictable TEMP (atomic-renamed to outPath at wave end, so
     // the final path is NEVER opened 'w'); resume waves append to the published
     // outPath (an 'a' after truncate-to-committed, not a truncate-to-zero).
     let outLen = 0; // out + tmpPath are function-scoped (declared above for the catch/finally)
@@ -976,7 +994,7 @@ export function reduceFile(src, opts = {}) {
         // OWNERSHIP-AFTER-CREATE (same rule as the json-single site above): the reap target is set
         // only once the exclusive create has succeeded, so the finally can never unlink a file the
         // engine did not make.
-        const candidate = `${outPath}.${process.pid}.tmp`;
+        const candidate = `${outPath}.${tmpSuffix}.tmp`;
         out = fs.openSync(candidate, 'wx'); // O_EXCL fresh inode (source-sacred by construction — same class as the json-single temp + the manifest); wave-1 rename breaks any hardlink at outPath before a resume ever appends
         tmpPath = candidate; // created by US → the reaper owns it
         if (struct.bomLen) { writeFull(out, readRange(fd, 0, struct.bomLen)); outLen = struct.bomLen; } // BOM is structural — always preserved (writeFull loops short writes)
@@ -1076,7 +1094,7 @@ export function reduceFile(src, opts = {}) {
     // DATA-level no-op fast-path for ndjson (cluster 2C / WAVE-8 L4-C): a wave that processed the WHOLE file in
     // ONE pass (offset===0 → done) and cut NOTHING is a byte-identical no-op — do NOT publish a wasteful rewrite;
     // return skipped:true, uniform with the opaque/json-single skip. (A MULTI-wave all-absent reduce is caught at
-    // reduceToCompletion's completion level.) The unpublished per-pid temp is reaped by the finally.
+    // reduceToCompletion's completion level.) The unpublished temp is reaped by the finally.
     // L4 nit-b (WAVE-9): match json-single's no-op (which takes NO snapshot) — a streaming ndjson pass MUST
     // snapshot before it can know cut===0, so a blob was written; if it was FRESH this call (snapWasFresh —
     // NOT a dedup of a blob another source references) remove it so a no-op leaves no orphan, and report
@@ -1134,7 +1152,7 @@ export function reduceFile(src, opts = {}) {
     return fail(`reduce failed: ${e.message}`); // #1: ANY fs error (bad outPath, ENOTDIR, rename race, disk full…) → ok:false, never a raw throw
   } finally {
     // Non-throwing cleanup (each op is individually caught so the finally can never mask the return):
-    // close the output fd and remove the unpublished per-pid temp if a throw left them behind. On the
+    // close the output fd and remove the unpublished temp if a throw left them behind. On the
     // happy path both are already null (fd closed, temp renamed) → this is inert. #7: a temp orphaned
     // between write and rename is reaped here. (A DIFFERENT-pid stale temp is deliberately NOT swept —
     // it may belong to a live process; the CoalWash lock prevents concurrent same-outPath runs.)
@@ -1439,11 +1457,14 @@ export function snapshotSource(src, snapshotDir) {
     // that trades this safety for speed. Under-fix over reopening a source-corruption hole.
     const manifestPath = path.join(snapshotDir, SNAPSHOT_MANIFEST);
     const row = `${JSON.stringify({ original: src, sha256: sha, bytes, at: new Date().toISOString(), deduped })}\n`;
-    const manifestTmp = `${manifestPath}.${process.pid}.tmp`;
+    // F2 [MEDIUM, rung-2 R1 lab] — UNPREDICTABLE temp name, matching the blob temp above (see its own
+    // comment for the full reasoning): the old `${manifestPath}.${pid}.tmp` was a guessable/observable
+    // pre-placement target, one of the 4 sites that still used it while only the blob temp had this fix.
+    const manifestTmp = `${manifestPath}.${crypto.randomBytes(12).toString('hex')}.tmp`;
     // OWNERSHIP-AFTER-CREATE + AN HONEST RETURN (lab-grad2 N5 — the same reaper defect as reduceFile's,
     // and this was its worst instance). The finally used to `existsSync → unlink` the temp path
-    // unconditionally, so a user file planted at `<store>/manifest.jsonl.<pid>.tmp` was DELETED by the
-    // cleanup after `wx` had correctly refused to write through it — and the function still returned a
+    // unconditionally, so a user file planted at the (then-predictable) manifest temp path was DELETED by
+    // the cleanup after `wx` had correctly refused to write through it — and the function still returned a
     // bare `{ok:true}`. Deleting a file with no snapshot and no bin is the furnace with no stop on the
     // way (house rule 2026-07-27: bins are not the furnace, but past the bin IS), and reporting success
     // over it is the same class as a rollback claiming clean over a partial.
@@ -1490,11 +1511,52 @@ function existsPopulated(p) {
 // safe. `src` (OPTIONAL, kept) only yields a sharper "you aimed at the protected source" diagnostic when a
 // caller declares one; the intrinsic clobber refusal is the load-bearing default guard. Restoring to a
 // fresh/empty scratch/target path is unaffected; overwriting a populated file is opt-in via force.
+//
+// OWNERSHIP (rung-2 F1, HIGH — the PRIMITIVE must not lean on a caller's guard, the same posture
+// `snapshotSource`'s own L1 self-guard above already takes). The hash check proves BYTE-INTEGRITY —
+// this blob really is the bytes named by its hash. It proves NOTHING about AUTHORIZATION: the store
+// directory is directly enumerable (`readdirSync` lists every hash, no manifest read required) and,
+// pre-fix, ANY ref discoverable that way restored for ANY caller. MEASURED, not reasoned: a per-tenant
+// `snapshotDir` shared across two roles let an ORDINARY, non-adversarial "recover everything visible in
+// the shared undo-net store" caretaker script land role A's secret content in role B's own recovery
+// directory — no malice required, only the caretaker discipline a shared store invites (`scratchpad/
+// cw-lab-rung2-r1/coord-verify/verify-crosstenant.mjs`, real run).
+//
+// `original` (REQUIRED whenever `snapshotDir` is given) is the fix: the caller must ASSERT which source
+// path it believes this blob is a snapshot OF, and the assertion is checked against the manifest row
+// `snapshotSource` wrote for that hash — a mismatch, or a manifest that cannot confirm it (absent /
+// unreadable / no matching row), REFUSES. This converts "restore any blob you can see" into "prove you
+// know what this blob is for" — a caller that cannot or does not know is refused rather than served
+// silently, and a caller that DOES know has to say so in code that is now auditable, not an implicit
+// enumeration. `original` is checked ONLY when `snapshotDir` is given: the explicit-blob-path mode (no
+// store context) is not an enumerable shared space and is already fully secured by the hash check above.
+//
+// WHY NOT REQUIRE IT UNCONDITIONALLY, AND WHY THE MANIFEST BECOMES LOAD-BEARING HERE ONLY: the manifest
+// is deliberately "an aid, not a gate" for RECOVERABILITY (`snapshotSource`'s own comment — the blob
+// alone is rail 5's undo net; a skipped manifest write must never make a byte-exact blob unrestorable).
+// That invariant is NOT reopened: an `original`-less caller (the whole existing call surface before this
+// fix) is completely unaffected, because ownership is asserted, never inferred — omitting `original` when
+// `snapshotDir` is absent still restores exactly as before. The manifest becomes load-bearing ONLY for
+// the NEW, additive ownership question, and only when a caller opts into asking it by declaring
+// `original` — never for the pre-existing byte-recovery guarantee.
+//
+// BOUND, stated per the lab's own framing: this closes the CARETAKER-DISCIPLINE failure mode (the
+// realistic one the lab called "arguably worse than an attacker scenario") and forces a determined
+// attacker's read of the manifest into an EXPLICIT, code-visible claim instead of a silent enumeration —
+// it is not a substitute for per-tenant isolated `snapshotDir`s, which remains the caller/deployment-side
+// defense in depth this same finding also names. Both layers hold at once, by design.
+//
+// COST, inheriting a PRE-EXISTING accepted precedent, not a new one: a restore with `snapshotDir` given
+// now reads the whole manifest — O(M) in its row count, the same order as `snapshotSource`'s own
+// already-accepted O(N²) manifest-write cost (see its comment: "the real ULTRA/estate caller's store is
+// per-batch/short-lived, few snapshots per run, the row count never reaches the knee"). The same
+// reasoning covers this read; a long-lived shared store hitting that knee is the pre-existing upgrade
+// trigger, not a new one this check introduces.
 export function restoreFromSnapshot(ref, toPath, opts) {
   // `= {}` only defaults `undefined`, so an explicit null third argument threw on
   // destructuring — the one caller shape that crashed a primitive whose own contract
   // (below) is that it never throws. Normalize first, destructure after.
-  const { snapshotDir = null, src = null, force = false } = (opts && typeof opts === 'object') ? opts : {};
+  const { snapshotDir = null, src = null, force = false, original = null } = (opts && typeof opts === 'object') ? opts : {};
   // A RECOVERY PRIMITIVE MUST NEVER THROW. Every other bad ref returns a fail-closed
   // {ok:false}, but a non-string ref reached path.isAbsolute and threw
   // ERR_INVALID_ARG_TYPE — the one input shape that crashes the caller instead of
@@ -1531,10 +1593,14 @@ export function restoreFromSnapshot(ref, toPath, opts) {
   if (!/^[0-9a-f]{64}$/.test(expect)) {
     return { ok: false, verified: false, reason: `snapshot ref is not a verifiable content-address (basename '${expect}' is not a sha256) — refused, never published unverified` };
   }
-  // #3 copy→verify→(guard)→rename: copy to a per-pid temp, hash-verify, guard the destination, THEN atomic
-  // rename — toPath is NEVER touched until the bytes are proven AND the clobber/alias guards pass. A mismatch
-  // or a refused destination leaves toPath (incl. a toPath===src) byte-intact.
-  const tmpPath = `${toPath}.${process.pid}.tmp`;
+  // #3 copy→verify→(guard)→rename: copy to an unpredictable temp, hash-verify, guard the destination, THEN
+  // atomic rename — toPath is NEVER touched until the bytes are proven AND the clobber/alias guards pass. A
+  // mismatch or a refused destination leaves toPath (incl. a toPath===src) byte-intact.
+  // F2 [MEDIUM, rung-2 R1 lab] — UNPREDICTABLE temp name, matching the blob temp in snapshotSource (see
+  // its own comment for the full reasoning): the old `${toPath}.${pid}.tmp` was guessable/observable and,
+  // being the RECOVERY path, a pre-placed alias here would have the undo net destroy a bystander while
+  // restoring — one of the 4 sites that still used it while only the blob temp had this fix.
+  const tmpPath = `${toPath}.${crypto.randomBytes(12).toString('hex')}.tmp`;
   // OWNERSHIP-AFTER-CREATE (the reduceFile/manifest reaper class, FOUND HERE BY GREPPING every
   // predictable temp rather than by a report — this site was not in the finding). It matters most
   // here: this is the RECOVERY path, so the failure mode was the undo net destroying a bystander
@@ -1596,7 +1662,34 @@ export function restoreFromSnapshot(ref, toPath, opts) {
       try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
       return { ok: false, verified: false, reason: `toPath exists and is non-empty — refusing to overwrite it without force:true (a restore never silently clobbers a populated destination, incl. the live source)` };
     }
-    fs.renameSync(tmpPath, toPath); // atomic publish — only content-verified, destination-guarded bytes land here
+    // (c) OWNERSHIP (rung-2 F1, see the function header) — ONLY when `snapshotDir` names a shared,
+    // enumerable store. The caller must ASSERT `original` (the source path it believes this blob came
+    // from) and the manifest must CONFIRM it; either the assertion is missing or the manifest cannot
+    // confirm it, and both refuse. Placed LAST, after every existing guard: a ref that was already going
+    // to be refused (bad shape, traversal, hash mismatch, alias, clobber) keeps its own, more specific
+    // reason — this only additionally gates restores that would otherwise have SUCCEEDED.
+    if (snapshotDir) {
+      if (typeof original !== 'string' || !original) {
+        try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+        return { ok: false, verified: false, reason: `ownership not declared: opts.original is required when snapshotDir is given — the store is a shared, enumerable content-address space, and a restore must assert which source it believes this blob is a snapshot of (refused, never served on a bare hash discovery)` };
+      }
+      const manifestPath = path.join(snapshotDir, SNAPSHOT_MANIFEST);
+      let manifestText = null;
+      try { manifestText = fs.readFileSync(manifestPath, 'utf8'); } catch { /* absent/unreadable -> cannot confirm */ }
+      let confirmed = false;
+      if (manifestText !== null) {
+        for (const line of manifestText.split('\n')) {
+          if (!line) continue;
+          let row; try { row = JSON.parse(line); } catch { continue; } // a malformed row confirms nothing, never crashes the restore
+          if (row && row.sha256 === expect && row.original === original) { confirmed = true; break; }
+        }
+      }
+      if (!confirmed) {
+        try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+        return { ok: false, verified: false, reason: `ownership unconfirmed: the store's manifest does not record '${original}' as the source of this blob (sha256 ${expect}) — refused (the manifest is absent, unreadable, or has no matching row)` };
+      }
+    }
+    fs.renameSync(tmpPath, toPath); // atomic publish — only content-verified, destination-guarded, OWNERSHIP-confirmed bytes land here
     return { ok: true, sha256: got, verified: true };
   } catch (e) {
     // ONLY our own inode. The EEXIST that lands here is precisely the case where the temp path
