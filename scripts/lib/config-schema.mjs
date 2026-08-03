@@ -20,17 +20,18 @@
 export const CONFIG_SCHEMA = [
   { key: 'coalwashMode', type: 'enum', values: ['auto', 'manual', 'off'], def: 'auto', help: 'Master switch: auto = session-start gauge + band nudges; manual = /coalwash only (gauge silent); off = fully silent' },
   { key: 'language', type: 'enum', values: ['auto', 'th', 'en', 'ja', 'zh', 'es'], def: 'auto', help: 'Language override for prompts and nudges (auto, th, en, ja, zh, es)' },
-  { key: 'fullPercent', type: 'number', min: 1, max: 50, def: 6, help: 'Legacy pre-floor heuristic ONLY — used while no lean floor has been stamped yet (0r retired it as the overhead dial; fatMultiple is the growable wall a stamped floor rides). Raising it = consciously carrying more overhead before the first clean (default: 6)' },
-  // 0r "WALL -> floor-relative": once a floor is stamped, the absolute-cap
-  // wall is fatMultiple x leanFloor (clamped at the true capacity ceiling),
-  // never the static fullPercent x capacity number — a legitimately-grown
-  // muscle store raises its own wall instead of false-FULLing forever.
-  // min sits STRICTLY above CEILING_BMI (caliper.mjs, 1.5) — the blueprint's
-  // ordering-clamp: the wall must never fire before OBESE arms (which would
-  // swallow OBESE). Default 2.0 = the same V8/Java GC-anchor family
-  // (1.5-2x heap growth) CEILING_BMI is drawn from, taking the HIGH edge
-  // since the wall is the outer, rarely-touched line.
-  { key: 'fatMultiple', type: 'number', min: 1.6, max: 10, def: 2.0, help: 'Growable absolute-cap wall = fatMultiple x the stamped lean floor, clamped at true capacity — must stay above the OBESE BMI ceiling (1.5) or the wall fires first and swallows OBESE (default: 2.0)' },
+  { key: 'fullPercent', type: 'number', min: 1, max: 50, def: 6, help: 'LEGACY (task #4) — read-tolerated and ignored, same as fatMultiple; the wall is true capacity + the CC index caps only, no lean floor or overhead dial involved any more (default: 6)' },
+  // LEGACY (task #4, same retirement as fullPercent above): 0r's
+  // "WALL -> floor-relative" design made the absolute-cap wall
+  // fatMultiple x leanFloor — task #4 replaced the whole floor-driven model
+  // with measured certain fat, so this key is now read-tolerated and
+  // ignored, same as fullPercent (the wall is true capacityTokens + the CC
+  // index caps only, no floor, no multiple). min/max/def are unchanged
+  // history: the ordering-clamp (min strictly above CEILING_BMI, itself
+  // LEGACY — caliper.mjs:97) that justified them no longer constrains
+  // anything live. Kept, not removed (removing a shipped config key would
+  // be a breaking change).
+  { key: 'fatMultiple', type: 'number', min: 1.6, max: 10, def: 2.0, help: 'LEGACY (task #4) — read-tolerated and ignored, same as fullPercent; the wall is true capacity + the CC index caps only, no floor multiple involved any more (default: 2.0)' },
   // targetPercent has NO band-math consumer: task #4 retired the BMI-vs-floor
   // model this comment used to describe (CEILING_BMI/CEILING_REARM_BMI are
   // LEGACY, see caliper.mjs:97 — zero band-logic readers); anti-flap now
