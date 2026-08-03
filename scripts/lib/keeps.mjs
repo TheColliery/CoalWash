@@ -101,9 +101,31 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
     // is trivially true for nearly any rewrite — the keep stops protecting
     // anything without ever LOOKING broken. A real new value must carry real
     // content, not just pass `typeof === 'string' && truthy`.
-    const hasRealContent = (v) => typeof v === 'string' && v.trim().length > 0;
-    const mergedAnchor = hasRealContent(anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);
-    const mergedAnchorFile = hasRealContent(anchorFile) ? anchorFile : (prior && typeof prior.anchorFile === 'string' ? prior.anchorFile : undefined);
+    // grad9 F3: `trim().length>0` still wasn't enough — the SAME defect, wearing
+    // different bytes. Two failures, opposite polarity, one root cause (a check
+    // asking "is this non-empty" instead of "does this identify a real span"):
+    // (1) a degenerate 1-3 char anchor ("e", "#", "the") passes `trim().length>0`
+    //     and silently OVERWRITES a real, much longer, adjudicated anchor on
+    //     re-affirm — and then, through applyPlan's real KEEPS-GATE, a rewrite
+    //     dropping EVERY byte of the true protected content goes ok:true,
+    //     applied:1, unflagged, while the entry still reads as "enforced".
+    // (2) U+200B (ZERO WIDTH SPACE) is Cf, not in JS `\s` — `'​'.trim()`
+    //     does NOT strip it, so a ZWSP-only value ALSO passes as "real content"
+    //     and then never matches anything in real text, permanently
+    //     false-refusing every future edit to that file.
+    // Fix the CLASS: strip ordinary whitespace AND Unicode invisible/format
+    // characters (\p{Cf}) before measuring, for BOTH fields (closes polarity 2
+    // everywhere) — and additionally require a real MINIMUM length for an
+    // ANCHOR specifically (closes polarity 1): an adjudicated keep names a
+    // specific clause, never a single character or a common short word.
+    // anchorFile is a PATH, which is legitimately short, so it keeps the
+    // non-empty-after-stripping bar only, no length floor.
+    const stripInvisible = (v) => String(v).replace(/[\s\p{Cf}]+/gu, '');
+    const MIN_MEANINGFUL_ANCHOR_LEN = 8;
+    const hasRealAnchor = (v) => typeof v === 'string' && stripInvisible(v).length >= MIN_MEANINGFUL_ANCHOR_LEN;
+    const hasRealPath = (v) => typeof v === 'string' && stripInvisible(v).length > 0;
+    const mergedAnchor = hasRealAnchor(anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);
+    const mergedAnchorFile = hasRealPath(anchorFile) ? anchorFile : (prior && typeof prior.anchorFile === 'string' ? prior.anchorFile : undefined);
     keeps.push({
       target,
       reason: String(reason || ''),

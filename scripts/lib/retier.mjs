@@ -305,14 +305,41 @@ export function planIndexDemotion(indexText, env) {
 // here is the SAME direction the module already commits to below ("a false
 // 'referenced' keeps the file in place — the safe fail direction"); this is
 // that same asymmetry applied to case instead of to a coincidental substring.
-function countOccurrences(hay, needle) {
-  if (!needle) return 0;
-  const h = hay.toLowerCase();
-  const n2 = needle.toLowerCase();
+//
+// grad9 F4 [HIGH, content-loss by displacement]: case-folding closed the
+// CASE axis but not the PUNCTUATION one. `[[Topic Name]]` (a real wikilink,
+// spaces) has ZERO substring overlap with a topic file's own slugified
+// basename/stem `topic-name.md`/`topic-name` (hyphens) — a genuinely
+// REFERENCED topic reads as unreferenced and gets archived out of the live
+// tree, while the referring file still literally contains the wikilink (the
+// top-anchor safety net checks that a token still resolves SOMEWHERE, and
+// the wikilink text itself never moved — it just points at a file that is
+// no longer there). Fix: when the exact case-folded match finds nothing, ALSO
+// try a DELIMITER-normalized match (hyphens/underscores/whitespace runs all
+// folded to a single space, on BOTH sides). This only ever WIDENS what
+// counts as "referenced" — the same safe-fail direction this function's own
+// header already commits to; a false "referenced" keeps the file in place,
+// it never manufactures a false "unreferenced".
+const DELIM_RE = /[-_\s]+/g;
+const normDelim = (s) => s.replace(DELIM_RE, ' ');
+function countRuns(h, n2) {
   let n = 0;
   let i = h.indexOf(n2);
   while (i !== -1) { n++; i = h.indexOf(n2, i + n2.length); }
   return n;
+}
+function countOccurrences(hay, needle) {
+  if (!needle) return 0;
+  const h = hay.toLowerCase();
+  const n2 = needle.toLowerCase();
+  // BOTH counted, never short-circuited: a topic's own text commonly
+  // contains its own EXACT hyphenated stem (e.g. a self-titled header),
+  // which would make an exact-count>0 early-return miss a delimiter-variant
+  // reference living ELSEWHERE (the wikilink in an index line) — the two
+  // counts are of DIFFERENT occurrences and neither substitutes for the
+  // other. max(), not sum(): still monotone-widening (never below the old
+  // exact-only count), never double-counts one real occurrence twice.
+  return Math.max(countRuns(h, n2), countRuns(normDelim(h), normDelim(n2)));
 }
 
 // Hop-2: topic files UNREFERENCED anywhere else in the merged tree (neither

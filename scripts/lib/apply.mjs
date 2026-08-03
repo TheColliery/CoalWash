@@ -192,8 +192,51 @@ function removedLines(origText, newText) {
 // case". A caller that doesn't pass it (the merge-pair check, a bounded,
 // cold call) keeps the old lazy-normalize-per-call behavior unchanged.
 const normWhitespace = (s) => String(s).replace(/\s+/g, ' ').trim();
+
+// grad9 F2 [HIGH, content-loss]: the flatten-everything normalizer above is
+// blind to semantic indentation BY CONSTRUCTION — collapsing every run of
+// `\s+` (newlines included) into one space erases the difference between
+// "the whole block shifted by a constant amount" (round 8's own CRLF/
+// re-indent tolerance target, legitimate) and "one line moved to a
+// DIFFERENT relative depth than its neighbors" (a Python statement dedented
+// out of a loop, a YAML key re-parented — same tokens, different program,
+// per grad9's own fixtures). Fix the CLASS: a needle spanning MORE THAN ONE
+// LINE is checked with a window-relative indentation match instead — every
+// contiguous run of haystack lines the same length as the needle is tried;
+// each line's own internal whitespace is collapsed (still tolerates reflow/
+// CRLF), but a haystack line's indentation RELATIVE TO ITS OWN WINDOW must
+// equal the needle's indentation relative to ITS OWN first line, exactly. A
+// uniform shift of the whole block passes (every line's relative offset is
+// unchanged, whichever window start it lands on); a shift of ONE line
+// relative to its neighbors fails, at every possible window. Single-line
+// needles have no relative structure to defend (there is nothing to be
+// relative TO) and fall through to the flatten-everything check below,
+// preserving the pre-existing cross-newline prose-reflow tolerance (a
+// sentence hard-wrapped mid-phrase) that a multi-line algorithm would break.
+function lineParts(s) {
+  return String(s).replace(/\r\n?/g, '\n').split('\n').map((line) => {
+    const m = /^([ \t]*)(.*)$/s.exec(line);
+    return { indent: m[1].length, text: m[2].replace(/[ \t]+/g, ' ').trimEnd() };
+  });
+}
+function indentRelativeSurvives(needle, haystack) {
+  const n = lineParts(needle);
+  const base = n[0].indent;
+  const rel = n.map((l) => l.indent - base);
+  const h = lineParts(haystack);
+  for (let start = 0; start + n.length <= h.length; start++) {
+    const hbase = h[start].indent;
+    let ok = true;
+    for (let j = 0; j < n.length && ok; j++) {
+      if (h[start + j].text !== n[j].text || (h[start + j].indent - hbase) !== rel[j]) ok = false;
+    }
+    if (ok) return true;
+  }
+  return false;
+}
 function textSurvives(needle, haystacks, normHaystacks) {
   if (haystacks.some((t) => t.includes(needle))) return true;
+  if (String(needle).includes('\n')) return haystacks.some((t) => indentRelativeSurvives(needle, t));
   const normNeedle = normWhitespace(needle);
   const norms = normHaystacks || haystacks.map(normWhitespace);
   return norms.some((t) => t.includes(normNeedle));

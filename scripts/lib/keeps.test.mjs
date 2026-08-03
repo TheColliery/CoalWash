@@ -209,10 +209,13 @@ test('recordKeep: re-affirming WITHOUT anchor/anchorFile preserves the prior enf
 test('recordKeep: a re-affirm that DOES supply a new anchor overrides (an intentional update, not a downgrade)', () => {
   const proj = sandbox();
   try {
-    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span', anchorFile: 'C:/store/f.md' });
-    recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: 'new span', anchorFile: 'C:/store/f2.md' });
+    // grad9 F3: fixture lengthened past the meaningful-anchor floor (8 real
+    // chars) — "old span"/"new span" (7 stripped chars) coincidentally sat
+    // BELOW it; the test's INTENT (a real new anchor overrides) is unchanged.
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span text', anchorFile: 'C:/store/f.md' });
+    recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: 'new span text', anchorFile: 'C:/store/f2.md' });
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
-    assert.strictEqual(entry.anchor, 'new span');
+    assert.strictEqual(entry.anchor, 'new span text');
     assert.strictEqual(entry.anchorFile, 'C:/store/f2.md');
   } finally { clean(proj); }
 });
@@ -237,9 +240,51 @@ test('RED-FIRST/root-E: a re-affirm passing a WHITESPACE-ONLY anchor does NOT ov
 test('RED-FIRST/root-E control: a re-affirm with a REAL (non-whitespace) new anchor still overrides normally — the fix does not over-refuse legitimate updates', () => {
   const proj = sandbox();
   try {
-    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span', anchorFile: 'C:/store/f.md' });
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span text', anchorFile: 'C:/store/f.md' });
     recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: '  new span with real content  ', anchorFile: 'C:/store/f2.md' });
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
     assert.strictEqual(entry.anchor, '  new span with real content  ', 'a real (surrounding-whitespace-only, not content-only) anchor still overrides — only a PURELY whitespace value is refused');
+  } finally { clean(proj); }
+});
+
+// grad9 F3: whitespace-only was never the full class — a DEGENERATE-but-
+// non-whitespace anchor ("e", "#", "the" — the lab's own examples) passed
+// the old `trim().length>0` check and silently overwrote a real, much
+// longer, adjudicated anchor on re-affirm.
+for (const junk of ['e', '#', 'the']) {
+  test(`RED-FIRST/F3-degenerate: a re-affirm passing the degenerate anchor ${JSON.stringify(junk)} does NOT overwrite the prior real anchor`, () => {
+    const proj = sandbox();
+    try {
+      const real = 'the exact protected span, ninety-plus characters long so it is unmistakably a real adjudicated clause not a fragment';
+      recordKeep(proj, { target: 'f.md:clause', reason: 'first adjudication', anchor: real, anchorFile: 'C:/store/f.md' });
+      recordKeep(proj, { target: 'f.md:clause', reason: 'degenerate re-affirm', anchor: junk, anchorFile: 'C:/store/f.md' });
+      const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+      assert.strictEqual(entry.anchor, real, `a degenerate anchor (${JSON.stringify(junk)}) must NOT replace the prior real one`);
+    } finally { clean(proj); }
+  });
+}
+
+// grad9 F3, OPPOSITE POLARITY: U+200B (ZERO WIDTH SPACE) is Cf, not in JS
+// `\s` — the old check's `.trim()` does not strip it, so a ZWSP-only value
+// passed as "real content" too, and would then PERMANENTLY false-refuse
+// every future edit (nothing in real text ever contains a bare ZWSP).
+test('RED-FIRST/F3-invisible: a re-affirm passing an INVISIBLE (U+200B-only) anchor does NOT overwrite the prior real anchor', () => {
+  const proj = sandbox();
+  try {
+    const real = 'the exact protected span, ninety-plus characters long so it is unmistakably a real adjudicated clause not a fragment';
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first adjudication', anchor: real, anchorFile: 'C:/store/f.md' });
+    recordKeep(proj, { target: 'f.md:clause', reason: 'invisible re-affirm', anchor: '\u200b\u200b\u200b', anchorFile: 'C:/store/f.md' });
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+    assert.strictEqual(entry.anchor, real, 'a ZWSP-only anchor must NOT replace the prior real one');
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/F3 control: a real anchor at/above the meaningful-length floor still overrides normally — the fix does not over-refuse a genuinely short-but-real update', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'the old ninety-plus char span used only to seed a real prior entry here', anchorFile: 'C:/store/f.md' });
+    recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: '8+chars!', anchorFile: 'C:/store/f2.md' }); // exactly 8 non-whitespace chars
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+    assert.strictEqual(entry.anchor, '8+chars!', 'a real anchor at the floor still overrides — only sub-floor junk is refused');
   } finally { clean(proj); }
 });

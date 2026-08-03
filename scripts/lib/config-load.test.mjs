@@ -173,6 +173,53 @@ test('W2-3: a MISSING global (never written at all) is unaffected -- unreadable 
   } finally { clean(home, proj); }
 });
 
+// grad9 R8-F5 (carried from round 8, never routed until now): `mergeSafety`
+// threaded `globalUnreadable` but never `projectUnreadable` -- readJsonc
+// ALREADY blanks `data` to `{}` on any unreadable condition today, so this is
+// a DEFENSIVE fix, not a live-bug close under the current readJsonc
+// implementation. RED-FIRST at the level that actually matters: mergeSafety
+// is a general, reusable function, and a caller passing REAL (would-be-
+// escalating) project data alongside `projectUnreadable:true` must get the
+// same "nothing asked" treatment global gets on ITS unreadable path -- the
+// function's OWN contract, independent of what any one caller's reader does.
+// A SAFER_ENUM/SAFER_TRUE key (coalwashMode, writeGuard, localOnly) is the
+// WRONG probe here — those are already clamped by the existing enum logic
+// regardless of projectUnreadable, so a test built on one would pass on
+// EITHER engine and prove nothing about the new wiring specifically. A plain
+// PASSTHROUGH key (nothing in OBJECT_SCHEMA_KEYS/SAFER_ENUM/SAFER_TRUE,
+// e.g. fullPercent) is set ONLY by the initial `{...global, ...p}` spread —
+// exactly the one place `projectUnreadable` changes what `p` is.
+test('RED-FIRST/R8-F5: mergeSafety ignores PROJECT data entirely when projectUnreadable is true, even for a plain passthrough key an enum clamp would never touch', () => {
+  const merged = mergeSafety(
+    { fullPercent: 6 },
+    { fullPercent: 99 }, // a real, non-safety-clamped override
+    { projectUnreadable: true },
+  );
+  assert.strictEqual(merged.fullPercent, 6, 'the project\'s override must be ignored entirely — nothing clamps this key, only projectUnreadable can be muting it');
+});
+
+test('RED-FIRST/R8-F5 control: with projectUnreadable FALSE (the default), the same passthrough override still lands — the fix does not silently mute a normally-readable project', () => {
+  const merged = mergeSafety({ fullPercent: 6 }, { fullPercent: 99 });
+  assert.strictEqual(merged.fullPercent, 99, 'a readable project still overrides a plain passthrough key, exactly as before');
+});
+
+// End-to-end symmetry check (not independently red-first — readJsonc already
+// blanks `data` on any unreadable project file today, so this passes on
+// EITHER engine; kept as the room's own "does a MISSING/corrupt project
+// escalate past global" invariant, now stated for the project side the way
+// W2-3 above states it for the global side).
+test('R8-F5 end-to-end: a PRESENT-but-corrupt project config cannot escalate past a stricter global stance', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ coalwashMode: 'off', writeGuard: 'on' }));
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), '{ not json'); // corrupt, but EXISTS
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.coalwashMode, 'off', 'a corrupt project file must never be read as an escalation attempt');
+    assert.strictEqual(cfg.writeGuard, 'on');
+  } finally { clean(home, proj); }
+});
+
 test('a poisoned project config cannot pollute Object.prototype through the merge', () => {
   const { home, proj } = sandbox();
   try {

@@ -127,6 +127,40 @@ test('config: resolveArchiveDir — "" and a RELATIVE dir both fall back to ~/.c
   } finally { clean(home); }
 });
 
+// grad9 R8-F7: resolveArchiveDir used a bare path.resolve() -- lexical only,
+// so a symlinked archiveDir (or symlinked ancestor) let the human-facing
+// consent bill name one location while archiveSession's own physical
+// write-containment resolved another. RED-FIRST at source: swap
+// estate-archive.mjs to HEAD (pre-fix), this test must fail (the lexical
+// link path returned, not the real target).
+test('RED-FIRST/R8-F7: resolveArchiveDir resolves a symlinked archiveDir to its REAL target, not the lexical link path', (t) => {
+  const { home } = sandbox();
+  try {
+    const realTarget = path.join(home, 'real-archive-target');
+    fs.mkdirSync(realTarget, { recursive: true });
+    const link = path.join(home, 'archive-link');
+    try {
+      fs.symlinkSync(realTarget, link, 'junction');
+    } catch {
+      t.skip('this box cannot create a directory symlink/junction — capability absent');
+      return;
+    }
+    const resolved = resolveArchiveDir(estateCfg({ archiveDir: link }), home);
+    const trueReal = fs.realpathSync.native(realTarget);
+    assert.strictEqual(resolved, trueReal, 'must be the REAL target, not the symlink\'s own lexical path');
+    assert.notStrictEqual(resolved, path.resolve(link), 'the pre-fix lexical answer must NOT be what we return');
+  } finally { clean(home); }
+});
+
+test('RED-FIRST/R8-F7 control: an ordinary (non-symlinked) absolute archiveDir with no existing ancestor still resolves exactly as before (no over-refusal)', () => {
+  const { home } = sandbox();
+  try {
+    const abs = path.join(home, 'brand-new', 'nested', 'archive');
+    const resolved = resolveArchiveDir(estateCfg({ archiveDir: abs }), home);
+    assert.strictEqual(resolved, path.resolve(abs), 'an ordinary path with no symlinks resolves identically to the old path.resolve() behavior');
+  } finally { clean(home); }
+});
+
 // ---------------------------------------------------------------------------
 // band classification
 // ---------------------------------------------------------------------------

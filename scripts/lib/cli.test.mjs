@@ -393,6 +393,31 @@ test('gaugeLine SURFACES a refused recovery, and stays silent when there was sim
   assert.ok(refused.length < quiet.length + 90, 'the terse line stays terse — the long reason belongs in --json');
   const done = gaugeLine({ ...base, recover: { recovered: 'rolled-back', restored: 2 } });
   assert.match(done, /recovered dangling run: rolled-back/, 'the success clause is unchanged');
+});
+
+// grad9 R8-F6 (carried from round 8, never routed until now): the assertion
+// this test used to make — that 'partial' reads as "recovered dangling run:
+// partial", the SAME shape as a clean success — WAS THE BUG, encoded as an
+// expected value. `recoverDangling` sets `error` alongside
+// `recovered:'partial'` specifically because SOME restore failed or was
+// refused (journal + snapshot kept, a mixed on-disk state) — the one outcome
+// that most needs the reader's attention read exactly like full success and
+// `rec.error` was never surfaced. RED-FIRST: swap cli.mjs to HEAD (pre-fix),
+// this must fail (the old 'recovered dangling run: partial' text, no mention
+// of the failure/refusal or that anything needs a look).
+test('RED-FIRST/R8-F6: gaugeLine gives a PARTIAL recovery its own visible clause, distinct from a clean success', () => {
+  const base = { verdict: { band: 'LEAN', bmi: 0 }, measure: { alwaysLoaded: { tokensEst: 1000 } } };
   const partial = gaugeLine({ ...base, recover: { recovered: 'partial', restored: 1, error: 'x' } });
-  assert.match(partial, /recovered dangling run: partial/, "'partial' reports as itself, never as a refusal");
+  assert.match(partial, /PARTIALLY recovered/i, `a partial recovery must be visibly distinct from a clean one (got: ${partial})`);
+  assert.doesNotMatch(partial, /recovered dangling run: partial/, 'must not read as the generic success clause');
+  assert.match(partial, /--json/, 'must point at where the failure/refusal detail lives');
+});
+
+test('RED-FIRST/R8-F6 control: a clean success (rolled-back/cleaned/no-mutation) still reports as itself, unaffected by the partial-specific clause', () => {
+  const base = { verdict: { band: 'LEAN', bmi: 0 }, measure: { alwaysLoaded: { tokensEst: 1000 } } };
+  for (const recovered of ['rolled-back', 'cleaned', 'no-mutation']) {
+    const line = gaugeLine({ ...base, recover: { recovered } });
+    assert.match(line, new RegExp(`recovered dangling run: ${recovered}`), `${recovered} must still read as a plain success`);
+    assert.doesNotMatch(line, /PARTIALLY/i);
+  }
 });

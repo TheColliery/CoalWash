@@ -120,7 +120,23 @@ export function resolveEstateCfg(estate) {
 // consent, so the destination is always shown, never silent.
 export function resolveArchiveDir(estate, home = os.homedir()) {
   const cfg = resolveEstateCfg(estate);
-  if (cfg.archiveDir && path.isAbsolute(cfg.archiveDir)) return path.resolve(cfg.archiveDir);
+  if (cfg.archiveDir && path.isAbsolute(cfg.archiveDir)) {
+    // grad9 R8-F7: was a bare path.resolve() -- lexical only, never follows
+    // a symlink. The ULTRA consent bill shows THIS value before the human
+    // presses "run"; archiveSession's own write-containment below resolves
+    // the same string PHYSICALLY (fs.realpathSync-based). A symlinked
+    // archiveDir (or a symlinked ancestor of it) let the two diverge -- the
+    // human approves one location, the engine's later checks reason about
+    // another. `physicalForCreate` (already imported, used a few lines below
+    // for the per-file destination check) resolves the deepest EXISTING
+    // ancestor and reattaches the not-yet-created tail, so the bill and the
+    // eventual write target are the SAME real path -- "check one spelling,
+    // act on that same spelling", the room's own recurring rule. `null` (no
+    // existing ancestor at all -- an unresolvable root) fails CLOSED to the
+    // safe OS-citizen default rather than trusting a raw string.
+    const real = physicalForCreate(cfg.archiveDir);
+    if (real) return real;
+  }
   return path.join(claudeBaseDir(home), 'coal', 'coalwash', ESTATE_ARCHIVE_DIRNAME);
 }
 

@@ -643,11 +643,26 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
   return merged;
 }
 
-export function mergeSafety(global, project, { globalUnreadable = false } = {}) {
-  const out = { ...global, ...project };
+export function mergeSafety(global, project, { globalUnreadable = false, projectUnreadable = false } = {}) {
+  // grad9 R8-F5: the PROJECT layer's own `unreadable` signal was computed by
+  // readJsonc and never threaded here — only globalUnreadable was. Today
+  // readJsonc always returns `data:{}` on any unreadable condition (parse
+  // error, wrong shape, missing file), so `project` is already effectively
+  // empty by the time it reaches this function and every downstream branch
+  // below already treats an empty project as "nothing asked" (the safe
+  // direction, same as an absent file). This wiring is therefore DEFENSIVE,
+  // not a live-bug close: `mergeSafety` is a general, reusable function, and
+  // its own input contract should never trust PROJECT data the caller has
+  // flagged as unverifiable, regardless of what a particular readJsonc
+  // implementation happens to do today — a caller passing a partially-parsed
+  // or hand-built `project` object alongside `projectUnreadable:true` must
+  // get the same "nothing asked" treatment global gets on its own
+  // unreadable path, not silently have that object's content honored.
+  const p = projectUnreadable ? {} : project;
+  const out = { ...global, ...p };
   for (const key of OBJECT_SCHEMA_KEYS) {
-    if (global[key] !== undefined || project[key] !== undefined) {
-      out[key] = mergeObjectKey(key, global[key], project[key], globalUnreadable);
+    if (global[key] !== undefined || p[key] !== undefined) {
+      out[key] = mergeObjectKey(key, global[key], p[key], globalUnreadable);
     }
   }
   for (const [key, order] of Object.entries(SAFER_ENUM)) {
@@ -657,14 +672,14 @@ export function mergeSafety(global, project, { globalUnreadable = false } = {}) 
     // asks -- never the schema default, which can be weaker than what the
     // user actually had set before the file broke.
     if (globalUnreadable) { out[key] = order[0]; continue; }
-    if (project[key] === undefined) continue; // nothing the project asked to change
+    if (p[key] === undefined) continue; // nothing the project asked to change (incl. an unreadable project, per grad9 R8-F5 above)
     const globalVal = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
     // CASE-FOLD to match the schema's case-insensitive enum. Comparing raw
     // case let a project 'AUTO' miss the lookup (indexOf -> -1) and fall
     // through to the shallow-merge (project wins), re-enabling a globally-off
     // skill (H5).
     let gi = order.indexOf(String(globalVal).toLowerCase());
-    const pi = order.indexOf(String(project[key]).toLowerCase());
+    const pi = order.indexOf(String(p[key]).toLowerCase());
     // An unreadable GLOBAL VALUE (parsed fine, but this one key's value is
     // invalid) reads as the schema default (the WAVE-2 R2 rule extended from
     // absent to invalid — the user's position cannot be read, and the
@@ -698,5 +713,5 @@ export function mergeSafety(global, project, { globalUnreadable = false } = {}) 
 export function loadMergedConfig({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const g = readJsonc(globalConfigPath(home));
   const p = readJsonc(projectConfigPath(cwd, home));
-  return mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable });
+  return mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable });
 }

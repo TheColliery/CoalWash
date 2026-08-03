@@ -1537,6 +1537,96 @@ test('KEEPS-GATE fixpoint CASCADE: excluding file A removes the text that satisf
   } finally { clean(proj); }
 });
 
+// grad9 F2 [HIGH, content-loss, mainline]: the whitespace normalizer was
+// blind to semantic indentation — same tokens, different program, judged as
+// "the anchor survives" and left unflagged. Both fixtures are the lab's own
+// (LAB-RECORD.md F2 / w1/harness.mjs), driven through the real KEEPS-GATE.
+test('RED-FIRST/F2-python: print(i*2) DEDENTED out of the loop (same tokens, runs once instead of 3x) is caught — the anchor no longer "survives"', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const origBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    print(i)\n    print(i*2)\nprint("done")\nTail notes.';
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = 'for i in range(3):\n    print(i)\n    print(i*2)\nprint("done")';
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    // print(i*2) dedented OUT of the loop — same tokens, different program.
+    const newBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    print(i)\nprint(i*2)\nprint("done")\nTail notes — rewritten.';
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error); // per-file exclusion, not a plan-fatal abort
+    assert.strictEqual(r.applied, 1, 'the OTHER file still applies — only the keep-protected one is excluded');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody, 'the file must be left UNTOUCHED (the semantic-indent change is refused)');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/F2-python control: a genuinely DIFFERENT token (i*2 -> i*3) is still correctly excluded — isolates the finding to the whitespace-only case', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const origBody = 'Ops snippet:\nfor i in range(3):\n    print(i)\n    print(i*2)\nTail.';
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = 'for i in range(3):\n    print(i)\n    print(i*2)';
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    const newBody = 'Ops snippet:\nfor i in range(3):\n    print(i)\n    print(i*3)\nTail changed.';
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.applied, 1, 'a real token change must still be excluded');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/F3-yaml: `cache: redis` re-parented from a SIBLING of db to a CHILD of db (2-space indent, same tokens) is caught', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const origBody = 'Config (load-bearing):\nservice:\n  db:\n    host: primary\n  cache: redis\nTail notes.';
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = 'service:\n  db:\n    host: primary\n  cache: redis';
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    // cache: redis re-parented to be a CHILD of db — same tokens, different config.
+    const newBody = 'Config (load-bearing):\nservice:\n  db:\n    host: primary\n    cache: redis\nTail notes — reformatted.';
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1, 'the rewrite must be EXCLUDED — the re-parenting is a real config change');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/F3-yaml control: a genuinely different value (redis -> memcached) is still correctly excluded', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const origBody = 'Config:\nservice:\n  db:\n    host: primary\n  cache: redis\nTail.';
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = 'service:\n  db:\n    host: primary\n  cache: redis';
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    const newBody = 'Config:\nservice:\n  db:\n    host: primary\n    cache: memcached\nTail changed.';
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.applied, 1);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
+  } finally { clean(proj); }
+});
+
 // grad7 findings-back (round 9 dispatch), MED: hoisting textSurvives to
 // module scope (Root B) closed the twin-drift but re-ran normWhitespace()
 // over EVERY post-text on EVERY textSurvives() call — and the KEEPS-GATE

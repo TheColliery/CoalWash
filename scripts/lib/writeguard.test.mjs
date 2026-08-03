@@ -147,7 +147,9 @@ test('RED-FIRST/root-C: a foreign occupant at the derived snapshot slot (the sta
     assert.ok(snap2, 'a fresh snapshot must still be taken for gov');
     assert.notStrictEqual(snap2, realSnap, 'must NOT reuse the foreign-occupied slot — a disambiguated new slot is required');
     assert.strictEqual(fs.readFileSync(snap2, 'utf8'), trueOrig, 'the NEW snapshot must hold GOV\'s own true original, never the foreign content');
-    assert.strictEqual(fs.readFileSync(`${snap2}.origpath`, 'utf8'), gov, 'the new slot\'s sidecar correctly identifies gov as its owner');
+    // grad9 F1: the sidecar now carries a SECOND line (the content hash) —
+    // check the path line specifically, not the whole file verbatim.
+    assert.strictEqual(fs.readFileSync(`${snap2}.origpath`, 'utf8').split('\n')[0], gov, 'the new slot\'s sidecar correctly identifies gov as its owner');
     // The foreign occupant is left completely untouched — never overwritten,
     // never treated as reclaimable.
     assert.strictEqual(fs.readFileSync(realSnap, 'utf8'), 'FOREIGN CONTENT — belongs to a different file entirely', 'the foreign occupant must survive untouched');
@@ -164,6 +166,39 @@ test('RED-FIRST/root-C control: a REAL same-session re-write of the SAME file st
     const snap2 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
     assert.strictEqual(snap2, snap1, 'the identity-verified fast path still returns the SAME slot for the SAME file — no unnecessary disambiguation');
     assert.strictEqual(fs.readFileSync(snap1, 'utf8'), GOV, 'baseline is still the untouched first-write orig');
+  } finally { clean(home, proj); }
+});
+
+// grad9 F1: round 8 named Root C as "no content-verify-before-trust"; the
+// sha256 upgrade closed the NAME-collision route but verifyOrigPath still
+// compared a PATH STRING only, never the blob's own bytes -- so a slot
+// tampered IN PLACE (content overwritten, sidecar path left matching) was
+// silently trusted as the file's own baseline. Coordinator's own fixture
+// reproduced this live: legit snapshot -> blob overwritten -> re-entry ->
+// "slot reused (no re-verify)? true". RED-FIRST: swap writeguard.mjs to HEAD
+// (pre-F1), this must fail (the tampered slot gets reused).
+test('RED-FIRST/F1: a blob tampered in place (sidecar path still matches, content does not) is NEVER trusted as this file\'s own baseline', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const trueOrig = GOV + '\nTHE TRUE ORIGINAL — this must survive, byte-exact.';
+    fs.writeFileSync(gov, trueOrig, 'utf8');
+    const snap1 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.ok(snap1 && fs.existsSync(snap1));
+    assert.strictEqual(fs.readFileSync(snap1, 'utf8'), trueOrig, 'setup: real baseline recorded');
+
+    // TAMPER: overwrite the blob's bytes directly, in place — exactly the
+    // coordinator's own reproduction. The sidecar (path + the ORIGINAL hash)
+    // is left untouched, so a path-only check would still say "match".
+    fs.writeFileSync(snap1, 'ATTACKER-CONTROLLED CONTENT', 'utf8');
+
+    // Same file, same session, requested again. Pre-fix: path match alone
+    // trusted the slot and reused the tampered blob as gov's baseline.
+    const snap2 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.ok(snap2, 'a fresh snapshot must still be taken');
+    assert.notStrictEqual(snap2, snap1, 'the tampered slot must NOT be reused — disambiguated to a new slot');
+    assert.strictEqual(fs.readFileSync(snap2, 'utf8'), trueOrig, 'the NEW snapshot must hold gov\'s own current true state, never the tampered blob');
+    assert.strictEqual(fs.readFileSync(snap1, 'utf8'), 'ATTACKER-CONTROLLED CONTENT', 'the tampered blob survives untouched, never silently "repaired"');
   } finally { clean(home, proj); }
 });
 

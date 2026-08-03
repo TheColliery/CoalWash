@@ -130,31 +130,54 @@ export function isGuardedTarget(touchedPath, { projectRoot, home } = {}) {
   return null;
 }
 
-// IDENTITY SIDECAR — the content-verify-before-trust the ruling names.
-// `fs.existsSync(snap)` alone answers "is there a file at this NAME", never
-// "does it belong to THIS phys" — the two differ exactly when snapName's
-// hash collides across two DIFFERENT physical paths (closed for a brute-
-// force attacker by the sha256 upgrade above; this sidecar is the
-// independent, non-hash-strength-dependent check, same "verify, don't
-// trust the name" discipline as explode.mjs's own blob dedup). Plain text,
-// same directory, written in the SAME call that creates the snapshot — no
-// concurrent-writer race beyond what the snapshot file itself already has.
+// IDENTITY SIDECAR — grad9 F1: round 8 named the defect "no content-verify-
+// before-trust". The sha256 upgrade above closed the NAME-collision route
+// (infeasible to forge a colliding snapName), but the sidecar this comment
+// used to describe as "the content-verify-before-trust the ruling names"
+// compared a PATH STRING only — it never read, hashed, or otherwise looked
+// at the blob's own bytes. Coordinator's fixture proved the gap live: take a
+// legit snapshot, overwrite the BLOB in place (no hash work, no collision
+// search — just a write to a file the engine's own listWriteguard already
+// enumerates), call snapshotOnFirstWrite again -> the slot was reused with
+// the tampered bytes trusted as "already snapshotted this session". The
+// label and the mechanism disagreed inside one comment block; the mechanism
+// is now upgraded to MATCH the label. The sidecar carries the recorded orig
+// PATH on its first line (still needed — a genuine collision is a different
+// phys entirely, and content-hashing alone can't distinguish "same file,
+// tampered" from "different file, same bytes") and the sha256 of the blob's
+// content, AS WRITTEN, on its second line. Reusing a slot now requires BOTH:
+// the recorded path matches AND the blob's CURRENT on-disk bytes still hash
+// to what was recorded at creation.
 function origPathSidecar(snap) { return `${snap}.origpath`; }
-function recordOrigPath(snap, phys) {
-  fs.writeFileSync(origPathSidecar(snap), phys, 'utf8');
+function contentDigest(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+function recordOrigPath(snap, phys, blobBuf) {
+  fs.writeFileSync(origPathSidecar(snap), `${phys}\n${contentDigest(blobBuf)}`, 'utf8');
 }
-// Returns true (verified match), false (a DIFFERENT phys owns this name —
-// the collision case), or null (no sidecar — a pre-fix legacy snapshot;
-// cannot confirm either way, so the caller treats it the same as false:
-// never assume identity that was never recorded). Consequence, right
-// direction but worth stating: a session in flight across the upgrade loses
-// its seatbelt BASELINE for a file it already snapshotted pre-fix (the
-// advisory goes silent, never a false one — fail-silent, not fail-wrong);
-// the human RESTORE path is untouched, since readWriteguardSnapshot resolves
-// by NAME via listWriteguard, not through this identity check.
+// Returns true (verified: path matches AND the blob's bytes, hashed right
+// now, still match what was recorded at write time), false (either a
+// DIFFERENT phys owns this name — the collision case — or the SAME phys's
+// blob was altered after the fact; either way, never trust it), or null
+// (unverifiable — no sidecar at all, a pre-content-hash legacy sidecar
+// carrying only a path with no second line, or the blob itself is
+// unreadable; the caller treats null the same as false: never assume
+// identity that was never recorded). Consequence, right direction but worth
+// stating: a session in flight across the FIRST upgrade (the path-only
+// sidecar) loses its seatbelt BASELINE for a file it already snapshotted
+// pre-fix (the advisory goes silent, never a false one — fail-silent, not
+// fail-wrong); the human RESTORE path is untouched, since
+// readWriteguardSnapshot resolves by NAME via listWriteguard, not through
+// this identity check.
 function verifyOrigPath(snap, phys) {
-  try { return fs.readFileSync(origPathSidecar(snap), 'utf8') === phys; }
-  catch { return null; }
+  try {
+    const raw = fs.readFileSync(origPathSidecar(snap), 'utf8');
+    const nl = raw.indexOf('\n');
+    if (nl === -1) return null; // legacy path-only sidecar, or malformed — unverifiable
+    if (raw.slice(0, nl) !== phys) return false;
+    const recordedHash = raw.slice(nl + 1).trim();
+    let blobBuf;
+    try { blobBuf = fs.readFileSync(snap); } catch { return null; } // blob unreadable — can't verify content
+    return contentDigest(blobBuf) === recordedHash;
+  } catch { return null; }
 }
 // Walk the disambiguation chain for `phys` inside `dir`: the FIRST candidate
 // that is either (a) verified as already belonging to phys, or (b) does not
@@ -188,7 +211,10 @@ export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home
     selfIgnore(writeguardRoot(projectRoot));
     selfIgnore(dir);
     fs.copyFileSync(phys, snap); // the ms-copy
-    recordOrigPath(snap, phys);
+    // hash what's ACTUALLY on disk at `snap` now (not `phys` before the
+    // copy) — this guards the copy step itself, not just a promise about
+    // the source.
+    recordOrigPath(snap, phys, fs.readFileSync(snap));
     return snap;
   } catch { return null; }
 }

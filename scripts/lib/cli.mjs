@@ -211,9 +211,21 @@ export function gaugeLine(g) {
   // belongs in --json, which the SKILL text now points at. The line's job is to
   // make the reader ASK.
   const rec = g.recover || {};
-  const recovered = rec.recovered && rec.recovered !== 'none'
-    ? ` · recovered dangling run: ${rec.recovered}`
-    : (rec.error ? ' · dangling run REFUSED, left for inspection (--json for the reason)' : '');
+  // grad9 R8-F6: 'partial' (some restore FAILED or a target was REFUSED,
+  // journal + snapshot KEPT for a human — apply.mjs's own `recoverDangling`
+  // still sets `error` alongside `recovered:'partial'`) was truthy and
+  // !=='none', so it fell into the SAME "recovered dangling run: partial"
+  // branch as a clean 'cleaned'/'rolled-back'/'no-mutation' success — the
+  // one case that most needs the reader's attention (a mixed on-disk state)
+  // read exactly like full success and rec.error, the field carrying the
+  // actual detail, was never surfaced. Same root cause the comment above
+  // already names for 'none'+error: a real event silently read as nothing
+  // notable. Give 'partial' its own branch before the general success check.
+  const recovered = rec.recovered === 'partial'
+    ? ' · dangling run PARTIALLY recovered — some item(s) failed/refused, journal + snapshot kept for inspection (--json for detail)'
+    : (rec.recovered && rec.recovered !== 'none'
+        ? ` · recovered dangling run: ${rec.recovered}`
+        : (rec.error ? ' · dangling run REFUSED, left for inspection (--json for the reason)' : ''));
   return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${recovered}`;
 }
 

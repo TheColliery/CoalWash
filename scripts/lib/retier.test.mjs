@@ -610,6 +610,60 @@ test('grad6 W2-F1: unreferencedTopics is case-folded — a case-different refere
   );
 });
 
+// grad9 F4 [HIGH, content-loss by displacement]: case-folding closed the CASE
+// axis (grad6 W2-F1 above) but not the PUNCTUATION one. `[[Topic Name]]` (a
+// real wikilink, spaces) has ZERO substring overlap with a topic file's own
+// slugified basename/stem `topic-name.md`/`topic-name` (hyphens) — a
+// genuinely-referenced topic reads as unreferenced and gets archived while
+// the referring file still literally contains the wikilink.
+test('RED-FIRST/F4: unreferencedTopics normalizes delimiter punctuation — a wikilink written with SPACES still counts against a HYPHENATED basename/stem', () => {
+  const store = {
+    topics: [{ path: '/s/topic-name.md', basename: 'topic-name.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'see [[Topic Name]] for detail\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    [],
+    'a SPACED wikilink must still count as a reference to the HYPHENATED topic-name.md — same reference, different delimiter'
+  );
+});
+
+test('RED-FIRST/F4 control: a genuinely unreferenced topic (no delimiter variant anywhere) is still correctly archived', () => {
+  const store = {
+    topics: [{ path: '/s/topic-name.md', basename: 'topic-name.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'nothing about it here\nplain';
+  assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), ['topic-name.md']);
+});
+
+// Same finding, driven through the REAL runRetier end-to-end (the lab's own
+// method — a unit-level pass alone can't prove the top-anchor safety net
+// structurally cannot catch this: the referring line survives verbatim in
+// the index, so probeAnchors sees nothing wrong while the target file
+// leaves the live tree).
+test('RED-FIRST/F4-integration: a topic referenced ONLY via a spaced wikilink survives a real over-arm demotion pass — it must NOT be archived', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    const idx = ['# Memory index', '', '- See [[Topic Name]] for detail — the referenced pointer [[flock-law]] v9.9.9'];
+    for (let i = 0; i < 24; i++) {
+      idx.push(`- [[uniq-${i}]] bullet ${i} — a long index line carrying enough prose to be worth demoting when the envelope arms [[flock-law]] v9.9.9 \`key-${i}\``);
+    }
+    write(path.join(dir, 'MEMORY.md'), idx.join('\n') + '\n');
+    const topicOrig = 'Plain prose body, referenced only from the index above via a spaced wikilink.\n';
+    write(path.join(dir, 'topic-name.md'), topicOrig);
+    write(path.join(dir, 'state.json'), '{"machine":true}');
+    write(path.join(dir, 'trace.jsonl'), '{"vendor":true}\n');
+
+    const estate = estateCfg(home);
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate, now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(fs.existsSync(path.join(dir, 'topic-name.md')), 'the topic must STAY LIVE — it is genuinely referenced, just via a different delimiter');
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'topic-name.md'), 'utf8'), topicOrig, 'untouched, byte-identical');
+  } finally { clean(home, proj); }
+});
+
 // grad6 W2-F2 (CoalBoard verdict): collectStores classified `.md` byte-exact,
 // so a referrer file saved as NOTES.MD (a case-preserving editor, or a tool
 // that writes uppercase extensions) fell into others[] instead of topics[] —
