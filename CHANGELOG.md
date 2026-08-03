@@ -2,9 +2,11 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.0.0] - 2026-08-03
 
-> WAVE-16 finding 1 (inspect findings-back): the grad6 3-commit unit (`7d57d4c`, `247a768`, `9e9ddde`) plus its own findings-back round changed six shipped libs with no `[Unreleased]` entry — opened per the room's own post-stable flow (`d68c12b`). No version bump; that stays main's press at ship time.
+> **BREAKING.** `fullPercent` and `fatMultiple` — documented, user-settable config keys (README's Configure table: *"raise it to consciously carry more muscle before the wall forces a run"*) — are now read-tolerated and ignored. Task #4 replaced the floor-driven wall they scaled with a measured-fat model that takes no config input; a project that set either key to change the capacity wall's behavior will see that setting silently stop doing anything. No error, no warning — the same read-tolerated-and-ignored shape as the earlier `forceMode` retirement, but that one shipped mid-beta, before this project's stable line existed. This one breaks a promise the shipped README made in a stable release, which is the SemVer MAJOR case by this room's own rule (`scripts-quality.md` §3: *"MAJOR = a BREAKING change [to a] ... config key"*) — sized here rather than left for a future release to under-bump, per the standing correct-forward instruction after the CoalBoard v1.0.13 / CoalTipple v1.0.23 precedent.
+>
+> WAVE-16 finding 1 (inspect findings-back): the grad6 3-commit unit (`7d57d4c`, `247a768`, `9e9ddde`) plus its own findings-back round changed six shipped libs with no `[Unreleased]` entry — opened per the room's own post-stable flow (`d68c12b`).
 
 ### Security
 
