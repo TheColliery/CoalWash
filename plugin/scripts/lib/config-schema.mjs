@@ -242,3 +242,41 @@ export function clampedRead(cfg, key) {
   if (spec.type === 'enum') return v.toLowerCase();
   return v;
 }
+
+// ---------------------------------------------------------------------------
+// The RE-TIER envelope — pure config interpretation (task #4: moved here from
+// retier.mjs, which re-exports both, so the conductor's gauge can read the
+// envelope NUMBERS for the reorganize break-even without a hook ever holding
+// a reference to retier.mjs — the "RE-TIER is wizard-only" grep-rail stays
+// strict and the demotion machinery stays structurally unreachable from
+// hooks. One definition; retier's own passes import it from here.
+// ---------------------------------------------------------------------------
+
+// `retier` arrives via clampedRead (per-sub-key degrade-to-default); this is
+// defense in depth for direct callers, same pattern as resolveEstateCfg.
+export function resolveRetierCfg(retier) {
+  const r = retier && typeof retier === 'object' ? retier : {};
+  const num = (v, def, min, max) => (Number.isFinite(v) && v >= min && v <= max ? v : def);
+  return {
+    targetTokens: num(r.targetTokens, 4125, 500, 6250), // 6250 = the CC hard cap (25 KB index / 4)
+    armPct: num(r.armPct, 20, 5, 50),
+    disarmPct: num(r.disarmPct, 10, 5, 50),
+    headroomPct: num(r.headroomPct, 10, 5, 50),
+  };
+}
+
+export function envelopeFor(retier) {
+  const c = resolveRetierCfg(retier);
+  return {
+    targetTokens: c.targetTokens,
+    armAt: Math.round(c.targetTokens * (1 + c.armPct / 100)),
+    disarmAt: Math.round(c.targetTokens * (1 - c.disarmPct / 100)),
+    fillCeiling: Math.round(c.targetTokens * (1 - c.headroomPct / 100)),
+  };
+}
+// Hook-facing variant: reads the config BLOCK itself, so a hook never has to
+// reference the block's key by name (the "RE-TIER is wizard-only" rail greps
+// hooks/ for that name and must stay byte-strict — see envelopeFor above).
+export function envelopeForConfig(cfg) {
+  return envelopeFor(cfg && typeof cfg === 'object' ? cfg.retier : undefined);
+}

@@ -187,8 +187,10 @@ function flipCase(s) {
 // A probe MISS is therefore exactly three things: no case-bearing character in the
 // basename to flip, `flipCase` refusing an unstable character per its own bounded
 // comment, or `dirPhys` being a filesystem root with no parent — plus the OUTER
-// stat failure above. Every one of them falls back to the FOLDING answer, never
-// the exact-match one.
+// stat failure above. Every one of them falls back to the CALLER's declared
+// `foldOnMiss`, never a real exact-match measurement — "the folding answer" only
+// because every caller today happens to declare REFUSE (`true`); a future PERMIT
+// caller declaring `false` would get the opposite fallback on the identical miss.
 //
 // A MISS ANSWERING `foldOnMiss` IS A KNOWN, NAMED WRONG ANSWER IN ONE DIRECTION —
 // say so plainly, not just "safe": on a directory that is genuinely case-SENSITIVE,

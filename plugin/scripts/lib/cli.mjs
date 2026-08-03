@@ -72,9 +72,10 @@ import { pathToFileURL } from 'node:url';
 import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
 import {
-  measureEntries, bandVerdict, breakEven, sessionsPerDay,
-  loadState, sanitizeLeanFloor, armDigGauge,
+  measureEntries, gaugeVerdict,
+  loadState, armDigGauge,
 } from './caliper.mjs';
+import { envelopeFor } from './retier.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './tailings.mjs';
@@ -106,19 +107,11 @@ import { retierScan, retierScanLines, runRetier, runRetierReport } from './retie
 export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const projectRoot = findProjectRoot(cwd, home);
   const cfg = loadMergedConfig({ cwd, home });
-  const fullPercent = clampedRead(cfg, 'fullPercent');
-  const fatMultiple = clampedRead(cfg, 'fatMultiple');
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
   const disc = discoverClassB({ projectRoot, home, managedPaths });
   const m = measureEntries(disc.entries, { withGzip: true });
   const proj = loadState(projectRoot, home);
-  // Same floor hygiene as the conductor: never trust the raw stored value.
-  // 0j note: this READ-ONLY gauge never stamps the provisional floor (the
-  // conductor's gauges are the stamping site); it CONSUMES the stored floor
-  // — real or provisional — identically to them.
-  const leanFloorTokens = sanitizeLeanFloor(proj.leanFloorTokens, m.alwaysLoaded.tokensEst);
-  const floorProvisional = proj.leanFloorProvisional === true;
   // Read-only hysteresis + latch state — the gauge CONSUMES these and never
   // stamps or records them (the conductor's SessionStart/Stop are the stamping
   // site). That is a claim about THIS composition only: the recovery preflight
@@ -128,25 +121,24 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   // instead of reporting the SAME armed state the conductor is tracking.
   const wasOver = !!(proj.lastVerdict && proj.lastVerdict.overCeiling);
   const wasEconLatched = !!(proj.lastVerdict && proj.lastVerdict.econLatched);
-  // 0g Q4: economics BEFORE the band — the band depends on the break-even.
-  const econ = breakEven({
-    footprintTokens: m.alwaysLoaded.tokensEst,
-    leanFloorTokens,
-    totalStoreTokens: m.totalTokensEst,
-    sessionsPerDay: sessionsPerDay(proj.stamps),
-  });
-  const verdict = bandVerdict({
-    footprintTokens: m.alwaysLoaded.tokensEst,
-    leanFloorTokens,
-    fullPercent,
-    fatMultiple,
-    indexBytes: m.index.bytes,
-    indexLines: m.index.lines,
+  // task #4: fat and muscle are MEASURED by this very gauge (the certain-fat
+  // scan inside measureEntries) — no stored floor is read, no fullPercent/
+  // fatMultiple wall is computed (both retired). The reorg envelope resolves
+  // from the same merged config, via retier's own resolver — same composition
+  // as the conductor's two gauge sites.
+  const gv = gaugeVerdict({
+    measure: m,
     wasOver,
-    economical: econ.economical,
     wasEconLatched,
-    floorProvisional,
+    stamps: proj.stamps,
+    envelope: envelopeFor(cfg.retier),
   });
+  const verdict = gv.verdict;
+  const econ = {
+    fatTokens: gv.fatTokens, perDay: gv.perDay, breakEvenDays: gv.breakEvenDays,
+    demotableTokens: gv.demotableTokens, reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
+    economical: gv.economical, muscleTokens: gv.muscleTokens, mechFatTokens: gv.mechFatTokens,
+  };
   // The INHERITED-ANCESTOR tier, measured the same way and reported SEPARATELY —
   // never added into `measure`, which is what the verdict acts on. The series law
   // calls this "context-cost-not-room-fat": it is real per-session cost the reader
@@ -200,7 +192,11 @@ export function gauge(opts = {}) {
 
 // The terse one-line gauge (method.md §0's reporting shape).
 export function gaugeLine(g) {
-  const bmi = g.verdict.bmi ? `BMI ${g.verdict.bmi.toFixed(2)}` : 'no floor yet';
+  // task #4: BMI = footprint / MEASURED muscle now (1.00 = provably-pure
+  // muscle), informational only — the certain-fat figure beside it is what
+  // the band actually acts on.
+  const fatBit = g.breakEven && Number.isFinite(g.breakEven.fatTokens) ? ` · certain fat ~${Math.round(g.breakEven.fatTokens)} tok` : '';
+  const bmi = (g.verdict.bmi ? `BMI ${g.verdict.bmi.toFixed(2)}` : 'BMI n/a') + fatBit;
   // A REFUSAL IS AN EVENT, AND SILENCE MADE IT INDISTINGUISHABLE FROM NOTHING.
   // Every refusal returns recovered:'none' + an error, so the old `!== 'none'`
   // test dropped ALL of them: a user with a poisoned journal sitting in a fresh
