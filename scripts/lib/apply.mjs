@@ -179,11 +179,24 @@ function removedLines(origText, newText) {
 // and no substring check of any shape can distinguish "reshaped" from
 // "shortened" without a real diff; named as the fix's honest limit, not
 // silently claimed closed.
+// grad7 findings-back (round 9 dispatch): the hoist above closed the twin-
+// drift but paid for it — a caller with a hot loop over MANY needles against
+// the SAME haystacks (the KEEPS-GATE below: one call per keep, per action)
+// re-ran normWhitespace() over every haystack on EVERY call, even though the
+// haystacks themselves are constant for the whole loop. Measured: 98ms ->
+// 3,183ms at 1.2MB of post-texts / 500 miss-path calls (20 keeps x 25
+// actions) — a 32.5x regression on the apply hot path. Fix: an OPTIONAL
+// third argument lets a hot-loop caller pre-normalize its haystacks ONCE and
+// pass them in; textSurvives stays the single shared helper (the whole point
+// of the hoist) rather than growing a second, drifting copy for "the fast
+// case". A caller that doesn't pass it (the merge-pair check, a bounded,
+// cold call) keeps the old lazy-normalize-per-call behavior unchanged.
 const normWhitespace = (s) => String(s).replace(/\s+/g, ' ').trim();
-function textSurvives(needle, haystacks) {
+function textSurvives(needle, haystacks, normHaystacks) {
   if (haystacks.some((t) => t.includes(needle))) return true;
   const normNeedle = normWhitespace(needle);
-  return haystacks.some((t) => normWhitespace(t).includes(normNeedle));
+  const norms = normHaystacks || haystacks.map(normWhitespace);
+  return norms.some((t) => t.includes(normNeedle));
 }
 
 // ---------------------------------------------------------------------------
@@ -948,7 +961,13 @@ export function applyPlan(plan, opts = {}) {
         // grad7 ruling Root B/twin-drift: the module-level `textSurvives` above
         // is the SAME helper the merge-pair check now calls — one function, not
         // a belief that two hand-copies matched.
-        const survives = (anchor) => textSurvives(anchor, postTexts);
+        // round-9 perf fix: postTexts is constant for the rest of this while-
+        // iteration (it only changes across iterations, after an exclusion
+        // shrinks `actionable`) — normalize it ONCE here and hand the memo to
+        // every textSurvives() call below, instead of paying normWhitespace()
+        // per haystack on every one of the (keeps x actions) calls.
+        const normPostTexts = postTexts.map(normWhitespace);
+        const survives = (anchor) => textSurvives(anchor, postTexts, normPostTexts);
         const excluded = new Set();
         for (const k of keeps) {
           const kf = k.anchorFile;

@@ -1537,6 +1537,52 @@ test('KEEPS-GATE fixpoint CASCADE: excluding file A removes the text that satisf
   } finally { clean(proj); }
 });
 
+// grad7 findings-back (round 9 dispatch), MED: hoisting textSurvives to
+// module scope (Root B) closed the twin-drift but re-ran normWhitespace()
+// over EVERY post-text on EVERY textSurvives() call — and the KEEPS-GATE
+// calls it once per keep whose anchorFile matches an action, checking the
+// anchor against ALL non-delete post-texts (an anchor legitimately MIGRATED
+// by a merge must still be found). Reviewer-measured: 98ms -> 3,183ms at
+// 1.2MB of post-texts / 500 per-haystack normalize calls (20 keeps x 25
+// actions). Fixed by memoizing normPostTexts ONCE per while-iteration
+// instead of once per textSurvives() call.
+test('GATE COST: KEEPS-GATE with many keeps against many large post-texts stays bounded (round-9 perf regression)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const ACTIONS = 25;
+    const KEEP_COUNT = 20;
+    const FILLER = 'lorem ipsum dolor sit amet consectetur adipiscing elit '.repeat(13600); // ~768KB/file, ~19.2MB total
+    const files = [];
+    const actions = [];
+    for (let i = 0; i < ACTIONS; i++) {
+      const f = path.join(store, `doc-${i}.md`);
+      write(f, `orig-${i} ${FILLER}`);
+      files.push(f);
+      // real rewrites — none of them contain any keep's anchor text, so every
+      // survives() call falls through to the whitespace-normalized fallback
+      // (the branch that used to re-normalize the whole postTexts array).
+      actions.push({ type: 'rewrite', path: f, content: `new-${i} ${FILLER}` });
+    }
+    for (let i = 0; i < KEEP_COUNT; i++) {
+      recordKeep(proj, {
+        target: `doc-${i}.md:missing-${i}`,
+        anchor: `an anchor that never appears anywhere in this fixture, number ${i}`,
+        anchorFile: files[i],
+      });
+    }
+    const t0 = process.hrtime.bigint();
+    const r = apply(planFor(proj, store, actions));
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    // every keep's anchor is genuinely missing everywhere -> every keep
+    // excludes its own file (correctness unaffected by the perf fix)
+    assert.strictEqual(r.applied, ACTIONS - KEEP_COUNT, r.error);
+    // measured on this box: pre-memoize ~2,962ms, post-memoize ~826ms alone;
+    // under full-suite contention post-memoize still lands well under
+    // 1800ms, which sits with wide margin on both sides
+    assert.ok(ms < 1800, `KEEPS-GATE against ${ACTIONS} large post-texts / ${KEEP_COUNT} keeps took ${ms.toFixed(0)}ms — the normalize-per-call regression is back`);
+  } finally { clean(proj); }
+});
+
 // ---------------------------------------------------------------------------
 // beta.12 item 4: the fat-bin/store.old retention sweep piggybacks on
 // applyPlan's existing preflight housekeeping (the same touchpoint

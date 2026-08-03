@@ -146,7 +146,12 @@ function recordOrigPath(snap, phys) {
 // Returns true (verified match), false (a DIFFERENT phys owns this name —
 // the collision case), or null (no sidecar — a pre-fix legacy snapshot;
 // cannot confirm either way, so the caller treats it the same as false:
-// never assume identity that was never recorded).
+// never assume identity that was never recorded). Consequence, right
+// direction but worth stating: a session in flight across the upgrade loses
+// its seatbelt BASELINE for a file it already snapshotted pre-fix (the
+// advisory goes silent, never a false one — fail-silent, not fail-wrong);
+// the human RESTORE path is untouched, since readWriteguardSnapshot resolves
+// by NAME via listWriteguard, not through this identity check.
 function verifyOrigPath(snap, phys) {
   try { return fs.readFileSync(origPathSidecar(snap), 'utf8') === phys; }
   catch { return null; }
