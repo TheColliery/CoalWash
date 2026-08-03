@@ -31,11 +31,15 @@ export const CONFIG_SCHEMA = [
   // (1.5-2x heap growth) CEILING_BMI is drawn from, taking the HIGH edge
   // since the wall is the outer, rarely-touched line.
   { key: 'fatMultiple', type: 'number', min: 1.6, max: 10, def: 2.0, help: 'Growable absolute-cap wall = fatMultiple x the stamped lean floor, clamped at true capacity — must stay above the OBESE BMI ceiling (1.5) or the wall fires first and swallows OBESE (default: 2.0)' },
-  // targetPercent has NO band-math consumer post-band-collapse: the anti-flap job
-  // moved to caliper.mjs's BMI Schmitt trigger (CEILING_BMI/CEILING_REARM_BMI). It
-  // survives as AGENT guidance for the wash clean-to depth (references/method.md §3);
-  // kept, not removed (removing a shipped config key would be a breaking change).
-  { key: 'targetPercent', type: 'number', min: 0.5, max: 49, def: 3, help: 'Clean-to depth target as % of capacity, below fullPercent — agent guidance for the wash (references/method.md §3); the anti-flap job now lives in caliper.mjs\'s BMI hysteresis, so no band-math reads this key today (default: 3)' },
+  // targetPercent has NO band-math consumer: task #4 retired the BMI-vs-floor
+  // model this comment used to describe (CEILING_BMI/CEILING_REARM_BMI are
+  // LEGACY, see caliper.mjs:97 — zero band-logic readers); anti-flap now
+  // lives in caliper.mjs's fat Schmitt trigger (FAT_ARM_TOKENS/
+  // FAT_REARM_TOKENS), an unrelated axis this key never fed either. It
+  // survives as AGENT guidance for the wash clean-to depth (references/
+  // method.md §3); kept, not removed (removing a shipped config key would
+  // be a breaking change).
+  { key: 'targetPercent', type: 'number', min: 0.5, max: 49, def: 3, help: 'Clean-to depth target as % of capacity — agent guidance for the wash (references/method.md §3); no band-math reads this key (default: 3)' },
   { key: 'fileMaxSizeKb', type: 'int', min: 1, max: 1024, def: 25, help: 'Per-file size cap in KB before a class-B file is flagged oversize (default: 25 — the CC memory-index cap class)' },
   { key: 'quickVsFull', type: 'enum', values: ['quick', 'full'], def: 'quick', help: 'Default run tier: quick = free mechanical pass; full = paid semantic pass (always a separate consent; default: quick)' },
   { key: 'localOnly', type: 'bool', def: false, help: "Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config (default: false)" },
