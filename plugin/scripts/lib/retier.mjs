@@ -64,28 +64,19 @@ const CLAIM_FLAG_CAP = 20; // report readability cap on #55 flags, never a data 
 // Mechanism 1 — the envelope
 // ---------------------------------------------------------------------------
 
-// `retier` arrives via clampedRead (per-sub-key degrade-to-default); this is
-// defense in depth for direct callers, same pattern as resolveEstateCfg.
-export function resolveRetierCfg(retier) {
-  const r = retier && typeof retier === 'object' ? retier : {};
-  const num = (v, def, min, max) => (Number.isFinite(v) && v >= min && v <= max ? v : def);
-  return {
-    targetTokens: num(r.targetTokens, 4125, 500, 6250), // 6250 = the CC hard cap (25 KB index / 4)
-    armPct: num(r.armPct, 20, 5, 50),
-    disarmPct: num(r.disarmPct, 10, 5, 50),
-    headroomPct: num(r.headroomPct, 10, 5, 50),
-  };
-}
-
-export function envelopeFor(retier) {
-  const c = resolveRetierCfg(retier);
-  return {
-    targetTokens: c.targetTokens,
-    armAt: Math.round(c.targetTokens * (1 + c.armPct / 100)),
-    disarmAt: Math.round(c.targetTokens * (1 - c.disarmPct / 100)),
-    fillCeiling: Math.round(c.targetTokens * (1 - c.headroomPct / 100)),
-  };
-}
+// task #4: resolveRetierCfg + envelopeFor MOVED to config-schema.mjs (pure
+// config interpretation, no demotion machinery) and re-exported here so every
+// existing consumer keeps its import path. WHY the move: the conductor's
+// gauge now needs the envelope NUMBERS for the reorganize break-even
+// (condition 2b), and the "RE-TIER is wizard-only — no hook wires it" rail is
+// enforced by a grep asserting hooks/ never references retier.mjs AT ALL. The
+// rail's real invariant is that no hook can reach the DEMOTION machinery;
+// moving the two pure functions to the schema module (a leaf the conductor
+// already imports) satisfies the gauge without the hook ever holding a
+// reference to this file — the grep stays strict, the machinery stays
+// unreachable, and there is still exactly ONE definition of the envelope.
+export { resolveRetierCfg, envelopeFor } from './config-schema.mjs';
+import { envelopeFor } from './config-schema.mjs';
 
 // The watermark pair. The DEAD ZONE [disarmAt..armAt) is the hysteresis
 // itself: a store washed down into it does NOT re-trigger (no-flap) — only

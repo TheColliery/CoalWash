@@ -1,7 +1,7 @@
 ---
 name: coalwash
 description: >-
-  Memory washer/defragmenter for agent memory — two lanes: class-B (memory+governance) cleans the FAT, never the MEAT; class-A (transcripts) is byte-identity-only. Fidelity-first: a free mechanical Quick pass + a CODE gate blocking any STRUCTURED-token drop by diff; the paid Full pass is a separate consent; every DELETE/MERGE is plan-sourced + snapshot-backed. Session-start gauge; BMI hysteresis arms OBESE (auto-Quick, standing config, never asks). FULL = the economic cut-point (break-even proven, numbers shown): force-runs Quick; still over → one wizard ask, re-armed on growth. A capacity wall also forces FULL (wash-if-fat, else externalize). NO calendar cadence — never loop it. A manual `/coalwash` runs a fat-only, muscle-reorg, or estate pass. localOnly = Quick-only, no sub sees memory content. Honest: slows memory-overhead growth, does NOT eliminate it. Triggers: "/coalwash", "clean memory", "defrag memory", a [CoalWash] band nudge. Cross-agent (Claude Code validated). Zero-dep, offline, no API keys.
+  Memory washer/defragmenter for agent memory — two lanes: class-B (memory+governance) cleans the FAT, never the MEAT; class-A (transcripts) is byte-identity-only. Fidelity-first: a free mechanical Quick pass + a CODE gate blocking any STRUCTURED-token drop by diff; the paid Full pass is a separate consent; every DELETE/MERGE is plan-sourced + snapshot-backed. Session-start gauge; Fat hysteresis arms OBESE (auto-Quick, standing config, never asks). FULL = the economic cut-point (break-even proven, numbers shown): force-runs Quick; still over → one wizard ask, re-armed on growth. A capacity wall also forces FULL (wash-if-fat, else externalize). NO calendar cadence — never loop it. A manual `/coalwash` runs a fat-only, muscle-reorg, or estate pass. localOnly = Quick-only, no sub sees memory content. Honest: slows memory-overhead growth, does NOT eliminate it. Triggers: "/coalwash", "clean memory", "defrag memory", a [CoalWash] band nudge. Cross-agent (Claude Code validated). Zero-dep, offline, no API keys.
 ---
 
 # CoalWash — the memory washer
@@ -28,13 +28,13 @@ description: >-
 
 ## The gauge (session-start conductor)
 
-The conductor measures at session start; the CLI gauge reports the band (`cli.mjs gauge` — the BMI / 1.5×–1.2× hysteresis / economic-latch / capacity-wall math lives in method §0). Act per the band:
+The conductor measures at session start; the CLI gauge reports the band (`cli.mjs gauge` — the certain-fat / hysteresis / both-break-evens / capacity-wall math lives in method §0). Act per the band:
 
 | Band | Trigger | Behavior |
 |---|---|---|
-| LEAN | Ceiling disarmed (BMI under the 1.5×/1.2× hysteresis or unmeasurable) and the capacity wall un-hit | Silent — a run would no-op; do not offer one. |
-| OBESE | Ceiling armed (BMI ≥ 1.5× the floor, until it falls back to 1.2×), but washing does not yet pay for itself | Auto-runs the mechanical Quick pass under standing config, **no ask** — pushes `oneLineResult` every time, including a zero cut. Re-arms on each genuinely new wave of fat past a growth watermark (not a clock), so a store that keeps accreting garbage keeps getting swept; an unchanged plateau stays silent. **OBESE never asks, however long it persists** — the wizard door lives at FULL only. |
-| FULL | Ceiling armed AND the break-even proof holds (`economic`, latched per episode) — OR the capacity wall is hit (`absolute-cap` / `externalize`) | `economic`/`absolute-cap`: **force-runs the mechanical Quick pass**, numbers SHOWN every fire, every cut snapshot-backed. Still over FULL after that Quick ran this episode → **ONE run/later wizard ask** (re-armed only once fat grows past the last-flagged level). `externalize` (~all muscle): pure information — advise externalize/split, never a wash. |
+| LEAN | Fat-hysteresis disarmed (certain fat under `FAT_ARM_TOKENS`/`FAT_REARM_TOKENS`, 500/200 tok) and the capacity wall un-hit | Silent — a run would no-op; do not offer one. |
+| OBESE | Fat-hysteresis armed (certain fat ≥ 500 tok, until it falls back to 200 tok), but washing does not yet pay for itself | Auto-runs the mechanical Quick pass under standing config, **no ask** — pushes `oneLineResult` every time, including a zero cut. Re-arms on each genuinely new wave of certain fat past the hysteresis mark (not a clock), so a store that keeps accreting garbage keeps getting swept; an unchanged plateau stays silent. **OBESE never asks, however long it persists** — the wizard door lives at FULL only. |
+| FULL | Fat-hysteresis armed AND **BOTH** break-evens hold — cutting the certain fat pays, AND reorganizing the RE-TIER envelope's demotable muscle pays too (`economic`, latched per episode) — OR the capacity wall is hit (`absolute-cap` / `externalize`) | `economic`/`absolute-cap`: **force-runs the mechanical Quick pass**, numbers SHOWN every fire (both break-even proofs), every cut snapshot-backed. Still over FULL after that Quick ran this episode → **ONE run/later wizard ask** (re-armed only once certain fat grows past the last-flagged level). `externalize` (~all muscle): pure information — advise externalize/split, never a wash. |
 
 ## The run pipeline (every `/coalwash` run — ordered; mechanics in method)
 
@@ -44,7 +44,7 @@ The conductor measures at session start; the CLI gauge reports the band (`cli.mj
 3. **Fidelity gate (code, the floor):** `gateFiles` on every rewrite/merge — ANY structured-token drop **blocks the apply** until restored, or until the plan names that exact drop in `approvedDrops` (method §4). Nothing drops silently.
 4. **Delete authorization:** a delete/merge IN the plan is its own authorization — `apply.mjs` needs no approval flag. Safety is UNDO.
 5. **Apply (code, transactional):** `applyPlan` — snapshot verified-at-creation before the first mutation → external-writer re-read (any foreign change aborts + rolls back) → atomic writes → verify → **deletes LAST** → commit → bin population by the plan's `origin` (method §5/§8). Any failure before commit restores the snapshot. `deferred: true` → lock held: say so, stop.
-6. **Receipt (code):** push `oneLineResult` — ONE line, two numbers, on every run including a zero cut (a silent run would be indistinguishable from one that never happened). After a **gate-passed FULL clean only**, stamp `setLeanFloor` (never after Quick/partial — uncleaned fat contaminates the floor). The fuller receipt is pull-only (`/coalwash:stats`), never pushed.
+6. **Receipt (code):** push `oneLineResult` — ONE line, two numbers, on every run including a zero cut (a silent run would be indistinguishable from one that never happened). After a **gate-passed FULL clean only**, stamp `setLeanFloor` for the receipt's history line (never after Quick/partial) — this field is LEGACY as of task #4: no gauge reads it for the band any more, so calling it at the wrong time is no longer a live-threshold risk, just a stale history byte. The fuller receipt is pull-only (`/coalwash:stats`), never pushed.
 
 ## Recovery — the bins (pull-only, method §8)
 

@@ -39,14 +39,16 @@
 //                   passive context injection it was always free to ignore
 //                   (beta.10 "ROUND 4 POSTMORTEM").
 //
-// BANDS (0g "FULL = THE ECONOMIC CUT-POINT" + 0g-RESOLUTION + 0m, MEMORY.md
-// — refines the beta.12 band collapse): purely economic, nested LEAN <
-// OBESE < FULL. OBESE = the hysteresis-gated BMI ceiling armed but carry <
-// wash (auto-Quick-silent); FULL = the ceiling armed AND
-// breakEven.economical (Q1: FULL ⊂ OBESE), LATCHED per episode (Q2 —
-// cleared by the LEAN reset); the WALL (0r: fatMultiple x the stamped lean
-// floor once measurable, clamped at true capacity — fullPercent x capacity
-// only pre-floor) keeps its three roles (Q3): pre-floor bootstrap cap,
+// BANDS (task #4, superseding the beta.12 BMI-floor Schmitt AND 0r's
+// floor-multiple wall — see caliper.mjs's top block for the ruling): purely
+// economic, nested LEAN < OBESE < FULL, driven by MEASURED CERTAIN FAT
+// (mechFatFromText at every gauge), never a stamped floor. OBESE = the
+// fat-Schmitt armed but carry < wash (auto-Quick-silent); FULL/economic =
+// armed AND BOTH break-evens hold (2a certain fat + 2b the RE-TIER envelope's
+// demotable muscle — the wizard tier is "Fat + reorganize muscle", both
+// halves must pay), LATCHED per episode (Q2 — cleared by the LEAN reset,
+// which is now CONTINUOUS: Quick removes the fat the gauge measures); the
+// WALL is the REAL capacity line only (capacityTokens + the CC index caps):
 // wash-first when armed, externalize when ~all-muscle. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
 // A DICTATOR"): every FULL crossing force-runs the FREE Quick pass under
 // the same standing consent as OBESE's auto-Quick — no economic proof
@@ -146,7 +148,7 @@ function updateDue(cfg, clampedRead, caliper) {
 }
 
 async function handleSessionStart(input) {
-  const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, classB, caliper] = await Promise.all([
+  const [{ loadMergedConfig, findProjectRoot }, { clampedRead, envelopeForConfig }, classB, caliper] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
     import(lib('class-b.mjs')),
@@ -157,8 +159,13 @@ async function handleSessionStart(input) {
   const mode = clampedRead(cfg, 'coalwashMode');
   if (mode === 'off') return; // fully silent
   const language = clampedRead(cfg, 'language');
-  const fullPercent = clampedRead(cfg, 'fullPercent');
-  const fatMultiple = clampedRead(cfg, 'fatMultiple');
+  // task #4: fullPercent/fatMultiple are no longer read — both walls they fed
+  // are retired (read-tolerated in config, ignored). The reorg break-even
+  // (condition 2b) reads the RE-TIER ENVELOPE instead, resolved by
+  // config-schema's envelope resolver — moved there from the RE-TIER module so no
+  // hook ever references that module (the "RE-TIER is wizard-only" grep-rail
+  // stays strict; the demotion machinery stays unreachable from hooks).
+  const envelope = envelopeForConfig(cfg);
 
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
@@ -211,20 +218,18 @@ async function handleSessionStart(input) {
     const quickTried = !!proj.quickTried;
 
     const now = Date.now();
-    // 0j "BMI ON AT INSTALL": a never-seen store gets a PROVISIONAL floor =
-    // this very footprint (BMI 1.00 live from day one); an existing floor —
-    // real or provisional — passes through UNTOUCHED (never ratchets; only
-    // a gate-passed clean's setLeanFloor overwrites it). Same state file the
-    // stamp/verdict writes on this path already touch — not a new mutation
-    // class (Phoenix #10).
-    const floorInfo = caliper.ensureProvisionalFloor(home, projectRoot, m.alwaysLoaded.tokensEst, now);
+    // task #4: no floor stamp of any kind — fat and muscle are MEASURED at
+    // this very gauge (measureEntries' certain-fat scan), so the numbers are
+    // current by construction; nothing has to have happened first (the 0j
+    // provisional-floor install stamp this block used to write is retired
+    // with the floor-driven band).
     // gaugeVerdict (shared with the Stop hook's gated re-gauge, beta.13 item
-    // 3) does the floor-sanitize -> economics -> bandVerdict glue in ONE
-    // place (0g Q4: economics now run BEFORE the band, because the band IS
-    // the break-even) — see caliper.mjs for why this is factored out rather
-    // than re-derived by hand at a second call site.
-    const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: floorInfo.floorTokens, floorProvisional: floorInfo.provisional, fullPercent, fatMultiple, wasOver, wasEconLatched, stamps: proj.stamps });
-    const { verdict, fatTokens, economical, perDay, breakEvenDays, floorUnmeasured } = gv;
+    // 3) does the economics -> bandVerdict glue in ONE place (0g Q4:
+    // economics run BEFORE the band, because the band IS the break-even) —
+    // see caliper.mjs for why this is factored out rather than re-derived by
+    // hand at a second call site.
+    const gv = caliper.gaugeVerdict({ measure: m, wasOver, wasEconLatched, stamps: proj.stamps, envelope });
+    const { verdict, fatTokens, economical, perDay, breakEvenDays } = gv;
 
     // WARP-HOLE (beta.13 item 3): the always-loaded path list + byte total —
     // the Stop hook's cheap re-stat baseline for catching a within-session
@@ -239,7 +244,12 @@ async function handleSessionStart(input) {
     caliper.recordVerdict(home, projectRoot, {
       band: verdict.band, reason: verdict.reason, economical, fatTokens,
       overCeiling: verdict.over, econLatched: verdict.econLatched,
-      perDay, breakEvenDays, floorUnmeasured,
+      perDay, breakEvenDays,
+      // task #4 — the new measured pair + the reorg proof's numbers, cached
+      // for the Stop hook's ask rendering (additive fields, no schema bump:
+      // lastVerdict is a per-gauge cache overwritten fresh at every gauge).
+      muscleTokens: gv.muscleTokens, demotableTokens: gv.demotableTokens,
+      reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
       hardCeilingTokens: verdict.hardCeilingTokens,
       alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
       storeTotalBytes: m.totalBytes, // the WHOLE measured store — the bin-retention budget base (P5/P8)
@@ -297,7 +307,7 @@ async function handleSessionStart(input) {
 // happened; the wizard-escalation ask remains the only question ever asked.
 async function handleStop(input) {
   if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
-  const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, caliper, ask, classB] = await Promise.all([
+  const [{ loadMergedConfig, findProjectRoot }, { clampedRead, envelopeForConfig }, caliper, ask, classB] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
     import(lib('caliper.mjs')),
@@ -309,8 +319,6 @@ async function handleStop(input) {
   // (0m: force itself has no off switch; a legacy forceMode key in a config
   // is read-tolerated and ignored, see config-schema.mjs RETIRED_KEYS).
   if (clampedRead(cfg, 'coalwashMode') === 'off') return; // fully silent
-  const fullPercent = clampedRead(cfg, 'fullPercent');
-  const fatMultiple = clampedRead(cfg, 'fatMultiple');
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
   const home = os.homedir();
@@ -342,16 +350,20 @@ async function handleStop(input) {
       if (deltaTokens > caliper.REGAUGE_DELTA_TOKENS) {
         const disc = classB.discoverClassB({ projectRoot, home, managedPaths });
         const m = caliper.measureEntries(disc.entries, { readBudgetBytes: READ_BUDGET_BYTES, withGzip: false });
-        // 0j: the SAME provisional-floor door as SessionStart — covers a
-        // store that only grew past FLOOR_MIN mid-session (was too tiny to
-        // stamp at SessionStart, spiked before this Stop).
-        const floorInfo = caliper.ensureProvisionalFloor(home, projectRoot, m.alwaysLoaded.tokensEst, now);
-        const gv = caliper.gaugeVerdict({ measure: m, rawLeanFloorTokens: floorInfo.floorTokens, floorProvisional: floorInfo.provisional, fullPercent, fatMultiple, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps });
+        // task #4: same measured-not-stamped gauge as SessionStart — fat and
+        // muscle come from THIS measure's certain-fat scan; the 0j
+        // provisional-floor door this block used to share is retired with
+        // the floor-driven band. The reorg envelope resolves via
+        // config-schema's envelope resolver (see the SessionStart site's
+        // comment for why it does NOT live in the RE-TIER module).
+        const gv = caliper.gaugeVerdict({ measure: m, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps, envelope: envelopeForConfig(cfg) });
         const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
         caliper.recordVerdict(home, projectRoot, {
           band: gv.verdict.band, reason: gv.verdict.reason, economical: gv.economical, fatTokens: gv.fatTokens,
           overCeiling: gv.verdict.over, econLatched: gv.verdict.econLatched,
-          perDay: gv.perDay, breakEvenDays: gv.breakEvenDays, floorUnmeasured: gv.floorUnmeasured,
+          perDay: gv.perDay, breakEvenDays: gv.breakEvenDays,
+          muscleTokens: gv.muscleTokens, demotableTokens: gv.demotableTokens,
+          reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
           hardCeilingTokens: gv.verdict.hardCeilingTokens, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
           storeTotalBytes: m.totalBytes, // same base as SessionStart (P5/P8)
         }, now);
@@ -368,7 +380,14 @@ async function handleStop(input) {
   const breakEven = {
     perDay: Number.isFinite(lastVerdict.perDay) ? lastVerdict.perDay : 0,
     breakEvenDays: Number.isFinite(lastVerdict.breakEvenDays) ? lastVerdict.breakEvenDays : null,
-    floorUnmeasured: !!lastVerdict.floorUnmeasured,
+  };
+  // task #4 condition 2b — the reorg proof's own numbers, cached by the gauge
+  // beside the fat proof's (absent on a pre-task-#4 cache -> zeros, which the
+  // ask template renders as "no reorg case", never undefined artifacts).
+  const reorg = {
+    demotableTokens: Number.isFinite(lastVerdict.demotableTokens) ? Math.round(lastVerdict.demotableTokens) : 0,
+    perDay: Number.isFinite(lastVerdict.reorgPerDay) ? lastVerdict.reorgPerDay : 0,
+    breakEvenDays: Number.isFinite(lastVerdict.reorgBreakEvenDays) ? lastVerdict.reorgBreakEvenDays : null,
   };
   // 0o: the session's accumulated sub-spawn parcel bill — rides the FULL
   // directive numbers as ONE clause (absent at zero; the meter itself never
@@ -393,7 +412,7 @@ async function handleStop(input) {
     // the whole system (0d: OBESE is auto-Quick-silent, it never asks).
     // Checked BEFORE the force branch below so an armed escalation crossing
     // can never be re-swallowed into another silent force-Quick loop.
-    reason = ask.wizardEscalation({ fatTokens, breakEven, spawns });
+    reason = ask.wizardEscalation({ fatTokens, breakEven, reorg, spawns });
   } else if (crossing.band === 'FULL') {
     // case (b) — 0m "FORCE = THE FREE TIER, NO PROOF NEEDED" + "FORCE IS A
     // DICTATOR, NO OFF SWITCH": every FULL crossing (economic AND
