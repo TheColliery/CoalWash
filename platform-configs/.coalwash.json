@@ -34,9 +34,11 @@
   // (25 = the Claude Code memory-index cap class).
   "fileMaxSizeKb": 25,
 
-  // Default run tier. quick = the free mechanical pass (dedup, dead links,
-  // index rebuild — no model ever reads the content); full = the paid semantic
-  // pass (always asked as a separate consent, never auto).
+  // Default run tier. quick = the free mechanical pass (flags exact-duplicate
+  // fat, empty tables/headings, possible dead links — no model ever reads
+  // the content; clearing what it finds is a hand edit or the wizard, not an
+  // auto-cut); full = the paid semantic pass (always asked as a separate
+  // consent, never auto).
   "quickVsFull": "quick",
 
   // Trade-secret mode: true = the SKILL contract runs Quick-only and skips
