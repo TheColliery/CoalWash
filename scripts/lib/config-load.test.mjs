@@ -819,7 +819,17 @@ test('RED-FIRST/required-foldOnMiss: the throw survives a NAMESPACE import (impo
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Best-effort temp cleanup for THESE tests only: `rmSync(..., { force: true })`
+// suppresses ENOENT but NOT a transient EPERM, and Windows Defender scanning a
+// freshly-written script file exactly when the test's finally-clause deletes it
+// produced a real gate failure here (EPERM on the probe .cjs, 2026-08-03) — a
+// flake in the CLEANUP, not in the assertion. A rare lingering per-pid dot-temp
+// is the lesser evil than a red gate over a file the test already finished with.
+const rmBestEffort = (p, opts) => { try { fs.rmSync(p, { force: true, ...opts }); } catch { /* transient AV hold; per-pid temp, next run uses a fresh name */ } };
+
 test('RED-FIRST/required-foldOnMiss: the throw survives a RE-EXPORT HOP — an intermediate file cannot launder a caller past the check', async () => {
+  // The hop file must sit BESIDE config-load.mjs — its re-export specifier is
+  // relative ('./config-load.mjs'), which is the realistic shape of a hop.
   const libDir = path.dirname(fileURLToPath(import.meta.url));
   const hopPath = path.join(libDir, `.cw-reexport-hop-${process.pid}.mjs`);
   fs.writeFileSync(hopPath, `export { volumeCaseFolds } from './config-load.mjs';\n`);
@@ -828,31 +838,33 @@ test('RED-FIRST/required-foldOnMiss: the throw survives a RE-EXPORT HOP — an i
     const hop = await import(pathToFileURL(hopPath).href);
     assert.throws(() => hop.volumeCaseFolds(dir), TypeError,
       're-exporting the symbol re-exports the SAME function object — an extra layer of indirection cannot route a caller around a required-argument check');
-  } finally { fs.rmSync(hopPath, { force: true }); fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmBestEffort(hopPath); rmBestEffort(dir, { recursive: true }); }
 });
 
 test('RED-FIRST/required-foldOnMiss: the throw survives require(esm) from CJS — empirical\'s finding that the conductor (hooks/, CJS) is a real, unflagged reach path', (t) => {
   // CAPABILITY PROBE, never assumed: require(esm) is unflagged on Node
   // 20.19/22.12/23.0+; the CI matrix is [22, 24] and both should carry it, but a
   // capability this version-sensitive is proven, not read off a changelog.
+  // Both probe scripts require config-load.mjs by ABSOLUTE path, so they live in
+  // the OS tmpdir — nothing forces them into the repo tree (the hop test above is
+  // different: its relative specifier pins it beside the target).
   const libDir = path.dirname(fileURLToPath(import.meta.url));
-  const probePath = path.join(libDir, `.cw-reqfold-probe-${process.pid}.cjs`);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'CW-REQFOLD-CJS-'));
+  const probePath = path.join(tmpDir, 'probe.cjs');
   fs.writeFileSync(probePath, `try { require(${JSON.stringify(path.join(libDir, 'config-load.mjs'))}); console.log('CAP-OK'); } catch (e) { console.log('CAP-ABSENT:' + e.code); }\n`);
-  let capLine;
-  try { capLine = execSync(`node "${probePath}"`, { encoding: 'utf8' }).trim(); }
-  finally { fs.rmSync(probePath, { force: true }); }
-  if (capLine !== 'CAP-OK') { t.skip(`require(esm) unavailable on this runtime (${capLine}) — capability proven absent, not assumed`); return; }
-
-  const cjsPath = path.join(libDir, `.cw-reqfold-cjs-${process.pid}.cjs`);
-  fs.writeFileSync(cjsPath,
-    `const { volumeCaseFolds } = require(${JSON.stringify(path.join(libDir, 'config-load.mjs'))});\n` +
-    `try { volumeCaseFolds(require('os').tmpdir()); console.log('NO-THROW'); }\n` +
-    `catch (e) { console.log(e instanceof TypeError ? 'THREW-TYPEERROR' : 'THREW-OTHER:' + e.constructor.name); }\n`);
   try {
+    const capLine = execSync(`node "${probePath}"`, { encoding: 'utf8' }).trim();
+    if (capLine !== 'CAP-OK') { t.skip(`require(esm) unavailable on this runtime (${capLine}) — capability proven absent, not assumed`); return; }
+
+    const cjsPath = path.join(tmpDir, 'caller.cjs');
+    fs.writeFileSync(cjsPath,
+      `const { volumeCaseFolds } = require(${JSON.stringify(path.join(libDir, 'config-load.mjs'))});\n` +
+      `try { volumeCaseFolds(require('os').tmpdir()); console.log('NO-THROW'); }\n` +
+      `catch (e) { console.log(e instanceof TypeError ? 'THREW-TYPEERROR' : 'THREW-OTHER:' + e.constructor.name); }\n`);
     const out = execSync(`node "${cjsPath}"`, { encoding: 'utf8' }).trim();
     assert.strictEqual(out, 'THREW-TYPEERROR',
       'require(esm) from a CJS caller (the conductor\'s own module system) must reach the SAME check — the module system a caller uses cannot bypass a runtime argument validation');
-  } finally { fs.rmSync(cjsPath, { force: true }); }
+  } finally { rmBestEffort(tmpDir, { recursive: true }); }
 });
 
 test('RED-FIRST/required-foldOnMiss: a MISS answer is caller-specific, never cached across DIFFERENT declared polarities for the SAME path', () => {
