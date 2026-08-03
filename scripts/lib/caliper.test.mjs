@@ -13,7 +13,7 @@ import {
   updateStampPath, oldUpdateStampPath, readUpdateStamp, writeUpdateStamp,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
   CEILING_BMI, CEILING_REARM_BMI, FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
-  FAT_MULTIPLE_DEFAULT,
+  FAT_MULTIPLE_DEFAULT, FAT_ARM_TOKENS, FAT_REARM_TOKENS, mechFatFromText,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
 } from './caliper.mjs';
 import { discoverClassB } from './class-b.mjs';
@@ -138,173 +138,118 @@ test('measureEntries respects the read budget (over-budget always-loaded falls b
 // fat-budget layer is needed.
 // ---------------------------------------------------------------------------
 
-test('bandVerdict: below the ceiling (un-armed) is LEAN; at/above CEILING_BMI (un-armed) arms OBESE', () => {
-  const floor = 10000; // well above FLOOR_MIN_TOKENS
-  const at = (fp, wasOver = false) => bandVerdict({ footprintTokens: fp, leanFloorTokens: floor, wasOver });
-  assert.strictEqual(at(Math.round(floor * (CEILING_BMI - 0.05))).band, 'LEAN');
-  const armed = at(Math.round(floor * CEILING_BMI));
+// ---------------------------------------------------------------------------
+// TASK #4 — the band is driven by MEASURED CERTAIN FAT, never a stamped floor.
+// Every test below is the old floor-era test's INTENT re-based onto the new
+// axis (Schmitt hysteresis, capacity wall, index caps, externalize split);
+// the floor-specific cases (bootstrap/'no-floor-yet'/'floor-too-small'/
+// fullPercent/fatMultiple walls) are retired WITH the definition they tested.
+// ---------------------------------------------------------------------------
+
+test('bandVerdict: certain fat below the arm mark is LEAN; at/above FAT_ARM_TOKENS (un-armed) arms OBESE', () => {
+  const at = (fat, wasOver = false) => bandVerdict({ footprintTokens: 50000, mechFatTokens: fat, wasOver });
+  assert.strictEqual(at(FAT_ARM_TOKENS - 1).band, 'LEAN');
+  const armed = at(FAT_ARM_TOKENS);
   assert.strictEqual(armed.band, 'OBESE');
-  assert.strictEqual(armed.reason, 'bmi');
+  assert.strictEqual(armed.reason, 'fat');
   assert.strictEqual(armed.over, true);
 });
 
-test('bandVerdict: hysteresis — once armed, BMI must fall to CEILING_REARM_BMI (not just under CEILING_BMI) to disarm', () => {
-  const floor = 10000;
-  const midZone = Math.round(floor * ((CEILING_BMI + CEILING_REARM_BMI) / 2)); // squarely inside the dead zone
-  const stillArmed = bandVerdict({ footprintTokens: midZone, leanFloorTokens: floor, wasOver: true });
-  assert.strictEqual(stillArmed.band, 'OBESE', 'a previously-armed ceiling stays armed inside the dead zone');
-  const neverArmed = bandVerdict({ footprintTokens: midZone, leanFloorTokens: floor, wasOver: false });
-  assert.strictEqual(neverArmed.band, 'LEAN', 'the SAME bmi never arms fresh from an un-armed state (needs the high mark)');
+test('bandVerdict: hysteresis — once armed, certain fat must fall to FAT_REARM_TOKENS (not just under FAT_ARM_TOKENS) to disarm', () => {
+  const midZone = Math.round((FAT_ARM_TOKENS + FAT_REARM_TOKENS) / 2); // squarely inside the dead zone
+  const stillArmed = bandVerdict({ footprintTokens: 50000, mechFatTokens: midZone, wasOver: true });
+  assert.strictEqual(stillArmed.band, 'OBESE', 'a previously-armed store stays armed inside the dead zone');
+  const neverArmed = bandVerdict({ footprintTokens: 50000, mechFatTokens: midZone, wasOver: false });
+  assert.strictEqual(neverArmed.band, 'LEAN', 'the SAME fat never arms fresh from an un-armed state (needs the high mark)');
 
-  const atRearm = bandVerdict({ footprintTokens: Math.round(floor * CEILING_REARM_BMI), leanFloorTokens: floor, wasOver: true });
-  assert.strictEqual(atRearm.band, 'LEAN', 'exactly at the low mark disarms (bmi <= CEILING_REARM_BMI clears it)');
-  const justAboveRearm = bandVerdict({ footprintTokens: Math.round(floor * CEILING_REARM_BMI) + 1, leanFloorTokens: floor, wasOver: true });
+  const atRearm = bandVerdict({ footprintTokens: 50000, mechFatTokens: FAT_REARM_TOKENS, wasOver: true });
+  assert.strictEqual(atRearm.band, 'LEAN', 'exactly at the low mark disarms (fat <= FAT_REARM_TOKENS clears it)');
+  const justAboveRearm = bandVerdict({ footprintTokens: 50000, mechFatTokens: FAT_REARM_TOKENS + 1, wasOver: true });
   assert.strictEqual(justAboveRearm.band, 'OBESE', 'one token above the low mark stays armed');
 });
 
-test('bandVerdict: a floor too small to trust (< FLOOR_MIN_TOKENS) never measures a ratio — reason floor-too-small', () => {
-  const v = bandVerdict({ footprintTokens: 5000, leanFloorTokens: FLOOR_MIN_TOKENS - 1 });
-  assert.strictEqual(v.band, 'LEAN');
-  assert.strictEqual(v.reason, 'floor-too-small');
-  assert.strictEqual(v.bmi, null);
-  // exactly at the minimum IS trusted
-  const trusted = bandVerdict({ footprintTokens: Math.round(FLOOR_MIN_TOKENS * CEILING_BMI), leanFloorTokens: FLOOR_MIN_TOKENS });
-  assert.strictEqual(trusted.band, 'OBESE');
+test('the 1:1 line (the task-#4 ruling verbatim): muscle +10 units moves the reported threshold +10 units, continuously', () => {
+  // "กล้ามโต 10 หน่วย นิยาม FULL โต 10 หน่วย" — the arm threshold is
+  // muscleTokens + FAT_ARM_TOKENS, a FUNCTION of measured muscle with slope
+  // exactly 1, never a stamped floor times a multiplier.
+  const a = bandVerdict({ footprintTokens: 50000, mechFatTokens: 100 });
+  const b = bandVerdict({ footprintTokens: 50010, mechFatTokens: 100 }); // +10 tokens of pure muscle
+  assert.strictEqual(a.muscleTokens, 49900);
+  assert.strictEqual(b.muscleTokens, 49910);
+  assert.strictEqual(b.hardCeilingTokens - a.hardCeilingTokens, 10, 'muscle +10 => threshold +10, exactly');
 });
 
-test('bandVerdict bootstrap: no floor yet -> LEAN (only the absolute cap can fire)', () => {
-  const v = bandVerdict({ footprintTokens: 5000, leanFloorTokens: 0 });
-  assert.strictEqual(v.band, 'LEAN');
-  assert.strictEqual(v.reason, 'no-floor-yet');
-  assert.strictEqual(v.bmi, null);
-});
-
-test('bandVerdict absolute-cap arms FULL regardless of floor: hard ceiling, index bytes, index lines', () => {
-  // hard ceiling: fullPercent(6) x the recalibrated CAPACITY_TOKENS
-  const ceiling = Math.round(CAPACITY_TOKENS * 6 / 100);
-  const hard = bandVerdict({ footprintTokens: ceiling, leanFloorTokens: 0, fullPercent: 6 });
+test('bandVerdict capacity wall arms FULL: true capacity, index bytes, index lines — each leg independent', () => {
+  const hard = bandVerdict({ footprintTokens: CAPACITY_TOKENS, mechFatTokens: 0 });
   assert.strictEqual(hard.band, 'FULL');
-  assert.strictEqual(hard.reason, 'absolute-cap');
-  const bytes = bandVerdict({ footprintTokens: 10, leanFloorTokens: 10, indexBytes: CC_INDEX_CAP_BYTES });
+  assert.strictEqual(hard.reason, 'externalize', '~all muscle at the capacity line -> externalize, never wash-harder');
+  const bytes = bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexBytes: CC_INDEX_CAP_BYTES });
   assert.strictEqual(bytes.band, 'FULL');
-  const lines = bandVerdict({ footprintTokens: 10, leanFloorTokens: 10, indexLines: CC_INDEX_CAP_LINES });
+  const lines = bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexLines: CC_INDEX_CAP_LINES });
   assert.strictEqual(lines.band, 'FULL');
 });
 
-// 0r station-3 catch (MED-B): the two index-cap cases above both use
-// leanFloorTokens:10 (< FLOOR_MIN_TOKENS), so they only ever exercise the
-// PRE-FLOOR (bmi===null) branch -- they say nothing about the index legs
-// POST-floor, where capHit's OTHER two terms (the growable fatMultiple x
-// floor leg) are also live. capHit is a three-term OR; the index legs fire
-// INDEPENDENTLY of the floor/wall math entirely, so a real (non-provisional),
-// small, well-under-CEILING_BMI floor still routes FULL/externalize the
-// instant an index cap clears -- 0r's floor-leg fix changes nothing here.
-test('0r/MED-B: an index-cap capHit fires POST-floor too, independent of the growable fatMultiple x floor leg (un-armed -> externalize)', () => {
-  const floor = 10000; // real, measurable, far below fatMultiple x floor (20000)
-  const bytes = bandVerdict({ footprintTokens: 10100, leanFloorTokens: floor, indexBytes: CC_INDEX_CAP_BYTES });
+test('capHit splits on MEASURED fat: armed -> absolute-cap (wash first), un-armed -> externalize (a wash cannot shrink muscle)', () => {
+  const armed = bandVerdict({ footprintTokens: CAPACITY_TOKENS, mechFatTokens: FAT_ARM_TOKENS });
+  assert.strictEqual(armed.band, 'FULL');
+  assert.strictEqual(armed.reason, 'absolute-cap');
+  assert.strictEqual(armed.hardCeilingTokens, CAPACITY_TOKENS, 'the reported wall on a capacity hit is the real capacity line');
+  const muscle = bandVerdict({ footprintTokens: CAPACITY_TOKENS, mechFatTokens: 0 });
+  assert.strictEqual(muscle.reason, 'externalize');
+  assert.strictEqual(muscle.over, false, 'externalize means the fat Schmitt is NOT armed — ~all muscle');
+});
+
+test('index-cap capHit is independent of the fat axis entirely (the 0r/MED-B intent, re-based)', () => {
+  // a small, un-armed store still routes FULL/externalize the instant a CC
+  // index cap clears — the index legs are platform limits, not fat findings.
+  const bytes = bandVerdict({ footprintTokens: 10100, mechFatTokens: 0, indexBytes: CC_INDEX_CAP_BYTES });
   assert.strictEqual(bytes.band, 'FULL');
-  assert.strictEqual(bytes.reason, 'externalize', 'bmi ~1.01 stays far under CEILING_BMI -- un-armed, so the index leg alone routes externalize, not absolute-cap');
+  assert.strictEqual(bytes.reason, 'externalize');
   assert.strictEqual(bytes.over, false);
-  const lines = bandVerdict({ footprintTokens: 10100, leanFloorTokens: floor, indexLines: CC_INDEX_CAP_LINES });
-  assert.strictEqual(lines.band, 'FULL');
+  const lines = bandVerdict({ footprintTokens: 10100, mechFatTokens: 0, indexLines: CC_INDEX_CAP_LINES });
   assert.strictEqual(lines.reason, 'externalize');
 });
 
-test('a raised fullPercent raises the hard ceiling (buying a bigger SSD)', () => {
-  const ceiling = Math.round(CAPACITY_TOKENS * 6 / 100);
-  const before = bandVerdict({ footprintTokens: ceiling, leanFloorTokens: 0, fullPercent: 6 });
-  const after = bandVerdict({ footprintTokens: ceiling, leanFloorTokens: 0, fullPercent: 12 });
-  assert.strictEqual(before.band, 'FULL');
-  assert.strictEqual(after.band, 'LEAN');
-});
-
 // ---------------------------------------------------------------------------
-// Growable-full (beta.7 #1, RE-DERIVED under the fractal-BMI ceiling — the
-// USER's three-layer invariant still holds: BMI = ratio, so it grows WITH a
-// legitimately large floor by construction; no separate fat-budget layer is
-// needed any more). Pins the exact live dogfood cases.
+// TASK #4 ACCEPTANCE (the dispatch's own regression fixture, real numbers from
+// the live false positive): a store that is ALL MUSCLE must never cross FULL —
+// not once, however large it grows. The old definition replayed this exact
+// sequence as BMI 1.81+ against a floor frozen at install and fired FULL every
+// session; a stamp-based fix fires somewhere in the sequence too (any stamp
+// lags growth). The measured definition stays silent throughout BY
+// CONSTRUCTION: no provable fat -> no arm -> no band, at any size.
 // ---------------------------------------------------------------------------
-
-test('growable-full (a): TheColliery post-clean (floor 29054, footprint ~29098) verdicts LEAN, not FULL/OBESE', () => {
-  const v = bandVerdict({ footprintTokens: 29098, leanFloorTokens: 29054 });
-  assert.strictEqual(v.band, 'LEAN');
+test('ACCEPTANCE (task #4): an all-muscle store replaying the live false-positive sequence never leaves LEAN, at any footprint', () => {
+  // the fired asks' own fat readings, replayed as pure-muscle footprints
+  // (floor 28,833 + fat 36,233 / 28,961 / 37,499 / 39,250 = the footprints
+  // the real store actually measured across the sequence)
+  const sequence = [65066, 57794, 66332, 68083];
+  let wasOver = false;
+  let wasEconLatched = false;
+  for (const footprint of sequence) {
+    const v = bandVerdict({ footprintTokens: footprint, mechFatTokens: 0, wasOver, wasEconLatched, economical: false });
+    assert.strictEqual(v.band, 'LEAN', 'all-muscle at footprint ' + footprint + ' must be SILENT — the old floor definition fired FULL here');
+    assert.strictEqual(v.over, false);
+    wasOver = v.over;
+    wasEconLatched = v.econLatched;
+  }
+  // and far beyond the sequence: 10x growth of pure muscle, still silent
+  // (only the REAL capacity line may ever speak, and that says externalize,
+  // never a wizard ask)
+  const big = bandVerdict({ footprintTokens: 500000, mechFatTokens: 0 });
+  assert.strictEqual(big.band, 'LEAN');
 });
 
-test('growable-full (b): a bootstrap store (no floor, ~44k) still verdicts FULL via the absolute cap (unchanged pre-floor heuristic)', () => {
-  const v = bandVerdict({ footprintTokens: 44000, leanFloorTokens: 0 });
+test('ACCEPTANCE control (non-vacuity): the SAME sequence with real measured fat arms and escalates — the silence above is the definition, not a dead band', () => {
+  const v = bandVerdict({ footprintTokens: 65066, mechFatTokens: 30000, economical: true });
   assert.strictEqual(v.band, 'FULL');
-  assert.strictEqual(v.reason, 'absolute-cap');
+  assert.strictEqual(v.reason, 'economic');
 });
 
-// 0r "WALL -> floor-relative": the pre-0r static wall (fullPercent x
-// capacity) false-FULLed on legitimate muscle growth once the floor itself
-// outgrew the small fullPercent% slice of capacity (the live bug: a
-// ~51.6k-tok muscle store vs a ~36k-tok static wall). This is the RED-FIRST
-// proof — before the fix this exact fixture (floor === the static wall,
-// footprint 200 tok over it, fat ~200 tok) hit capHit and returned
-// FULL/externalize forever; the growable wall (fatMultiple x leanFloor)
-// fixes it because the wall now rides the floor.
-test('0r: a muscle store past the OLD static wall, with the floor stamped and fat small, is NOT absolute-cap (LEAN/OBESE per fat as usual)', () => {
-  const staticWall = Math.round(CAPACITY_TOKENS * 6 / 100);
-  const v = bandVerdict({ footprintTokens: staticWall + 200, leanFloorTokens: staticWall, fullPercent: 6 });
-  assert.strictEqual(v.band, 'LEAN', 'over the retired static wall, but fat ~200 tok never trips the growable wall');
-  assert.notStrictEqual(v.reason, 'externalize', 'a wash cannot help muscle -- but this store was never actually capacity-bound');
-});
-
-test('0r: no stamped floor -> legacy behavior unchanged (the growth needs a MEASURED floor to track)', () => {
-  const staticWall = Math.round(CAPACITY_TOKENS * 6 / 100);
-  const v = bandVerdict({ footprintTokens: staticWall + 200, leanFloorTokens: 0, fullPercent: 6 });
-  assert.strictEqual(v.band, 'FULL', 'pre-floor bootstrap still fires the plain fullPercent x capacity heuristic');
-  assert.strictEqual(v.reason, 'absolute-cap');
-});
-
-test('growable-full (c): post-floor, ~all-muscle, AT THE TRUE CAPACITY CLAMP -> the externalize variant (never "wash harder" on muscle)', () => {
-  // 0r: post-floor the wall is fatMultiple x leanFloor, clamped at the TRUE
-  // capacity ceiling (the raw context window) -- so the only way to still
-  // hit capHit while ~all-muscle is a floor big enough that fatMultiple x
-  // floor itself exceeds capacity, forcing the clamp down to capacityTokens.
-  const floor = CAPACITY_TOKENS;
-  const v = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor });
-  assert.strictEqual(v.band, 'FULL');
-  assert.strictEqual(v.reason, 'externalize');
-  assert.strictEqual(v.over, false, 'externalize means the ceiling itself is NOT armed — ~all muscle');
-  assert.strictEqual(v.hardCeilingTokens, CAPACITY_TOKENS, 'the reported wall is the raw capacity clamp, not fatMultiple x floor');
-});
-
-test('0r: the capacity clamp still fires at true capacity even with a LOW fatMultiple (the clamp, not the multiple, is the binding line here)', () => {
-  const floor = CAPACITY_TOKENS;
-  const v = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor, fatMultiple: 1.7 });
-  assert.strictEqual(v.band, 'FULL');
-  assert.strictEqual(v.reason, 'externalize');
-  assert.strictEqual(v.hardCeilingTokens, CAPACITY_TOKENS);
-});
-
-// 0r/MED-D: the wall does not ONLY move up (the headline case) — for a SMALL
-// floor (fatMultiple x floor < the old static 36000-tok wall, i.e. floor <
-// 18000 at the default fatMultiple 2.0), it moves DOWN too, so FULL now fires
-// EARLIER on a fresh/small-floor project than the old static wall ever did.
-// Declared as a real behaviour WIDENING (CHANGELOG ### Changed), not a bug.
-test('0r/MED-D: a SMALL floor moves the wall DOWN too — FULL fires earlier than the old static wall (a fresh/small-floor project escalates sooner)', () => {
-  const floor = 3000;
-  const footprint = 7000; // bmi 2.33 (armed), old static wall 36000 -> old: OBESE only
-  const v = bandVerdict({ footprintTokens: footprint, leanFloorTokens: floor });
-  assert.strictEqual(v.band, 'FULL', '0r: the growable wall (2.0 x 3000 = 6000) is BELOW 7000 -- this used to be OBESE under the static 36000-tok wall');
-  assert.strictEqual(v.reason, 'absolute-cap');
-  assert.strictEqual(v.over, true, 'armed (bmi 2.33 >= CEILING_BMI) -- the wash-first diagnosis, never externalize, on a real small floor');
-});
-
-test('growable-full: a large legitimate floor still ARMS the ceiling once BMI itself reaches it, at realistic scale (never a flat token budget)', () => {
-  // A floor well under the hard capacity ceiling, so this pins the BMI path
-  // in isolation (a floor near 29054 would ALSO trip the absolute-cap at
-  // 1.5x, conflating the two triggers).
-  const floor = 10000;
-  const v = bandVerdict({ footprintTokens: Math.round(floor * CEILING_BMI) + 1, leanFloorTokens: floor });
-  assert.strictEqual(v.band, 'OBESE');
-  assert.strictEqual(v.reason, 'bmi');
-});
-
-test('breakEven: deterministic numbers; economical iff horizon carry exceeds the run cost', () => {
-  const e = breakEven({ footprintTokens: 2000, leanFloorTokens: 1000, totalStoreTokens: 3000, sessionsPerDay: 2 });
+test('breakEven: deterministic numbers over a MEASURED mass; economical iff horizon carry exceeds the run cost', () => {
+  // task #4: the reclaimable mass is an INPUT (measured certain fat, or the
+  // envelope's demotable muscle) — never footprint minus a stamped floor.
+  const e = breakEven({ fatTokens: 1000, footprintTokens: 2000, totalStoreTokens: 3000, sessionsPerDay: 2 });
   assert.strictEqual(e.fatTokens, 1000);
   assert.strictEqual(e.perDay, 2000);
   assert.strictEqual(e.runCostTokens, 3000 * RUN_COST_MULTIPLIER);
@@ -315,10 +260,51 @@ test('breakEven: deterministic numbers; economical iff horizon carry exceeds the
 });
 
 test('breakEven with zero fat: never economical, break-even infinite', () => {
-  const e = breakEven({ footprintTokens: 1000, leanFloorTokens: 1000, totalStoreTokens: 1000, sessionsPerDay: 5 });
+  const e = breakEven({ fatTokens: 0, footprintTokens: 1000, totalStoreTokens: 1000, sessionsPerDay: 5 });
   assert.strictEqual(e.fatTokens, 0);
   assert.strictEqual(e.breakEvenDays, Infinity);
   assert.strictEqual(e.economical, false);
+});
+
+// ---------------------------------------------------------------------------
+// task #4 — the certain-fat estimator itself
+// ---------------------------------------------------------------------------
+
+test('mechFatFromText: distinct substance is ALL muscle (zero certain fat) — the estimator cannot bill unique content as fat', () => {
+  const distinct = Array.from({ length: 200 }, (_, i) => 'a genuinely distinct load-bearing line number ' + i + ' with real content').join('\n');
+  const mf = mechFatFromText(distinct);
+  assert.strictEqual(mf.tokensEst, 0);
+});
+
+test('mechFatFromText: exact-duplicate substance lines beyond the first are certain fat; short structural repeats are NOT', () => {
+  const line = 'this exact substantive sentence repeats itself verbatim in the store';
+  const text = [line, 'unique middle content of real substance here', line, line].join('\n');
+  const mf = mechFatFromText(text);
+  assert.ok(mf.dupTokens > 0, 'the 2nd and 3rd copies count');
+  const structural = ['|---|---|', '```', '- item', '|---|---|', '```', '- item'].join('\n');
+  assert.strictEqual(mechFatFromText(structural).tokensEst, 0, 'markdown structure under MECH_DUP_MIN_CHARS never counts as fat');
+});
+
+test('mechFatFromText: blank runs beyond 2 count; 2 or fewer do not', () => {
+  assert.strictEqual(mechFatFromText('a\n\n\n\nb').tokensEst > 0, true); // 3 blank lines -> excess past 2
+  assert.strictEqual(mechFatFromText('a\n\n\nb').tokensEst, 0); // 2 blank lines -> fine
+});
+
+test('measureEntries accumulates mechFat from the always-loaded texts it reads; an unread (over-budget) entry contributes 0 (muscle, fail-toward-silence)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-mech-'));
+  try {
+    const dup = 'this exact substantive sentence repeats itself verbatim in the store';
+    fs.writeFileSync(path.join(dir, 'fat.md'), [dup, dup, dup].join('\n'));
+    fs.writeFileSync(path.join(dir, 'muscle.md'), 'one distinct real line of content here');
+    const entries = [
+      { path: path.join(dir, 'fat.md'), bytes: fs.statSync(path.join(dir, 'fat.md')).size, alwaysLoaded: true, kind: 'governance' },
+      { path: path.join(dir, 'muscle.md'), bytes: fs.statSync(path.join(dir, 'muscle.md')).size, alwaysLoaded: true, kind: 'governance' },
+    ];
+    const m = measureEntries(entries);
+    assert.ok(m.mechFat.tokensEst > 0, 'the dup file contributes certain fat');
+    const starved = measureEntries(entries, { readBudgetBytes: 1 }); // nothing fits the budget
+    assert.strictEqual(starved.mechFat.tokensEst, 0, 'unread content is muscle to the estimator, never guessed fat');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('sessionsPerDay: bootstrap 1/day under 2 stamps; measured rate; clamped [0.1, 20]', () => {
@@ -583,7 +569,7 @@ test('recordVerdict: round-trips through state (incl. overCeiling + payback + ha
     assert.strictEqual(proj1.lastVerdict.overCeiling, true);
     assert.strictEqual(proj1.lastVerdict.perDay, 500);
     assert.strictEqual(proj1.lastVerdict.breakEvenDays, 3.2);
-    assert.strictEqual(proj1.lastVerdict.floorUnmeasured, false);
+    assert.strictEqual(proj1.lastVerdict.floorUnmeasured, undefined, 'task #4: the floor family is GONE from the cache, not defaulted');
     assert.strictEqual(proj1.lastVerdict.hardCeilingTokens, 36000);
 
     const t2 = t1 + 1000;
@@ -602,7 +588,11 @@ test('recordVerdict: missing/non-finite payback/hardCeilingTokens fields degrade
     assert.strictEqual(st.overCeiling, false);
     assert.strictEqual(st.perDay, 0);
     assert.strictEqual(st.breakEvenDays, null);
-    assert.strictEqual(st.floorUnmeasured, false);
+    assert.strictEqual(st.floorUnmeasured, undefined, 'task #4: no floor field, even as a default');
+    assert.strictEqual(st.muscleTokens, 0);
+    assert.strictEqual(st.demotableTokens, 0);
+    assert.strictEqual(st.reorgPerDay, 0);
+    assert.strictEqual(st.reorgBreakEvenDays, null);
     assert.strictEqual(st.hardCeilingTokens, 0);
   } finally { clean(home, proj); }
 });
@@ -803,49 +793,69 @@ test('WARP-HOLE STRUCTURAL GATE: statOnlyFootprintBytes opens ZERO file content 
 // hand at a second call site.
 // ---------------------------------------------------------------------------
 
+// task #4 fixtures: a measure whose certain fat is CARRIED IN, mirroring what
+// measureEntries now accumulates from the texts it reads. The retier ENVELOPE
+// is passed explicitly (the conductor resolves it from config; absent =>
+// condition 2b fails closed and the wizard ask cannot arm).
+const ENV = { targetTokens: 4125, armAt: 4950, disarmAt: 3712, fillCeiling: 3712 };
+function measureOf({ footprint, mechFat = 0, indexBytes = 0, indexLines = 0, total = footprint }) {
+  return {
+    alwaysLoaded: { tokensEst: footprint, bytes: footprint * 4 },
+    index: { bytes: indexBytes, lines: indexLines },
+    mechFat: { tokensEst: mechFat, dupTokens: mechFat, blankTokens: 0 },
+    totalTokensEst: total,
+  };
+}
+
 test('gaugeVerdict: LEAN never computes payback numbers (matches the pre-refactor SessionStart gating exactly)', () => {
-  const measure = { alwaysLoaded: { tokensEst: 200, bytes: 800 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 200 };
-  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 10000, fullPercent: 6 });
+  const gv = gaugeVerdict({ measure: measureOf({ footprint: 200, mechFat: 0 }), envelope: ENV });
   assert.strictEqual(gv.verdict.band, 'LEAN');
   assert.strictEqual(gv.economical, false);
   assert.strictEqual(gv.perDay, 0);
   assert.strictEqual(gv.breakEvenDays, null);
-  assert.strictEqual(gv.floorUnmeasured, false);
 });
 
-test('gaugeVerdict: FULL+economical computes the payback numbers and arms economical:true; OBESE computes payback but never arms economical', () => {
-  // 0r: floor 10000; footprint 20200 (>= the growable wall fatMultiple(2.0) x
-  // floor = 20000, AND bmi 2.02 >= 1.5) -> FULL/absolute-cap.
-  const measure = { alwaysLoaded: { tokensEst: 20200, bytes: 80800 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 20200 };
-  // No stamps (< 2 -> sessionsPerDay's own bootstrap default of 1/day) —
-  // matches the conductor's own economical-FULL fixture ("1 stamp -> sessionsPerDay=1").
-  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 10000, fullPercent: 6 });
-  assert.strictEqual(gv.verdict.band, 'FULL');
-  assert.strictEqual(gv.verdict.reason, 'absolute-cap');
-  assert.strictEqual(gv.economical, true);
-  assert.strictEqual(gv.fatTokens, 10200);
-  assert.ok(gv.perDay > 0);
-  assert.ok(Number.isFinite(gv.breakEvenDays));
+test('gaugeVerdict (task #4 condition 2): FULL/economic needs BOTH break-evens — certain fat alone is NOT enough to arm the wizard ask', () => {
+  // stamps modelling ~4 sessions/day so BOTH carries clear the run cost when
+  // their masses are real (the demotable mass is bounded by the CC index cap,
+  // so at 1 session/day it could never out-carry a 60k run cost — the proof
+  // needs a real usage rate, which is exactly what the stamps ring measures).
+  const now = Date.now();
+  const day = 86400000;
+  const stamps = Array.from({ length: 20 }, (_, i) => ({ t: now - 5 * day + i * ((5 * day) / 20) }));
 
-  // OBESE: bmi armed, under the hard cap, carry < wash -> payback computed,
-  // economical stays false (only FULL may arm the force case). 0g fixture
-  // note: the recall-heavy totalTokensEst (120000, so runCost = 360k dwarfs
-  // the 84k carry) is what keeps this store in the chronic-chubby zone — the
-  // SAME footprint over a lean recall store would be economically FULL now
-  // (pinned by the economic-FULL tests below).
-  const obeseMeasure = { alwaysLoaded: { tokensEst: 16000, bytes: 64000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 120000 };
-  const gvObese = gaugeVerdict({ measure: obeseMeasure, rawLeanFloorTokens: 10000, fullPercent: 6 });
-  assert.strictEqual(gvObese.verdict.band, 'OBESE');
-  assert.strictEqual(gvObese.economical, false, 'OBESE never arms economical, even though payback IS computed');
-  assert.ok(gvObese.perDay > 0, 'payback numbers ARE computed for OBESE (queue 0c)');
+  // Big certain fat, lean store -> condition 2a passes easily. Index under the
+  // envelope's arm mark -> demotable 0 -> condition 2b FAILS -> the band stays
+  // OBESE (auto-Quick), never FULL/economic, never the ask.
+  const fatOnly = gaugeVerdict({ measure: measureOf({ footprint: 20000, mechFat: 10000 }), envelope: ENV, stamps });
+  assert.strictEqual(fatOnly.verdict.band, 'OBESE', 'one proof is not two: fat pays, reorg does not -> no wizard-ask band');
+  assert.strictEqual(fatOnly.economical, false);
+  assert.ok(fatOnly.perDay > 0, 'payback numbers ARE computed for OBESE (queue 0c)');
+
+  // Same store with the index over the envelope's arm mark -> demotable mass
+  // is real -> BOTH proofs hold -> FULL/economic.
+  const both = gaugeVerdict({ measure: measureOf({ footprint: 20000, mechFat: 10000, indexBytes: 24 * 1024 }), envelope: ENV, stamps });
+  assert.strictEqual(both.verdict.band, 'FULL');
+  assert.strictEqual(both.verdict.reason, 'economic');
+  assert.strictEqual(both.economical, true);
+  assert.ok(both.demotableTokens > 0, 'the demotable mass is measured, not asserted');
+  assert.ok(both.reorgPerDay > 0, 'the reorg proof carries its own shown numbers');
+
+  // And the mirror hole: huge demotable muscle but ~no certain fat -> 2b
+  // passes, 2a fails -> no arm at all (the fat Schmitt never armed) -> LEAN.
+  const reorgOnly = gaugeVerdict({ measure: measureOf({ footprint: 20000, mechFat: 0, indexBytes: 24 * 1024 }), envelope: ENV, stamps });
+  assert.strictEqual(reorgOnly.verdict.band, 'LEAN', 'no certain fat -> nothing arms; demotable alone never manufactures an ask');
+});
+
+test('gaugeVerdict: an ABSENT envelope fails condition 2b closed — the wizard ask cannot arm on a missing input', () => {
+  const gv = gaugeVerdict({ measure: measureOf({ footprint: 20000, mechFat: 10000, indexBytes: 24 * 1024 }) }); // no envelope
+  assert.strictEqual(gv.demotableTokens, 0);
+  assert.strictEqual(gv.economical, false, 'a missing input must never manufacture an ask — fail toward silence');
+  assert.strictEqual(gv.verdict.band, 'OBESE');
 });
 
 test('gaugeVerdict: FULL(externalize) never computes payback numbers (a wash cannot help ~all-muscle over capacity)', () => {
-  // 0r: post-floor the wall clamps at TRUE capacity, so ~all-muscle-over-cap
-  // now needs a floor near capacityTokens itself (fatMultiple x floor would
-  // otherwise clear the wall long before this store gets anywhere near it).
-  const measure = { alwaysLoaded: { tokensEst: CAPACITY_TOKENS + 200, bytes: (CAPACITY_TOKENS + 200) * 4 }, index: { bytes: 0, lines: 0 }, totalTokensEst: CAPACITY_TOKENS + 200 };
-  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: CAPACITY_TOKENS, fullPercent: 6 });
+  const gv = gaugeVerdict({ measure: measureOf({ footprint: CAPACITY_TOKENS + 200, mechFat: 0 }), envelope: ENV });
   assert.strictEqual(gv.verdict.band, 'FULL');
   assert.strictEqual(gv.verdict.reason, 'externalize');
   assert.strictEqual(gv.economical, false);
@@ -853,123 +863,86 @@ test('gaugeVerdict: FULL(externalize) never computes payback numbers (a wash can
   assert.strictEqual(gv.breakEvenDays, null);
 });
 
-test('gaugeVerdict: a poisoned leanFloor is sanitized exactly like the raw sanitizeLeanFloor call would', () => {
-  const measure = { alwaysLoaded: { tokensEst: 100, bytes: 400 }, index: { bytes: 26 * 1024, lines: 0 }, totalTokensEst: 100 };
-  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 999999999, fullPercent: 6 });
-  assert.strictEqual(gv.leanFloorTokens, 0, 'grossly-implausible floor discarded');
-  assert.strictEqual(gv.verdict.band, 'FULL', 'the index-byte absolute cap still fires');
-  assert.strictEqual(gv.verdict.reason, 'absolute-cap');
+test('gaugeVerdict ACCEPTANCE (task #4, end-to-end): the all-muscle live sequence stays LEAN through the FULL composition, hysteresis threaded', () => {
+  const sequence = [65066, 57794, 66332, 68083];
+  let wasOver = false, wasEconLatched = false;
+  for (const footprint of sequence) {
+    const gv = gaugeVerdict({ measure: measureOf({ footprint, mechFat: 0, total: footprint * 16 }), wasOver, wasEconLatched, envelope: ENV });
+    assert.strictEqual(gv.verdict.band, 'LEAN', 'all-muscle at ' + footprint + ' must be silent through gaugeVerdict too');
+    wasOver = gv.verdict.over;
+    wasEconLatched = gv.verdict.econLatched;
+  }
 });
 
 // ---------------------------------------------------------------------------
-// 0g "FULL = THE ECONOMIC CUT-POINT" + 0g-RESOLUTION (MEMORY.md): FULL ⊂
-// OBESE (Q1 — the economic test fires only with the BMI ceiling armed),
-// LATCHED per episode (Q2 — no flap on boundary drift, no second Schmitt),
-// the wall's three roles preserved (Q3), economics computed before the band
-// (Q4). All pre-0g bandVerdict tests above pass economical/wasEconLatched
-// as their default false, so the pre-0g behavior is pinned unchanged there.
+// 0g Q1/Q2/Q3 survive on the new axis: FULL/economic ⊂ armed (Q1), the
+// per-episode latch + its CONTINUOUS escape (Q2 — Quick removes the measured
+// fat, the band falls to LEAN by measurement, no stamp), the capacity wall's
+// wash-first/externalize split (Q3).
 // ---------------------------------------------------------------------------
 
-test('0g Q1: crossing the economic line while the ceiling is armed lands FULL/economic and sets the latch', () => {
-  const floor = 10000;
-  const v = bandVerdict({ footprintTokens: 15020, leanFloorTokens: floor, economical: true });
+test('0g Q1: the combined economic proof while the fat Schmitt is armed lands FULL/economic and sets the latch', () => {
+  const v = bandVerdict({ footprintTokens: 15020, mechFatTokens: 5000, economical: true });
   assert.strictEqual(v.band, 'FULL');
   assert.strictEqual(v.reason, 'economic');
-  assert.strictEqual(v.over, true, 'FULL ⊂ OBESE: the ceiling itself is armed');
+  assert.strictEqual(v.over, true, 'FULL ⊂ OBESE: the fat Schmitt itself is armed');
   assert.strictEqual(v.econLatched, true, 'the per-episode latch sets at the arm');
 });
 
 test('0g Q1: the economic test alone NEVER fires un-armed — no LEAN→FULL jump for a tiny-fat-heavy-use store', () => {
-  const floor = 10000;
-  // Under the arm mark entirely.
-  const under = bandVerdict({ footprintTokens: 11000, leanFloorTokens: floor, economical: true });
+  const under = bandVerdict({ footprintTokens: 11000, mechFatTokens: FAT_ARM_TOKENS - 1, economical: true });
   assert.strictEqual(under.band, 'LEAN');
   assert.strictEqual(under.econLatched, false);
-  // In the dead zone but never previously armed (wasOver false).
-  const deadZoneUnarmed = bandVerdict({ footprintTokens: 13500, leanFloorTokens: floor, wasOver: false, economical: true });
+  const deadZoneUnarmed = bandVerdict({ footprintTokens: 13500, mechFatTokens: Math.round((FAT_ARM_TOKENS + FAT_REARM_TOKENS) / 2), wasOver: false, economical: true });
   assert.strictEqual(deadZoneUnarmed.band, 'LEAN', 'the dead zone never arms fresh, economics notwithstanding');
-  // Bootstrap (no floor): bmi null -> the ceiling cannot be armed -> only the wall can fire.
-  const bootstrap = bandVerdict({ footprintTokens: 5000, leanFloorTokens: 0, economical: true });
-  assert.strictEqual(bootstrap.band, 'LEAN');
-  assert.strictEqual(bootstrap.reason, 'no-floor-yet');
-  assert.strictEqual(bootstrap.econLatched, false, 'pre-floor can never latch (Q1: economic FULL needs the armed ceiling)');
 });
 
 test('0g: the OBESE zone is armed-but-not-economical (chronic-chubby is CORRECT — carry < wash)', () => {
-  const v = bandVerdict({ footprintTokens: 15020, leanFloorTokens: 10000, economical: false });
+  const v = bandVerdict({ footprintTokens: 15020, mechFatTokens: 5000, economical: false });
   assert.strictEqual(v.band, 'OBESE');
-  assert.strictEqual(v.reason, 'bmi');
+  assert.strictEqual(v.reason, 'fat');
   assert.strictEqual(v.econLatched, false);
 });
 
 test('0g Q2: the latch holds FULL through an armed session whose fresh proof dipped (boundary drift never flaps the band)', () => {
-  const floor = 10000;
-  // Dead zone (bmi 1.35, over held by wasOver) + fresh economics false + the latch -> still FULL.
-  const held = bandVerdict({ footprintTokens: 13500, leanFloorTokens: floor, wasOver: true, economical: false, wasEconLatched: true });
+  const midZone = Math.round((FAT_ARM_TOKENS + FAT_REARM_TOKENS) / 2);
+  const held = bandVerdict({ footprintTokens: 13500, mechFatTokens: midZone, wasOver: true, economical: false, wasEconLatched: true });
   assert.strictEqual(held.band, 'FULL');
   assert.strictEqual(held.reason, 'economic');
   assert.strictEqual(held.econLatched, true, 'the latch persists through the dip');
-  // Same store WITHOUT the latch is the control: plain OBESE.
-  const control = bandVerdict({ footprintTokens: 13500, leanFloorTokens: floor, wasOver: true, economical: false, wasEconLatched: false });
+  const control = bandVerdict({ footprintTokens: 13500, mechFatTokens: midZone, wasOver: true, economical: false, wasEconLatched: false });
   assert.strictEqual(control.band, 'OBESE', 'without the latch the same dip would drop the band — the latch is the anti-flap');
 });
 
-test('0g Q2: the latch falls with the ceiling — LEAN (the episode reset) clears it, a stale latch can never hold an un-armed store FULL', () => {
-  const floor = 10000;
-  // BMI at/under the low-water mark disarms regardless of latch or fresh economics.
-  const v = bandVerdict({ footprintTokens: 11000, leanFloorTokens: floor, wasOver: true, economical: true, wasEconLatched: true });
+test('0g Q2: the latch falls with the Schmitt — LEAN (the CONTINUOUS episode reset: Quick removed the measured fat) clears it, no stamp involved', () => {
+  const v = bandVerdict({ footprintTokens: 11000, mechFatTokens: FAT_REARM_TOKENS, wasOver: true, economical: true, wasEconLatched: true });
   assert.strictEqual(v.band, 'LEAN');
   assert.strictEqual(v.over, false);
-  assert.strictEqual(v.econLatched, false, 'LEAN writes the latch false — the episode is over');
+  assert.strictEqual(v.econLatched, false, 'LEAN writes the latch false — the episode is over, by MEASUREMENT');
 });
 
-test('0g Q3: capHit+over stays FULL/absolute-cap (wash-first) and still carries the latch when the economic condition holds', () => {
-  // 0r: floor 10000, growable wall = fatMultiple(2.0) x floor = 20000.
-  const floor = 10000;
-  const wall = floor * FAT_MULTIPLE_DEFAULT;
-  const v = bandVerdict({ footprintTokens: wall + 200, leanFloorTokens: floor, economical: true });
+test('0g Q3: capHit+armed stays FULL/absolute-cap (wash-first) and still carries the latch when the economic condition holds', () => {
+  const v = bandVerdict({ footprintTokens: CAPACITY_TOKENS + 100, mechFatTokens: 5000, economical: true });
   assert.strictEqual(v.band, 'FULL');
-  assert.strictEqual(v.reason, 'absolute-cap', 'the wall keeps reason-precedence over economic');
-  assert.strictEqual(v.econLatched, true, 'the episode latch still sets — shrinking back under the wall mid-episode must not drop the band');
-  // ...and the follow-on session under the wall rides the latch into FULL/economic.
-  const after = bandVerdict({ footprintTokens: wall - 1000, leanFloorTokens: floor, wasOver: true, economical: false, wasEconLatched: true });
-  assert.strictEqual(after.band, 'FULL');
-  assert.strictEqual(after.reason, 'economic');
+  assert.strictEqual(v.reason, 'absolute-cap');
+  assert.strictEqual(v.econLatched, true);
 });
 
 test('0g Q3: externalize (capHit while un-armed, ~all-muscle) never latches, even against a mistakenly-true economical', () => {
-  // 0r: un-armed capHit now only happens at the TRUE capacity clamp (a
-  // floor near capacityTokens itself — fatMultiple x floor would clear the
-  // wall long before bmi could stay under CEILING_BMI at any smaller floor).
-  const floor = CAPACITY_TOKENS;
-  const v = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor, economical: true });
+  const v = bandVerdict({ footprintTokens: CAPACITY_TOKENS + 100, mechFatTokens: 0, economical: true });
   assert.strictEqual(v.band, 'FULL');
   assert.strictEqual(v.reason, 'externalize');
   assert.strictEqual(v.econLatched, false);
 });
 
-test('0g gaugeVerdict: a lean-recall armed store past the break-even is FULL/economic end-to-end (economical armed, payback computed, latch out)', () => {
-  // fat 6000, store 16000: carry 6000*14 = 84000 > runCost 16000*3 = 48000.
-  const measure = { alwaysLoaded: { tokensEst: 16000, bytes: 64000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 16000 };
-  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 10000, fullPercent: 6 });
+test('0g gaugeVerdict: a LATCHED session whose fresh proof dipped keeps the BAND but not the FORCE — economical reflects the fresh numbers only', () => {
+  // fat in the dead zone (armed via wasOver), latch carried, fresh proof
+  // false (fat too small to pay) -> band FULL/economic, force disarmed.
+  const midZone = Math.round((FAT_ARM_TOKENS + FAT_REARM_TOKENS) / 2);
+  const gv = gaugeVerdict({ measure: measureOf({ footprint: 13500, mechFat: midZone, total: 200000 }), wasOver: true, wasEconLatched: true, envelope: ENV });
   assert.strictEqual(gv.verdict.band, 'FULL');
   assert.strictEqual(gv.verdict.reason, 'economic');
-  assert.strictEqual(gv.economical, true);
-  assert.strictEqual(gv.verdict.econLatched, true);
-  assert.ok(gv.perDay > 0);
-  assert.ok(Number.isFinite(gv.breakEvenDays));
-});
-
-test('0g gaugeVerdict: a LATCHED session whose fresh proof dipped keeps the BAND but not the FORCE — economical reflects the fresh numbers only', () => {
-  // fat 2500, store 12500: carry 35000 < runCost 37500 -> fresh economics
-  // false; bmi 1.25 sits in the dead zone held armed by wasOver.
-  const measure = { alwaysLoaded: { tokensEst: 12500, bytes: 50000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 12500 };
-  const gv = gaugeVerdict({ measure, rawLeanFloorTokens: 10000, fullPercent: 6, wasOver: true, wasEconLatched: true });
-  assert.strictEqual(gv.verdict.band, 'FULL', 'Q2: the latch holds the band');
-  assert.strictEqual(gv.verdict.reason, 'economic');
-  assert.strictEqual(gv.verdict.econLatched, true);
-  assert.strictEqual(gv.economical, false, 'the FORCE arms on the fresh deterministic proof only (economic-dominance: numbers must hold at every fire) — a pending crossing degrades to the plain ask, never a forced run');
-  assert.ok(gv.perDay > 0, 'payback numbers still shown on whatever surfaces');
+  assert.strictEqual(gv.economical, false, 'the FORCE needs the fresh combined proof; the latch holds only the BAND');
 });
 
 test('0g: recordVerdict round-trips econLatched, and a LEAN overwrite clears it (the episode reset in state)', () => {
@@ -992,7 +965,7 @@ test('0g: recordVerdict round-trips econLatched, and a LEAN overwrite clears it 
 // gate-passed clean) overwrites it; FLOOR_MIN and the WALL are unchanged.
 // ---------------------------------------------------------------------------
 
-test('0j ensureProvisionalFloor: a never-seen store stamps floor = footprint with the provisional flag; day-one BMI = 1.00 through gaugeVerdict', () => {
+test('0j ensureProvisionalFloor (LEGACY state writer): a never-seen store stamps floor = footprint with the provisional flag — and the gauge NO LONGER reads it (task #4)', () => {
   const { home, proj } = sandbox();
   try {
     const r = ensureProvisionalFloor(home, proj, 10000, 1000);
@@ -1002,11 +975,14 @@ test('0j ensureProvisionalFloor: a never-seen store stamps floor = footprint wit
     assert.strictEqual(st.leanFloorProvisional, true);
     assert.strictEqual(st.leanFloorAt, 1000);
 
-    const measure = { alwaysLoaded: { tokensEst: 10000, bytes: 40000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 10000 };
-    const gv = gaugeVerdict({ measure, rawLeanFloorTokens: r.floorTokens, floorProvisional: r.provisional, fullPercent: 6 });
+    // task #4: the gauge measures fat/muscle from content — a day-one
+    // all-muscle store is BMI 1.00 by MEASUREMENT (mechFat 0), not because a
+    // provisional stamp happens to equal the footprint; the stamped floor is
+    // not an input to gaugeVerdict at all any more.
+    const measure = { alwaysLoaded: { tokensEst: 10000, bytes: 40000 }, index: { bytes: 0, lines: 0 }, mechFat: { tokensEst: 0, dupTokens: 0, blankTokens: 0 }, totalTokensEst: 10000 };
+    const gv = gaugeVerdict({ measure });
     assert.strictEqual(gv.verdict.band, 'LEAN');
-    assert.strictEqual(gv.verdict.bmi, 1, 'BMI live at exactly 1.00 on day one');
-    assert.strictEqual(gv.floorUnmeasured, false, 'a provisional floor IS a measured baseline — no upper-bound labeling');
+    assert.strictEqual(gv.verdict.bmi, 1, 'BMI 1.00 on day one — measured, never stamped');
   } finally { clean(home, proj); }
 });
 
@@ -1061,17 +1037,23 @@ test('0j: a footprint under FLOOR_MIN_TOKENS stamps nothing — the tiny-store g
   } finally { clean(home, proj); }
 });
 
-test('0j bandVerdict: capHit with a PROVISIONAL floor stays FULL/absolute-cap (wash first) — a provisional baseline can never certify externalize', () => {
-  // Day-one over-wall store: floor = footprint (provisional), bmi 1.0, un-armed.
-  // 0r: un-armed capHit only happens at the TRUE capacity clamp now (see the
-  // externalize test above) — floor = CAPACITY_TOKENS pins that same shape.
-  const floor = CAPACITY_TOKENS;
-  const v = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor, floorProvisional: true });
-  assert.strictEqual(v.band, 'FULL');
-  assert.strictEqual(v.reason, 'absolute-cap', '0j: pre-existing fat may be baked into the provisional baseline — never diagnose "all muscle" from it');
-  // The identical numbers with a REAL floor = the all-muscle externalize case (0g Q3, unchanged).
-  const real = bandVerdict({ footprintTokens: floor + 200, leanFloorTokens: floor, floorProvisional: false });
-  assert.strictEqual(real.reason, 'externalize');
+test('task #4 retires the 0j provisional-baseline hedge: day one and day 100 are the SAME gauge — the externalize diagnosis is MEASURED, never inferred from a baseline', () => {
+  // The old rule ("a provisional baseline can never certify externalize —
+  // pre-existing fat may be baked into it") existed because "all muscle" was
+  // an INFERENCE from a stamped floor equal to the footprint. There is no
+  // baseline to bake anything into now: certain fat is measured from content
+  // at every gauge, so a store with mechFat 0 at the capacity line IS
+  // provably ~all-certain-muscle on day one exactly as on day 100, and the
+  // externalize advice is correct immediately. The hedge's real concern
+  // (semantic fat invisible to code) is unchanged — and unchanged EITHER
+  // way: no floor stamp ever measured semantic fat either.
+  const dayOne = bandVerdict({ footprintTokens: CAPACITY_TOKENS + 200, mechFatTokens: 0 });
+  assert.strictEqual(dayOne.band, 'FULL');
+  assert.strictEqual(dayOne.reason, 'externalize');
+  // and with measured certain fat present, the same line reads wash-first —
+  // the split follows the MEASUREMENT, no day-one special case in either direction.
+  const withFat = bandVerdict({ footprintTokens: CAPACITY_TOKENS + 200, mechFatTokens: FAT_ARM_TOKENS });
+  assert.strictEqual(withFat.reason, 'absolute-cap');
 });
 
 // ---------------------------------------------------------------------------

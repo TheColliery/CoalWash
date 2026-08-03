@@ -86,7 +86,9 @@ test('gauge --json: one call returns recover + platform + measure + verdict + br
     assert.ok(g.measure.alwaysLoaded.tokensEst > 0, 'the seeded CLAUDE.md was measured');
     assert.ok(['LEAN', 'OBESE', 'FULL'].includes(g.verdict.band));
     assert.strictEqual(typeof g.breakEven.economical, 'boolean');
-    assert.strictEqual(g.breakEven.floorUnmeasured, true, 'no floor stamped in a fresh sandbox');
+    assert.ok(Number.isFinite(g.breakEven.fatTokens), 'the MEASURED certain fat rides the breakEven block (task #4)');
+    assert.ok(Number.isFinite(g.breakEven.muscleTokens), 'measured muscle reported beside it');
+    assert.strictEqual(g.breakEven.floorUnmeasured, undefined, 'the floor family is GONE from the gauge output, not defaulted');
   } finally { clean(home, proj); }
 });
 
@@ -205,20 +207,22 @@ test('F1: a traversal-shaped id via the CLI is a clean not-found — exit 1, emp
   } finally { clean(home, proj); }
 });
 
-test('gauge() direct call: honors an explicit home/cwd and applies the floor sanitizer', () => {
+test('gauge() direct call: honors an explicit home/cwd — and a poisoned stored floor changes NOTHING (task #4: no floor is ever read)', () => {
   const { home, proj } = sandbox();
   // claudeBaseDir consults CLAUDE_CONFIG_DIR before the home argument — clear
   // it for the in-process call so the sandbox home stays hermetic.
   const savedEnv = process.env.CLAUDE_CONFIG_DIR;
   delete process.env.CLAUDE_CONFIG_DIR;
   try {
-    // A poisoned (grossly-implausible) stored floor must be discarded, not trusted.
+    // A poisoned (grossly-implausible) stored floor is INERT: task #4 measures
+    // fat and muscle from content, so no stored floor is consulted at all.
     const sp = projStatePath(home, proj);
     fs.mkdirSync(path.dirname(sp), { recursive: true });
     fs.writeFileSync(sp, JSON.stringify({ leanFloorTokens: 10 ** 9 }), 'utf8');
     const g = gauge({ cwd: proj, home });
-    assert.strictEqual(g.breakEven.floorUnmeasured, true, 'sanitizeLeanFloor discarded the poisoned floor');
-    assert.match(gaugeLine(g), /no floor yet/);
+    assert.ok(['LEAN', 'OBESE', 'FULL'].includes(g.verdict.band), 'the gauge ran on the explicit home/cwd');
+    assert.strictEqual(g.breakEven.floorUnmeasured, undefined, 'no floor is consulted, poisoned or not');
+    assert.match(gaugeLine(g), /certain fat ~\d+ tok/);
   } finally {
     if (savedEnv !== undefined) process.env.CLAUDE_CONFIG_DIR = savedEnv;
     clean(home, proj);
@@ -334,21 +338,30 @@ test('NESTED-HABITAT: a room FALSE-FULLed by its inherited umbrella now reads LE
     // per-session cost, it is just not this room's to wash or externalize).
     assert.ok(g.inherited.alwaysLoaded.tokensEst > g.verdict.hardCeilingTokens,
       'the ancestor tier is measured and exceeds the ceiling on its own — that is the number a reader needs to SEE');
-    assert.ok(g.measure.alwaysLoaded.tokensEst < g.verdict.hardCeilingTokens / 4,
-      'the room-owned footprint is a small fraction of the ceiling');
+    assert.ok(g.verdict.hardCeilingTokens >= g.measure.alwaysLoaded.tokensEst,
+      'task #4: the FULL line RIDES the measured muscle (threshold = muscle + arm), so a pure-muscle room can never cross it');
   } finally { clean(home); }
 });
 
+// task #4 re-base of both controls: a giant DISTINCT 'R'-run is measured
+// muscle now and correctly stays LEAN — the arming fixture is real duplicate
+// fat (the estimator's own evidence) plus a CC-index-cap hit, the same two
+// ingredients the shipped absolute-cap route requires.
+function seedRoomFatAndCapIndex(home, room) {
+  const dupFat = Array.from({ length: 60 }, () => 'this exact line is deliberate duplicate padding for the nested-habitat control').join('\n');
+  fs.writeFileSync(path.join(room, 'CLAUDE.md'), '# room\n@MEMORY.md\n' + dupFat, 'utf8');
+  const slug = fs.realpathSync.native(room).replace(/[^A-Za-z0-9]/g, '-');
+  const mem = path.join(home, '.claude', 'projects', slug, 'memory');
+  fs.mkdirSync(mem, { recursive: true });
+  fs.writeFileSync(path.join(mem, 'MEMORY.md'), 'i'.repeat(26 * 1024), 'utf8'); // over CC_INDEX_CAP_BYTES
+}
+
 test('NESTED-HABITAT CONTROL: a room over its OWN cap still reads FULL — the wall did not stop firing', () => {
-  // No umbrella at all; the room's own governance is the thing over the ceiling.
+  // No umbrella at all; the room's own fat + index-cap hit is the trigger.
   const { home, room } = nested({ umbrellaBytes: 0, roomBytes: 4_000 });
   try {
-    fs.writeFileSync(path.join(room, 'CLAUDE.md'), '# room\n@MEMORY.md\n' + 'R'.repeat(400_000), 'utf8');
+    seedRoomFatAndCapIndex(home, room);
     const g = measureOnly({ cwd: room, home });
-    // ASSERTS THE BAND ONLY, ON PURPOSE: a control earns its name by being GREEN
-    // on BOTH the pre-fix and post-fix bodies. Asserting the new `inherited`
-    // field here would make it fail pre-fix for a reason that has nothing to do
-    // with the wall, and a control that goes red with the change proves nothing.
     assert.strictEqual(g.verdict.band, 'FULL', 'room-owned fat over the ceiling must still hit the wall');
     assert.strictEqual(g.verdict.reason, 'absolute-cap');
   } finally { clean(home); }
@@ -357,9 +370,8 @@ test('NESTED-HABITAT CONTROL: a room over its OWN cap still reads FULL — the w
 test('NESTED-HABITAT CONTROL 2: the umbrella is excluded, the room\'s own fat is NOT — a room that is BOTH still reads FULL', () => {
   const { home, room } = nested({ umbrellaBytes: 400_000, roomBytes: 4_000 });
   try {
-    fs.writeFileSync(path.join(room, 'CLAUDE.md'), '# room\n@MEMORY.md\n' + 'R'.repeat(400_000), 'utf8');
+    seedRoomFatAndCapIndex(home, room);
     const g = measureOnly({ cwd: room, home });
-    // Band-only for the same reason as the control above: green on both bodies.
     assert.strictEqual(g.verdict.band, 'FULL', 'excluding the ancestor tier must not excuse the room\'s own fat');
   } finally { clean(home); }
 });

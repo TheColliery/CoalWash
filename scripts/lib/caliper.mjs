@@ -1,41 +1,63 @@
 // ponytail: 1147 lines at declaration — one hysteresis state machine: the verdict logic (Schmitt trigger, econ latch, crossings) defines the SEMANTICS of the persisted fields it reads back, and the STATE_SCHEMA reset discipline audits field meaning against rulings; splitting verdict from state separates each field's writer from the logic that gives it meaning.
 // caliper.mjs — footprint measurement + the ceiling verdict + the economic
-// break-even math (beta.12 "THE BAND COLLAPSE" — supersedes the beta.7/beta.8
-// 4-band PLUMP/OBESE/FULL(fat-budget) ladder).
+// break-even math.
 //
-// BAND COLLAPSE (MEMORY.md "THE BAND COLLAPSE" + "THE ONE-CEILING NUMBER" +
-// the INFECTION AUDIT's "BMI goes FRACTAL" ruling — the LATEST, superseding
-// statement): LEAN/PLUMP/OBESE die as SEPARATE behavior drivers. The state
-// machine is BINARY — below-ceiling = silence, past-ceiling = guaranteed
-// action — driven by ONE metric (Memory-BMI = footprint / leanFloor,
-// floor-relative so legitimate MEAT growth never false-fires) and ONE
-// ceiling, HYSTERESIS-gated (a Schmitt trigger, replacing the old time-based
-// snooze as the anti-flapping guard — BMI-only, never a clock):
-//   armed OFF -> ON  requires bmi >= CEILING_BMI   (the high-water mark)
-//   armed ON  -> OFF requires bmi <= CEILING_REARM_BMI (the low-water mark)
-//   the dead zone between the two marks holds whatever state it already had.
-// Bands returned (0g "FULL = THE ECONOMIC CUT-POINT" + its 0g-RESOLUTION,
-// MEMORY.md — the bands are PURELY ECONOMIC now, nested LEAN < OBESE < FULL):
-//   LEAN  — ceiling un-armed: no meaningful fat. Silent.
-//   OBESE — ceiling armed (fat exists) but carry < wash: the chronic-chubby-
-//           is-CORRECT zone (0c). Auto-Quick-silent only, never asks.
-//   FULL  — the economic cut-point (reason 'economic'): ceiling armed AND
-//           breakEven.economical. Q1: FULL ⊂ OBESE — the economic test alone
-//           can never fire un-armed, so a tiny-fat-heavy-use store never
-//           jumps LEAN→FULL. Q2: LATCHED per episode — once economical arms
-//           FULL it holds (`econLatched`, cached like `overCeiling`) until
-//           the episode ends (the LEAN reset; wizard completion lands there
-//           via the post-clean floor stamp collapsing BMI to ~1.0). No
-//           second Schmitt threshold: the latch IS the anti-flap.
-// The WALL (fullPercent x CAPACITY_TOKENS, or the CC index-byte/line caps) is
-// demoted from "what FULL means" to the OUTER capacity line with three
-// surviving roles (Q3): pre-floor bootstrap FULL/'absolute-cap' (cold-start
-// entry, bmi null); capHit while armed = FULL/'absolute-cap' (real fat to
-// reclaim — wash first); capHit while un-armed = FULL/'externalize' (~all
-// muscle; washing cannot help, advise externalizing/splitting). Pre-floor
-// (bootstrap, no clean yet) or a floor too small to trust
-// (< FLOOR_MIN_TOKENS) both collapse bmi to null — only the wall can fire,
-// matching the original bootstrap heuristic.
+// TASK #4 (USER ruling, 2026-08-03) — THE FULL DEFINITION TRACKS MUSCLE 1:1,
+// CONTINUOUSLY, and it SUPERSEDES both prior wall models (beta.12's
+// BMI-vs-stamped-floor Schmitt AND 0r's fatMultiple x floor growable wall).
+// Verbatim: "กล้ามโต 10 หน่วย นิยาม FULL โต 10 หน่วย" — muscle grows 10 units,
+// the FULL definition grows 10 units. Not a multiplier, not a re-stamp, not
+// event-driven: the threshold is a FUNCTION of current muscle mass recomputed
+// at every gauge, so no "waiting for a successful clean" state can exist to
+// get stuck in. The stamped lean floor is RETIRED as a band driver — the live
+// defect this fixes: BMI = footprint / install-floor with the floor written
+// once and `setLeanFloor` carrying ZERO production callers meant every token
+// of legitimate muscle growth was silently attributed to FAT, latching an
+// all-muscle store into FULL forever (measured on the umbrella store:
+// footprint 28,833 -> 58,836 tok of real campaign history, band FULL every
+// session, force firing and cutting nothing — the cry-wolf failure).
+//
+// THE NEW AXIS — CERTAIN FAT, measured from CONTENT at every gauge:
+//   mechFatTokens — what the mechanical tier can PROVE is fat right now
+//                   (see mechFatFromText: exact-duplicate substance lines +
+//                   blank-run excess). A LOWER BOUND by construction: code
+//                   counts only what it can prove; semantic fat is invisible
+//                   to it (it always was — the old definition merely
+//                   PRETENDED to see it by attributing all growth to fat).
+//   muscleTokens  — footprint − mechFat: everything not provably fat is
+//                   muscle until a human/semantic tier says otherwise. The
+//                   fail direction of an estimator miss is toward MUSCLE =
+//                   toward silence, the direction this fix exists to force.
+//   the 1:1 line  — a store enters OBESE exactly when footprint exceeds
+//                   muscleTokens + FAT_ARM_TOKENS. d(line)/d(muscle) = 1:
+//                   muscle +10 => threshold +10, continuously, no stamp.
+// Hysteresis stays a Schmitt trigger, re-axed onto mechFat (never a clock):
+//   armed OFF -> ON  requires mechFat >= FAT_ARM_TOKENS
+//   armed ON  -> OFF requires mechFat <= FAT_REARM_TOKENS
+//   the dead zone between the marks holds whatever state it already had.
+// Bands (nesting unchanged, LEAN < OBESE < FULL):
+//   LEAN  — no provable fat worth acting on. Silent.
+//   OBESE — certain fat armed but carry < wash: auto-Quick-silent, never asks.
+//   FULL/economic — certain fat armed AND **BOTH** break-evens hold (task #4
+//           condition 2): (a) cutting the CERTAIN FAT pays (breakEven over
+//           mechFat) AND (b) reorganising NON-COMPACT MUSCLE pays (breakEven
+//           over the retier envelope's demotable mass — the wizard tier this
+//           ask opens is "Fat + reorganize muscle", and the reorganize half
+//           was never costed before; a fat-only payoff must not open a
+//           two-part paid run). Both proofs fresh, both shown.
+//           Q2's per-episode latch survives (econLatched) — and its escape is
+//           now CONTINUOUS: Quick removing the certain fat drops mechFat
+//           under FAT_REARM_TOKENS and the band falls to LEAN by measurement,
+//           not by any post-clean stamp (the old comment here documented "the
+//           post-clean floor stamp collapsing BMI" as the escape — that stamp
+//           was an uncalled function; the escape it described did not exist).
+// The WALL is the REAL capacity line only — footprint >= capacityTokens, or
+// the CC index caps: capHit while armed = FULL/'absolute-cap' (certain fat
+// exists — wash first); capHit while un-armed = FULL/'externalize' (~all
+// muscle; washing cannot help, advise externalizing/splitting). The
+// fullPercent x capacity heuristic and the fatMultiple x floor wall are both
+// RETIRED (each was a stamp/percent proxy that false-FULLed on muscle);
+// their config keys are read-tolerated and ignored, the forceMode precedent.
 //
 // FORCE AT FULL IS UNCONDITIONAL (0m "FORCE = THE FREE TIER, NO PROOF
 // NEEDED" + "FORCE IS A DICTATOR, NO OFF SWITCH"): every FULL crossing —
@@ -72,22 +94,28 @@ import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn } from './class
 // constants — PLACEHOLDERS, calibrate at the fidelity benchmark (2026-07-08
 // amendment: "Numbers = placeholder constants in code, calibrate at benchmark")
 // ---------------------------------------------------------------------------
-// THE ONE-CEILING NUMBER (MEMORY.md, recommended for beta.12): the GC-anchor
-// derivation — V8/Java major-GC fire at 1.5-2x heap growth; we take the LOW
-// edge because the sweep is code-only-cheap AND class-B fat charges rent in
-// THROUGHPUT every prompt (unlike RAM fat, which only charges capacity),
-// justifying an earlier trigger. Hysteresis re-arm at 1.2 vs natural
-// accretion ~1-3%/session = months-per-fire on a healthy store.
+// LEGACY (task #4): CEILING_BMI / CEILING_REARM_BMI / FAT_MULTIPLE_DEFAULT
+// drove the retired BMI-vs-stamped-floor Schmitt and the 0r floor-multiple
+// wall. Exported still (state migration comments + history cite them); no
+// band logic reads them any more.
 export const CEILING_BMI = 1.5;
 export const CEILING_REARM_BMI = 1.2;
-// 0r "WALL -> floor-relative": the same GC-anchor family as CEILING_BMI
-// (V8/Java major-GC fire at 1.5-2x heap growth) but the HIGH edge -- the WALL
-// is the outer, rarely-touched line (unlike OBESE's frequent low-edge arm),
-// so it earns the more permissive end of the same range. Config key
-// `fatMultiple`; schema min sits strictly above CEILING_BMI (the
-// blueprint's ordering-clamp: the wall must never fire before OBESE arms,
-// or OBESE gets swallowed).
 export const FAT_MULTIPLE_DEFAULT = 2.0;
+// TASK #4 — the certain-fat Schmitt marks (tokens, not a ratio). PLACEHOLDERS
+// like every constant in this block, calibrate at the benchmark. The arm mark
+// deliberately reuses REGAUGE_DELTA_TOKENS' own "a REAL content change" scale
+// (~500 tok ~ a genuine MEMORY.md crystallize append): certain fat below the
+// scale of one real append is noise the sweep should not churn on. Re-arm at
+// 200 keeps the Schmitt's dead zone (auto-Quick removes what it measures, so
+// a completed pass lands well under the re-arm mark by construction).
+export const FAT_ARM_TOKENS = 500;
+export const FAT_REARM_TOKENS = 200;
+// mechFatFromText's substance threshold: a trimmed line must carry at least
+// this many chars before an exact repeat of it counts as duplicate FAT —
+// shorter repeats are markdown STRUCTURE (table separators, fence markers,
+// list bullets, `---` rules) that legitimately recurs. Placeholder, same
+// convention.
+export const MECH_DUP_MIN_CHARS = 24;
 // Floor-sanity lower bound ("<~10KB no-measure", the beta.6 floor-guard
 // family's other half — sanitizeLeanFloor below already guards the UPPER
 // bound): a floor this small can't support a trustworthy RATIO — a trivial
@@ -153,9 +181,55 @@ export function gzipRatio(text) {
   return zlib.gzipSync(buf).length / buf.length;
 }
 
+// TASK #4 — the CERTAIN-FAT estimator: what the mechanical tier can PROVE is
+// fat in this text, right now, from content alone. Two classes only, both
+// deterministic:
+//   (a) exact-duplicate SUBSTANCE lines — a trimmed line of >=
+//       MECH_DUP_MIN_CHARS chars repeating verbatim within the file; every
+//       occurrence beyond the first counts (the broom's own flagship certain
+//       cut: an exact dup is provable garbage, its first copy is the content).
+//       WITHIN-file only, by design: a byte-identical copy ACROSS files is a
+//       policy decision (the KoharuTH managed-pack lesson — deleting a local
+//       copy of a global pack changes future load behavior), never certain.
+//   (b) blank-run excess — blank lines beyond 2 consecutive (pure spacing;
+//       the Quick tier's whitespace class).
+// Everything else is MUSCLE to this estimator. That is the honest direction:
+// this is a LOWER BOUND on fat, so a miss reads as muscle and the band stays
+// SILENT — the task-#4 fail direction. Semantic fat (verbose wrapping,
+// restatement in different words) is invisible here and stays the wizard's
+// judgment; the old definition never saw it either, it only pretended to by
+// billing all growth as fat.
+export function mechFatFromText(text) {
+  const lines = String(text).split(/\r?\n/);
+  const seen = new Map();
+  let dupTokens = 0;
+  let blankTokens = 0;
+  let blankRun = 0;
+  for (const raw of lines) {
+    const t = raw.trim();
+    if (!t) {
+      blankRun++;
+      if (blankRun > 2) blankTokens += 1; // ~1 tok per excess blank line (a newline's worth)
+      continue;
+    }
+    blankRun = 0;
+    if (t.length >= MECH_DUP_MIN_CHARS) {
+      const n = seen.get(t) || 0;
+      if (n >= 1) dupTokens += tokensEst(raw);
+      seen.set(t, n + 1);
+    }
+  }
+  return { tokensEst: dupTokens + blankTokens, dupTokens, blankTokens };
+}
+
 // Measure a discovered class-B entry set. Reads content ONLY for always-loaded
 // entries (small by definition) up to `readBudgetBytes`; recall entries are
 // sized from stat bytes (deterministic) with the ASCII token heuristic.
+// TASK #4: the same read now also feeds the certain-fat estimator — m.mechFat
+// accumulates mechFatFromText over every always-loaded text actually read.
+// An entry NOT read (over the read budget, or a read error) contributes 0
+// certain fat: can't see it -> can't prove it's fat -> counts as muscle ->
+// the band stays quiet (the fail-toward-silence direction, deliberately).
 export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = false } = {}) {
   const m = {
     files: entries.length,
@@ -163,6 +237,7 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
     totalTokensEst: 0,
     alwaysLoaded: { files: 0, bytes: 0, tokensEst: 0 },
     index: { bytes: 0, lines: 0 },
+    mechFat: { tokensEst: 0, dupTokens: 0, blankTokens: 0 }, // task #4 — certain fat, accumulated from the texts read below
     gzipRatio: null,
     est: true, // token numbers are estimates — receipt must label "~est"
   };
@@ -180,11 +255,15 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
           readSoFar += e.bytes;
           tok = tokensEst(text);
           if (withGzip) gzParts.push(text);
+          const mf = mechFatFromText(text);
+          m.mechFat.tokensEst += mf.tokensEst;
+          m.mechFat.dupTokens += mf.dupTokens;
+          m.mechFat.blankTokens += mf.blankTokens;
           if (e.kind === 'memory-index') {
             m.index.bytes = e.bytes;
             m.index.lines = text.split('\n').length;
           }
-        } catch { /* stat-based estimate stands */ }
+        } catch { /* stat-based estimate stands; unread => 0 certain fat (muscle) */ }
       } else if (e.kind === 'memory-index') {
         m.index.bytes = e.bytes;
       }
@@ -245,107 +324,102 @@ export function statOnlyFootprintBytes(paths) {
 // clean has proven what the muscle actually is.
 export function bandVerdict({
   footprintTokens,
-  leanFloorTokens = 0,
+  mechFatTokens = 0,
   capacityTokens = CAPACITY_TOKENS,
-  fullPercent = 6,
-  fatMultiple = FAT_MULTIPLE_DEFAULT,
   indexBytes = 0,
   indexLines = 0,
   wasOver = false,
   economical = false,
   wasEconLatched = false,
-  floorProvisional = false,
 } = {}) {
-  // 0r "the WALL TRACKS the lean MEAT floor, growable, clamped at the hard
-  // ceiling": with a stamped (measurable) floor the WALL is
-  // fatMultiple x leanFloor -- a legitimately-grown muscle store raises its
-  // own wall right along with it -- clamped at the TRUE capacity ceiling
-  // (the raw context window, "ssd-full"), never the small fullPercent%
-  // number (that was the pre-0r static wall this fix retires). No stamped
-  // floor yet -> the growth needs a MEASURED floor to track, so this stays
-  // the pre-0r legacy heuristic (fullPercent x capacity) unchanged.
-  const hardCeilingTokens = Math.round(capacityTokens * (fullPercent / 100));
-  const measurable = leanFloorTokens >= FLOOR_MIN_TOKENS;
-  const wallTokens = measurable
-    ? Math.min(fatMultiple * leanFloorTokens, capacityTokens)
-    : hardCeilingTokens;
+  // TASK #4 — muscle is MEASURED at every gauge, never stamped: everything
+  // the certain-fat estimator cannot prove is fat is muscle. The 1:1 line
+  // (the file-top ruling, "กล้ามโต 10 หน่วย นิยาม FULL โต 10 หน่วย"): the
+  // fat band arms exactly when footprint exceeds muscle + FAT_ARM_TOKENS,
+  // so d(threshold)/d(muscle) = 1 — muscle +10 => threshold +10,
+  // continuously, with no stamp to lag behind and no event to miss.
+  const fat = Math.max(0, Math.round(mechFatTokens));
+  const muscleTokens = Math.max(0, Math.round(footprintTokens - fat));
+  // The WALL is the REAL capacity line only (the raw working-window
+  // placeholder + the CC index caps, both person-independent machine
+  // limits). The fullPercent%-of-capacity heuristic and the 0r
+  // fatMultiple x floor wall are RETIRED — each was a proxy that read
+  // muscle growth as capacity pressure (the task-#4 false positive).
   const capHit =
-    footprintTokens >= wallTokens ||
+    footprintTokens >= capacityTokens ||
     indexBytes >= CC_INDEX_CAP_BYTES ||
     indexLines >= CC_INDEX_CAP_LINES;
-  // Fractal BMI (the INFECTION AUDIT's superseding ruling): the floor must
-  // itself be large enough to trust a ratio against (FLOOR_MIN_TOKENS) —
-  // below that, or with no floor stamped yet, bmi collapses to null exactly
-  // like the pre-floor bootstrap case always has.
-  const bmi = measurable ? footprintTokens / leanFloorTokens : null;
-  // Schmitt-trigger hysteresis: once armed (over), BMI must fall to the LOW
-  // mark to disarm; once disarmed, BMI must reach the HIGH mark to arm again.
-  // This is the anti-flapping guard living in the metric, not a clock.
-  const over = bmi === null ? false : (wasOver ? bmi > CEILING_REARM_BMI : bmi >= CEILING_BMI);
-  // 0g Q1+Q2: the economic FULL condition — armed AND (fresh proof OR the
-  // per-episode latch). over=false zeroes it by construction (FULL ⊂ OBESE),
-  // which is also what clears the latch at the LEAN reset: LEAN writes
-  // econLatched:false back to the cache.
+  // bmi survives as an INFORMATIONAL ratio only — footprint over MEASURED
+  // muscle (1.0 = provably-pure muscle), no longer footprint over a stamped
+  // floor and no longer a band driver. Kept because stats/receipts render it.
+  const bmi = muscleTokens > 0 ? footprintTokens / muscleTokens : null;
+  // Schmitt-trigger hysteresis, re-axed onto CERTAIN FAT (tokens, not a
+  // ratio): once armed, fat must fall to the LOW mark to disarm; once
+  // disarmed, fat must reach the HIGH mark to arm again. Anti-flap lives in
+  // the metric, never a clock — unchanged discipline, new axis.
+  const over = wasOver ? fat > FAT_REARM_TOKENS : fat >= FAT_ARM_TOKENS;
+  // 0g Q1+Q2 survive on the new axis: FULL/economic = armed AND (fresh
+  // proof OR the per-episode latch). `economical` here is the CALLER's
+  // combined proof — task #4 condition 2: BOTH break-evens (certain fat AND
+  // demotable muscle) must hold; gaugeVerdict ANDs them before this call.
+  // The latch's escape is continuous now: Quick removes the certain fat it
+  // measures, fat falls under FAT_REARM_TOKENS, LEAN writes the latch false.
   const econFull = over && (economical || wasEconLatched);
+  // hardCeilingTokens: the display "wall" — the real capacity line when that
+  // is what fired, else the 1:1 fat line (muscle + arm mark), which moves
+  // with muscle by construction.
+  const fatLineTokens = muscleTokens + FAT_ARM_TOKENS;
 
-  if (bmi === null) {
-    // Bootstrap (pre-floor) or a floor too small to trust: unchanged
-    // wall-only heuristic — it correctly drove the first real clean
-    // (beta.6). The ceiling (and with it the economic FULL, Q1) wakes up
-    // only once a full clean stamps a measurable floor.
-    if (capHit) return { band: 'FULL', reason: 'absolute-cap', bmi, over: false, econLatched: false, hardCeilingTokens: wallTokens };
-    return { band: 'LEAN', reason: leanFloorTokens > 0 ? 'floor-too-small' : 'no-floor-yet', bmi, over: false, econLatched: false, hardCeilingTokens: wallTokens };
-  }
-
-  // Post-floor: the machine's WALL is the one PERSON-independent capacity
-  // line — hitting it while BMI is still under the wash ceiling (~all-muscle,
-  // over is false) gets DIFFERENT advice: externalize, never "wash harder"
-  // (a wash cannot shrink muscle). Over the wash ceiling too (real fat
-  // exists) -> absolute-cap, wash first (Q3 — the wall's real-fat case
-  // stands; it may not be enough, but it helps). The reason label keeps the
-  // wall's precedence over 'economic' (a capHit FULL still latches when the
-  // economic condition holds, so shrinking back under the wall mid-episode
-  // cannot drop the band out of FULL — same no-flap rule, Q2).
   if (capHit) {
-    return over || floorProvisional
-      ? { band: 'FULL', reason: 'absolute-cap', bmi, over, econLatched: econFull, hardCeilingTokens: wallTokens }
-      : { band: 'FULL', reason: 'externalize', bmi, over, econLatched: false, hardCeilingTokens: wallTokens };
+    // The one PERSON-INDEPENDENT line. Certain fat present -> wash first
+    // ('absolute-cap' — it may not be enough, but it helps and it is free);
+    // ~all muscle -> 'externalize' (a wash cannot shrink muscle; advise
+    // moving muscle out / splitting, never "wash harder").
+    return over
+      ? { band: 'FULL', reason: 'absolute-cap', bmi, over, econLatched: econFull, muscleTokens, hardCeilingTokens: capacityTokens }
+      : { band: 'FULL', reason: 'externalize', bmi, over, econLatched: false, muscleTokens, hardCeilingTokens: capacityTokens };
   }
-  if (econFull) return { band: 'FULL', reason: 'economic', bmi, over, econLatched: true, hardCeilingTokens: wallTokens };
+  if (econFull) return { band: 'FULL', reason: 'economic', bmi, over, econLatched: true, muscleTokens, hardCeilingTokens: fatLineTokens };
   return over
-    ? { band: 'OBESE', reason: 'bmi', bmi, over, econLatched: false, hardCeilingTokens: wallTokens }
-    : { band: 'LEAN', reason: 'bmi', bmi, over, econLatched: false, hardCeilingTokens: wallTokens };
+    ? { band: 'OBESE', reason: 'fat', bmi, over, econLatched: false, muscleTokens, hardCeilingTokens: fatLineTokens }
+    : { band: 'LEAN', reason: 'fat', bmi, over, econLatched: false, muscleTokens, hardCeilingTokens: fatLineTokens };
 }
 
 // ---------------------------------------------------------------------------
 // economic break-even (deterministic — CODE computes, numbers are SHOWN)
 // ---------------------------------------------------------------------------
 
-// cost(one CW run) vs cost(carrying the fat over the horizon).
-// economical === true is the ONLY thing that may arm the FULL force-run.
+// cost(one CW run) vs cost(carrying `fatTokens` over the horizon).
+// TASK #4: the reclaimable mass is now an INPUT — the caller passes what it
+// MEASURED (certain fat, or the envelope's demotable muscle), never a
+// footprint-minus-stamped-floor inference (the retired formula that billed
+// all growth as fat). One arithmetic, two proofs: gaugeVerdict runs this
+// once over mechFat (condition 2a — is the CERTAIN FAT worth a run?) and
+// once over the retier envelope's demotable mass (condition 2b — is the
+// NON-COMPACT MUSCLE worth a run?); the wizard ask needs BOTH to hold. Each
+// half is charged the FULL run cost deliberately — conservative by design:
+// the ask this proof arms opens a two-part paid run, and the fix's whole
+// direction is fewer, better-grounded asks.
 export function breakEven({
-  footprintTokens,
-  leanFloorTokens = 0,
+  fatTokens = 0,
+  footprintTokens = 0,
   totalStoreTokens = 0,
   sessionsPerDay = 1,
   horizonDays = ECON_HORIZON_DAYS,
 } = {}) {
-  const fatTokens = Math.max(0, Math.round(footprintTokens - leanFloorTokens));
-  const perDay = Math.round(fatTokens * sessionsPerDay);
+  const fat = Math.max(0, Math.round(fatTokens));
+  const perDay = Math.round(fat * sessionsPerDay);
   const runCostTokens = Math.round(Math.max(totalStoreTokens, footprintTokens) * RUN_COST_MULTIPLIER);
   const horizonCarryTokens = perDay * horizonDays;
   const breakEvenDays = perDay > 0 ? runCostTokens / perDay : Infinity;
   return {
-    fatTokens,
+    fatTokens: fat,
     perDay,
     runCostTokens,
     horizonCarryTokens,
     horizonDays,
     breakEvenDays,
     economical: horizonCarryTokens > runCostTokens,
-    // leanFloor 0 = never-cleaned store: "fat" is then the WHOLE footprint,
-    // an UPPER BOUND, not a measured excess — shown figures must say so.
-    floorUnmeasured: leanFloorTokens <= 0,
   };
 }
 
@@ -376,43 +450,78 @@ export function sessionsPerDay(stamps, now = Date.now()) {
 // over its inputs) — discovery (class-b.mjs) and state persistence
 // (recordVerdict/recordCrossing) stay the CALLER's job, the same module
 // boundaries as before.
-export function gaugeVerdict({ measure, rawLeanFloorTokens, fullPercent = 6, fatMultiple = FAT_MULTIPLE_DEFAULT, wasOver = false, wasEconLatched = false, floorProvisional = false, stamps } = {}) {
-  const leanFloorTokens = sanitizeLeanFloor(rawLeanFloorTokens, measure.alwaysLoaded.tokensEst);
-  // Q4: economics FIRST — pure arithmetic, ~free, and the band needs it.
-  const econ = breakEven({
-    footprintTokens: measure.alwaysLoaded.tokensEst,
-    leanFloorTokens,
+// TASK #4 signature: the stamped floor and its knobs (rawLeanFloorTokens /
+// floorProvisional / fullPercent / fatMultiple) are GONE from the flow — fat
+// comes from the measure's own certain-fat scan, muscle is footprint minus
+// that, and no state has to have HAPPENED for either number to be current.
+// `envelope` = retier.mjs's envelopeFor() output ({armAt, fillCeiling}), the
+// caller's to supply (conductor/cli resolve it from config; caliper does not
+// import retier — retier imports caliper, and a cycle here would be the
+// same-module-boundary bug the room's own import rules exist to stop).
+// ABSENT envelope => demotable 0 => condition 2b FAILS => the wizard ask
+// cannot arm. Fail-closed toward SILENCE, the task-#4 direction: a missing
+// input must never manufacture an ask.
+export function gaugeVerdict({ measure, wasOver = false, wasEconLatched = false, stamps, envelope = null } = {}) {
+  const footprintTokens = measure.alwaysLoaded.tokensEst;
+  const mechFatTokens = (measure.mechFat && Number.isFinite(measure.mechFat.tokensEst)) ? measure.mechFat.tokensEst : 0;
+  const spd = sessionsPerDay(stamps);
+  // Condition 2a — the CERTAIN FAT worth: carry-vs-run over what the
+  // mechanical tier can prove is fat right now.
+  const econFat = breakEven({
+    fatTokens: mechFatTokens,
+    footprintTokens,
     totalStoreTokens: measure.totalTokensEst,
-    sessionsPerDay: sessionsPerDay(stamps),
+    sessionsPerDay: spd,
   });
+  // Condition 2b — the NON-COMPACT MUSCLE worth: what the retier envelope
+  // would demote from the always-loaded index (the mechanically-computable
+  // core of the wizard's "reorganize muscle" half — the envelope DECIDES
+  // placement, so its overflow IS the demotable mass; the outsider's
+  // semantic judgments beyond that are unquantifiable and deliberately not
+  // counted). Under the envelope's arm mark = dead zone = nothing to demote.
+  const indexTokens = tokensEstFromBytes(measure.index.bytes);
+  const demotableTokens = (envelope && Number.isFinite(envelope.armAt) && Number.isFinite(envelope.fillCeiling) && indexTokens >= envelope.armAt)
+    ? Math.max(0, indexTokens - envelope.fillCeiling)
+    : 0;
+  const econReorg = breakEven({
+    fatTokens: demotableTokens,
+    footprintTokens,
+    totalStoreTokens: measure.totalTokensEst,
+    sessionsPerDay: spd,
+  });
+  // BOTH must hold (task #4 condition 2) before the economic FULL — the band
+  // the wizard ask rides — can arm. The band function receives the AND.
+  const bothEconomical = econFat.economical && econReorg.economical;
   const verdict = bandVerdict({
-    footprintTokens: measure.alwaysLoaded.tokensEst,
-    leanFloorTokens,
-    fullPercent,
-    fatMultiple,
+    footprintTokens,
+    mechFatTokens,
     indexBytes: measure.index.bytes,
     indexLines: measure.index.lines,
     wasOver,
-    economical: econ.economical,
+    economical: bothEconomical,
     wasEconLatched,
-    floorProvisional, // 0j: a provisional baseline never certifies externalize
   });
-  const fatTokens = econ.fatTokens; // same formula as before the Q4 inversion — max(0, round(footprint - floor))
+  const fatTokens = econFat.fatTokens;
   let economical = false;
-  let perDay = 0, breakEvenDays = null, floorUnmeasured = false;
+  let perDay = 0, breakEvenDays = null;
+  let reorgPerDay = 0, reorgBreakEvenDays = null;
   if (verdict.band !== 'LEAN' && verdict.reason !== 'externalize') {
-    perDay = econ.perDay;
-    breakEvenDays = econ.breakEvenDays;
-    floorUnmeasured = econ.floorUnmeasured;
+    perDay = econFat.perDay;
+    breakEvenDays = econFat.breakEvenDays;
+    reorgPerDay = econReorg.perDay;
+    reorgBreakEvenDays = econReorg.breakEvenDays;
     // FRESH proof only, deliberately NOT `|| latched` (economic-dominance
     // clause: the forced spend needs the deterministic numbers to hold AND
     // be shown at every fire) — a latched-FULL session whose fresh proof
     // dipped keeps the BAND (Q2, no flap) but disarms the FORCE for that
     // session; a pending crossing then degrades to the plain ask (never
     // silent, never a forced run on numbers that don't hold today).
-    if (verdict.band === 'FULL') economical = econ.economical;
+    if (verdict.band === 'FULL') economical = bothEconomical;
   }
-  return { verdict, leanFloorTokens, fatTokens, economical, perDay, breakEvenDays, floorUnmeasured };
+  return {
+    verdict, fatTokens, mechFatTokens, muscleTokens: verdict.muscleTokens, demotableTokens,
+    economical, perDay, breakEvenDays, reorgPerDay, reorgBreakEvenDays,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -825,10 +934,15 @@ export function recordSubSpawn(home, projectRoot, now = Date.now()) {
   return saveState(proj, projectRoot, home);
 }
 
-// Stamp the lean floor (the post-clean footprint — call ONLY after a full clean
-// whose fidelity gate passed, else uncleaned fat contaminates the floor).
-// Clears the provisional flag (0j): a gate-passed clean's floor is the TRUE
-// lean baseline, superseding any install-time provisional stamp.
+// LEGACY (task #4) — the stamped lean floor is RETIRED as a band driver: no
+// gauge reads it any more (fat and muscle are measured from content at every
+// gauge). This stamp, ensureProvisionalFloor, and sanitizeLeanFloor survive
+// only as state-history writers/readers (the floor fields already persisted
+// in real stores stay harmless bytes; SKILL.md's post-clean step may still
+// invoke this for the receipt's history line). Task #4's own audit measured
+// this function at ZERO production callers across scripts/ and hooks/ while
+// the band's documented "post-clean floor stamp" escape depended on it — the
+// uncalled release valve that let an all-muscle store latch FULL forever.
 export function setLeanFloor(home, projectRoot, tokens, now = Date.now()) {
   const proj = loadState(projectRoot, home);
   proj.leanFloorTokens = Math.round(tokens);
@@ -932,7 +1046,14 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
     econLatched: !!(verdict && verdict.econLatched),
     perDay: Number.isFinite(perDay) ? Math.round(perDay) : 0,
     breakEvenDays: Number.isFinite(breakEvenDays) ? breakEvenDays : null,
-    floorUnmeasured: !!(verdict && verdict.floorUnmeasured),
+    // task #4 — the measured pair + condition 2b's own proof numbers, cached
+    // for the Stop ask (additive fields on a per-gauge cache overwritten
+    // fresh every gauge; no schema bump — absence on an old cache degrades to
+    // zeros, which the ask template renders as "no reorg case").
+    muscleTokens: Number.isFinite(verdict && verdict.muscleTokens) ? Math.round(verdict.muscleTokens) : 0,
+    demotableTokens: Number.isFinite(verdict && verdict.demotableTokens) ? Math.round(verdict.demotableTokens) : 0,
+    reorgPerDay: Number.isFinite(verdict && verdict.reorgPerDay) ? Math.round(verdict.reorgPerDay) : 0,
+    reorgBreakEvenDays: Number.isFinite(verdict && verdict.reorgBreakEvenDays) ? verdict.reorgBreakEvenDays : null,
     hardCeilingTokens: Number.isFinite(hardCeilingTokens) ? Math.round(hardCeilingTokens) : 0,
     // WARP-HOLE (beta.13 item 3): the always-loaded path list + its byte total
     // AT this gauge — the Stop hook's cheap re-stat baseline

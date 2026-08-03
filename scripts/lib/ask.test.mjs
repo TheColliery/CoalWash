@@ -154,9 +154,9 @@ test('obeseAutoQuick: carries the payback line when breakEven is supplied; malfo
 
 test('wizardEscalation: a REAL two-button ask (question tool present) — names the mechanical pass already ran, the wizard heavy tier, and never auto-runs', () => {
   const r = wizardEscalation({ fatTokens: 900 });
-  assert.ok(r.includes('STILL over the FULL capacity ceiling'), r);
-  assert.ok(r.includes('fat ~900 tok'), r);
-  assert.ok(r.includes('mechanical Quick pass already ran'), r);
+  assert.ok(r.includes('survived the automatic Quick pass'), r); // task #4: the headline is the MEASURED residue, not a wall claim
+  assert.ok(r.includes('certain fat (~900 tok, measured'), r);
+  assert.ok(r.includes('needs semantic judgment'), r);
   assert.ok(r.includes('question tool'), 'the semantic escalation is a real ask, unlike obeseAutoQuick/forceAuto');
   assert.ok(r.includes('ทำ'), r);
   assert.ok(r.includes('/coalwash'), r);
@@ -168,9 +168,16 @@ test('wizardEscalation: a REAL two-button ask (question tool present) — names 
 });
 
 test('wizardEscalation: carries the payback line when breakEven is supplied; malformed/missing input never throws', () => {
-  const withBE = wizardEscalation({ fatTokens: 900, breakEven: { perDay: 300, breakEvenDays: 5, floorUnmeasured: false } });
+  const withBE = wizardEscalation({ fatTokens: 900, breakEven: { perDay: 300, breakEvenDays: 5 } });
   assert.ok(withBE.includes('~300 tok/day'), withBE);
   assert.ok(withBE.includes('pays back in ~5 day(s)'), withBE);
+  // task #4 condition 2b: the reorganize half's own proof renders when supplied...
+  const withReorg = wizardEscalation({ fatTokens: 900, reorg: { demotableTokens: 1500, perDay: 90, breakEvenDays: 6 } });
+  assert.ok(withReorg.includes('The reorganize half pays too'), withReorg);
+  assert.ok(withReorg.includes('~1500 tok of always-loaded index is demotable'), withReorg);
+  assert.ok(withReorg.includes('~6 day(s)'), withReorg);
+  // ...and is ABSENT (not zero-rendered) when there is no demotable mass.
+  assert.ok(!wizardEscalation({ fatTokens: 900 }).includes('reorganize half pays'), 'no demotable mass -> no reorg clause');
   assert.doesNotThrow(() => wizardEscalation());
   assert.doesNotThrow(() => wizardEscalation({}));
   assert.doesNotThrow(() => wizardEscalation(null));
