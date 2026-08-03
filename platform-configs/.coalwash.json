@@ -9,23 +9,25 @@
   // a locked value pins user-facing prose (technical terms stay verbatim).
   "language": "auto",
 
-  // Legacy pre-floor heuristic ONLY — the absolute-cap threshold before any
-  // lean floor has been measured (0r retired this as the overhead dial once a
-  // floor exists; see fatMultiple below). Raising it = consciously choosing to
-  // carry more memory overhead before the first clean ("buying a bigger SSD").
+  // RETIRED as a band input by task #4 (2026-08-03, v1.0.0) — read-tolerated
+  // and ignored. Used to be the pre-floor absolute-cap heuristic; there is no
+  // floor-driven wall left for it to feed (fat/muscle are measured from
+  // content at every gauge instead). Kept here only so an existing value
+  // still validates rather than failing.
   "fullPercent": 6,
 
-  // 0r: once a lean floor is measured, the absolute-cap wall is
-  // fatMultiple x leanFloor (clamped at true capacity) — a legitimately-grown
-  // muscle store raises its own wall instead of false-firing against a fixed
-  // % of capacity. Must stay above the OBESE BMI ceiling (1.5, caliper.mjs
-  // CEILING_BMI) or the wall would fire before OBESE arms.
+  // RETIRED as a band input by task #4 (2026-08-03, v1.0.0) — read-tolerated
+  // and ignored. Used to scale a floor-relative absolute-cap wall
+  // (fatMultiple x leanFloor); the wall is now the real capacityTokens plus
+  // the CC index caps only, with no floor to scale. Kept here only so an
+  // existing value still validates rather than failing.
   "fatMultiple": 2.0,
 
-  // Clean-to depth target as % of capacity (below fullPercent). Agent guidance
-  // for the wash's clean-to depth (references/method.md §3) — NOT the anti-flap
-  // hysteresis (that job moved to caliper.mjs's BMI Schmitt trigger); no band-math
-  // reads this key today. An inverted pair degrades to the defaults on read.
+  // Clean-to depth target as % of capacity. Agent guidance for the wash's
+  // clean-to depth (references/method.md §3) — NOT the anti-flap hysteresis
+  // (that job is caliper.mjs's fat Schmitt trigger, task #4/v1.0.0: arm at
+  // FAT_ARM_TOKENS, disarm at FAT_REARM_TOKENS); no band-math reads this key
+  // today. An out-of-range value degrades to the default on read.
   "targetPercent": 3,
 
   // Per-file size cap in KB before a class-B file is flagged oversize
