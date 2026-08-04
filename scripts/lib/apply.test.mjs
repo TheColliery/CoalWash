@@ -1887,6 +1887,11 @@ test('GATE COST: KEEPS-GATE with many keeps against many large post-texts stays 
     const t0 = process.hrtime.bigint();
     const r = apply(planFor(proj, store, actions));
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    // WAVE-8 RE-INSPECT (main-cmd, CI red at a651c20, windows-latest only):
+    // this assertion's message rendered ONLY on failure, so no Windows green
+    // baseline ever accumulated anywhere -- a thin margin and a real
+    // regression were indistinguishable from outside. Print on every run.
+    console.log(`GATE COST ms: KEEPS-GATE/${ACTIONS}-post-texts/${KEEP_COUNT}-keeps = ${ms.toFixed(1)}`);
     // every keep's anchor is genuinely missing everywhere -> every keep
     // excludes its own file (correctness unaffected by the perf fix)
     assert.strictEqual(r.applied, ACTIONS - KEEP_COUNT, r.error);

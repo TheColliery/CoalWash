@@ -1087,6 +1087,10 @@ test('KEY-LINE COST: a 60 KiB pathological line parses in bounded time (was ~5.4
     const t0 = process.hrtime.bigint();
     frontmatterBlockParse(line);
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    // WAVE-8 RE-INSPECT: print on every run, not only on failure -- a
+    // silent-on-success perf assertion never accumulates a baseline (see
+    // apply.test.mjs's GATE COST test, same fix, same reason).
+    console.log(`KEY-LINE COST ms: ${line.length}-char line = ${ms.toFixed(1)}`);
     assert.ok(ms < 1500, `parsing ${line.length} chars took ${ms.toFixed(0)}ms — the quadratic is back`);
   }
 });
@@ -1124,6 +1128,8 @@ test('GATE COST: a drop-heavy 512 KB pair gates in bounded time (was ~4.8 s quad
   const t0 = process.hrtime.bigint();
   const r = checkFidelity(orig, next);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  // WAVE-8 RE-INSPECT: print on every run, not only on failure.
+  console.log(`GATE COST ms: drop-heavy-512KB/${r.drops.length}-drops = ${ms.toFixed(1)}`);
   assert.ok(r.drops.length > 1000, `the fixture must actually be drop-heavy; got ${r.drops.length}`);
   assert.ok(ms < 2000, `gating ${orig.length} chars with ${r.drops.length} drops took ${ms.toFixed(0)}ms — the quadratic is back`);
 });
@@ -1150,6 +1156,8 @@ test('GATE COST: a marker-heavy LOW-DROP 1 MB pair gates in bounded time (the ty
   const t0 = process.hrtime.bigint();
   const r = checkFidelity(orig, next);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  // WAVE-8 RE-INSPECT: print on every run, not only on failure.
+  console.log(`GATE COST ms: marker-heavy-1MB/${r.drops.length}-drops = ${ms.toFixed(1)}`);
   assert.ok(r.drops.length > 100, `the fixture must still drop something; got ${r.drops.length}`);
   assert.ok(ms < 2000, `gating 1 MB marker-heavy with ${r.drops.length} drops took ${ms.toFixed(0)}ms — the surviving-token scan is back`);
 });
@@ -1182,6 +1190,8 @@ test('GATE COST: an unbroken [\\w.-] run with NO valid file extension gates in b
   const t0 = process.hrtime.bigint();
   checkFidelity('proven at commit c19e528b', next);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  // WAVE-8 RE-INSPECT: print on every run, not only on failure.
+  console.log(`GATE COST ms: extension-less-256KiB = ${ms.toFixed(1)}`);
   assert.ok(ms < 1000, `gating a ${next.length}-char extension-less run took ${ms.toFixed(0)}ms — FILE_REF_RE's quadratic is back`);
 });
 
