@@ -1809,13 +1809,15 @@ export function restoreFromSnapshot(ref, toPath, opts) {
     let manifestText = null;
     try { manifestText = fs.readFileSync(manifestPath, 'utf8'); } catch { /* absent/unreadable -> cannot confirm */ }
     let confirmed = false;
+    let devinoContradicted = false; // rung-2 F4: at least one row's live dev/ino disagreed with its own canonMatch
     if (manifestText !== null) {
       for (const line of manifestText.split('\n')) {
         if (!line) continue;
         let row; try { row = JSON.parse(line); } catch { continue; } // a malformed row confirms nothing, never crashes the restore
         if (!row || row.sha256 !== expect) continue;
         const canonMatch = row.originalCanonical != null && declaredCanonical != null && row.originalCanonical === declaredCanonical;
-        const devinoMatch = row.originalDev != null && row.originalIno != null && declaredDev != null && declaredIno != null && row.originalDev === declaredDev && row.originalIno === declaredIno;
+        const devinoAvailable = row.originalDev != null && row.originalIno != null && declaredDev != null && declaredIno != null;
+        const devinoMatch = devinoAvailable && row.originalDev === declaredDev && row.originalIno === declaredIno;
         // rot-canary self-catch: fall back to the OLD exact-string compare whenever the row has NO
         // usable canonical identity to compare against — either a row written before this fix
         // (`originalCanonical === undefined`, the key never existed) OR a row where snapshot-time
@@ -1827,12 +1829,30 @@ export function restoreFromSnapshot(ref, toPath, opts) {
         // code (a bare string compare that never depended on canonicalization succeeding at all).
         // Still exact equality either way, no new merge risk.
         const legacyExactMatch = row.originalCanonical == null && row.original === original;
+        // rung-2 F4 [HIGH]: canonMatch is a PATH-SPELLING compare and says nothing about WHAT
+        // currently occupies that path. When the declared original still exists (dev/ino were
+        // captured live), a dev/ino comparison is available and authoritative — the identity of the
+        // FILE, not the string naming it. A row whose recorded dev/ino disagrees with that live
+        // reading describes a DIFFERENT file that used to live at this path (deleted, then a new
+        // file recreated at the same name — ordinary lifecycle, no attacker required) and must
+        // override a stale canonMatch, not merely fail to help it. When the original is genuinely
+        // gone (the point of a restore), declaredDev/declaredIno stay null, devinoAvailable is
+        // false, and canonMatch alone authorizes exactly as before — this leg only bites when a
+        // live, computable identity check contradicts the path string.
+        const devinoContradicts = devinoAvailable && !devinoMatch;
+        if (devinoContradicts) { devinoContradicted = true; continue; }
         if (canonMatch || devinoMatch || legacyExactMatch) { confirmed = true; break; }
       }
     }
     if (!confirmed) {
       try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
-      return { ok: false, verified: false, reason: `ownership unconfirmed: the store's manifest does not record '${original}' as the source of this blob (sha256 ${expect}) — refused (the manifest is absent, unreadable, or has no matching row)` };
+      // rung-2 F4: a devino contradiction gets its OWN reason, never the generic "unconfirmed"
+      // message — that message reads identically to an honest manifest miss, and this is not one;
+      // it is a live, computable identity check that actively DISAGREED with a row's path string.
+      const reason = devinoContradicted
+        ? `ownership contradicted: '${original}' currently resolves to a different file (dev/ino mismatch) than the one the manifest row for this blob (sha256 ${expect}) describes — refused (the path was recycled since the snapshot was taken)`
+        : `ownership unconfirmed: the store's manifest does not record '${original}' as the source of this blob (sha256 ${expect}) — refused (the manifest is absent, unreadable, or has no matching row)`;
+      return { ok: false, verified: false, reason };
     }
     fs.renameSync(tmpPath, toPath); // atomic publish — only content-verified, destination-guarded, OWNERSHIP-confirmed bytes land here
     return { ok: true, sha256: got, verified: true };

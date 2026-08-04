@@ -2499,7 +2499,10 @@ test('F1 [HIGH]: a shared snapshotDir cannot be blindly recovered from — owner
     const roleBHash = sha256File(roleB);
     const impersonate = restoreFromSnapshot(roleBHash, path.join(dir, 'impersonate.out'), { snapshotDir: sharedSnap, original: roleA });
     assert.strictEqual(impersonate.ok, false, 'a false ownership claim (right hash, wrong declared original) must be refused, not merely trusted');
-    assert.match(impersonate.reason, /ownership unconfirmed/);
+    // rung-2 F4: roleA genuinely EXISTS, so declaredDev/Ino are captured and this classifies as a
+    // devino CONTRADICTION (roleA's real identity disagrees with roleB's blob's recorded row) —
+    // a strictly more precise diagnosis than the old generic "unconfirmed", same refusal.
+    assert.match(impersonate.reason, /ownership contradicted|dev\/ino mismatch/);
   } finally { rm(dir); }
 });
 
@@ -2733,7 +2736,10 @@ test('rung-2 F3 rail 1: canonicalization does not merge two genuinely different 
     assert.strictEqual(snap.ok, true);
     const r = restoreFromSnapshot(snap.sha256, path.join(cs.root, 'out.txt'), { snapshotDir: store, original: fileUpper });
     assert.strictEqual(r.ok, false, 'declaring the WRONG (case-variant, genuinely different) file as the original must still refuse — canonicalization must not collapse two distinct files into one confirmed identity');
-    assert.match(r.reason, /ownership unconfirmed/);
+    // rung-2 F4: fileUpper genuinely EXISTS, so declaredDev/Ino are captured and this now
+    // classifies as a devino CONTRADICTION (a live identity check that actively disagreed),
+    // a strictly more precise diagnosis than the old generic "unconfirmed" — same refusal, sharper reason.
+    assert.match(r.reason, /ownership contradicted|dev\/ino mismatch/);
   } finally { rm(cs.root); }
 });
 
@@ -2839,5 +2845,49 @@ test('rung-2 F3 [self-catch]: a row whose canonicalization genuinely FAILED at s
 
     const exact = restoreFromSnapshot(sha, path.join(dir, 'out.txt'), { snapshotDir: store, original: src });
     assert.strictEqual(exact.ok, true, `an exact match against a row with explicitly-null (not undefined) canonical fields must still confirm — a write-time canonicalization failure must not make the row permanently unconfirmable (got ${exact.reason})`);
+  } finally { rm(dir); }
+});
+
+// rung-2 F4 [HIGH] — canonMatch is a PATH-SPELLING compare; it says nothing about WHAT currently
+// occupies that path. dev/ino exist specifically to defend against spelling drift, but nothing
+// stopped canonMatch from authorizing a restore even when a LIVE, computable dev/ino comparison
+// disagreed with it. Delete the original, recreate a DIFFERENT file at the exact same path
+// (ordinary lifecycle — tenant rotation, a recycled temp name — no attacker required), and a row
+// still recording the OLD canonical string authorized a restore against the NEW file's location.
+test('rung-2 F4 [HIGH]: a live dev/ino mismatch overrides a stale canonMatch — recycled-path confidentiality', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    fs.mkdirSync(store, { recursive: true });
+    const originalPath = path.join(dir, 'recycled.txt');
+
+    // --- Leg 1: CONTROL — original still exists, unmodified. Unaffected by the fix. ---
+    fs.writeFileSync(originalPath, 'first tenant secret\n');
+    const snap1 = snapshotSource(originalPath, store);
+    assert.strictEqual(snap1.ok, true, 'setup: control snapshot');
+    const control = restoreFromSnapshot(snap1.sha256, path.join(dir, 'control.out'), { snapshotDir: store, original: originalPath });
+    assert.strictEqual(control.ok, true, `control leg (original unchanged) must still succeed (got ${control.reason})`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'control.out'), 'utf8'), 'first tenant secret\n');
+
+    // --- Leg 2: LEGITIMATE DELETE — original genuinely gone, nothing recreated. Must NOT break. ---
+    const deletedPath = path.join(dir, 'deleted.txt');
+    fs.writeFileSync(deletedPath, 'a file that will be deleted\n');
+    const snap2 = snapshotSource(deletedPath, store);
+    assert.strictEqual(snap2.ok, true, 'setup: to-be-deleted snapshot');
+    fs.unlinkSync(deletedPath); // genuinely gone — no recreation
+    const legitDelete = restoreFromSnapshot(snap2.sha256, path.join(dir, 'legit-delete.out'), { snapshotDir: store, original: deletedPath });
+    assert.strictEqual(legitDelete.ok, true, `a restore of a genuinely-deleted original (declaredDev/Ino unavailable) must still confirm via canonMatch alone (got ${legitDelete.reason})`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'legit-delete.out'), 'utf8'), 'a file that will be deleted\n');
+
+    // --- Leg 3: THE ATTACK — delete, then recreate a DIFFERENT file at the SAME path. ---
+    // originalPath (leg 1) still holds "first tenant secret" — that's what snap1's row describes.
+    // Recycle the path for a second, unrelated tenant with unrelated content: same string, new inode.
+    fs.unlinkSync(originalPath);
+    fs.writeFileSync(originalPath, 'second tenant UNRELATED content\n');
+    const recycled = restoreFromSnapshot(snap1.sha256, path.join(dir, 'recycled.out'), { snapshotDir: store, original: originalPath });
+    assert.strictEqual(recycled.ok, false, `a restore against a path whose live dev/ino disagrees with the recorded row must refuse, not serve the old (potentially secret) content (got ok:${recycled.ok})`);
+    assert.strictEqual(recycled.verified, false);
+    assert.match(recycled.reason, /dev|ino|identity|mismatch/i, 'the refusal names the dev/ino disagreement specifically, not a generic "unconfirmed" message indistinguishable from an honest miss');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'recycled.out')), false, 'nothing was copied out — the old secret never reaches the caller');
   } finally { rm(dir); }
 });
