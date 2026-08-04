@@ -1614,11 +1614,19 @@ function existsPopulated(p) {
 //
 // THE BOUNDARY, stated plainly for whoever is reading this to understand what the store actually
 // promises:
-//   1. THE STORE IS TRUSTED-TENANT-ONLY. Any principal with write access to `snapshotDir`'s manifest
-//      can forge a row claiming ownership of any blob in that store (MEASURED: `scratchpad/
-//      cw-lab-rung2-r2/w1/attack3-manifest-path.mjs` §3e, AND re-verified against a SCHEMA-AWARE
-//      forgery that also fabricates matching `originalCanonical`/`originalDev`/`originalIno` — both
-//      leak the victim's content, `ok:true`). This is not a bug awaiting a fix; it is the boundary.
+//   1. THE STORE IS TRUSTED-TENANT-ONLY. CORRECTED 2026-08-05 (source: `cw-lab-rung2-r4/LAB-RECORD.md`
+//      §"The F1 sibling attempt" Attempt B) — this point used to state the precondition as "write
+//      access to snapshotDir's manifest"; that is SUFFICIENT but was never NECESSARY. The attack needs only
+//      (a) READ access to the victim's blob bytes, by ANY means (a direct copy, a listing — the
+//      store is content-addressed, so possessing the bytes IS possessing a valid ref), plus
+//      (b) ordinary WRITE access to any directory the restoring process can reach — the attacker's
+//      OWN, never the victim's. The attacker declares their own directory as `snapshotDir` and
+//      forges their own manifest there; F1-b's fix (snapshotDir now required) does not close this,
+//      since the attacker already owns a directory that satisfies the requirement. (MEASURED:
+//      `scratchpad/cw-lab-rung2-r2/w1/attack3-manifest-path.mjs` §3e, AND re-verified against a
+//      SCHEMA-AWARE forgery that also fabricates matching `originalCanonical`/`originalDev`/
+//      `originalIno` — both leak the victim's content, `ok:true`.) This is not a bug awaiting a
+//      fix; it is the boundary.
 //   2. THE MITIGATION IS ISOLATION, and it is the OPERATOR's to arrange, not the engine's to enforce —
 //      a `snapshotDir` per trust domain, so no shared manifest for a co-tenant to write into exists in
 //      the first place.
