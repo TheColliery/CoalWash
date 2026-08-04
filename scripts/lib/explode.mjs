@@ -846,16 +846,51 @@ export function reduceFile(src, opts = {}) {
       }
     }
 
-    // Rail 5: a real cut is snapshot-gated. Take the content-addressed snapshot
-    // on wave 1 only; carry its path across waves via `resume`.
+    // Rail 5: a real cut is snapshot-gated on EVERY wave, not wave 1 alone. Take the
+    // content-addressed snapshot on wave 1; a resumed wave carries its path via `resume`
+    // for the TRUSTED loop only (below) — an UNTRUSTED hand-driven resume never trusts
+    // that string.
+    //
+    // PRE-FIX DEFECT (rung-2 rail-5, CRITICAL, source-confirmed): this whole gate lived
+    // inside `if (!dryRun && offset === 0)`, so a direct `reduceFile(src, {offset:N>0, ...})`
+    // — a shipped, documented calling convention (see `_trustedResume`'s own comment above,
+    // naming exactly this as the untrusted surface) — never required `snapshotDir` at all,
+    // and `snapshotPath` below was seeded straight from the caller-supplied `resume.snapshotPath`
+    // with NO check that any blob existed there. Content was destroyed, `ok:true` returned, and
+    // the reported `snapshotPath` could name a blob nobody ever created — a caller reading that
+    // field believes an undo net exists when none does; worse than a bare bypass, since a bypass
+    // that REPORTS a net makes the caller act as if one is there.
     let snapshotPath = (resume && resume.snapshotPath) || null;
     let snapWasFresh = false; // L4 nit-b: true when THIS call COPIED a new blob (not a dedup of a shared one)
-    if (!dryRun && offset === 0) {
+    if (!dryRun) {
       if (!snapshotDir) return fail('refusing to reduce without snapshotDir (rail 5: no snapshot, no destroy)');
-      const snap = snapshotSource(src, snapshotDir);
-      if (!snap.ok) return fail(`snapshot failed: ${snap.reason}`);
-      snapshotPath = snap.snapshotPath;
-      snapWasFresh = !snap.deduped;
+      if (offset === 0) {
+        const snap = snapshotSource(src, snapshotDir);
+        if (!snap.ok) return fail(`snapshot failed: ${snap.reason}`);
+        snapshotPath = snap.snapshotPath;
+        snapWasFresh = !snap.deduped;
+      } else if (!_trustedResume) {
+        // UNTRUSTED resume: never trust the caller's `resume.snapshotPath` string — it is
+        // public input (`sha256File` is exported, so anyone can compute a plausible-looking
+        // name), and `src` is opened read-only for the whole reduce (never mutated by this
+        // engine across waves — the write goes to `outPath`, a different file by construction;
+        // `collidesWithSource` above already refuses `outPath === src`). So the true wave-1
+        // blob's content-address is INDEPENDENTLY RE-DERIVABLE from `src`'s current bytes; a
+        // legitimate multi-wave drive's source has not changed since the snapshot was taken,
+        // so this is exact, not a heuristic. Compute the expected path ourselves and require a
+        // REAL, self-consistent (filename === its own hash) blob to exist there — a forged,
+        // stale, or never-created claim refuses. The caller-supplied string is never read.
+        const expected = path.join(snapshotDir, sha256File(src));
+        let verified = false;
+        try { verified = fs.existsSync(expected) && sha256File(expected) === path.basename(expected); } catch { /* unreadable -> not verified */ }
+        if (!verified) return fail('resume: no verifiable snapshot blob for this source in the store (rail 5: no snapshot, no destroy)');
+        snapshotPath = expected;
+      }
+      // _trustedResume (reduceToCompletion's own loop, offset>0): keeps the `snapshotPath`
+      // already carried from `resume` above, unchanged. It was created by THIS SAME trusted
+      // call chain a few lines up the loop, never caller-forgeable, and re-hashing `src` on
+      // every wave to re-verify it would cost O(waves x size) for no added safety — the same
+      // performance trade the resume ground-truth anchor below already makes for this exact flag.
     }
 
     // json-single: the whole (small, already-verified) file is exactly one unit.

@@ -2921,3 +2921,97 @@ test.todo('rung-2 F4 [HIGH] Leg 3: recycled-path confidentiality -- LIVE ON LINU
   } finally { rm(dir); }
 });
 
+// rung-2 rail-5 [CRITICAL, round-6 discovery wave, coordinator-reproduced] -- rail 5's own promise
+// ("no snapshot, no destroy") was enforced only at offset===0. A direct `reduceFile(src, {offset>0,
+// resume:{snapshotPath: <anything>}})` -- a shipped, documented calling convention (see the
+// `_trustedResume` comment on reduceFile's own destructuring: "a bare / hand-driven / crash-recovery
+// reduceFile resume ... leaves it false") -- never required snapshotDir at all on that path, and the
+// returned `snapshotPath` was seeded straight from the caller-supplied `resume.snapshotPath` with no
+// existence check. Content was destroyed, ok:true, and the reported snapshotPath could name a blob
+// that was never created -- worse than a bare bypass, since a caller trusting that field acts as if
+// an undo net exists when none does. Two independent gaps, tested separately below: (1) no snapshotDir
+// requirement past wave 1; (2) even WITH a real store present, a forged snapshotPath was trusted
+// verbatim with zero existence/content-address check.
+test('rung-2 rail-5 [CRITICAL]: a hand-driven resume with NO snapshotDir at all is refused, not silently destructive', () => {
+  const dir = tmp();
+  try {
+    const src = write(dir, 'src.jsonl', Buffer.from(
+      JSON.stringify({ type: 'mode', value: 1 }) + '\n' + JSON.stringify({ type: 'user', text: 'SECRET that must survive' }) + '\n', 'utf8'));
+    const prefixLen = Buffer.byteLength(JSON.stringify({ type: 'mode', value: 1 }) + '\n', 'utf8');
+    const out = write(dir, 'out.jsonl', Buffer.from('', 'utf8'));
+    const hash = sha256File(src);
+    const r = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], offset: prefixLen,
+      resume: { srcSha256: hash, outLen: 0, snapshotPath: path.join(dir, 'NEVER-CREATED', hash) },
+    });
+    assert.strictEqual(r.ok, false, 'a resumed wave with no snapshotDir must refuse, exactly as an offset=0 wave already does');
+    assert.match(r.reason, /snapshotDir|snapshot/i);
+    assert.strictEqual(r.snapshotPath, null, 'no forged snapshotPath is echoed on the refusal path');
+  } finally { rm(dir); }
+});
+
+test('rung-2 rail-5 [CRITICAL]: a hand-driven resume WITH a real store, but a forged/never-written snapshotPath, is refused', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    fs.mkdirSync(snapshotDir, { recursive: true }); // the store genuinely exists — it is just empty for this src
+    const src = write(dir, 'src.jsonl', Buffer.from(
+      JSON.stringify({ type: 'mode', value: 1 }) + '\n' + JSON.stringify({ type: 'user', text: 'SECRET2 that must survive' }) + '\n', 'utf8'));
+    const prefixLen = Buffer.byteLength(JSON.stringify({ type: 'mode', value: 1 }) + '\n', 'utf8');
+    const out = write(dir, 'out.jsonl', Buffer.from('', 'utf8'));
+    const hash = sha256File(src); // attacker can compute this themselves -- sha256File is exported
+    const forgedPath = path.join(snapshotDir, hash); // plausible name; nobody ever wrote a blob there
+    const r = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], offset: prefixLen, snapshotDir,
+      resume: { srcSha256: hash, outLen: 0, snapshotPath: forgedPath },
+    });
+    assert.strictEqual(r.ok, false, 'a resumed wave whose claimed snapshot blob does not exist must refuse');
+    assert.match(r.reason, /verifiable|snapshot/i);
+    assert.notStrictEqual(r.snapshotPath, forgedPath, 'the forged path is never echoed back as authoritative');
+  } finally { rm(dir); }
+});
+
+// Must-break control, both directions: a LEGITIMATE hand-driven resume — a real snapshot taken at
+// wave 1, its real path carried into a genuinely resumed wave 2 — must still succeed. The fix closes
+// the untrusted-claim gap; it must not turn every hand-driven resume into a refusal.
+test('rung-2 rail-5 CONTROL: a legitimate hand-driven resume with a REAL wave-1 snapshot still succeeds', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    const src = write(dir, 'src.jsonl', Buffer.from(
+      JSON.stringify({ type: 'mode', value: 1 }) + '\n' + JSON.stringify({ type: 'user', text: 'kept line' }) + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    const w1 = reduceFile(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 1 });
+    assert.strictEqual(w1.ok, true);
+    assert.strictEqual(w1.done, false, 'setup: maxLines=1 forces a checkpoint so a real wave 2 is exercised');
+    assert.ok(w1.checkpoint, 'setup: a real checkpoint carries the real snapshotPath forward');
+    const w2 = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], snapshotDir,
+      offset: w1.checkpoint.srcOffset,
+      resume: { srcSha256: sha256File(src), outLen: w1.outLen ?? 0, snapshotPath: w1.snapshotPath, structure: 'ndjson', bomLen: 0 },
+    });
+    assert.strictEqual(w2.ok, true, 'a genuine hand-driven resume with a real, verifiable snapshot is not caught by the fix');
+    assert.match(fs.readFileSync(out, 'utf8'), /kept line/, 'the kept record survives verbatim across the resumed wave');
+  } finally { rm(dir); }
+});
+
+// Must-break control: reduceToCompletion's own trusted internal loop (_trustedResume=true) must be
+// completely unaffected — it keeps carrying its own wave-1 snapshotPath across waves without the
+// per-wave re-verification the untrusted path now pays, matching the existing performance discipline
+// the resume ground-truth anchor already uses for the same flag.
+test('rung-2 rail-5 CONTROL: reduceToCompletion (trusted multi-wave loop) is unaffected by the fix', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    const lines = [];
+    for (let i = 0; i < 20; i++) lines.push(JSON.stringify({ type: i % 2 === 0 ? 'mode' : 'user', i }));
+    const src = write(dir, 'src.jsonl', Buffer.from(lines.join('\n') + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    const r = reduceToCompletion(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 3 });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.done, true);
+    assert.strictEqual(r.unitsCut, 10);
+    assert.strictEqual(r.unitsKept, 10);
+  } finally { rm(dir); }
+});
+
