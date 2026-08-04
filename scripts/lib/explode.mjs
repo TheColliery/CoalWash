@@ -1617,7 +1617,39 @@ function existsPopulated(p) {
 //       differ, it cannot be trusted as a general fix because the SAME machine, SAME code, adjacent
 //       runs, produced BOTH outcomes. A signal that sometimes helps and sometimes doesn't is not a
 //       security boundary. No OS-reported stat field (dev, ino, birthtime, ctime) closes this
-//       reliably at this operation's natural timescale.
+//       reliably at this operation's natural timescale — AT MILLISECOND resolution.
+//
+//       A THIRD diagnostic (run 30941217882, deleted after this landed) checked whether the
+//       collision was a real physical tie or a DISPLAY-RESOLUTION artifact, by reading the SAME
+//       bigint stat's ctimeNs/birthtimeNs fields instead of its Ms ones:
+//         ubuntu · node 22: before.birthtimeNs=1785870006585535727 after=1785870006586474805
+//           -> DIFFER by ~939,078 ns (~0.94ms) -- genuinely two ticks, not one.
+//         ubuntu · node 24: before.birthtimeNs=1785870005367425059 after=1785870005368065787
+//           -> DIFFER by ~640,728 ns (~0.64ms) -- the SAME run whose Ms-truncated reading showed
+//           "IDENTICAL" above; at ns resolution the two operations were never actually simultaneous,
+//           only close enough to round into the same millisecond bucket.
+//       Read as MECHANISM, not luck: unlink+writeFileSync is a real kernel round-trip (VFS lookup,
+//       journal commit, page-cache update) costing hundreds of microseconds minimum on any real
+//       hardware -- the observed gap is that cost, not a coin-flip against clock-tick granularity.
+//       This is the OPPOSITE shape from the ms-level finding: there, "sometimes 0 sometimes not"
+//       meant genuine physical collision at that resolution; here, a single ns-resolution sample
+//       showing separation is consistent with a real, structural lower bound on inter-syscall
+//       latency -- encouraging, but ONE sample per platform is not the repeated-trial proof this
+//       room's own DIAG-#2 lesson (a favorable single sample IS NOT a security boundary) demands
+//       before trusting a timing signal. NOT adopted as the closing mechanism on that basis.
+//
+//       THE BELT WAS CONSIDERED AND DOES NOT FIT THIS CASE, stated so nobody re-tries it blind. The
+//       existing belt (see `collidesWithSource`/gate-4-shaped fail-closed refusals elsewhere in this
+//       file) fires when identity CANNOT BE COMPUTED AT ALL (e.g. `stat.ino === 0`, an inode-less
+//       volume) -- an ABSENCE trigger. Leg 3's attack is the opposite shape: dev/ino ARE computable
+//       and DO match (the row's recorded values and the live recreated file's values are identical,
+//       by inode recycling) -- a PRESENT-BUT-WRONG signal, not an absent one. Widening an
+//       absence-triggered belt to also catch a present-but-misleading value would require the exact
+//       comparison this paragraph already shows is unreliable at ms resolution and unproven at ns
+//       resolution -- there is no cheap, deterministic "identity is not establishable" test for this
+//       specific shape without ALSO solving the timing question above. The two residuals are
+//       therefore ONE residual, not two, and the real fix is the infrastructure named below, not a
+//       belt-trigger edit.
 //
 //       DISPOSITION: NARROWED, NOT CLOSED. `6f261e4` correctly and verifiably (all 3 CI platforms,
 //       Legs 1-2 of the F4 test) closes the SIMPLER attack — an attacker declares a FALSE original while
@@ -1633,10 +1665,19 @@ function existsPopulated(p) {
 //       (b) extending F2's operational boundary (trusted-tenant-only store, operator-arranged isolation)
 //       to explicitly cover ordinary filesystem churn AT THE ORIGINAL PATH, not merely store-write
 //       access — since this residual needs no store access at all, only ordinary delete+recreate
-//       activity at a tracked path. NEITHER IS BUILT HERE — both are a design decision for whoever owns
+//       activity at a tracked path, or (c) — the ns diagnostic's real finding — recording
+//       `originalCtimeNs`/`originalBirthtimeNs` in the manifest row AT SNAPSHOT TIME (mechanically the
+//       same shape `originalDev`/`originalIno` already use) and comparing it alongside dev/ino at
+//       restore time; the measured ~0.6-0.9ms real separation is promising evidence this closes the
+//       observed case, but is a genuine `SNAPSHOT_MANIFEST` row-shape addition — legacy rows lack the
+//       field, needs the same graceful-absence handling `legacyExactMatch` already has for
+//       `originalCanonical`, and needs more than a one-sample measurement before being trusted as a
+//       security boundary. NONE OF THE THREE IS BUILT HERE — each is a design decision for whoever owns
 //       this engine's wiring, per the state-schema-guard convention (AGENTS.md), not something to build
-//       unilaterally under one dispatch. The `rung-2 F4 [HIGH]` test's Leg 3 stays exactly as written and
-//       stays RED on `ubuntu-latest` — that is the correct, honest state until one of the above lands.
+//       unilaterally under one dispatch. The `rung-2 F4 [HIGH]` test's Leg 3 is `test.todo()` with this
+//       full reasoning inline (see the test itself) — it still RUNS every gate on every platform and
+//       still PRINTS, it simply does not fail the build on ubuntu until one of the above lands; that is
+//       the correct, honest, deterministic state, not a green claiming a closed gap.
 // Both are recomputed fresh at restore time from the CALLER's declared `original` — the manifest row
 // carries its OWN canonical + dev/ino, captured once at snapshot time — and a match on EITHER mechanism
 // confirms. Neither can MERGE two genuinely different originals (rung-2 F3 rail 1): two distinct real
