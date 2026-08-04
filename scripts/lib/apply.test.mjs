@@ -3621,3 +3621,97 @@ test('F9 (FR3, RULING-LAYER-3 Amdt.4): a list-continuation whitespace shift surv
     assert.strictEqual(r.applied, 1);
   } finally { clean(proj); }
 });
+
+// WAVE-6 HIGH (INSPECT on 36e4bfa, cw-class-b-reviewer): round 11's
+// flattenSurvives gained a uniformity requirement -- correct for the
+// KEEPS-GATE (F3), silently inherited by the merge-pair check (:1197,
+// reached via the SAME shared textSurvives() when the absorbed text is
+// flush-left/multi-line). The two consumers ask DIFFERENT questions: the
+// keeps-gate asks "does this exact protected span's MEANING survive"
+// (reparenting changes meaning -> refuse is correct); the merge-pair check
+// asks "was this deleted file's content absorbed at all, so nothing was
+// silently destroyed" (reparenting one line during absorption loses
+// NOTHING -- refusing here means the check wrongly concludes "not absorbed"
+// and lets BOTH halves proceed independently: source survives untouched
+// AND destination gets the (still-present, just reindented) content too --
+// the exact two-copies bug grad6 §1b exists to prevent, reopened).
+test('RED-FIRST/WAVE-6-HIGH: a merge that reparents ONE interior line of the absorbed text is still caught -- flattenSurvives\'s uniformity check must not leak into the merge-pair consumer', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    const B = path.join(store, 'b.md');
+    const srcText = '---\ncritical: true\nnever closes\nSee [[keep-me]] and 42 issues.';
+    write(A, srcText);
+    write(B, 'Base B.');
+    assert.strictEqual(isPinned(A), true, 'setup sanity: an unclosed fence fails CLOSED (incapacity)');
+    // ONE interior line ("critical: true") nested under its neighbour; the
+    // rest of the flush-left block is untouched. Text order/content is
+    // identical -- only that one line's OWN indent changed.
+    const reparented = '---\n  critical: true\nnever closes\nSee [[keep-me]] and 42 issues.';
+    const r = apply(planFor(proj, store, [
+      { type: 'delete', path: A },
+      { type: 'rewrite', path: B, content: 'Base B, merged.\n' + reparented },
+    ]));
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(fs.existsSync(A), true, 'the source must SURVIVE untouched (incapacity refusal)');
+    assert.strictEqual(fs.readFileSync(B, 'utf8'), 'Base B.', 'the destination must NOT be rewritten -- two copies would exist otherwise (A\'s original content, plus its reparented text inside B)');
+    assert.ok((r.flagged || []).some((f) => f.path === B && /merge-pair/.test(f.reason)), `the reparented paired rewrite must still be flagged as excluded: ${JSON.stringify(r.flagged)}`);
+  } finally { clean(proj); }
+});
+
+test('WAVE-6 HIGH control: a keeps-gate anchor with the SAME one-interior-line reparent is still correctly REFUSED -- the fix must not weaken the keeps-gate to fix the merge-pair consumer', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'a: 1\nb: 2\nc: 3\nd: 4\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'a: 1\nb: 2\nc: 3', anchorFile: f });
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'a: 1\n  b: 2\nc: 3\nd: 4\n' },
+    ]));
+    assert.strictEqual(r.ok, false, 'the keeps-gate must stay STRICT -- this is the F3 fixture round 11 exists to close');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+  } finally { clean(proj); }
+});
+
+// WAVE-6 MED-1 (cw-class-b-reviewer): pins the residual's own re-judged
+// table -- an F3 reparent with NO sibling carrying the text is correctly
+// refused (round 11's headline fix); the SAME reparent with a sibling in
+// the same plan coincidentally carrying the text is NOT refused, because
+// the strict check's own failure routes it into the pre-existing,
+// unchanged F6 fallback sweep. Declared as a NAMED RESIDUAL at the KEEPS-
+// GATE call site's own comment, not silently fixed here -- see that
+// comment for why (rail #2's migration case forbids extending the
+// structural check into the fallback).
+test('WAVE-6 MED-1 (documented residual, NOT a regression): F3 reparent with no sibling carrying the text is refused', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'a: 1\nb: 2\nc: 3\nd: 4\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'a: 1\nb: 2\nc: 3', anchorFile: f });
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'a: 1\n  b: 2\nc: 3\nd: 4\n' },
+    ]));
+    assert.strictEqual(r.ok, false, 'no sibling carries the text -- the strict check + fallback both correctly refuse');
+  } finally { clean(proj); }
+});
+
+test('WAVE-6 MED-1 (documented residual, NOT a regression): the SAME F3 reparent with a sibling coincidentally carrying the text is rescued by the F6 fallback', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    const sibling = path.join(store, 'other.md');
+    write(f, 'a: 1\nb: 2\nc: 3\nd: 4\n');
+    write(sibling, 'unrelated content'); // will be rewritten to coincidentally carry the anchor text
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'a: 1\nb: 2\nc: 3', anchorFile: f });
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'a: 1\n  b: 2\nc: 3\nd: 4\n' }, // the reparent -- structurally refused on its own
+      { type: 'rewrite', path: sibling, content: 'a: 1\nb: 2\nc: 3\nunrelated but coincidentally carries the exact anchor text' },
+    ]));
+    // NAMED RESIDUAL, not a bug: the strict own-file check on f.md correctly
+    // fails (same as the test above), so this keep falls into the fallback
+    // sweep -- which finds the anchor verbatim in `sibling`'s new content
+    // and treats it as satisfied. f.md's own reparent therefore proceeds.
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'a: 1\n  b: 2\nc: 3\nd: 4\n', 'the residual: the reparent on f.md is NOT refused when a sibling coincidentally carries the text');
+  } finally { clean(proj); }
+});

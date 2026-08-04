@@ -285,7 +285,7 @@ function needleIndentShape(needle, origParts) {
   }
   return shape;
 }
-function indentRelativeSurvives(shape, haystack, haystackParts) {
+function indentRelativeSurvives(shape, haystack, haystackParts, strict = true) {
   const { n, nRanks, atZero, flatNeedle, origChain } = shape;
   const h = haystackParts || lineParts(haystack);
   // grad11 STEP 2 perf (bonus, pre-existing loop): same head-line-text
@@ -323,7 +323,7 @@ function indentRelativeSurvives(shape, haystack, haystackParts) {
   // indent value -- true for a genuine reflow (indentation was never
   // introduced), false for an in-place reparent (one line's indent changed
   // while its neighbours' did not).
-  if (atZero) return flattenSurvives(flatNeedle, h);
+  if (atZero) return flattenSurvives(flatNeedle, h, strict);
   return false;
 }
 // grad11 STEP 2 [CRITICAL, F3+F4+F9 — one predicate, not three]: RULING-LAYER-3
@@ -440,16 +440,37 @@ function flattenWithLineMap(parts) {
   }
   return { flat, chunks };
 }
-function flattenSurvives(flatNeedle, haystackParts) {
+// WAVE-6 HIGH (cw-class-b-reviewer, INSPECT on 36e4bfa): the uniformity
+// requirement below is CONSUMER-SPECIFIC, not a universal property of "did
+// this text survive". `strict` (default true) gates it: the KEEPS-GATE
+// asks whether an exact protected span's MEANING survives, and a reparent
+// changes meaning even when the flattened text still matches -- refuse.
+// The merge-pair check (apply.mjs's own applyPlan, ~line 1197) asks only
+// whether a deleted file's content was ABSORBED somewhere, so nothing was
+// silently destroyed -- a reparent during absorption loses no bytes, and
+// refusing there was the actual bug: it makes the merge-pair check
+// wrongly conclude "not absorbed", letting BOTH halves proceed
+// independently (source survives + destination also gets the content) --
+// two copies, the exact defect grad6 §1b exists to prevent. This was
+// round 11's own regression: `flattenSurvives` did not exist before that
+// round (the merge-pair path only ever went through `textSurvives`'s
+// plain single-line-style flatten), so the merge-pair consumer inherited
+// a NEW gate it never asked for, silently, through the shared helper.
+function flattenSurvives(flatNeedle, haystackParts, strict = true) {
   const { flat, chunks } = flattenWithLineMap(haystackParts);
   const idx = flat.indexOf(flatNeedle);
   if (idx === -1) return false;
+  if (!strict) return true;
   const end = idx + flatNeedle.length;
   const spanIndents = new Set();
   for (const c of chunks) { if (c.start < end && c.end > idx) spanIndents.add(haystackParts[c.lineIndex].indent); }
   return spanIndents.size <= 1;
 }
-function textSurvives(needle, haystacks, normHaystacks, haystackLineParts) {
+// WAVE-6 HIGH: `strict` (default true, the KEEPS-GATE's own need) threads
+// through to flattenSurvives's uniformity check -- see that function's own
+// header for the two consumers' different questions. The merge-pair check
+// (applyPlan, ~:1197) is the one caller that passes `false`.
+function textSurvives(needle, haystacks, normHaystacks, haystackLineParts, strict = true) {
   if (haystacks.some((t) => t.includes(needle))) return true;
   // grad10 F3 [HIGH, content-loss]: was `.includes('\n')`, LF-only -- a
   // needle whose lines are joined by a bare CR (no LF anywhere) classified
@@ -470,7 +491,7 @@ function textSurvives(needle, haystacks, normHaystacks, haystackLineParts) {
     // needleIndentShape's own header) — same haystack-vs-needle split the
     // single-line branch below already makes for normWhitespace.
     const shape = needleIndentShape(needle);
-    return haystacks.some((t, i) => indentRelativeSurvives(shape, t, haystackLineParts && haystackLineParts[i]));
+    return haystacks.some((t, i) => indentRelativeSurvives(shape, t, haystackLineParts && haystackLineParts[i], strict));
   }
   const normNeedle = normWhitespace(needle);
   const norms = normHaystacks || haystacks.map(normWhitespace);
@@ -1194,7 +1215,12 @@ export function applyPlan(plan, opts = {}) {
         const pairedOut = new Set();
         for (const a of actionable) {
           if (a.type === 'delete' || typeof a.content !== 'string') continue;
-          if (excludedDeleteTexts.some((t) => textSurvives(t, [a.content]))) {
+          // WAVE-6 HIGH: strict=false -- this check asks "was the deleted
+          // text absorbed at all" (data-loss prevention), never "does its
+          // exact structural meaning survive" (the keeps-gate's own,
+          // stricter question). See flattenSurvives's header for why the
+          // two must not share a default.
+          if (excludedDeleteTexts.some((t) => textSurvives(t, [a.content], undefined, undefined, false))) {
             pairedOut.add(a);
             flagged.push({
               path: a.phys,
@@ -1369,8 +1395,35 @@ export function applyPlan(plan, opts = {}) {
             // content that never lived in file X). NAMED RESIDUAL: this is
             // also the reachable surface of LAB-RECORD's F6 (a floor-
             // clearing generic anchor coincidentally present elsewhere in
-            // the same plan) -- unchanged from before this round, not newly
-            // introduced, and not closed here; declared, not silently fixed.
+            // the same plan).
+            //
+            // WAVE-6 MED-1 (cw-class-b-reviewer, re-judged, not merely
+            // re-stated): the CHANNEL is unchanged from before this round --
+            // true. But the POPULATION reaching it is NOT: pre-round-11, an
+            // F3/F4/F9-shaped anchor (a reparent, a blank-line-defeated
+            // dedent) PASSED the old, weaker own-file check and never
+            // reached this sweep at all. Post-round-11, that same anchor now
+            // FAILS the new strict check above and falls INTO this sweep --
+            // where F6's coincidence (a sibling file in the same plan
+            // happening to carry the same text) can rescue it silently. So
+            // round 11's headline CRITICAL fixes hold unconditionally only
+            // while no other file in the plan coincidentally carries the
+            // anchor's text; when one does, the loss this round exists to
+            // catch is again silent. "Unchanged from before this round" was
+            // true of the mechanism and incomplete about its exposure.
+            //
+            // RE-JUDGED: still the right trade, stated with the reason
+            // rather than assumed. Closing it here would mean giving the
+            // fallback the SAME ancestor-chain check the strict path uses --
+            // which is exactly what rail #2 (the legitimate cross-file
+            // migration case F9's own fixtures rely on) forbids: a migrated
+            // anchor has no "original position" in a file it never lived in,
+            // so a structural check there is not stricter, it is
+            // MEANINGLESS, and would false-refuse real merges. F6 itself
+            // predates this round and needs a design answer at the ANCHOR
+            // layer (a more distinctive anchor, or a real per-anchor
+            // provenance field) that this call site cannot supply. Declared,
+            // with the grown population named, not silently fixed.
             //
             // grad11 CI-RED FOLLOW-UP: `excludeAction` is passed ONLY when
             // `triedOwnFile` is true -- i.e. only when survivesOwnFile was
