@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { checkFidelity, gateFiles, inventory, inventoryDropKeys, frontmatterKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
+import { checkFidelity, gateFiles, inventory, inventoryDropKeys, frontmatterKeys, readFrontmatter, frontmatterBlockParse, __testHooks, FILE_REF_RUN_CAP } from './fidelity-gate.mjs';
 
 // Thai fixtures from char codes only — never raw composables/invisibles in source.
 const SARA_AM = String.fromCharCode(0x0e33); // the CORRECT single char
@@ -1041,6 +1041,15 @@ test('LINE BASIS: a block containing a bare CR refuses — the split basis canno
 // replacement is linear; the bound below is ~1000x the fixed cost and ~4x
 // under the measured quadratic, so it can only trip if the quadratic returns.
 // Semantics are pinned by the RETIRED-REGEX ORACLE test underneath, not here.
+//
+// DECLARED WALL-CLOCK, no count conversion (press 2): `keyLineParse` makes
+// exactly ONE `.exec()` call on `body` whether that call is linear or
+// catastrophically backtracking — the retired quadratic lived entirely
+// inside V8's own regex engine for that single call, not in a loop, a
+// re-parse, or any cap our code enforces. There is no call count or bound
+// to assert instead of time; the call count is 1 on both the fixed and the
+// broken engine. Elapsed ms is the only available proxy for "is
+// KEY_SEP_STRICT still non-backtracking" here.
 // ---------------------------------------------------------------------------
 test('KEY-LINE COST: a 60 KiB pathological line parses in bounded time (was ~5.4 s quadratic)', () => {
   const shapes = [
@@ -1085,11 +1094,27 @@ function dropHeavyPair(targetBytes) {
 }
 test('GATE COST: a drop-heavy 512 KB pair gates in bounded time (was ~4.8 s quadratic at this size)', () => {
   const { orig, next } = dropHeavyPair(512 * 1024);
+  __testHooks.reset();
   const t0 = process.hrtime.bigint();
   const r = checkFidelity(orig, next);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  const calls = __testHooks.parseNumTokenCalls; // read before any further parseNumToken traffic
   assert.ok(r.drops.length > 1000, `the fixture must actually be drop-heavy; got ${r.drops.length}`);
-  assert.ok(ms < 2000, `gating ${orig.length} chars with ${r.drops.length} drops took ${ms.toFixed(0)}ms — the quadratic is back`);
+  // COUNT, the primary assertion (press 2): the retired quadratic was
+  // parseNumToken called once per DROP x CANDIDATE pair; the fix parses
+  // survivor candidates ONCE per gate call (parseSurvivorCands), so total
+  // calls are linear in (dropped numbers + next's own numbers), never
+  // multiplied by both. If the per-drop re-parse regresses, this count
+  // jumps to roughly drops x candidates regardless of how fast the machine
+  // is — a machine-independent signal the wall clock isn't.
+  const numberDrops = r.drops.filter((d) => d.type === 'number-drop' || d.type === 'number-precision').length;
+  assert.ok(numberDrops > 1000, `the fixture must actually drop NUMBERS (not just any drop); got ${numberDrops}`);
+  const nextNumberCount = inventory(next).numbers.size; // exact candidate-pool size, independently derived
+  const bound = numberDrops + nextNumberCount; // one parseNumToken per dropped orig token + one per next candidate
+  assert.ok(calls <= bound,
+    `parseNumToken called ${calls} times for ${numberDrops} drops x ${nextNumberCount} candidates (linear bound ${bound}) — the per-drop candidate re-parse is back`);
+  // ms kept as a secondary sanity check, not the regression signal.
+  assert.ok(ms < 2000, `gating ${orig.length} chars with ${r.drops.length} drops took ${ms.toFixed(0)}ms — unexpectedly slow even with the call count in bounds`);
 });
 
 // The SECOND quadratic term in the same function (found while closing #36,
@@ -1111,11 +1136,26 @@ test('GATE COST: a marker-heavy LOW-DROP 1 MB pair gates in bounded time (the ty
   }
   const orig = lines.join('\n');
   const next = lines.filter((_, k) => k % 16 !== 15).join('\n'); // ~6% dropped, 94% survive
+  __testHooks.reset();
   const t0 = process.hrtime.bigint();
   const r = checkFidelity(orig, next);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  const includesCalls = __testHooks.evidenceIncludesCalls;
   assert.ok(r.drops.length > 100, `the fixture must still drop something; got ${r.drops.length}`);
-  assert.ok(ms < 2000, `gating 1 MB marker-heavy with ${r.drops.length} drops took ${ms.toFixed(0)}ms — the surviving-token scan is back`);
+  const anchorDrops = r.drops.filter((d) => d.type === 'evidence-anchor-drop').length;
+  // COUNT, the primary assertion (press 2): nextEvTokens.has(tok) answers the
+  // survives case (94% of this fixture) in O(1); next.includes(tok) — the
+  // full-text scan the fix exists to avoid — is only reached for a token the
+  // extraction missed (an absent one, or one embedded inside a longer word).
+  // A regressed short-circuit pays the scan for EVERY orig evidence token
+  // instead; bound generously above the genuinely-unextractable residual
+  // (this fixture's tokens all extract cleanly, so the honest floor is 0 —
+  // some slack for a token that legitimately needs the fallback).
+  const survivingLines = lines.length - Math.floor(lines.length / 16);
+  assert.ok(includesCalls <= anchorDrops + 10,
+    `next.includes(tok) evaluated ${includesCalls} times for ${anchorDrops} anchor drops out of ${survivingLines} surviving lines — the nextEvTokens short-circuit is back`);
+  // ms kept as a secondary sanity check, not the regression signal.
+  assert.ok(ms < 2000, `gating 1 MB marker-heavy with ${r.drops.length} drops took ${ms.toFixed(0)}ms — unexpectedly slow even with the call count in bounds`);
 });
 
 test('GATE COST control: the FIRST coarser survivor in inventory order is still the one named — the tie-break is pinned', () => {
@@ -1143,10 +1183,21 @@ test('GATE COST control: the FIRST coarser survivor in inventory order is still 
 // 256 KiB — Phoenix #3's PostToolUse seatbelt budget is 100ms).
 test('GATE COST: an unbroken [\\w.-] run with NO valid file extension gates in bounded time (grad6 #6)', () => {
   const next = ('a'.repeat(9) + '.').repeat(Math.floor((256 * 1024) / 10));
+  __testHooks.reset();
   const t0 = process.hrtime.bigint();
   checkFidelity('proven at commit c19e528b', next);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  assert.ok(ms < 1000, `gating a ${next.length}-char extension-less run took ${ms.toFixed(0)}ms — FILE_REF_RE's quadratic is back`);
+  // BOUND, the primary assertion (press 2): this is a length-cap regression,
+  // not a call-count one — matchFileRefs still runs FILE_REF_RE once per
+  // [\w.-] run either way. What the fix bounds is the SLICE LENGTH each call
+  // actually sees. Assert the cap held directly: if FILE_REF_RUN_CAP's
+  // enforcement is bypassed, the single ~26 KB pathological run in this
+  // fixture is passed to the regex whole, and this assertion catches it
+  // deterministically — no timing involved.
+  assert.ok(__testHooks.fileRefMaxSliceLen <= FILE_REF_RUN_CAP,
+    `a ${__testHooks.fileRefMaxSliceLen}-char slice reached FILE_REF_RE (cap is ${FILE_REF_RUN_CAP}) — the run-length cap is not being enforced`);
+  // ms kept as a secondary sanity check, not the regression signal.
+  assert.ok(ms < 1000, `gating a ${next.length}-char extension-less run took ${ms.toFixed(0)}ms — unexpectedly slow even with the cap enforced`);
 });
 
 // Same fix, correctness control: an ordinary short filename reference must

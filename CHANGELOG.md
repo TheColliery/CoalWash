@@ -2,6 +2,12 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Changed
+
+- **`fidelity-gate.mjs`: three of four `GATE COST`/`KEY-LINE COST` perf-regression tests converted from a wall-clock bound to a COUNT bound** (press 2 — this class of test had produced four cross-platform CI blocks in one day). `roundedSurvivor`'s candidate re-parse, the evidence-anchor `next.includes` short-circuit, and `FILE_REF_RE`'s run-length cap each guard a real, machine-independent invariant (a call count or a max slice length) that the old ms-based assertions could only approximate; each is now instrumented via a new test-only `__testHooks` export (`parseNumTokenCalls`, `evidenceIncludesCalls`, `fileRefMaxSliceLen`) and mutation-proven to redden on the exact regression it replaces. The fourth (`KEY-LINE COST`) has no genuine count behind it — the retired quadratic lived entirely inside a single regex `.exec()` call's own backtracking, not in a loop our code controls — so its wall-clock bound stays, with the reason declared inline. Zero behavior change; the `ms` assertions remain as secondary sanity checks on all four.
+
 ## [1.0.0] - 2026-08-03
 
 > **BREAKING.** `fullPercent` and `fatMultiple` — documented, user-settable config keys (README's Configure table: *"raise it to consciously carry more muscle before the wall forces a run"*) — are now read-tolerated and ignored. Task #4 replaced the floor-driven wall they scaled with a measured-fat model that takes no config input; a project that set either key to change the capacity wall's behavior will see that setting silently stop doing anything. No error, no warning — the same read-tolerated-and-ignored shape as the earlier `forceMode` retirement, but that one shipped mid-beta, before this project's stable line existed. This one breaks a promise the shipped README made in a stable release, which is the SemVer MAJOR case by this room's own rule (`scripts-quality.md` §3: *"MAJOR = a BREAKING change [to a] ... config key"*) — sized here rather than left for a future release to under-bump, per the standing correct-forward instruction after the CoalBoard v1.0.13 / CoalTipple v1.0.23 precedent.

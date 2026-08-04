@@ -306,6 +306,18 @@ function occurrenceCounts(text) {
   return out;
 }
 
+// Perf-regression counters for tests only (press 2: wall-clock -> count
+// conversion). Each field tracks a call/iteration site whose growth is the
+// OBSERVABLE symptom of a specific past quadratic; a test asserts the count
+// stays bounded instead of asserting elapsed ms. `reset()` clears all three
+// between tests in the same file (node:test isolates by FILE, not by test).
+export const __testHooks = {
+  parseNumTokenCalls: 0,
+  evidenceIncludesCalls: 0,
+  fileRefMaxSliceLen: 0,
+  reset() { this.parseNumTokenCalls = 0; this.evidenceIncludesCalls = 0; this.fileRefMaxSliceLen = 0; },
+};
+
 // ---------------------------------------------------------------------------
 // class 9 — number-precision (exact -> rounded survivor detection)
 // ---------------------------------------------------------------------------
@@ -319,6 +331,7 @@ function occurrenceCounts(text) {
 //         integer's trailing zeros coarsen it ("44000" -> 1000, "44192" -> 1).
 //   sig   significant digits, leading zeros excluded ("0.92" -> 2).
 function parseNumToken(tok) {
+  __testHooks.parseNumTokenCalls++;
   const percent = tok.endsWith('%');
   const body = percent ? tok.slice(0, -1) : tok;
   if (/^\d+\/\d+$/.test(body)) return { kind: 'ratio' };
@@ -408,13 +421,17 @@ const FILE_REF_RE = /\b[\w][\w.-]*\.(?:md|mjs|cjs|js|json|jsonc|ps1|txt|yml|yaml
 // length before the regex runs bounds the pathological per-run cost to
 // O(cap) instead of O(run length); no real filename comes remotely close to
 // the cap, so ordinary content is unaffected.
-const FILE_REF_RUN_CAP = 256;
+export const FILE_REF_RUN_CAP = 256;
 function matchFileRefs(s) {
   const out = new Set();
   const runs = s.match(/[\w.-]+/g);
   if (!runs) return out;
   for (const run of runs) {
     const slice = run.length > FILE_REF_RUN_CAP ? run.slice(0, FILE_REF_RUN_CAP) : run;
+    // The cap, not a call count, is what bounds this regex's worst case — track
+    // the max SLICE LENGTH the regex ever actually runs against, so a test can
+    // assert the cap held instead of timing the whole call.
+    if (slice.length > __testHooks.fileRefMaxSliceLen) __testHooks.fileRefMaxSliceLen = slice.length;
     for (const v of matchSet(slice, FILE_REF_RE)) out.add(v);
   }
   return out;
@@ -975,7 +992,11 @@ export function checkFidelity(origText, newText) {
     return markerMemo.get(marker);
   };
   for (const [tok, marker] of evOrig) {
-    if (nextEvTokens.has(tok) || next.includes(tok)) continue;
+    // #36's short-circuit: nextEvTokens.has(tok) answers the common (survives)
+    // case in O(1); next.includes(tok) — the full-text scan the fix exists to
+    // avoid — is only REACHED for a token the extraction missed. Counted so a
+    // test can assert this stays rare instead of timing the whole call.
+    if (nextEvTokens.has(tok) || (__testHooks.evidenceIncludesCalls++, next.includes(tok))) continue;
     if (markerAliveFor(marker)) drops.push({ type: 'evidence-anchor-drop', value: tok, marker });
   }
   const warnings = [];
