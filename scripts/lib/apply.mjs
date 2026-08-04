@@ -219,24 +219,92 @@ function lineParts(s) {
     return { indent: m[1].length, text: m[2].replace(/[ \t]+/g, ' ').trimEnd() };
   });
 }
-function indentRelativeSurvives(needle, haystack) {
+// grad10 F8 [MEDIUM, false-refusal x3]: exact character-DELTA equality was
+// too strict. A uniform tabs->spaces reformat SCALES every level's delta
+// (1 tab = 1 char at level 1, 2 tabs = 2 chars at level 2; converted to
+// 4-space indents that becomes +4 vs +8 -- proportional, not additive), so
+// the exact-delta check refused an ordinary reformat; the same shape hit a
+// cosmetic 2-space-vs-3-space list re-indent. Dense RANK of each line's
+// indent, not the raw delta: two sequences carrying the SAME relative order
+// (line i more/equally/less indented than line j, for every pair) rank
+// identically regardless of the absolute unit or scale. A REAL structural
+// change (a line moving to a DIFFERENT relative depth than its neighbors --
+// the python-dedent / yaml-reparent shapes round 9's fix targets) changes
+// at least one pairwise relationship and therefore the rank sequence too --
+// cheap O(n log n) stand-in for the O(n^2) pairwise-sign comparison it is
+// equivalent to.
+function denseRank(indents) {
+  const sorted = [...new Set(indents)].sort((a, b) => a - b);
+  const rankOf = new Map(sorted.map((v, i) => [v, i]));
+  return indents.map((v) => rankOf.get(v));
+}
+// grad10 F9 [perf, off-subject]: the needle side of a multi-line comparison
+// is CONSTANT across every haystack in one `.some()` sweep (one needle, N
+// haystacks) — parsing/ranking it inside the per-haystack function meant
+// re-doing that work N times for the SAME needle on every single call.
+// Hoisted out: `textSurvives` computes it once and hands the pre-computed
+// needle down; `indentRelativeSurvives` never re-derives it. This closed a
+// second instance of the SAME class the haystack-side fix (below) closes —
+// found while proving the haystack-side fix's own perf test, not in the
+// dispatch's findings; same root cause, same commit, worth fixing together
+// rather than leaving a matching hole one parameter over.
+function needleIndentShape(needle) {
   const n = lineParts(needle);
-  const base = n[0].indent;
-  const rel = n.map((l) => l.indent - base);
-  const h = lineParts(haystack);
+  const nRanks = denseRank(n.map((l) => l.indent));
+  // grad10 F8: a needle with NO indentation variation at all (every line at
+  // the same rank -- the shape a hard-wrapped PROSE anchor takes; a code/
+  // config anchor carrying real nesting does not look like this) has no
+  // relative structure to defend, and the ONLY reason such a needle is
+  // multi-line at all is a hard wrap, not a meaningful line break. Falling
+  // back to the flatten-everything check (below) is safe ONLY for this
+  // class: a semantic-indent attack needs at least one line at a DIFFERENT
+  // relative depth than another, which this needle, by construction, does
+  // not have. A needle WITH real variation never reaches the fallback, so
+  // round 9's python-dedent/yaml-reparent catches are unaffected.
+  const uniform = new Set(nRanks).size <= 1;
+  return { n, nRanks, uniform, flatNeedle: uniform ? normWhitespace(needle) : null };
+}
+function indentRelativeSurvives(shape, haystack, haystackParts) {
+  const { n, nRanks, uniform, flatNeedle } = shape;
+  const h = haystackParts || lineParts(haystack);
   for (let start = 0; start + n.length <= h.length; start++) {
-    const hbase = h[start].indent;
+    const hRanks = denseRank(h.slice(start, start + n.length).map((l) => l.indent));
     let ok = true;
     for (let j = 0; j < n.length && ok; j++) {
-      if (h[start + j].text !== n[j].text || (h[start + j].indent - hbase) !== rel[j]) ok = false;
+      if (h[start + j].text !== n[j].text || hRanks[j] !== nRanks[j]) ok = false;
     }
     if (ok) return true;
   }
+  // grad10 F8: reflow tolerance for a genuinely flat (prose-shaped)
+  // multi-line needle -- the same flatten-everything check single-line
+  // needles already get below, reached HERE because the needle's own line
+  // breaks carry no structural meaning to defend.
+  if (uniform) return normWhitespace(haystack).includes(flatNeedle);
   return false;
 }
-function textSurvives(needle, haystacks, normHaystacks) {
+function textSurvives(needle, haystacks, normHaystacks, haystackLineParts) {
   if (haystacks.some((t) => t.includes(needle))) return true;
-  if (String(needle).includes('\n')) return haystacks.some((t) => indentRelativeSurvives(needle, t));
+  // grad10 F3 [HIGH, content-loss]: was `.includes('\n')`, LF-only -- a
+  // needle whose lines are joined by a bare CR (no LF anywhere) classified
+  // as single-line and fell through to the old flatten check, restoring
+  // the EXACT pre-round-9 behaviour for that one line-ending shape.
+  // `lineParts` itself already normalizes CRLF *and* bare CR to LF
+  // (`replace(/\r\n?/g, '\n')`); the CLASSIFICATION test needs the same
+  // breadth or it never reaches code that already handles the shape.
+  if (/\r|\n/.test(String(needle))) {
+    // grad10 F9 [perf, off-subject]: pass the precomputed lineParts (if the
+    // caller memoized them) instead of re-parsing every haystack on every
+    // call -- the multi-line path used to branch BEFORE ever touching the
+    // memo the KEEPS-GATE below already builds for the single-line path,
+    // so a multi-line keep re-parsed every haystack on every one of its
+    // (keep x action) calls. Same class as the regression round 9 paid for
+    // once already (that one was normWhitespace; this is lineParts). The
+    // needle side is hoisted once per textSurvives() call too (see
+    // needleIndentShape's own header) — same haystack-vs-needle split the
+    // single-line branch below already makes for normWhitespace.
+    const shape = needleIndentShape(needle);
+    return haystacks.some((t, i) => indentRelativeSurvives(shape, t, haystackLineParts && haystackLineParts[i]));
+  }
   const normNeedle = normWhitespace(needle);
   const norms = normHaystacks || haystacks.map(normWhitespace);
   return norms.some((t) => t.includes(normNeedle));
@@ -1009,8 +1077,14 @@ export function applyPlan(plan, opts = {}) {
         // shrinks `actionable`) — normalize it ONCE here and hand the memo to
         // every textSurvives() call below, instead of paying normWhitespace()
         // per haystack on every one of the (keeps x actions) calls.
+        // grad10 F9: same memoization, same reason, for the multi-line path's
+        // own per-haystack parse — round 9 memoized normWhitespace() but the
+        // multi-line branch (added the same round) never touched it, so a
+        // multi-line keep re-parsed every haystack with lineParts() on every
+        // call while the single-line path reused its precompute.
         const normPostTexts = postTexts.map(normWhitespace);
-        const survives = (anchor) => textSurvives(anchor, postTexts, normPostTexts);
+        const linePostTexts = postTexts.map(lineParts);
+        const survives = (anchor) => textSurvives(anchor, postTexts, normPostTexts, linePostTexts);
         const excluded = new Set();
         for (const k of keeps) {
           const kf = k.anchorFile;

@@ -1434,8 +1434,8 @@ test('KEEPS-GATE: deleting the anchored file WITHOUT migrating the anchor is ref
   const { proj, store } = sandbox();
   try {
     const f = path.join(store, 'anchored.md');
-    write(f, 'holds the anchor text here');
-    recordKeep(proj, { target: 'anchored.md', anchor: 'the anchor text here', anchorFile: f });
+    write(f, 'holds the real anchor text right here');
+    recordKeep(proj, { target: 'anchored.md', anchor: 'the real anchor text right here', anchorFile: f });
     const r = apply(planFor(proj, store, [{ type: 'delete', path: f }]));
     assert.strictEqual(r.ok, false);
     assert.match(r.error, /keep-protected|excluded/);
@@ -1509,17 +1509,21 @@ test('KEEPS-GATE fixpoint CASCADE: excluding file A removes the text that satisf
     const a = path.join(store, 'a.md');
     const b = path.join(store, 'b.md');
     const c = path.join(store, 'c.md');
-    const aOrig = 'A-file: alpha anchor lives here. Padding.';
-    const bOrig = 'B-file: beta anchor lives here. Padding.';
+    // grad10 F4 raised the meaningful-anchor floor to 20 chars + 2 words —
+    // "alpha anchor lives here" (20 stripped chars) sat exactly AT it,
+    // "beta anchor lives here" (19) sat one UNDER it; both lengthened with
+    // margin, the cascade mechanic itself is unchanged.
+    const aOrig = 'A-file: alpha anchor truly lives here. Padding.';
+    const bOrig = 'B-file: beta anchor truly lives here. Padding.';
     write(a, aOrig);
     write(b, bOrig);
     write(c, 'C filler.');
-    recordKeep(proj, { target: 'a.md:alpha', anchor: 'alpha anchor lives here', anchorFile: a });
-    recordKeep(proj, { target: 'b.md:beta', anchor: 'beta anchor lives here', anchorFile: b });
+    recordKeep(proj, { target: 'a.md:alpha', anchor: 'alpha anchor truly lives here', anchorFile: a });
+    recordKeep(proj, { target: 'b.md:beta', anchor: 'beta anchor truly lives here', anchorFile: b });
     const r = apply(planFor(proj, store, [
       // A's rewrite drops its OWN anchor but carries B's -> pass 1 excludes A
       // (alpha in no post text) while keep-B is satisfied ONLY via A's content.
-      { type: 'rewrite', path: a, content: 'A-file: compressed. Quoting: beta anchor lives here.' },
+      { type: 'rewrite', path: a, content: 'A-file: compressed. Quoting: beta anchor truly lives here.' },
       // B's rewrite drops beta from B itself -> once A is excluded, pass 2
       // finds beta in NO surviving post text -> B excluded too.
       { type: 'rewrite', path: b, content: 'B-file: compressed.' },
@@ -1532,8 +1536,8 @@ test('KEEPS-GATE fixpoint CASCADE: excluding file A removes the text that satisf
     assert.strictEqual(fs.readFileSync(c, 'utf8'), 'C trimmed.');
     const keepFlags = r.flagged.filter((f) => /keep enforcement/.test(f.reason));
     assert.strictEqual(keepFlags.length, 2, 'both exclusions surface by name');
-    assert.ok(keepFlags.some((f) => f.reason.includes('alpha anchor lives here')));
-    assert.ok(keepFlags.some((f) => f.reason.includes('beta anchor lives here')));
+    assert.ok(keepFlags.some((f) => f.reason.includes('alpha anchor truly lives here')));
+    assert.ok(keepFlags.some((f) => f.reason.includes('beta anchor truly lives here')));
   } finally { clean(proj); }
 });
 
@@ -1623,6 +1627,155 @@ test('RED-FIRST/F3-yaml control: a genuinely different value (redis -> memcached
       { type: 'rewrite', path: other, content: 'trimmed' },
     ]));
     assert.strictEqual(r.applied, 1);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
+  } finally { clean(proj); }
+});
+
+// grad10 F3 [HIGH, content-loss]: `String(needle).includes('\n')` is LF
+// ONLY — a needle whose lines are joined by a BARE CR (no LF anywhere)
+// contains no '\n' character at all, so it classified as single-line and
+// fell through to the old flatten check, restoring the EXACT round-9 python-
+// dedent bypass for this one line-ending shape. Same fixture as F2-python
+// above, CR instead of LF throughout.
+test('RED-FIRST/F3-barecr: the SAME python-dedent bypass, joined by a bare CR instead of LF, is still caught', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const CR = '\r';
+    const origBody = `Ops snippet (load-bearing):${CR}for i in range(3):${CR}    print(i)${CR}    print(i*2)${CR}print("done")${CR}Tail notes.`;
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = `for i in range(3):${CR}    print(i)${CR}    print(i*2)${CR}print("done")`;
+    assert.ok(!anchor.includes('\n'), 'setup sanity: the anchor genuinely contains NO LF character');
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    const newBody = `Ops snippet (load-bearing):${CR}for i in range(3):${CR}    print(i)${CR}print(i*2)${CR}print("done")${CR}Tail notes — rewritten.`;
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1, 'the OTHER file still applies — only the keep-protected one is excluded');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody, 'the file must be left UNTOUCHED');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/F3-barecr control: a real token change (i*2 -> i*3), bare-CR joined, is still correctly excluded', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const CR = '\r';
+    const origBody = `Ops snippet:${CR}for i in range(3):${CR}    print(i)${CR}    print(i*2)${CR}Tail.`;
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = `for i in range(3):${CR}    print(i)${CR}    print(i*2)`;
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    const newBody = `Ops snippet:${CR}for i in range(3):${CR}    print(i)${CR}    print(i*3)${CR}Tail changed.`;
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.applied, 1);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
+  } finally { clean(proj); }
+});
+
+// grad10 F8 [MEDIUM, false-refusal x3]: exact indent-delta equality blocked
+// legitimate reformats. All three are the "gate fires on harmless work"
+// class — the proof here is that legitimate edits PASS, not that bad ones
+// are blocked (round 9's own F2/F3 tests above already prove the latter,
+// unaffected by this fix).
+test('RED-FIRST/F8-tabs2spaces: a uniform TABS-to-SPACES reformat (delta SCALES, does not shift) still matches — must NOT be refused', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const T = '\t';
+    const origBody = `Config (load-bearing):\nservice:\n${T}db:\n${T}${T}host: primary\nTail notes.`;
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = `service:\n${T}db:\n${T}${T}host: primary`;
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    // every tab replaced by 4 spaces -- a real editor "convert indentation"
+    // action. Level-1 delta goes from +1 char (1 tab) to +4 chars (4
+    // spaces); level-2 goes from +2 to +8 -- SCALED, not shifted by a
+    // constant, which is exactly what the old exact-delta check refused.
+    const S4 = '    ';
+    const newBody = `Config (load-bearing):\nservice:\n${S4}db:\n${S4}${S4}host: primary\nTail notes — reformatted.`;
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 2, 'BOTH files must apply — the tabs-to-spaces reformat is harmless and must not be refused');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), newBody, 'the reformatted file must actually land');
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/F8-cosmetic-reindent: a cosmetic list re-indent (2-space -> 3-space per level) still matches — must NOT be refused', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const origBody = 'Notes (load-bearing):\ntop:\n  mid:\n    leaf: value\nTail notes.';
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = 'top:\n  mid:\n    leaf: value';
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    const newBody = 'Notes (load-bearing):\ntop:\n   mid:\n      leaf: value\nTail notes — reformatted.';
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 2, 'BOTH files must apply — the cosmetic re-indent is harmless and must not be refused');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), newBody);
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/F8-prose-reflow: a PROSE anchor captured spanning a hard wrap still matches after a DIFFERENT reflow — must NOT be refused', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    // the anchor itself was captured with an embedded hard wrap (multi-line
+    // by construction) — no indentation variation at all, purely prose.
+    const anchor = 'the exact wording that must survive\nany future rewrap of this paragraph';
+    const origBody = `Notes: ${anchor}. Tail.`;
+    write(f, origBody);
+    write(other, 'trim me');
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    // reflowed at a DIFFERENT wrap point — same words, same order, the wrap
+    // now lands one word earlier.
+    const newBody = 'Notes: the exact wording that must\nsurvive any future rewrap of this paragraph. Tail — reformatted.';
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 2, 'BOTH files must apply — a reflowed prose anchor with no structure to lose must not be refused');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), newBody);
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/F8 must-break control: F8\'s reflow tolerance must NOT let a genuine multi-line dedent bypass through the uniform fallback', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const origBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    print(i)\n    print(i*2)\nprint("done")\nTail notes.';
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = 'for i in range(3):\n    print(i)\n    print(i*2)\nprint("done")';
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    const newBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    print(i)\nprint(i*2)\nprint("done")\nTail notes — rewritten.';
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.applied, 1, 'the dedent must still be REFUSED — this anchor has real indentation variation, never reaches the uniform fallback');
     assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
   } finally { clean(proj); }
 });

@@ -328,7 +328,32 @@ function countRuns(h, n2) {
   while (i !== -1) { n++; i = h.indexOf(n2, i + n2.length); }
   return n;
 }
-function countOccurrences(hay, needle) {
+// grad10 F6 [MEDIUM, opposite-polarity — introduced by grad9's own F4 fix]:
+// the delimiter fold above was scoped to the WHOLE corpus. A stem that
+// happens to spell out an ordinary run of English words — `the-plan` ->
+// `the plan` — then matches ANY sentence containing those two words in
+// sequence, not because anything references the file, but because the fold
+// erased the one signal (the hyphen) that told a real compound apart from
+// plain prose. Driven through the real applyPlan: `the-plan.md`, referenced
+// by nobody, survived a demotion pass it should have failed.
+//
+// The genuine case the fold exists for (grad9 F4) is syntactically marked: a
+// WIKILINK written with spaces, `[[Topic Name]]`, against a filename written
+// with hyphens, `topic-name.md`. So the delimiter-normalized leg is scoped to
+// wikilink-bracketed spans of the corpus ONLY — the exact (un-normalized)
+// leg still searches the whole corpus, unchanged, since a literal hyphenated
+// stem appearing in ordinary prose was never the source of this bug. A
+// markdown link target (`(topic-name.md)`) needs no bracket-scoping either:
+// its hyphenated form already matches the exact leg verbatim.
+const WIKILINK_RE = /\[\[([^[\]]*)\]\]/g;
+function wikilinkSpans(hay) {
+  let out = '';
+  let m;
+  WIKILINK_RE.lastIndex = 0;
+  while ((m = WIKILINK_RE.exec(hay))) out += `${m[1]}\n`;
+  return out;
+}
+function countOccurrences(hay, needle, delimHay = hay) {
   if (!needle) return 0;
   const h = hay.toLowerCase();
   const n2 = needle.toLowerCase();
@@ -339,7 +364,37 @@ function countOccurrences(hay, needle) {
   // counts are of DIFFERENT occurrences and neither substitutes for the
   // other. max(), not sum(): still monotone-widening (never below the old
   // exact-only count), never double-counts one real occurrence twice.
-  return Math.max(countRuns(h, n2), countRuns(normDelim(h), normDelim(n2)));
+  // `delimHay` is the NARROWER haystack the delimiter-normalized leg reads
+  // from — bracket-scoped spans for the corpus, or `hay` itself (unchanged
+  // old behavior) when the caller has no narrower span to offer.
+  return Math.max(countRuns(h, n2), countRuns(normDelim(delimHay.toLowerCase()), normDelim(n2)));
+}
+
+// grad10 F7a [MEDIUM, content-loss] percent-encoding: a markdown link target
+// written percent-encoded (`topic%2Dname.md`) has zero substring overlap
+// with the topic's own raw basename ("topic-name.md") — `%2D` decodes to
+// the exact hyphen the filename already contains. A plain `%XX` -> one-byte
+// substitution (never `decodeURIComponent`, which THROWS on a malformed or
+// partial sequence — ordinary prose is full of bare `%` signs, e.g. "50% done",
+// that are not escapes at all, and a throw here would crash the whole census
+// on innocuous text) closes it: decode the corpus once, then a plain exact
+// substring search — no delimiter fold needed on this leg, since decoding
+// already produces the real character the exact leg was always looking for.
+function percentDecodeAscii(s) {
+  return s.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+// grad10 F7b [MEDIUM, content-loss, directionally asymmetric]: a PLURAL
+// filename referenced only in SINGULAR prose ("guidelines.md" vs "the
+// guideline") has zero substring overlap in that direction. The reverse (a
+// singular filename referenced by plural prose) is already caught for free
+// by ordinary substring containment — "guideline" IS a substring of
+// "guidelines". Trying the stem with ONE trailing "s" stripped, as an
+// additional candidate, closes the missing direction without a stemming
+// library — deliberately narrow (the one shape reported), and the safe
+// direction: it only ever widens what counts as referenced.
+function englishSingular(stem) {
+  return stem.length > 1 && stem.endsWith('s') ? stem.slice(0, -1) : null;
 }
 
 // Hop-2: topic files UNREFERENCED anywhere else in the merged tree (neither
@@ -350,13 +405,24 @@ function countOccurrences(hay, needle) {
 // resolution if FP-keeps ever matter.
 export function unreferencedTopics(store, allTextConcat) {
   const out = [];
+  const wikilinkHay = wikilinkSpans(allTextConcat); // grad10 F6: computed once, not per topic
+  const decodedHay = percentDecodeAscii(allTextConcat).toLowerCase(); // grad10 F7a: computed once, not per topic
   for (const t of store.topics) {
     if (t.basename === OVERFLOW_BASENAME) continue; // the ladder's own tier-2 rung — never cascades itself
     const stem = t.basename.replace(/\.md$/i, '');
-    const ownBase = countOccurrences(t.text, t.basename);
+    const ownBase = countOccurrences(t.text, t.basename); // own text: unscoped, unaffected by F6/F7
     const ownStem = countOccurrences(t.text, stem);
-    const allBase = countOccurrences(allTextConcat, t.basename);
-    const allStem = countOccurrences(allTextConcat, stem);
+    let allBase = countOccurrences(allTextConcat, t.basename, wikilinkHay); // grad10 F6: delimiter leg scoped to [[...]] spans
+    let allStem = countOccurrences(allTextConcat, stem, wikilinkHay);
+    // grad10 F7a: also try the percent-decoded corpus, exact-only (no delimiter
+    // fold — decoding already produced the real hyphen/underscore/space).
+    allBase = Math.max(allBase, countRuns(decodedHay, t.basename.toLowerCase()));
+    allStem = Math.max(allStem, countRuns(decodedHay, stem.toLowerCase()));
+    // grad10 F7b: also try the stem's English singular as an additional
+    // reference candidate (basename is skipped — the ".md" extension already
+    // breaks the "ends in s" test, so it never applies there).
+    const singular = englishSingular(stem);
+    if (singular) allStem = Math.max(allStem, countOccurrences(allTextConcat, singular, wikilinkHay));
     if (allBase > ownBase || allStem > ownStem) continue; // referenced elsewhere (case-insensitive) -> stays
     out.push(t);
   }

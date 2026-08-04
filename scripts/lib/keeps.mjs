@@ -114,15 +114,61 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
     //     and then never matches anything in real text, permanently
     //     false-refusing every future edit to that file.
     // Fix the CLASS: strip ordinary whitespace AND Unicode invisible/format
-    // characters (\p{Cf}) before measuring, for BOTH fields (closes polarity 2
+    // characters before measuring, for BOTH fields (closes polarity 2
     // everywhere) — and additionally require a real MINIMUM length for an
     // ANCHOR specifically (closes polarity 1): an adjudicated keep names a
     // specific clause, never a single character or a common short word.
     // anchorFile is a PATH, which is legitimately short, so it keeps the
     // non-empty-after-stripping bar only, no length floor.
-    const stripInvisible = (v) => String(v).replace(/[\s\p{Cf}]+/gu, '');
-    const MIN_MEANINGFUL_ANCHOR_LEN = 8;
-    const hasRealAnchor = (v) => typeof v === 'string' && stripInvisible(v).length >= MIN_MEANINGFUL_ANCHOR_LEN;
+    //
+    // grad10 F5 [MEDIUM, both polarities]: `\p{Cf}` alone missed FOUR more
+    // classes that reproduce the identical bug — combining marks (Mn, e.g.
+    // U+0300), controls beyond `\s` (Cc, e.g. U+0001), and two SPECIFIC
+    // codepoints outside any strippable-whole-category (Hangul filler
+    // U+3164 is `Lo` — letters, which legitimately holds CJK/Thai/etc. real
+    // text and must NOT be blanket-stripped; Braille blank U+2800 is `So` —
+    // symbols, which legitimately holds real math/currency/etc. content for
+    // the identical reason). `\p{Default_Ignorable_Code_Point}` (a real
+    // ECMAScript Unicode property, verified supported and verified to leave
+    // ordinary CJK/Latin/Thai letters untouched) catches U+3164 without
+    // touching Lo generally; U+2800 has no such property to lean on, so it
+    // is named explicitly rather than folded into a category that would
+    // over-strip. `\p{Mn}`/`\p{Cc}` ARE safe to strip wholesale for THIS
+    // purpose specifically: they only affect the LENGTH MEASUREMENT here,
+    // never the stored anchor text (`mergedAnchor = anchor`, verbatim,
+    // below) — a combining-mark-heavy script (Thai, Vietnamese, Arabic
+    // diacritics) undercounts its true visible length, which is the SAFE
+    // direction (more likely to correctly ask for a longer anchor, never
+    // less). NAMED RESIDUAL: this is not a complete Default_Ignorable
+    // enumeration — a future invisible-rendering codepoint outside these
+    // categories is not guaranteed caught; the five reported here are.
+    const stripInvisible = (v) => String(v).replace(/[\s\p{Cf}\p{Cc}\p{Mn}\p{Default_Ignorable_Code_Point}⠀]+/gu, '');
+    // grad10 F4 [HIGH, content-loss]: length alone is a LENGTH proxy, not a
+    // DISTINCTIVENESS one — "whatever" and "!!!!!!!!" both cleared the old
+    // 8-char floor, and both are common/repeated enough to coincidentally
+    // survive somewhere in unrelated boilerplate even after the protected
+    // clause they were meant to name is gone, so the KEEPS-GATE's survival
+    // check finds them and never flags the loss. Raising the floor alone
+    // narrows but does not close this (a longer common phrase can still
+    // coincidentally recur). Adding a MULTI-WORD requirement closes the
+    // reported shape without needing this plumbing-only module to read and
+    // verify against the target file's real content (an architecture change
+    // out of scope here — keeps.mjs is deliberately "plumbing only" per
+    // this file's own header, the SKILL contract decides what to record):
+    // a single repeated token, however long ("!!!!!!!!!!!!!!!!!!!!") or
+    // however common ("whatever"), is not "a specific clause" — an
+    // adjudicated keep names one. NAMED RESIDUAL: this narrows the risk, it
+    // does not prove uniqueness — a genuinely rare-but-short 2-word phrase
+    // could theoretically still coincide with unrelated text; closing that
+    // fully needs the file-content verification named above, deferred.
+    const MIN_MEANINGFUL_ANCHOR_LEN = 20;
+    const MIN_ANCHOR_WORDS = 2;
+    const hasRealAnchor = (v) => {
+      if (typeof v !== 'string') return false;
+      if (stripInvisible(v).length < MIN_MEANINGFUL_ANCHOR_LEN) return false;
+      const words = v.split(/[\s\p{Cf}\p{Cc}\p{Default_Ignorable_Code_Point}]+/gu).filter((w) => stripInvisible(w).length > 0);
+      return words.length >= MIN_ANCHOR_WORDS;
+    };
     const hasRealPath = (v) => typeof v === 'string' && stripInvisible(v).length > 0;
     const mergedAnchor = hasRealAnchor(anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);
     const mergedAnchorFile = hasRealPath(anchorFile) ? anchorFile : (prior && typeof prior.anchorFile === 'string' ? prior.anchorFile : undefined);

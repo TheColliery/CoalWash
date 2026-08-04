@@ -789,14 +789,19 @@ test('#58 deletion-unaware restore (search): a dug-up row whose wording matches 
     const archiveDir = path.join(home, 'arch');
     appendIndexRow(archiveDir, { sessionId: 'hit', projectSlug: 'p', firstUserLine: 'Investigate the SECRETLEGACYTOKEN rollback behavior', topEntities: ['SECRETLEGACYTOKEN'], bytes: 10, msgCount: 2 });
     appendIndexRow(archiveDir, { sessionId: 'clean', projectSlug: 'p', firstUserLine: 'Unrelated session about the login flow', topEntities: ['LoginFlow'], bytes: 10, msgCount: 2 });
-    // the user later DELETED that fact — recorded as an adjudicated keep carrying the verbatim anchor
-    recordKeep(proj, { target: 'MEMORY.md#legacy', anchor: 'SECRETLEGACYTOKEN', reason: 'removed', date: '2026-07-16' });
+    // the user later DELETED that fact — recorded as an adjudicated keep carrying the verbatim anchor.
+    // grad10 F4 raised the meaningful-anchor floor (20 stripped chars, 2+ words) —
+    // the bare token alone no longer clears it, so the recorded anchor is a real
+    // substring of the row's own text (still a genuine literal match for
+    // matchTombstones' case-insensitive substring compare, never a token that
+    // merely CONTAINS the secret).
+    recordKeep(proj, { target: 'MEMORY.md#legacy', anchor: 'the SECRETLEGACYTOKEN rollback', reason: 'removed', date: '2026-07-16' });
     const tombstones = collectTombstones({ projectRoot: proj, home });
-    assert.ok(tombstones.anchors.some((a) => a.text === 'SECRETLEGACYTOKEN'), 'the keep anchor is in the registry');
+    assert.ok(tombstones.anchors.some((a) => a.text === 'the SECRETLEGACYTOKEN rollback'), 'the keep anchor is in the registry');
 
     const hits = searchIndex('SECRETLEGACYTOKEN', { archiveDir, tombstones });
     assert.strictEqual(hits.length, 1, 'the search RETURNS the row — recovery is never blocked');
-    assert.ok(Array.isArray(hits[0].laterRemoved) && hits[0].laterRemoved[0].anchor === 'SECRETLEGACYTOKEN', 'the row is annotated with the tombstone match');
+    assert.ok(Array.isArray(hits[0].laterRemoved) && hits[0].laterRemoved[0].anchor === 'the SECRETLEGACYTOKEN rollback', 'the row is annotated with the tombstone match');
     assert.match(searchLines(hits, { hasDeathLog: tombstones.hasDeathLog }), /later-removed\?.*SECRETLEGACYTOKEN/, 'the rendered line carries the advisory');
 
     const cleanRows = searchIndex('login', { archiveDir, tombstones });
@@ -815,12 +820,14 @@ test('#58 (restore): recovering a session whose FULL content holds pre-cut wordi
     seedSession(home, proj, 'sess-warm', 30, { content });
     const run = runEstate({ projectRoot: proj, home, estate: estateCfg() });
     assert.strictEqual(run.archived.length, 1);
-    recordKeep(proj, { target: 'MEMORY.md', anchor: 'SECRETLEGACYTOKEN', date: '2026-07-16' });
+    // grad10 F4: same floor-raise as the search test above — anchor lengthened to
+    // a real substring of the transcript's own text.
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'the SECRETLEGACYTOKEN was set', date: '2026-07-16' });
     const tombstones = collectTombstones({ projectRoot: proj, home });
 
     const r = restoreSession('sess-warm', { archiveDir: run.archiveDir, to: path.join(home, 'restore-out'), tombstones });
     assert.strictEqual(r.ok, true, 'recovery succeeds byte-exact');
-    assert.ok(Array.isArray(r.laterRemoved) && r.laterRemoved[0].anchor === 'SECRETLEGACYTOKEN', 'the restore is flagged laterRemoved');
+    assert.ok(Array.isArray(r.laterRemoved) && r.laterRemoved[0].anchor === 'the SECRETLEGACYTOKEN was set', 'the restore is flagged laterRemoved');
 
     const r2 = restoreSession('sess-warm', { archiveDir: run.archiveDir, to: path.join(home, 'restore-out2') });
     assert.strictEqual(r2.ok, true);

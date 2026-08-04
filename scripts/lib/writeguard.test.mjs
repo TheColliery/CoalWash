@@ -202,6 +202,75 @@ test('RED-FIRST/F1: a blob tampered in place (sidecar path still matches, conten
   } finally { clean(home, proj); }
 });
 
+// grad10 F1 [CRITICAL]: the write-path digest (above) gates SLOT REUSE.
+// readWriteguardSnapshot — THE RESTORE DOOR, the one a human actually
+// presses — searched every session dir by NAME ONLY and returned the
+// NEWEST by mtime, no identity check at all. Coordinator's own
+// reproduction, mirrored exactly: plant a rogue blob under the SAME
+// canonical name in a DIFFERENT (unswept) session dir, with a newer mtime —
+// no access to the live session's own slot, none to the governed file
+// itself. The rogue even COPIES the legit sidecar verbatim (the lazy
+// attack: reuses the true content's hash without re-signing for its own
+// bytes) — exactly the shape `verifyBlobIntegrity` now catches.
+test('RED-FIRST/F1-restore: a rogue blob planted under the SAME snapName in a DIFFERENT session dir, with a newer mtime, does NOT win the restore', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, '.claude', 'agent-memory', 'coder', 'MEMORY.md');
+    const trueOrig = '# coder MEMORY\n\nload-bearing craft nobody can regenerate\n';
+    fs.mkdirSync(path.dirname(gov), { recursive: true });
+    fs.writeFileSync(gov, trueOrig, 'utf8');
+
+    // CLEAN CONTROL FIRST — nothing believed until this passes, same
+    // discipline the coordinator's own fixture used.
+    const snap = snapshotOnFirstWrite(proj, 'sess-live', gov, { home });
+    fs.writeFileSync(gov, '# coder MEMORY\n\nrewritten\n', 'utf8');
+    const clean = readWriteguardSnapshot(proj, path.basename(snap), { home });
+    assert.strictEqual(clean && clean.content.toString('utf8'), trueOrig, 'setup: a clean restore returns the true original');
+
+    // The legit snapshot is left ENTIRELY ALONE from here.
+    const legitBytes = fs.readFileSync(snap, 'utf8');
+
+    // Plant a rogue blob under the SAME name in a DIFFERENT session dir,
+    // copying the legit sidecar verbatim (no re-signing for the rogue bytes).
+    const slotName = path.basename(snap);
+    const rogueDir = path.join(proj, '.claude', 'coalwash', 'writeguard', 'sess-other');
+    fs.mkdirSync(rogueDir, { recursive: true });
+    const rogue = path.join(rogueDir, slotName);
+    fs.writeFileSync(rogue, '# coder MEMORY\n\n(rogue content)\n', 'utf8');
+    for (const f of fs.readdirSync(path.dirname(snap))) {
+      if (f.startsWith(slotName) && f !== slotName) fs.copyFileSync(path.join(path.dirname(snap), f), path.join(rogueDir, f));
+    }
+    const future = Date.now() / 1000 + 60;
+    fs.utimesSync(rogue, future, future); // newer mtime — wins the OLD mtime-only sort
+
+    const got = readWriteguardSnapshot(proj, path.basename(snap), { home });
+    assert.strictEqual(fs.readFileSync(snap, 'utf8'), legitBytes, 'the legit snapshot must survive untouched on disk');
+    assert.notStrictEqual(got && got.content.toString('utf8'), '# coder MEMORY\n\n(rogue content)\n', 'the rogue must NEVER be served');
+    assert.strictEqual(got && got.content.toString('utf8'), trueOrig, 'the TRUE original must still be served — the newest VERIFIED candidate, not the newest candidate outright');
+  } finally { clean(home, proj); }
+});
+
+test('RED-FIRST/F1-restore control: a rogue blob with NO copied sidecar at all is refused the same way (unverifiable, not merely mismatched)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const trueOrig = GOV + '\nTHE TRUE ORIGINAL for the no-sidecar rogue control.';
+    fs.writeFileSync(gov, trueOrig, 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess-live', gov, { home });
+
+    const slotName = path.basename(snap);
+    const rogueDir = path.join(proj, '.claude', 'coalwash', 'writeguard', 'sess-other');
+    fs.mkdirSync(rogueDir, { recursive: true });
+    const rogue = path.join(rogueDir, slotName);
+    fs.writeFileSync(rogue, 'bare rogue, no sidecar at all', 'utf8');
+    const future = Date.now() / 1000 + 60;
+    fs.utimesSync(rogue, future, future);
+
+    const got = readWriteguardSnapshot(proj, path.basename(snap), { home });
+    assert.strictEqual(got && got.content.toString('utf8'), trueOrig, 'the true original still wins — the sidecar-less rogue never verifies');
+  } finally { clean(home, proj); }
+});
+
 test('airbag: a source-code write / a not-yet-existing file / a non-guarded path all snapshot NOTHING', () => {
   const { home, proj } = sandbox();
   try {

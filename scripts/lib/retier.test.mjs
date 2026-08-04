@@ -636,6 +636,90 @@ test('RED-FIRST/F4 control: a genuinely unreferenced topic (no delimiter variant
   assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), ['topic-name.md']);
 });
 
+// grad10 F6 [MEDIUM, opposite-polarity — introduced by F4's own fix]: F4's
+// delimiter fold ran over the WHOLE corpus, so a stem that spells out
+// ordinary English words (`the-plan` -> `the plan`) matches any prose
+// sentence containing those two words in sequence, with no reference
+// anywhere. Scoping the delimiter leg to `[[...]]` wikilink spans closes it.
+test('RED-FIRST/F6: a stem that reads as ordinary prose after delimiter-folding (the-plan -> "the plan") is NOT counted as referenced by a coincidental sentence — it is genuinely unreferenced and must archive', () => {
+  const store = {
+    topics: [{ path: '/s/the-plan.md', basename: 'the-plan.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'we should review the plan carefully before shipping\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    ['the-plan.md'],
+    'no [[...]] wikilink anywhere -- an ordinary sentence containing "the plan" must not count as a reference'
+  );
+});
+
+test('RED-FIRST/F6 control: the-plan.md IS correctly kept live when a real spaced wikilink references it', () => {
+  const store = {
+    topics: [{ path: '/s/the-plan.md', basename: 'the-plan.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'see [[The Plan]] for detail\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    [],
+    'F4\'s original case must still hold: a real spaced wikilink still counts, even against a stem that also reads as ordinary prose'
+  );
+});
+
+// grad10 F7a [MEDIUM, content-loss]: a markdown link target written
+// percent-encoded (`topic%2Dname.md`) has zero raw-substring overlap with
+// the topic's own hyphenated basename until the corpus is percent-decoded.
+test('RED-FIRST/F7a: a percent-encoded link target still counts as a reference', () => {
+  const store = {
+    topics: [{ path: '/s/topic-name.md', basename: 'topic-name.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'see [doc](topic%2Dname.md) for detail\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    [],
+    'topic%2Dname.md decodes to topic-name.md — a real reference, must not be archived'
+  );
+});
+
+test('RED-FIRST/F7a control: a genuinely unreferenced topic is still archived even with an unrelated % sign in the corpus (decode never throws, never over-matches)', () => {
+  const store = {
+    topics: [{ path: '/s/topic-name.md', basename: 'topic-name.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'the job is 50% done, nothing about it here\nplain';
+  assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), ['topic-name.md']);
+});
+
+// grad10 F7b [MEDIUM, content-loss, directionally asymmetric]: a plural
+// filename referenced only by singular prose has zero substring overlap in
+// THAT direction — the reverse (singular filename, plural prose) is already
+// caught for free by ordinary substring containment.
+test('RED-FIRST/F7b: a plural filename (guidelines.md) referenced only by singular prose ("the guideline") still counts as a reference', () => {
+  const store = {
+    topics: [{ path: '/s/guidelines.md', basename: 'guidelines.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'always read the guideline before shipping\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    [],
+    'singular prose referencing a plural filename must still count — it is a genuine reference, just a different grammatical number'
+  );
+});
+
+test('RED-FIRST/F7b control: the reverse direction (singular filename, plural prose) was already caught and stays caught', () => {
+  const store = {
+    topics: [{ path: '/s/guideline.md', basename: 'guideline.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'the guidelines here are clear\nplain';
+  assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), []);
+});
+
+test('RED-FIRST/F7b control: a genuinely unreferenced plural-named topic is still archived', () => {
+  const store = {
+    topics: [{ path: '/s/guidelines.md', basename: 'guidelines.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'nothing about it here\nplain';
+  assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), ['guidelines.md']);
+});
+
 // Same finding, driven through the REAL runRetier end-to-end (the lab's own
 // method — a unit-level pass alone can't prove the top-anchor safety net
 // structurally cannot catch this: the referring line survives verbatim in

@@ -209,13 +209,13 @@ test('recordKeep: re-affirming WITHOUT anchor/anchorFile preserves the prior enf
 test('recordKeep: a re-affirm that DOES supply a new anchor overrides (an intentional update, not a downgrade)', () => {
   const proj = sandbox();
   try {
-    // grad9 F3: fixture lengthened past the meaningful-anchor floor (8 real
-    // chars) — "old span"/"new span" (7 stripped chars) coincidentally sat
-    // BELOW it; the test's INTENT (a real new anchor overrides) is unchanged.
-    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span text', anchorFile: 'C:/store/f.md' });
-    recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: 'new span text', anchorFile: 'C:/store/f2.md' });
+    // grad9 F3, then grad10 F4: fixture lengthened TWICE past the rising
+    // meaningful-anchor floor (8 real chars, then 20 chars + 2 words) — the
+    // test's INTENT (a real new anchor overrides) is unchanged both times.
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span of real text here', anchorFile: 'C:/store/f.md' });
+    recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: 'new span of real text here', anchorFile: 'C:/store/f2.md' });
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
-    assert.strictEqual(entry.anchor, 'new span text');
+    assert.strictEqual(entry.anchor, 'new span of real text here');
     assert.strictEqual(entry.anchorFile, 'C:/store/f2.md');
   } finally { clean(proj); }
 });
@@ -240,7 +240,7 @@ test('RED-FIRST/root-E: a re-affirm passing a WHITESPACE-ONLY anchor does NOT ov
 test('RED-FIRST/root-E control: a re-affirm with a REAL (non-whitespace) new anchor still overrides normally — the fix does not over-refuse legitimate updates', () => {
   const proj = sandbox();
   try {
-    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span text', anchorFile: 'C:/store/f.md' });
+    recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'old span of real text here', anchorFile: 'C:/store/f.md' });
     recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: '  new span with real content  ', anchorFile: 'C:/store/f2.md' });
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
     assert.strictEqual(entry.anchor, '  new span with real content  ', 'a real (surrounding-whitespace-only, not content-only) anchor still overrides — only a PURELY whitespace value is refused');
@@ -283,8 +283,82 @@ test('RED-FIRST/F3 control: a real anchor at/above the meaningful-length floor s
   const proj = sandbox();
   try {
     recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'the old ninety-plus char span used only to seed a real prior entry here', anchorFile: 'C:/store/f.md' });
-    recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: '8+chars!', anchorFile: 'C:/store/f2.md' }); // exactly 8 non-whitespace chars
+    // grad10 F4 raised the floor to 20 chars + 2 words -- "8+chars!" (round
+    // 9's own control fixture) is a single token and now correctly sits
+    // BELOW it; this is a real, multi-word phrase at/above the NEW floor.
+    recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: 'genuinely real anchor text', anchorFile: 'C:/store/f2.md' });
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
-    assert.strictEqual(entry.anchor, '8+chars!', 'a real anchor at the floor still overrides — only sub-floor junk is refused');
+    assert.strictEqual(entry.anchor, 'genuinely real anchor text', 'a real anchor at the floor still overrides — only sub-floor junk is refused');
+  } finally { clean(proj); }
+});
+
+// grad10 F4 [HIGH, content-loss]: round 9's 8-char floor is a LENGTH proxy
+// for DISTINCTIVENESS, and the proxy does not hold — "whatever" and
+// "!!!!!!!!" both clear 8 chars, and both are common/repeated enough to
+// coincidentally recur in unrelated boilerplate even after the clause they
+// were meant to name is gone, so a rewrite deleting that clause still finds
+// the word "surviving" elsewhere and goes through unflagged. Applies to a
+// FIRST-TIME record (no prior to fall back to), not only a re-affirm — the
+// keep gets NO enforcement handle at all rather than a worthless one.
+for (const junk of ['whatever', '!!!!!!!!']) {
+  test(`RED-FIRST/F4-distinctiveness: a FIRST-TIME record with the non-distinctive anchor ${JSON.stringify(junk)} gets NO enforcement handle`, () => {
+    const proj = sandbox();
+    try {
+      const ok = recordKeep(proj, { target: 'f.md:clause', reason: 'test', anchor: junk, anchorFile: 'C:/store/f.md' });
+      assert.strictEqual(ok, true, 'the write itself still succeeds — this is a merge/acceptance decision, not a failure');
+      const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+      assert.ok(entry, 'the keep entry itself is still recorded (target/reason/date) — advisory shape, pre-beta.12');
+      assert.strictEqual(entry.anchor, undefined, `${JSON.stringify(junk)} must NOT become an enforcement handle — it is not distinctive enough to trust`);
+    } finally { clean(proj); }
+  });
+}
+
+test('RED-FIRST/F4-distinctiveness control: a real multi-word phrase at the SAME length as "whatever"-class junk still gets an enforcement handle', () => {
+  const proj = sandbox();
+  try {
+    // "a rare specific phrase indeed" -- stripped 26 chars, 5 words: at/above
+    // BOTH the length and word-count floors, must NOT be over-refused.
+    recordKeep(proj, { target: 'f.md:clause', reason: 'test', anchor: 'a rare specific phrase indeed', anchorFile: 'C:/store/f.md' });
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+    assert.strictEqual(entry.anchor, 'a rare specific phrase indeed', 'a genuinely distinctive short phrase must still be accepted');
+  } finally { clean(proj); }
+});
+
+// grad10 F5 [MEDIUM, both polarities]: `\p{Cf}` alone missed FOUR more
+// invisible/degenerate classes reproducing the SAME bug: combining marks
+// (Mn), controls beyond `\s` (Cc), and two specific non-strippable-category
+// codepoints (Hangul filler U+3164 is Lo, Braille blank U+2800 is So).
+// Each ×8 (mirroring the lab's own repro shape) should read as degenerate,
+// same as round 9's "e"/"#"/"the".
+const F5_INVISIBLE = {
+  'U+0300 combining grave (Mn)': '\u0300'.repeat(8),
+  'U+0001 control (Cc)': '\u0001'.repeat(8),
+  'U+3164 Hangul filler (Lo)': '\u3164'.repeat(8),
+  'U+2800 Braille blank (So)': '\u2800'.repeat(8),
+};
+for (const [label, junk] of Object.entries(F5_INVISIBLE)) {
+  test(`RED-FIRST/F5-invisible: a re-affirm passing ${label} does NOT overwrite the prior real anchor`, () => {
+    const proj = sandbox();
+    try {
+      const real = 'the exact protected span, ninety-plus characters long so it is unmistakably a real adjudicated clause not a fragment';
+      recordKeep(proj, { target: 'f.md:clause', reason: 'first adjudication', anchor: real, anchorFile: 'C:/store/f.md' });
+      recordKeep(proj, { target: 'f.md:clause', reason: 'invisible re-affirm', anchor: junk, anchorFile: 'C:/store/f.md' });
+      const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+      assert.strictEqual(entry.anchor, real, `${label} must NOT replace the prior real one`);
+    } finally { clean(proj); }
+  });
+}
+
+test('RED-FIRST/F5-invisible control: real CJK/Thai text (containing legitimate combining marks and Lo-category letters) is NOT wrongly rejected as invisible', () => {
+  const proj = sandbox();
+  try {
+    // Thai script legitimately combines base consonants with Mn vowel/tone
+    // marks; CJK ideographs are legitimately Lo. Neither is what F5 strips
+    // -- only the SPECIFIC invisible-rendering codepoints are.
+    const thai = 'สวัสดีครับ ยินดีต้อนรับเข้าสู่ระบบของเรา'; // real Thai sentence, well over the floor
+    const ok = recordKeep(proj, { target: 'f.md:thai', reason: 'test', anchor: thai, anchorFile: 'C:/store/f.md' });
+    assert.strictEqual(ok, true);
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:thai');
+    assert.strictEqual(entry.anchor, thai, 'real Thai text must be accepted as a distinctive anchor, verbatim');
   } finally { clean(proj); }
 });

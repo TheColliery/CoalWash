@@ -148,6 +148,52 @@ export function isGuardedTarget(touchedPath, { projectRoot, home } = {}) {
 // content, AS WRITTEN, on its second line. Reusing a slot now requires BOTH:
 // the recorded path matches AND the blob's CURRENT on-disk bytes still hash
 // to what was recorded at creation.
+//
+// grad10 F2 [CRITICAL against this repair's OWN stated purpose, NOT CLOSED
+// AT THIS LAYER — stated plainly rather than papered over]: the sidecar is
+// a PLAIN FILE in the SAME unprotected directory as the blob it attests,
+// and its two-line format is documented in this shipped source. An actor
+// who overwrites the blob can recompute sha256 of THEIR OWN bytes and
+// rewrite the sidecar to match — `verifyOrigPath`/`verifyBlobIntegrity`
+// both return `true`, and the forgery becomes the trusted baseline. A
+// self-attesting hash stored beside the content it attests, writable by
+// the same actor, proves SELF-consistency (these two files were meant to
+// go together), never PROVENANCE (the pair was ever honest). What this
+// repair bought, honestly stated: two consistent writes instead of one
+// inconsistent one (F1's slot-reuse and restore-door bypasses, both real,
+// both closed). What it did not buy, and cannot buy at this layer: a trust
+// model.
+//
+// THREE CANDIDATE FIXES CONSIDERED AND KILLED, so "not closable here" is a
+// checked claim, not an assumption:
+//   (1) HMAC with a secret key stored elsewhere. Fails because there is no
+//       PRIVILEGE boundary in this tool's actual deployment between "the
+//       legitimate writeguard writer" and "the actor this finding is
+//       about" — per this file's own header, that actor is explicitly
+//       "main, subs, other tools" running with the SAME OS-user privilege
+//       as the code that would need to read the key to verify. Anywhere
+//       this process can read a key, so can whatever wrote the rogue blob.
+//   (2) OS file permissions / ACLs restricting write to the writeguard
+//       dir. Fails for the same reason (same UID can chmod its own files
+//       back), is not zero-dependency-portable (Phoenix #2), and POSIX
+//       permissions and Windows ACLs are not the same primitive — this
+//       file already treats cross-platform parity as binding elsewhere.
+//   (3) Move the trust record OUTSIDE the project tree (e.g. under
+//       ~/.claude/), reasoning a project-tree-scoped attacker (a cloned
+//       malicious repo's own content) could not reach it. Fails because
+//       nothing in this deployment scopes an agent/tool's WRITE access to
+//       project-tree-only — a Write/Edit call reaches wherever the OS user
+//       can, home included; there is no evidence of a narrower-scoped
+//       actor in this tool's actual threat surface to make the boundary
+//       real, only a hypothetical one.
+// All three fail on the identical root cause: closing F2 needs a trust
+// boundary this store does not have (a genuinely separate privilege level,
+// or a credential store the writer cannot also read) — not a cleverer
+// check inside the same unprotected directory. Building one would be
+// building a weaker check that LOOKS like a fix, which is precisely what
+// this finding is about. Routed up, same standing as class-A's own F2 on
+// the snapshot manifest (`explode.mjs`) — a board there enumerated and
+// killed seven candidates before reaching the same disposition.
 function origPathSidecar(snap) { return `${snap}.origpath`; }
 function contentDigest(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 function recordOrigPath(snap, phys, blobBuf) {
@@ -164,9 +210,18 @@ function recordOrigPath(snap, phys, blobBuf) {
 // stating: a session in flight across the FIRST upgrade (the path-only
 // sidecar) loses its seatbelt BASELINE for a file it already snapshotted
 // pre-fix (the advisory goes silent, never a false one — fail-silent, not
-// fail-wrong); the human RESTORE path is untouched, since
-// readWriteguardSnapshot resolves by NAME via listWriteguard, not through
-// this identity check.
+// fail-wrong).
+// CORRECTED grad10 F1: the sentence that used to close this comment claimed
+// "the human RESTORE path is untouched, since readWriteguardSnapshot
+// resolves by NAME... not through this identity check" — true of the CODE
+// at the time, and the wrong design. `readWriteguardSnapshot` searched
+// EVERY session dir by NAME ONLY and returned the newest by mtime; `snapName`
+// is a pure public function of the physical path, so a rogue blob planted
+// under the same name in ANY session dir (no access to the live session's
+// slot, no access to the governed file) with a newer mtime won over the
+// real snapshot. See `verifyBlobIntegrity` below, now wired into
+// `readWriteguardSnapshot` — the restore door the round-10 dispatch names
+// as "the one a human actually presses" is gated too.
 function verifyOrigPath(snap, phys) {
   try {
     const raw = fs.readFileSync(origPathSidecar(snap), 'utf8');
@@ -292,21 +347,70 @@ export function listWriteguard(projectRoot, { home: _home } = {}) {
   return out;
 }
 
+// grad10 F1 [CRITICAL]: round 9's digest closed slot-REUSE at the WRITE path
+// (resolveSnapPath/verifyOrigPath) but the RESTORE door — the one a human
+// actually presses — went through no identity check of any kind (see the
+// correction above `verifyOrigPath`). Coordinator's own reproduction, built
+// from the repair's stated claim, confirmed it live: a rogue blob planted
+// under the SAME canonical name in a DIFFERENT (unswept) session dir, with a
+// newer mtime, was served over the real snapshot — no access to the live
+// session's own slot needed, none to the governed file itself. The rogue in
+// that reproduction even COPIED the legit sidecar verbatim (the lazy
+// attack — reusing the true content's hash without re-signing for its own
+// bytes), which is exactly what this check catches: the blob's CURRENT
+// bytes must still hash to what its OWN sidecar recorded.
+//
+// Deliberately NARROWER than `verifyOrigPath` at the write path: restore has
+// no independently-trusted `phys` to compare the sidecar's recorded path
+// against (the caller supplies only a bare snapName, by design — that is
+// the whole point of "point at a snapshot, never reproduce bytes"), so this
+// checks SELF-consistency (has this blob been altered since this sidecar
+// was last written), not PROVENANCE (was the sidecar itself ever honest).
+// It closes the reproduced attack. It does NOT close an attacker who
+// recomputes a matching hash for their OWN forged bytes and writes a fresh,
+// internally-consistent sidecar to match — that is co-tampering, F2's
+// finding, and applies here exactly as it applies at the write path.
+//
+// A legacy (pre-F1) sidecar carries no hash line and is UNVERIFIABLE, not
+// merely absent — treated the SAME as a failed verification (skip, never
+// silently serve unverified content), the identical fail-closed polarity
+// `resolveSnapPath` already applies at write time. The cost: a session in
+// flight across THIS upgrade loses restorability for a snapshot it already
+// took pre-fix, via this door specifically (the write-path's own legacy-
+// sidecar cost, documented above, was scoped to a NEW baseline never being
+// taken; this is the restore-side twin of that same trade).
+function verifyBlobIntegrity(snapPath) {
+  try {
+    const raw = fs.readFileSync(origPathSidecar(snapPath), 'utf8');
+    const nl = raw.indexOf('\n');
+    if (nl === -1) return false; // legacy path-only sidecar — unverifiable, never trusted
+    const recordedHash = raw.slice(nl + 1).trim();
+    const blobBuf = fs.readFileSync(snapPath);
+    return contentDigest(blobBuf) === recordedHash;
+  } catch { return false; }
+}
+
 // Read ONE snapshot's ORIGINAL bytes by its bare snapName. THE RECOVERY DOOR
 // (0p law, USER-reaffirmed "ต้องทำให้ ai ลงไปเก็บกู้ ห้ามเสกของใหม่เข้า"):
 // CODE moves the bytes — they never pass through an agent's context; the AI
 // only names WHICH snapshot, code copies the REAL bytes. An AI re-authoring a
 // "recovery" from memory is the ADD-01 hallucination-twin (a fake that looks
 // original); undo is trustworthy ONLY because the bytes are the real bytes,
-// model-untouched. isBareId-contained (F1); searches every session dir and
-// returns the NEWEST match (post-sweep only the current session survives, so a
-// cross-session name collision is the exception). null on a non-bare id / miss.
+// model-untouched. isBareId-contained (F1); searches every session dir,
+// VERIFIES each candidate's blob-vs-sidecar integrity (grad10 F1), and
+// returns the newest VERIFIED match — never the newest match outright
+// (post-sweep only the current session survives, so a cross-session name
+// collision, verified or not, is the exception the sweep exists to close;
+// this check is the net for the window before that sweep runs). null on a
+// non-bare id, a miss, or every candidate failing verification (fail
+// closed — a human pressing restore gets a refusal, never unverified bytes).
 export function readWriteguardSnapshot(projectRoot, snapName, { home } = {}) {
   if (!isBareId(snapName)) return null;
   const rows = listWriteguard(projectRoot, { home }).filter((r) => r.name === snapName);
   if (!rows.length) return null;
   rows.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  const pick = rows[0];
+  const pick = rows.find((r) => verifyBlobIntegrity(r.snapshotPath));
+  if (!pick) return null;
   // BYTES (G3-3's twin, same commit — the bins and this door are one concept
   // with two implementations, and when one learns the other changes or the
   // "same law" comment is a lie). The snapshot on disk is byte-exact (a
