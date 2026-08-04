@@ -2576,12 +2576,69 @@ test('rung-2 F1 [HIGH]: the ownership check applies to the BLOB-PATH call shape 
     assert.strictEqual(leaked, false, 'CODER role secret content must NOT land in REVIEWER role recovery dir via the blob-path call shape');
 
     // NOT VACUOUS: the same blob-path call shape still succeeds when ownership is correctly
-    // declared — ownershipDir derives from the blob's own directory when snapshotDir is
-    // omitted, so the legitimate path stays open.
+    // declared — rung-2 F1-b now REQUIRES snapshotDir explicitly (no more path.dirname(blob)
+    // fallback; that fallback let an attacker-owned directory supply its own manifest), so the
+    // legitimate path stays open only when the caller names it, which this call does.
     const roleAHash = sha256File(roleA);
-    const legit = restoreFromSnapshot(path.join(sharedSnap, roleAHash), path.join(dir, 'legit.out'), { original: roleA });
+    const legit = restoreFromSnapshot(path.join(sharedSnap, roleAHash), path.join(dir, 'legit.out'), { snapshotDir: sharedSnap, original: roleA });
     assert.strictEqual(legit.ok, true, `a correctly-declared legitimate blob-path restore must succeed (got ${legit.reason})`);
     assert.strictEqual(fs.readFileSync(path.join(dir, 'legit.out'), 'utf8'), fs.readFileSync(roleA, 'utf8'));
+  } finally { rm(dir); }
+});
+
+// rung-2 F1-b [HIGH] — `ownershipDir` used to fall back to `path.dirname(blob)` when `snapshotDir`
+// was omitted, and `blob` is the very reference being restored (untrusted input): an attacker who
+// copies a victim's blob into a directory they own and writes their own self-consistent manifest
+// row there (original/originalCanonical/originalDev/originalIno all matching a file the attacker
+// genuinely owns) gets a self-authorizing ownership oracle — the party being asked "is this really
+// a snapshot of `original`?" chooses the manifest that answers it. RED-FIRST re-verified live in
+// this session against a temp copy of this file's own pre-fix HEAD (git show), confirmed
+// ok:true/verified:true/the victim's secret landing at the attacker-chosen path — not reasoned.
+test('rung-2 F1-b [HIGH]: a self-authorizing manifest in an attacker-owned directory is refused when snapshotDir is omitted', () => {
+  const dir = tmp();
+  try {
+    // victim: a real secret, snapshotted into the VICTIM's own store
+    const victimStore = path.join(dir, 'victim-store'); fs.mkdirSync(victimStore, { recursive: true });
+    const victimSrc = write(dir, 'victim-memory.md', Buffer.from('CODER role secret: prod DB password is hunter2\n'));
+    const snap = snapshotSource(victimSrc, victimStore);
+    assert.strictEqual(snap.ok, true, 'setup: victim snapshot');
+
+    // attacker: their OWN directory + their OWN genuinely-owned file
+    const attackerDir = path.join(dir, 'attacker-dir'); fs.mkdirSync(attackerDir, { recursive: true });
+    const attackerOwnedFile = write(dir, 'attacker-owns-this.txt', Buffer.from('nothing sensitive, this is the attackers own file\n'));
+
+    // attacker copies the VICTIM's blob bytes into their own directory (identical content -> identical sha256)
+    const victimBlob = fs.readFileSync(snap.snapshotPath);
+    const sha = crypto.createHash('sha256').update(victimBlob).digest('hex');
+    const attackerBlobPath = path.join(attackerDir, sha);
+    fs.writeFileSync(attackerBlobPath, victimBlob);
+
+    // attacker writes a SELF-CONSISTENT manifest row: original/originalCanonical/originalDev/originalIno
+    // all genuinely matching the attacker's own file (would pass canonMatch/devinoMatch for real)
+    const declaredCanonical = physicalForCreate(attackerOwnedFile);
+    const st = fs.statSync(attackerOwnedFile, { bigint: true });
+    const row = JSON.stringify({
+      original: attackerOwnedFile, originalCanonical: declaredCanonical,
+      originalDev: st.dev.toString(), originalIno: st.ino.toString(),
+      sha256: sha, bytes: victimBlob.length, at: new Date().toISOString(), deduped: false,
+    }) + '\n';
+    fs.writeFileSync(path.join(attackerDir, SNAPSHOT_MANIFEST), row);
+
+    // THE ATTACK: blob path points into the attacker's directory, NO snapshotDir passed
+    const dest = path.join(dir, 'exfiltrated.out');
+    const result = restoreFromSnapshot(attackerBlobPath, dest, { original: attackerOwnedFile });
+    assert.strictEqual(result.ok, false, 'a blob-path restore with no snapshotDir must refuse, even with a self-consistent manifest sitting beside the blob');
+    assert.strictEqual(result.verified, false);
+    assert.match(result.reason, /snapshotDir/i, 'the refusal names the missing snapshotDir — never a generic ownership-unconfirmed message indistinguishable from an honest miss');
+    assert.strictEqual(fs.existsSync(dest), false, 'nothing was copied out to the attacker-chosen destination — the victims secret never lands anywhere the attack could read it back from');
+
+    // CONTROL: the identical attacker setup, but the caller declares the REAL snapshotDir — refused
+    // for the honest reason (manifest confirms nothing there), proving the gate isn't just eating
+    // every call: a legitimate restore against the real store still succeeds.
+    const legitDest = path.join(dir, 'legit.out');
+    const legit = restoreFromSnapshot(snap.sha256, legitDest, { snapshotDir: victimStore, original: victimSrc });
+    assert.strictEqual(legit.ok, true, `a correctly-declared legitimate restore must still succeed (got ${legit.reason})`);
+    assert.strictEqual(fs.readFileSync(legitDest, 'utf8'), fs.readFileSync(victimSrc, 'utf8'));
   } finally { rm(dir); }
 });
 

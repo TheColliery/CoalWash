@@ -1760,20 +1760,32 @@ export function restoreFromSnapshot(ref, toPath, opts) {
       return { ok: false, verified: false, reason: `toPath exists and is non-empty — refusing to overwrite it without force:true (a restore never silently clobbers a populated destination, incl. the live source)` };
     }
     // (c) OWNERSHIP (rung-2, see the function header) — UNCONDITIONAL, not gated on whether the caller
-    // named `snapshotDir`. The blob has already passed existsSync above, so `path.dirname(blob)` always
-    // resolves to a real directory even when the caller handed over a bare path — `ownershipDir` is
-    // that directory when no `snapshotDir` was given, else `snapshotDir` itself; ONE code path either
-    // way. The caller must ASSERT `original` (the source path it believes this blob came from) and the
-    // manifest must CONFIRM it via a CANONICALIZED compare (rung-2 F3, see the function header); either
-    // the assertion is missing or the manifest cannot confirm it, and both refuse. Placed LAST, after
-    // every existing guard: a ref that was already going to be refused (bad shape, traversal, hash
-    // mismatch, alias, clobber) keeps its own, more specific reason — this only additionally gates
-    // restores that would otherwise have SUCCEEDED.
-    const ownershipDir = snapshotDir || path.dirname(blob);
+    // named `snapshotDir`. The caller must ASSERT `original` (the source path it believes this blob
+    // came from) AND declare `snapshotDir` (WHERE to consult the manifest that confirms it); the
+    // manifest must CONFIRM `original` via a CANONICALIZED compare (rung-2 F3, see the function
+    // header); any of the three missing/failing refuses. Placed LAST, after every existing guard: a
+    // ref that was already going to be refused (bad shape, traversal, hash mismatch, alias, clobber)
+    // keeps its own, more specific reason — this only additionally gates restores that would
+    // otherwise have SUCCEEDED.
+    //
+    // rung-2 F1-b: `ownershipDir` used to fall back to `path.dirname(blob)` when `snapshotDir` was
+    // omitted — the blob is UNTRUSTED INPUT (the very reference being restored), so that fallback let
+    // the ownership ORACLE be chosen by the same party being asked the question: copy a victim's blob
+    // into an attacker-owned directory, write a self-consistent single-row manifest beside it (the
+    // lab's `cw-lab-rung2-r3` construction — internally-consistent `original`/`originalCanonical`/
+    // `originalDev`/`originalIno`, all matching a file the attacker genuinely owns), and the engine
+    // consults the attacker's own manifest to authorize the attacker's own restore. `snapshotDir` is
+    // now REQUIRED — a caller that does not know its own snapshot directory has no business asking
+    // for a confirmed restore.
     if (typeof original !== 'string' || !original) {
       try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
       return { ok: false, verified: false, reason: `ownership not declared: opts.original is required — the store is a shared, enumerable content-address space (directly, or via its own directory), and a restore must assert which source it believes this blob is a snapshot of (refused, never served on a bare hash discovery)` };
     }
+    if (typeof snapshotDir !== 'string' || !snapshotDir) {
+      try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+      return { ok: false, verified: false, reason: `ownership oracle undeclared: opts.snapshotDir is required — deriving the manifest directory from the untrusted blob reference lets whoever controls that path also supply the manifest that confirms it (refused, never derived from the restored reference itself)` };
+    }
+    const ownershipDir = snapshotDir;
     // rung-2 F3 rail 2: unresolvable fails CLOSED (declaredCanonical/declaredDev/declaredIno stay null,
     // never a lexical fallback) — the declared original may legitimately be GONE (that is the point of
     // a restore), so `physicalForCreate` degrades gracefully rather than `physicalOrNull`'s hard refuse.
