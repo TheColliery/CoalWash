@@ -67,7 +67,7 @@ Advisory nets for every OTHER hand editing a class-B governance/memory file (mai
 | 3 | Background toggle | wizard choice 2/4, spawn-capable, not `localOnly` |
 | 4 | Wizard bill start/cancel — this IS the Full-tier separate consent for wizard-tier runs | after the choice + toggle |
 | 5 | Insider adjudication (accept/shrink/reject) per flag | every outsider flag |
-| 6 | Unverifiable contradiction → human, change nothing | adjudication finds an unverifiable contradiction |
+| 6 | Unverifiable contradiction → human, change nothing (prohibition #50) | adjudication finds an unverifiable contradiction |
 | 7 | Unknown-platform parcel candidates → human confirms | preflight finds an unmapped platform |
 | 8 | `estate.deleteCold: true` config | before ULTRA's COLD archive-then-delete |
 | 9 | CoalFace hand-off offer (ONCE) | choice-4 ③ past both size ∧ count gates |
@@ -128,8 +128,10 @@ Lane: `ALL` · `AMBIENT` (session-triggered runs only) · `WIZARD` (any `/coalwa
 | 45 | Never let a CRUSHING dig-gauge verdict block the raw dig | ALL |
 | 46 | ③ never touches the index slot or class-A | WIZARD-4 |
 | 47 | ③ never runs from pressure alone — only the user's choice | WIZARD-4 |
-| 48 | The wash-target store is never a comms channel; MAIN alone applies through the gate; no extra workers spawn inside CoalWash past the hand-off | WIZARD-4 |
+| 48 | The wash-target store is never a comms channel; MAIN alone applies through the gate; no ad-hoc multi-worker fan-out (a "mini-CoalFace") runs inside CoalWash at any point, not just past the hand-off | WIZARD-4 |
 | 49 | Never claim "works on X" for an unvalidated platform (the no-hooks emulation is never claimed as hook parity) | PLATFORM |
+| 50 | On an unverifiable contradiction, change nothing until the human decides | ALL |
+| 51 | The activation ladder is capability-keyed — never route by platform name | PLATFORM |
 
 ## Asks (Stop hook — CODE-built templates, `ask.mjs`)
 
@@ -163,9 +165,9 @@ The deliberate door — no BMI, no numbers at entry (openable on any store, incl
 
 **Choice 4 — THREE layers (procedure + table: §11):** **①** ULTRA engine = choice 3. **②** RE-TIER engine (`cli.mjs retier-run` on start, print verbatim; refuses below the arm line). **③** ONE agent clone (prohibition #40) reorganizes the MANUAL tier (prohibition #46) — **③a merge/regroup duplicate topics, THEN ③b condense** — every rewrite through `gateFiles`, every move through MOVE-VERIFY, ONE `applyPlan` tx, `origin: 'wizard-cut'`. `localOnly` blocks ③ (①② still run). Prohibition #47. All wizard-ONLY.
 
-**③-clone coordination + logbook: §9b** (disjoint partitions · collection-merge · blocked-returns-named; prohibition #48). **CoalFace hand-off:** ③ past both size∧count gates (`handoffVerdict`, §9c) → NO more workers inside CoalWash; at fan-out grade OFFER `/coalface` ONCE (never a mini-CoalFace; the fidelity gate stays the domain gate). ONE huge file = 1 worker — demote-first.
+**③-clone coordination + logbook: §9b** (disjoint partitions · collection-merge · blocked-returns-named). **CoalFace hand-off:** ③ past both size∧count gates (`handoffVerdict`, §9c) → NO more workers inside CoalWash; at fan-out grade OFFER `/coalface` ONCE (prohibition #48 — the fidelity gate stays the domain gate). ONE huge file = 1 worker — demote-first.
 
-## Activation ladder (capability-keyed, never platform-keyed)
+## Activation ladder (capability-keyed; prohibition #51)
 
 Has lifecycle hooks → the shipped conductor runs the gauge at `SessionStart`, delivers any pending ask/force at `Stop`, counts sub spawns at `PostToolUse` (Claude Code today). No hooks → best-effort agent-driven: an always-loaded instruction watches for visible class-B bloat and OFFERS the ask-box (probabilistic; prohibition #49). Always → manual `/coalwash`. A platform adding hooks moves UP (wire the hook, retire the emulation).
 

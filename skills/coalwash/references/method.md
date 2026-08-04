@@ -392,7 +392,7 @@ Undo: the run's snapshot (kept 3) + the wizard bin (`store.old`) + the estate ar
 
 ## 12. Ledger authoring — how a row earns its place (maintainer note, not a reader instruction)
 
-The SKILL.md Prohibitions ledger is presented as a **complete, already-decided set** — a reader transcribes rows, never re-derives membership. This section is for whoever ADDS or EDITS a row later; it plays no role in reading the shipped ledger.
+The SKILL.md Prohibitions ledger's INTENT is a complete, already-decided set a reader transcribes rather than re-derives — **treat that as the goal, not an achieved fact.** Run 29 (`SKILL-VARIANCE-WALK.md`) found real prohibition-shaped clauses outside the ledger; the three it named by source are closed as of that findings-back round, but no full line-by-line audit of the rest of the body has been run — a future strong-tier walk finding a fourth gap would not be a surprise. This section is for whoever ADDS or EDITS a row.
 
 **What makes a sentence a PROHIBITION, not a guideline:** rewrite it as "you must never `<verb the agent performs>`." If that preserves the meaning AND names a concrete action the agent could otherwise choose to take, it earns a row. A sentence describing what CODE refuses (not an agent choice) does not — unless the agent could independently attempt the same forbidden thing by hand (this room's agents hand-compose plan JSON and node snippets, so most code-enforced rules still earn one).
 
