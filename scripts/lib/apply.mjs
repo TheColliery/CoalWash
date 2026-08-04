@@ -529,18 +529,26 @@ function textSurvives(needle, haystacks, normHaystacks, haystackLineParts, stric
 // FUTURE tightening of `textSurvives`'s single-line branch (:493-498) is
 // caught by the KEEPS-GATE's own single-line ACCEPTANCE tests, which the
 // WAVE-7 sweep made non-vacuous: "a whitespace-reflowed anchor still
-// matches" (needs the normWhitespace tolerance specifically), "an anchor
+// matches" (pins the HAYSTACK-side normWhitespace tolerance), "an
+// IRREGULAR-whitespace anchor still matches a clean rewritten haystack"
+// (pins the NEEDLE-side tolerance -- normNeedle = normWhitespace(needle),
+// :496; added at WAVE-8 RE-INSPECT after a six-mutation sweep found the
+// haystack-side test alone left the needle side uncovered: an irregular
+// anchor whose clause was reflowed-and-kept would be wrongly REFUSED under
+// a needle-side-only tightening, with the whole suite green), "an anchor
 // MIGRATED to another file... passes", and the CALL COUNT single-line-only
-// test. Tested directly: stripping textSurvives's normWhitespace tolerance
-// (forcing exact-match only) reddens the whitespace-reflow test immediately
-// -- restored after confirming.
+// test. Tested directly, both sides: stripping textSurvives's normWhitespace
+// tolerance on either side (haystack-only or needle-only) reddens its
+// matching test immediately -- restored after confirming.
 //
 // A future caller of THIS function with a single-line anchor (violating the
 // one precondition the current call site enforces) does not crash -- it
-// falls through to the ancestor-chain-aware multi-line path below, a
-// stricter mechanism than the deleted shortcut, not a silent no-op. If a
-// new call site needs the old single-line shortcut back, gate it the same
-// way the existing one does, rather than reintroducing an untested twin.
+// falls through to the ancestor-chain-aware multi-line path below. Measured
+// across six single-line cases (incl. reindented and nested): the fallthrough
+// agreed with the deleted shortcut on all six -- NO LOOSER, never observed
+// stricter. If a new call site needs the old single-line shortcut back, gate
+// it the same way the existing one does, rather than reintroducing an
+// untested twin.
 function survivesOwnFile(anchor, newContent, origText) {
   if (String(newContent).includes(anchor)) return true; // exact substring -- unambiguous either way
   const shape = needleIndentShape(anchor, lineParts(origText));

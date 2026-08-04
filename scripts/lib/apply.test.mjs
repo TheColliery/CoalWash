@@ -1467,6 +1467,28 @@ test('KEEPS-GATE: a whitespace-reflowed anchor still matches (normalized form ac
   } finally { clean(proj); }
 });
 
+test('KEEPS-GATE: an IRREGULAR-whitespace anchor still matches a clean rewritten haystack (needle-side normalization)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'needle.md');
+    write(f, 'Rule: the  three   word\trule stands. Tail.');
+    // WAVE-8 RE-INSPECT (cw-class-b-reviewer): the reflow test above only
+    // reflows the HAYSTACK and keeps the NEEDLE clean -- it pins
+    // textSurvives's haystack-side normWhitespace tolerance and is BLIND to
+    // the needle side (normNeedle = normWhitespace(needle), :496). This is
+    // the missing half: the STORED anchor itself carries irregular internal
+    // whitespace (double space, triple space, a tab), the rewritten haystack
+    // is clean/regular. Proven non-vacuous BEFORE apply().
+    recordKeep(proj, { target: 'needle.md', anchor: 'the  three   word\trule stands', anchorFile: f });
+    assertAnchorStored(proj, 'needle.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'Rule: the three word rule stands. Tail trimmed.' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1);
+  } finally { clean(proj); }
+});
+
 test('KEEPS-GATE: GLOBAL keeps are consulted too (an adjudicated keep shields machine-wide)', () => {
   const { proj, store } = sandbox();
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
