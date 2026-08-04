@@ -2891,3 +2891,25 @@ test('rung-2 F4 [HIGH]: a live dev/ino mismatch overrides a stale canonMatch —
     assert.strictEqual(fs.existsSync(path.join(dir, 'recycled.out')), false, 'nothing was copied out — the old secret never reaches the caller');
   } finally { rm(dir); }
 });
+
+// TEMPORARY DIAGNOSTIC — dispatched by main-cmd, 2026-08-05, to settle whether the F4 [HIGH]
+// ubuntu red (run 30937712605) is inode recycling or a different cause. NO ASSERTIONS — cannot
+// fail the gate. Prints raw dev/ino across all 3 CI platforms so the answer is read data, not
+// inferred. DELETE once the F4 test above (Leg 3) reaches a settled disposition.
+test('TEMP DIAGNOSTIC: dev/ino across unlink+recreate at the same path (delete before merge)', () => {
+  const dir = tmp();
+  try {
+    const p = path.join(dir, 'recycled-probe.txt');
+    fs.writeFileSync(p, 'first\n');
+    const before = fs.statSync(p, { bigint: true });
+    fs.unlinkSync(p);
+    fs.writeFileSync(p, 'second\n');
+    const after = fs.statSync(p, { bigint: true });
+    const sameDev = before.dev === after.dev;
+    const sameIno = before.ino === after.ino;
+    console.error(`TEMP-DIAG platform=${process.platform} node=${process.version} ` +
+      `before.dev=${before.dev} before.ino=${before.ino} ` +
+      `after.dev=${after.dev} after.ino=${after.ino} ` +
+      `sameDev=${sameDev} sameIno=${sameIno} RECYCLED=${sameDev && sameIno}`);
+  } finally { rm(dir); }
+});
