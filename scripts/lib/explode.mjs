@@ -1594,6 +1594,14 @@ function existsPopulated(p) {
 //       FILESYSTEM-SEMANTICS-ASSUMPTION BREAK — the code assumed "a live dev/ino match reliably
 //       identifies the same file," which ext4 violates under exactly this access pattern).
 //
+//       CONFIRMED WITH RAW NUMBERS, not left as deduction from the test's pass/fail alone (GitHub
+//       Actions run 30939561156, a one-shot printing diagnostic, deleted after this landed):
+//         linux  (ubuntu, node 22): before.ino=8917289 after.ino=8917289  -> IDENTICAL (recycled)
+//         win32  (windows, node 22): before.ino=8162774324769855 after.ino=8444249301480511 -> DIFFERENT
+//         darwin (macos, node 24): before.ino=2882206 after.ino=2882207 -> DIFFERENT (sequential)
+//       Three platforms, one immediate unlink+recreate at one path: only Linux recycles the inode
+//       at CI scale. This is measured, not inferred from the assertion's own outcome.
+//
 //       Birthtime was considered and NOT added as a fix: Node's `Stats.birthtimeMs` shape is
 //       platform-independent, but its Linux VALUE is not — reliability depends on `statx()` kernel
 //       support and libuv's crtime-vs-ctime fallback, neither verifiable from a non-Linux dev box, and
