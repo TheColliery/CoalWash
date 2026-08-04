@@ -507,20 +507,42 @@ function textSurvives(needle, haystacks, normHaystacks, haystackLineParts, stric
 // a legitimate merge (rail #2) -- the KEEPS-GATE call site below falls back
 // to the existing, unchanged, cross-file `textSurvives` sweep for that case.
 //
-// grad11 CI-RED FOLLOW-UP: the single-line branch below is left intact
-// (correctness, callable standalone) but its call site now only reaches
-// this function for a MULTI-LINE anchor -- see the guard at the call site's
-// own comment for why (a single-line anchor gains nothing from a strict
-// own-file check and the branch cost a redundant `normWhitespace` per call
-// that the fallback's own memo already covers).
+// WAVE-8 (cw-class-b-reviewer): the single-line branch that used to sit here
+// was DELETED, not merely left unreachable. `b3a9893` gates this function's
+// ONE call site on `/\r|\n/.test(k.anchor)`, so a single-line anchor is now
+// NEVER routed here at all -- the branch had become dead code, and a
+// mutation proved it: inverting its answer to `return false` left the whole
+// suite green (1095/1095), because nothing could reach it to notice.
+//
+// The equivalence claim that branch existed to preserve -- "the fallback's
+// whole-plan scan is a SUPERSET of the own-file-only check, so nothing the
+// strict check would have found is lost" -- is NOT carried by a dead twin;
+// dead code cannot fail when the thing it claims to mirror changes. What
+// DOES carry it is predicate identity: for a single-line anchor, this
+// function's own deleted branch and `textSurvives`'s single-line branch ran
+// the IDENTICAL two checks (`includes`, then `normWhitespace(...).includes`)
+// -- so removing the twin and routing single-line anchors through the one
+// remaining implementation (the fallback, `textSurvives`) does not narrow
+// coverage, it just stops maintaining a second copy of the same test.
+//
+// The real backstop -- verified by mutation, not asserted -- is that a
+// FUTURE tightening of `textSurvives`'s single-line branch (:493-498) is
+// caught by the KEEPS-GATE's own single-line ACCEPTANCE tests, which the
+// WAVE-7 sweep made non-vacuous: "a whitespace-reflowed anchor still
+// matches" (needs the normWhitespace tolerance specifically), "an anchor
+// MIGRATED to another file... passes", and the CALL COUNT single-line-only
+// test. Tested directly: stripping textSurvives's normWhitespace tolerance
+// (forcing exact-match only) reddens the whitespace-reflow test immediately
+// -- restored after confirming.
+//
+// A future caller of THIS function with a single-line anchor (violating the
+// one precondition the current call site enforces) does not crash -- it
+// falls through to the ancestor-chain-aware multi-line path below, a
+// stricter mechanism than the deleted shortcut, not a silent no-op. If a
+// new call site needs the old single-line shortcut back, gate it the same
+// way the existing one does, rather than reintroducing an untested twin.
 function survivesOwnFile(anchor, newContent, origText) {
   if (String(newContent).includes(anchor)) return true; // exact substring -- unambiguous either way
-  if (!/\r|\n/.test(String(anchor))) {
-    // a single-line anchor has no ancestor of ITS OWN content to defend
-    // (there is nothing "inside" one line) -- flatten-tolerant only, same as
-    // textSurvives's own single-line branch.
-    return normWhitespace(newContent).includes(normWhitespace(anchor));
-  }
   const shape = needleIndentShape(anchor, lineParts(origText));
   return indentRelativeSurvives(shape, newContent);
 }
@@ -1376,11 +1398,22 @@ export function applyPlan(plan, opts = {}) {
             // that added this call unconditionally (25 files/~768KB each,
             // 20 single-line keeps -- 20 redundant O(768KB) normalizations).
             // Skipping straight to the fallback for a single-line anchor
-            // loses nothing: the fallback's whole-plan scan is a SUPERSET
-            // of the own-file-only check (the file the strict check would
-            // have looked at is one of the fallback's own haystacks), so
-            // anything the strict check would have found, the fallback
-            // finds too -- it just also tolerates the SAME cross-file
+            // loses nothing -- but the reason is PREDICATE IDENTITY, not
+            // scope alone (WAVE-8, cw-class-b-reviewer: a wider haystack
+            // under a LOOSER predicate would be a weakening, the direction
+            // that matters on a gate whose job is to refuse; naming scope
+            // as the reason licenses exactly that in a future edit). What
+            // actually carries the claim: `survivesOwnFile`'s deleted
+            // single-line branch and `textSurvives`'s single-line branch
+            // (used below) ran the IDENTICAL two checks (`includes`, then
+            // `normWhitespace(...).includes`), in the same order, over
+            // haystack sets that partition the exact same total: {own file}
+            // union {every other file} either way. Same predicate, same
+            // union -- provably the same accept/reject verdict, by
+            // exhausting both branches (see `survivesOwnFile`'s own header,
+            // above this file's KEEPS-GATE, for the deleted branch and the
+            // test that now backstops this claim). It also, as a
+            // consequence and not the reason, tolerates the SAME cross-file
             // migration a multi-line anchor gets via the fallback path
             // below, which single-line anchors are safe to inherit for
             // free (they never had a structural "original position" to
