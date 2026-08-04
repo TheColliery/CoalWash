@@ -1576,12 +1576,19 @@ test('rung-2 r8 Finding A [MED-HIGH]: a hand-driven resume verifies outPath\'s C
     // ATTACK: the caller-supplied checkpoint is genuine (no forgery) — only outPath's ALREADY-COMMITTED
     // bytes are replaced by equal-length garbage, exactly what a stray external writer or a hostile
     // co-tenant with ordinary write access to outPath (no src/snapshotDir/manifest access needed) can do.
-    fs.writeFileSync(out, Buffer.alloc(real.length, 'X'.charCodeAt(0)));
+    // CodeQL js/file-system-race (#37) — DISMISSED, same class + same reasoning as the WAVE-8 L-META
+    // dismissal above: this write/stat/read trio is not a check-then-act guard, it IS the simulated
+    // external writer this test exists to provoke. `out` lives in a per-test mkdtemp dir no other actor
+    // can name, the suite is single-process/synchronous, and the post-call read below is an ASSERTION
+    // about the tamper's persistence, not a precondition protecting anything. There is no second writer
+    // to race, so there is no flake.
+    const forged = Buffer.alloc(real.length, 'X'.charCodeAt(0));
+    fs.writeFileSync(out, forged);
     assert.strictEqual(fs.statSync(out).size, real.length, 'the substitution preserves LENGTH exactly — the old length-only guard cannot see this');
     const r = reduceFile(src, { ...opts, offset: w1.nextOffset, resume: w1.checkpoint });
     assert.strictEqual(r.ok, false, 'a content-substituted committed prefix is refused (pre-fix: ok:true — the forged bytes survive and the real reduced prefix is silently gone)');
     assert.match(r.reason, /content|mismatch|match/i);
-    assert.ok(fs.readFileSync(out).equals(Buffer.alloc(real.length, 'X'.charCodeAt(0))), 'the refusal does not itself further corrupt the tampered file — nothing is appended over it');
+    assert.ok(fs.readFileSync(out).equals(forged), 'the refusal does not itself further corrupt the tampered file — nothing is appended over it');
   } finally { rm(dir); }
 });
 
