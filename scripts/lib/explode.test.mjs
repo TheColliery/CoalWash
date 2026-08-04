@@ -2999,6 +2999,33 @@ test('rung-2 rail-5 CONTROL: a legitimate hand-driven resume with a REAL wave-1 
 // completely unaffected — it keeps carrying its own wave-1 snapshotPath across waves without the
 // per-wave re-verification the untrusted path now pays, matching the existing performance discipline
 // the resume ground-truth anchor already uses for the same flag.
+// rung-2 rail-5 F1 [MED, INSPECT-found, coordinator-reproduced] -- the first fix's trusted branch
+// (_trustedResume=true, offset>0) skipped BOTH the untrusted verification AND its own snapshot
+// gate whenever `snapshotPath` was falsy -- and `_trustedResume` is an ORDINARY opt on an EXPORTED
+// function, forgeable by any direct caller, not a real internal-only handoff. A direct call setting
+// `_trustedResume: true` with no real snapshotPath carried destroyed content, ok:true, no snapshot
+// anywhere -- rail 5 was still not universal after the first fix.
+test('rung-2 rail-5 F1 [MED]: a forged _trustedResume with NO carried snapshotPath is refused, not silently trusted', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    fs.mkdirSync(snapshotDir, { recursive: true });
+    const src = write(dir, 'src.jsonl', Buffer.from(
+      JSON.stringify({ type: 'mode', value: 1 }) + '\n' + JSON.stringify({ type: 'user', text: 'SECRET3 that must survive' }) + '\n', 'utf8'));
+    const prefixLen = Buffer.byteLength(JSON.stringify({ type: 'mode', value: 1 }) + '\n', 'utf8');
+    const out = write(dir, 'out.jsonl', Buffer.from('', 'utf8'));
+    // `_trustedResume` is a bare opt, not a capability token -- any caller of the exported
+    // `reduceFile` can set it. No `resume.snapshotPath` is carried at all here.
+    const r = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], offset: prefixLen, snapshotDir,
+      resume: { srcSha256: sha256File(src), outLen: 0 },
+      _trustedResume: true,
+    });
+    assert.strictEqual(r.ok, false, 'a forged trusted-resume with no real snapshot carried must refuse, exactly like the untrusted path does');
+    assert.match(r.reason, /snapshotPath|snapshot/i);
+  } finally { rm(dir); }
+});
+
 test('rung-2 rail-5 CONTROL: reduceToCompletion (trusted multi-wave loop) is unaffected by the fix', () => {
   const dir = tmp();
   try {
@@ -3012,6 +3039,11 @@ test('rung-2 rail-5 CONTROL: reduceToCompletion (trusted multi-wave loop) is una
     assert.strictEqual(r.done, true);
     assert.strictEqual(r.unitsCut, 10);
     assert.strictEqual(r.unitsKept, 10);
+    // INSPECT F2 (LOW): pin the property this control is actually named for — a genuine multi-wave
+    // drive, not merely a correct single-wave result. Without this, a future change that made
+    // maxLines ineffective would stay green while no longer exercising the trusted resume path
+    // (the one this fix's comment above makes claims about) at all.
+    assert.ok(r.waves > 1, `expected a genuine multi-wave drive at maxLines:3/20 lines, got waves=${r.waves}`);
   } finally { rm(dir); }
 });
 

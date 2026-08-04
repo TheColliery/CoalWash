@@ -885,12 +885,26 @@ export function reduceFile(src, opts = {}) {
         try { verified = fs.existsSync(expected) && sha256File(expected) === path.basename(expected); } catch { /* unreadable -> not verified */ }
         if (!verified) return fail('resume: no verifiable snapshot blob for this source in the store (rail 5: no snapshot, no destroy)');
         snapshotPath = expected;
+      } else if (offset !== 0) {
+        // _trustedResume path (reduceToCompletion's own loop, offset>0): keeps the `snapshotPath`
+        // already carried from `resume` above, unchanged, and does NOT re-hash `src` to re-verify
+        // it — that would cost O(waves x size) for no added safety inside `reduceToCompletion`'s own
+        // internal drive, the same performance trade the resume ground-truth anchor below already
+        // makes for this exact flag.
+        //
+        // CORRECTED (rung-2 rail-5 INSPECT F1, MED): the prior comment here claimed the carried
+        // `snapshotPath` is "never caller-forgeable" — true of `reduceToCompletion`'s OWN internal
+        // call, false of `_trustedResume` itself, which is an ORDINARY, unprefixed opt on this
+        // EXPORTED function (see its destructuring above) — any direct caller can pass
+        // `_trustedResume: true` and skip both this branch's snapshot AND the untrusted branch's
+        // verification. A caller doing that with `resume.snapshotPath: null` (or omitted) slips
+        // through here with `snapshotPath` staying null and still cuts, ok:true, no snapshot at
+        // all — rail 5 was not yet universal. One cheap check closes it without touching the
+        // performance trade: require SOMETHING was actually carried before trusting the skip.
+        if (!(typeof snapshotPath === 'string' && snapshotPath)) {
+          return fail('resume: no snapshotPath carried on a trusted resume — refusing to skip the snapshot check on nothing (rail 5: no snapshot, no destroy)');
+        }
       }
-      // _trustedResume (reduceToCompletion's own loop, offset>0): keeps the `snapshotPath`
-      // already carried from `resume` above, unchanged. It was created by THIS SAME trusted
-      // call chain a few lines up the loop, never caller-forgeable, and re-hashing `src` on
-      // every wave to re-verify it would cost O(waves x size) for no added safety — the same
-      // performance trade the resume ground-truth anchor below already makes for this exact flag.
     }
 
     // json-single: the whole (small, already-verified) file is exactly one unit.
