@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
-import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine } from './apply.mjs';
+import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks } from './apply.mjs';
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
@@ -1760,7 +1760,7 @@ test('RED-FIRST/F8-prose-reflow: a PROSE anchor captured spanning a hard wrap st
   } finally { clean(proj); }
 });
 
-test('RED-FIRST/F8 must-break control: F8\'s reflow tolerance must NOT let a genuine multi-line dedent bypass through the uniform fallback', () => {
+test('RED-FIRST/F8 must-break control (non-uniform needle): a genuine multi-line dedent is still refused via the dense-rank sliding window — this anchor has real internal indentation variation, never reaches the uniform/atZero fallback at all', () => {
   const { proj, store } = sandbox();
   try {
     const f = path.join(store, 'protected.md');
@@ -1775,8 +1775,41 @@ test('RED-FIRST/F8 must-break control: F8\'s reflow tolerance must NOT let a gen
       { type: 'rewrite', path: f, content: newBody },
       { type: 'rewrite', path: other, content: 'trimmed' },
     ]));
-    assert.strictEqual(r.applied, 1, 'the dedent must still be REFUSED — this anchor has real indentation variation, never reaches the uniform fallback');
+    assert.strictEqual(r.applied, 1, 'the dedent must still be REFUSED — this anchor (4 lines, depths 0/4/4/0) is non-uniform and never reaches the uniform/atZero fallback');
     assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
+  } finally { clean(proj); }
+});
+
+// grad10-round-2 HIGH-1 [content-loss, F8's own uniform fallback reopened
+// round 9's python-dedent for a NARROWER anchor]: the control above cannot
+// reach F8's uniform/atZero branch at all (its anchor is non-uniform, depths
+// 0/4/4/0) — "a control that cannot reach the branch it names is not a
+// control." THIS control captures ONLY the 2-line loop body (both lines at
+// the SAME depth — genuinely uniform, and genuinely indented, indent0=4>0),
+// then dedents that body whole OUT of the loop (both lines move together to
+// indent 0 — still mutually uniform, at a DIFFERENT absolute depth). Dense
+// rank alone cannot see this: a uniform sequence collapses to the identical
+// rank pattern regardless of magnitude, so the attack needs variation in the
+// HAYSTACK's absolute placement, not the needle's internal structure — the
+// absolute-indent gate in indentRelativeSurvives exists for exactly this.
+test('RED-FIRST/F8-round2-HIGH1 must-break control (uniform, indented needle): a loop body captured ALONE, dedented whole out of its loop, is still refused — genuinely reaches the uniform/atZero branch, and atZero is false (indent0=4), so the fallback is never used either', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'protected.md');
+    const other = path.join(store, 'other.md');
+    const origBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    process_item(i)\n    process_item(i*2)\nprint("done")\nTail notes.';
+    write(f, origBody);
+    write(other, 'trim me');
+    const anchor = '    process_item(i)\n    process_item(i*2)';
+    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    const newBody = 'Ops snippet (load-bearing):\nfor i in range(3):\nprocess_item(i)\nprocess_item(i*2)\nprint("done")\nTail notes — rewritten.';
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: newBody },
+      { type: 'rewrite', path: other, content: 'trimmed' },
+    ]));
+    assert.strictEqual(r.applied, 1, 'the body-only dedent must be REFUSED — the anchor is uniform (both lines depth 4) but that indent is non-zero, so the absolute-indent gate fires and the flatten fallback is never reached');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody, 'the file must be left UNTOUCHED');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
   } finally { clean(proj); }
 });
 
@@ -1823,6 +1856,65 @@ test('GATE COST: KEEPS-GATE with many keeps against many large post-texts stays 
     // under full-suite contention post-memoize still lands well under
     // 1800ms, which sits with wide margin on both sides
     assert.ok(ms < 1800, `KEEPS-GATE against ${ACTIONS} large post-texts / ${KEEP_COUNT} keeps took ${ms.toFixed(0)}ms — the normalize-per-call regression is back`);
+  } finally { clean(proj); }
+});
+
+// grad10-round-2 LOW-7: F9's own fix (memoize the multi-line haystack parse)
+// paid its memoization UNCONDITIONALLY every while-iteration, including the
+// common case where every keep is single-line and the memo is never read.
+// Reviewer-measured ~+16% on the single-line-only path via wall-clock. THAT
+// INSTRUMENT DOES NOT SURVIVE HERE: two independent attempts (this round)
+// to isolate the effect through a real `apply()` call both failed --
+// `applyPlan`'s own I/O (file writes, the fidelity gate's diff pass, the
+// airbag/seatbelt) dominates total time at ANY fixture scale large enough
+// to also make `lineParts()`'s cost visible (confirmed: a 25-file/25-keep
+// version cost >2s on EITHER engine; a 3-file/30MB version cost ~2.9s on
+// the ALREADY-FIXED lazy engine alone -- the KEEPS-GATE's own share was
+// never the majority of either number). `getLinePostTexts` is now LAZY --
+// built at most once per while-iteration, only when an anchor actually
+// needs it (`/\r|\n/.test(anchor)`) -- and the regression protection for
+// THAT claim is a CALL COUNT, not a clock: `__testHooks.linePartsMapCalls`
+// increments once per `postTexts.map(lineParts)` build. Zero production
+// cost (one integer increment, read by nobody outside a test).
+test('CALL COUNT (round-10-round-2 LOW-7): a KEEPS-GATE pass with ONLY single-line anchors never builds the multi-line memo at all', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f1 = path.join(store, 'a.md');
+    const f2 = path.join(store, 'b.md');
+    write(f1, 'orig-a anchor-a-present here');
+    write(f2, 'orig-b anchor-b-present here');
+    recordKeep(proj, { target: 'a.md:span', anchor: 'anchor-a-present', anchorFile: f1 });
+    recordKeep(proj, { target: 'b.md:span', anchor: 'anchor-b-present', anchorFile: f2 });
+    __testHooks.linePartsMapCalls = 0;
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f1, content: 'new-a anchor-a-present here' },
+      { type: 'rewrite', path: f2, content: 'new-b anchor-b-present here' },
+    ]));
+    assert.strictEqual(r.applied, 2, r.error); // both keeps survive, nothing excluded
+    assert.strictEqual(__testHooks.linePartsMapCalls, 0, 'no anchor here is multi-line -- the memo must never be built');
+  } finally { clean(proj); }
+});
+
+test('CALL COUNT (round-10-round-2 LOW-7) control: a mixed pass with ONE multi-line anchor builds the memo EXACTLY ONCE, shared across the whole iteration', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f1 = path.join(store, 'a.md');
+    const f2 = path.join(store, 'b.md');
+    const f3 = path.join(store, 'c.md');
+    write(f1, 'orig-a anchor-a-present here');
+    write(f2, 'orig-b anchor-b-present here');
+    write(f3, 'orig-c\nmulti\nline\nanchor-c-present here\nmore text');
+    recordKeep(proj, { target: 'a.md:span', anchor: 'anchor-a-present', anchorFile: f1 }); // single-line
+    recordKeep(proj, { target: 'b.md:span', anchor: 'anchor-b-present', anchorFile: f2 }); // single-line
+    recordKeep(proj, { target: 'c.md:span', anchor: 'multi\nline\nanchor-c-present', anchorFile: f3 }); // multi-line
+    __testHooks.linePartsMapCalls = 0;
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f1, content: 'new-a anchor-a-present here' },
+      { type: 'rewrite', path: f2, content: 'new-b anchor-b-present here' },
+      { type: 'rewrite', path: f3, content: 'new-c\nmulti\nline\nanchor-c-present here\nmore text' },
+    ]));
+    assert.strictEqual(r.applied, 3, r.error); // all three survive, one iteration
+    assert.strictEqual(__testHooks.linePartsMapCalls, 1, 'ONE multi-line anchor still needs the memo -- built once, not once per anchor and not skipped');
   } finally { clean(proj); }
 });
 

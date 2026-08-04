@@ -75,6 +75,31 @@ test('0p writeguard-list via CLI: metadata only (name/bytes/session/path), never
   } finally { clean(home, proj); }
 });
 
+// grad10-round-2 MED-5: readWriteguardSnapshot returns null both for "no row
+// of this name exists" AND "a row exists but failed F1's integrity check" --
+// the CLI used to say "not found" for both, so a genuine tamper read as a
+// missing file, the wrong message at the worst moment. This test snapshots a
+// REAL file (so the name IS listed by writeguard-list), then tampers the
+// on-disk blob bytes directly (breaking the sidecar's recorded hash) --
+// distinct from the "no-such-snap" case above, which never had a row at all.
+test('0p writeguard-restore via CLI: a snapshot that IS listed but fails integrity verification gets its OWN message, never "not found"', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n', 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const name = path.basename(snap);
+    fs.writeFileSync(snap, 'TAMPERED — no longer what the sidecar attests', 'utf8'); // in-place tamper, sidecar unchanged
+    const list = run(proj, home, ['writeguard-list']);
+    assert.ok(list.stdout.includes(name), 'the tampered snapshot is still LISTED (metadata only, no integrity check there)');
+    const r = run(proj, home, ['writeguard-restore', name]);
+    assert.strictEqual(r.status, 1);
+    assert.strictEqual(r.stdout, '', 'no content -- unverified bytes are never served');
+    assert.ok(r.stderr.includes('FAILED integrity verification'), r.stderr);
+    assert.ok(!r.stderr.includes('not found'), `must NOT say "not found" for a snapshot that IS listed: ${r.stderr}`);
+  } finally { clean(home, proj); }
+});
+
 test('gauge --json: one call returns recover + platform + measure + verdict + breakEven, exit 0', () => {
   const { home, proj } = sandbox();
   try {

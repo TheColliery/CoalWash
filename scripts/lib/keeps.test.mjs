@@ -283,9 +283,11 @@ test('RED-FIRST/F3 control: a real anchor at/above the meaningful-length floor s
   const proj = sandbox();
   try {
     recordKeep(proj, { target: 'f.md:clause', reason: 'first', anchor: 'the old ninety-plus char span used only to seed a real prior entry here', anchorFile: 'C:/store/f.md' });
-    // grad10 F4 raised the floor to 20 chars + 2 words -- "8+chars!" (round
-    // 9's own control fixture) is a single token and now correctly sits
-    // BELOW it; this is a real, multi-word phrase at/above the NEW floor.
+    // grad10 F4 raised the floor to 20 chars + 2 words, then grad10-round-2
+    // HIGH-2 replaced the word-count leg with a distinct-character floor
+    // (script-agnostic) and lowered the length floor to 12 -- "8+chars!"
+    // (round 9's own control fixture, 8 chars) sits BELOW it either way;
+    // this fixture clears both the length and distinct-char floors.
     recordKeep(proj, { target: 'f.md:clause', reason: 'moved', anchor: 'genuinely real anchor text', anchorFile: 'C:/store/f2.md' });
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
     assert.strictEqual(entry.anchor, 'genuinely real anchor text', 'a real anchor at the floor still overrides — only sub-floor junk is refused');
@@ -316,8 +318,9 @@ for (const junk of ['whatever', '!!!!!!!!']) {
 test('RED-FIRST/F4-distinctiveness control: a real multi-word phrase at the SAME length as "whatever"-class junk still gets an enforcement handle', () => {
   const proj = sandbox();
   try {
-    // "a rare specific phrase indeed" -- stripped 26 chars, 5 words: at/above
-    // BOTH the length and word-count floors, must NOT be over-refused.
+    // "a rare specific phrase indeed" -- stripped 26 chars, well above both
+    // the length floor (12) and the distinct-character floor (6, this
+    // phrase has ~11 distinct chars); must NOT be over-refused.
     recordKeep(proj, { target: 'f.md:clause', reason: 'test', anchor: 'a rare specific phrase indeed', anchorFile: 'C:/store/f.md' });
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
     assert.strictEqual(entry.anchor, 'a rare specific phrase indeed', 'a genuinely distinctive short phrase must still be accepted');
@@ -360,5 +363,59 @@ test('RED-FIRST/F5-invisible control: real CJK/Thai text (containing legitimate 
     assert.strictEqual(ok, true);
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:thai');
     assert.strictEqual(entry.anchor, thai, 'real Thai text must be accepted as a distinctive anchor, verbatim');
+  } finally { clean(proj); }
+});
+
+// grad10-round-2 HIGH-2 [content-loss, silent and total]: F4's word-count
+// requirement assumed every script marks word boundaries with whitespace.
+// The ABOVE Thai control has a phrase-level space in it and so passed the
+// old word-count test too -- false comfort, per the reviewer's own finding.
+// These fixtures are genuinely SPACE-FREE (real Thai/Japanese/Chinese
+// clauses, single unbroken run), which the OLD design refused outright and
+// SILENTLY (recordKeep still returns true; the anchor is simply dropped).
+const HIGH2_NO_DELIMITER = {
+  'Thai, no phrase spaces (50 chars)': 'การป้องกันข้อมูลส่วนบุคคลเป็นสิ่งสำคัญมากในยุคดิจิทัลปัจจุบันนี้อย่างแน่นอน',
+  'Japanese (31 chars)': 'これは実際に保護されるべき重要な設定項目についての具体的な説明文です',
+  'Chinese (24 chars)': '这是一个真正需要保护的重要配置项目的具体说明',
+};
+for (const [label, anchor] of Object.entries(HIGH2_NO_DELIMITER)) {
+  test(`RED-FIRST/HIGH2-no-delimiter: ${label} — a real, space-free clause is enforced as a real anchor`, () => {
+    const proj = sandbox();
+    try {
+      const ok = recordKeep(proj, { target: 'f.md:clause', reason: 'test', anchor, anchorFile: 'C:/store/f.md' });
+      assert.strictEqual(ok, true);
+      const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
+      assert.strictEqual(entry.anchor, anchor, `${label} must become a real enforcement handle -- no word delimiter needed`);
+    } finally { clean(proj); }
+  });
+}
+
+test('RED-FIRST/HIGH2-short-real-phrase: "git rev-parse HEAD" (16 stripped chars, 3 words, under the OLD 20-char floor) is enforced — short and real is not the same as non-distinctive', () => {
+  const proj = sandbox();
+  try {
+    const anchor = 'git rev-parse HEAD';
+    const ok = recordKeep(proj, { target: 'f.md:cmd', reason: 'test', anchor, anchorFile: 'C:/store/f.md' });
+    assert.strictEqual(ok, true);
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:cmd');
+    assert.strictEqual(entry.anchor, anchor, 'a short, genuinely distinctive command must not be refused for its length alone');
+  } finally { clean(proj); }
+});
+
+test('RED-FIRST/HIGH2-junk-still-refused: the reported junk shapes stay refused under the new distinct-character measure too', () => {
+  const proj = sandbox();
+  try {
+    for (const junk of ['whatever', '!!!!!!!!', 'e', '#', 'the']) {
+      const ok = recordKeep(proj, { target: `f.md:${junk}`, reason: 'test', anchor: junk, anchorFile: 'C:/store/f.md' });
+      assert.strictEqual(ok, true, `write itself still succeeds for ${JSON.stringify(junk)}`);
+      const entry = loadKeeps(proj).find((k) => k.target === `f.md:${junk}`);
+      assert.strictEqual(entry.anchor, undefined, `${JSON.stringify(junk)} must still get NO enforcement handle`);
+    }
+    // a LONGER pure-repetition string must also be refused -- the length
+    // floor alone can always be cleared by repeating one character; the
+    // distinct-character floor is what actually closes that door.
+    const longRepeat = '!'.repeat(30);
+    recordKeep(proj, { target: 'f.md:longrepeat', reason: 'test', anchor: longRepeat, anchorFile: 'C:/store/f.md' });
+    const entry2 = loadKeeps(proj).find((k) => k.target === 'f.md:longrepeat');
+    assert.strictEqual(entry2.anchor, undefined, 'a 30-char single-character repeat clears the length floor but must still be refused (1 distinct char < 6)');
   } finally { clean(proj); }
 });

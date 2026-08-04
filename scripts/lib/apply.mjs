@@ -95,6 +95,13 @@ import { unreferencedTopics } from './retier.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
+// grad10-round-2 LOW-7: test-only regression counters. Read by nobody in any
+// production code path — a plain integer increment costs nothing measurable,
+// and it exists because wall-clock could not isolate the KEEPS-GATE's own
+// memoization signal from applyPlan's own I/O at any fixture scale (see
+// apply.test.mjs's CALL COUNT tests for the measurement that established
+// this). Reset to 0 by a test before the call it is measuring.
+export const __testHooks = { linePartsMapCalls: 0 };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -251,21 +258,32 @@ function denseRank(indents) {
 function needleIndentShape(needle) {
   const n = lineParts(needle);
   const nRanks = denseRank(n.map((l) => l.indent));
-  // grad10 F8: a needle with NO indentation variation at all (every line at
-  // the same rank -- the shape a hard-wrapped PROSE anchor takes; a code/
-  // config anchor carrying real nesting does not look like this) has no
-  // relative structure to defend, and the ONLY reason such a needle is
-  // multi-line at all is a hard wrap, not a meaningful line break. Falling
-  // back to the flatten-everything check (below) is safe ONLY for this
-  // class: a semantic-indent attack needs at least one line at a DIFFERENT
-  // relative depth than another, which this needle, by construction, does
-  // not have. A needle WITH real variation never reaches the fallback, so
-  // round 9's python-dedent/yaml-reparent catches are unaffected.
+  // grad10 F8, CORRECTED grad10-round-2 HIGH-1: the claim that a needle with
+  // no INTERNAL indentation variation "has no relative structure to defend"
+  // was FALSE for an INDENTED uniform needle. Dense rank collapses a run of
+  // EQUAL values to the SAME rank regardless of magnitude -- a 2-line loop
+  // body captured alone (both lines at depth 4, nRanks=[0,0]) matches ANY
+  // haystack window whose two lines are ALSO mutually equal, at ANY shared
+  // depth -- including depth 0, i.e. the body dedented whole OUT of its
+  // loop. The rank check alone has ZERO discriminating power for a uniform
+  // needle; it was never "safe by construction", it was UNTESTED. Reproduced
+  // through the real applyPlan: `applied:2, breach landed:true, keep
+  // flagged:false` -- the exact python-dedent shape this file's F2 fix
+  // exists to catch, reopened by capturing a narrower (body-only) anchor.
+  // The genuinely SAFE case is narrower than "uniform": a needle whose
+  // shared indent is ZERO -- pure prose, hard-wrapped, where "absolute
+  // indent" was never a meaningful signal to defend in the first place (F8's
+  // own reported shape, `RED-FIRST/F8-prose-reflow`). A uniform needle with
+  // a NON-zero shared indent (code/config, however flat internally) still
+  // carries real structural meaning -- its absolute nesting depth -- that a
+  // pure rank comparison cannot see. `atZero` names that boundary; the
+  // absolute-indent gate below is keyed on it.
   const uniform = new Set(nRanks).size <= 1;
-  return { n, nRanks, uniform, flatNeedle: uniform ? normWhitespace(needle) : null };
+  const atZero = uniform && n[0].indent === 0;
+  return { n, nRanks, uniform, atZero, indent0: n[0].indent, flatNeedle: atZero ? normWhitespace(needle) : null };
 }
 function indentRelativeSurvives(shape, haystack, haystackParts) {
-  const { n, nRanks, uniform, flatNeedle } = shape;
+  const { n, nRanks, uniform, atZero, indent0, flatNeedle } = shape;
   const h = haystackParts || lineParts(haystack);
   for (let start = 0; start + n.length <= h.length; start++) {
     const hRanks = denseRank(h.slice(start, start + n.length).map((l) => l.indent));
@@ -273,13 +291,30 @@ function indentRelativeSurvives(shape, haystack, haystackParts) {
     for (let j = 0; j < n.length && ok; j++) {
       if (h[start + j].text !== n[j].text || hRanks[j] !== nRanks[j]) ok = false;
     }
+    // grad10-round-2 HIGH-1: a uniform needle's rank check alone accepts ANY
+    // window whose lines are mutually equal, at ANY shared depth -- so for a
+    // uniform needle that WAS indented (indent0 > 0), also require the
+    // matched window's absolute indent to be the SAME as the needle's own.
+    // Never applied to a non-uniform needle (its rank check already carries
+    // real discriminating power, unaffected) or to a zero-indent needle
+    // (prose -- absolute indent was never meaningful there; the flatten
+    // fallback below is that case's own, deliberately looser, tolerance).
+    // NAMED RESIDUAL, safe-direction: a uniform CODE anchor globally
+    // re-scaled to a different absolute indent (the whole file re-indented,
+    // still nested the same) now REFUSES rather than matches -- this
+    // function's own bias throughout is fail-closed-on-ambiguity (an
+    // over-refusal flags+keeps the file untouched; an under-refusal loses
+    // content silently), so trading a rare false refusal to close a real
+    // content-loss channel is the correct direction, not a regression.
+    if (ok && uniform && indent0 > 0 && h[start].indent !== indent0) ok = false;
     if (ok) return true;
   }
-  // grad10 F8: reflow tolerance for a genuinely flat (prose-shaped)
-  // multi-line needle -- the same flatten-everything check single-line
-  // needles already get below, reached HERE because the needle's own line
-  // breaks carry no structural meaning to defend.
-  if (uniform) return normWhitespace(haystack).includes(flatNeedle);
+  // grad10 F8: reflow tolerance for a genuinely flat, NEVER-indented
+  // (prose-shaped) multi-line needle only -- the same flatten-everything
+  // check single-line needles already get below. Scoped to `atZero`
+  // (grad10-round-2 HIGH-1), not `uniform` alone: an indented-but-uniform
+  // needle must never reach this looser, indent-blind check.
+  if (atZero) return normWhitespace(haystack).includes(flatNeedle);
   return false;
 }
 function textSurvives(needle, haystacks, normHaystacks, haystackLineParts) {
@@ -1082,9 +1117,28 @@ export function applyPlan(plan, opts = {}) {
         // multi-line branch (added the same round) never touched it, so a
         // multi-line keep re-parsed every haystack with lineParts() on every
         // call while the single-line path reused its precompute.
+        //
+        // grad10-round-2 LOW-7: the memo above was built UNCONDITIONALLY,
+        // every while-iteration, even when every keep this iteration is
+        // single-line and `getLinePostTexts()` would never be read at all —
+        // measured cost on the common (single-line-only) path: ~898-1055ms
+        // depending on run, up ~16% for work that produces nothing. Made
+        // lazy: `postTexts.map(lineParts)` runs at most once per iteration,
+        // on the FIRST anchor that is actually multi-line, and never at all
+        // when none are. The multi-line-heavy case is unaffected (same one
+        // build, amortized across every multi-line anchor this iteration);
+        // only the single-line-only case stops paying for a memo it never
+        // consumes. `__testHooks.linePartsMapCalls` counts real builds —
+        // wall-clock could not isolate this signal (two independent
+        // attempts confirmed `applyPlan`'s own I/O dominates total time at
+        // any fixture scale large enough to also show `lineParts()`'s cost;
+        // see the regression test's own header for the measurements), so
+        // the regression protection is a call count, not a clock.
         const normPostTexts = postTexts.map(normWhitespace);
-        const linePostTexts = postTexts.map(lineParts);
-        const survives = (anchor) => textSurvives(anchor, postTexts, normPostTexts, linePostTexts);
+        let linePostTextsMemo = null;
+        const getLinePostTexts = () => (linePostTextsMemo ||= (__testHooks.linePartsMapCalls++, postTexts.map(lineParts)));
+        const survives = (anchor) => textSurvives(anchor, postTexts, normPostTexts,
+          /\r|\n/.test(String(anchor)) ? getLinePostTexts() : undefined);
         const excluded = new Set();
         for (const k of keeps) {
           const kf = k.anchorFile;

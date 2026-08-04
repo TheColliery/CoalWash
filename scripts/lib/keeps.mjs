@@ -148,26 +148,48 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
     // 8-char floor, and both are common/repeated enough to coincidentally
     // survive somewhere in unrelated boilerplate even after the protected
     // clause they were meant to name is gone, so the KEEPS-GATE's survival
-    // check finds them and never flags the loss. Raising the floor alone
-    // narrows but does not close this (a longer common phrase can still
-    // coincidentally recur). Adding a MULTI-WORD requirement closes the
-    // reported shape without needing this plumbing-only module to read and
-    // verify against the target file's real content (an architecture change
-    // out of scope here — keeps.mjs is deliberately "plumbing only" per
-    // this file's own header, the SKILL contract decides what to record):
-    // a single repeated token, however long ("!!!!!!!!!!!!!!!!!!!!") or
-    // however common ("whatever"), is not "a specific clause" — an
-    // adjudicated keep names one. NAMED RESIDUAL: this narrows the risk, it
-    // does not prove uniqueness — a genuinely rare-but-short 2-word phrase
-    // could theoretically still coincide with unrelated text; closing that
-    // fully needs the file-content verification named above, deferred.
-    const MIN_MEANINGFUL_ANCHOR_LEN = 20;
-    const MIN_ANCHOR_WORDS = 2;
+    // check finds them and never flags the loss.
+    //
+    // CORRECTED grad10-round-2 HIGH-2: the first fix (raise the floor +
+    // require >=2 WHITESPACE-delimited words) closed the reported shape by
+    // assuming every script marks word boundaries with whitespace. Thai,
+    // Japanese and Chinese do not — a real, adjudicated 24-50 character CJK/
+    // Thai clause splits into exactly ONE "word" and was refused outright,
+    // SILENTLY: `recordKeep` still returns true, the anchor is dropped, and
+    // apply.mjs's KEEPS-GATE filters an anchor-less keep out of enforcement
+    // entirely — the keep protects nothing and the user is told it worked.
+    // Same silent-total-failure shape for any space-FREE technical token at
+    // any length (a URL, a bare function call like `verifyBlobIntegrity()`),
+    // and the word-count floor ALSO over-refused a genuinely short, real,
+    // space-delimited phrase ("git rev-parse HEAD", 16 stripped chars) for
+    // no reason connected to distinctiveness at all.
+    //
+    // The replacement measure is SCRIPT-AGNOSTIC by construction: distinct
+    // CODEPOINT COUNT, never word count. "!!!!!!!!!!!!!!!!!!!!" (any length)
+    // has exactly 1 distinct codepoint; "whatever"/"the the the" collapse to
+    // a handful. A real adjudicated clause — in ANY script, with or without
+    // word delimiters — draws from a far wider set: Thai/CJK/Latin prose all
+    // carry many distinct codepoints even at short lengths, because a real
+    // sentence is not a repeated token. Deliberately an ABSOLUTE floor, not
+    // a RATIO: a ratio decays with length for any bounded alphabet (English
+    // prose naturally drops toward ~26 distinct letters as length grows,
+    // which a fixed ratio would eventually misread as non-distinctive) —
+    // an absolute floor has no such decay and stays correct at any length.
+    // MIN_MEANINGFUL_ANCHOR_LEN lowered from 20 to 12 (still above both
+    // 8-char junk examples, comfortably below "git rev-parse HEAD"'s 16).
+    // NAMED RESIDUAL: neither measure proves true uniqueness (this is
+    // "plumbing only" per this file's own header — no read of the target
+    // file's real content, an architecture change out of scope here) — a
+    // short repeated PHRASE built from >=6 distinct characters
+    // ("whatever whatever", 7 distinct chars) can still clear both floors.
+    // Narrows the risk; does not close it fully, same standing as before.
+    const MIN_MEANINGFUL_ANCHOR_LEN = 12;
+    const MIN_DISTINCT_CHARS = 6;
     const hasRealAnchor = (v) => {
       if (typeof v !== 'string') return false;
-      if (stripInvisible(v).length < MIN_MEANINGFUL_ANCHOR_LEN) return false;
-      const words = v.split(/[\s\p{Cf}\p{Cc}\p{Default_Ignorable_Code_Point}]+/gu).filter((w) => stripInvisible(w).length > 0);
-      return words.length >= MIN_ANCHOR_WORDS;
+      const stripped = stripInvisible(v);
+      if (stripped.length < MIN_MEANINGFUL_ANCHOR_LEN) return false;
+      return new Set([...stripped]).size >= MIN_DISTINCT_CHARS;
     };
     const hasRealPath = (v) => typeof v === 'string' && stripInvisible(v).length > 0;
     const mergedAnchor = hasRealAnchor(anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);

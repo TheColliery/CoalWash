@@ -316,8 +316,23 @@ function main() {
     const name = args[1];
     if (!name) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const r = readWriteguardSnapshot(findProjectRoot(process.cwd(), os.homedir()), name, { home: os.homedir() });
-      if (!r) { console.error(`writeguard-restore: snapshot '${name}' not found`); process.exitCode = 1; return; }
+      const projectRoot = findProjectRoot(process.cwd(), os.homedir());
+      const r = readWriteguardSnapshot(projectRoot, name, { home: os.homedir() });
+      if (!r) {
+        // grad10-round-2 MED-5: readWriteguardSnapshot returns null for TWO
+        // different reasons — no row of that name exists at all, or a row
+        // exists but failed verifyBlobIntegrity (F1) — and "not found" was
+        // said for both. A genuine tamper then reads as a missing file,
+        // exactly the wrong message at the moment it matters most. Re-check
+        // listWriteguard (the same source writeguard-list itself reads) to
+        // tell the two apart before choosing the message.
+        const existed = listWriteguard(projectRoot, { home: os.homedir() }).some((row) => row.name === name);
+        console.error(existed
+          ? `writeguard-restore: snapshot '${name}' exists but FAILED integrity verification (tampered, or unreadable) — refusing to serve unverified bytes`
+          : `writeguard-restore: snapshot '${name}' not found`);
+        process.exitCode = 1;
+        return;
+      }
       process.stdout.write(r.content); // the byte-exact ORIGINAL — code-moved, model-untouched
       console.error(`[CoalWash] restored write-guard snapshot ${r.name} (${r.bytes} bytes, session ${r.session}) — byte-exact original on stdout; redirect it to the file, never re-type it`);
     } catch (e) {

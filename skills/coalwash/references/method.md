@@ -212,7 +212,7 @@ node [LIB]/cli.mjs writeguard-list                       # name · bytes · sess
 node [LIB]/cli.mjs writeguard-restore [SNAP_NAME] > [FILE]   # byte-exact original -> file; NEVER re-type it
 ```
 
-(Or a plain `cp <snapshotPath> <file>` — the snapshot IS the original bytes.) `writeguard-restore` is `isBareId`-contained (a traversal name is a clean not-found); the bytes go stdout→file, never through the model's context.
+**Never a plain `cp <snapshotPath> <file>`.** That reads correct-looking bytes off disk, but it skips `writeguard-restore`'s own identity check entirely — a snapshot's on-disk bytes can be tampered in place without touching its filename, and `writeguard-restore` refuses to serve exactly that (verified against the sidecar's recorded digest; a raw `cp` has no such check and cannot tell tampered bytes from real ones). Always go through the CLI command above. `writeguard-restore` is `isBareId`-contained (a traversal name is a clean not-found); the bytes go stdout→file, never through the model's context.
 
 ## 9. Wizard — engine snippets
 
