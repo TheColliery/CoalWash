@@ -1425,6 +1425,21 @@ export function applyPlan(plan, opts = {}) {
             // provenance field) that this call site cannot supply. Declared,
             // with the grown population named, not silently fixed.
             //
+            // WAVE-7 (cw-class-b-reviewer, offered not demanded): a NARROWER
+            // option exists and was named, not built -- disqualify a specific
+            // ACTION from the F6 fallback rescue when its own strict own-file
+            // check FAILED (rather than never having been attempted). The
+            // real trade, stated plainly: this breaks the legitimate case of
+            // restructuring AND migrating in the same plan (an action that
+            // fails its own reparent check while a sibling file elsewhere in
+            // the SAME edit genuinely absorbs its content). F6's coincidence
+            // is rare (needs an unrelated sibling to happen to carry matching
+            // text); a restructure-and-migrate plan is not. Trading a rare
+            // false-negative for a more common false-positive is the wrong
+            // direction for a fail-closed tool whose own bias throughout is
+            // "flag and let a human decide," not "silently refuse more."
+            // Not built.
+            //
             // grad11 CI-RED FOLLOW-UP: `excludeAction` is passed ONLY when
             // `triedOwnFile` is true -- i.e. only when survivesOwnFile was
             // ACTUALLY ATTEMPTED (and failed) above. Passing it unconditionally

@@ -1419,6 +1419,12 @@ test('KEEPS-GATE: an anchor MIGRATED to another file in the same txn passes (a m
     write(src, 'Precious: the exact wording survives moves. Other stuff.');
     write(dst, 'Target file.');
     recordKeep(proj, { target: 'src.md:precious', anchor: 'the exact wording survives moves', anchorFile: src });
+    // WAVE-7 sweep (cw-class-b-reviewer): this test's "passes" claim is
+    // ACCEPTANCE-shaped and cannot distinguish "the migration was detected"
+    // from "no keep was ever enforced" -- an anchor silently dropped by F5's
+    // floor produces the identical r.ok:true/applied:2 outcome (nothing in
+    // postActionable to exclude). Proven non-vacuous BEFORE apply().
+    assertAnchorStored(proj, 'src.md:precious');
     const r = apply(planFor(proj, store, [
       { type: 'delete', path: src },
       { type: 'rewrite', path: dst, content: 'Target file. Precious: the exact wording survives moves.' },
@@ -1450,6 +1456,9 @@ test('KEEPS-GATE: a whitespace-reflowed anchor still matches (normalized form ac
     const f = path.join(store, 'flow.md');
     write(f, 'Rule: the three word rule stands. Tail.');
     recordKeep(proj, { target: 'flow.md', anchor: 'the three word rule stands', anchorFile: f });
+    // WAVE-7 sweep: "still matches" is ACCEPTANCE-shaped -- a dropped anchor
+    // (nothing to enforce) produces the identical r.ok:true/applied:1.
+    assertAnchorStored(proj, 'flow.md');
     const r = apply(planFor(proj, store, [
       { type: 'rewrite', path: f, content: 'Rule: the three\nword  rule stands. Tail trimmed.' },
     ]));
@@ -1698,6 +1707,9 @@ test('RED-FIRST/F8-tabs2spaces: a uniform TABS-to-SPACES reformat (delta SCALES,
     write(other, 'trim me');
     const anchor = `service:\n${T}db:\n${T}${T}host: primary`;
     recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    // WAVE-7 sweep: "must NOT be refused" is ACCEPTANCE-shaped -- proven
+    // non-vacuous before the plan applies (a dropped anchor also applies).
+    assertAnchorStored(proj, 'protected.md:anchor');
     // every tab replaced by 4 spaces -- a real editor "convert indentation"
     // action. Level-1 delta goes from +1 char (1 tab) to +4 chars (4
     // spaces); level-2 goes from +2 to +8 -- SCALED, not shifted by a
@@ -1724,6 +1736,8 @@ test('RED-FIRST/F8-cosmetic-reindent: a cosmetic list re-indent (2-space -> 3-sp
     write(other, 'trim me');
     const anchor = 'top:\n  mid:\n    leaf: value';
     recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    // WAVE-7 sweep: same class as F8-tabs2spaces above -- proven non-vacuous.
+    assertAnchorStored(proj, 'protected.md:anchor');
     const newBody = 'Notes (load-bearing):\ntop:\n   mid:\n      leaf: value\nTail notes — reformatted.';
     const r = apply(planFor(proj, store, [
       { type: 'rewrite', path: f, content: newBody },
@@ -1747,6 +1761,8 @@ test('RED-FIRST/F8-prose-reflow: a PROSE anchor captured spanning a hard wrap st
     write(f, origBody);
     write(other, 'trim me');
     recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
+    // WAVE-7 sweep: same class as F8-tabs2spaces above -- proven non-vacuous.
+    assertAnchorStored(proj, 'protected.md:anchor');
     // reflowed at a DIFFERENT wrap point — same words, same order, the wrap
     // now lands one word earlier.
     const newBody = 'Notes: the exact wording that must\nsurvive any future rewrap of this paragraph. Tail — reformatted.';
@@ -1885,6 +1901,12 @@ test('CALL COUNT (round-10-round-2 LOW-7): a KEEPS-GATE pass with ONLY single-li
     write(f2, 'orig-b anchor-b-present here');
     recordKeep(proj, { target: 'a.md:span', anchor: 'anchor-a-present', anchorFile: f1 });
     recordKeep(proj, { target: 'b.md:span', anchor: 'anchor-b-present', anchorFile: f2 });
+    // WAVE-7 sweep: `linePartsMapCalls===0` is achievable EITHER because no
+    // anchor here is multi-line (the claim), OR because both anchors were
+    // silently dropped and the KEEPS-GATE loop never ran at all -- the two
+    // states are indistinguishable by this assertion alone. Proven non-vacuous.
+    assertAnchorStored(proj, 'a.md:span');
+    assertAnchorStored(proj, 'b.md:span');
     __testHooks.linePartsMapCalls = 0;
     const r = apply(planFor(proj, store, [
       { type: 'rewrite', path: f1, content: 'new-a anchor-a-present here' },
@@ -3703,6 +3725,15 @@ test('WAVE-6 MED-1 (documented residual, NOT a regression): the SAME F3 reparent
     write(f, 'a: 1\nb: 2\nc: 3\nd: 4\n');
     write(sibling, 'unrelated content'); // will be rewritten to coincidentally carry the anchor text
     recordKeep(proj, { target: 'MEMORY.md', anchor: 'a: 1\nb: 2\nc: 3', anchorFile: f });
+    // WAVE-7 (cw-class-b-reviewer): this test asserts the reparent LANDS --
+    // exactly what would ALSO happen if the keep were never enforced at all
+    // (an anchor silently dropped by F5's floor). Proven by mutation
+    // (MIN_MEANINGFUL_ANCHOR_LEN -> 9999): the OTHER MED-1 test (no sibling)
+    // correctly reddens, but this one stayed green -- it cannot distinguish
+    // "rescued by the F6 fallback" from "never enforced", and pinning that
+    // rescue is this test's entire job. Non-vacuity MUST be asserted BEFORE
+    // apply() -- a precondition added after would still pass vacuously.
+    assertAnchorStored(proj, 'MEMORY.md');
     const r = apply(planFor(proj, store, [
       { type: 'rewrite', path: f, content: 'a: 1\n  b: 2\nc: 3\nd: 4\n' }, // the reparent -- structurally refused on its own
       { type: 'rewrite', path: sibling, content: 'a: 1\nb: 2\nc: 3\nunrelated but coincidentally carries the exact anchor text' },
