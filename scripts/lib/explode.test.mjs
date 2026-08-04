@@ -2891,3 +2891,27 @@ test('rung-2 F4 [HIGH]: a live dev/ino mismatch overrides a stale canonMatch —
     assert.strictEqual(fs.existsSync(path.join(dir, 'recycled.out')), false, 'nothing was copied out — the old secret never reaches the caller');
   } finally { rm(dir); }
 });
+
+// TEMPORARY DIAGNOSTIC #3 — dispatched by main-cmd, 2026-08-05. DIAG #2 (birthtimeMs/ctimeMs,
+// millisecond precision) collided on node 24 (unlink+recreate landed inside one tick). Before
+// accepting that no OS timestamp closes this, probe the NANOSECOND fields node's own bigint stat
+// exposes (birthtimeNs/ctimeNs) -- the clock's real granularity may be coarser than the field's
+// format, so this must be MEASURED on real ext4, not assumed from the field existing.
+// NO ASSERTIONS -- cannot fail the gate. DELETE once read.
+test('TEMP DIAGNOSTIC #3: nanosecond birthtime/ctime across the SAME recycled-inode access pattern', () => {
+  const dir = tmp();
+  try {
+    const p = path.join(dir, 'recycled-probe3.txt');
+    fs.writeFileSync(p, 'first\n');
+    const before = fs.statSync(p, { bigint: true });
+    fs.unlinkSync(p);
+    fs.writeFileSync(p, 'second\n');
+    const after = fs.statSync(p, { bigint: true });
+    console.error(`TEMP-DIAG3 platform=${process.platform} node=${process.version} ` +
+      `sameIno=${before.ino === after.ino} ` +
+      `before.birthtimeNs=${before.birthtimeNs} after.birthtimeNs=${after.birthtimeNs} ` +
+      `sameBirthtimeNs=${before.birthtimeNs === after.birthtimeNs} ` +
+      `before.ctimeNs=${before.ctimeNs} after.ctimeNs=${after.ctimeNs} ` +
+      `sameCtimeNs=${before.ctimeNs === after.ctimeNs}`);
+  } finally { rm(dir); }
+});
