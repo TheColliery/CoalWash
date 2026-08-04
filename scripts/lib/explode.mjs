@@ -1574,13 +1574,52 @@ function existsPopulated(p) {
 //       does not collapse them — `collidesWithSource`'s own comment already says realpath "is blind to a
 //       hardlink"). A hardlinked alias of the true original, or the original renamed/moved on the SAME
 //       volume, confirms via dev+ino even though its realpath string differs from the row's.
-//       WHAT THIS LEG OPENS, not just what it closes (INSPECT MED-LOW, unnamed before this): dev+ino
+//       WHAT THIS LEG OPENS, not just what it closes (INSPECT MED-LOW, named here; rung-2 F4, HIGH,
+//       was dispatched specifically to close it — see below for why it only narrows). dev+ino
 //       is recorded at SNAPSHOT time and compared against a stat taken at RESTORE time — an inode
-//       REUSED between those two moments grants ownership to a genuinely different file. Bounded, not
-//       ignored: under F2's own threat model the attacker can forge a row outright, so this adds
-//       nothing there; without store write they would additionally need inode-reassignment control
-//       PLUS the row's exact values. Not a blocker — but a residual worth naming rather than a leg
-//       worth dropping (dropping it reopens the F3 hardlink/alias case this fix exists to close).
+//       REUSED between those two moments grants ownership to a genuinely different file.
+//
+//       rung-2 F4 [HIGH, CORRECTED 2026-08-05] — `devinoContradicts` (below, in `restoreFromSnapshot`)
+//       was built to close this: when the declared original still exists, its LIVE dev+ino is checked
+//       against the row's, and a disagreement overrides a stale `canonMatch` instead of merely failing
+//       to help it. MEASURED FALSE AS A FULL CLOSE, not reasoned — real CI (GitHub Actions run
+//       30937712605, `ubuntu-latest` node 22 AND 24) proves the shipped fix (`6f261e4`) does not close
+//       the recycled-path case on ext4: `unlinkSync` immediately followed by `writeFileSync` at the same
+//       path, under low allocation pressure, lets the OS hand the NEW file the SAME inode number the
+//       OLD one held — `devinoMatch` then computes TRUE for a genuinely different file, same as
+//       `canonMatch` (same path string), and the row confirms. `windows-latest`/`macos-latest` stay
+//       green on the identical test because NTFS/APFS do not reproduce that recycling pattern in this
+//       CI matrix — the test is not flaky, it is honestly platform-dependent, and it is CORRECT for it
+//       to stay red on Linux until this actually closes (master-loss-taxonomy class #57,
+//       FILESYSTEM-SEMANTICS-ASSUMPTION BREAK — the code assumed "a live dev/ino match reliably
+//       identifies the same file," which ext4 violates under exactly this access pattern).
+//
+//       Birthtime was considered and NOT added as a fix: Node's `Stats.birthtimeMs` shape is
+//       platform-independent, but its Linux VALUE is not — reliability depends on `statx()` kernel
+//       support and libuv's crtime-vs-ctime fallback, neither verifiable from a non-Linux dev box, and
+//       even a working birthtime could plausibly land within the SAME sub-millisecond window this
+//       exact `unlinkSync`→`writeFileSync` reproduction uses, meaning it might narrow without closing
+//       the very test it would need to turn green. Shipping it as "the fix" without being able to prove
+//       either claim would have repeated this same mistake with a different signal.
+//
+//       DISPOSITION: NARROWED, NOT CLOSED. `6f261e4` correctly and verifiably (all 3 CI platforms,
+//       Legs 1-2 of the F4 test) closes the SIMPLER attack — an attacker declares a FALSE original while
+//       the TRUE original persists untouched. The recycled-path variant (Leg 3) is a confirmed-live
+//       residual, bounded exactly as this paragraph already said before F4 was attempted: under F2's
+//       own threat model (STEP 2, below) an attacker with store write can forge a row outright, so this
+//       adds nothing there; without store write they would additionally need the path recycled at them
+//       AND the row's exact values — narrower than F2's residual, but not closed by any signal this
+//       function can read at restore time. Closing it fully needs one of: (a) an out-of-band,
+//       CoalWash-owned identity marker this stateless CLI does not currently maintain (a persistent
+//       watch/generation-counter, or writing a per-snapshot token somewhere that survives incidental
+//       recycling but not a deliberate copy — real new infrastructure, not a stat-field swap), or
+//       (b) extending F2's operational boundary (trusted-tenant-only store, operator-arranged isolation)
+//       to explicitly cover ordinary filesystem churn AT THE ORIGINAL PATH, not merely store-write
+//       access — since this residual needs no store access at all, only ordinary delete+recreate
+//       activity at a tracked path. NEITHER IS BUILT HERE — both are a design decision for whoever owns
+//       this engine's wiring, per the state-schema-guard convention (AGENTS.md), not something to build
+//       unilaterally under one dispatch. The `rung-2 F4 [HIGH]` test's Leg 3 stays exactly as written and
+//       stays RED on `ubuntu-latest` — that is the correct, honest state until one of the above lands.
 // Both are recomputed fresh at restore time from the CALLER's declared `original` — the manifest row
 // carries its OWN canonical + dev/ino, captured once at snapshot time — and a match on EITHER mechanism
 // confirms. Neither can MERGE two genuinely different originals (rung-2 F3 rail 1): two distinct real
@@ -1839,6 +1878,11 @@ export function restoreFromSnapshot(ref, toPath, opts) {
         // gone (the point of a restore), declaredDev/declaredIno stay null, devinoAvailable is
         // false, and canonMatch alone authorizes exactly as before — this leg only bites when a
         // live, computable identity check contradicts the path string.
+        // CORRECTED 2026-08-05: this narrows, it does not close, the recycled-path case — a
+        // RECYCLED inode can make `devinoMatch` compute true for a genuinely different file
+        // (confirmed live on ext4 via real CI, not merely reasoned). See the "WHAT THIS LEG OPENS"
+        // / rung-2 F4 paragraph on the OWNERSHIP header above for the full disposition and why no
+        // stat-time signal closes this alone.
         const devinoContradicts = devinoAvailable && !devinoMatch;
         if (devinoContradicts) { devinoContradicted = true; continue; }
         if (canonMatch || devinoMatch || legacyExactMatch) { confirmed = true; break; }

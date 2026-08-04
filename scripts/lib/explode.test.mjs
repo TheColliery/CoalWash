@@ -2512,7 +2512,7 @@ test('F1 [HIGH]: a shared snapshotDir cannot be blindly recovered from — owner
 // pinning the property the fix claims, not just its downstream effect.
 test('F2 [MEDIUM]: none of the 4 write-temp sites use the predictable ${name}.${pid}.tmp form', () => {
   const dir = tmp();
-  const pidPattern = new RegExp(`\.${process.pid}\.tmp$`);
+  const pidPattern = new RegExp(`\\.${process.pid}\\.tmp$`);
   const seenTmp = [];
   const realOpenSync = fs.openSync;
   fs.openSync = (p, ...rest) => {
