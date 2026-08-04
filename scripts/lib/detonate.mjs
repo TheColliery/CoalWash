@@ -1,3 +1,12 @@
+// ponytail: 802 lines at declaration — one gate-chain, not a module boundary: every private helper
+// here (buildReport/redactUnit/isFreeFormBearing/oversizedTypeToken/sampleSlice for the advisory
+// report; ancestorIsDir/realOrNull/isUnder for the mechanical path/param gates) exists ONLY to feed
+// the single `detonate()` function's sequential gate 1-5 chain, unexported and never reused outside
+// it. A module split would scatter one function's own internals across files for zero reuse benefit,
+// and the gate order itself (structural, path, params, execute) is the thing that must stay legible
+// in one place — splitting it is exactly the seam this file's own WHY-header warns detonate exists to
+// avoid one level up (mechanical safety lives in CODE, not scattered across files a reader must
+// reassemble).
 // detonate.mjs — the SUPPORT engine (STEP 2) that GATES the main reducer (explode.mjs).
 //
 // WHY IT EXISTS: explode.mjs is INCOMPLETE-by-design — reduceFile is a PRIMITIVE the CALLER drives (the
