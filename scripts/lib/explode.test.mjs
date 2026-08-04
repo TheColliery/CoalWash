@@ -2886,23 +2886,20 @@ test('rung-2 F4 [HIGH]: dev/ino confirms/refuses correctly on the two UNCONDITIO
 // 30937712605, ubuntu-latest node 22 AND 24) -- ext4 recycles a just-freed inode for the very next
 // file created at the same path under low allocation pressure, so declaredDev/declaredIno
 // coincidentally equal the row's recorded values and devinoMatch authorizes a restore that should
-// refuse. Windows/macOS don't reproduce this at CI scale (real dev/ino numbers logged in the
-// explode.mjs OWNERSHIP header, run 30939561156). Millisecond-resolution birthtime/ctime were
-// measured and found to ALSO collide under real load (run 30940310775, ubuntu node 24: dev/ino AND
-// birthtime AND ctime all identical -- the whole unlink+recreate landed in one tick); a nanosecond-
-// resolution follow-up (run 30941217882) showed real separation on both ubuntu legs (~0.6-0.9ms),
-// consistent with genuine kernel round-trip latency rather than a lucky sample -- but one sample per
-// platform is not the repeated-trial proof this room's own DIAG-#2 lesson demands, so it was NOT
-// adopted as a fix. Full reasoning, all three diagnostics' numbers, and the three named closing
-// options (an out-of-band identity marker, extending F2's trust boundary, or recording ctimeNs in
-// the manifest at snapshot time) live in explode.mjs's OWNERSHIP header, "rung-2 F4" paragraph --
-// read it before touching this test. `test.todo()`, not `skip()`: this still RUNS on every platform,
+// refuse. A tier-2 ctimeNs comparison was ATTEMPTED and REVERTED (2026-08-05, same day) -- it
+// directly regressed RUNG5 A6 (restoring a snapshot back over a since-modified source), because
+// `ctime` bumps on ANY write to an inode's content, not only when the inode is reused for a
+// different file: a recycled inode and a genuinely-modified original are structurally
+// indistinguishable by dev/ino+ctime alone. Confirmed by direct measurement, not reasoned. Full
+// diagnostic history (three CI runs: ms-precision collision, ns-precision separation, then the
+// ctime-regression finding) lives in explode.mjs's OWNERSHIP header, "rung-2 F4" paragraph -- read
+// it before touching this test. `test.todo()`, not `skip()`: this still RUNS on every platform,
 // still PRINTS its result, and node flags it if it unexpectedly starts passing -- it flips back to a
-// hard failure the moment one of the three options lands. This is not muting; the finding stays live
-// in four places (this comment, explode.mjs's OWNERSHIP header, the room's MEMORY.md, and rung 2's
-// own graduation bar, which this residual keeps at 0) -- NOT the CHANGELOG, per this room's own rule
-// that a change reaching no shipped dist earns no entry there (explode.mjs is UNWIRED_ENGINE).
-test.todo('rung-2 F4 [HIGH] Leg 3: recycled-path confidentiality -- LIVE ON LINUX, no closing metadata signal exists yet (see explode.mjs OWNERSHIP header)', () => {
+// hard failure the moment a real closing mechanism lands. This is not muting; the finding stays live
+// in the places named in the OWNERSHIP header and this room's MEMORY.md, NOT the CHANGELOG, per this
+// room's own rule that a change reaching no shipped dist earns no entry there (explode.mjs is
+// UNWIRED_ENGINE).
+test.todo('rung-2 F4 [HIGH] Leg 3: recycled-path confidentiality -- LIVE ON LINUX, ctime tried and structurally cannot discriminate this (see explode.mjs OWNERSHIP header)', () => {
   const dir = tmp();
   try {
     const store = path.join(dir, 'store');
@@ -2923,3 +2920,4 @@ test.todo('rung-2 F4 [HIGH] Leg 3: recycled-path confidentiality -- LIVE ON LINU
     assert.strictEqual(fs.existsSync(path.join(dir, 'recycled.out')), false, 'nothing was copied out — the old secret never reaches the caller');
   } finally { rm(dir); }
 });
+

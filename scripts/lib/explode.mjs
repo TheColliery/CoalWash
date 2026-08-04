@@ -1589,10 +1589,9 @@ function existsPopulated(p) {
 //       OLD one held — `devinoMatch` then computes TRUE for a genuinely different file, same as
 //       `canonMatch` (same path string), and the row confirms. `windows-latest`/`macos-latest` stay
 //       green on the identical test because NTFS/APFS do not reproduce that recycling pattern in this
-//       CI matrix — the test is not flaky, it is honestly platform-dependent, and it is CORRECT for it
-//       to stay red on Linux until this actually closes (master-loss-taxonomy class #57,
-//       FILESYSTEM-SEMANTICS-ASSUMPTION BREAK — the code assumed "a live dev/ino match reliably
-//       identifies the same file," which ext4 violates under exactly this access pattern).
+//       CI matrix — the test is not flaky, it is honestly platform-dependent (master-loss-taxonomy
+//       class #57, FILESYSTEM-SEMANTICS-ASSUMPTION BREAK — the code assumed "a live dev/ino match
+//       reliably identifies the same file," which ext4 violates under exactly this access pattern).
 //
 //       CONFIRMED WITH RAW NUMBERS, not left as deduction from the test's pass/fail alone (GitHub
 //       Actions run 30939561156, a one-shot printing diagnostic, deleted after this landed):
@@ -1643,41 +1642,49 @@ function existsPopulated(p) {
 //       file) fires when identity CANNOT BE COMPUTED AT ALL (e.g. `stat.ino === 0`, an inode-less
 //       volume) -- an ABSENCE trigger. Leg 3's attack is the opposite shape: dev/ino ARE computable
 //       and DO match (the row's recorded values and the live recreated file's values are identical,
-//       by inode recycling) -- a PRESENT-BUT-WRONG signal, not an absent one. Widening an
-//       absence-triggered belt to also catch a present-but-misleading value would require the exact
-//       comparison this paragraph already shows is unreliable at ms resolution and unproven at ns
-//       resolution -- there is no cheap, deterministic "identity is not establishable" test for this
-//       specific shape without ALSO solving the timing question above. The two residuals are
-//       therefore ONE residual, not two, and the real fix is the infrastructure named below, not a
-//       belt-trigger edit.
+//       by inode recycling) -- a PRESENT-BUT-WRONG signal, not an absent one. The belt itself is
+//       UNCHANGED, and remains correct for its own, different (inode-less) case.
 //
-//       DISPOSITION: NARROWED, NOT CLOSED. `6f261e4` correctly and verifiably (all 3 CI platforms,
-//       Legs 1-2 of the F4 test) closes the SIMPLER attack — an attacker declares a FALSE original while
-//       the TRUE original persists untouched. The recycled-path variant (Leg 3) is a confirmed-live
-//       residual, bounded exactly as this paragraph already said before F4 was attempted: under F2's
-//       own threat model (STEP 2, below) an attacker with store write can forge a row outright, so this
-//       adds nothing there; without store write they would additionally need the path recycled at them
-//       AND the row's exact values — narrower than F2's residual, but not closed by any signal this
-//       function can read at restore time. Closing it fully needs one of: (a) an out-of-band,
+//       TIER 2 (ctimeNs) — ATTEMPTED AND REVERTED, 2026-08-05, SAME DAY. `ctimeNs` was tried as the
+//       tier-2 discriminator ("same dev/ino, does ctimeNs also disagree?"), following directly from
+//       the ns-measurement two paragraphs up. It directly REGRESSED a real, pre-existing legitimate
+//       case (`RUNG5 A6`: restoring a snapshot back over a since-modified source), caught by this
+//       room's own full-suite-before-commit discipline before it shipped. Root cause, MEASURED twice
+//       by direct isolated probe, not reasoned: `ctime` bumps on ANY write to an inode's content, not
+//       only when the inode is reused for a different file. A recycled inode (File B created fresh at
+//       a path File A used to occupy) and a genuinely-modified original (File A, same inode, content
+//       rewritten) both present the IDENTICAL signature — "same dev/ino, a later ctime than what the
+//       manifest recorded" — because both are, respectively, a creation event and a write event, and
+//       POSIX/NTFS ctime semantics do not distinguish "this inode's OWNER changed" from "this inode's
+//       CONTENT changed". No refinement of the ctime comparison closes this; the filesystem does not
+//       expose the fact tier 2 needed. This is a durable NEGATIVE finding, the same class as F2's own
+//       "not patchable at this layer" — reverted from both the manifest write side (`originalCtimeNs`
+//       is not recorded) and the restore side (no ctimeNs comparison exists), leaving no dead
+//       machinery behind.
+//
+//       DISPOSITION: NARROWED, NOT CLOSED — unchanged from before tier 2 was attempted. `6f261e4`
+//       correctly and verifiably (all 3 CI platforms, Legs 1-2 of the F4 test) closes the SIMPLER
+//       attack: an attacker declares a FALSE original while the TRUE original persists untouched. The
+//       recycled-path variant (Leg 3) is a confirmed-live residual on Linux, bounded exactly as this
+//       paragraph already said before F4 was attempted: under F2's own threat model (STEP 2, below) an
+//       attacker with store write can forge a row outright, so this adds nothing there; without store
+//       write they would additionally need the path recycled at them AND the row's exact values —
+//       narrower than F2's residual, but not closed by any dev/ino/ctime signal this function can read
+//       at restore time (tier 2 was the best-available metadata attempt, and it is now confirmed
+//       insufficient, not merely untried). Closing it fully needs one of: (a) an out-of-band,
 //       CoalWash-owned identity marker this stateless CLI does not currently maintain (a persistent
-//       watch/generation-counter, or writing a per-snapshot token somewhere that survives incidental
-//       recycling but not a deliberate copy — real new infrastructure, not a stat-field swap), or
-//       (b) extending F2's operational boundary (trusted-tenant-only store, operator-arranged isolation)
-//       to explicitly cover ordinary filesystem churn AT THE ORIGINAL PATH, not merely store-write
-//       access — since this residual needs no store access at all, only ordinary delete+recreate
-//       activity at a tracked path, or (c) — the ns diagnostic's real finding — recording
-//       `originalCtimeNs`/`originalBirthtimeNs` in the manifest row AT SNAPSHOT TIME (mechanically the
-//       same shape `originalDev`/`originalIno` already use) and comparing it alongside dev/ino at
-//       restore time; the measured ~0.6-0.9ms real separation is promising evidence this closes the
-//       observed case, but is a genuine `SNAPSHOT_MANIFEST` row-shape addition — legacy rows lack the
-//       field, needs the same graceful-absence handling `legacyExactMatch` already has for
-//       `originalCanonical`, and needs more than a one-sample measurement before being trusted as a
-//       security boundary. NONE OF THE THREE IS BUILT HERE — each is a design decision for whoever owns
-//       this engine's wiring, per the state-schema-guard convention (AGENTS.md), not something to build
-//       unilaterally under one dispatch. The `rung-2 F4 [HIGH]` test's Leg 3 is `test.todo()` with this
-//       full reasoning inline (see the test itself) — it still RUNS every gate on every platform and
-//       still PRINTS, it simply does not fail the build on ubuntu until one of the above lands; that is
-//       the correct, honest, deterministic state, not a green claiming a closed gap.
+//       watch/generation-counter, or a per-snapshot token that survives incidental recycling but not a
+//       deliberate copy — real new infrastructure, not a stat-field swap), or (b) extending F2's
+//       operational boundary (trusted-tenant-only store, operator-arranged isolation) to explicitly
+//       cover ordinary filesystem churn AT THE ORIGINAL PATH, not merely store-write access — since
+//       this residual needs no store access at all, only ordinary delete+recreate activity at a
+//       tracked path. NEITHER IS BUILT HERE — both are a design decision for whoever owns this engine's
+//       wiring, per the state-schema-guard convention (AGENTS.md), not something to build unilaterally
+//       under one dispatch. The `rung-2 F4 [HIGH]` test's Leg 3 stays `test.todo()` and stays RED on
+//       `ubuntu-latest` — that is the correct, honest state until one of the above lands. It still
+//       RUNS every gate on every platform and still PRINTS; it does not fail the build, but reading
+//       "does not fail the build" as "the gap is closed" would be exactly the mistake this whole
+//       investigation exists to prevent.
 // Both are recomputed fresh at restore time from the CALLER's declared `original` — the manifest row
 // carries its OWN canonical + dev/ino, captured once at snapshot time — and a match on EITHER mechanism
 // confirms. Neither can MERGE two genuinely different originals (rung-2 F3 rail 1): two distinct real
@@ -1936,11 +1943,17 @@ export function restoreFromSnapshot(ref, toPath, opts) {
         // gone (the point of a restore), declaredDev/declaredIno stay null, devinoAvailable is
         // false, and canonMatch alone authorizes exactly as before — this leg only bites when a
         // live, computable identity check contradicts the path string.
-        // CORRECTED 2026-08-05: this narrows, it does not close, the recycled-path case — a
-        // RECYCLED inode can make `devinoMatch` compute true for a genuinely different file
-        // (confirmed live on ext4 via real CI, not merely reasoned). See the "WHAT THIS LEG OPENS"
-        // / rung-2 F4 paragraph on the OWNERSHIP header above for the full disposition and why no
-        // stat-time signal closes this alone.
+        // rung-2 F4 TIER 2 — ATTEMPTED, REVERTED (2026-08-05). A ctimeNs comparison was built here
+        // and directly REGRESSED a legitimate case, caught by this room's own full-suite-before-commit
+        // discipline (RUNG5 A6, restoring a snapshot back over a since-MODIFIED source): `ctime`
+        // updates on ANY write to an inode's content, not only when the inode is reused for a
+        // different file — confirmed twice by direct measurement (two isolated probes, both platforms
+        // of this box), not merely reasoned. A recycled inode and a genuinely-modified original are
+        // therefore STRUCTURALLY INDISTINGUISHABLE by dev/ino + ctime alone: both present as "same
+        // dev/ino, later ctime". This is a durable negative finding, not a bug in the check's
+        // wiring — no refinement of the ctime comparison closes it, because the filesystem does not
+        // record the information tier 2 needed (whether the inode's OWNER changed, only that its
+        // content did). See the OWNERSHIP header above for the full writeup and what remains true.
         const devinoContradicts = devinoAvailable && !devinoMatch;
         if (devinoContradicts) { devinoContradicted = true; continue; }
         if (canonMatch || devinoMatch || legacyExactMatch) { confirmed = true; break; }
