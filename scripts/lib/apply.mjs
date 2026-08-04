@@ -255,67 +255,199 @@ function denseRank(indents) {
 // found while proving the haystack-side fix's own perf test, not in the
 // dispatch's findings; same root cause, same commit, worth fixing together
 // rather than leaving a matching hole one parameter over.
-function needleIndentShape(needle) {
+function needleIndentShape(needle, origParts) {
   const n = lineParts(needle);
   const nRanks = denseRank(n.map((l) => l.indent));
-  // grad10 F8, CORRECTED grad10-round-2 HIGH-1: the claim that a needle with
-  // no INTERNAL indentation variation "has no relative structure to defend"
-  // was FALSE for an INDENTED uniform needle. Dense rank collapses a run of
-  // EQUAL values to the SAME rank regardless of magnitude -- a 2-line loop
-  // body captured alone (both lines at depth 4, nRanks=[0,0]) matches ANY
-  // haystack window whose two lines are ALSO mutually equal, at ANY shared
-  // depth -- including depth 0, i.e. the body dedented whole OUT of its
-  // loop. The rank check alone has ZERO discriminating power for a uniform
-  // needle; it was never "safe by construction", it was UNTESTED. Reproduced
-  // through the real applyPlan: `applied:2, breach landed:true, keep
-  // flagged:false` -- the exact python-dedent shape this file's F2 fix
-  // exists to catch, reopened by capturing a narrower (body-only) anchor.
-  // The genuinely SAFE case is narrower than "uniform": a needle whose
-  // shared indent is ZERO -- pure prose, hard-wrapped, where "absolute
-  // indent" was never a meaningful signal to defend in the first place (F8's
-  // own reported shape, `RED-FIRST/F8-prose-reflow`). A uniform needle with
-  // a NON-zero shared indent (code/config, however flat internally) still
-  // carries real structural meaning -- its absolute nesting depth -- that a
-  // pure rank comparison cannot see. `atZero` names that boundary; the
-  // absolute-indent gate below is keyed on it.
+  // grad10 F8: an ABSOLUTE-INDENT-EQUALITY gate here (round-10-round-2's
+  // HIGH-1 fix) is RETIRED as of grad11 STEP 2 -- RULING-LAYER-3 Amendment 4
+  // proved it is a classifier-cell guard, not an invariant guard: F4 showed a
+  // trailing blank line (parses to indent 0) makes an otherwise-uniform
+  // needle classify as non-uniform "by construction", routing it around the
+  // gate entirely, and F9 showed the gate false-refuses a legitimate whole-
+  // document reindent (absolute indent changes; the RELATIVE structure to
+  // what encloses it does not). `uniform`/`atZero` still classify the needle
+  // (used below to choose which structural check applies), but neither
+  // bucket carries its own indent-magnitude rule anymore -- see
+  // `ancestorChain`/`flattenSurvives` above for the replacement.
   const uniform = new Set(nRanks).size <= 1;
   const atZero = uniform && n[0].indent === 0;
-  return { n, nRanks, uniform, atZero, indent0: n[0].indent, flatNeedle: atZero ? normWhitespace(needle) : null };
+  const shape = { n, nRanks, uniform, atZero, indent0: n[0].indent, flatNeedle: atZero ? normWhitespace(needle) : null, origChain: null };
+  // grad11 STEP 2: locate the anchor's TRUE position in the file's OWN
+  // original bytes (origParts = lineParts(origBuf), passed by the KEEPS-GATE
+  // call site ONLY when checking a keep against ITS OWN file -- never for the
+  // cross-file migration sweep, where no "original position in THIS file"
+  // exists to derive a chain from). -1 (not located) degrades to no chain,
+  // which callers below treat as "cannot verify structurally" -- never a
+  // silent pass, see indentRelativeSurvives's own fallback ordering.
+  if (origParts) {
+    const pos = locateStructural(shape, origParts);
+    if (pos !== -1) shape.origChain = ancestorChain(origParts, pos, n[0].indent);
+  }
+  return shape;
 }
 function indentRelativeSurvives(shape, haystack, haystackParts) {
-  const { n, nRanks, uniform, atZero, indent0, flatNeedle } = shape;
+  const { n, nRanks, atZero, flatNeedle, origChain } = shape;
   const h = haystackParts || lineParts(haystack);
+  // grad11 STEP 2 perf (bonus, pre-existing loop): same head-line-text
+  // pre-filter as locateStructural's own header comment -- reject the cheap
+  // way (one string compare) before paying for denseRank at a position that
+  // was always going to fail on `h[start+0].text !== n[0].text` anyway.
+  // Pre-existing from round 9/10, not introduced this round; folded in here
+  // because it directly reduces the cost this round's own perf check found.
   for (let start = 0; start + n.length <= h.length; start++) {
+    if (h[start].text !== n[0].text) continue;
     const hRanks = denseRank(h.slice(start, start + n.length).map((l) => l.indent));
     let ok = true;
     for (let j = 0; j < n.length && ok; j++) {
       if (h[start + j].text !== n[j].text || hRanks[j] !== nRanks[j]) ok = false;
     }
-    // grad10-round-2 HIGH-1: a uniform needle's rank check alone accepts ANY
-    // window whose lines are mutually equal, at ANY shared depth -- so for a
-    // uniform needle that WAS indented (indent0 > 0), also require the
-    // matched window's absolute indent to be the SAME as the needle's own.
-    // Never applied to a non-uniform needle (its rank check already carries
-    // real discriminating power, unaffected) or to a zero-indent needle
-    // (prose -- absolute indent was never meaningful there; the flatten
-    // fallback below is that case's own, deliberately looser, tolerance).
-    // NAMED RESIDUAL, safe-direction: a uniform CODE anchor globally
-    // re-scaled to a different absolute indent (the whole file re-indented,
-    // still nested the same) now REFUSES rather than matches -- this
-    // function's own bias throughout is fail-closed-on-ambiguity (an
-    // over-refusal flags+keeps the file untouched; an under-refusal loses
-    // content silently), so trading a rare false refusal to close a real
-    // content-loss channel is the correct direction, not a regression.
-    if (ok && uniform && indent0 > 0 && h[start].indent !== indent0) ok = false;
+    // grad11 STEP 2: replaces round-10-round-2's absolute-indent gate. When
+    // this shape's origin chain is known (checking the anchor against ITS
+    // OWN file), a candidate window must preserve that SAME chain among its
+    // own enclosing lines -- new ancestors (deeper nesting) are tolerated,
+    // dropping an original one is not. When no origChain is available
+    // (cross-file migration; the anchor could never have had "an original
+    // position" in a file it did not come from), this check is a no-op and
+    // the rank+text match above is the whole test -- unchanged behaviour for
+    // the migration case, named as a residual in the round's own return.
+    if (ok && origChain) { if (!chainPreserved(origChain, ancestorChain(h, start, h[start].indent))) ok = false; }
     if (ok) return true;
   }
-  // grad10 F8: reflow tolerance for a genuinely flat, NEVER-indented
-  // (prose-shaped) multi-line needle only -- the same flatten-everything
-  // check single-line needles already get below. Scoped to `atZero`
-  // (grad10-round-2 HIGH-1), not `uniform` alone: an indented-but-uniform
-  // needle must never reach this looser, indent-blind check.
-  if (atZero) return normWhitespace(haystack).includes(flatNeedle);
+  // grad11 STEP 2 [F3]: the flatten fallback ITSELF is where a needle whose
+  // OWN lines are all flush-left (atZero) gets checked once the exact
+  // rank+text loop above finds no match -- which is exactly what happens
+  // when an interior line has been REPARENTED (its own rank changed, so the
+  // rank loop correctly fails), and the old code then re-matched on
+  // flattened text alone, discarding that failure entirely. `flattenSurvives`
+  // additionally requires the matched span's contributing lines to share ONE
+  // indent value -- true for a genuine reflow (indentation was never
+  // introduced), false for an in-place reparent (one line's indent changed
+  // while its neighbours' did not).
+  if (atZero) return flattenSurvives(flatNeedle, h);
   return false;
+}
+// grad11 STEP 2 [CRITICAL, F3+F4+F9 — one predicate, not three]: RULING-LAYER-3
+// Amendment 4's construction proved no partition over {needle, post-text} can
+// separate a legitimate whole-block move from content escaping its enclosing
+// scope -- the two produce BYTE-IDENTICAL windows when the distinguishing
+// line (what used to come immediately before the anchor) sits outside both
+// inputs. The fix is not a smarter bucket; it is a wider FRAME: locate the
+// anchor's own TRUE position in the file's ORIGINAL bytes (origBuf, already
+// staged 120+ lines above this file's KEEPS-GATE and unread by it until now),
+// derive its ANCESTOR CHAIN (the stack of enclosing lines, outer-to-inner, by
+// indent), and require the SAME chain to survive -- by text, in order -- among
+// whatever encloses the matched window in the new text. New ancestors may be
+// INSERTED (nesting deeper is F9/H4's own legitimate shape); no ORIGINAL
+// ancestor may be DROPPED (losing the enclosing line is exactly what content
+// escaping a loop/section does). Blank lines carry no structure and are
+// skipped when walking for ancestors, closing F4's own bypass (a blank line
+// parses to indent 0 and used to make an otherwise-uniform anchor classify as
+// non-uniform "by construction", routing it around the absolute-indent gate
+// entirely -- the gate this replaces).
+function ancestorChain(parts, spanStart, spanIndent) {
+  const chain = [];
+  // FOUND-DURING-BUILD: seeding `shallowest` at Infinity let a line at the
+  // SAME (or greater) indent as the span's own first line register as an
+  // "ancestor" -- a SIBLING statement, not an enclosing one. A body dedented
+  // to sit flush with its own former loop header (the header text unchanged,
+  // only the body's indent dropped) then read as "still enclosed by that
+  // header", because the header was merely the shallowest line SEEN, never
+  // checked against the span's OWN depth. Seeding with `spanIndent` makes
+  // the walk ask the right question from line one: is this STRICTLY
+  // SHALLOWER than what it is supposed to enclose?
+  let shallowest = spanIndent;
+  for (let i = spanStart - 1; i >= 0; i--) {
+    const l = parts[i];
+    if (!l.text) continue; // blank line -- no structure to record
+    if (l.indent < shallowest) { chain.unshift(l.text); shallowest = l.indent; }
+    if (shallowest === 0) break; // top-level reached; nothing can enclose it further
+  }
+  return chain;
+}
+// Is `origChain` a (possibly proper) SUBSEQUENCE of `candChain`, matched by
+// exact line text, in the SAME relative order? A candidate chain may carry
+// EXTRA entries (deepened nesting, fine); it may not be missing any original
+// entry (an enclosing line that vanished, the loss this check exists to
+// catch) or have them out of order (a reordering this codebase has never
+// observed but which a stack-based ancestor walk makes free to also reject).
+function chainPreserved(origChain, candChain) {
+  // FOUND-DURING-BUILD (F9/FR3): an exact-text compare here is TOO STRICT --
+  // it refuses a legitimate reflow of the ancestor line ITSELF (e.g. a list
+  // marker widened from "- " to "-   ", the F9 list-continuation-shift
+  // fixture), because the two spellings of the SAME enclosing line are not
+  // byte-identical even though nothing structural moved. Compare each
+  // ancestor entry the same way the whole file already tolerates whitespace
+  // reflow elsewhere (normWhitespace) -- membership/order is still exact
+  // (a missing or reordered ancestor still fails), only its own internal
+  // spacing is forgiven.
+  let i = 0;
+  const normOrig = origChain.map(normWhitespace);
+  for (const t of candChain) {
+    const nt = normWhitespace(t);
+    if (i < normOrig.length && normOrig[i] === nt) i++;
+  }
+  return i === normOrig.length;
+}
+// Locate the needle's own exact structural position within `parts` (the SAME
+// text+rank match indentRelativeSurvives uses below) -- called ONCE, against
+// a file's OWN original lineParts, to derive where the anchor TRULY sat. -1
+// if not found (a keep whose anchor does not verbatim-appear in its own
+// recorded original -- defensive; should not happen for a real keep, whose
+// anchor names literal original content, but the caller degrades safely).
+function locateStructural(shape, parts) {
+  const { n, nRanks } = shape;
+  // grad11 STEP 2 perf: check the cheap head-line TEXT match before paying
+  // for `denseRank` (an O(N) allocation+sort) at every candidate position.
+  // A needle genuinely absent from `parts` (the common shape on a large,
+  // unrelated document -- the round's own worst-case perf probe) rejects on
+  // this one comparison at nearly every position instead of building and
+  // ranking the whole window first. Measured: ~28% of the round's total
+  // fixture cost was this scan running to completion needlessly; this cuts
+  // it back toward a single linear pass. Behavior-identical -- `ok` would
+  // have gone false at j=0 anyway on a head mismatch.
+  for (let start = 0; start + n.length <= parts.length; start++) {
+    if (parts[start].text !== n[0].text) continue;
+    const ranks = denseRank(parts.slice(start, start + n.length).map((l) => l.indent));
+    let ok = true;
+    for (let j = 0; j < n.length && ok; j++) {
+      if (parts[start + j].text !== n[j].text || ranks[j] !== nRanks[j]) ok = false;
+    }
+    if (ok) return start;
+  }
+  return -1;
+}
+// The atZero/flatten path's own structural guard (F3's fix): map the
+// flattened haystack's character offsets back to the ORIGINAL lines that
+// contributed them, so a substring match can be checked for INTERNAL indent
+// uniformity across whatever span it covers. A reflow (F8-prose-reflow,
+// LEGIT-A) never introduces indentation -- every contributing line stays at
+// its own flat 0 (or one shared value) -- so a uniform span is safe. A
+// reparent WITHIN the anchor's own captured lines (F3's exact shape: a
+// flush-left multi-key YAML/statement block where one interior line gets
+// indented under its neighbour, text order otherwise untouched) shows up as
+// a NON-uniform span even though the flattened text still matches exactly --
+// that mismatch is the signal the old raw `.includes()` check discarded.
+function flattenWithLineMap(parts) {
+  const chunks = [];
+  let flat = '';
+  for (let i = 0; i < parts.length; i++) {
+    const t = parts[i].text;
+    if (!t) continue; // blank lines contribute nothing to the flattened text
+    if (flat.length) flat += ' ';
+    const startAt = flat.length;
+    flat += t;
+    chunks.push({ lineIndex: i, start: startAt, end: flat.length });
+  }
+  return { flat, chunks };
+}
+function flattenSurvives(flatNeedle, haystackParts) {
+  const { flat, chunks } = flattenWithLineMap(haystackParts);
+  const idx = flat.indexOf(flatNeedle);
+  if (idx === -1) return false;
+  const end = idx + flatNeedle.length;
+  const spanIndents = new Set();
+  for (const c of chunks) { if (c.start < end && c.end > idx) spanIndents.add(haystackParts[c.lineIndex].indent); }
+  return spanIndents.size <= 1;
 }
 function textSurvives(needle, haystacks, normHaystacks, haystackLineParts) {
   if (haystacks.some((t) => t.includes(needle))) return true;
@@ -343,6 +475,26 @@ function textSurvives(needle, haystacks, normHaystacks, haystackLineParts) {
   const normNeedle = normWhitespace(needle);
   const norms = normHaystacks || haystacks.map(normWhitespace);
   return norms.some((t) => t.includes(normNeedle));
+}
+
+// grad11 STEP 2: the STRICT, ancestor-chain-aware check -- used ONLY when
+// checking a keep's anchor against the SAME file it was recorded against
+// (origText = that file's own original bytes, read once already for the
+// staging/fidelity baseline). Never applied to any OTHER file's content: a
+// migrated anchor has no "original position" in a file it did not come
+// from, so the chain check would be meaningless there and would FALSE-REFUSE
+// a legitimate merge (rail #2) -- the KEEPS-GATE call site below falls back
+// to the existing, unchanged, cross-file `textSurvives` sweep for that case.
+function survivesOwnFile(anchor, newContent, origText) {
+  if (String(newContent).includes(anchor)) return true; // exact substring -- unambiguous either way
+  if (!/\r|\n/.test(String(anchor))) {
+    // a single-line anchor has no ancestor of ITS OWN content to defend
+    // (there is nothing "inside" one line) -- flatten-tolerant only, same as
+    // textSurvives's own single-line branch.
+    return normWhitespace(newContent).includes(normWhitespace(anchor));
+  }
+  const shape = needleIndentShape(anchor, lineParts(origText));
+  return indentRelativeSurvives(shape, newContent);
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,7 +1255,12 @@ export function applyPlan(plan, opts = {}) {
       // rewrite) — re-check until stable. Each pass strictly shrinks
       // `actionable`, so this terminates in <= actions.length passes.
       while (keeps.length) {
-        const postTexts = actionable.filter((a) => a.type !== 'delete').map((a) => a.content);
+        // grad11 STEP 2: kept PARALLEL to postTexts (same filter, same order)
+        // so the fallback sweep below can exclude ONE action's own entry by
+        // reference -- rather than by string equality, which would wrongly
+        // exclude every action sharing byte-identical content.
+        const postActionable = actionable.filter((a) => a.type !== 'delete');
+        const postTexts = postActionable.map((a) => a.content);
         // grad7 ruling Root B/twin-drift: the module-level `textSurvives` above
         // is the SAME helper the merge-pair check now calls — one function, not
         // a belief that two hand-copies matched.
@@ -1137,15 +1294,53 @@ export function applyPlan(plan, opts = {}) {
         const normPostTexts = postTexts.map(normWhitespace);
         let linePostTextsMemo = null;
         const getLinePostTexts = () => (linePostTextsMemo ||= (__testHooks.linePartsMapCalls++, postTexts.map(lineParts)));
-        const survives = (anchor) => textSurvives(anchor, postTexts, normPostTexts,
-          /\r|\n/.test(String(anchor)) ? getLinePostTexts() : undefined);
+        // grad11 STEP 2: `excludeAction`, when it names an entry actually IN
+        // postTexts (a rewrite that already tried and failed the strict
+        // own-file check, above), is left OUT of this sweep's own haystack
+        // set. Without this, the fallback re-scans that SAME file's content
+        // through the looser rank-only logic and can "rescue" a genuinely
+        // structural loss the strict check just correctly refused -- the
+        // exact bug this exclusion closes (found red-first while proving
+        // this fix: a body-dedented-out-of-its-loop case matched again via
+        // this path alone). A delete (never in postTexts to begin with) or
+        // any action not found here degrades to the FULL, unexcluded sweep,
+        // unchanged from before this round.
+        const survives = (anchor, excludeAction) => {
+          const idx = excludeAction ? postActionable.indexOf(excludeAction) : -1;
+          if (idx === -1) {
+            return textSurvives(anchor, postTexts, normPostTexts,
+              /\r|\n/.test(String(anchor)) ? getLinePostTexts() : undefined);
+          }
+          const texts = postTexts.filter((_, i) => i !== idx);
+          const norms = normPostTexts.filter((_, i) => i !== idx);
+          return textSurvives(anchor, texts, norms); // rarer path (fallback only) -- no lazy multi-line memo here, not the hot loop
+        };
         const excluded = new Set();
         for (const k of keeps) {
           const kf = k.anchorFile;
           for (const a of actionable) {
             if (a.type === 'create' || excluded.has(a)) continue; // a create is never "the keep's file"
             if (!samePathForKeep(a.phys, kf)) continue;
-            if (survives(k.anchor)) continue;
+            // grad11 STEP 2: try the STRICT, ancestor-chain-aware check
+            // against this action's OWN original bytes first (a.origBuf,
+            // staged well above this gate and unread by it until now) --
+            // this is where F3/F4/F9 all live, and it is the only place the
+            // check can mean anything (a "where did this sit originally"
+            // question needs an original to ask it about). A delete has no
+            // new `.content` to check structurally, so it skips straight to
+            // the fallback below, unchanged.
+            if (a.type === 'rewrite' && a.origBuf && survivesOwnFile(k.anchor, a.content, a.origBuf.toString('utf8'))) continue;
+            // Fallback: the EXISTING, unchanged, whole-plan sweep -- an
+            // anchor legitimately MIGRATED to a different file in this same
+            // plan is still found here (rail #2's own migration case; this
+            // path carries zero of the new structural guard by design, since
+            // no "original position in file X" question is answerable for
+            // content that never lived in file X). NAMED RESIDUAL: this is
+            // also the reachable surface of LAB-RECORD's F6 (a floor-
+            // clearing generic anchor coincidentally present elsewhere in
+            // the same plan) -- unchanged from before this round, not newly
+            // introduced, and not closed here; declared, not silently fixed.
+            if (survives(k.anchor, a)) continue;
             excluded.add(a);
             // 80 chars = display truncation only (keeps the flag line one-line
             // readable); the full anchor stays in keeps.json, nothing decided on it.

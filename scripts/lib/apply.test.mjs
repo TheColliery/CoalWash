@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks } from './apply.mjs';
-import { recordKeep, recordGlobalKeep } from './keeps.mjs';
+import { recordKeep, recordGlobalKeep, loadKeeps } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
 import { recordVerdict } from './caliper.mjs';
@@ -1896,6 +1896,18 @@ test('CALL COUNT (round-10-round-2 LOW-7): a KEEPS-GATE pass with ONLY single-li
 });
 
 test('CALL COUNT (round-10-round-2 LOW-7) control: a mixed pass with ONE multi-line anchor builds the memo EXACTLY ONCE, shared across the whole iteration', () => {
+  // grad11 STEP 2 note: this fixture was redesigned. The old one rewrote
+  // c.md with content that contained the multi-line anchor as a raw
+  // substring -- `survivesOwnFile`'s own first check (a plain `.includes`)
+  // now catches that BEFORE the structural/memo machinery is ever reached,
+  // so the memo build count went to 0 and this control stopped exercising
+  // what it names. The memo is now built ONLY by the fallback cross-file
+  // sweep (`survives()`, idx===-1) -- reached by a DELETE (never in
+  // `postActionable`, so never eligible for the own-file strict check at
+  // all) whose anchor migrates, non-verbatim (indent shifted, so the raw
+  // substring check also fails), into a SURVIVING file elsewhere in the
+  // plan. This is exactly rail #2's declared migration case, and it is the
+  // one remaining path that still needs `haystackLineParts`.
   const { proj, store } = sandbox();
   try {
     const f1 = path.join(store, 'a.md');
@@ -1909,9 +1921,9 @@ test('CALL COUNT (round-10-round-2 LOW-7) control: a mixed pass with ONE multi-l
     recordKeep(proj, { target: 'c.md:span', anchor: 'multi\nline\nanchor-c-present', anchorFile: f3 }); // multi-line
     __testHooks.linePartsMapCalls = 0;
     const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f1, content: 'new-a anchor-a-present here' },
+      { type: 'rewrite', path: f1, content: 'new-a anchor-a-present here\n  multi\n  line\n  anchor-c-present here' },
       { type: 'rewrite', path: f2, content: 'new-b anchor-b-present here' },
-      { type: 'rewrite', path: f3, content: 'new-c\nmulti\nline\nanchor-c-present here\nmore text' },
+      { type: 'delete', path: f3 }, // migrated, not verbatim: forces the structural memo path, not the raw-includes shortcut
     ]));
     assert.strictEqual(r.applied, 3, r.error); // all three survive, one iteration
     assert.strictEqual(__testHooks.linePartsMapCalls, 1, 'ONE multi-line anchor still needs the memo -- built once, not once per anchor and not skipped');
@@ -3467,5 +3479,145 @@ test('DEMAND-10/keeps-gate POSITIVE: a keep recorded with a spelling that does N
     assert.ok(r.flagged.some((f) => /keep enforcement/.test(f.reason)),
       `the keep must still BIND despite its recorded spelling not resolving on this volume — a keep whose exact case falls out of sync with the real file must not silently stop protecting it (got: ${r.error})`);
     assert.strictEqual(fs.readFileSync(real, 'utf8'), 'The pinned clause: never trust a raw floor value.', 'file left untouched');
+  } finally { clean(proj); }
+});
+
+// grad11 STEP 2 -- F3/F4/F9, the board's own w1/ fixtures (RULING-LAYER-3
+// Amendment 4), reproduced through the real recordKeep()+applyPlan() door,
+// never the lab's own throwaway harness. Every case first proves NON-VACUITY
+// (the anchor was actually STORED, not silently dropped by F5) before
+// asserting the outcome -- LAB-RECORD's own warning: "an F3/F4 probe passes
+// VACUOUSLY" when the anchor field is empty, because an anchor-less keep is
+// filtered out of enforcement entirely and every plan just "survives" with
+// nothing checking it.
+function assertAnchorStored(proj, target) {
+  const k = loadKeeps(proj).find((e) => e.target === target);
+  assert.ok(k, `no keep entry recorded for target "${target}"`);
+  assert.strictEqual(typeof k.anchor, 'string', 'anchor field must be a stored string, not dropped (F5)');
+  assert.ok(k.anchor.length > 0, 'anchor field must be non-empty -- a dropped anchor makes this probe vacuous (F5)');
+}
+
+test('F3 (F-A1, RULING-LAYER-3 Amdt.4): a flush-left multi-key needle refuses an IN-PLACE reparent the flatten fallback used to mask', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'a: 1\nb: 2\nc: 3\nd: 4\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'a: 1\nb: 2\nc: 3', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'a: 1\n  b: 2\nc: 3\nd: 4\n' }, // "b" reparented under "a", text order unchanged
+    ]));
+    assert.strictEqual(r.ok, false, 'an in-place reparent inside the anchor span must refuse, not silently pass on flattened text');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'a: 1\nb: 2\nc: 3\nd: 4\n', 'file left untouched');
+  } finally { clean(proj); }
+});
+
+test('F3 (F-A2, RULING-LAYER-3 Amdt.4): the same reparent shape on plain code statements refuses too', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'setup()\nrun_task()\ncleanup()\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'setup()\nrun_task()\ncleanup()', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'setup()\n    run_task()\ncleanup()\n' }, // run_task() reparented under setup()
+    ]));
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+  } finally { clean(proj); }
+});
+
+test('F3 control (F-A3, MUST-BREAK): outright deletion of the flush-left needle still refuses -- the bucket is not simply broken for everything', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'setup()\nrun_task()\ncleanup()\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'setup()\nrun_task()\ncleanup()', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'setup()\ncleanup()\n' }, // run_task() fully removed
+    ]));
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+  } finally { clean(proj); }
+});
+
+test('F4 (F-B1, RULING-LAYER-3 Amdt.4): a trailing blank line inside the needle no longer defeats the structural refusal on a real dedent', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'for outer in xs:\n    for item in items:\n        do_a()\n        do_b()\n\nafter\n');
+    // trailing \n in the anchor itself parses to a third, blank line -- the
+    // exact shape that flipped `uniform` to false and skipped the old
+    // absolute-indent gate entirely.
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '        do_a()\n        do_b()\n', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'for item in items:\n  do_a()\n  do_b()\n\nafter\n' }, // depth 8 -> depth 2, one loop level lost
+    ]));
+    assert.strictEqual(r.ok, false, 'a blank line inside the needle must not exempt it from the structural check');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+  } finally { clean(proj); }
+});
+
+test('F4 control (F-B2, MUST-BREAK): the same dedent WITHOUT the blank line still refuses -- confirms F-B1 tests the blank-line seam specifically', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'for outer in xs:\n    for item in items:\n        do_a()\n        do_b()\nafter\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '        do_a()\n        do_b()', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'for item in items:\n  do_a()\n  do_b()\nafter\n' },
+    ]));
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+  } finally { clean(proj); }
+});
+
+test('F9 (FR1, RULING-LAYER-3 Amdt.4): a legitimate whole-doc reindent under a NEW enclosing heading now survives (ancestor chain grows, does not drop)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'section:\n    do_a()\n    do_b()\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_a()\n    do_b()', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'section:\n  under_new_heading:\n        do_a()\n        do_b()\n' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'section:\n  under_new_heading:\n        do_a()\n        do_b()\n');
+  } finally { clean(proj); }
+});
+
+test('F9 (FR2, RULING-LAYER-3 Amdt.4): tabs-to-spaces conversion survives -- no absolute char-count comparison left to false-refuse it', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, '\tdo_a()\n\tdo_b()\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '\tdo_a()\n\tdo_b()', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: '    do_a()\n    do_b()\n' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1);
+  } finally { clean(proj); }
+});
+
+test('F9 (FR3, RULING-LAYER-3 Amdt.4): a list-continuation whitespace shift survives -- chainPreserved tolerates a reflowed (not missing) ancestor line', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, '- item\n  cont line one\n  cont line two\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '  cont line one\n  cont line two', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: '-   item\n    cont line one\n    cont line two\n' }, // marker widened "- " -> "-   ", pure reflow
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1);
   } finally { clean(proj); }
 });

@@ -33,8 +33,8 @@ test('loadKeeps: [] when the file is missing, corrupt, or the wrong shape', () =
 test('recordKeep: writes a retrievable entry; the shared sandbox dir self-ignores', () => {
   const proj = sandbox();
   try {
-    const ok = recordKeep(proj, { target: 'dogfood-to-harden', reason: 'confirmed load-bearing 2026-07-09' });
-    assert.strictEqual(ok, true);
+    const r = recordKeep(proj, { target: 'dogfood-to-harden', reason: 'confirmed load-bearing 2026-07-09' });
+    assert.strictEqual(r.ok, true);
     const keeps = loadKeeps(proj);
     assert.strictEqual(keeps.length, 1);
     assert.strictEqual(keeps[0].target, 'dogfood-to-harden');
@@ -71,10 +71,10 @@ test('recordKeep: multiple distinct targets coexist', () => {
 test('recordKeep: refuses a missing/empty/non-string target, nothing written', () => {
   const proj = sandbox();
   try {
-    assert.strictEqual(recordKeep(proj, { reason: 'no target' }), false);
-    assert.strictEqual(recordKeep(proj, { target: '' }), false);
-    assert.strictEqual(recordKeep(proj, { target: 42 }), false);
-    assert.strictEqual(recordKeep(proj), false);
+    assert.strictEqual(recordKeep(proj, { reason: 'no target' }).ok, false);
+    assert.strictEqual(recordKeep(proj, { target: '' }).ok, false);
+    assert.strictEqual(recordKeep(proj, { target: 42 }).ok, false);
+    assert.strictEqual(recordKeep(proj).ok, false);
     assert.strictEqual(fs.existsSync(keepsPath(proj)), false, 'nothing written on refusal');
   } finally { clean(proj); }
 });
@@ -112,7 +112,7 @@ test('R5: a NEWER-schema keeps.json is READ-ONLY — loadKeeps [], recordKeep re
     const futureBytes = JSON.stringify({ v: 99, keeps: [{ target: 'future-thing', futureField: { nested: true } }] });
     fs.writeFileSync(keepsPath(proj), futureBytes, 'utf8');
     assert.deepStrictEqual(loadKeeps(proj), [], 'a newer schema is unreadable to this version, never guessed at');
-    assert.strictEqual(recordKeep(proj, { target: 'y' }), false, 'an older tool must not rewrite a newer artifact');
+    assert.strictEqual(recordKeep(proj, { target: 'y' }).ok, false, 'an older tool must not rewrite a newer artifact');
     assert.strictEqual(fs.readFileSync(keepsPath(proj), 'utf8'), futureBytes, 'the newer file is byte-untouched');
   } finally { clean(proj); }
 });
@@ -127,8 +127,8 @@ test('global keeps: recordGlobalKeep writes beside the global state file, indepe
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-ghome-')));
   try {
     assert.deepStrictEqual(loadGlobalKeeps(home), []);
-    const ok = recordGlobalKeep(home, { target: 'global-claude-md-section', reason: 'shields it machine-wide' });
-    assert.strictEqual(ok, true);
+    const r = recordGlobalKeep(home, { target: 'global-claude-md-section', reason: 'shields it machine-wide' });
+    assert.strictEqual(r.ok, true);
     const keeps = loadGlobalKeeps(home);
     assert.strictEqual(keeps.length, 1);
     assert.strictEqual(keeps[0].target, 'global-claude-md-section');
@@ -165,7 +165,7 @@ test('global keeps: [] on missing/corrupt/wrong-shape/newer-schema, same conserv
     const futureBytes = JSON.stringify({ v: 99, keeps: [{ target: 'future' }] });
     fs.writeFileSync(globalKeepsPath(home), futureBytes, 'utf8');
     assert.deepStrictEqual(loadGlobalKeeps(home), []);
-    assert.strictEqual(recordGlobalKeep(home, { target: 'y' }), false, 'an older tool must not rewrite a newer artifact');
+    assert.strictEqual(recordGlobalKeep(home, { target: 'y' }).ok, false, 'an older tool must not rewrite a newer artifact');
     assert.strictEqual(fs.readFileSync(globalKeepsPath(home), 'utf8'), futureBytes, 'the newer file is byte-untouched');
   } finally { clean(home); }
 });
@@ -195,7 +195,8 @@ test('recordKeep: re-affirming WITHOUT anchor/anchorFile preserves the prior enf
   try {
     recordKeep(proj, { target: 'f.md:clause', reason: 'first adjudication', anchor: 'the exact protected span', anchorFile: 'C:/store/f.md' });
     const reAffirmed = recordKeep(proj, { target: 'f.md:clause', reason: 'second look, still load-bearing', date: '2026-08-01' });
-    assert.strictEqual(reAffirmed, true);
+    assert.strictEqual(reAffirmed.ok, true);
+    assert.strictEqual(reAffirmed.anchorDropped, false, 'nothing was requested this call -- preserving a PRIOR anchor is not a drop');
     const keeps = loadKeeps(proj);
     assert.strictEqual(keeps.length, 1);
     const entry = keeps[0];
@@ -230,7 +231,8 @@ test('RED-FIRST/root-E: a re-affirm passing a WHITESPACE-ONLY anchor does NOT ov
   try {
     recordKeep(proj, { target: 'f.md:clause', reason: 'first adjudication', anchor: 'the exact protected span, fifteen-plus real characters', anchorFile: 'C:/store/f.md' });
     const r = recordKeep(proj, { target: 'f.md:clause', reason: 'accidental blank re-affirm', anchor: ' ', anchorFile: 'C:/store/f.md' });
-    assert.strictEqual(r, true, 'the write itself still succeeds (this is a merge decision, not a failure)');
+    assert.strictEqual(r.ok, true, 'the write itself still succeeds (this is a merge decision, not a failure)');
+    assert.strictEqual(r.anchorDropped, true, 'grad11 F5: the caller DID ask for an anchor this call, and it did not land — the return must say so');
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
     assert.strictEqual(entry.anchor, 'the exact protected span, fifteen-plus real characters', 'a whitespace-only anchor must NOT replace the prior real one');
     assert.strictEqual(entry.reason, 'accidental blank re-affirm', 'non-anchor fields still update normally — only the content-empty anchor is refused');
@@ -306,8 +308,10 @@ for (const junk of ['whatever', '!!!!!!!!']) {
   test(`RED-FIRST/F4-distinctiveness: a FIRST-TIME record with the non-distinctive anchor ${JSON.stringify(junk)} gets NO enforcement handle`, () => {
     const proj = sandbox();
     try {
-      const ok = recordKeep(proj, { target: 'f.md:clause', reason: 'test', anchor: junk, anchorFile: 'C:/store/f.md' });
-      assert.strictEqual(ok, true, 'the write itself still succeeds — this is a merge/acceptance decision, not a failure');
+      const r = recordKeep(proj, { target: 'f.md:clause', reason: 'test', anchor: junk, anchorFile: 'C:/store/f.md' });
+      assert.strictEqual(r.ok, true, 'the write itself still succeeds — this is a merge/acceptance decision, not a failure');
+      assert.strictEqual(r.anchorDropped, true, 'grad11 F5: a real anchor was requested and did not clear the floor — the return must say so, not read like an ordinary advisory keep');
+      assert.strictEqual(r.anchorStored, false);
       const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
       assert.ok(entry, 'the keep entry itself is still recorded (target/reason/date) — advisory shape, pre-beta.12');
       assert.strictEqual(entry.anchor, undefined, `${JSON.stringify(junk)} must NOT become an enforcement handle — it is not distinctive enough to trust`);
@@ -333,6 +337,13 @@ test('RED-FIRST/F4-distinctiveness control: a real multi-word phrase at the SAME
 // codepoints (Hangul filler U+3164 is Lo, Braille blank U+2800 is So).
 // Each ×8 (mirroring the lab's own repro shape) should read as degenerate,
 // same as round 9's "e"/"#"/"the".
+//
+// grad11 F5 correction: Mn is NO LONGER in the strip set (see keeps.mjs own
+// header comment on stripInvisible). The U+0300 row below is still
+// correctly refused, but now through the ORDINARY length floor (8 raw
+// chars < 12), the same door as any other too-short junk -- not through
+// invisible-stripping. The other three rows are unaffected; Cc/Lo/So were
+// never touched by that fix.
 const F5_INVISIBLE = {
   'U+0300 combining grave (Mn)': '\u0300'.repeat(8),
   'U+0001 control (Cc)': '\u0001'.repeat(8),
@@ -357,10 +368,13 @@ test('RED-FIRST/F5-invisible control: real CJK/Thai text (containing legitimate 
   try {
     // Thai script legitimately combines base consonants with Mn vowel/tone
     // marks; CJK ideographs are legitimately Lo. Neither is what F5 strips
-    // -- only the SPECIFIC invisible-rendering codepoints are.
+    // -- only the SPECIFIC invisible-rendering codepoints are. (grad11 F5:
+    // Mn used to ALSO be stripped, on the theory that undercounting is
+    // always safe -- it is not, for exactly this content. Fixed at source.)
     const thai = 'สวัสดีครับ ยินดีต้อนรับเข้าสู่ระบบของเรา'; // real Thai sentence, well over the floor
-    const ok = recordKeep(proj, { target: 'f.md:thai', reason: 'test', anchor: thai, anchorFile: 'C:/store/f.md' });
-    assert.strictEqual(ok, true);
+    const r = recordKeep(proj, { target: 'f.md:thai', reason: 'test', anchor: thai, anchorFile: 'C:/store/f.md' });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.anchorDropped, false, 'a real Thai clause over the floor must not read as dropped');
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:thai');
     assert.strictEqual(entry.anchor, thai, 'real Thai text must be accepted as a distinctive anchor, verbatim');
   } finally { clean(proj); }
@@ -382,8 +396,9 @@ for (const [label, anchor] of Object.entries(HIGH2_NO_DELIMITER)) {
   test(`RED-FIRST/HIGH2-no-delimiter: ${label} — a real, space-free clause is enforced as a real anchor`, () => {
     const proj = sandbox();
     try {
-      const ok = recordKeep(proj, { target: 'f.md:clause', reason: 'test', anchor, anchorFile: 'C:/store/f.md' });
-      assert.strictEqual(ok, true);
+      const r = recordKeep(proj, { target: 'f.md:clause', reason: 'test', anchor, anchorFile: 'C:/store/f.md' });
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.anchorDropped, false);
       const entry = loadKeeps(proj).find((k) => k.target === 'f.md:clause');
       assert.strictEqual(entry.anchor, anchor, `${label} must become a real enforcement handle -- no word delimiter needed`);
     } finally { clean(proj); }
@@ -394,8 +409,9 @@ test('RED-FIRST/HIGH2-short-real-phrase: "git rev-parse HEAD" (16 stripped chars
   const proj = sandbox();
   try {
     const anchor = 'git rev-parse HEAD';
-    const ok = recordKeep(proj, { target: 'f.md:cmd', reason: 'test', anchor, anchorFile: 'C:/store/f.md' });
-    assert.strictEqual(ok, true);
+    const r = recordKeep(proj, { target: 'f.md:cmd', reason: 'test', anchor, anchorFile: 'C:/store/f.md' });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.anchorDropped, false);
     const entry = loadKeeps(proj).find((k) => k.target === 'f.md:cmd');
     assert.strictEqual(entry.anchor, anchor, 'a short, genuinely distinctive command must not be refused for its length alone');
   } finally { clean(proj); }
@@ -405,8 +421,9 @@ test('RED-FIRST/HIGH2-junk-still-refused: the reported junk shapes stay refused 
   const proj = sandbox();
   try {
     for (const junk of ['whatever', '!!!!!!!!', 'e', '#', 'the']) {
-      const ok = recordKeep(proj, { target: `f.md:${junk}`, reason: 'test', anchor: junk, anchorFile: 'C:/store/f.md' });
-      assert.strictEqual(ok, true, `write itself still succeeds for ${JSON.stringify(junk)}`);
+      const r = recordKeep(proj, { target: `f.md:${junk}`, reason: 'test', anchor: junk, anchorFile: 'C:/store/f.md' });
+      assert.strictEqual(r.ok, true, `write itself still succeeds for ${JSON.stringify(junk)}`);
+      assert.strictEqual(r.anchorDropped, true, `${JSON.stringify(junk)} was requested and did not clear the floor`);
       const entry = loadKeeps(proj).find((k) => k.target === `f.md:${junk}`);
       assert.strictEqual(entry.anchor, undefined, `${JSON.stringify(junk)} must still get NO enforcement handle`);
     }
@@ -417,5 +434,58 @@ test('RED-FIRST/HIGH2-junk-still-refused: the reported junk shapes stay refused 
     recordKeep(proj, { target: 'f.md:longrepeat', reason: 'test', anchor: longRepeat, anchorFile: 'C:/store/f.md' });
     const entry2 = loadKeeps(proj).find((k) => k.target === 'f.md:longrepeat');
     assert.strictEqual(entry2.anchor, undefined, 'a 30-char single-character repeat clears the length floor but must still be refused (1 distinct char < 6)');
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// grad11 STEP 1 — F5, the dispatch's own two named sub-defects, reproduced
+// with the dispatch's own exact examples.
+// ---------------------------------------------------------------------------
+
+test('grad11 F5 floor-value: the dispatch\'s own 3-line YAML anchor (whitespace-stripped to 9 chars under the OLD rule) now clears the floor', () => {
+  const proj = sandbox();
+  try {
+    const anchor = 'a: 1\nb: 2\nc: 3';
+    const r = recordKeep(proj, { target: 'f.md:yaml', reason: 'test', anchor, anchorFile: 'C:/store/f.md' });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.anchorDropped, false, 'an ordinary 3-key multi-line anchor must not be treated as too short');
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:yaml');
+    assert.strictEqual(entry.anchor, anchor, 'stored verbatim, not the whitespace-collapsed measuring form');
+  } finally { clean(proj); }
+});
+
+test('grad11 F5 floor-value: the dispatch\'s own Thai example ("ห้ามลบไฟล์นี้", 13 codepoints -> 9 under the OLD Mn-stripping rule) now clears the floor', () => {
+  const proj = sandbox();
+  try {
+    const anchor = 'ห้ามลบไฟล์นี้';
+    const r = recordKeep(proj, { target: 'f.md:thai-short', reason: 'test', anchor, anchorFile: 'C:/store/f.md' });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.anchorDropped, false, 'a real 13-codepoint Thai clause must not be treated as too short because its combining marks were stripped');
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:thai-short');
+    assert.strictEqual(entry.anchor, anchor);
+  } finally { clean(proj); }
+});
+
+test('grad11 F5 floor-value control: whitespace-padding still refuses -- collapsing runs is not the same as counting them', () => {
+  const proj = sandbox();
+  try {
+    const anchor = 'x' + ' '.repeat(20); // "x" + padding -- must still read as ~1 real char
+    const r = recordKeep(proj, { target: 'f.md:padded', reason: 'test', anchor, anchorFile: 'C:/store/f.md' });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.anchorDropped, true, 'whitespace padding must not manufacture a passing length');
+    const entry = loadKeeps(proj).find((k) => k.target === 'f.md:padded');
+    assert.strictEqual(entry.anchor, undefined);
+  } finally { clean(proj); }
+});
+
+test('grad11 F5 return-contract: recordKeepAt returns an object, never a bare boolean', () => {
+  const proj = sandbox();
+  try {
+    const r = recordKeep(proj, { target: 'x', reason: 'r' });
+    assert.strictEqual(typeof r, 'object');
+    assert.notStrictEqual(r, null);
+    assert.strictEqual(typeof r.ok, 'boolean');
+    assert.strictEqual(typeof r.anchorDropped, 'boolean');
+    assert.strictEqual(typeof r.anchorStored, 'boolean');
   } finally { clean(proj); }
 });
