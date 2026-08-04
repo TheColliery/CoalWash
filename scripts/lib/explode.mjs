@@ -1016,19 +1016,35 @@ export function reduceFile(src, opts = {}) {
           if (sha256File(src) !== expectSha) {
             return fail('resume: the source changed since the checkpoint (its sha256 no longer matches the held snapshot) — refusing to splice a torn output across two source states (restore from the snapshot)');
           }
-          // (b) OFFSET↔OUTLEN: re-derive the committed length by reducing the source prefix [0, offset) with the
-          // SAME cut logic (the source is now proven == the snapshot). A forged/stale (offset, outLen) pair —
-          // individually valid but mutually inconsistent — reduces to a DIFFERENT length than claimed → refuse.
+          // (b) OFFSET↔OUTLEN↔CONTENT: re-derive the committed length AND the committed BYTES by reducing the
+          // source prefix [0, offset) with the SAME cut logic (the source is now proven == the snapshot). A
+          // forged/stale (offset, outLen) pair — individually valid but mutually inconsistent — reduces to a
+          // DIFFERENT length than claimed → refuse. rung-2 r8 Finding A (MED-HIGH): the length check ALONE is
+          // not enough — it is satisfied by ANY equal-length bytes, so a caller with ordinary write access to
+          // `outPath` (no src/snapshotDir/manifest access needed) can substitute the already-committed prefix
+          // between waves and this block, pre-fix, never noticed. Fixed by hashing what SHOULD be at
+          // outPath[0, committed) as it is derived (same KEPT-line decisions as the length re-derivation,
+          // costing nothing extra beyond that scan) and comparing it below against outPath's ACTUAL bytes in
+          // that range. Untrusted path only — `_trustedResume` (reduceToCompletion's own loop) never reaches
+          // here, so an honest multi-wave drive never pays this; the cost lands only on the caller that needs
+          // proving, at O(committed) ⊆ O(offset), the same order already paid two lines below by the sha256File
+          // source-desync check.
           let derivedOutLen = struct.bomLen || 0; // BOM is preserved verbatim (outLen starts at the BOM length)
+          const derivedHash = crypto.createHash('sha256');
+          if (struct.bomLen) derivedHash.update(readRange(fd, 0, struct.bomLen));
           scanWave(fd, offset, struct.bomLen || 0, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, (lineBuf) => {
             const lt = lineText(lineBuf);
-            if (!lt.trim()) { derivedOutLen += lineBuf.length; return; } // blank line kept verbatim
+            if (!lt.trim()) { derivedOutLen += lineBuf.length; derivedHash.update(lineBuf); return; } // blank line kept verbatim
             let po = null, pOk = true;
             try { po = JSON.parse(lt); } catch { pOk = false; }
-            if (!(pOk && cutSet.has(unitType(po, typeField)))) derivedOutLen += lineBuf.length; // kept (unparseable/typeless/non-cut)
+            if (!(pOk && cutSet.has(unitType(po, typeField)))) { derivedOutLen += lineBuf.length; derivedHash.update(lineBuf); } // kept (unparseable/typeless/non-cut)
           });
           if (derivedOutLen !== committed) {
             return fail(`resume: checkpoint (offset ${offset}, outLen ${committed}) is inconsistent — the source prefix [0, ${offset}) reduces to ${derivedOutLen} bytes, not ${committed} (a forged/stale checkpoint would drop or duplicate records at the resume seam — refused)`);
+          }
+          const actual = sha256FileRange(outPath, 0, committed);
+          if (actual.read !== committed || actual.digest !== derivedHash.digest('hex')) {
+            return fail(`resume: the committed prefix in outPath (bytes [0, ${committed})) does not match what the source prefix [0, ${offset}) reduces to — content mismatch, not merely a length one (the output was altered independently of the source since the checkpoint was recorded; refused)`);
           }
         }
       }

@@ -1563,6 +1563,46 @@ test('WAVE-8 L-META (resume anchor — source-desync): a source REWRITTEN betwee
   } finally { rm(dir); }
 });
 
+test('rung-2 r8 Finding A [MED-HIGH]: a hand-driven resume verifies outPath\'s CONTENT, not just its LENGTH — an EQUAL-LENGTH substitution between waves is refused', () => {
+  const dir = tmp();
+  try {
+    const mk = (tag) => buildJsonl(Array.from({ length: 100 }, (_, i) => ({ type: i % 4 === 0 ? 'queue-operation' : 'user', i, tag: `${tag}${i}` }))).buf;
+    const src = write(dir, 'sess.jsonl', mk('REAL'));
+    const out = path.join(dir, 'out.jsonl');
+    const opts = { cutTypes: ['queue-operation'], outPath: out, snapshotDir: path.join(dir, 's'), maxLines: 20 };
+    const w1 = reduceFile(src, { ...opts, offset: 0, resume: null });
+    assert.strictEqual(w1.done, false, 'the fixture is set up to stop mid-file (multi-wave)');
+    const real = fs.readFileSync(out);
+    // ATTACK: the caller-supplied checkpoint is genuine (no forgery) — only outPath's ALREADY-COMMITTED
+    // bytes are replaced by equal-length garbage, exactly what a stray external writer or a hostile
+    // co-tenant with ordinary write access to outPath (no src/snapshotDir/manifest access needed) can do.
+    fs.writeFileSync(out, Buffer.alloc(real.length, 'X'.charCodeAt(0)));
+    assert.strictEqual(fs.statSync(out).size, real.length, 'the substitution preserves LENGTH exactly — the old length-only guard cannot see this');
+    const r = reduceFile(src, { ...opts, offset: w1.nextOffset, resume: w1.checkpoint });
+    assert.strictEqual(r.ok, false, 'a content-substituted committed prefix is refused (pre-fix: ok:true — the forged bytes survive and the real reduced prefix is silently gone)');
+    assert.match(r.reason, /content|mismatch|match/i);
+    assert.ok(fs.readFileSync(out).equals(Buffer.alloc(real.length, 'X'.charCodeAt(0))), 'the refusal does not itself further corrupt the tampered file — nothing is appended over it');
+  } finally { rm(dir); }
+});
+
+test('rung-2 r8 Finding A CONTROL: a legitimate, UNTAMPERED hand-driven multi-wave resume still completes byte-identical (the content check does not false-positive on honest progress)', () => {
+  const dir = tmp();
+  try {
+    const objs = Array.from({ length: 100 }, (_, i) => ({ type: i % 4 === 0 ? 'queue-operation' : 'user', i, tag: `REAL${i}` }));
+    const { buf, lines } = buildJsonl(objs);
+    const src = write(dir, 'sess.jsonl', buf);
+    const out = path.join(dir, 'out.jsonl');
+    const opts = { cutTypes: ['queue-operation'], outPath: out, snapshotDir: path.join(dir, 's'), maxLines: 20 };
+    let w = reduceFile(src, { ...opts, offset: 0, resume: null });
+    let waves = 1;
+    while (!w.done) { w = reduceFile(src, { ...opts, offset: w.nextOffset, resume: w.checkpoint }); waves++; }
+    assert.ok(waves > 1, 'the fixture genuinely spans multiple hand-driven waves (a single-wave run proves nothing about resume content-checking)');
+    assert.strictEqual(w.ok, true, 'an honest, untampered multi-wave hand-driven resume still completes (pre- and post-fix)');
+    const expected = expectKept(lines, objs, 'type', ['queue-operation']);
+    assert.ok(fs.readFileSync(out).equals(expected), 'the final output is still byte-exact — the new content check never rejects genuine progress');
+  } finally { rm(dir); }
+});
+
 test('WAVE-8 L4-B (budget-floor amplification): a sub-CHUNK budget the OLD fixed 2 GiB projection permitted (but that re-reads many× the filesize) is REFUSED by the filesize-relative amplification cap — FAST, no grind', () => {
   const dir = tmp();
   try {
