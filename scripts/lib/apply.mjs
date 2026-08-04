@@ -290,7 +290,24 @@ function needleIndentShape(needle, origParts) {
   // silent pass, see indentRelativeSurvives's own fallback ordering.
   if (origParts) {
     const pos = locateStructural(shape, origParts);
-    if (pos !== -1) shape.origChain = ancestorChain(origParts, pos, n[0].indent);
+    // round-12 lab F1 [CRITICAL, content-loss], root cause: this used to
+    // pass n[0].indent -- the ANCHOR STRING'S OWN recorded indent -- as the
+    // reference depth ancestorChain walks against. For an anchor recorded
+    // FLUSH-LEFT (indent 0, as literally written in keeps.json) whose REAL
+    // position in the file is nested (e.g. indent 2 under a loop header),
+    // this asks "find ancestors shallower than 0", which is impossible --
+    // origChain silently comes back [] (empty, not null), and an EMPTY
+    // chain vacuously "preserves" against any candidate (chainPreserved's
+    // own i===normOrig.length check passes trivially at length 0). Every
+    // downstream consumer (both indentRelativeSurvives's own loop AND
+    // flattenSurvives, once F1's signature fix threads it through) then
+    // treats this exactly like "no origChain available" -- silently, with
+    // no signal that a chain SHOULD have existed. `locateStructural`
+    // already found the anchor's TRUE position by rank+text match;
+    // `origParts[pos].indent` is that position's REAL indent and is what
+    // ancestorChain needs as its reference depth, independent of however
+    // the anchor happened to be recorded.
+    if (pos !== -1) shape.origChain = ancestorChain(origParts, pos, origParts[pos].indent);
   }
   return shape;
 }
@@ -319,7 +336,29 @@ function indentRelativeSurvives(shape, haystack, haystackParts, strict = true) {
     // position" in a file it did not come from), this check is a no-op and
     // the rank+text match above is the whole test -- unchanged behaviour for
     // the migration case, named as a residual in the round's own return.
-    if (ok && origChain) { if (!chainPreserved(origChain, ancestorChain(h, start, h[start].indent))) ok = false; }
+    //
+    // round-12 lab F2 [CRITICAL, content-loss]: this loop used to `continue`
+    // past a rank+text match whose chain FAILED, hunting for a later window
+    // whose chain happened to pass -- a `.some()` over candidate windows,
+    // answering "does ANY window survive" where the invariant needs "does
+    // THE window this keep protects survive". A shallow, structurally-
+    // identical DECOY elsewhere in the haystack (its own valid chain, from
+    // its own position) satisfied the loop before the deep, genuinely-
+    // escaped occurrence was ever reached. Fixed: a rank+text match whose
+    // chain does NOT preserve is itself a positive signal that an instance
+    // of this anchor's shape has escaped its enclosing structure --
+    // refuse immediately rather than let a later, unrelated window paper
+    // over it. NAMED RESIDUAL (over-refusal, never content-loss, see the
+    // room's own acceptance rule): a legitimate rewrite where an UNRELATED
+    // occurrence of the same anchor text sits, by coincidence, earlier in
+    // document order than the keep's real (safe) content can now be
+    // refused too -- the frame carries no signal to distinguish "the real
+    // content escaped, masked by a decoy" from "an unrelated decoy sits
+    // beside a safe original" without a position-correlation mechanism
+    // this fix does not add. Tested and accepted as the round's return.
+    if (ok && origChain) {
+      if (!chainPreserved(origChain, ancestorChain(h, start, h[start].indent))) return false;
+    }
     if (ok) return true;
   }
   // grad11 STEP 2 [F3]: the flatten fallback ITSELF is where a needle whose
@@ -332,7 +371,7 @@ function indentRelativeSurvives(shape, haystack, haystackParts, strict = true) {
   // indent value -- true for a genuine reflow (indentation was never
   // introduced), false for an in-place reparent (one line's indent changed
   // while its neighbours' did not).
-  if (atZero) return flattenSurvives(flatNeedle, h, strict);
+  if (atZero) return flattenSurvives(flatNeedle, h, strict, origChain); // round-12 lab F1
   return false;
 }
 // grad11 STEP 2 [CRITICAL, F3+F4+F9 — one predicate, not three]: RULING-LAYER-3
@@ -465,12 +504,30 @@ function flattenWithLineMap(parts) {
 // round (the merge-pair path only ever went through `textSurvives`'s
 // plain single-line-style flatten), so the merge-pair consumer inherited
 // a NEW gate it never asked for, silently, through the shared helper.
-function flattenSurvives(flatNeedle, haystackParts, strict = true) {
+// round-12 lab F1 [CRITICAL, content-loss]: this function never received
+// shape.origChain -- an anchor recorded FLUSH-LEFT (indent 0, as literally
+// written in the keeps.json anchor string, regardless of its real indent in
+// the file) always routes here via indentRelativeSurvives's atZero branch,
+// and the ancestor-chain frame round 11 widened the OTHER branch with was
+// silently discarded. A loop body escaping its loop, when the anchor
+// protecting it happened to be recorded flush-left, was silently allowed.
+// Fixed the same way the exact-match loop already does it: when origChain
+// is known, locate which line of `haystackParts` the matched span STARTS
+// on (via flattenWithLineMap's own chunk->lineIndex map, already built for
+// the uniformity check below) and require that line's own ancestor chain
+// to preserve origChain -- same predicate, same direction, now on both
+// branches instead of one.
+function flattenSurvives(flatNeedle, haystackParts, strict = true, origChain = null) {
   const { flat, chunks } = flattenWithLineMap(haystackParts);
   const idx = flat.indexOf(flatNeedle);
   if (idx === -1) return false;
-  if (!strict) return true;
   const end = idx + flatNeedle.length;
+  if (origChain) {
+    const first = chunks.find((c) => c.start < end && c.end > idx);
+    if (!first) return false; // defensive: a match with no contributing line is unreachable, refuse rather than assume
+    if (!chainPreserved(origChain, ancestorChain(haystackParts, first.lineIndex, haystackParts[first.lineIndex].indent))) return false;
+  }
+  if (!strict) return true;
   const spanIndents = new Set();
   for (const c of chunks) { if (c.start < end && c.end > idx) spanIndents.add(haystackParts[c.lineIndex].indent); }
   return spanIndents.size <= 1;

@@ -3683,6 +3683,128 @@ test('F9 (FR3, RULING-LAYER-3 Amdt.4): a list-continuation whitespace shift surv
   } finally { clean(proj); }
 });
 
+// round 12 lab (LAB-RECORD.md, F1/F2) -- the input-frame widening (F3/F4/F9
+// above) closed the construction that motivated it and left the CLASS: two
+// branches of indentRelativeSurvives reach a verdict without consulting
+// origChain at all.
+test('F1 [CRITICAL, content-loss] (round-12 lab): a keep anchor recorded FLUSH-LEFT bypasses the own-file chain check -- the atZero fallback never consults origChain', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'for item in items:\n  value_x: 100\n  value_y: 200\nafter loop\n');
+    // the anchor is recorded WITHOUT its real leading indent -- needleIndentShape
+    // parses the ANCHOR STRING itself (not its context in the file), so both
+    // lines read as indent 0: uniform=true, indent0=0, atZero=true. That routes
+    // this keep through flattenSurvives, whose OLD signature never received
+    // shape.origChain at all.
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'value_x: 100\nvalue_y: 200', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      // the loop header is GONE, and the body is REFLOWED onto one physical
+      // line (not merely dedented) -- this is deliberate: survivesOwnFile's
+      // OWN raw `.includes(anchor)` pre-check (an EARLIER, unrelated
+      // short-circuit, line ~602) would trivially match a byte-identical
+      // 2-line dedent before either fix's code ever ran. Reflowing onto one
+      // line makes the raw check miss (the anchor's own recorded newline
+      // no longer appears verbatim) AND makes the exact-match rank+text
+      // loop miss too (n.length=2 physical lines vs h's one merged line),
+      // forcing the ONLY remaining path: atZero -> flattenSurvives, which
+      // is exactly the branch F1 is about.
+      { type: 'rewrite', path: f, content: 'value_x: 100 value_y: 200\nafter loop\n' },
+    ]));
+    assert.strictEqual(r.ok, false, 'the loop header enclosing this anchor is gone -- must refuse, not allow the escape');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'for item in items:\n  value_x: 100\n  value_y: 200\nafter loop\n', 'file left untouched');
+  } finally { clean(proj); }
+});
+
+test('F1 control (round-12 lab): the SAME reflow-escape with the anchor recorded WITH its real indent already refuses -- proves the fix is needle-recording-specific, not a new capability', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'for item in items:\n  value_x: 100\n  value_y: 200\nafter loop\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '  value_x: 100\n  value_y: 200', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'value_x: 100 value_y: 200\nafter loop\n' },
+    ]));
+    assert.strictEqual(r.ok, false, r.error);
+  } finally { clean(proj); }
+});
+
+test('F2 [CRITICAL, content-loss] (round-12 lab, atZero deliberately excluded): a decoy occurrence elsewhere in the haystack masks an escape on the strict chain path', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    // TWO structurally-identical blocks under the SAME header text in the
+    // ORIGINAL file -- locateStructural finds the FIRST ("Section A:") and
+    // derives origChain from it; the second is a genuine duplicate.
+    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\nSection A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      // the FIRST block's content escapes its header (moved to top, header
+      // dropped); the SECOND, untouched, structurally-identical block is the
+      // decoy -- the loop's OLD .some() semantics accepts on the decoy and
+      // never has to explain the first block's own missing header. The
+      // decoy's spacing after each colon is doubled (normalizes identically
+      // via lineParts, so the STRUCTURAL match is unaffected) so the FULL
+      // rewritten content is not byte-identical to the recorded anchor --
+      // otherwise survivesOwnFile's own EARLIER raw `.includes(anchor)`
+      // pre-check would find the untouched decoy's exact bytes and short-
+      // circuit before either fix's code ever ran, testing nothing.
+      { type: 'rewrite', path: f, content: 'keep_line_one: alpha\nkeep_line_two: beta\nSection A:\n  keep_line_one:  alpha\n  keep_line_two:  beta\n' },
+    ]));
+    assert.strictEqual(r.ok, false, 'the first block escaped its header -- a decoy elsewhere must not mask it');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\nSection A:\n  keep_line_one: alpha\n  keep_line_two: beta\n', 'file left untouched');
+  } finally { clean(proj); }
+});
+
+test('F2 control (round-12 lab): the SAME escape with NO decoy present already refuses -- unaffected by the fix, proves F2 needs the second occurrence to exploit', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'keep_line_one: alpha\nkeep_line_two: beta\n' },
+    ]));
+    assert.strictEqual(r.ok, false, r.error);
+  } finally { clean(proj); }
+});
+
+test('F2 residual, named not hidden (round-12 lab): a legitimate rewrite with an UNRELATED decoy positioned BEFORE the real content in document order can be over-refused -- accepted trade, over-refusal not content-loss', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    // the keep's real content sits under "Section A:" (its true origChain);
+    // "Section C:" holds an UNRELATED block sharing the same anchor text by
+    // construction -- a coincidence this test deliberately manufactures to
+    // measure the residual, not a realistic accident. Both copies carry the
+    // doubled-colon-spacing perturbation (see F2's attack comment) so the
+    // raw substring pre-check does not short-circuit either one.
+    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      // the real content survives, untouched in MEANING, under Section A --
+      // but a legitimately-added reference copy under Section C now sits
+      // BEFORE it in document order, and Section C's own chain does not
+      // satisfy origChain (['Section A:']).
+      { type: 'rewrite', path: f, content: 'Section C:\n  keep_line_one:  alpha\n  keep_line_two:  beta\nSection A:\n  keep_line_one:  alpha\n  keep_line_two:  beta\n' },
+    ]));
+    // NAMED RESIDUAL: this refuses even though the real content is intact.
+    // The fix cannot distinguish "an escape masked by a later decoy" (F2)
+    // from "an unrelated earlier decoy beside a safe original" without a
+    // position-correlation signal the frame does not carry -- see the
+    // fix's own header comment. Direction is over-refusal (file untouched,
+    // flagged), never content loss.
+    assert.strictEqual(r.ok, false, 'accepted residual: an earlier unrelated decoy over-refuses a legitimate edit -- see the fix comment');
+  } finally { clean(proj); }
+});
+
 // WAVE-6 HIGH (INSPECT on 36e4bfa, cw-class-b-reviewer): round 11's
 // flattenSurvives gained a uniformity requirement -- correct for the
 // KEEPS-GATE (F3), silently inherited by the merge-pair check (:1197,
