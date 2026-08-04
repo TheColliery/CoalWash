@@ -2988,7 +2988,7 @@ test('rung-2 rail-5 CONTROL: a legitimate hand-driven resume with a REAL wave-1 
     const w2 = reduceFile(src, {
       outPath: out, cutTypes: ['mode'], snapshotDir,
       offset: w1.checkpoint.srcOffset,
-      resume: { srcSha256: sha256File(src), outLen: w1.outLen ?? 0, snapshotPath: w1.snapshotPath, structure: 'ndjson', bomLen: 0 },
+      resume: { srcSha256: sha256File(src), outLen: w1.checkpoint.outLen, snapshotPath: w1.snapshotPath, structure: 'ndjson', bomLen: 0 },
     });
     assert.strictEqual(w2.ok, true, 'a genuine hand-driven resume with a real, verifiable snapshot is not caught by the fix');
     assert.match(fs.readFileSync(out, 'utf8'), /kept line/, 'the kept record survives verbatim across the resumed wave');
@@ -3023,6 +3023,101 @@ test('rung-2 rail-5 F1 [MED]: a forged _trustedResume with NO carried snapshotPa
     });
     assert.strictEqual(r.ok, false, 'a forged trusted-resume with no real snapshot carried must refuse, exactly like the untrusted path does');
     assert.match(r.reason, /snapshotPath|snapshot/i);
+  } finally { rm(dir); }
+});
+
+// rung-2 w7-leaf2 [reporting half, ROUND 7] -- `reduceToCompletion`'s `ok:false` on a later wave read
+// as "refused, nothing happened" while an EARLIER wave had already published real bytes to `outPath`
+// (and a real blob into the snapshot store). `acc.partialOutput` now distinguishes the two. Four
+// angles: the flag stays true through a normal multi-wave success (sanity) · stays false on an
+// immediate, zero-wave refusal (no false positive) · is correctly reset to false by the two internal
+// paths that already clean up their own partial · and, at the `reduceFile` level (the exact call
+// shape `reduceToCompletion` uses internally, `_trustedResume:true`), a genuine wave-2 failure leaves
+// wave 1's real bytes sitting at `outPath` -- the invariant the flag exists to report, reproduced
+// through the real region-hash desync mechanism rather than asserted.
+
+test('rung-2 w7-leaf2: partialOutput is true through a normal multi-wave SUCCESS (sanity)', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    const lines = [];
+    for (let i = 0; i < 20; i++) lines.push(JSON.stringify({ type: i % 2 === 0 ? 'mode' : 'user', i }));
+    const src = write(dir, 'src.jsonl', Buffer.from(lines.join('\n') + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    const r = reduceToCompletion(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 3 });
+    assert.strictEqual(r.ok, true);
+    assert.ok(r.waves > 1, 'setup: a genuine multi-wave drive');
+    assert.strictEqual(r.partialOutput, true, 'real bytes were published during this drive');
+  } finally { rm(dir); }
+});
+
+test('rung-2 w7-leaf2: partialOutput is false on an IMMEDIATE refusal — zero waves ever published', () => {
+  const dir = tmp();
+  try {
+    const src = write(dir, 'src.jsonl', Buffer.from(JSON.stringify({ type: 'mode' }) + '\n', 'utf8'));
+    // no snapshotDir -> rail 5 refuses before any wave runs at all.
+    const r = reduceToCompletion(src, { outPath: path.join(dir, 'out.jsonl'), cutTypes: ['mode'] });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.waves, 1, 'setup: the single call was made, but reduceFile itself refused before publishing');
+    assert.strictEqual(r.partialOutput, false, 'nothing was ever published — must not read as "something happened"');
+  } finally { rm(dir); }
+});
+
+test('rung-2 w7-leaf2: the re-read-ceiling refusal cleans up its own partial AND clears the flag', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    // WAVE-14's own note: a small dense file at a pathological per-wave budget (maxLines:1) re-reads
+    // many multiples of its own size and trips the SUB-CHUNK re-read ceiling without needing a
+    // multi-CHUNK fixture -- reused here rather than re-derived.
+    const lines = [];
+    for (let i = 0; i < 400; i++) lines.push(JSON.stringify({ type: 'user', i, pad: 'x'.repeat(40) }));
+    const src = write(dir, 'src.jsonl', Buffer.from(lines.join('\n') + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    const r = reduceToCompletion(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 1 });
+    assert.strictEqual(r.ok, false, 'setup: the re-read ceiling must actually trip for this test to mean anything');
+    assert.match(r.reason, /re-read/i);
+    assert.ok(r.waves > 1, 'setup: the ceiling trips mid-drive, not on wave 1 alone');
+    assert.strictEqual(r.partialOutput, false, 'the internal cleanup already unlinked the partial — the flag must agree with reality');
+    assert.strictEqual(fs.existsSync(out), false, 'confirms the cleanup actually ran, not just the flag');
+  } finally { rm(dir); }
+});
+
+test('rung-2 w7-leaf2: at the reduceFile level (the shape reduceToCompletion uses internally), a wave-2 failure leaves wave-1\'s real bytes published', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    // L1 is KEPT (not cutType 'mode') so wave 1's own output is genuinely non-empty; L2 is what
+    // wave 2 reads and where the corruption below lands.
+    const L1 = JSON.stringify({ type: 'user', text: 'wave-1 content that must survive on disk' });
+    const L2 = JSON.stringify({ type: 'user', value: 1 });
+    const src = write(dir, 'src.jsonl', Buffer.from(L1 + '\n' + L2 + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    // Wave 1, exactly the internal shape (_trustedResume:true), forced to checkpoint after one line.
+    const w1 = reduceFile(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 1, _trustedResume: true });
+    assert.strictEqual(w1.ok, true);
+    assert.strictEqual(w1.done, false, 'setup: a real wave 2 is exercised');
+    assert.strictEqual(fs.existsSync(out), true, 'wave 1 already published for real — this is the fact the flag exists to report');
+    const w1Bytes = fs.readFileSync(out, 'utf8');
+    assert.match(w1Bytes, /wave-1 content/, 'wave 1\'s real output is on disk, not a temp');
+    // Corrupt src in place, same byte length, so wave 2's region-hash re-read of [prevOffset, nextOffset)
+    // disagrees with the wave-1 snapshot -- the desync path reduceFile's own comment names.
+    const srcBuf = fs.readFileSync(src);
+    srcBuf.write('X', L1.length + 1); // one byte inside L2's region, length-preserving
+    fs.writeFileSync(src, srcBuf);
+    const w2 = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], snapshotDir,
+      offset: w1.checkpoint.srcOffset,
+      resume: { srcSha256: sha256File(src), outLen: w1.checkpoint.outLen, snapshotPath: w1.snapshotPath, structure: 'ndjson', bomLen: 0 },
+      _trustedResume: true,
+    });
+    assert.strictEqual(w2.ok, false, 'setup: the desync must actually fire');
+    assert.match(w2.reason, /source changed mid-reduction/);
+    // THE INVARIANT: wave 2 failing does not retroactively unpublish wave 1. This is exactly what
+    // reduceToCompletion's ok:false-with-no-cleanup return would hand a caller with no signal at all
+    // before this fix -- partialOutput exists so that signal is no longer silent.
+    assert.strictEqual(fs.existsSync(out), true, 'wave 1\'s real output is STILL on disk after wave 2 refused');
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), w1Bytes, 'unchanged — wave 2 never got to flush anything');
   } finally { rm(dir); }
 });
 

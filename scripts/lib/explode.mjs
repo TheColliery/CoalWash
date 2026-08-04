@@ -1233,6 +1233,18 @@ export function reduceToCompletion(src, opts = {}) {
     ok: true, skipped: false, structure: null, dryRun: !opts.outPath, waves: 0,
     unitsSeen: 0, unitsCut: 0, unitsKept: 0, unitsUnparsed: 0, bytesSeen: 0, bytesCut: 0, bytesKept: 0,
     snapshotPath: null, outPath: opts.outPath || null, done: false, reason: null,
+    // ROUND-7 w7-leaf2 (the second, separate HIGH — the REPORTING half, not the TOCTOU half): on a
+    // multi-wave drive, wave 1's real bytes are published at `outPath` the moment wave 1 completes
+    // (see the write-setup comment above `reduceFile`'s ndjson branch — "atomic-renamed to outPath
+    // at wave end", then EVERY later wave appends to that already-published file). If a LATER wave
+    // then fails, an early `ok:false` return here read as "refused, nothing happened" -- but wave 1
+    // had already written real bytes into `outPath` (and, on wave 1, a real blob into the snapshot
+    // store) before the failure. This flag distinguishes the two: true means at least one real,
+    // non-dry-run wave published before the run ended, whatever the final `ok` value says. Two
+    // internal failure paths below already clean up the partial file themselves (the overlong-wave
+    // and re-read-ceiling refusals) -- they explicitly clear this flag back to false, since nothing
+    // partial is left on disk once that cleanup runs.
+    partialOutput: false,
   };
   // BREAK 3-B (WAVE-7 L4 — the size-relative re-read-explosion floor lives on the DRIVE loop, where the
   // explosion happens; a single reduceFile wave can't explode). Stat once: a sub-CHUNK per-wave BYTE budget
@@ -1273,6 +1285,11 @@ export function reduceToCompletion(src, opts = {}) {
     acc.unitsSeen += r.unitsSeen; acc.unitsCut += r.unitsCut; acc.unitsKept += r.unitsKept; acc.unitsUnparsed += r.unitsUnparsed;
     acc.bytesSeen += r.bytesSeen; acc.bytesCut += r.bytesCut; acc.bytesKept += r.bytesKept;
     if (r.snapshotPath) acc.snapshotPath = r.snapshotPath;
+    // This wave genuinely wrote/appended real bytes to `outPath` (a dry-run writes nothing at all;
+    // reduceFile's own atomic-temp-then-rename or append-mode write already committed by the time it
+    // returns ok:true). Set unconditionally here, not just once — a later wave's failure must still
+    // read as "yes, something upstream already published," which is exactly what this flag is for.
+    if (!acc.dryRun) acc.partialOutput = true;
     if (r.done) {
       acc.done = true;
       acc.reductionPct = acc.bytesSeen ? Number((100 * acc.bytesCut / acc.bytesSeen).toFixed(2)) : 0;
@@ -1292,6 +1309,7 @@ export function reduceToCompletion(src, opts = {}) {
         acc.skipped = true;
         acc.reason = 'none of the requested cut-types are present in the file — nothing to cut (a no-op ndjson reduction is skipped; source untouched, no output written)';
         acc.outPath = null;
+        acc.partialOutput = false; // the byte-identical copy was just unlinked above — nothing partial remains
       }
       // LOOP SOURCE-ANCHOR (cluster 1 / L3, WAVE-9): the old end-ONLY whole-file re-hash lived here — it was
       // defeated by a mid-loop change reverted before completion, and caught a non-revert change only AFTER
@@ -1319,6 +1337,7 @@ export function reduceToCompletion(src, opts = {}) {
       if (advance > 0 && advance < CHUNK && (size / advance) * CHUNK > REREAD_AMPLIFICATION_CAP * size) { // WAVE-8 L4-B: filesize-relative
         if (!acc.dryRun && acc.outPath) { try { fs.unlinkSync(acc.outPath); } catch { /* best-effort cleanup of wave 1's partial */ } }
         acc.ok = false;
+        acc.partialOutput = false; // wave 1's partial was just unlinked above — nothing left on disk
         acc.reason = `per-wave budget too small for the ${size}-byte file — wave 1 advanced only ${advance} bytes, projecting ~${Math.ceil(size / advance)} waves each re-reading a full chunk (~${Math.ceil(CHUNK / advance)}× the filesize of re-reads, over the ${REREAD_AMPLIFICATION_CAP}× cap — an O(waves × CHUNK) re-read explosion); raise maxBytes/maxLines or omit them for the safe defaults`;
         return acc;
       }
@@ -1353,6 +1372,7 @@ export function reduceToCompletion(src, opts = {}) {
     if (reReadAccum > reReadCeiling) {
       if (!acc.dryRun && acc.outPath) { try { fs.unlinkSync(acc.outPath); } catch { /* best-effort cleanup of the partial */ } }
       acc.ok = false;
+      acc.partialOutput = false; // the accumulated partial was just unlinked above — nothing left on disk
       acc.reason = `per-wave budget too small for the ${size}-byte file — the drive has re-read ~${reReadAccum} bytes over ${acc.waves} waves (past the size-relative re-read ceiling ${reReadCeiling} B [${size > CHUNK ? REREAD_AMPLIFICATION_CAP : REREAD_SUBCHUNK_CAP}× filesize] — an O(waves × re-read) explosion that grinds a sub-budget on ANY file size, small files included); raise maxBytes/maxLines or omit them for the safe defaults`;
       return acc;
     }
@@ -1781,9 +1801,26 @@ function existsPopulated(p) {
 //      SCHEMA-AWARE forgery that also fabricates matching `originalCanonical`/`originalDev`/
 //      `originalIno` — both leak the victim's content, `ok:true`.) This is not a bug awaiting a
 //      fix; it is the boundary.
+//   1b. A SECOND, STRICTLY WEAKER ROUTE TO THE SAME BOUNDARY. CORRECTED 2026-08-05 (source:
+//      `cw-lab-rung2-r7/LAB-RECORD.md`, w7-leaf1, department-head-confirmed at source). The ownership
+//      check above confirms `original` against a manifest row — but `toPath` (where the verified
+//      bytes get published) is a THIRD, independent input this check never binds to `original` or the
+//      confirming row at all. A caller does not need to forge anything: reading a genuine,
+//      already-existing manifest row supplies a valid `original`, and `toPath` is the caller's own
+//      choice from the start. No write to the store, no forged row — READ access to the manifest is
+//      SUFFICIENT on its own, given ordinary write access to a directory the attacker already owns
+//      (the same (b) as point 1, but (a) drops from "possess the blob bytes" to "can read the
+//      manifest", a strictly weaker adversary). (MEASURED: `scratchpad/cw-lab-rung2-r7/coord-verify/
+//      verify-topath-decouple.mjs` — a wrong `original` refuses; the true, unmodified `original` plus
+//      an attacker-chosen `toPath` succeeds, `ok:true, verified:true`, manifest byte-unchanged.) Not a
+//      separate defect from point 1 — the SAME trust boundary, reached through the read-only door.
 //   2. THE MITIGATION IS ISOLATION, and it is the OPERATOR's to arrange, not the engine's to enforce —
-//      a `snapshotDir` per trust domain, so no shared manifest for a co-tenant to write into exists in
-//      the first place.
+//      a `snapshotDir` per trust domain. CORRECTED 2026-08-05 (the 1b measurement above): isolating
+//      against co-tenant WRITE alone is NOT sufficient — point 1b needs only READ access to the
+//      manifest, no write anywhere. The isolation an operator arranges must keep a co-tenant from
+//      READING another tenant's `snapshotDir`, not merely from writing into it; a store mounted
+//      read-only across tenants is NOT safe under this boundary and was, until this correction,
+//      stated as if it were.
 //   3. WHAT OWNERSHIP CHECKING DOES BUY, so this is never read as "the check is worthless": it closes
 //      the CARETAKER-DISCIPLINE failure mode — the realistic one, and the one the lab actually
 //      reproduced first (an ordinary, non-adversarial "recover everything visible in a shared store"
