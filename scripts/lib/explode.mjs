@@ -1602,13 +1602,22 @@ function existsPopulated(p) {
 //       Three platforms, one immediate unlink+recreate at one path: only Linux recycles the inode
 //       at CI scale. This is measured, not inferred from the assertion's own outcome.
 //
-//       Birthtime was considered and NOT added as a fix: Node's `Stats.birthtimeMs` shape is
-//       platform-independent, but its Linux VALUE is not — reliability depends on `statx()` kernel
-//       support and libuv's crtime-vs-ctime fallback, neither verifiable from a non-Linux dev box, and
-//       even a working birthtime could plausibly land within the SAME sub-millisecond window this
-//       exact `unlinkSync`→`writeFileSync` reproduction uses, meaning it might narrow without closing
-//       the very test it would need to turn green. Shipping it as "the fix" without being able to prove
-//       either claim would have repeated this same mistake with a different signal.
+//       Birthtime/ctime were considered and NOT added as a fix — CONFIRMED unreliable with a second
+//       diagnostic (run 30940310775, deleted after this landed), not left as a reasoned guess:
+//         ubuntu · node 24 (F4's own test RED here): sameIno=true sameBirthtime=true sameCtime=true —
+//           dev/ino, birthtime AND ctime all IDENTICAL. The whole unlink+recreate landed inside one
+//           millisecond tick; no stat-time field distinguishes the two files at that resolution.
+//         ubuntu · node 22 (F4's own test GREEN here, a DIFFERENT probe instance, same run): the
+//           diagnostic's own unlink+recreate DID recycle the inode (sameIno=true) yet birthtime
+//           differed by exactly 1ms — recycling is a per-attempt RACE against ext4's free-inode
+//           state, not a fixed property of one CI run; the same machine recycles on one attempt and
+//           not the next.
+//       Two consequences: (1) the sub-millisecond-collision risk this paragraph originally predicted
+//       is REAL, not hypothetical — node 24's run hit it exactly; (2) even where birthtime DOES
+//       differ, it cannot be trusted as a general fix because the SAME machine, SAME code, adjacent
+//       runs, produced BOTH outcomes. A signal that sometimes helps and sometimes doesn't is not a
+//       security boundary. No OS-reported stat field (dev, ino, birthtime, ctime) closes this
+//       reliably at this operation's natural timescale.
 //
 //       DISPOSITION: NARROWED, NOT CLOSED. `6f261e4` correctly and verifiably (all 3 CI platforms,
 //       Legs 1-2 of the F4 test) closes the SIMPLER attack — an attacker declares a FALSE original while

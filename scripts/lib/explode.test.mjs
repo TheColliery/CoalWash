@@ -2891,25 +2891,3 @@ test('rung-2 F4 [HIGH]: a live dev/ino mismatch overrides a stale canonMatch —
     assert.strictEqual(fs.existsSync(path.join(dir, 'recycled.out')), false, 'nothing was copied out — the old secret never reaches the caller');
   } finally { rm(dir); }
 });
-
-// TEMPORARY DIAGNOSTIC #2 — dispatched by main-cmd, 2026-08-05. Confirmed inode recycling on ext4
-// (run 30939561156). Before designing a birthtime-based fix, measure whether Node's birthtimeMs
-// actually distinguishes the recycled file on THIS CI's real kernel/Node combo -- do not assume.
-// NO ASSERTIONS -- cannot fail the gate. DELETE once the fix's design is settled.
-test('TEMP DIAGNOSTIC #2: birthtime/ctime across the SAME unlink+recreate that recycles the inode', () => {
-  const dir = tmp();
-  try {
-    const p = path.join(dir, 'recycled-probe2.txt');
-    fs.writeFileSync(p, 'first\n');
-    const before = fs.statSync(p, { bigint: true });
-    fs.unlinkSync(p);
-    fs.writeFileSync(p, 'second\n');
-    const after = fs.statSync(p, { bigint: true });
-    console.error(`TEMP-DIAG2 platform=${process.platform} node=${process.version} ` +
-      `sameIno=${before.ino === after.ino} ` +
-      `before.birthtimeMs=${before.birthtimeMs} after.birthtimeMs=${after.birthtimeMs} ` +
-      `sameBirthtime=${before.birthtimeMs === after.birthtimeMs} ` +
-      `before.ctimeMs=${before.ctimeMs} after.ctimeMs=${after.ctimeMs} ` +
-      `sameCtime=${before.ctimeMs === after.ctimeMs}`);
-  } finally { rm(dir); }
-});
