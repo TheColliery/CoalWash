@@ -485,6 +485,13 @@ function textSurvives(needle, haystacks, normHaystacks, haystackLineParts) {
 // from, so the chain check would be meaningless there and would FALSE-REFUSE
 // a legitimate merge (rail #2) -- the KEEPS-GATE call site below falls back
 // to the existing, unchanged, cross-file `textSurvives` sweep for that case.
+//
+// grad11 CI-RED FOLLOW-UP: the single-line branch below is left intact
+// (correctness, callable standalone) but its call site now only reaches
+// this function for a MULTI-LINE anchor -- see the guard at the call site's
+// own comment for why (a single-line anchor gains nothing from a strict
+// own-file check and the branch cost a redundant `normWhitespace` per call
+// that the fallback's own memo already covers).
 function survivesOwnFile(anchor, newContent, origText) {
   if (String(newContent).includes(anchor)) return true; // exact substring -- unambiguous either way
   if (!/\r|\n/.test(String(anchor))) {
@@ -1329,7 +1336,31 @@ export function applyPlan(plan, opts = {}) {
             // question needs an original to ask it about). A delete has no
             // new `.content` to check structurally, so it skips straight to
             // the fallback below, unchanged.
-            if (a.type === 'rewrite' && a.origBuf && survivesOwnFile(k.anchor, a.content, a.origBuf.toString('utf8'))) continue;
+            //
+            // grad11 CI-RED FOLLOW-UP: gated on `/\r|\n/.test(k.anchor)` --
+            // a SINGLE-LINE anchor has no ancestor chain of its own to
+            // defend (nothing is "inside" one line; survivesOwnFile's own
+            // single-line branch already says this), so routing it through
+            // this strict check bought it nothing and cost it a FRESH
+            // `normWhitespace(a.content)` on every (keep x action) pair --
+            // duplicate work the fallback below's `normPostTexts` memo
+            // already paid for once per file at the top of this iteration.
+            // Windows CI measured the regression directly: 4 consecutive
+            // green commits at ~1800ms threshold, then 2117ms on the commit
+            // that added this call unconditionally (25 files/~768KB each,
+            // 20 single-line keeps -- 20 redundant O(768KB) normalizations).
+            // Skipping straight to the fallback for a single-line anchor
+            // loses nothing: the fallback's whole-plan scan is a SUPERSET
+            // of the own-file-only check (the file the strict check would
+            // have looked at is one of the fallback's own haystacks), so
+            // anything the strict check would have found, the fallback
+            // finds too -- it just also tolerates the SAME cross-file
+            // migration a multi-line anchor gets via the fallback path
+            // below, which single-line anchors are safe to inherit for
+            // free (they never had a structural "original position" to
+            // defend in the first place).
+            const triedOwnFile = a.type === 'rewrite' && a.origBuf && /\r|\n/.test(String(k.anchor));
+            if (triedOwnFile && survivesOwnFile(k.anchor, a.content, a.origBuf.toString('utf8'))) continue;
             // Fallback: the EXISTING, unchanged, whole-plan sweep -- an
             // anchor legitimately MIGRATED to a different file in this same
             // plan is still found here (rail #2's own migration case; this
@@ -1340,7 +1371,21 @@ export function applyPlan(plan, opts = {}) {
             // clearing generic anchor coincidentally present elsewhere in
             // the same plan) -- unchanged from before this round, not newly
             // introduced, and not closed here; declared, not silently fixed.
-            if (survives(k.anchor, a)) continue;
+            //
+            // grad11 CI-RED FOLLOW-UP: `excludeAction` is passed ONLY when
+            // `triedOwnFile` is true -- i.e. only when survivesOwnFile was
+            // ACTUALLY ATTEMPTED (and failed) above. Passing it unconditionally
+            // was a SECOND correctness bug the single-line perf fix almost
+            // shipped: a single-line anchor that legitimately survives ONLY
+            // in its own file (never routed through survivesOwnFile at all
+            // now) was having that very file excluded from this sweep's
+            // haystack, so it found nothing and was wrongly refused -- caught
+            // by re-running the round-11 suite, not by the perf fixture
+            // (which uses anchors absent everywhere by design and could not
+            // see this). Exclusion is only sound relative to a check that
+            // actually ran against that file; with no such check, the fallback
+            // must see every file, exactly as it did before this round.
+            if (survives(k.anchor, triedOwnFile ? a : undefined)) continue;
             excluded.add(a);
             // 80 chars = display truncation only (keeps the flag line one-line
             // readable); the full anchor stays in keeps.json, nothing decided on it.
