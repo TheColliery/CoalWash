@@ -1860,7 +1860,7 @@ test('RED-FIRST/F8-round2-HIGH1 must-break control (uniform, indented needle): a
 // 1.2MB of post-texts / 500 per-haystack normalize calls (20 keeps x 25
 // actions). Fixed by memoizing normPostTexts ONCE per while-iteration
 // instead of once per textSurvives() call.
-test('GATE COST: KEEPS-GATE with many keeps against many large post-texts stays bounded (round-9 perf regression)', () => {
+test('CALL COUNT (GATE COST RULING, main-cmd): KEEPS-GATE normalizes post-texts ONCE per while-iteration, not once per keep', () => {
   const { proj, store } = sandbox();
   try {
     const ACTIONS = 25;
@@ -1884,21 +1884,33 @@ test('GATE COST: KEEPS-GATE with many keeps against many large post-texts stays 
         anchorFile: files[i],
       });
     }
-    const t0 = process.hrtime.bigint();
+    // GATE COST RULING (main-cmd): wall-clock retired for this test -- 19.2MB
+    // of incidental applyPlan file I/O let disk-I/O runner variance dominate
+    // the ms number and manufacture CI red on unregressed code (three
+    // platforms, one push, 14deee8). The test's own failure message always
+    // named the real invariant -- "the normalize-per-call regression is
+    // back" -- a COUNT. `normPostTextsBuilds` increments once per
+    // `postTexts.map(normWhitespace)` build (apply.mjs, the KEEPS-GATE's
+    // while-loop body). Every one of this fixture's 20 keeps' own anchors is
+    // genuinely absent everywhere, so all 20 own-files are excluded on the
+    // FIRST full pass; the SECOND pass finds nothing left to exclude (no
+    // remaining keep's file is still in `actionable`) and the fixpoint loop
+    // breaks -- 2 while-iterations, 2 builds, regardless of KEEP_COUNT. The
+    // pre-Root-B regression re-normalized inside textSurvives() on every
+    // survives() call instead -- one per keep on pass 1 alone, so 20+ builds
+    // for this exact fixture. The two shapes are an order of magnitude
+    // apart; the bound below sits with wide margin on both sides.
+    __testHooks.normPostTextsBuilds = 0;
     const r = apply(planFor(proj, store, actions));
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    // WAVE-8 RE-INSPECT (main-cmd, CI red at a651c20, windows-latest only):
-    // this assertion's message rendered ONLY on failure, so no Windows green
-    // baseline ever accumulated anywhere -- a thin margin and a real
-    // regression were indistinguishable from outside. Print on every run.
-    console.log(`GATE COST ms: KEEPS-GATE/${ACTIONS}-post-texts/${KEEP_COUNT}-keeps = ${ms.toFixed(1)}`);
     // every keep's anchor is genuinely missing everywhere -> every keep
     // excludes its own file (correctness unaffected by the perf fix)
     assert.strictEqual(r.applied, ACTIONS - KEEP_COUNT, r.error);
-    // measured on this box: pre-memoize ~2,962ms, post-memoize ~826ms alone;
-    // under full-suite contention post-memoize still lands well under
-    // 1800ms, which sits with wide margin on both sides
-    assert.ok(ms < 1800, `KEEPS-GATE against ${ACTIONS} large post-texts / ${KEEP_COUNT} keeps took ${ms.toFixed(0)}ms — the normalize-per-call regression is back`);
+    // measured (not guessed): exactly 2 -- pass 1 excludes all 20 own-files,
+    // pass 2 finds none of the 20 keeps' files still in `actionable` and
+    // breaks. A per-call regression would build ~20+ (one per keep, pass 1
+    // alone) -- an order of magnitude apart, so an exact match is the
+    // correct assertion, not a loose bound.
+    assert.strictEqual(__testHooks.normPostTextsBuilds, 2, `normPostTextsBuilds=${__testHooks.normPostTextsBuilds} (expected exactly 2) -- the normalize-per-call regression is back (a per-iteration memo never scales with keep count)`);
   } finally { clean(proj); }
 });
 

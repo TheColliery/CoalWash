@@ -101,7 +101,16 @@ export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup 
 // memoization signal from applyPlan's own I/O at any fixture scale (see
 // apply.test.mjs's CALL COUNT tests for the measurement that established
 // this). Reset to 0 by a test before the call it is measuring.
-export const __testHooks = { linePartsMapCalls: 0 };
+//
+// GATE COST RULING (main-cmd, CI red at 14deee8 across three platforms):
+// wall-clock could not isolate THIS signal either, for the identical reason
+// — 19.2 MB of incidental applyPlan file I/O dominates any fixture large
+// enough to make normPostTexts's own cost visible, and disk I/O varies by
+// runner in a way a fixed ms bound cannot absorb. `normPostTextsBuilds`
+// counts real builds of the round-9 Root B memo (apply.test.mjs's CALL
+// COUNT test at the KEEPS-GATE, same file, same reason as linePartsMapCalls
+// above) — a count does not vary by runner, disk, or load.
+export const __testHooks = { linePartsMapCalls: 0, normPostTextsBuilds: 0 };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -1355,6 +1364,7 @@ export function applyPlan(plan, opts = {}) {
         // see the regression test's own header for the measurements), so
         // the regression protection is a call count, not a clock.
         const normPostTexts = postTexts.map(normWhitespace);
+        __testHooks.normPostTextsBuilds++; // GATE COST RULING: one build per while-iteration is the invariant this counts
         let linePostTextsMemo = null;
         const getLinePostTexts = () => (linePostTextsMemo ||= (__testHooks.linePartsMapCalls++, postTexts.map(lineParts)));
         // grad11 STEP 2: `excludeAction`, when it names an entry actually IN
