@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds } from './config-load.mjs';
+import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -909,3 +909,101 @@ test('RED-FIRST/required-foldOnMiss: a MISS answer is caller-specific, never cac
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+
+// ---------------------------------------------------------------------------
+// board #55: readCleanupPeriodDays -- the settings cascade the estate
+// horizon derives from. The "managed" tier is a fixed OS path
+// (managedSettingsPath()) and is NOT test-injectable; every test here
+// exercises the injectable local/project/user/default tiers, and confirms
+// the managed candidate simply falls through when absent (verified live on
+// this box before writing these tests: the managed path does not exist).
+// ---------------------------------------------------------------------------
+
+function writeJson(p, obj) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(obj), 'utf8');
+}
+
+test('readCleanupPeriodDays: nothing set anywhere -> the documented platform default (30, source "default", no file)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.deepStrictEqual(r, { days: 30, source: 'default', file: null });
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: a USER settings.json value is read when nothing more specific exists', () => {
+  const { home, proj } = sandbox();
+  try {
+    const userFile = path.join(claudeBaseDir(home), 'settings.json');
+    writeJson(userFile, { cleanupPeriodDays: 21 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 21);
+    assert.strictEqual(r.source, 'user');
+    assert.strictEqual(r.file, userFile);
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: PROJECT settings.json overrides USER', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git')); // a real project-root marker
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 21 });
+    const projFile = path.join(proj, '.claude', 'settings.json');
+    writeJson(projFile, { cleanupPeriodDays: 10 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 10);
+    assert.strictEqual(r.source, 'project');
+    assert.strictEqual(r.file, projFile);
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: LOCAL settings.local.json overrides PROJECT (highest injectable tier)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 10 });
+    const localFile = path.join(proj, '.claude', 'settings.local.json');
+    writeJson(localFile, { cleanupPeriodDays: 3 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 3);
+    assert.strictEqual(r.source, 'local');
+    assert.strictEqual(r.file, localFile);
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: a PRESENT-BUT-UNREADABLE file at one tier falls through to the next tier -- never guessed as "key absent, use default"', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    const projFile = path.join(proj, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(projFile), { recursive: true });
+    fs.writeFileSync(projFile, '{ this is not valid json', 'utf8'); // present, broken
+    const userFile = path.join(claudeBaseDir(home), 'settings.json');
+    writeJson(userFile, { cleanupPeriodDays: 8 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 8, 'the broken project tier is skipped, not treated as a confirmed absence');
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: an invalid value (below the platform floor, or non-numeric) is treated as key-absent, falling through to the next tier', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 0 }); // below the platform's documented minimum of 1
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 5 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 5, 'cleanupPeriodDays:0 is invalid per the platform\'s own documented floor -- never trusted as a real value');
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: an unresolvable project root (no cwd marker) drops the local/project tiers and proceeds straight to user/default, never throws', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = readCleanupPeriodDays({ cwd: proj, home }); // no .git/.coalwash.json/CLAUDE.md marker anywhere
+    assert.strictEqual(r.days, 30);
+    assert.strictEqual(r.source, 'default');
+  } finally { clean(home, proj); }
+});

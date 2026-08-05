@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   discoverEstateCC, detectOrphanSlugs, measureEstate, attributeTranscript,
-  reclaimableEstimate, estateReport, RECLAIM_HORIZON_MS,
+  reclaimableEstimate, estateReport, RECLAIM_HORIZON_MS, deriveEstateHorizonDays,
 } from './estate.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 
@@ -138,6 +138,67 @@ test('reclaimableEstimate: only entries older than the horizon count, labeled ~e
   assert.strictEqual(r.bytes, 1000);
   assert.strictEqual(r.est, true);
   assert.strictEqual(r.horizonDays, 30);
+});
+
+// ---------------------------------------------------------------------------
+// board #55: deriveEstateHorizonDays — the horizon must UNDERCUT the
+// platform's own cleanupPeriodDays, never mirror it
+// ---------------------------------------------------------------------------
+
+test('board #55: the OLD constant reclaim horizon (== the platform default) leaves ZERO safety margin — an entry never counts as reclaimable before the platform sweep already threatens it; the NEW derived horizon fixes this', () => {
+  const now = Date.now();
+  // A file aged 20 days — inside the platform's own 30-day default sweep
+  // window (CC has not yet claimed it), but past the derived 15-day
+  // CoalWash horizon (deriveEstateHorizonDays(30) => 15).
+  const entries = [{ bytes: 4096, mtimeMs: now - 20 * 86400000 }];
+
+  // OLD behavior: reclaimableEstimate's own default horizonMs
+  // (RECLAIM_HORIZON_MS, 30 days — what the pre-fix estateReport() used
+  // unconditionally, deliberately equal to the platform's own default).
+  const old = reclaimableEstimate(entries, { now });
+  assert.strictEqual(old.files, 0, 'the OLD 30-day-constant horizon reports NOTHING reclaimable at day 20 — no window ever existed before the platform itself would claim the same file at day 30');
+
+  // NEW behavior: the derived horizon for a real 30-day platform default.
+  const horizon = deriveEstateHorizonDays(30);
+  assert.strictEqual(horizon.horizonDays, 15);
+  assert.strictEqual(horizon.degraded, false);
+  const fresh = reclaimableEstimate(entries, { now, horizonMs: horizon.horizonDays * 86400000 });
+  assert.strictEqual(fresh.files, 1, 'the derived 15-day horizon flags it 10 days before the platform would ever sweep it — a real safety margin');
+  assert.strictEqual(fresh.bytes, 4096);
+});
+
+test('deriveEstateHorizonDays: the horizon strictly UNDERCUTS the platform cleanup period at every valid value except the platform floor (cleanup=1, where zero margin is unavoidable) — closes the equal-threshold race the old constant-30-day default produced', () => {
+  const cases = [
+    { cleanup: 60, horizonDays: 30, degraded: false },
+    { cleanup: 30, horizonDays: 15, degraded: false },
+    { cleanup: 14, horizonDays: 7, degraded: false },
+    { cleanup: 13, horizonDays: 12, degraded: true },
+    { cleanup: 8, horizonDays: 7, degraded: true },
+    { cleanup: 7, horizonDays: 6, degraded: true },
+    { cleanup: 2, horizonDays: 1, degraded: true },
+    { cleanup: 1, horizonDays: 1, degraded: true }, // the ONE unavoidable equal case — the platform's own floor
+  ];
+  for (const c of cases) {
+    const h = deriveEstateHorizonDays(c.cleanup);
+    assert.strictEqual(h.horizonDays, c.horizonDays, `cleanup=${c.cleanup}`);
+    assert.strictEqual(h.degraded, c.degraded, `cleanup=${c.cleanup}`);
+    if (c.cleanup > 1) assert.ok(h.horizonDays < c.cleanup, `cleanup=${c.cleanup}: horizon must strictly undercut the platform period`);
+  }
+  // Unreadable/invalid input falls to the platform's own documented default.
+  assert.deepStrictEqual(deriveEstateHorizonDays(NaN), { horizonDays: 15, degraded: false, cleanupPeriodDays: 30 });
+  assert.deepStrictEqual(deriveEstateHorizonDays(0), { horizonDays: 15, degraded: false, cleanupPeriodDays: 30 });
+});
+
+test('estateReport: wires the derived horizon end-to-end and states the derivation in the report text', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = estateReport({ projectRoot: proj, home });
+    assert.strictEqual(r.cleanup.days, 30, 'bare sandbox has no settings.json anywhere -> the documented platform default');
+    assert.strictEqual(r.cleanup.source, 'default');
+    assert.strictEqual(r.horizon.horizonDays, 15);
+    assert.strictEqual(r.horizon.degraded, false);
+    assert.match(r.text, /horizon derivation: platform cleanupPeriodDays=30 \(default\) -> reclaim horizon 15d/);
+  } finally { clean(home, proj); }
 });
 
 // ---------------------------------------------------------------------------

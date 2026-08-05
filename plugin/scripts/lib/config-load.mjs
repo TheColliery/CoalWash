@@ -530,6 +530,61 @@ function readJsonc(file) {
   }
 }
 
+// board #55 (owner-ordered): the PLATFORM's own `cleanupPeriodDays` (Claude Code's session-
+// retention setting), not CoalWash's own `.coalwash.json` — READ, never assumed. Verified live
+// (code.claude.com/docs/en/settings, fetched at build time — a version-sensitive fact per
+// source-grounding, re-check at revalidate): key `cleanupPeriodDays`, default 30, min 1, deletes
+// at STARTUP. Verified cascade, HIGHEST wins: Managed > Local > Project > User — a 4-tier
+// cascade, not the 2-tier project/user shorthand this docket's own dispatch text used; the
+// difference matters (an org enforcing a short retention via Managed settings must win).
+//
+// MANAGED settings has THREE real delivery mechanisms and this reads exactly ONE of them:
+// (1) file-based (`managed-settings.json` under a fixed per-OS path) — read here.
+// (2) Windows Registry (`HKLM`/`HKCU`...\Policies\ClaudeCode`) — NOT read: no zero-dep node
+//     builtin reads the registry (Phoenix #2), and a native module is out of scope for this
+//     engine's discipline. Named as an honest ceiling, not a silent gap.
+// (3) server-delivered (claude.ai admin console / self-hosted gateway) — NOT read: no local
+//     file exists for this tier at all: nothing to read.
+// `managed-settings.d/*.json` drop-ins are also NOT read — their merge order past the base file
+// is not specified precisely enough (by what this fetch verified) to implement without
+// guessing, and guessing a merge order is worse than declining to.
+// So: an org enforcing cleanupPeriodDays via registry policy or server delivery is invisible to
+// this function; it falls through to whichever LOWER tier is actually readable. This narrows
+// the guarantee from "the platform's real value" to "the platform's real value on every
+// delivery mechanism this engine can read without a new dependency" — stated here so nobody
+// mistakes the narrower claim for the wider one.
+function managedSettingsPath() {
+  if (process.platform === 'win32') return 'C:\\Program Files\\ClaudeCode\\managed-settings.json';
+  if (process.platform === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json';
+  return '/etc/claude-code/managed-settings.json'; // linux/WSL, the documented Linux/WSL path
+}
+
+// Returns { days, source, file }. `source` is one of managed/local/project/user/default — the
+// derivation this reads FEEDS the estate horizon's own report (board #55 item 5: state which
+// value was read, from where). A file that EXISTS but is unreadable/malformed is skipped to the
+// NEXT tier (readJsonc's `unreadable` flag) rather than treated as "key absent, use default" —
+// the same distinguishing discipline `mergeSafety` already applies to CoalWash's own config,
+// extended here to the platform's. A missing/unresolvable project root just drops the
+// local/project tiers and proceeds to user/default — never throws.
+export function readCleanupPeriodDays({ cwd = process.cwd(), home = os.homedir() } = {}) {
+  const candidates = [{ source: 'managed', file: managedSettingsPath() }];
+  let projectRoot = null;
+  try { projectRoot = findProjectRoot(cwd, home); } catch { /* no project root -> skip local/project tiers */ }
+  if (projectRoot) {
+    candidates.push({ source: 'local', file: path.join(projectRoot, '.claude', 'settings.local.json') });
+    candidates.push({ source: 'project', file: path.join(projectRoot, '.claude', 'settings.json') });
+  }
+  candidates.push({ source: 'user', file: path.join(claudeBaseDir(home), 'settings.json') });
+
+  for (const { source, file } of candidates) {
+    const { data, unreadable } = readJsonc(file);
+    if (unreadable) continue; // present but broken -> try the next tier, never guess
+    const v = data && data.cleanupPeriodDays;
+    if (Number.isFinite(v) && v >= 1) return { days: Math.floor(v), source, file };
+  }
+  return { days: 30, source: 'default', file: null }; // the documented default, key absent everywhere readable
+}
+
 // Safety-shaping keys merge MONOTONICALLY: a project may only move a value toward
 // the SAFER end, never weaken a deliberate GLOBAL safety choice. This closes the
 // trust boundary (a cloned untrusted repo's `.coalwash.json` cannot flip a user's

@@ -148,6 +148,49 @@ test('bands: mtime classifies active/warm/cold; the current session is ACTIVE re
   } finally { clean(home, proj); }
 });
 
+// --- board #55: the roster-sid hard-skip -----------------------------------
+
+test('board #55: a session whose sid appears in the roster is hard-skipped regardless of age — a live seat, and WARM archiving is destructive to its accumulated experience (the 2026-08-05 NO-HANDOFF LAW)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const liveSid = '5ef08fe4-4065-4d48-a93c-d693a4132ec5';
+    seedSession(home, proj, liveSid, 500); // older than purgeAfterDays(180) — would otherwise be COLD
+    seedSession(home, proj, 'ordinary-sess', 500); // an equally-old sibling with no roster mention
+    write(path.join(proj, '.claude', 'agent-roster.md'), `| CoalWash | coder | \`${liveSid}\` | sonnet · high | resident |\n`);
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    const band = Object.fromEntries(c.sessions.map((s) => [s.id, s.band]));
+    assert.strictEqual(band[liveSid], 'active', 'roster-listed sid is protected regardless of age');
+    assert.strictEqual(band['ordinary-sess'], 'cold', 'a sibling with no roster mention archives normally — the guard is not protect-everything');
+    assert.strictEqual(c.roster.unreachable, false);
+    assert.strictEqual(c.roster.protectedCount, 1);
+  } finally { clean(home, proj); }
+});
+
+test('board #55: an unreadable/empty roster file fails toward protecting EVERY session this run — uncertainty fails toward ACTIVE, never compress on doubt', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-a', 500);
+    seedSession(home, proj, 'sess-b', 500);
+    write(path.join(proj, '.claude', 'agent-roster.md'), ''); // present but empty — cannot confirm any sid's status
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(c.roster.unreachable, true);
+    const band = Object.fromEntries(c.sessions.map((s) => [s.id, s.band]));
+    assert.strictEqual(band['sess-a'], 'active');
+    assert.strictEqual(band['sess-b'], 'active');
+  } finally { clean(home, proj); }
+});
+
+test('board #55: no roster file at all is the NORMAL case (no department-head convention adopted) — protects nothing, existing bands unchanged', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-old', 200);
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(c.roster.unreachable, false);
+    assert.strictEqual(c.roster.protectedCount, 0);
+    assert.strictEqual(c.sessions.find((s) => s.id === 'sess-old').band, 'cold');
+  } finally { clean(home, proj); }
+});
+
 // --- MED-1: the CoalHearth guard, keyed on what CH ACTUALLY writes ---------
 
 test('MED-1: a REAL-shaped CH in_progress journal (NO sessionId) with a FRESH mtime protects the newest session unit even when every transcript mtime reads old — and does NOT protect-everything', () => {

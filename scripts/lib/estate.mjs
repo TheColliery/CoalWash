@@ -19,17 +19,58 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir } from './config-load.mjs';
+import { claudeBaseDir, readCleanupPeriodDays } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
 
 // Read-budget cap for the two OPTIONAL content sniffs below (topic hint +
 // orphan cwd) — a multi-MB transcript is never read in full for either; both
 // stop at this many bytes from the file's start.
 const SNIFF_BUDGET_BYTES = 4096;
-// Mirrors CC's own first-party `cleanupPeriodDays` default (verified live,
-// COALWASH_BLUEPRINT.md §19 U1: 30 days, mtime-based) — an honest anchor
-// borrowed from the platform's own retention convention, not an invented one.
+// The RAW platform-mirror value (CC's own first-party `cleanupPeriodDays`
+// default, verified live, COALWASH_BLUEPRINT.md §19 U1: 30 days, mtime-based)
+// — kept as an explicit-override FIXTURE constant for callers that want it,
+// never as `estateReport`'s own default any more. Board #55, 2026-08-05:
+// setting the reclaim horizon EQUAL to the platform's own sweep period was
+// the live defect — CC's startup cleanup can claim a file before this
+// project's own next run ever sees it as reclaimable, so `estate --json`
+// reported `reclaim.bytes/files` stuck at effectively zero on every real
+// machine (nothing survives long enough to cross an EQUAL threshold).
+// `estateReport` now derives its horizon from the REAL, machine-read
+// `cleanupPeriodDays` via `deriveEstateHorizonDays` below — always strictly
+// below the platform period by construction, never merely mirroring it.
 export const RECLAIM_HORIZON_MS = 30 * 86400000;
+
+// board #55 (owner-ordered): derive the reclaim horizon FROM the platform's
+// real cleanupPeriodDays, never hardcode/assume one. Two regimes:
+//   cleanup >= 14: horizon = max(7, floor(cleanup / 2)) — half the platform
+//     period, floored at 7. Rationale (the owner's own argument, kept
+//     verbatim because it is load-bearing, not a taste call): this archiver
+//     has no scheduler of its own — it fires only when a run happens, at a
+//     cadence CoalWash does not control. The horizon must leave room for AT
+//     LEAST TWO run opportunities before the platform's own sweep claims a
+//     file out from under it; half the platform period is the cheapest
+//     value that satisfies this at every cleanup >= 14.
+//   cleanup < 14: the `max(7, ...)` floor stops scaling down as cleanup
+//     shrinks, and below 14 it produces LESS than 1 day of real margin (at
+//     cleanup === 14, margin === 7; at cleanup === 7 the floor and the half
+//     coincide, margin === 0 — the SAME equal-threshold defect this whole
+//     fix exists to close, recurring at a smaller cleanup value). Degrade
+//     instead of pretending: horizon = max(1, cleanup - 1), which always
+//     leaves >= 1 day of margin by construction, except at the platform's
+//     own documented floor (cleanup === 1) where zero margin is unavoidable
+//     — no horizon choice can beat the platform's shortest possible window.
+//     Reported as `degraded: true` so a user running an unusually short
+//     cleanup window SEES that CoalWash's own safety window had to shrink
+//     to match, rather than silently inheriting a worse guarantee.
+export function deriveEstateHorizonDays(cleanupPeriodDays) {
+  const cleanup = Number.isFinite(cleanupPeriodDays) && cleanupPeriodDays >= 1
+    ? Math.floor(cleanupPeriodDays)
+    : 30; // unreadable/invalid input — the platform's own documented default
+  if (cleanup >= 14) {
+    return { horizonDays: Math.max(7, Math.floor(cleanup / 2)), degraded: false, cleanupPeriodDays: cleanup };
+  }
+  return { horizonDays: Math.max(1, cleanup - 1), degraded: true, cleanupPeriodDays: cleanup };
+}
 // Defensive cap on the per-session overflow walk (tool-results/subagents/...).
 // This module runs off the SessionStart hot path (a /stats or CLI call, not
 // a per-turn hook), so it can afford to be more generous than class-b.mjs's
@@ -282,7 +323,9 @@ function fmtBytes(n) {
 export function estateReport({ projectRoot = process.cwd(), home = os.homedir(), now = Date.now() } = {}) {
   const entries = discoverEstateCC({ projectRoot, home });
   const measured = measureEstate(entries);
-  const reclaim = reclaimableEstimate(entries, { now });
+  const cleanup = readCleanupPeriodDays({ cwd: projectRoot, home });
+  const horizon = deriveEstateHorizonDays(cleanup.days);
+  const reclaim = reclaimableEstimate(entries, { now, horizonMs: horizon.horizonDays * 86400000 });
   const orphans = detectOrphanSlugs({ home });
   const orphanBytes = orphans.reduce((s, o) => s + (o.bytes || 0), 0);
 
@@ -294,11 +337,12 @@ export function estateReport({ projectRoot = process.cwd(), home = os.homedir(),
     lines.push(`    ${type}: ${v.files} file(s), ${fmtBytes(v.bytes)}`);
   }
   lines.push(`  ~est reclaimable (older than ${reclaim.horizonDays}d): ${reclaim.files} file(s), ~${fmtBytes(reclaim.bytes)}`);
+  lines.push(`  horizon derivation: platform cleanupPeriodDays=${cleanup.days} (${cleanup.source}${cleanup.file ? `, ${cleanup.file}` : ''}) -> reclaim horizon ${horizon.horizonDays}d${horizon.degraded ? ' [DEGRADED: the platform window is too tight for a two-run-opportunity margin]' : ''}`);
   lines.push(orphans.length
     ? `  orphan slug dir(s), machine-wide: ${orphans.length}, ~${fmtBytes(orphanBytes)} (owning project no longer on disk — candidates, not confirmed)`
     : '  orphan slug dirs, machine-wide: none found');
   lines.push('  P1 = report-only; P2 (retention/archive) rides "claude project purge" + CoalWash\'s own bins, not built yet.');
 
   const summary = `[CoalWash] estate: ${fmtBytes(measured.totalBytes)} this project (${measured.files} files) · ~${fmtBytes(reclaim.bytes)} ~est reclaimable · ${orphans.length} orphan slug(s) machine-wide`;
-  return { summary, text: lines.join('\n'), measured, reclaim, orphans, orphanBytes };
+  return { summary, text: lines.join('\n'), measured, reclaim, orphans, orphanBytes, cleanup, horizon };
 }

@@ -156,6 +156,55 @@ export function chJournalGuard(projectRoot) {
   } catch { return none; }
 }
 
+// board #55 (owner-ordered) — a room following the department-head-contract
+// convention (TheColliery/.claude/DEPARTMENT-HEAD-CONTRACT.md) records live
+// resident sessions in a project-root `.claude/agent-roster.md`; WARM
+// archiving is copy-verify-then-DELETE, destructive to a resident's own
+// transcript — the 2026-08-05 NO-HANDOFF LAW treats a warm transcript AS the
+// seat's accumulated experience, so archiving one out from under a live seat
+// is the exact damage this guard exists to prevent, regardless of age.
+//
+// Deliberately PROJECT-RELATIVE, never a hardcoded absolute path — the
+// owner's dispatch named `TheColliery/.claude/agent-roster.md` as today's
+// concrete instance, but CoalWash ships to arbitrary projects with no such
+// convention at all. Reading `<projectRoot>/.claude/agent-roster.md`
+// degrades correctly either way: a project that never adopted the
+// convention has no such file, this guard is a silent no-op, and every
+// existing WARM/COLD/ACTIVE behavior is unchanged.
+//
+// EVERY UUID-shaped token found ANYWHERE in the file's text counts as
+// protected — not scoped to rows the file's own markdown marks "live" (a
+// `~~coder~~ RETIRED` row still names its old sid in prose).
+// ponytail: a markdown-aware live/retired classifier would be strictly more
+// precise, but over-protecting a retired sid costs nothing (its transcript
+// just isn't archived this run either) — the failure this guard exists to
+// prevent is destroying a LIVE seat's experience, and a coarser regex that
+// never under-protects closes that with far less surface to get wrong.
+//
+// "Fail toward SKIPPING if the roster is unreachable" (the owner's own
+// words): a MISSING roster file is the NORMAL case (no convention adopted)
+// and protects nothing — but a roster file that EXISTS and cannot be
+// read/is empty is a genuine "cannot confirm any sid's status" state, and
+// per this whole module's law ("uncertainty fails toward ACTIVE — never
+// compress on doubt"), that state protects EVERY session this run, not
+// zero. `unreachable: true` tells the caller exactly that.
+export function readRosterSids(projectRoot) {
+  const p = path.join(projectRoot, '.claude', 'agent-roster.md');
+  let text;
+  try {
+    text = fs.readFileSync(p, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { sids: new Set(), unreachable: false };
+    return { sids: null, unreachable: true }; // present but unreadable -- protect everything
+  }
+  if (!text) return { sids: null, unreachable: true }; // present but empty -- same fail-closed treatment
+  const sids = new Set();
+  for (const m of text.matchAll(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi)) {
+    sids.add(m[0].toLowerCase());
+  }
+  return { sids, unreachable: false };
+}
+
 // ---------------------------------------------------------------------------
 // session listing + band classification
 // ---------------------------------------------------------------------------
@@ -248,16 +297,18 @@ export function classifySessions({ projectRoot = process.cwd(), home = os.homedi
   // always writing a fresh journal while the run happens).
   const ch = chJournalGuard(projectRoot);
   const chFresh = ch.inProgress && (ch.mtimeMs === null || now - ch.mtimeMs < compressMs);
+  const roster = readRosterSids(projectRoot);
   const newestMtimeMs = listed.sessions.length ? Math.max(...listed.sessions.map((s) => s.newestMtimeMs)) : -Infinity;
   for (const s of listed.sessions) {
     const age = now - s.newestMtimeMs;
     const chProtected = (ch.sessionId !== null && s.id === ch.sessionId)
       || (chFresh && s.newestMtimeMs === newestMtimeMs);
-    if (s.id === currentSessionId || chProtected || !Number.isFinite(age) || age < compressMs) s.band = 'active';
+    const rosterProtected = roster.unreachable || roster.sids.has(s.id.toLowerCase());
+    if (s.id === currentSessionId || chProtected || rosterProtected || !Number.isFinite(age) || age < compressMs) s.band = 'active';
     else if (cfg.purgeAfterDays !== 0 && age >= purgeMs) s.band = 'cold';
     else s.band = 'warm';
   }
-  return { ...listed, cfg };
+  return { ...listed, cfg, roster: { unreachable: roster.unreachable, protectedCount: roster.sids ? roster.sids.size : 0 } };
 }
 
 // ---------------------------------------------------------------------------
