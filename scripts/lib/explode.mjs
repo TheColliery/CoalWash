@@ -1027,7 +1027,13 @@ export function reduceFile(src, opts = {}) {
           if (!Array.isArray(resume.cutTypes)) {
             return fail('resume: the checkpoint carries no cutTypes binding (missing or malformed — refused; a hand-driven resume must re-supply the checkpoint verbatim, never a hand-constructed one)');
           }
-          const checkpointCutTypes = [...resume.cutTypes].sort();
+          // INSPECT F1 (LOW, rung-2 r9 findings-back): `resumeCutTypes` is deduped for free (it comes
+          // from `cutSet`, a Set) but a raw caller-supplied `resume.cutTypes` array is not — an
+          // undeduped checkpoint side made this comparator array-equal-after-sort rather than genuinely
+          // set-equal, refusing a checkpoint-side duplicate the comment's own "duplicating is not a
+          // false refusal" claim promised would pass. `new Set(...)` on this side too closes the gap: a
+          // duplicate carries no extra authority either way, since the APPLIED policy is always `cutSet`.
+          const checkpointCutTypes = [...new Set(resume.cutTypes)].sort();
           if (resumeCutTypes.length !== checkpointCutTypes.length || resumeCutTypes.some((t, i) => t !== checkpointCutTypes[i])) {
             return fail(`resume: cutTypes [${resumeCutTypes.join(',')}] does not match the checkpoint's authorised set [${checkpointCutTypes.join(',')}] — a resume cannot escalate, narrow, or otherwise change the destruction policy wave 1 established (refused)`);
           }

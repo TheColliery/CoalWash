@@ -1648,11 +1648,29 @@ test('rung-2 r9 leaf1 [MEDIUM]: a hand-driven resume BINDS cutTypes to wave 1 �
     const expected = expectKept(lines, objs, 'type', ['queue-operation']);
     assert.ok(fs.readFileSync(path.join(dir, 'out3.jsonl')).equals(expected), 'the honest resume output is still byte-exact');
 
-    // CONTROL C (order/dedup independence): re-ordering or duplicating the SAME set of types must
-    // still be treated as unchanged, never a false refusal.
+    // CONTROL C (order/dedup independence, CALL side): re-ordering or duplicating the SAME set of
+    // types on the CALL's cutTypes must still be treated as unchanged, never a false refusal.
+    // (This side is deduped for free via cutSet — a Set — so it never reaches the checkpoint-side
+    // dedup path CONTROL D below exercises; kept as its own case rather than folded in, per
+    // INSPECT F1: the two sides are genuinely different code paths and a fix to one does not prove
+    // the other.)
     const w1d = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out4.jsonl'), snapshotDir: path.join(dir, 's4'), maxLines: 2 });
     const controlReordered = reduceFile(src, { cutTypes: ['queue-operation', 'queue-operation'], outPath: path.join(dir, 'out4.jsonl'), snapshotDir: path.join(dir, 's4'), offset: w1d.nextOffset, resume: w1d.checkpoint, maxLines: 100 });
-    assert.strictEqual(controlReordered.ok, true, 'a duplicate-but-set-equal cutTypes resume is not falsely refused (Set comparison, not array-equality)');
+    assert.strictEqual(controlReordered.ok, true, 'a duplicate-but-set-equal cutTypes resume is not falsely refused on the CALL side (Set comparison, not array-equality)');
+
+    // CONTROL D (INSPECT F1, rung-2 r9 findings-back): the CHECKPOINT side must be deduped too — a
+    // hand-constructed checkpoint carrying a duplicate cutTypes entry is not falsely refused. This is
+    // the case CONTROL C's own claim (before this fix) could NOT actually verify: the call-side Set
+    // dedups its input before the comparator ever runs, so a call-side duplicate never reaches it —
+    // only a checkpoint-side duplicate does, and this is the fixture that exercises that path.
+    const w1e = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out5.jsonl'), snapshotDir: path.join(dir, 's5'), maxLines: 2 });
+    const controlCheckpointDup = reduceFile(src, {
+      cutTypes: ['queue-operation'], outPath: path.join(dir, 'out5.jsonl'), snapshotDir: path.join(dir, 's5'),
+      offset: w1e.nextOffset,
+      resume: { ...w1e.checkpoint, cutTypes: ['queue-operation', 'queue-operation'] },
+      maxLines: 100,
+    });
+    assert.strictEqual(controlCheckpointDup.ok, true, 'a duplicate-but-set-equal cutTypes CHECKPOINT is not falsely refused (both sides deduped, genuinely set-equal, not array-equal-after-sort)');
   } finally { rm(dir); }
 });
 
