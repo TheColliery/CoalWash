@@ -1016,6 +1016,21 @@ export function reduceFile(src, opts = {}) {
           if (sha256File(src) !== expectSha) {
             return fail('resume: the source changed since the checkpoint (its sha256 no longer matches the held snapshot) — refusing to splice a torn output across two source states (restore from the snapshot)');
           }
+          // (a2) CUTTYPES BINDING (rung-2 r9 leaf1, MEDIUM): the resume call's OWN cutTypes must be the
+          // EXACT SET wave 1 authorised — never a superset, subset, or any other divergence. Set-equal
+          // (sorted-and-compared, not array-equal), so re-ordering or duplicating the same types is not
+          // a false refusal (a caller re-serializing cutTypes from a Set/object has no reason to
+          // preserve array order). A checkpoint with no cutTypes field at all (pre-this-fix, forged, or
+          // hand-constructed) is refused fail-closed — same posture as the missing-snapshotPath guard
+          // three lines up: an incomplete checkpoint is an untrustworthy one, never a silent pass-through.
+          const resumeCutTypes = [...cutSet].sort();
+          if (!Array.isArray(resume.cutTypes)) {
+            return fail('resume: the checkpoint carries no cutTypes binding (missing or malformed — refused; a hand-driven resume must re-supply the checkpoint verbatim, never a hand-constructed one)');
+          }
+          const checkpointCutTypes = [...resume.cutTypes].sort();
+          if (resumeCutTypes.length !== checkpointCutTypes.length || resumeCutTypes.some((t, i) => t !== checkpointCutTypes[i])) {
+            return fail(`resume: cutTypes [${resumeCutTypes.join(',')}] does not match the checkpoint's authorised set [${checkpointCutTypes.join(',')}] — a resume cannot escalate, narrow, or otherwise change the destruction policy wave 1 established (refused)`);
+          }
           // (b) OFFSET↔OUTLEN↔CONTENT: re-derive the committed length AND the committed BYTES by reducing the
           // source prefix [0, offset) with the SAME cut logic (the source is now proven == the snapshot). A
           // forged/stale (offset, outLen) pair — individually valid but mutually inconsistent — reduces to a
@@ -1211,7 +1226,16 @@ export function reduceFile(src, opts = {}) {
       ok: true, skipped: false, structure: 'ndjson', dryRun,
       unitsSeen, unitsCut, unitsKept, unitsUnparsed, bytesSeen, bytesCut, bytesKept,
       done: r.done, nextOffset: r.nextOffset,
-      checkpoint: r.done ? null : { srcOffset: r.nextOffset, outLen, structure: 'ndjson', bomLen: struct.bomLen || 0, snapshotPath },
+      // rung-2 r9 leaf1 (MEDIUM): cutTypes is bound into the checkpoint (canonical sorted array,
+      // set-equal not array-equal — see the resume-side compare below) so a hand-driven resume
+      // cannot ESCALATE the destruction policy mid-file. Without this, a resume call could pass a
+      // cutTypes list that adds a type ABSENT from the already-processed prefix: the offset<->outLen
+      // content re-derivation (below) re-scans that SAME prefix under the NEW cutSet, produces an
+      // IDENTICAL result (the added type never appears there to diverge), passes, and the REST of
+      // the file is then cut under a policy wave 1 never authorised — silent over-destruction,
+      // ok:true, zero signal. Bound at wave 1 (this return), the ONLY point that knows what the
+      // caller actually authorised for THIS drive.
+      checkpoint: r.done ? null : { srcOffset: r.nextOffset, outLen, structure: 'ndjson', bomLen: struct.bomLen || 0, snapshotPath, cutTypes: [...cutSet].sort() },
       outPath: dryRun ? null : outPath, snapshotPath,
     };
   } catch (e) {

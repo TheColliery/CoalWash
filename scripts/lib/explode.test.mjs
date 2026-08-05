@@ -1610,6 +1610,66 @@ test('rung-2 r8 Finding A CONTROL: a legitimate, UNTAMPERED hand-driven multi-wa
   } finally { rm(dir); }
 });
 
+test('rung-2 r9 leaf1 [MEDIUM]: a hand-driven resume BINDS cutTypes to wave 1 — escalating to a type ABSENT from the processed prefix is refused, not silently applied to the tail', () => {
+  const dir = tmp();
+  try {
+    // 'secret' sits AFTER the wave-1 boundary — the escalation attack depends on the added type
+    // being absent from the already-processed prefix (present-in-prefix already refuses, see below).
+    const objs = [
+      { type: 'queue-operation', n: 0 },
+      { type: 'user', n: 1 },
+      { type: 'user', n: 2 },
+      { type: 'secret', n: 3 },
+      { type: 'user', n: 4 },
+    ];
+    const { buf, lines } = buildJsonl(objs);
+    const src = write(dir, 'sess.jsonl', buf);
+    const out = path.join(dir, 'out.jsonl');
+    const snapshotDir = path.join(dir, 's');
+    const w1 = reduceFile(src, { cutTypes: ['queue-operation'], outPath: out, snapshotDir, maxLines: 2 });
+    assert.strictEqual(w1.done, false, 'the fixture stops before reaching the secret record (multi-wave)');
+    assert.strictEqual(w1.unitsCut, 1, 'wave 1 processed exactly the queue-operation record — the secret record is not yet in the prefix');
+
+    // ATTACK: resume with an ESCALATED cutTypes — 'secret' was never authorised by wave 1.
+    const attack = reduceFile(src, { cutTypes: ['queue-operation', 'secret'], outPath: out, snapshotDir, offset: w1.nextOffset, resume: w1.checkpoint, maxLines: 100 });
+    assert.strictEqual(attack.ok, false, 'a resume escalating cutTypes beyond what wave 1 authorised is refused (pre-fix: ok:true — the secret record is silently cut from the tail with zero signal)');
+    assert.match(attack.reason, /cutTypes|cut-types|cut list|policy/i);
+
+    // CONTROL A (must still refuse, unaffected by this fix): escalating to a type PRESENT in the
+    // processed prefix was already refused by the pre-existing content check (the derivation diverges).
+    const w1b = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out2.jsonl'), snapshotDir: path.join(dir, 's2'), maxLines: 2 });
+    const controlPresent = reduceFile(src, { cutTypes: ['queue-operation', 'user'], outPath: path.join(dir, 'out2.jsonl'), snapshotDir: path.join(dir, 's2'), offset: w1b.nextOffset, resume: w1b.checkpoint, maxLines: 100 });
+    assert.strictEqual(controlPresent.ok, false, 'escalating to a type already present in the prefix is refused (pre-existing content-mismatch guard, unaffected by this fix)');
+
+    // CONTROL B (must succeed): an UNCHANGED cutTypes resume is unaffected by this fix.
+    const w1c = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out3.jsonl'), snapshotDir: path.join(dir, 's3'), maxLines: 2 });
+    const controlSame = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out3.jsonl'), snapshotDir: path.join(dir, 's3'), offset: w1c.nextOffset, resume: w1c.checkpoint, maxLines: 100 });
+    assert.strictEqual(controlSame.ok, true, 'an honest resume with the SAME cutTypes still completes (the fix does not false-positive on unchanged policy)');
+    const expected = expectKept(lines, objs, 'type', ['queue-operation']);
+    assert.ok(fs.readFileSync(path.join(dir, 'out3.jsonl')).equals(expected), 'the honest resume output is still byte-exact');
+
+    // CONTROL C (order/dedup independence): re-ordering or duplicating the SAME set of types must
+    // still be treated as unchanged, never a false refusal.
+    const w1d = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out4.jsonl'), snapshotDir: path.join(dir, 's4'), maxLines: 2 });
+    const controlReordered = reduceFile(src, { cutTypes: ['queue-operation', 'queue-operation'], outPath: path.join(dir, 'out4.jsonl'), snapshotDir: path.join(dir, 's4'), offset: w1d.nextOffset, resume: w1d.checkpoint, maxLines: 100 });
+    assert.strictEqual(controlReordered.ok, true, 'a duplicate-but-set-equal cutTypes resume is not falsely refused (Set comparison, not array-equality)');
+  } finally { rm(dir); }
+});
+
+test('rung-2 r9 leaf1 CONTROL: reduceToCompletion (the trusted multi-wave loop) is unaffected — it always re-spreads the same cutTypes, never reaches the untrusted binding check', () => {
+  const dir = tmp();
+  try {
+    const objs = Array.from({ length: 60 }, (_, i) => ({ type: i % 3 === 0 ? 'queue-operation' : 'user', i, tag: `T${i}` }));
+    const { buf, lines } = buildJsonl(objs);
+    const src = write(dir, 'sess.jsonl', buf);
+    const out = path.join(dir, 'out.jsonl');
+    const r = reduceToCompletion(src, { cutTypes: ['queue-operation'], outPath: out, snapshotDir: path.join(dir, 's'), maxLines: 5 });
+    assert.strictEqual(r.ok, true, 'the trusted loop completes unaffected by the cutTypes-binding check');
+    const expected = expectKept(lines, objs, 'type', ['queue-operation']);
+    assert.ok(fs.readFileSync(out).equals(expected), 'byte-exact, unchanged from before this fix');
+  } finally { rm(dir); }
+});
+
 test('WAVE-8 L4-B (budget-floor amplification): a sub-CHUNK budget the OLD fixed 2 GiB projection permitted (but that re-reads many× the filesize) is REFUSED by the filesize-relative amplification cap — FAST, no grind', () => {
   const dir = tmp();
   try {
@@ -1914,7 +1974,7 @@ test('WAVE-11 L4 (forged/omitted-readAccum resume): a HAND-DRIVEN reduceFile dri
     fs.readSync = (...a) => { const n = realRead(...a); if (n > 0) readBytes += n; return n; };
     // each rebuilt checkpoint carries ONLY the fields a naive persist-then-resume caller would serialize — NO
     // internal counter (the OMITTED case, byte-for-byte identical to a deliberately FORGED reset).
-    const rebuild = (cp) => ({ srcOffset: cp.srcOffset, outLen: cp.outLen, structure: cp.structure, bomLen: cp.bomLen, snapshotPath: cp.snapshotPath });
+    const rebuild = (cp) => ({ srcOffset: cp.srcOffset, outLen: cp.outLen, structure: cp.structure, bomLen: cp.bomLen, snapshotPath: cp.snapshotPath, cutTypes: cp.cutTypes });
     let r, tripped = false, guard = 0;
     try {
       const opts = { cutTypes: ['cut'], outPath: path.join(dir, 'out.jsonl'), snapshotDir: path.join(dir, 's'), maxLines: 1 };
@@ -3035,7 +3095,7 @@ test('rung-2 rail-5 CONTROL: a legitimate hand-driven resume with a REAL wave-1 
     const w2 = reduceFile(src, {
       outPath: out, cutTypes: ['mode'], snapshotDir,
       offset: w1.checkpoint.srcOffset,
-      resume: { srcSha256: sha256File(src), outLen: w1.checkpoint.outLen, snapshotPath: w1.snapshotPath, structure: 'ndjson', bomLen: 0 },
+      resume: { srcSha256: sha256File(src), outLen: w1.checkpoint.outLen, snapshotPath: w1.snapshotPath, structure: 'ndjson', bomLen: 0, cutTypes: w1.checkpoint.cutTypes },
     });
     assert.strictEqual(w2.ok, true, 'a genuine hand-driven resume with a real, verifiable snapshot is not caught by the fix');
     assert.match(fs.readFileSync(out, 'utf8'), /kept line/, 'the kept record survives verbatim across the resumed wave');
