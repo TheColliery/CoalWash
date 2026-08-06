@@ -1,3 +1,13 @@
+// ponytail: 805 lines at declaration (board #55/#56, 2026-08-06) — this file is
+// every settings-cascade + path-canonicalization + case-fold primitive CoalWash
+// shares across both lanes (pathWithin/touchesClaudeBase/canonicalOrNull/
+// volumeCaseFolds/readCleanupPeriodDays/discoverRetentionCandidateKeys); every
+// one of them is a security- or correctness-load-bearing trust-boundary check
+// with an extensive HISTORY of subtle, hard-won fixes (see the R2/R3/R4/board-
+// ruling comments throughout) — splitting it would scatter one cohesive trust
+// boundary's reasoning across files, which is exactly the shape this room's own
+// "twin drift" lesson warns against. Not split.
+//
 // CoalWash config path resolution — the flock-canonical cascade (global
 // ~/.claude/.coalwash.json overlaid by the nearest project .coalwash.json).
 // The project walk STOPS AT HOME (an upward config search that doesn't stop at
