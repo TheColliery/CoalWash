@@ -123,6 +123,12 @@ export function observedMachineAgeDays({ home = os.homedir(), now = Date.now() }
     if (!st) continue;
     // birthtime is the true creation stamp; some POSIX filesystems don't support it and report
     // 0 (or equal to mtime) — degrade to mtime there rather than trust an all-zero timestamp.
+    // INSPECT F3 (2026-08-06, LOW, bound not defect): without real birthtime, an active
+    // long-lived slug dir's mtime keeps bumping on every entry add/remove, so its measured
+    // age under-reports and the machine can read younger than it is — the gate fires LESS
+    // often (loss direction). Taking the MAX across every slug dir below mitigates this (an
+    // inactive dir keeps its old mtime), and it only bites once the mtime-degraded reading
+    // is also wrong about the assumed period.
     const bt = Number.isFinite(st.birthtimeMs) && st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
     const ageMs = now - bt;
     if (ageMs > maxAgeMs) maxAgeMs = ageMs;
@@ -170,8 +176,19 @@ export function resolveEstateHorizon({ cwd = process.cwd(), home = os.homedir(),
   const machineAgeDays = observedMachineAgeDays({ home, now });
 
   if (transitionJustLost) {
+    // INSPECT Finding A (2026-08-06): the flat constant ALONE was unsafe here. F1's own fix
+    // removed the floor's lower bound, so a genuine OBSERVED measurement can legitimately imply
+    // a horizon smaller than NOTHING_ESTABLISHABLE_HORIZON_DAYS -- and the machine-age gate
+    // (rung 3, above) does not apply in this branch at all: there is no trusted assumed period
+    // left to test the observation AGAINST (that is the entire reason this branch exists), so
+    // any real observed floor is honored directly rather than gated. Clamped via the SAME
+    // Math.max(1, ...) as the main branch below (Finding B) so a genuinely-measured 0 is not
+    // misread by deriveEstateHorizonDays as "absent, use the documented default".
+    const floorDerived = observedFloorDays !== null
+      ? deriveEstateHorizonDays(Math.max(1, observedFloorDays))
+      : NOTHING_ESTABLISHABLE_HORIZON_DAYS;
     return {
-      horizonDays: NOTHING_ESTABLISHABLE_HORIZON_DAYS, cleanupPeriodDays: null,
+      horizonDays: Math.min(NOTHING_ESTABLISHABLE_HORIZON_DAYS, floorDerived), cleanupPeriodDays: null,
       rung: 'nothing-establishable', source: read.source, file: read.file,
       observedFloorDays, machineAgeDays, floorApplied: false, candidateKeys, keyResolvedNow, transitionJustLost,
     };
@@ -182,7 +199,13 @@ export function resolveEstateHorizon({ cwd = process.cwd(), home = os.homedir(),
   let floorApplied = false;
   if (observedFloorDays !== null && machineAgeDays !== null
     && machineAgeDays >= cleanupPeriodDays && observedFloorDays < cleanupPeriodDays) {
-    cleanupPeriodDays = observedFloorDays;
+    // INSPECT Finding B (2026-08-06): observedFloorDays is a MEASUREMENT, not a config read --
+    // a genuine 0 (every transcript under 24h old, the strongest possible aggressive-sweep
+    // evidence) must not be routed unclamped into deriveEstateHorizonDays, whose <1 -> 30
+    // fallback exists for a DIFFERENT case ("the config key is absent, use the documented
+    // default") and would otherwise silently invert a measured 0 into the LARGEST horizon
+    // instead of the smallest.
+    cleanupPeriodDays = Math.max(1, observedFloorDays);
     floorApplied = true;
   }
 

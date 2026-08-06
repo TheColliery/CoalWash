@@ -1,4 +1,8 @@
-// ponytail: 805 lines at declaration (board #55/#56, 2026-08-06) — this file is
+// ponytail: 805 lines at declaration (board #55/#56, 2026-08-06; the count is
+// the tripwire's own PRE-declaration reading — this comment block adds ~10
+// more, so `wc -l` on the committed file reads slightly higher; re-derive
+// with `wc -l` for the CURRENT size, per this rule's own "N is history, not
+// a live claim") — this file is
 // every settings-cascade + path-canonicalization + case-fold primitive CoalWash
 // shares across both lanes (pathWithin/touchesClaudeBase/canonicalOrNull/
 // volumeCaseFolds/readCleanupPeriodDays/discoverRetentionCandidateKeys); every

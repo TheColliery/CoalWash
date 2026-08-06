@@ -298,6 +298,43 @@ test('resolveEstateHorizon rung 4: NOTHING ESTABLISHABLE — a resolved -> unres
   } finally { clean(home, proj); }
 });
 
+test('INSPECT Finding A (2026-08-06): a transition + a genuine LOW observed floor produces a horizon SMALLER than the flat 7d constant, never larger — the constant alone is not safe once F1 removed the floor path\'s lower bound', () => {
+  const { home, proj } = sandbox();
+  try {
+    const now = Date.now();
+    plantTranscript(home, 'slugA', 'sess1', 3, now); // real evidence: everything is 3d old or younger
+    const h = resolveEstateHorizon({ cwd: proj, home, now, priorKeyResolved: true });
+    assert.strictEqual(h.rung, 'nothing-establishable');
+    assert.strictEqual(h.observedFloorDays, 3);
+    assert.strictEqual(h.horizonDays, 1, 'deriveEstateHorizonDays(3) = 1, strictly smaller than the flat 7d constant');
+    assert.ok(h.horizonDays < 7, 'the flat constant alone would have been LARGER than what the evidence supports -- the forbidden direction');
+  } finally { clean(home, proj); }
+});
+
+test('INSPECT Finding A: with NO observed floor at all, the transition branch still falls back to the flat 7d constant unchanged', () => {
+  const { home, proj } = sandbox();
+  try {
+    const h = resolveEstateHorizon({ cwd: proj, home, priorKeyResolved: true }); // no transcripts planted -> observedFloorDays: null
+    assert.strictEqual(h.observedFloorDays, null);
+    assert.strictEqual(h.horizonDays, 7, 'no evidence to be smaller than the constant -- unchanged from before the fix');
+  } finally { clean(home, proj); }
+});
+
+test('INSPECT Finding B (2026-08-06): a genuinely-MEASURED observedFloorDays of 0 (every transcript under 24h old) must NOT invert into the LARGEST horizon via deriveEstateHorizonDays\'s config-absence clamp', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 30 });
+    const now = FUTURE_NOW(); // machine is old enough (~200d >= 30) to trust the observation
+    plantTranscript(home, 'slugA', 'sess1', 0, now); // the oldest surviving file is under 24h old -> floor = 0
+    const h = resolveEstateHorizon({ cwd: proj, home, now });
+    assert.strictEqual(h.observedFloorDays, 0);
+    assert.strictEqual(h.floorApplied, true);
+    assert.strictEqual(h.cleanupPeriodDays, 1, 'clamped to the platform floor, never left as the raw measured 0');
+    assert.strictEqual(h.horizonDays, 0, 'the SMALLEST possible horizon -- not 15, which the unclamped bug produced by reading 0 as "absent"');
+  } finally { clean(home, proj); }
+});
+
 test('resolveEstateHorizon rung 4: NOT triggered when priorKeyResolved is null (no history) or false (already unresolved last time, not a NEW transition)', () => {
   const { home, proj } = sandbox();
   try {
