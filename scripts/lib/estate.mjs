@@ -98,14 +98,44 @@ export function observedRetentionFloorDays({ home = os.homedir(), now = Date.now
   return maxAgeMs === -Infinity ? null : Math.floor(maxAgeMs / 86400000);
 }
 
-// board #55 AMENDMENT, ladder rung 3's threshold — fires ("materially below") only when real
-// evidence exists NEAR the assumed boundary. Without this floor, a FRESH install (nothing has
-// had time to age past a few days) would misread "no file is old yet" as "the sweep is more
-// aggressive than stated", ratcheting every new install to a tiny horizon on pure absence of
-// evidence. Requiring the observed floor to reach at least half the assumed period is the line
-// between genuine divergence and not-enough-history-to-say-anything-yet — a real judgment
-// call, declared here rather than hidden inside an unexplained number.
-const OBSERVED_FLOOR_MIN_FRACTION = 0.5;
+// INSPECT F1 (2026-08-06), closing the 0.5-fraction dead band: the age of the oldest surviving
+// *.jsonl alone cannot tell "fresh install, nothing has aged yet" apart from "the real sweep is
+// stricter than assumed" — both produce a SMALL observed floor. Distinguishing them needs a
+// THIRD signal this file did not measure: how long has this MACHINE been in use at all. The
+// slug DIRECTORY a project's sessions live under is created once and — per this module's own
+// `detectOrphanSlugs` (an orphan slug dir persisting after its owning project is gone) — is not
+// removed by the platform's own session-file sweep, so its creation time is a sweep-immune
+// proxy for "how long has CC been tracking this machine's projects at all."
+export function observedMachineAgeDays({ home = os.homedir(), now = Date.now() } = {}) {
+  const base = claudeBaseDir(home);
+  const claudeRoot = physicalOrNull(base);
+  if (!claudeRoot) return null;
+  const projectsDir = path.join(base, 'projects');
+  let projectDirs;
+  try { projectDirs = fs.readdirSync(projectsDir, { withFileTypes: true }); } catch { return null; }
+
+  let maxAgeMs = -Infinity;
+  for (const d of projectDirs) {
+    if (!d.isDirectory()) continue;
+    const slugPhys = physicalOrNull(path.join(projectsDir, d.name));
+    if (!slugPhys || !containedIn(slugPhys, [claudeRoot])) continue; // fail-closed
+    const st = statOrNull(slugPhys);
+    if (!st) continue;
+    // birthtime is the true creation stamp; some POSIX filesystems don't support it and report
+    // 0 (or equal to mtime) — degrade to mtime there rather than trust an all-zero timestamp.
+    const bt = Number.isFinite(st.birthtimeMs) && st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
+    const ageMs = now - bt;
+    if (ageMs > maxAgeMs) maxAgeMs = ageMs;
+  }
+  return maxAgeMs === -Infinity ? null : Math.floor(maxAgeMs / 86400000);
+}
+
+// INSPECT F1's own fix: the gate now asks "is this machine OLD ENOUGH that, if the assumed
+// period were correct, we'd expect a file to have survived close to it — yet nothing did?"
+// rather than "is the observed floor a big enough FRACTION of the assumed period?" — the
+// fraction test excluded exactly the range where a real divergence looks smallest (the amendment
+// found this: an observed floor of 10 against an assumed 30 sat in the excluded dead band while
+// being the STRONGEST evidence of the two that the assumption is wrong). The 0.5 ratio is GONE.
 // Rung 4's fallback when the key assumption itself just broke (see resolveEstateHorizon) — the
 // owner's own proposed value, a small horizon because unknown means we do not know when the
 // axe falls, so archive early and lean on the restore path.
@@ -116,9 +146,12 @@ const NOTHING_ESTABLISHABLE_HORIZON_DAYS = 7;
 //      cascade → bind to it.
 //   2. KEY ABSENT everywhere readable — the documented default (30) applies. NORMAL, not a
 //      failure — this machine's actual, honest state.
-//   3. OBSERVED FLOOR (observedRetentionFloorDays) — a ONE-WAY empirical cross-check: only
-//      ever LOWERS the bound (an observed floor far ABOVE the assumed value is reported, never
-//      used to RAISE the horizon — raising is the data-loss direction).
+//   3. OBSERVED FLOOR (observedRetentionFloorDays), gated by MACHINE AGE (observedMachineAgeDays)
+//      — a ONE-WAY empirical cross-check: only ever LOWERS the bound. Fires when the machine has
+//      been in use at least as long as the assumed period (so a real sweep boundary at that
+//      period would have been tested by now) yet the oldest surviving file is younger than it —
+//      real evidence, not a ratio guess. An observed floor far ABOVE the assumed value is
+//      reported, never used to RAISE the horizon — raising is the data-loss direction.
 //   4. NOTHING ESTABLISHABLE — fires when the key was resolved on the CALLER's last run
 //      (`priorKeyResolved: true`) and is unresolved THIS run: a resolved→unresolved flip is a
 //      rename/removal signal, and at the exact moment that assumption breaks, trusting the
@@ -134,30 +167,29 @@ export function resolveEstateHorizon({ cwd = process.cwd(), home = os.homedir(),
   const candidateKeys = discoverRetentionCandidateKeys({ cwd, home });
   const transitionJustLost = priorKeyResolved === true && !keyResolvedNow;
   const observedFloorDays = observedRetentionFloorDays({ home, now });
+  const machineAgeDays = observedMachineAgeDays({ home, now });
 
   if (transitionJustLost) {
     return {
       horizonDays: NOTHING_ESTABLISHABLE_HORIZON_DAYS, cleanupPeriodDays: null,
       rung: 'nothing-establishable', source: read.source, file: read.file,
-      observedFloorDays, floorApplied: false, candidateKeys, keyResolvedNow, transitionJustLost,
+      observedFloorDays, machineAgeDays, floorApplied: false, candidateKeys, keyResolvedNow, transitionJustLost,
     };
   }
 
   let cleanupPeriodDays = read.days;
   const rung = keyResolvedNow ? 'resolved' : 'documented-default';
   let floorApplied = false;
-  if (observedFloorDays !== null) {
-    const materialThreshold = cleanupPeriodDays * OBSERVED_FLOOR_MIN_FRACTION;
-    if (observedFloorDays >= materialThreshold && observedFloorDays < cleanupPeriodDays) {
-      cleanupPeriodDays = observedFloorDays;
-      floorApplied = true;
-    }
+  if (observedFloorDays !== null && machineAgeDays !== null
+    && machineAgeDays >= cleanupPeriodDays && observedFloorDays < cleanupPeriodDays) {
+    cleanupPeriodDays = observedFloorDays;
+    floorApplied = true;
   }
 
   return {
     horizonDays: deriveEstateHorizonDays(cleanupPeriodDays), cleanupPeriodDays, rung,
-    source: read.source, file: read.file, observedFloorDays, floorApplied, candidateKeys,
-    keyResolvedNow, transitionJustLost,
+    source: read.source, file: read.file, observedFloorDays, machineAgeDays, floorApplied,
+    candidateKeys, keyResolvedNow, transitionJustLost,
   };
 }
 

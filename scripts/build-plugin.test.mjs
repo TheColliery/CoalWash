@@ -62,6 +62,30 @@ test('checkDist fails loud in both directions: stale file and orphan', () => {
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
+test('board #56: a CRLF-vs-LF-only difference is NOT stale — content parity, not byte parity', () => {
+  const dist = scratchDist();
+  try {
+    buildDist(dist);
+    const p = path.join(dist, 'hooks', 'hooks.json');
+    const asCrlf = fs.readFileSync(p, 'utf8').replace(/\n/g, '\r\n');
+    fs.writeFileSync(p, asCrlf);
+    assert.notStrictEqual(fs.readFileSync(path.join(repoRoot, 'hooks', 'hooks.json')).compare(fs.readFileSync(p)), 0, 'sanity: the bytes really do differ');
+    assert.deepStrictEqual(checkDist(dist), [], 'a pure line-ending difference must not read as stale');
+  } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
+test('board #56: a REAL content difference under CRLF line endings still fails loud — the normalization must not mask an actual edit', () => {
+  const dist = scratchDist();
+  try {
+    buildDist(dist);
+    const p = path.join(dist, 'hooks', 'hooks.json');
+    const tampered = fs.readFileSync(p, 'utf8').replace(/\n/g, '\r\n') + '\r\n// tampered';
+    fs.writeFileSync(p, tampered);
+    const drift = checkDist(dist);
+    assert.ok(drift.some((d) => d.includes('stale in plugin/') && d.includes('hooks.json')), drift.join('; '));
+  } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
 test('TP-6: a stray dot-dir under a DIST_ITEM never ships, and the exclusion is not a blind spot (a planted one fails loud)', () => {
   const dist = scratchDist();
   try {

@@ -10,7 +10,7 @@ import path from 'node:path';
 import {
   discoverEstateCC, detectOrphanSlugs, measureEstate, attributeTranscript,
   reclaimableEstimate, estateReport, RECLAIM_HORIZON_MS, deriveEstateHorizonDays,
-  resolveEstateHorizon,
+  resolveEstateHorizon, observedMachineAgeDays,
 } from './estate.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 
@@ -219,13 +219,24 @@ test('resolveEstateHorizon rung 2: KEY ABSENT everywhere — the documented defa
   } finally { clean(home, proj); }
 });
 
-test('resolveEstateHorizon rung 3: the observed floor overrides ONE-WAY when materially below the assumed value (real evidence near the boundary, nothing survived to it)', () => {
+// INSPECT F1 (2026-08-06) closed the old 0.5-fraction dead band by gating rung 3 on MACHINE AGE
+// (the slug directory's own birthtime) instead of a ratio of the observed floor to the assumed
+// period. `fs.utimesSync` can backdate a FILE's mtime but not a directory's birthtime (the OS
+// sets it at real creation time and offers no portable API to rewrite it) -- so these tests
+// shift `now` INTO THE FUTURE instead of shifting the directory's birth into the past. The slug
+// dir is created at real test-execution time; a `now` far enough ahead of that makes it read as
+// old, while `plantTranscript`'s own `now`-relative mtime math still lands exactly where asked.
+const FUTURE_NOW = () => Date.now() + 200 * 86400000; // 200 real days ahead of actual execution
+
+test('resolveEstateHorizon rung 3: the observed floor overrides ONE-WAY when the MACHINE is old enough to have tested the boundary (real evidence, not a ratio guess)', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     writeSettings(proj, { cleanupPeriodDays: 30 }); // assumed 30d
-    plantTranscript(home, 'slugA', 'sess1', 20); // real evidence: 20d >= 30*0.5(=15) AND < 30 -> fires
-    const h = resolveEstateHorizon({ cwd: proj, home });
+    const now = FUTURE_NOW();
+    plantTranscript(home, 'slugA', 'sess1', 20, now); // the machine (slug dir) is ~200d old >= 30 -> the gate is open; oldest surviving file is 20d < 30
+    const h = resolveEstateHorizon({ cwd: proj, home, now });
+    assert.ok(h.machineAgeDays >= 30, `machineAgeDays=${h.machineAgeDays}`);
     assert.strictEqual(h.floorApplied, true);
     assert.strictEqual(h.observedFloorDays, 20);
     assert.strictEqual(h.cleanupPeriodDays, 20, 'bound to the OBSERVED value, not the settings value, once the cross-check fires');
@@ -233,29 +244,44 @@ test('resolveEstateHorizon rung 3: the observed floor overrides ONE-WAY when mat
   } finally { clean(home, proj); }
 });
 
-test('resolveEstateHorizon rung 3: a FRESH-INSTALL observed floor (well below half the assumed period) is NOT material — no evidence near the boundary means no override, avoiding a false-aggressive horizon on day one', () => {
+test('resolveEstateHorizon rung 3: a machine YOUNGER than the assumed period never fires the floor, however low the observed value — closes the old dead band correctly (INSPECT F1) instead of by a ratio guess', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     writeSettings(proj, { cleanupPeriodDays: 30 });
-    plantTranscript(home, 'slugA', 'sess1', 3); // 3d << 15 (30*0.5) -- not enough history to say anything
-    const h = resolveEstateHorizon({ cwd: proj, home });
-    assert.strictEqual(h.floorApplied, false, 'a 3-day-old file on a fresh install is not evidence the real sweep is aggressive');
-    assert.strictEqual(h.observedFloorDays, 3, 'still reported, informationally');
+    const now = Date.now(); // the slug dir's real birthtime is ~now -> machineAgeDays ~0, far under 30
+    plantTranscript(home, 'slugA', 'sess1', 0, now); // even an ultra-low observed floor (0d) must not fire on a fresh machine
+    const h = resolveEstateHorizon({ cwd: proj, home, now });
+    assert.ok(h.machineAgeDays < 30, `machineAgeDays=${h.machineAgeDays}`);
+    assert.strictEqual(h.floorApplied, false, 'a young machine cannot have tested a 30-day boundary yet, regardless of how low the observed floor reads');
     assert.strictEqual(h.cleanupPeriodDays, 30);
   } finally { clean(home, proj); }
 });
 
-test('resolveEstateHorizon rung 3: an observed floor ABOVE the assumed value NEVER raises the horizon — the one-way rule, the data-loss direction is forbidden', () => {
+test('resolveEstateHorizon rung 3: an observed floor ABOVE the assumed value NEVER raises the horizon — the one-way rule, the data-loss direction is forbidden — even on an old machine', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     writeSettings(proj, { cleanupPeriodDays: 10 });
-    plantTranscript(home, 'slugA', 'sess1', 25); // a file has survived FAR past the assumed 10d
-    const h = resolveEstateHorizon({ cwd: proj, home });
+    const now = FUTURE_NOW();
+    plantTranscript(home, 'slugA', 'sess1', 25, now); // machine is old (~200d) AND a file survived far past the assumed 10d
+    const h = resolveEstateHorizon({ cwd: proj, home, now });
+    assert.ok(h.machineAgeDays >= 10);
     assert.strictEqual(h.floorApplied, false, 'observed-above-assumed is reported, never used to widen the horizon');
     assert.strictEqual(h.observedFloorDays, 25);
     assert.strictEqual(h.cleanupPeriodDays, 10, 'stays bound to the settings value -- raising would be the forbidden direction');
+  } finally { clean(home, proj); }
+});
+
+test('observedMachineAgeDays: the oldest slug DIRECTORY (not the .jsonl inside it) sets the age, machine-wide; no projects dir at all -> null (no signal, not zero)', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.strictEqual(observedMachineAgeDays({ home }), null, 'nothing under ~/.claude/projects yet');
+    const now = FUTURE_NOW();
+    plantTranscript(home, 'slugOld', 'sessA', 5, now); // the FILE is aged to 5d; the DIR's own birthtime is real (~now-200d relative to `now`)
+    plantTranscript(home, 'slugNew', 'sessB', 100, now); // a MORE aged file, but same real dir-creation moment
+    const age = observedMachineAgeDays({ home, now });
+    assert.ok(age >= 199 && age <= 201, `age=${age} -- must track directory birth (~200d under the future now), not either file's own mtime (5d or 100d)`);
   } finally { clean(home, proj); }
 });
 

@@ -553,6 +553,16 @@ function readJsonc(file) {
 // the guarantee from "the platform's real value" to "the platform's real value on every
 // delivery mechanism this engine can read without a new dependency" — stated here so nobody
 // mistakes the narrower claim for the wider one.
+//
+// INSPECT F2 (2026-08-06), one platform fact this cascade does not model: per CC's own docs,
+// an UNREADABLE settings file makes the platform PAUSE its whole retention sweep (unless a
+// managed value is present), never fall through to a lower tier and keep sweeping at that
+// value. This function, by contrast, treats an unreadable tier as "keep looking" — modelling
+// "find a number" rather than "predict whether the platform is sweeping at all". The direction
+// is SAFE (a paused real sweep deletes nothing, while this cascade still reports a number and
+// estate.mjs's horizon still assumes a sweep is happening, so the worst case is OVER-reporting
+// what's reclaimable, never under-reporting it) — but it is a real, named gap between what this
+// function's header describes and what the platform actually does on that one input shape.
 function managedSettingsPath() {
   if (process.platform === 'win32') return 'C:\\Program Files\\ClaudeCode\\managed-settings.json';
   if (process.platform === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json';

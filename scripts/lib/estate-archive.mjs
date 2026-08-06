@@ -147,10 +147,19 @@ export function writeEstateKeyResolvedState(resolved, home = os.homedir()) {
   // Direct write, no tmp-then-atomic-move — this file's own EXDEV discipline
   // (#57, the archive destination may sit on a different drive by design)
   // bans that rename call ANYWHERE in this module, enforced by
-  // apply.test.mjs's own literal-string scan. A torn write on this one
-  // boolean costs nothing
-  // worse than one run's transition signal not firing — the atomicity a
-  // tmp+rename buys is not worth reintroducing a same-device assumption
+  // apply.test.mjs's own literal-string scan. A torn write, and the reader's
+  // own fail-silent catch on a corrupt read, both degrade to `null` (no
+  // history) rather than a wrong boolean. INSPECT F3 (2026-08-06): stated
+  // by DIRECTION, not just "costs nothing" — `null` means rung 4 (the
+  // small-constant fallback) never fires, so the horizon falls back to
+  // rung 2's larger documented-default-derived value instead of the
+  // smaller rung-4 constant. That is the SAFE side of the amendment's own
+  // asymmetry (never smaller than the honest read would have chosen — see
+  // resolveEstateHorizon's own worked proof that the floor path can never
+  // beat rung 4's constant), so this needs two coincident, rare events
+  // (a transition AND a torn/corrupt read on the very next run) and
+  // self-heals the run after — never worth the atomicity a tmp+rename
+  // would buy back at the cost of reintroducing a same-device assumption
   // into a file whose whole point is not needing one.
   try {
     const p = estateKeyResolvedStatePath(home);
