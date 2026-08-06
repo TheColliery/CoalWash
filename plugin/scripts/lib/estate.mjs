@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir, readCleanupPeriodDays } from './config-load.mjs';
+import { claudeBaseDir, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
 
 // Read-budget cap for the two OPTIONAL content sniffs below (topic hint +
@@ -40,37 +40,127 @@ const SNIFF_BUDGET_BYTES = 4096;
 // below the platform period by construction, never merely mirroring it.
 export const RECLAIM_HORIZON_MS = 30 * 86400000;
 
-// board #55 (owner-ordered): derive the reclaim horizon FROM the platform's
-// real cleanupPeriodDays, never hardcode/assume one. Two regimes:
-//   cleanup >= 14: horizon = max(7, floor(cleanup / 2)) — half the platform
-//     period, floored at 7. Rationale (the owner's own argument, kept
-//     verbatim because it is load-bearing, not a taste call): this archiver
-//     has no scheduler of its own — it fires only when a run happens, at a
-//     cadence CoalWash does not control. The horizon must leave room for AT
-//     LEAST TWO run opportunities before the platform's own sweep claims a
-//     file out from under it; half the platform period is the cheapest
-//     value that satisfies this at every cleanup >= 14.
-//   cleanup < 14: the `max(7, ...)` floor stops scaling down as cleanup
-//     shrinks, and below 14 it produces LESS than 1 day of real margin (at
-//     cleanup === 14, margin === 7; at cleanup === 7 the floor and the half
-//     coincide, margin === 0 — the SAME equal-threshold defect this whole
-//     fix exists to close, recurring at a smaller cleanup value). Degrade
-//     instead of pretending: horizon = max(1, cleanup - 1), which always
-//     leaves >= 1 day of margin by construction, except at the platform's
-//     own documented floor (cleanup === 1) where zero margin is unavoidable
-//     — no horizon choice can beat the platform's shortest possible window.
-//     Reported as `degraded: true` so a user running an unusually short
-//     cleanup window SEES that CoalWash's own safety window had to shrink
-//     to match, rather than silently inheriting a worse guarantee.
+// board #55 AMENDMENT (owner, 2026-08-05) — "ผูกตัวแปรตาม cleanupPeriodDays เพื่อให้อัพเดต
+// ตามไปมาได้" (bind the variable to cleanupPeriodDays so it tracks automatically, both
+// directions). Supersedes the earlier max(7,…)/degrade formula: DERIVED FRESH on every call,
+// never persisted — a CACHED horizon carries stale semantics the instant the platform value
+// changes, silently, in the data-loss direction (the state-schema-guard defect by
+// construction — binding means computing, not seeding). One formula, no branches:
+// horizonDays = floor(cleanupPeriodDays / 2). The old max(7,…) floor and the <14 special case
+// are GONE — they broke the very proportionality this amendment asks for (at cleanup=10 a
+// floor of 7 left a 3-day window, TIGHTER than the ratio it was meant to protect).
 export function deriveEstateHorizonDays(cleanupPeriodDays) {
   const cleanup = Number.isFinite(cleanupPeriodDays) && cleanupPeriodDays >= 1
     ? Math.floor(cleanupPeriodDays)
     : 30; // unreadable/invalid input — the platform's own documented default
-  if (cleanup >= 14) {
-    return { horizonDays: Math.max(7, Math.floor(cleanup / 2)), degraded: false, cleanupPeriodDays: cleanup };
-  }
-  return { horizonDays: Math.max(1, cleanup - 1), degraded: true, cleanupPeriodDays: cleanup };
+  return Math.floor(cleanup / 2);
 }
+
+// Defensive cap on the machine-wide project-dir walk below — same class as
+// ESTATE_FILE_CAP (a pathological machine gets a bounded, not unbounded, scan).
+const ESTATE_PROJECTS_SCAN_CAP = 20000;
+
+// board #55 AMENDMENT, ladder rung 3 — the empirical cross-check that survives a rename.
+// Do not only ask the platform what its policy IS; MEASURE what it actually DOES: the age of
+// the OLDEST *.jsonl transcript still on disk, MACHINE-WIDE (every project's slug dir under
+// ~/.claude/projects/, not scoped to one project — the platform's own sweep is not
+// per-project either, so a bigger sample is the point, per the owner's own instruction).
+// Returns the age in whole days of the single oldest surviving transcript, or null when
+// nothing exists anywhere to measure (a fresh install — no signal, not a zero).
+export function observedRetentionFloorDays({ home = os.homedir(), now = Date.now() } = {}) {
+  const base = claudeBaseDir(home);
+  const claudeRoot = physicalOrNull(base);
+  if (!claudeRoot) return null;
+  const projectsDir = path.join(base, 'projects');
+  let projectDirs;
+  try { projectDirs = fs.readdirSync(projectsDir, { withFileTypes: true }); } catch { return null; }
+
+  let maxAgeMs = -Infinity;
+  let seen = 0;
+  outer: for (const d of projectDirs) {
+    if (!d.isDirectory()) continue;
+    const slugPhys = physicalOrNull(path.join(projectsDir, d.name));
+    if (!slugPhys || !containedIn(slugPhys, [claudeRoot])) continue; // fail-closed
+    let files;
+    try { files = fs.readdirSync(slugPhys, { withFileTypes: true }); } catch { continue; }
+    for (const f of files) {
+      if (seen >= ESTATE_PROJECTS_SCAN_CAP) break outer;
+      if (!f.isFile() || !f.name.endsWith('.jsonl')) continue;
+      seen++;
+      const filePhys = physicalOrNull(path.join(slugPhys, f.name));
+      if (!filePhys || !containedIn(filePhys, [claudeRoot])) continue;
+      const st = statOrNull(filePhys);
+      if (!st || !st.isFile()) continue;
+      const ageMs = now - st.mtimeMs;
+      if (ageMs > maxAgeMs) maxAgeMs = ageMs;
+    }
+  }
+  return maxAgeMs === -Infinity ? null : Math.floor(maxAgeMs / 86400000);
+}
+
+// board #55 AMENDMENT, ladder rung 3's threshold — fires ("materially below") only when real
+// evidence exists NEAR the assumed boundary. Without this floor, a FRESH install (nothing has
+// had time to age past a few days) would misread "no file is old yet" as "the sweep is more
+// aggressive than stated", ratcheting every new install to a tiny horizon on pure absence of
+// evidence. Requiring the observed floor to reach at least half the assumed period is the line
+// between genuine divergence and not-enough-history-to-say-anything-yet — a real judgment
+// call, declared here rather than hidden inside an unexplained number.
+const OBSERVED_FLOOR_MIN_FRACTION = 0.5;
+// Rung 4's fallback when the key assumption itself just broke (see resolveEstateHorizon) — the
+// owner's own proposed value, a small horizon because unknown means we do not know when the
+// axe falls, so archive early and lean on the restore path.
+const NOTHING_ESTABLISHABLE_HORIZON_DAYS = 7;
+
+// board #55 AMENDMENT — THE LADDER, evaluated fresh every call, never cached:
+//   1. KEY READ + SANE (readCleanupPeriodDays) — present, sane value anywhere in the
+//      cascade → bind to it.
+//   2. KEY ABSENT everywhere readable — the documented default (30) applies. NORMAL, not a
+//      failure — this machine's actual, honest state.
+//   3. OBSERVED FLOOR (observedRetentionFloorDays) — a ONE-WAY empirical cross-check: only
+//      ever LOWERS the bound (an observed floor far ABOVE the assumed value is reported, never
+//      used to RAISE the horizon — raising is the data-loss direction).
+//   4. NOTHING ESTABLISHABLE — fires when the key was resolved on the CALLER's last run
+//      (`priorKeyResolved: true`) and is unresolved THIS run: a resolved→unresolved flip is a
+//      rename/removal signal, and at the exact moment that assumption breaks, trusting the
+//      (possibly now-stale) documented default is not safe — a small conservative constant
+//      substitutes instead.
+//   5. discoverRetentionCandidateKeys runs alongside, always, report-only.
+//   6. `keyResolvedNow`/`transitionJustLost` are RETURNED, never written here — this function
+//      stays a pure read (estate.mjs's own "zero mutation" invariant); a caller with write
+//      access (cli.mjs's `estate` command) owns persisting the tiny transition marker.
+export function resolveEstateHorizon({ cwd = process.cwd(), home = os.homedir(), now = Date.now(), priorKeyResolved = null } = {}) {
+  const read = readCleanupPeriodDays({ cwd, home });
+  const keyResolvedNow = read.source !== 'default';
+  const candidateKeys = discoverRetentionCandidateKeys({ cwd, home });
+  const transitionJustLost = priorKeyResolved === true && !keyResolvedNow;
+  const observedFloorDays = observedRetentionFloorDays({ home, now });
+
+  if (transitionJustLost) {
+    return {
+      horizonDays: NOTHING_ESTABLISHABLE_HORIZON_DAYS, cleanupPeriodDays: null,
+      rung: 'nothing-establishable', source: read.source, file: read.file,
+      observedFloorDays, floorApplied: false, candidateKeys, keyResolvedNow, transitionJustLost,
+    };
+  }
+
+  let cleanupPeriodDays = read.days;
+  const rung = keyResolvedNow ? 'resolved' : 'documented-default';
+  let floorApplied = false;
+  if (observedFloorDays !== null) {
+    const materialThreshold = cleanupPeriodDays * OBSERVED_FLOOR_MIN_FRACTION;
+    if (observedFloorDays >= materialThreshold && observedFloorDays < cleanupPeriodDays) {
+      cleanupPeriodDays = observedFloorDays;
+      floorApplied = true;
+    }
+  }
+
+  return {
+    horizonDays: deriveEstateHorizonDays(cleanupPeriodDays), cleanupPeriodDays, rung,
+    source: read.source, file: read.file, observedFloorDays, floorApplied, candidateKeys,
+    keyResolvedNow, transitionJustLost,
+  };
+}
+
 // Defensive cap on the per-session overflow walk (tool-results/subagents/...).
 // This module runs off the SessionStart hot path (a /stats or CLI call, not
 // a per-turn hook), so it can afford to be more generous than class-b.mjs's
@@ -315,16 +405,26 @@ function fmtBytes(n) {
   return `${v} B`;
 }
 
+// board #55 AMENDMENT — a small derived horizon is informational, never a different formula
+// (point 4 of the amendment). The threshold is a judgment call, declared here rather than an
+// unexplained magic number in the report text.
+const SMALL_HORIZON_WARN_DAYS = 3;
+
 // Assemble the P1 report: a plain-text block + a one-line summary. READ-ONLY
 // — like every export in this module, nothing here writes, deletes, or
 // moves a byte; this is measure + attribute + advise, in full. Never
 // includes per-transcript topic hints (see attributeTranscript's doc) — the
 // aggregate report stays metrics-only.
-export function estateReport({ projectRoot = process.cwd(), home = os.homedir(), now = Date.now() } = {}) {
+//
+// `priorKeyResolved` (board #55 AMENDMENT, ladder rung 6): whether cleanupPeriodDays resolved
+// on the CALLER's last run — this module never persists it (zero-mutation invariant), so a
+// caller with write access (cli.mjs's `estate` command) reads/writes the tiny marker and
+// passes it in; omitted (the default, `null`) simply means transition detection does not fire
+// for that call — an honest degrade, never a false signal.
+export function estateReport({ projectRoot = process.cwd(), home = os.homedir(), now = Date.now(), priorKeyResolved = null } = {}) {
   const entries = discoverEstateCC({ projectRoot, home });
   const measured = measureEstate(entries);
-  const cleanup = readCleanupPeriodDays({ cwd: projectRoot, home });
-  const horizon = deriveEstateHorizonDays(cleanup.days);
+  const horizon = resolveEstateHorizon({ cwd: projectRoot, home, now, priorKeyResolved });
   const reclaim = reclaimableEstimate(entries, { now, horizonMs: horizon.horizonDays * 86400000 });
   const orphans = detectOrphanSlugs({ home });
   const orphanBytes = orphans.reduce((s, o) => s + (o.bytes || 0), 0);
@@ -337,12 +437,33 @@ export function estateReport({ projectRoot = process.cwd(), home = os.homedir(),
     lines.push(`    ${type}: ${v.files} file(s), ${fmtBytes(v.bytes)}`);
   }
   lines.push(`  ~est reclaimable (older than ${reclaim.horizonDays}d): ${reclaim.files} file(s), ~${fmtBytes(reclaim.bytes)}`);
-  lines.push(`  horizon derivation: platform cleanupPeriodDays=${cleanup.days} (${cleanup.source}${cleanup.file ? `, ${cleanup.file}` : ''}) -> reclaim horizon ${horizon.horizonDays}d${horizon.degraded ? ' [DEGRADED: the platform window is too tight for a two-run-opportunity margin]' : ''}`);
+
+  if (horizon.rung === 'nothing-establishable') {
+    lines.push(`  horizon binding: cleanupPeriodDays could not be trusted this run (see the transition warning below) -> conservative horizon ${horizon.horizonDays}d`);
+  } else {
+    const overrideNote = horizon.floorApplied
+      ? `, OBSERVED-FLOOR OVERRIDE — the platform's own oldest surviving transcript is ${horizon.observedFloorDays}d, below the settings value`
+      : '';
+    lines.push(`  horizon binding: cleanupPeriodDays=${horizon.cleanupPeriodDays}d (${horizon.rung}${horizon.file ? `, ${horizon.file}` : ''}${overrideNote}) -> reclaim horizon ${horizon.horizonDays}d`);
+  }
+  if (horizon.observedFloorDays !== null && !horizon.floorApplied) {
+    lines.push(`  observed floor (informational): the oldest surviving transcript machine-wide is ${horizon.observedFloorDays}d old`);
+  }
+  if (horizon.horizonDays <= SMALL_HORIZON_WARN_DAYS) {
+    lines.push(`  WARN: the derived reclaim horizon (${horizon.horizonDays}d) is small — sessions may read reclaimable soon after they go idle`);
+  }
+  for (const c of horizon.candidateKeys) {
+    lines.push(`  NOTE: an unbound retention-shaped key was found and is NOT used — "${c.key}": ${JSON.stringify(c.value)} (${c.source})`);
+  }
+  if (horizon.transitionJustLost) {
+    lines.push('  WARN: cleanupPeriodDays resolved on the prior run and does not resolve now — possible rename/removal; the estate horizon fell back to a conservative constant');
+  }
+
   lines.push(orphans.length
     ? `  orphan slug dir(s), machine-wide: ${orphans.length}, ~${fmtBytes(orphanBytes)} (owning project no longer on disk — candidates, not confirmed)`
     : '  orphan slug dirs, machine-wide: none found');
   lines.push('  P1 = report-only; P2 (retention/archive) rides "claude project purge" + CoalWash\'s own bins, not built yet.');
 
   const summary = `[CoalWash] estate: ${fmtBytes(measured.totalBytes)} this project (${measured.files} files) · ~${fmtBytes(reclaim.bytes)} ~est reclaimable · ${orphans.length} orphan slug(s) machine-wide`;
-  return { summary, text: lines.join('\n'), measured, reclaim, orphans, orphanBytes, cleanup, horizon };
+  return { summary, text: lines.join('\n'), measured, reclaim, orphans, orphanBytes, horizon };
 }

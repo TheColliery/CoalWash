@@ -124,6 +124,41 @@ export function resolveArchiveDir(estate, home = os.homedir()) {
   return path.join(claudeBaseDir(home), 'coal', 'coalwash', ESTATE_ARCHIVE_DIRNAME);
 }
 
+// board #55 AMENDMENT, ladder rung 6 — the ONLY thing persisted across runs for the estate
+// horizon ladder is whether cleanupPeriodDays RESOLVED last time, machine-wide (not
+// per-project — the key's own resolution has nothing to do with which project is asking).
+// Never the horizon itself (a cached horizon is the exact staleness defect the amendment
+// bans). Lives here, not in estate.mjs, because this file — not estate.mjs — is the one
+// chartered for mutation (this module's own header); estate.mjs's ladder function stays a
+// pure read that takes/returns this state as plain parameters, never touching disk itself.
+// Global (OS-citizen namespace, ~/.claude/coal/coalwash/) — fail-silent both ways: a missing
+// or corrupt marker degrades to "no prior state" (transition detection simply does not fire
+// this run), never a thrown error over a one-boolean side-channel.
+function estateKeyResolvedStatePath(home = os.homedir()) {
+  return path.join(claudeBaseDir(home), 'coal', 'coalwash', 'estate-cleanup-key.json');
+}
+export function readEstateKeyResolvedState(home = os.homedir()) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(estateKeyResolvedStatePath(home), 'utf8'));
+    return typeof raw.resolved === 'boolean' ? raw.resolved : null;
+  } catch { return null; }
+}
+export function writeEstateKeyResolvedState(resolved, home = os.homedir()) {
+  // Direct write, no tmp-then-atomic-move — this file's own EXDEV discipline
+  // (#57, the archive destination may sit on a different drive by design)
+  // bans that rename call ANYWHERE in this module, enforced by
+  // apply.test.mjs's own literal-string scan. A torn write on this one
+  // boolean costs nothing
+  // worse than one run's transition signal not firing — the atomicity a
+  // tmp+rename buys is not worth reintroducing a same-device assumption
+  // into a file whose whole point is not needing one.
+  try {
+    const p = estateKeyResolvedStatePath(home);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ resolved }), 'utf8');
+  } catch { /* fail-silent — informational side-channel, never blocks a report */ }
+}
+
 // CoalHearth in-progress journal signals for THIS project (MED-1 root-cause
 // fix). CH's production writer (CoalHearth lib/state-snapshot.js
 // buildStateSnapshot) persists { status:'in_progress', checklist,

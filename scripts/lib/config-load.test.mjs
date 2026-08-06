@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays } from './config-load.mjs';
+import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -1005,5 +1005,65 @@ test('readCleanupPeriodDays: an unresolvable project root (no cwd marker) drops 
     const r = readCleanupPeriodDays({ cwd: proj, home }); // no .git/.coalwash.json/CLAUDE.md marker anywhere
     assert.strictEqual(r.days, 30);
     assert.strictEqual(r.source, 'default');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// board #55 AMENDMENT (2026-08-05): the ladder's rung-1 sanity tightening
+// (integer, upper-bound) and rung-5 candidate-key discovery.
+// ---------------------------------------------------------------------------
+
+test('readCleanupPeriodDays: a non-integer value is rejected as insane and falls through to the next tier', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 14.5 });
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 9 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 9);
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: a value over the sane upper bound (3650, >10 years -- a unit/semantics change, not a long retention) is rejected and falls through', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 999999 });
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 12 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 12);
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: exactly the sane upper bound (3650) is accepted -- the bound is inclusive, not an off-by-one trap', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 3650 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 3650);
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('discoverRetentionCandidateKeys: finds retention-shaped sibling keys by name, across every tier, excluding cleanupPeriodDays itself', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 30, pruneAfterDays: 10 });
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { retentionPolicy: 'strict', unrelatedKey: 'x' });
+    const found = discoverRetentionCandidateKeys({ cwd: proj, home });
+    const keys = found.map((f) => f.key).sort();
+    assert.deepStrictEqual(keys, ['pruneAfterDays', 'retentionPolicy']);
+    assert.ok(!keys.includes('cleanupPeriodDays'), 'the known key is never reported as a "candidate"');
+    assert.ok(!keys.includes('unrelatedKey'), 'a key with no retention-shaped name is not a false positive');
+  } finally { clean(home, proj); }
+});
+
+test('discoverRetentionCandidateKeys: no matches anywhere -> empty array, never null/undefined', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.deepStrictEqual(discoverRetentionCandidateKeys({ cwd: proj, home }), []);
   } finally { clean(home, proj); }
 });

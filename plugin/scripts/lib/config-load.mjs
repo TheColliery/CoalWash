@@ -566,7 +566,10 @@ function managedSettingsPath() {
 // the same distinguishing discipline `mergeSafety` already applies to CoalWash's own config,
 // extended here to the platform's. A missing/unresolvable project root just drops the
 // local/project tiers and proceeds to user/default — never throws.
-export function readCleanupPeriodDays({ cwd = process.cwd(), home = os.homedir() } = {}) {
+//
+// Shared by readCleanupPeriodDays and discoverRetentionCandidateKeys (rung 5 of the estate
+// horizon ladder, estate.mjs) — one candidate-tier list, not two independently-drifting copies.
+function settingsCascadeCandidates({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const candidates = [{ source: 'managed', file: managedSettingsPath() }];
   let projectRoot = null;
   try { projectRoot = findProjectRoot(cwd, home); } catch { /* no project root -> skip local/project tiers */ }
@@ -575,14 +578,49 @@ export function readCleanupPeriodDays({ cwd = process.cwd(), home = os.homedir()
     candidates.push({ source: 'project', file: path.join(projectRoot, '.claude', 'settings.json') });
   }
   candidates.push({ source: 'user', file: path.join(claudeBaseDir(home), 'settings.json') });
+  return candidates;
+}
 
-  for (const { source, file } of candidates) {
+// board #55 AMENDMENT (owner, 2026-08-05), ladder rung 1: SANE, not just present. A value must
+// be a positive INTEGER within a plausible range — reject 0, negatives, non-integers, and an
+// absurd magnitude (>3650 = >10 years — that is not "a long retention", it is the key having
+// been repurposed to a different unit or a different meaning; trusting it would silently bind
+// the estate horizon to garbage). The upper bound is deliberately generous (10 years, not a
+// tight guess) — the point is catching a UNIT/SEMANTICS change, not second-guessing a genuinely
+// long-lived org policy.
+const CLEANUP_DAYS_MAX_SANE = 3650;
+function saneCleanupDays(v) {
+  return Number.isFinite(v) && Number.isInteger(v) && v >= 1 && v <= CLEANUP_DAYS_MAX_SANE;
+}
+
+export function readCleanupPeriodDays({ cwd = process.cwd(), home = os.homedir() } = {}) {
+  for (const { source, file } of settingsCascadeCandidates({ cwd, home })) {
     const { data, unreadable } = readJsonc(file);
     if (unreadable) continue; // present but broken -> try the next tier, never guess
     const v = data && data.cleanupPeriodDays;
-    if (Number.isFinite(v) && v >= 1) return { days: Math.floor(v), source, file };
+    if (saneCleanupDays(v)) return { days: v, source, file };
   }
   return { days: 30, source: 'default', file: null }; // the documented default, key absent everywhere readable
+}
+
+// board #55 AMENDMENT, ladder rung 5: CANDIDATE-NAME DISCOVERY, report-only, NEVER auto-bound.
+// Scans the same settings cascade for any OTHER key whose name suggests a retention/cleanup
+// concern (`/cleanup|retention|prune|expire|purge/i`) — the signal that would catch a renamed
+// or replaced `cleanupPeriodDays` before this engine ever silently trusts a guess. Every match
+// is returned by name/value/source for the estate report to print; binding to a guessed key
+// would be inventing semantics, which is exactly the failure this whole ladder exists to avoid.
+export function discoverRetentionCandidateKeys({ cwd = process.cwd(), home = os.homedir() } = {}) {
+  const RETENTION_KEY_RE = /cleanup|retention|prune|expire|purge/i;
+  const found = [];
+  for (const { source, file } of settingsCascadeCandidates({ cwd, home })) {
+    const { data, unreadable } = readJsonc(file);
+    if (unreadable || !data || typeof data !== 'object') continue;
+    for (const key of Object.keys(data)) {
+      if (key === 'cleanupPeriodDays') continue; // the known key -- not a "candidate"
+      if (RETENTION_KEY_RE.test(key)) found.push({ key, value: data[key], source, file });
+    }
+  }
+  return found;
 }
 
 // Safety-shaping keys merge MONOTONICALLY: a project may only move a value toward

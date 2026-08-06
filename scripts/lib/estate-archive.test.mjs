@@ -17,6 +17,7 @@ import {
   classifySessions, buildIndexRow, archiveSession, estateUltraScan,
   ultraBillLine, runEstate, runEstateReport, searchIndex, searchLines,
   restoreSession, ESTATE_INDEX_NAME, appendIndexRow, collectTombstones,
+  readEstateKeyResolvedState, writeEstateKeyResolvedState,
 } from './estate-archive.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 import { acquireLock, globalLockPath } from './apply.mjs';
@@ -188,6 +189,29 @@ test('board #55: no roster file at all is the NORMAL case (no department-head co
     assert.strictEqual(c.roster.unreachable, false);
     assert.strictEqual(c.roster.protectedCount, 0);
     assert.strictEqual(c.sessions.find((s) => s.id === 'sess-old').band, 'cold');
+  } finally { clean(home, proj); }
+});
+
+// --- board #55 AMENDMENT: the ladder's rung-6 transition marker ------------
+
+test('readEstateKeyResolvedState: no marker written yet -> null (no history), never throws', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.strictEqual(readEstateKeyResolvedState(home), null);
+  } finally { clean(home, proj); }
+});
+
+test('writeEstateKeyResolvedState + readEstateKeyResolvedState round-trip both booleans; a corrupt marker degrades to null (no history), never throws', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeEstateKeyResolvedState(true, home);
+    assert.strictEqual(readEstateKeyResolvedState(home), true);
+    writeEstateKeyResolvedState(false, home);
+    assert.strictEqual(readEstateKeyResolvedState(home), false, 'a second write overwrites cleanly, not merges');
+
+    const p = path.join(home, '.claude', 'coal', 'coalwash', 'estate-cleanup-key.json');
+    fs.writeFileSync(p, 'not valid json{{{', 'utf8');
+    assert.strictEqual(readEstateKeyResolvedState(home), null, 'corrupt marker -> no history, never a thrown error');
   } finally { clean(home, proj); }
 });
 

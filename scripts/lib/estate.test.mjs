@@ -10,6 +10,7 @@ import path from 'node:path';
 import {
   discoverEstateCC, detectOrphanSlugs, measureEstate, attributeTranscript,
   reclaimableEstimate, estateReport, RECLAIM_HORIZON_MS, deriveEstateHorizonDays,
+  resolveEstateHorizon,
 } from './estate.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 
@@ -145,59 +146,192 @@ test('reclaimableEstimate: only entries older than the horizon count, labeled ~e
 // platform's own cleanupPeriodDays, never mirror it
 // ---------------------------------------------------------------------------
 
-test('board #55: the OLD constant reclaim horizon (== the platform default) leaves ZERO safety margin — an entry never counts as reclaimable before the platform sweep already threatens it; the NEW derived horizon fixes this', () => {
-  const now = Date.now();
-  // A file aged 20 days — inside the platform's own 30-day default sweep
-  // window (CC has not yet claimed it), but past the derived 15-day
-  // CoalWash horizon (deriveEstateHorizonDays(30) => 15).
-  const entries = [{ bytes: 4096, mtimeMs: now - 20 * 86400000 }];
-
-  // OLD behavior: reclaimableEstimate's own default horizonMs
-  // (RECLAIM_HORIZON_MS, 30 days — what the pre-fix estateReport() used
-  // unconditionally, deliberately equal to the platform's own default).
-  const old = reclaimableEstimate(entries, { now });
-  assert.strictEqual(old.files, 0, 'the OLD 30-day-constant horizon reports NOTHING reclaimable at day 20 — no window ever existed before the platform itself would claim the same file at day 30');
-
-  // NEW behavior: the derived horizon for a real 30-day platform default.
-  const horizon = deriveEstateHorizonDays(30);
-  assert.strictEqual(horizon.horizonDays, 15);
-  assert.strictEqual(horizon.degraded, false);
-  const fresh = reclaimableEstimate(entries, { now, horizonMs: horizon.horizonDays * 86400000 });
-  assert.strictEqual(fresh.files, 1, 'the derived 15-day horizon flags it 10 days before the platform would ever sweep it — a real safety margin');
-  assert.strictEqual(fresh.bytes, 4096);
+test('deriveEstateHorizonDays: ONE branchless formula, floor(cleanup/2) — NO floor at any value (closes the amendment\'s own named regression: the old max(7,…) floor left a TIGHTER-than-the-ratio window at cleanup=10)', () => {
+  assert.strictEqual(deriveEstateHorizonDays(60), 30);
+  assert.strictEqual(deriveEstateHorizonDays(30), 15);
+  assert.strictEqual(deriveEstateHorizonDays(14), 7);
+  assert.strictEqual(deriveEstateHorizonDays(10), 5, 'the old floor would have forced 7d here — TIGHTER than the 5d the ratio actually implies');
+  assert.strictEqual(deriveEstateHorizonDays(7), 3);
+  assert.strictEqual(deriveEstateHorizonDays(2), 1);
+  assert.strictEqual(deriveEstateHorizonDays(1), 0, 'floor(1/2) = 0 is a valid output — the skip set (ACTIVE/roster), not a horizon floor, is what keeps this safe');
+  // Unreadable/invalid input falls to the platform's own documented default (30 -> 15).
+  assert.strictEqual(deriveEstateHorizonDays(NaN), 15);
+  assert.strictEqual(deriveEstateHorizonDays(0), 15);
 });
 
-test('deriveEstateHorizonDays: the horizon strictly UNDERCUTS the platform cleanup period at every valid value except the platform floor (cleanup=1, where zero margin is unavoidable) — closes the equal-threshold race the old constant-30-day default produced', () => {
-  const cases = [
-    { cleanup: 60, horizonDays: 30, degraded: false },
-    { cleanup: 30, horizonDays: 15, degraded: false },
-    { cleanup: 14, horizonDays: 7, degraded: false },
-    { cleanup: 13, horizonDays: 12, degraded: true },
-    { cleanup: 8, horizonDays: 7, degraded: true },
-    { cleanup: 7, horizonDays: 6, degraded: true },
-    { cleanup: 2, horizonDays: 1, degraded: true },
-    { cleanup: 1, horizonDays: 1, degraded: true }, // the ONE unavoidable equal case — the platform's own floor
-  ];
-  for (const c of cases) {
-    const h = deriveEstateHorizonDays(c.cleanup);
-    assert.strictEqual(h.horizonDays, c.horizonDays, `cleanup=${c.cleanup}`);
-    assert.strictEqual(h.degraded, c.degraded, `cleanup=${c.cleanup}`);
-    if (c.cleanup > 1) assert.ok(h.horizonDays < c.cleanup, `cleanup=${c.cleanup}: horizon must strictly undercut the platform period`);
-  }
-  // Unreadable/invalid input falls to the platform's own documented default.
-  assert.deepStrictEqual(deriveEstateHorizonDays(NaN), { horizonDays: 15, degraded: false, cleanupPeriodDays: 30 });
-  assert.deepStrictEqual(deriveEstateHorizonDays(0), { horizonDays: 15, degraded: false, cleanupPeriodDays: 30 });
+// ---------------------------------------------------------------------------
+// resolveEstateHorizon — the ladder, one test per rung, each asserting BOTH
+// the chosen horizon and the reported provenance (the amendment's own
+// "fourth tense" requirement).
+// ---------------------------------------------------------------------------
+
+function writeSettings(dir, obj) {
+  const p = path.join(dir, '.claude', 'settings.json');
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(obj), 'utf8');
+  return p;
+}
+function plantTranscript(home, slug, id, ageDays, now = Date.now()) {
+  const dir = path.join(home, '.claude', 'projects', slug);
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, `${id}.jsonl`);
+  fs.writeFileSync(p, '{}\n', 'utf8');
+  const t = new Date(now - ageDays * 86400000);
+  fs.utimesSync(p, t, t);
+  return p;
+}
+
+test('resolveEstateHorizon rung 1: KEY READ + SANE — a present, sane project value binds; provenance names the project tier + file', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    const f = writeSettings(proj, { cleanupPeriodDays: 20 });
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.cleanupPeriodDays, 20);
+    assert.strictEqual(h.rung, 'resolved');
+    assert.strictEqual(h.file, f);
+    assert.strictEqual(h.horizonDays, 10);
+    assert.strictEqual(h.keyResolvedNow, true);
+  } finally { clean(home, proj); }
 });
 
-test('estateReport: wires the derived horizon end-to-end and states the derivation in the report text', () => {
+test('resolveEstateHorizon rung 1: an ABSURD value (>3650, the amendment\'s own named example) is rejected as insane and falls through to rung 2', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 4000 }); // > 3650 -- a unit/semantics change, not a long retention
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.rung, 'documented-default', 'an absurd value must not be trusted as a real cleanupPeriodDays');
+    assert.strictEqual(h.cleanupPeriodDays, 30);
+    assert.strictEqual(h.keyResolvedNow, false);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 2: KEY ABSENT everywhere — the documented default (30) applies, NORMAL not a failure, rung named "documented-default"', () => {
+  const { home, proj } = sandbox();
+  try {
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.rung, 'documented-default');
+    assert.strictEqual(h.cleanupPeriodDays, 30);
+    assert.strictEqual(h.horizonDays, 15);
+    assert.strictEqual(h.file, null);
+    assert.strictEqual(h.keyResolvedNow, false);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 3: the observed floor overrides ONE-WAY when materially below the assumed value (real evidence near the boundary, nothing survived to it)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 30 }); // assumed 30d
+    plantTranscript(home, 'slugA', 'sess1', 20); // real evidence: 20d >= 30*0.5(=15) AND < 30 -> fires
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.floorApplied, true);
+    assert.strictEqual(h.observedFloorDays, 20);
+    assert.strictEqual(h.cleanupPeriodDays, 20, 'bound to the OBSERVED value, not the settings value, once the cross-check fires');
+    assert.strictEqual(h.horizonDays, 10);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 3: a FRESH-INSTALL observed floor (well below half the assumed period) is NOT material — no evidence near the boundary means no override, avoiding a false-aggressive horizon on day one', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 30 });
+    plantTranscript(home, 'slugA', 'sess1', 3); // 3d << 15 (30*0.5) -- not enough history to say anything
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.floorApplied, false, 'a 3-day-old file on a fresh install is not evidence the real sweep is aggressive');
+    assert.strictEqual(h.observedFloorDays, 3, 'still reported, informationally');
+    assert.strictEqual(h.cleanupPeriodDays, 30);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 3: an observed floor ABOVE the assumed value NEVER raises the horizon — the one-way rule, the data-loss direction is forbidden', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 10 });
+    plantTranscript(home, 'slugA', 'sess1', 25); // a file has survived FAR past the assumed 10d
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.floorApplied, false, 'observed-above-assumed is reported, never used to widen the horizon');
+    assert.strictEqual(h.observedFloorDays, 25);
+    assert.strictEqual(h.cleanupPeriodDays, 10, 'stays bound to the settings value -- raising would be the forbidden direction');
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 4: NOTHING ESTABLISHABLE — a resolved -> unresolved transition distrusts even the documented default, uses the small conservative constant (7d) directly, no halving applied to it', () => {
+  const { home, proj } = sandbox();
+  try {
+    // no settings anywhere this run -> keyResolvedNow=false; priorKeyResolved=true simulates
+    // the key having resolved LAST run (a caller-supplied transition signal).
+    const h = resolveEstateHorizon({ cwd: proj, home, priorKeyResolved: true });
+    assert.strictEqual(h.rung, 'nothing-establishable');
+    assert.strictEqual(h.horizonDays, 7);
+    assert.strictEqual(h.transitionJustLost, true);
+    assert.strictEqual(h.keyResolvedNow, false);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 4: NOT triggered when priorKeyResolved is null (no history) or false (already unresolved last time, not a NEW transition)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const noHistory = resolveEstateHorizon({ cwd: proj, home, priorKeyResolved: null });
+    assert.strictEqual(noHistory.rung, 'documented-default');
+    assert.strictEqual(noHistory.transitionJustLost, false);
+
+    const alreadyUnresolved = resolveEstateHorizon({ cwd: proj, home, priorKeyResolved: false });
+    assert.strictEqual(alreadyUnresolved.rung, 'documented-default');
+    assert.strictEqual(alreadyUnresolved.transitionJustLost, false, 'staying unresolved is not a NEW transition');
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 5: an unbound retention-shaped key is REPORTED by name and value, never auto-bound to it', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 30, retentionWindowDays: 5 }); // an unknown sibling
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.cleanupPeriodDays, 30, 'never bound to the guessed key');
+    assert.strictEqual(h.candidateKeys.length, 1);
+    assert.strictEqual(h.candidateKeys[0].key, 'retentionWindowDays');
+    assert.strictEqual(h.candidateKeys[0].value, 5);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 6: keyResolvedNow is a plain OUTPUT — the function never writes; the SAME cwd/home returns the identical value on repeated pure calls', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 20 });
+    const h1 = resolveEstateHorizon({ cwd: proj, home });
+    const h2 = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h1.keyResolvedNow, true);
+    assert.deepStrictEqual(h1, h2, 'purity: no hidden state mutated by the first call changes the second');
+    assert.strictEqual(fs.existsSync(path.join(home, 'coal')), false, 'estate.mjs itself never writes -- no coal/ dir appears from this call alone');
+  } finally { clean(home, proj); }
+});
+
+test('estateReport: wires the ladder end-to-end and states the binding in the report text, including the small-horizon WARN', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 4 }); // -> horizon 2d, triggers the small-horizon WARN
+    const r = estateReport({ projectRoot: proj, home });
+    assert.strictEqual(r.horizon.cleanupPeriodDays, 4);
+    assert.strictEqual(r.horizon.horizonDays, 2);
+    assert.match(r.text, /horizon binding: cleanupPeriodDays=4d \(resolved/);
+    assert.match(r.text, /WARN: the derived reclaim horizon \(2d\) is small/);
+    assert.strictEqual(r.cleanup, undefined, 'the amendment folds the old separate cleanup field into horizon');
+  } finally { clean(home, proj); }
+});
+
+test('estateReport: a bare sandbox (no settings anywhere) states the documented default plainly, no WARN, no crash', () => {
   const { home, proj } = sandbox();
   try {
     const r = estateReport({ projectRoot: proj, home });
-    assert.strictEqual(r.cleanup.days, 30, 'bare sandbox has no settings.json anywhere -> the documented platform default');
-    assert.strictEqual(r.cleanup.source, 'default');
-    assert.strictEqual(r.horizon.horizonDays, 15);
-    assert.strictEqual(r.horizon.degraded, false);
-    assert.match(r.text, /horizon derivation: platform cleanupPeriodDays=30 \(default\) -> reclaim horizon 15d/);
+    assert.match(r.text, /horizon binding: cleanupPeriodDays=30d \(documented-default\) -> reclaim horizon 15d/);
+    assert.ok(!r.text.includes('WARN'), '15d is not small');
+    assert.ok(!r.text.includes('undefined') && !r.text.includes('NaN'));
   } finally { clean(home, proj); }
 });
 

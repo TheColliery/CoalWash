@@ -87,6 +87,7 @@ import { estateReport } from './estate.mjs';
 import {
   estateUltraScan, ultraBillLine, runEstate, runEstateReport,
   searchIndex, searchLines, restoreSession, resolveArchiveDir, collectTombstones,
+  readEstateKeyResolvedState, writeEstateKeyResolvedState,
 } from './estate-archive.mjs';
 import { retierScan, retierScanLines, runRetier, runRetierReport } from './retier.mjs';
 
@@ -327,8 +328,14 @@ function main() {
     }
   } else if (cmd === 'estate') {
     try {
-      const projectRoot = findProjectRoot(process.cwd(), os.homedir());
-      const r = estateReport({ projectRoot, home: os.homedir() });
+      const home = os.homedir();
+      const projectRoot = findProjectRoot(process.cwd(), home);
+      // board #55 AMENDMENT, ladder rung 6: read the prior run's transition marker, pass it
+      // into the (pure) report, then persist whatever THIS run found — the only place this
+      // tiny side-channel is read or written; estate.mjs itself never touches disk for it.
+      const priorKeyResolved = readEstateKeyResolvedState(home);
+      const r = estateReport({ projectRoot, home, priorKeyResolved });
+      writeEstateKeyResolvedState(r.horizon.keyResolvedNow, home);
       console.log(args.includes('--json') ? JSON.stringify(r, null, 1) : r.text);
     } catch (e) {
       console.error(`estate failed: ${e.message}`);
