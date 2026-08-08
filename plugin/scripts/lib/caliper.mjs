@@ -94,13 +94,17 @@ import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn } from './class
 // constants — PLACEHOLDERS, calibrate at the fidelity benchmark (2026-07-08
 // amendment: "Numbers = placeholder constants in code, calibrate at benchmark")
 // ---------------------------------------------------------------------------
-// LEGACY (task #4): CEILING_BMI / CEILING_REARM_BMI / FAT_MULTIPLE_DEFAULT
-// drove the retired BMI-vs-stamped-floor Schmitt and the 0r floor-multiple
-// wall. Exported still (state migration comments + history cite them); no
-// band logic reads them any more.
+// LEGACY (task #4): CEILING_BMI / CEILING_REARM_BMI drove the retired
+// BMI-vs-stamped-floor Schmitt. Exported still (state migration comments +
+// history cite them by name — config-schema.mjs's own ordering-clamp note
+// among others); no band logic reads them any more.
+// FAT_MULTIPLE_DEFAULT (the sibling that drove the 0r floor-multiple wall)
+// was cut here (board #72 ponytail-audit finding #1, 2026-08-08): unlike
+// these two, nothing anywhere — code, test, or comment — cited it by name;
+// the "history cites it" reason this comment used to claim for all three
+// never actually applied to this one.
 export const CEILING_BMI = 1.5;
 export const CEILING_REARM_BMI = 1.2;
-export const FAT_MULTIPLE_DEFAULT = 2.0;
 // TASK #4 — the certain-fat Schmitt marks (tokens, not a ratio). PLACEHOLDERS
 // like every constant in this block, calibrate at the benchmark. The arm mark
 // deliberately reuses REGAUGE_DELTA_TOKENS' own "a REAL content change" scale

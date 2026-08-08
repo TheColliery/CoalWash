@@ -13,7 +13,10 @@
 // "twin drift" lesson warns against. Not split.
 //
 // CoalWash config path resolution — the flock-canonical cascade (global
-// ~/.claude/.coalwash.json overlaid by the nearest project .coalwash.json).
+// ~/.claude/.coalwash.json overlaid by the nearest project config). Per-
+// project config now lives under an agent dir (namespace campaign #69+#39,
+// owner-designated 2026-08-08) — see `projectConfigPath`'s own header for
+// the full read order and the LEGACY root-dotfile fallback it still honors.
 // The project walk STOPS AT HOME (an upward config search that doesn't stop at
 // home once escaped a HOME-overridden test sandbox into the real global config)
 // and compares PHYSICAL paths on both sides (macOS /var -> /private/var symlink:
@@ -437,7 +440,17 @@ export function physicalDir(p) {
 // Adding a marker can only make the walk stop LOWER — a NARROWER, fail-closed
 // containment anchor for apply.mjs — except in exactly the no-marker fallback
 // above, where the governance root IS the correct answer.
-const ROOT_MARKERS = ['.git', '.coalwash.json', 'CLAUDE.md'];
+// The three per-agent-dir shapes were added by the namespace campaign
+// (#69+#39, owner-designated 2026-08-08) alongside the LEGACY dotfile: a
+// project configured ONLY through the new shape (no `.git`, no `CLAUDE.md`,
+// and — since it migrated — no root `.coalwash.json` either) would otherwise
+// match NOTHING and fall through to the raw `startDir` fallback, the exact
+// per-subdir scatter class this file's own history already names above. Same
+// additive-only invariant: each new entry can only make the walk stop LOWER.
+const ROOT_MARKERS = [
+  '.git', '.coalwash.json', 'CLAUDE.md',
+  '.claude/coal/coalwash.json', '.agents/coal/coalwash.json', '.gemini/coal/coalwash.json',
+];
 
 // Walk up from startDir looking for a project-root marker; NEVER walk above
 // `home` — stop there and fall back to startDir.
@@ -490,8 +503,39 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
     dir = parent;
   }
 }
+// Namespace campaign (#69+#39, owner-designated 2026-08-08). Per-project
+// config lives under an agent dir, never bare at the project root any more.
+// THE READ ORDER IS A RAIL — identical wording in every room's readCfg
+// comment and README Configure section, one flock:
+//   1. <project>/.<the running agent's OWN dir>/coal/<skill>.json — the dir
+//      of the agent actually executing. CoalWash activates ONLY through
+//      Claude Code's own hook system (`hooks/hooks.json`); it has no other
+//      running-agent identity to branch on, so for THIS room "own dir" is
+//      always `.claude` and collapses onto the first entry of step 2 below
+//      rather than needing a separate check.
+//   2. Other known agent dirs, fixed order: `.claude` -> `.agents` ->
+//      `.gemini` (first FOUND wins).
+//   3. LEGACY: <project>/.<skill-dotfile>.json at the project root (today's
+//      shape) — read normally, no breakage for an existing user.
+// WRITE target = where the config was found; absent everywhere, the running
+// agent's own dir. Hooks never perform this move on a READ (Phoenix #5, no
+// side effects) — and CoalWash has NO project-config WRITER anywhere in this
+// codebase to begin with (no configure.mjs, no consent-persistence call):
+// both `.coalwash.json` files, global and project, are hand-edited by the
+// user or another tool, never written by CoalWash itself. So "move on
+// write" has no code path to hook here — this function is the READ side
+// only, which is this room's entire scope for the campaign.
+const AGENT_DIR_ORDER = ['.claude', '.agents', '.gemini'];
+export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
+  const root = findProjectRoot(cwd, home);
+  const candidates = AGENT_DIR_ORDER.map((d) => path.join(root, d, 'coal', 'coalwash.json'));
+  candidates.push(path.join(root, '.coalwash.json')); // LEGACY, always last
+  return candidates;
+}
 export function projectConfigPath(cwd = process.cwd(), home = os.homedir()) {
-  return path.join(findProjectRoot(cwd, home), '.coalwash.json');
+  const candidates = projectConfigCandidates(cwd, home);
+  for (const c of candidates) if (pathExists(c)) return c;
+  return candidates[0]; // nothing found anywhere -- own-dir is both the read and write target
 }
 
 // Decode raw config bytes to text, sniffing the encoding (H6). Node's default

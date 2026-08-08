@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
+import { globalConfigPath, projectConfigPath, projectConfigCandidates, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -1065,5 +1065,106 @@ test('discoverRetentionCandidateKeys: no matches anywhere -> empty array, never 
   const { home, proj } = sandbox();
   try {
     assert.deepStrictEqual(discoverRetentionCandidateKeys({ cwd: proj, home }), []);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// Namespace campaign (#69+#39, owner-designated 2026-08-08): per-project
+// config read order — own agent dir -> other known agent dirs (fixed order)
+// -> LEGACY root dotfile. Precedence x3 + the ROOT_MARKERS scatter fix +
+// the structural move-on-write proof + the clamp-unchanged regression.
+// ---------------------------------------------------------------------------
+
+test('projectConfigCandidates: the rail order is .claude -> .agents -> .gemini -> LEGACY, always relative to the resolved project root', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    const c = projectConfigCandidates(proj, home);
+    assert.deepStrictEqual(c, [
+      path.join(proj, '.claude', 'coal', 'coalwash.json'),
+      path.join(proj, '.agents', 'coal', 'coalwash.json'),
+      path.join(proj, '.gemini', 'coal', 'coalwash.json'),
+      path.join(proj, '.coalwash.json'),
+    ]);
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath precedence 1/3: own-dir (.claude) wins even when every other candidate, including LEGACY, also exists', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'own-dir' });
+    writeJson(path.join(proj, '.agents', 'coal', 'coalwash.json'), { coalwashMode: 'other-dir' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy' });
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath precedence 2/3: .claude absent, .agents present -> the other-known-dir entry wins over LEGACY', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.agents', 'coal', 'coalwash.json'), { coalwashMode: 'other-dir' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy' });
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.agents', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath precedence 3/3: no new-shape candidate exists anywhere -> LEGACY root dotfile is read, no breakage for an existing user', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    // 'manual' -- a genuine coalwashMode enum member, not a made-up marker string,
+    // so this exercises the REAL loadMergedConfig path rather than tripping
+    // mergeSafety's own "junk value gets no say" clamp on an unrecognized value.
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'manual' });
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.coalwash.json'));
+    // and it actually READS through loadMergedConfig, not just resolves the path
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).coalwashMode, 'manual');
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath: nothing exists anywhere -> the own-dir (.claude) path is the read AND write target, matching a never-configured project', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+test('ROOT_MARKERS scatter fix: a subdir of a project configured ONLY via the new per-agent-dir shape (no .git, no CLAUDE.md, no LEGACY dotfile) still resolves to the true project root, not the raw subdir', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'auto' });
+    const subdir = path.join(proj, 'nested', 'deeper');
+    fs.mkdirSync(subdir, { recursive: true });
+    assert.strictEqual(findProjectRoot(subdir, home), proj, 'the new config shape alone is enough to anchor the walk at the true root');
+  } finally { clean(home, proj); }
+});
+
+test('move-on-CONFIG-WRITE-only (Phoenix #5): no code path anywhere in this engine ever WRITES .coalwash.json (project or global) -- both files are hand-edited only, so this room has no write-side of the migration to build', () => {
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  const hooksDir = path.join(libDir, '..', '..', 'hooks');
+  const offenders = [];
+  for (const dir of [libDir, hooksDir]) {
+    for (const f of fs.readdirSync(dir)) {
+      if (!/\.(mjs|js)$/.test(f) || f.endsWith('.test.mjs')) continue;
+      const text = fs.readFileSync(path.join(dir, f), 'utf8');
+      // a literal write call whose destination string contains the config filename
+      if (/writeFileSync\([^)]*coalwash\.json/i.test(text)) offenders.push(f);
+    }
+  }
+  assert.deepStrictEqual(offenders, [], 'if this ever fires, the room now has a real writer and the design-doc write-new-drop-old step is owed for real');
+});
+
+test('clamp-unchanged regression: the safer-value-wins clamp applies identically no matter WHICH read-order candidate supplied the project value', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(globalConfigPath(home), { coalwashMode: 'off' });
+    // the project value arrives via the NEW own-dir shape, not the legacy path
+    writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'auto' });
+    const merged = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(merged.coalwashMode, 'off', 'a project may not escalate past a deliberate global off, regardless of which candidate file the value came from -- only the ADDRESS moved, the clamp semantics did not');
   } finally { clean(home, proj); }
 });

@@ -127,7 +127,9 @@ The remaining subcommands (`estate`, `estate-scan`, `estate-run`, `retier-scan`,
 
 ## 🔧 Configure
 
-Every tool in the series supports two config levels — a global `~/.claude/.coalwash.json` and a per-project `.coalwash.json` override — so a globally-installed skill can be tuned or **shut off per project** (`coalwashMode: "off"` is the off-switch) — a skill you don't need in a given project stops loading (and burning tokens) there. **Project wins, except for a handful of safety keys** (`coalwashMode`, `updateMode`, `writeGuard`, `localOnly`, `estate.deleteCold`) — a cloned project's config may only make those *quieter*, never weaken a deliberate global choice or an unreadable one; every other key is plain project-wins. The main keys:
+Every tool in the series supports two config levels — a global `~/.claude/.coalwash.json` and a per-project override — so a globally-installed skill can be tuned or **shut off per project** (`coalwashMode: "off"` is the off-switch) — a skill you don't need in a given project stops loading (and burning tokens) there. **Project wins, except for a handful of safety keys** (`coalwashMode`, `updateMode`, `writeGuard`, `localOnly`, `estate.deleteCold`) — a cloned project's config may only make those *quieter*, never weaken a deliberate global choice or an unreadable one; every other key is plain project-wins.
+
+**Where the per-project override lives — the read order (identical across the series, one flock):** (1) `<project>/.<the running agent's own dir>/coal/coalwash.json` — the dir of the agent actually executing (Claude Code: `.claude`); (2) other known agent dirs, fixed order `.claude` → `.agents` → `.gemini` (first found wins); (3) LEGACY: `<project>/.coalwash.json` at the project root (the pre-2026-08-08 shape) — still read normally, no breakage for an existing config. Whichever one is found is where an edit takes effect; nothing is auto-moved on read. The main keys:
 
 | Key | Default | What it does |
 |---|---|---|

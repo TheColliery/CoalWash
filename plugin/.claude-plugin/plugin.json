@@ -1,6 +1,6 @@
 {
   "name": "coalwash",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "CoalWash — memory-defragment/cleanup engine for agent memory, two lanes: class-B (memory + governance files) gets the semantic wash — a free mechanical Quick pass plus a code-enforced fidelity gate blocking any STRUCTURED-token drop by diff (links, dates, versions, frontmatter; prose fidelity is the paid semantic layer's job), consent-gated Full pass, every cut snapshot-backed (whole-run rollback); class-A (transcripts — the estate) gets byte-identity ULTRA archiving, never semantic-edited. Honest frame: slows how fast memory-overhead grows — it does not eliminate memory cost. Zero-dependency, offline, no API keys.",
   "author": {
     "name": "HetCreep"
