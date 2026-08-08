@@ -63,18 +63,34 @@ const loadKeepsFrom = loadKeepsAt;
 // Record (or refresh) an adjudicated keep at `file`. Upserts by `target` — a
 // re-review of the same target REPLACES the prior entry rather than piling up
 // duplicates (the ledger tracks the LATEST verdict, not a full history).
-// Returns true on a successful write, false on any failure (never throws) —
-// including a keeps.json from a NEWER schema, which is never rewritten.
 // Optional beta.12 fields (the KEEPS-GATE's enforcement handle): `anchor` =
 // the VERBATIM protected text span, `anchorFile` = the absolute path of the
 // store file it lives in. A keep carrying both is mechanically enforced at
 // applyPlan; a keep without them stays advisory (the pre-beta.12 shape,
 // unchanged behavior).
+//
+// grad11 F5 return-contract (main's ruling): a bare `true`/`false` cannot
+// distinguish "the write failed" from "the write succeeded but the anchor
+// you asked for did not survive the floor" — the same three-valued-outcome-
+// forced-into-two shape as `deadLinks` firing while `applyPlan` still
+// returns `ok:true`, and as `frontmatterCensus`'s old hardcoded
+// `incomplete:false`. Returns `{ ok, anchorDropped, anchorStored }`:
+// `ok` = the write itself succeeded (the old boolean's exact meaning, and
+// the ONLY thing an early-return failure — bad target, newer schema, a
+// thrown I/O error — can report, so those paths still resolve to `ok:false`
+// with nothing to say about an anchor that was never reached);
+// `anchorStored` = the entry that landed on disk carries A real anchor
+// (from this call or a preserved prior one); `anchorDropped` = TRUE exactly
+// when this call supplied a real, non-empty anchor string and the ENTRY
+// THAT LANDED does not carry that string — the floor rejected it and no
+// prior anchor happened to survive in its place. A caller that never
+// intended to set an anchor this call (the pre-beta.12 advisory shape)
+// gets `anchorDropped:false` — nothing was requested, so nothing was lost.
 function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anchorFile } = {}) {
-  if (typeof target !== 'string' || !target) return false;
+  if (typeof target !== 'string' || !target) return { ok: false, anchorDropped: false, anchorStored: false };
   try {
     const raw = rawKeepsOrNull(file);
-    if (raw && typeof raw === 'object' && !Array.isArray(raw) && Number(raw.v) > KEEPS_SCHEMA_V) return false; // read-only to us
+    if (raw && typeof raw === 'object' && !Array.isArray(raw) && Number(raw.v) > KEEPS_SCHEMA_V) return { ok: false, anchorDropped: false, anchorStored: false }; // read-only to us
     ensureDir();
     const existing = loadKeepsFrom(file);
     const prior = existing.find((k) => k.target === target);
@@ -92,8 +108,146 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
     // call shape, so the safe direction is to never let re-affirming silently
     // weaken protection; explicitly clearing an anchor is a different, not-yet-
     // built feature, not this fix's job.
-    const mergedAnchor = (typeof anchor === 'string' && anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);
-    const mergedAnchorFile = (typeof anchorFile === 'string' && anchorFile) ? anchorFile : (prior && typeof prior.anchorFile === 'string' ? prior.anchorFile : undefined);
+    // grad7 ruling Root E / grad8 F4: the ORIGINAL grad6 fix checked truthiness
+    // (`anchor` alone), which a whitespace-only string satisfies ('' is falsy,
+    // ' ' is not) — a re-affirm call passing anchor:' ' silently OVERWROTE a
+    // real 15+ char protected span with a single space, while the KEEPS-GATE
+    // downstream (apply.mjs) still reads the entry as "enforced" (anchor is a
+    // non-empty string) and its own survival check (`content.includes(' ')`)
+    // is trivially true for nearly any rewrite — the keep stops protecting
+    // anything without ever LOOKING broken. A real new value must carry real
+    // content, not just pass `typeof === 'string' && truthy`.
+    // grad9 F3: `trim().length>0` still wasn't enough — the SAME defect, wearing
+    // different bytes. Two failures, opposite polarity, one root cause (a check
+    // asking "is this non-empty" instead of "does this identify a real span"):
+    // (1) a degenerate 1-3 char anchor ("e", "#", "the") passes `trim().length>0`
+    //     and silently OVERWRITES a real, much longer, adjudicated anchor on
+    //     re-affirm — and then, through applyPlan's real KEEPS-GATE, a rewrite
+    //     dropping EVERY byte of the true protected content goes ok:true,
+    //     applied:1, unflagged, while the entry still reads as "enforced".
+    // (2) U+200B (ZERO WIDTH SPACE) is Cf, not in JS `\s` — `'​'.trim()`
+    //     does NOT strip it, so a ZWSP-only value ALSO passes as "real content"
+    //     and then never matches anything in real text, permanently
+    //     false-refusing every future edit to that file.
+    // Fix the CLASS: strip ordinary whitespace AND Unicode invisible/format
+    // characters before measuring, for BOTH fields (closes polarity 2
+    // everywhere) — and additionally require a real MINIMUM length for an
+    // ANCHOR specifically (closes polarity 1): an adjudicated keep names a
+    // specific clause, never a single character or a common short word.
+    // anchorFile is a PATH, which is legitimately short, so it keeps the
+    // non-empty-after-stripping bar only, no length floor.
+    //
+    // grad10 F5 [MEDIUM, both polarities]: `\p{Cf}` alone missed FOUR more
+    // classes that reproduce the identical bug — combining marks (Mn, e.g.
+    // U+0300), controls beyond `\s` (Cc, e.g. U+0001), and two SPECIFIC
+    // codepoints outside any strippable-whole-category (Hangul filler
+    // U+3164 is `Lo` — letters, which legitimately holds CJK/Thai/etc. real
+    // text and must NOT be blanket-stripped; Braille blank U+2800 is `So` —
+    // symbols, which legitimately holds real math/currency/etc. content for
+    // the identical reason). `\p{Default_Ignorable_Code_Point}` (a real
+    // ECMAScript Unicode property, verified supported and verified to leave
+    // ordinary CJK/Latin/Thai letters untouched) catches U+3164 without
+    // touching Lo generally; U+2800 has no such property to lean on, so it
+    // is named explicitly rather than folded into a category that would
+    // over-strip.
+    //
+    // grad11 F5 [HIGH, silent, both halves the SAME bug this whole comment
+    // block is fighting]. The line above used to ALSO strip `\p{Mn}` and
+    // ALL of `\s` (not just runs of it), on the theory below that
+    // undercounting a script's visible length is always the SAFE direction.
+    // It is not, and the falsified claim ("SCRIPT-AGNOSTIC by construction",
+    // a few lines below) is the tell: `\p{Mn}` marks are VISIBLE, load-
+    // bearing parts of the rendered glyph in Thai, Vietnamese, and Arabic —
+    // not invisible padding, the opposite of what this function exists to
+    // strip. `ห้ามลบไฟล์นี้` (13 codepoints, a real adjudicated Thai clause)
+    // lost 4 of them to Mn-stripping and fell to 9 — under the 12-char floor
+    // below — silently dropped with `recordKeepAt` still returning success.
+    // `\p{Mn}` is REMOVED from the strip set; the four still-genuinely-
+    // invisible classes above (Cf/Cc/the two named exceptions) stay.
+    //
+    // The second half is the SAME shape on a different axis: `\s` used to be
+    // DELETED outright rather than collapsed, so a real multi-line or multi-
+    // word anchor's own STRUCTURAL whitespace (a 3-key flush-left YAML block
+    // joined by newlines, an ordinary space-delimited phrase) was punished
+    // exactly as hard as deliberate whitespace padding meant to inflate an
+    // otherwise-junk anchor's apparent length. `"a: 1\nb: 2\nc: 3"` — a real,
+    // ordinary, three-key anchor — stripped to `"a:1b:2c:3"` (9 chars, under
+    // the floor) under the old rule. Collapsing every whitespace RUN to one
+    // representative space, instead of deleting it, keeps a real anchor's
+    // true ~14-char length intact while still refusing pure padding ("x" +
+    // 20 spaces collapses to "x", still 1 char). `\p{Cc}` (which already
+    // includes LF/CR/TAB) still strips anything the `\s+` collapse did not
+    // already reduce to one ordinary space.
+    //
+    // NAMED RESIDUAL, restated with the corrected reasoning: this is not a
+    // complete Default_Ignorable enumeration — a future invisible-rendering
+    // codepoint outside these categories is not guaranteed caught; the four
+    // reported here are.
+    const stripInvisible = (v) => String(v).replace(/\s+/g, ' ').trim().replace(/[\p{Cf}\p{Cc}\p{Default_Ignorable_Code_Point}⠀]+/gu, '');
+    // grad10 F4 [HIGH, content-loss]: length alone is a LENGTH proxy, not a
+    // DISTINCTIVENESS one — "whatever" and "!!!!!!!!" both cleared the old
+    // 8-char floor, and both are common/repeated enough to coincidentally
+    // survive somewhere in unrelated boilerplate even after the protected
+    // clause they were meant to name is gone, so the KEEPS-GATE's survival
+    // check finds them and never flags the loss.
+    //
+    // CORRECTED grad10-round-2 HIGH-2: the first fix (raise the floor +
+    // require >=2 WHITESPACE-delimited words) closed the reported shape by
+    // assuming every script marks word boundaries with whitespace. Thai,
+    // Japanese and Chinese do not — a real, adjudicated 24-50 character CJK/
+    // Thai clause splits into exactly ONE "word" and was refused outright,
+    // SILENTLY: `recordKeep` still returns true, the anchor is dropped, and
+    // apply.mjs's KEEPS-GATE filters an anchor-less keep out of enforcement
+    // entirely — the keep protects nothing and the user is told it worked.
+    // Same silent-total-failure shape for any space-FREE technical token at
+    // any length (a URL, a bare function call like `verifyBlobIntegrity()`),
+    // and the word-count floor ALSO over-refused a genuinely short, real,
+    // space-delimited phrase ("git rev-parse HEAD", 16 stripped chars) for
+    // no reason connected to distinctiveness at all.
+    //
+    // The replacement measure is SCRIPT-AGNOSTIC by construction: distinct
+    // CODEPOINT COUNT, never word count. grad11 F5 note: this claim was
+    // FALSE at this file's own HEAD — see `stripInvisible` immediately
+    // above, which was silently discarding Mn/whitespace content the
+    // measure below then never got a chance to count. The claim is true of
+    // what this function computes NOW; it was never true of what shipped.
+    // "!!!!!!!!!!!!!!!!!!!!" (any length)
+    // has exactly 1 distinct codepoint; "whatever"/"the the the" collapse to
+    // a handful. A real adjudicated clause — in ANY script, with or without
+    // word delimiters — draws from a far wider set: Thai/CJK/Latin prose all
+    // carry many distinct codepoints even at short lengths, because a real
+    // sentence is not a repeated token. Deliberately an ABSOLUTE floor, not
+    // a RATIO: a ratio decays with length for any bounded alphabet (English
+    // prose naturally drops toward ~26 distinct letters as length grows,
+    // which a fixed ratio would eventually misread as non-distinctive) —
+    // an absolute floor has no such decay and stays correct at any length.
+    // MIN_MEANINGFUL_ANCHOR_LEN lowered from 20 to 12 (still above both
+    // 8-char junk examples, comfortably below "git rev-parse HEAD"'s 16).
+    // NAMED RESIDUAL: neither measure proves true uniqueness (this is
+    // "plumbing only" per this file's own header — no read of the target
+    // file's real content, an architecture change out of scope here) — a
+    // short repeated PHRASE built from >=6 distinct characters
+    // ("whatever whatever", 7 distinct chars) can still clear both floors.
+    // Narrows the risk; does not close it fully, same standing as before.
+    const MIN_MEANINGFUL_ANCHOR_LEN = 12;
+    const MIN_DISTINCT_CHARS = 6;
+    const hasRealAnchor = (v) => {
+      if (typeof v !== 'string') return false;
+      const stripped = stripInvisible(v);
+      if (stripped.length < MIN_MEANINGFUL_ANCHOR_LEN) return false;
+      return new Set([...stripped]).size >= MIN_DISTINCT_CHARS;
+    };
+    const hasRealPath = (v) => typeof v === 'string' && stripInvisible(v).length > 0;
+    const mergedAnchor = hasRealAnchor(anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);
+    const mergedAnchorFile = hasRealPath(anchorFile) ? anchorFile : (prior && typeof prior.anchorFile === 'string' ? prior.anchorFile : undefined);
+    // grad11 F5 return-contract: see the header comment above recordKeepAt.
+    // `anchorRequested` is deliberately the RAW `typeof anchor==='string' &&
+    // anchor.length>0` test, not `hasRealAnchor` — a caller who typed ANY
+    // non-empty string was asking for an anchor; whether it cleared the
+    // floor is exactly the outcome being reported, not a precondition for
+    // reporting it.
+    const anchorRequested = typeof anchor === 'string' && anchor.length > 0;
+    const anchorDropped = anchorRequested && mergedAnchor !== anchor;
     keeps.push({
       target,
       reason: String(reason || ''),
@@ -104,9 +258,9 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
     const tmp = file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), 'utf8');
     fs.renameSync(tmp, file);
-    return true;
+    return { ok: true, anchorDropped, anchorStored: !!mergedAnchor };
   } catch {
-    return false;
+    return { ok: false, anchorDropped: false, anchorStored: false };
   }
 }
 

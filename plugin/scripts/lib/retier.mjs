@@ -305,14 +305,96 @@ export function planIndexDemotion(indexText, env) {
 // here is the SAME direction the module already commits to below ("a false
 // 'referenced' keeps the file in place — the safe fail direction"); this is
 // that same asymmetry applied to case instead of to a coincidental substring.
-function countOccurrences(hay, needle) {
-  if (!needle) return 0;
-  const h = hay.toLowerCase();
-  const n2 = needle.toLowerCase();
+//
+// grad9 F4 [HIGH, content-loss by displacement]: case-folding closed the
+// CASE axis but not the PUNCTUATION one. `[[Topic Name]]` (a real wikilink,
+// spaces) has ZERO substring overlap with a topic file's own slugified
+// basename/stem `topic-name.md`/`topic-name` (hyphens) — a genuinely
+// REFERENCED topic reads as unreferenced and gets archived out of the live
+// tree, while the referring file still literally contains the wikilink (the
+// top-anchor safety net checks that a token still resolves SOMEWHERE, and
+// the wikilink text itself never moved — it just points at a file that is
+// no longer there). Fix: when the exact case-folded match finds nothing, ALSO
+// try a DELIMITER-normalized match (hyphens/underscores/whitespace runs all
+// folded to a single space, on BOTH sides). This only ever WIDENS what
+// counts as "referenced" — the same safe-fail direction this function's own
+// header already commits to; a false "referenced" keeps the file in place,
+// it never manufactures a false "unreferenced".
+const DELIM_RE = /[-_\s]+/g;
+const normDelim = (s) => s.replace(DELIM_RE, ' ');
+function countRuns(h, n2) {
   let n = 0;
   let i = h.indexOf(n2);
   while (i !== -1) { n++; i = h.indexOf(n2, i + n2.length); }
   return n;
+}
+// grad10 F6 [MEDIUM, opposite-polarity — introduced by grad9's own F4 fix]:
+// the delimiter fold above was scoped to the WHOLE corpus. A stem that
+// happens to spell out an ordinary run of English words — `the-plan` ->
+// `the plan` — then matches ANY sentence containing those two words in
+// sequence, not because anything references the file, but because the fold
+// erased the one signal (the hyphen) that told a real compound apart from
+// plain prose. Driven through the real applyPlan: `the-plan.md`, referenced
+// by nobody, survived a demotion pass it should have failed.
+//
+// The genuine case the fold exists for (grad9 F4) is syntactically marked: a
+// WIKILINK written with spaces, `[[Topic Name]]`, against a filename written
+// with hyphens, `topic-name.md`. So the delimiter-normalized leg is scoped to
+// wikilink-bracketed spans of the corpus ONLY — the exact (un-normalized)
+// leg still searches the whole corpus, unchanged, since a literal hyphenated
+// stem appearing in ordinary prose was never the source of this bug. A
+// markdown link target (`(topic-name.md)`) needs no bracket-scoping either:
+// its hyphenated form already matches the exact leg verbatim.
+const WIKILINK_RE = /\[\[([^[\]]*)\]\]/g;
+function wikilinkSpans(hay) {
+  let out = '';
+  let m;
+  WIKILINK_RE.lastIndex = 0;
+  while ((m = WIKILINK_RE.exec(hay))) out += `${m[1]}\n`;
+  return out;
+}
+function countOccurrences(hay, needle, delimHay = hay) {
+  if (!needle) return 0;
+  const h = hay.toLowerCase();
+  const n2 = needle.toLowerCase();
+  // BOTH counted, never short-circuited: a topic's own text commonly
+  // contains its own EXACT hyphenated stem (e.g. a self-titled header),
+  // which would make an exact-count>0 early-return miss a delimiter-variant
+  // reference living ELSEWHERE (the wikilink in an index line) — the two
+  // counts are of DIFFERENT occurrences and neither substitutes for the
+  // other. max(), not sum(): still monotone-widening (never below the old
+  // exact-only count), never double-counts one real occurrence twice.
+  // `delimHay` is the NARROWER haystack the delimiter-normalized leg reads
+  // from — bracket-scoped spans for the corpus, or `hay` itself (unchanged
+  // old behavior) when the caller has no narrower span to offer.
+  return Math.max(countRuns(h, n2), countRuns(normDelim(delimHay.toLowerCase()), normDelim(n2)));
+}
+
+// grad10 F7a [MEDIUM, content-loss] percent-encoding: a markdown link target
+// written percent-encoded (`topic%2Dname.md`) has zero substring overlap
+// with the topic's own raw basename ("topic-name.md") — `%2D` decodes to
+// the exact hyphen the filename already contains. A plain `%XX` -> one-byte
+// substitution (never `decodeURIComponent`, which THROWS on a malformed or
+// partial sequence — ordinary prose is full of bare `%` signs, e.g. "50% done",
+// that are not escapes at all, and a throw here would crash the whole census
+// on innocuous text) closes it: decode the corpus once, then a plain exact
+// substring search — no delimiter fold needed on this leg, since decoding
+// already produces the real character the exact leg was always looking for.
+function percentDecodeAscii(s) {
+  return s.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+// grad10 F7b [MEDIUM, content-loss, directionally asymmetric]: a PLURAL
+// filename referenced only in SINGULAR prose ("guidelines.md" vs "the
+// guideline") has zero substring overlap in that direction. The reverse (a
+// singular filename referenced by plural prose) is already caught for free
+// by ordinary substring containment — "guideline" IS a substring of
+// "guidelines". Trying the stem with ONE trailing "s" stripped, as an
+// additional candidate, closes the missing direction without a stemming
+// library — deliberately narrow (the one shape reported), and the safe
+// direction: it only ever widens what counts as referenced.
+function englishSingular(stem) {
+  return stem.length > 1 && stem.endsWith('s') ? stem.slice(0, -1) : null;
 }
 
 // Hop-2: topic files UNREFERENCED anywhere else in the merged tree (neither
@@ -323,13 +405,24 @@ function countOccurrences(hay, needle) {
 // resolution if FP-keeps ever matter.
 export function unreferencedTopics(store, allTextConcat) {
   const out = [];
+  const wikilinkHay = wikilinkSpans(allTextConcat); // grad10 F6: computed once, not per topic
+  const decodedHay = percentDecodeAscii(allTextConcat).toLowerCase(); // grad10 F7a: computed once, not per topic
   for (const t of store.topics) {
     if (t.basename === OVERFLOW_BASENAME) continue; // the ladder's own tier-2 rung — never cascades itself
     const stem = t.basename.replace(/\.md$/i, '');
-    const ownBase = countOccurrences(t.text, t.basename);
+    const ownBase = countOccurrences(t.text, t.basename); // own text: unscoped, unaffected by F6/F7
     const ownStem = countOccurrences(t.text, stem);
-    const allBase = countOccurrences(allTextConcat, t.basename);
-    const allStem = countOccurrences(allTextConcat, stem);
+    let allBase = countOccurrences(allTextConcat, t.basename, wikilinkHay); // grad10 F6: delimiter leg scoped to [[...]] spans
+    let allStem = countOccurrences(allTextConcat, stem, wikilinkHay);
+    // grad10 F7a: also try the percent-decoded corpus, exact-only (no delimiter
+    // fold — decoding already produced the real hyphen/underscore/space).
+    allBase = Math.max(allBase, countRuns(decodedHay, t.basename.toLowerCase()));
+    allStem = Math.max(allStem, countRuns(decodedHay, stem.toLowerCase()));
+    // grad10 F7b: also try the stem's English singular as an additional
+    // reference candidate (basename is skipped — the ".md" extension already
+    // breaks the "ends in s" test, so it never applies there).
+    const singular = englishSingular(stem);
+    if (singular) allStem = Math.max(allStem, countOccurrences(allTextConcat, singular, wikilinkHay));
     if (allBase > ownBase || allStem > ownStem) continue; // referenced elsewhere (case-insensitive) -> stays
     out.push(t);
   }
@@ -903,6 +996,11 @@ export function runRetier({
         ok: false,
         rolledBack: failed === 0 ? true : 'partial',
         error: `top-anchor survival probe THREW (${e.message}) — run rolled back${failed ? ` (${failed} restore failure(s) — check snapshot ${r.snapshotDir})` : ''}`,
+        // grad7 ruling Root D: applyPlan's own per-file refusals (e.g. a
+        // bin-stash failure) describe what happened during the now-rolled-
+        // back apply — real diagnostic context, not something the rollback
+        // erases. Both rollback-failure returns below used to drop it.
+        flagged: r.flagged || [],
       };
     }
     if (misses.length) {
@@ -916,6 +1014,7 @@ export function runRetier({
         rolledBack: failed === 0 ? true : 'partial',
         anchorMisses: misses,
         error: `top-anchor survival probe FAILED (${misses.length} of ${anchors.length} anchors unresolved) — run rolled back${failed ? ` (${failed} restore failure(s) — check snapshot ${r.snapshotDir})` : ''}`,
+        flagged: r.flagged || [], // grad7 ruling Root D — see the sibling throw-path return above
       };
     }
 
@@ -939,6 +1038,18 @@ export function runRetier({
       // main agent-driven path already sees it (method.md prints the whole
       // result JSON). Threaded through so runRetierReport can render it.
       flagged: r.flagged || [],
+      // grad7 ruling Root D: three SIBLINGS of `flagged` on applyPlan's own
+      // return object (apply.mjs:1235) were dropped the exact same way —
+      // the WAVE-16 fix threaded ONE field off a multi-field object and
+      // never checked whether the object had others. `deadLinks`/
+      // `deadLinkLine` mirror receipt.mjs's own field (the main apply path
+      // already renders `deadLinkLine`); `binConflicts` is threaded here
+      // for data completeness even though NO consumer in this codebase
+      // renders it today (receipt.mjs doesn't either — a wider, separate
+      // gap, reported not fixed here; see the room MEMORY.md entry).
+      deadLinks: r.deadLinks || [],
+      deadLinkLine: r.deadLinkLine || null,
+      binConflicts: r.binConflicts || [],
       stores: over.map(({ st, p }) => ({
         label: st.label,
         movedLines: p.hop1.movedLines.length,
@@ -957,7 +1068,15 @@ export function runRetierReport(res) {
   if (!res) return '[CoalWash] RE-TIER: no result';
   if (res.refused) return `[CoalWash] RE-TIER refused: ${res.reason}`;
   if (res.deferred) return `[CoalWash] RE-TIER deferred: ${res.error || 'lock held'} — nothing touched`;
-  if (!res.ok) return `[CoalWash] RE-TIER failed: ${res.error}${res.rolledBack ? ` (rolled back: ${res.rolledBack})` : ''}`;
+  if (!res.ok) {
+    // grad7 ruling Root D: `flagged` describes the now-rolled-back apply's
+    // OWN per-file refusals (e.g. a bin-stash failure) — real diagnostic
+    // context for a failed run, not something the rollback should also
+    // erase from the operator's view.
+    const base = `[CoalWash] RE-TIER failed: ${res.error}${res.rolledBack ? ` (rolled back: ${res.rolledBack})` : ''}`;
+    const flaggedLines = (res.flagged || []).map((f) => `\n  FLAGGED ${f.path}: ${f.reason}`).join('');
+    return base + flaggedLines;
+  }
   const lines = [];
   const moved = res.stores.reduce((n, s) => n + s.movedLines, 0);
   const arch = res.stores.reduce((n, s) => n + s.topicsArchived, 0);
@@ -971,5 +1090,10 @@ export function runRetierReport(res) {
   // same reason KEPT is rendered above (a per-file exclusion the operator
   // needs to see), never silently dropped now that it is threaded through.
   for (const f of res.flagged || []) lines.push(`  FLAGGED ${f.path}: ${f.reason}`);
+  // grad7 ruling Root D: deadLinkLine is applyPlan's own one-line advisory
+  // (already formatted — see apply.mjs's deadLinkLine), mirroring exactly
+  // how receipt.mjs already renders it on the main apply path. It was
+  // threaded onto the return object above but never reached this renderer.
+  if (res.deadLinkLine) lines.push(`  ${res.deadLinkLine}`);
   return lines.join('\n');
 }

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { globalConfigPath, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds } from './config-load.mjs';
+import { globalConfigPath, projectConfigPath, projectConfigCandidates, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -956,3 +956,262 @@ test('RED-FIRST/required-foldOnMiss: a MISS answer is caller-specific, never cac
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+
+// ---------------------------------------------------------------------------
+// board #55: readCleanupPeriodDays -- the settings cascade the estate
+// horizon derives from. The "managed" tier is a fixed OS path
+// (managedSettingsPath()) and is NOT test-injectable; every test here
+// exercises the injectable local/project/user/default tiers, and confirms
+// the managed candidate simply falls through when absent (verified live on
+// this box before writing these tests: the managed path does not exist).
+// ---------------------------------------------------------------------------
+
+function writeJson(p, obj) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(obj), 'utf8');
+}
+
+test('readCleanupPeriodDays: nothing set anywhere -> the documented platform default (30, source "default", no file)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.deepStrictEqual(r, { days: 30, source: 'default', file: null });
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: a USER settings.json value is read when nothing more specific exists', () => {
+  const { home, proj } = sandbox();
+  try {
+    const userFile = path.join(claudeBaseDir(home), 'settings.json');
+    writeJson(userFile, { cleanupPeriodDays: 21 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 21);
+    assert.strictEqual(r.source, 'user');
+    assert.strictEqual(r.file, userFile);
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: PROJECT settings.json overrides USER', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git')); // a real project-root marker
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 21 });
+    const projFile = path.join(proj, '.claude', 'settings.json');
+    writeJson(projFile, { cleanupPeriodDays: 10 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 10);
+    assert.strictEqual(r.source, 'project');
+    assert.strictEqual(r.file, projFile);
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: LOCAL settings.local.json overrides PROJECT (highest injectable tier)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 10 });
+    const localFile = path.join(proj, '.claude', 'settings.local.json');
+    writeJson(localFile, { cleanupPeriodDays: 3 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 3);
+    assert.strictEqual(r.source, 'local');
+    assert.strictEqual(r.file, localFile);
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: a PRESENT-BUT-UNREADABLE file at one tier falls through to the next tier -- never guessed as "key absent, use default"', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    const projFile = path.join(proj, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(projFile), { recursive: true });
+    fs.writeFileSync(projFile, '{ this is not valid json', 'utf8'); // present, broken
+    const userFile = path.join(claudeBaseDir(home), 'settings.json');
+    writeJson(userFile, { cleanupPeriodDays: 8 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 8, 'the broken project tier is skipped, not treated as a confirmed absence');
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: an invalid value (below the platform floor, or non-numeric) is treated as key-absent, falling through to the next tier', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 0 }); // below the platform's documented minimum of 1
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 5 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 5, 'cleanupPeriodDays:0 is invalid per the platform\'s own documented floor -- never trusted as a real value');
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: an unresolvable project root (no cwd marker) drops the local/project tiers and proceeds straight to user/default, never throws', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = readCleanupPeriodDays({ cwd: proj, home }); // no .git/.coalwash.json/CLAUDE.md marker anywhere
+    assert.strictEqual(r.days, 30);
+    assert.strictEqual(r.source, 'default');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// board #55 AMENDMENT (2026-08-05): the ladder's rung-1 sanity tightening
+// (integer, upper-bound) and rung-5 candidate-key discovery.
+// ---------------------------------------------------------------------------
+
+test('readCleanupPeriodDays: a non-integer value is rejected as insane and falls through to the next tier', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 14.5 });
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 9 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 9);
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: a value over the sane upper bound (3650, >10 years -- a unit/semantics change, not a long retention) is rejected and falls through', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 999999 });
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 12 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 12);
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('readCleanupPeriodDays: exactly the sane upper bound (3650) is accepted -- the bound is inclusive, not an off-by-one trap', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { cleanupPeriodDays: 3650 });
+    const r = readCleanupPeriodDays({ cwd: proj, home });
+    assert.strictEqual(r.days, 3650);
+    assert.strictEqual(r.source, 'user');
+  } finally { clean(home, proj); }
+});
+
+test('discoverRetentionCandidateKeys: finds retention-shaped sibling keys by name, across every tier, excluding cleanupPeriodDays itself', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'settings.json'), { cleanupPeriodDays: 30, pruneAfterDays: 10 });
+    writeJson(path.join(claudeBaseDir(home), 'settings.json'), { retentionPolicy: 'strict', unrelatedKey: 'x' });
+    const found = discoverRetentionCandidateKeys({ cwd: proj, home });
+    const keys = found.map((f) => f.key).sort();
+    assert.deepStrictEqual(keys, ['pruneAfterDays', 'retentionPolicy']);
+    assert.ok(!keys.includes('cleanupPeriodDays'), 'the known key is never reported as a "candidate"');
+    assert.ok(!keys.includes('unrelatedKey'), 'a key with no retention-shaped name is not a false positive');
+  } finally { clean(home, proj); }
+});
+
+test('discoverRetentionCandidateKeys: no matches anywhere -> empty array, never null/undefined', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.deepStrictEqual(discoverRetentionCandidateKeys({ cwd: proj, home }), []);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// Namespace campaign (#69+#39, owner-designated 2026-08-08): per-project
+// config read order — own agent dir -> other known agent dirs (fixed order)
+// -> LEGACY root dotfile. Precedence x3 + the ROOT_MARKERS scatter fix +
+// the structural move-on-write proof + the clamp-unchanged regression.
+// ---------------------------------------------------------------------------
+
+test('projectConfigCandidates: the rail order is .claude -> .agents -> .gemini -> LEGACY, always relative to the resolved project root', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    const c = projectConfigCandidates(proj, home);
+    assert.deepStrictEqual(c, [
+      path.join(proj, '.claude', 'coal', 'coalwash.json'),
+      path.join(proj, '.agents', 'coal', 'coalwash.json'),
+      path.join(proj, '.gemini', 'coal', 'coalwash.json'),
+      path.join(proj, '.coalwash.json'),
+    ]);
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath precedence 1/3: own-dir (.claude) wins even when every other candidate, including LEGACY, also exists', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'own-dir' });
+    writeJson(path.join(proj, '.agents', 'coal', 'coalwash.json'), { coalwashMode: 'other-dir' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy' });
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath precedence 2/3: .claude absent, .agents present -> the other-known-dir entry wins over LEGACY', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.agents', 'coal', 'coalwash.json'), { coalwashMode: 'other-dir' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy' });
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.agents', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath precedence 3/3: no new-shape candidate exists anywhere -> LEGACY root dotfile is read, no breakage for an existing user', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    // 'manual' -- a genuine coalwashMode enum member, not a made-up marker string,
+    // so this exercises the REAL loadMergedConfig path rather than tripping
+    // mergeSafety's own "junk value gets no say" clamp on an unrecognized value.
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'manual' });
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.coalwash.json'));
+    // and it actually READS through loadMergedConfig, not just resolves the path
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).coalwashMode, 'manual');
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath: nothing exists anywhere -> the own-dir (.claude) path is the read AND write target, matching a never-configured project', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+test('ROOT_MARKERS scatter fix: a subdir of a project configured ONLY via the new per-agent-dir shape (no .git, no CLAUDE.md, no LEGACY dotfile) still resolves to the true project root, not the raw subdir', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'auto' });
+    const subdir = path.join(proj, 'nested', 'deeper');
+    fs.mkdirSync(subdir, { recursive: true });
+    assert.strictEqual(findProjectRoot(subdir, home), proj, 'the new config shape alone is enough to anchor the walk at the true root');
+  } finally { clean(home, proj); }
+});
+
+test('move-on-CONFIG-WRITE-only (Phoenix #5): no code path anywhere in this engine ever WRITES .coalwash.json (project or global) -- both files are hand-edited only, so this room has no write-side of the migration to build', () => {
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  const hooksDir = path.join(libDir, '..', '..', 'hooks');
+  const offenders = [];
+  for (const dir of [libDir, hooksDir]) {
+    for (const f of fs.readdirSync(dir)) {
+      if (!/\.(mjs|js)$/.test(f) || f.endsWith('.test.mjs')) continue;
+      const text = fs.readFileSync(path.join(dir, f), 'utf8');
+      // a literal write call whose destination string contains the config filename
+      if (/writeFileSync\([^)]*coalwash\.json/i.test(text)) offenders.push(f);
+    }
+  }
+  assert.deepStrictEqual(offenders, [], 'if this ever fires, the room now has a real writer and the design-doc write-new-drop-old step is owed for real');
+});
+
+test('clamp-unchanged regression: the safer-value-wins clamp applies identically no matter WHICH read-order candidate supplied the project value', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(globalConfigPath(home), { coalwashMode: 'off' });
+    // the project value arrives via the NEW own-dir shape, not the legacy path
+    writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'auto' });
+    const merged = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(merged.coalwashMode, 'off', 'a project may not escalate past a deliberate global off, regardless of which candidate file the value came from -- only the ADDRESS moved, the clamp semantics did not');
+  } finally { clean(home, proj); }
+});

@@ -1,5 +1,22 @@
+// ponytail: 805 lines at declaration (board #55/#56, 2026-08-06; the count is
+// the tripwire's own PRE-declaration reading — this comment block adds ~10
+// more, so `wc -l` on the committed file reads slightly higher; re-derive
+// with `wc -l` for the CURRENT size, per this rule's own "N is history, not
+// a live claim") — this file is
+// every settings-cascade + path-canonicalization + case-fold primitive CoalWash
+// shares across both lanes (pathWithin/touchesClaudeBase/canonicalOrNull/
+// volumeCaseFolds/readCleanupPeriodDays/discoverRetentionCandidateKeys); every
+// one of them is a security- or correctness-load-bearing trust-boundary check
+// with an extensive HISTORY of subtle, hard-won fixes (see the R2/R3/R4/board-
+// ruling comments throughout) — splitting it would scatter one cohesive trust
+// boundary's reasoning across files, which is exactly the shape this room's own
+// "twin drift" lesson warns against. Not split.
+//
 // CoalWash config path resolution — the flock-canonical cascade (global
-// ~/.claude/.coalwash.json overlaid by the nearest project .coalwash.json).
+// ~/.claude/.coalwash.json overlaid by the nearest project config). Per-
+// project config now lives under an agent dir (namespace campaign #69+#39,
+// owner-designated 2026-08-08) — see `projectConfigPath`'s own header for
+// the full read order and the LEGACY root-dotfile fallback it still honors.
 // The project walk STOPS AT HOME (an upward config search that doesn't stop at
 // home once escaped a HOME-overridden test sandbox into the real global config)
 // and compares PHYSICAL paths on both sides (macOS /var -> /private/var symlink:
@@ -423,7 +440,17 @@ export function physicalDir(p) {
 // Adding a marker can only make the walk stop LOWER — a NARROWER, fail-closed
 // containment anchor for apply.mjs — except in exactly the no-marker fallback
 // above, where the governance root IS the correct answer.
-const ROOT_MARKERS = ['.git', '.coalwash.json', 'CLAUDE.md'];
+// The three per-agent-dir shapes were added by the namespace campaign
+// (#69+#39, owner-designated 2026-08-08) alongside the LEGACY dotfile: a
+// project configured ONLY through the new shape (no `.git`, no `CLAUDE.md`,
+// and — since it migrated — no root `.coalwash.json` either) would otherwise
+// match NOTHING and fall through to the raw `startDir` fallback, the exact
+// per-subdir scatter class this file's own history already names above. Same
+// additive-only invariant: each new entry can only make the walk stop LOWER.
+const ROOT_MARKERS = [
+  '.git', '.coalwash.json', 'CLAUDE.md',
+  '.claude/coal/coalwash.json', '.agents/coal/coalwash.json', '.gemini/coal/coalwash.json',
+];
 
 // Walk up from startDir looking for a project-root marker; NEVER walk above
 // `home` — stop there and fall back to startDir.
@@ -476,8 +503,39 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
     dir = parent;
   }
 }
+// Namespace campaign (#69+#39, owner-designated 2026-08-08). Per-project
+// config lives under an agent dir, never bare at the project root any more.
+// THE READ ORDER IS A RAIL — identical wording in every room's readCfg
+// comment and README Configure section, one flock:
+//   1. <project>/.<the running agent's OWN dir>/coal/<skill>.json — the dir
+//      of the agent actually executing. CoalWash activates ONLY through
+//      Claude Code's own hook system (`hooks/hooks.json`); it has no other
+//      running-agent identity to branch on, so for THIS room "own dir" is
+//      always `.claude` and collapses onto the first entry of step 2 below
+//      rather than needing a separate check.
+//   2. Other known agent dirs, fixed order: `.claude` -> `.agents` ->
+//      `.gemini` (first FOUND wins).
+//   3. LEGACY: <project>/.<skill-dotfile>.json at the project root (today's
+//      shape) — read normally, no breakage for an existing user.
+// WRITE target = where the config was found; absent everywhere, the running
+// agent's own dir. Hooks never perform this move on a READ (Phoenix #5, no
+// side effects) — and CoalWash has NO project-config WRITER anywhere in this
+// codebase to begin with (no configure.mjs, no consent-persistence call):
+// both `.coalwash.json` files, global and project, are hand-edited by the
+// user or another tool, never written by CoalWash itself. So "move on
+// write" has no code path to hook here — this function is the READ side
+// only, which is this room's entire scope for the campaign.
+const AGENT_DIR_ORDER = ['.claude', '.agents', '.gemini'];
+export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
+  const root = findProjectRoot(cwd, home);
+  const candidates = AGENT_DIR_ORDER.map((d) => path.join(root, d, 'coal', 'coalwash.json'));
+  candidates.push(path.join(root, '.coalwash.json')); // LEGACY, always last
+  return candidates;
+}
 export function projectConfigPath(cwd = process.cwd(), home = os.homedir()) {
-  return path.join(findProjectRoot(cwd, home), '.coalwash.json');
+  const candidates = projectConfigCandidates(cwd, home);
+  for (const c of candidates) if (pathExists(c)) return c;
+  return candidates[0]; // nothing found anywhere -- own-dir is both the read and write target
 }
 
 // Decode raw config bytes to text, sniffing the encoding (H6). Node's default
@@ -528,6 +586,109 @@ function readJsonc(file) {
   } catch {
     return { data: {}, unreadable: existed };
   }
+}
+
+// board #55 (owner-ordered): the PLATFORM's own `cleanupPeriodDays` (Claude Code's session-
+// retention setting), not CoalWash's own `.coalwash.json` — READ, never assumed. Verified live
+// (code.claude.com/docs/en/settings, fetched at build time — a version-sensitive fact per
+// source-grounding, re-check at revalidate): key `cleanupPeriodDays`, default 30, min 1, deletes
+// at STARTUP. Verified cascade, HIGHEST wins: Managed > Local > Project > User — a 4-tier
+// cascade, not the 2-tier project/user shorthand this docket's own dispatch text used; the
+// difference matters (an org enforcing a short retention via Managed settings must win).
+//
+// MANAGED settings has THREE real delivery mechanisms and this reads exactly ONE of them:
+// (1) file-based (`managed-settings.json` under a fixed per-OS path) — read here.
+// (2) Windows Registry (`HKLM`/`HKCU`...\Policies\ClaudeCode`) — NOT read: no zero-dep node
+//     builtin reads the registry (Phoenix #2), and a native module is out of scope for this
+//     engine's discipline. Named as an honest ceiling, not a silent gap.
+// (3) server-delivered (claude.ai admin console / self-hosted gateway) — NOT read: no local
+//     file exists for this tier at all: nothing to read.
+// `managed-settings.d/*.json` drop-ins are also NOT read — their merge order past the base file
+// is not specified precisely enough (by what this fetch verified) to implement without
+// guessing, and guessing a merge order is worse than declining to.
+// So: an org enforcing cleanupPeriodDays via registry policy or server delivery is invisible to
+// this function; it falls through to whichever LOWER tier is actually readable. This narrows
+// the guarantee from "the platform's real value" to "the platform's real value on every
+// delivery mechanism this engine can read without a new dependency" — stated here so nobody
+// mistakes the narrower claim for the wider one.
+//
+// INSPECT F2 (2026-08-06), one platform fact this cascade does not model: per CC's own docs,
+// an UNREADABLE settings file makes the platform PAUSE its whole retention sweep (unless a
+// managed value is present), never fall through to a lower tier and keep sweeping at that
+// value. This function, by contrast, treats an unreadable tier as "keep looking" — modelling
+// "find a number" rather than "predict whether the platform is sweeping at all". The direction
+// is SAFE (a paused real sweep deletes nothing, while this cascade still reports a number and
+// estate.mjs's horizon still assumes a sweep is happening, so the worst case is OVER-reporting
+// what's reclaimable, never under-reporting it) — but it is a real, named gap between what this
+// function's header describes and what the platform actually does on that one input shape.
+function managedSettingsPath() {
+  if (process.platform === 'win32') return 'C:\\Program Files\\ClaudeCode\\managed-settings.json';
+  if (process.platform === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json';
+  return '/etc/claude-code/managed-settings.json'; // linux/WSL, the documented Linux/WSL path
+}
+
+// Returns { days, source, file }. `source` is one of managed/local/project/user/default — the
+// derivation this reads FEEDS the estate horizon's own report (board #55 item 5: state which
+// value was read, from where). A file that EXISTS but is unreadable/malformed is skipped to the
+// NEXT tier (readJsonc's `unreadable` flag) rather than treated as "key absent, use default" —
+// the same distinguishing discipline `mergeSafety` already applies to CoalWash's own config,
+// extended here to the platform's. A missing/unresolvable project root just drops the
+// local/project tiers and proceeds to user/default — never throws.
+//
+// Shared by readCleanupPeriodDays and discoverRetentionCandidateKeys (rung 5 of the estate
+// horizon ladder, estate.mjs) — one candidate-tier list, not two independently-drifting copies.
+function settingsCascadeCandidates({ cwd = process.cwd(), home = os.homedir() } = {}) {
+  const candidates = [{ source: 'managed', file: managedSettingsPath() }];
+  let projectRoot = null;
+  try { projectRoot = findProjectRoot(cwd, home); } catch { /* no project root -> skip local/project tiers */ }
+  if (projectRoot) {
+    candidates.push({ source: 'local', file: path.join(projectRoot, '.claude', 'settings.local.json') });
+    candidates.push({ source: 'project', file: path.join(projectRoot, '.claude', 'settings.json') });
+  }
+  candidates.push({ source: 'user', file: path.join(claudeBaseDir(home), 'settings.json') });
+  return candidates;
+}
+
+// board #55 AMENDMENT (owner, 2026-08-05), ladder rung 1: SANE, not just present. A value must
+// be a positive INTEGER within a plausible range — reject 0, negatives, non-integers, and an
+// absurd magnitude (>3650 = >10 years — that is not "a long retention", it is the key having
+// been repurposed to a different unit or a different meaning; trusting it would silently bind
+// the estate horizon to garbage). The upper bound is deliberately generous (10 years, not a
+// tight guess) — the point is catching a UNIT/SEMANTICS change, not second-guessing a genuinely
+// long-lived org policy.
+const CLEANUP_DAYS_MAX_SANE = 3650;
+function saneCleanupDays(v) {
+  return Number.isFinite(v) && Number.isInteger(v) && v >= 1 && v <= CLEANUP_DAYS_MAX_SANE;
+}
+
+export function readCleanupPeriodDays({ cwd = process.cwd(), home = os.homedir() } = {}) {
+  for (const { source, file } of settingsCascadeCandidates({ cwd, home })) {
+    const { data, unreadable } = readJsonc(file);
+    if (unreadable) continue; // present but broken -> try the next tier, never guess
+    const v = data && data.cleanupPeriodDays;
+    if (saneCleanupDays(v)) return { days: v, source, file };
+  }
+  return { days: 30, source: 'default', file: null }; // the documented default, key absent everywhere readable
+}
+
+// board #55 AMENDMENT, ladder rung 5: CANDIDATE-NAME DISCOVERY, report-only, NEVER auto-bound.
+// Scans the same settings cascade for any OTHER key whose name suggests a retention/cleanup
+// concern (`/cleanup|retention|prune|expire|purge/i`) — the signal that would catch a renamed
+// or replaced `cleanupPeriodDays` before this engine ever silently trusts a guess. Every match
+// is returned by name/value/source for the estate report to print; binding to a guessed key
+// would be inventing semantics, which is exactly the failure this whole ladder exists to avoid.
+export function discoverRetentionCandidateKeys({ cwd = process.cwd(), home = os.homedir() } = {}) {
+  const RETENTION_KEY_RE = /cleanup|retention|prune|expire|purge/i;
+  const found = [];
+  for (const { source, file } of settingsCascadeCandidates({ cwd, home })) {
+    const { data, unreadable } = readJsonc(file);
+    if (unreadable || !data || typeof data !== 'object') continue;
+    for (const key of Object.keys(data)) {
+      if (key === 'cleanupPeriodDays') continue; // the known key -- not a "candidate"
+      if (RETENTION_KEY_RE.test(key)) found.push({ key, value: data[key], source, file });
+    }
+  }
+  return found;
 }
 
 // Safety-shaping keys merge MONOTONICALLY: a project may only move a value toward
@@ -643,11 +804,26 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
   return merged;
 }
 
-export function mergeSafety(global, project, { globalUnreadable = false } = {}) {
-  const out = { ...global, ...project };
+export function mergeSafety(global, project, { globalUnreadable = false, projectUnreadable = false } = {}) {
+  // grad9 R8-F5: the PROJECT layer's own `unreadable` signal was computed by
+  // readJsonc and never threaded here — only globalUnreadable was. Today
+  // readJsonc always returns `data:{}` on any unreadable condition (parse
+  // error, wrong shape, missing file), so `project` is already effectively
+  // empty by the time it reaches this function and every downstream branch
+  // below already treats an empty project as "nothing asked" (the safe
+  // direction, same as an absent file). This wiring is therefore DEFENSIVE,
+  // not a live-bug close: `mergeSafety` is a general, reusable function, and
+  // its own input contract should never trust PROJECT data the caller has
+  // flagged as unverifiable, regardless of what a particular readJsonc
+  // implementation happens to do today — a caller passing a partially-parsed
+  // or hand-built `project` object alongside `projectUnreadable:true` must
+  // get the same "nothing asked" treatment global gets on its own
+  // unreadable path, not silently have that object's content honored.
+  const p = projectUnreadable ? {} : project;
+  const out = { ...global, ...p };
   for (const key of OBJECT_SCHEMA_KEYS) {
-    if (global[key] !== undefined || project[key] !== undefined) {
-      out[key] = mergeObjectKey(key, global[key], project[key], globalUnreadable);
+    if (global[key] !== undefined || p[key] !== undefined) {
+      out[key] = mergeObjectKey(key, global[key], p[key], globalUnreadable);
     }
   }
   for (const [key, order] of Object.entries(SAFER_ENUM)) {
@@ -657,14 +833,14 @@ export function mergeSafety(global, project, { globalUnreadable = false } = {}) 
     // asks -- never the schema default, which can be weaker than what the
     // user actually had set before the file broke.
     if (globalUnreadable) { out[key] = order[0]; continue; }
-    if (project[key] === undefined) continue; // nothing the project asked to change
+    if (p[key] === undefined) continue; // nothing the project asked to change (incl. an unreadable project, per grad9 R8-F5 above)
     const globalVal = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
     // CASE-FOLD to match the schema's case-insensitive enum. Comparing raw
     // case let a project 'AUTO' miss the lookup (indexOf -> -1) and fall
     // through to the shallow-merge (project wins), re-enabling a globally-off
     // skill (H5).
     let gi = order.indexOf(String(globalVal).toLowerCase());
-    const pi = order.indexOf(String(project[key]).toLowerCase());
+    const pi = order.indexOf(String(p[key]).toLowerCase());
     // An unreadable GLOBAL VALUE (parsed fine, but this one key's value is
     // invalid) reads as the schema default (the WAVE-2 R2 rule extended from
     // absent to invalid — the user's position cannot be read, and the
@@ -698,5 +874,5 @@ export function mergeSafety(global, project, { globalUnreadable = false } = {}) 
 export function loadMergedConfig({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const g = readJsonc(globalConfigPath(home));
   const p = readJsonc(projectConfigPath(cwd, home));
-  return mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable });
+  return mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable });
 }

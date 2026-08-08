@@ -1,10 +1,32 @@
+// ponytail: 802 lines at declaration — one gate-chain, not a module boundary: every private helper
+// here (buildReport/redactUnit/isFreeFormBearing/oversizedTypeToken/sampleSlice for the advisory
+// report; ancestorIsDir/realOrNull/isUnder for the mechanical path/param gates) exists ONLY to feed
+// the single `detonate()` function's sequential gate 1-5 chain, unexported and never reused outside
+// it. A module split would scatter one function's own internals across files for zero reuse benefit,
+// and the gate order itself (structural, path, params, execute) is the thing that must stay legible
+// in one place — splitting it is exactly the seam this file's own WHY-header warns detonate exists to
+// avoid one level up (mechanical safety lives in CODE, not scattered across files a reader must
+// reassemble).
 // detonate.mjs — the SUPPORT engine (STEP 2) that GATES the main reducer (explode.mjs).
 //
-// WHY IT EXISTS: explode.mjs is INCOMPLETE-by-design — it TRUSTS its input and only benign-no-ops on
-// forged input (a forged offset/outLen → ok:true no-op, source intact; it does NOT reject bad input).
-// detonate COMPLETES it as the MECHANICAL floor: it proves the input is CORRECT + safe (the file, the
+// WHY IT EXISTS: explode.mjs is INCOMPLETE-by-design — reduceFile is a PRIMITIVE the CALLER drives (the
+// agent supplies offset/resume/cutTypes/outPath directly). detonate COMPLETES it as the MECHANICAL
+// floor for the gated, fresh-full-file entry point: it proves the input is CORRECT + safe (the file, the
 // structure, the write paths, the params), then EXECUTES the caller's cut and snapshots it. The abusive
 // caller is REFUSED, not corrupted. Safety lives in this CODE (the mechanical gates), never in a manual.
+//
+// CORRECTED 2026-08-05 (rot-canary QUICK, direct-caller scope): this WHY used to argue detonate exists
+// BECAUSE reduceFile "only benign-no-ops on forged input" and "does NOT reject bad input" — false since
+// well before this correction (WAVE-6 L3#2, WAVE-8 L3/L-META, rung-2 rail-5, F1-F4, and Finding A:
+// reduceFile actively REFUSES a forged/inconsistent offset, outLen, or now a content-tampered committed
+// prefix). Left standing, that claim argued detonate's own offset/resume refusal below is redundant with
+// something reduceFile no longer even fails to do — the exact reasoning that would tempt a future edit
+// to relax THIS gate. It is not redundant: detonate refuses ANY offset/resume as its OWN, narrower
+// contract (a fresh full-file detonation only, never a mid-stream one) — defense-in-depth over an
+// engine it does not re-implement, not a workaround for one that could not defend itself. detonate's
+// real, still-true value is unchanged and lies elsewhere: the PARAMS/PATH gates below (cutTypes,
+// budgets, outPath-vs-source/store collisions) that reduceFile does not attempt at all, plus the
+// advisory report.
 //
 // WHAT IT DELIBERATELY DOES NOT DO — the mechanical floor is not the semantic ceiling: it does NOT judge
 // the question "is this unit waste (rock) or content (ore)?". That question is UNDECIDABLE for a

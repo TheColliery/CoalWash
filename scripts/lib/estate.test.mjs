@@ -9,7 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   discoverEstateCC, detectOrphanSlugs, measureEstate, attributeTranscript,
-  reclaimableEstimate, estateReport, RECLAIM_HORIZON_MS,
+  reclaimableEstimate, estateReport, RECLAIM_HORIZON_MS, deriveEstateHorizonDays,
+  resolveEstateHorizon, observedMachineAgeDays,
 } from './estate.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 
@@ -138,6 +139,263 @@ test('reclaimableEstimate: only entries older than the horizon count, labeled ~e
   assert.strictEqual(r.bytes, 1000);
   assert.strictEqual(r.est, true);
   assert.strictEqual(r.horizonDays, 30);
+});
+
+// ---------------------------------------------------------------------------
+// board #55: deriveEstateHorizonDays — the horizon must UNDERCUT the
+// platform's own cleanupPeriodDays, never mirror it
+// ---------------------------------------------------------------------------
+
+test('deriveEstateHorizonDays: ONE branchless formula, floor(cleanup/2) — NO floor at any value (closes the amendment\'s own named regression: the old max(7,…) floor left a TIGHTER-than-the-ratio window at cleanup=10)', () => {
+  assert.strictEqual(deriveEstateHorizonDays(60), 30);
+  assert.strictEqual(deriveEstateHorizonDays(30), 15);
+  assert.strictEqual(deriveEstateHorizonDays(14), 7);
+  assert.strictEqual(deriveEstateHorizonDays(10), 5, 'the old floor would have forced 7d here — TIGHTER than the 5d the ratio actually implies');
+  assert.strictEqual(deriveEstateHorizonDays(7), 3);
+  assert.strictEqual(deriveEstateHorizonDays(2), 1);
+  assert.strictEqual(deriveEstateHorizonDays(1), 0, 'floor(1/2) = 0 is a valid output — the skip set (ACTIVE/roster), not a horizon floor, is what keeps this safe');
+  // Unreadable/invalid input falls to the platform's own documented default (30 -> 15).
+  assert.strictEqual(deriveEstateHorizonDays(NaN), 15);
+  assert.strictEqual(deriveEstateHorizonDays(0), 15);
+});
+
+// ---------------------------------------------------------------------------
+// resolveEstateHorizon — the ladder, one test per rung, each asserting BOTH
+// the chosen horizon and the reported provenance (the amendment's own
+// "fourth tense" requirement).
+// ---------------------------------------------------------------------------
+
+function writeSettings(dir, obj) {
+  const p = path.join(dir, '.claude', 'settings.json');
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(obj), 'utf8');
+  return p;
+}
+function plantTranscript(home, slug, id, ageDays, now = Date.now()) {
+  const dir = path.join(home, '.claude', 'projects', slug);
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, `${id}.jsonl`);
+  fs.writeFileSync(p, '{}\n', 'utf8');
+  const t = new Date(now - ageDays * 86400000);
+  fs.utimesSync(p, t, t);
+  return p;
+}
+
+test('resolveEstateHorizon rung 1: KEY READ + SANE — a present, sane project value binds; provenance names the project tier + file', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    const f = writeSettings(proj, { cleanupPeriodDays: 20 });
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.cleanupPeriodDays, 20);
+    assert.strictEqual(h.rung, 'resolved');
+    assert.strictEqual(h.file, f);
+    assert.strictEqual(h.horizonDays, 10);
+    assert.strictEqual(h.keyResolvedNow, true);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 1: an ABSURD value (>3650, the amendment\'s own named example) is rejected as insane and falls through to rung 2', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 4000 }); // > 3650 -- a unit/semantics change, not a long retention
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.rung, 'documented-default', 'an absurd value must not be trusted as a real cleanupPeriodDays');
+    assert.strictEqual(h.cleanupPeriodDays, 30);
+    assert.strictEqual(h.keyResolvedNow, false);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 2: KEY ABSENT everywhere — the documented default (30) applies, NORMAL not a failure, rung named "documented-default"', () => {
+  const { home, proj } = sandbox();
+  try {
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.rung, 'documented-default');
+    assert.strictEqual(h.cleanupPeriodDays, 30);
+    assert.strictEqual(h.horizonDays, 15);
+    assert.strictEqual(h.file, null);
+    assert.strictEqual(h.keyResolvedNow, false);
+  } finally { clean(home, proj); }
+});
+
+// INSPECT F1 (2026-08-06) closed the old 0.5-fraction dead band by gating rung 3 on MACHINE AGE
+// (the slug directory's own birthtime) instead of a ratio of the observed floor to the assumed
+// period. `fs.utimesSync` can backdate a FILE's mtime but not a directory's birthtime (the OS
+// sets it at real creation time and offers no portable API to rewrite it) -- so these tests
+// shift `now` INTO THE FUTURE instead of shifting the directory's birth into the past. The slug
+// dir is created at real test-execution time; a `now` far enough ahead of that makes it read as
+// old, while `plantTranscript`'s own `now`-relative mtime math still lands exactly where asked.
+const FUTURE_NOW = () => Date.now() + 200 * 86400000; // 200 real days ahead of actual execution
+
+test('resolveEstateHorizon rung 3: the observed floor overrides ONE-WAY when the MACHINE is old enough to have tested the boundary (real evidence, not a ratio guess)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 30 }); // assumed 30d
+    const now = FUTURE_NOW();
+    plantTranscript(home, 'slugA', 'sess1', 20, now); // the machine (slug dir) is ~200d old >= 30 -> the gate is open; oldest surviving file is 20d < 30
+    const h = resolveEstateHorizon({ cwd: proj, home, now });
+    assert.ok(h.machineAgeDays >= 30, `machineAgeDays=${h.machineAgeDays}`);
+    assert.strictEqual(h.floorApplied, true);
+    assert.strictEqual(h.observedFloorDays, 20);
+    assert.strictEqual(h.cleanupPeriodDays, 20, 'bound to the OBSERVED value, not the settings value, once the cross-check fires');
+    assert.strictEqual(h.horizonDays, 10);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 3: a machine YOUNGER than the assumed period never fires the floor, however low the observed value — closes the old dead band correctly (INSPECT F1) instead of by a ratio guess', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 30 });
+    const now = Date.now(); // the slug dir's real birthtime is ~now -> machineAgeDays ~0, far under 30
+    plantTranscript(home, 'slugA', 'sess1', 0, now); // even an ultra-low observed floor (0d) must not fire on a fresh machine
+    const h = resolveEstateHorizon({ cwd: proj, home, now });
+    assert.ok(h.machineAgeDays < 30, `machineAgeDays=${h.machineAgeDays}`);
+    assert.strictEqual(h.floorApplied, false, 'a young machine cannot have tested a 30-day boundary yet, regardless of how low the observed floor reads');
+    assert.strictEqual(h.cleanupPeriodDays, 30);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 3: an observed floor ABOVE the assumed value NEVER raises the horizon — the one-way rule, the data-loss direction is forbidden — even on an old machine', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 10 });
+    const now = FUTURE_NOW();
+    plantTranscript(home, 'slugA', 'sess1', 25, now); // machine is old (~200d) AND a file survived far past the assumed 10d
+    const h = resolveEstateHorizon({ cwd: proj, home, now });
+    assert.ok(h.machineAgeDays >= 10);
+    assert.strictEqual(h.floorApplied, false, 'observed-above-assumed is reported, never used to widen the horizon');
+    assert.strictEqual(h.observedFloorDays, 25);
+    assert.strictEqual(h.cleanupPeriodDays, 10, 'stays bound to the settings value -- raising would be the forbidden direction');
+  } finally { clean(home, proj); }
+});
+
+test('observedMachineAgeDays: the oldest slug DIRECTORY (not the .jsonl inside it) sets the age, machine-wide; no projects dir at all -> null (no signal, not zero)', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.strictEqual(observedMachineAgeDays({ home }), null, 'nothing under ~/.claude/projects yet');
+    const now = FUTURE_NOW();
+    plantTranscript(home, 'slugOld', 'sessA', 5, now); // the FILE is aged to 5d; the DIR's own birthtime is real (~now-200d relative to `now`)
+    plantTranscript(home, 'slugNew', 'sessB', 100, now); // a MORE aged file, but same real dir-creation moment
+    const age = observedMachineAgeDays({ home, now });
+    assert.ok(age >= 199 && age <= 201, `age=${age} -- must track directory birth (~200d under the future now), not either file's own mtime (5d or 100d)`);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 4: NOTHING ESTABLISHABLE — a resolved -> unresolved transition distrusts even the documented default, uses the small conservative constant (7d) directly, no halving applied to it', () => {
+  const { home, proj } = sandbox();
+  try {
+    // no settings anywhere this run -> keyResolvedNow=false; priorKeyResolved=true simulates
+    // the key having resolved LAST run (a caller-supplied transition signal).
+    const h = resolveEstateHorizon({ cwd: proj, home, priorKeyResolved: true });
+    assert.strictEqual(h.rung, 'nothing-establishable');
+    assert.strictEqual(h.horizonDays, 7);
+    assert.strictEqual(h.transitionJustLost, true);
+    assert.strictEqual(h.keyResolvedNow, false);
+  } finally { clean(home, proj); }
+});
+
+test('INSPECT Finding A (2026-08-06): a transition + a genuine LOW observed floor produces a horizon SMALLER than the flat 7d constant, never larger — the constant alone is not safe once F1 removed the floor path\'s lower bound', () => {
+  const { home, proj } = sandbox();
+  try {
+    const now = Date.now();
+    plantTranscript(home, 'slugA', 'sess1', 3, now); // real evidence: everything is 3d old or younger
+    const h = resolveEstateHorizon({ cwd: proj, home, now, priorKeyResolved: true });
+    assert.strictEqual(h.rung, 'nothing-establishable');
+    assert.strictEqual(h.observedFloorDays, 3);
+    assert.strictEqual(h.horizonDays, 1, 'deriveEstateHorizonDays(3) = 1, strictly smaller than the flat 7d constant');
+    assert.ok(h.horizonDays < 7, 'the flat constant alone would have been LARGER than what the evidence supports -- the forbidden direction');
+  } finally { clean(home, proj); }
+});
+
+test('INSPECT Finding A: with NO observed floor at all, the transition branch still falls back to the flat 7d constant unchanged', () => {
+  const { home, proj } = sandbox();
+  try {
+    const h = resolveEstateHorizon({ cwd: proj, home, priorKeyResolved: true }); // no transcripts planted -> observedFloorDays: null
+    assert.strictEqual(h.observedFloorDays, null);
+    assert.strictEqual(h.horizonDays, 7, 'no evidence to be smaller than the constant -- unchanged from before the fix');
+  } finally { clean(home, proj); }
+});
+
+test('INSPECT Finding B (2026-08-06): a genuinely-MEASURED observedFloorDays of 0 (every transcript under 24h old) must NOT invert into the LARGEST horizon via deriveEstateHorizonDays\'s config-absence clamp', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 30 });
+    const now = FUTURE_NOW(); // machine is old enough (~200d >= 30) to trust the observation
+    plantTranscript(home, 'slugA', 'sess1', 0, now); // the oldest surviving file is under 24h old -> floor = 0
+    const h = resolveEstateHorizon({ cwd: proj, home, now });
+    assert.strictEqual(h.observedFloorDays, 0);
+    assert.strictEqual(h.floorApplied, true);
+    assert.strictEqual(h.cleanupPeriodDays, 1, 'clamped to the platform floor, never left as the raw measured 0');
+    assert.strictEqual(h.horizonDays, 0, 'the SMALLEST possible horizon -- not 15, which the unclamped bug produced by reading 0 as "absent"');
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 4: NOT triggered when priorKeyResolved is null (no history) or false (already unresolved last time, not a NEW transition)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const noHistory = resolveEstateHorizon({ cwd: proj, home, priorKeyResolved: null });
+    assert.strictEqual(noHistory.rung, 'documented-default');
+    assert.strictEqual(noHistory.transitionJustLost, false);
+
+    const alreadyUnresolved = resolveEstateHorizon({ cwd: proj, home, priorKeyResolved: false });
+    assert.strictEqual(alreadyUnresolved.rung, 'documented-default');
+    assert.strictEqual(alreadyUnresolved.transitionJustLost, false, 'staying unresolved is not a NEW transition');
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 5: an unbound retention-shaped key is REPORTED by name and value, never auto-bound to it', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 30, retentionWindowDays: 5 }); // an unknown sibling
+    const h = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h.cleanupPeriodDays, 30, 'never bound to the guessed key');
+    assert.strictEqual(h.candidateKeys.length, 1);
+    assert.strictEqual(h.candidateKeys[0].key, 'retentionWindowDays');
+    assert.strictEqual(h.candidateKeys[0].value, 5);
+  } finally { clean(home, proj); }
+});
+
+test('resolveEstateHorizon rung 6: keyResolvedNow is a plain OUTPUT — the function never writes; the SAME cwd/home returns the identical value on repeated pure calls', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 20 });
+    const h1 = resolveEstateHorizon({ cwd: proj, home });
+    const h2 = resolveEstateHorizon({ cwd: proj, home });
+    assert.strictEqual(h1.keyResolvedNow, true);
+    assert.deepStrictEqual(h1, h2, 'purity: no hidden state mutated by the first call changes the second');
+    assert.strictEqual(fs.existsSync(path.join(home, 'coal')), false, 'estate.mjs itself never writes -- no coal/ dir appears from this call alone');
+  } finally { clean(home, proj); }
+});
+
+test('estateReport: wires the ladder end-to-end and states the binding in the report text, including the small-horizon WARN', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeSettings(proj, { cleanupPeriodDays: 4 }); // -> horizon 2d, triggers the small-horizon WARN
+    const r = estateReport({ projectRoot: proj, home });
+    assert.strictEqual(r.horizon.cleanupPeriodDays, 4);
+    assert.strictEqual(r.horizon.horizonDays, 2);
+    assert.match(r.text, /horizon binding: cleanupPeriodDays=4d \(resolved/);
+    assert.match(r.text, /WARN: the derived reclaim horizon \(2d\) is small/);
+    assert.strictEqual(r.cleanup, undefined, 'the amendment folds the old separate cleanup field into horizon');
+  } finally { clean(home, proj); }
+});
+
+test('estateReport: a bare sandbox (no settings anywhere) states the documented default plainly, no WARN, no crash', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = estateReport({ projectRoot: proj, home });
+    assert.match(r.text, /horizon binding: cleanupPeriodDays=30d \(documented-default\) -> reclaim horizon 15d/);
+    assert.ok(!r.text.includes('WARN'), '15d is not small');
+    assert.ok(!r.text.includes('undefined') && !r.text.includes('NaN'));
+  } finally { clean(home, proj); }
 });
 
 // ---------------------------------------------------------------------------

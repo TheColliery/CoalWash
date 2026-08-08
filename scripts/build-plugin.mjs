@@ -41,6 +41,13 @@ const isTest = (p) => /\.test\.[cm]?js$/.test(p);
 // This is a NAMED, deliberate divergence from "the dist carries all of scripts/lib", not an oversight.
 // REVISIT at the class-A skill-wiring release: wire the SKILL surface, delete this block, rebuild —
 // the engine then ships together with the caller that makes it reachable.
+//
+// LANDING PRECONDITION (rung-2 F2 — the full boundary + the 7-fix kill-list live TODAY in
+// scripts/lib/explode.mjs, restoreFromSnapshot's STEP 2 header comment, NOT yet in SECURITY.md):
+// explode.mjs may leave this list ONLY once EITHER per-tenant manifests exist (F2 closed in code) OR
+// that boundary is COPIED into shipped SECURITY.md (F2 closed by disclosure, still to be written) — a
+// co-tenant with manifest write access can forge ownership of any blob in a shared snapshotDir today,
+// and nothing here enforces isolation.
 const UNWIRED_ENGINE = [
   path.join('scripts', 'lib', 'explode.mjs'),
   path.join('scripts', 'lib', 'detonate.mjs'),
@@ -77,10 +84,32 @@ export function buildDist(distRoot = dist) {
   }
 }
 
-// Every source file under DIST_ITEMS must exist in distRoot AND match
-// byte-for-byte, distRoot must hold nothing under those items without a source
-// (orphan), and no top-level entry may exist that no DIST_ITEM accounts for.
-// Returns [] when in sync.
+// Content parity ignores LINE-ENDING representation, not just bytes — a CRLF
+// checkout and an LF checkout of the identical git blob must compare EQUAL.
+// `.gitattributes`'s `* text=auto eol=lf` (board #47, one-flock shape shared
+// across the sibling rooms) normalizes ON COMMIT, not on every checkout of an
+// already-checked-out working tree, so two checkouts of the SAME commit can
+// legitimately carry different EOL bytes on disk while holding the same
+// content (board #56 — a real false-stale, measured: `caliper.mjs` source
+// 80,723 B / 1,323 CR bytes vs its `plugin/` twin 79,400 B / 0 CR bytes,
+// while `git hash-object` on BOTH sides and `git show HEAD:` on both paths
+// all agree on one identical blob). The gate's actual contract is CONTENT
+// parity, not byte parity — a raw `Buffer.compare` is the wrong instrument
+// for it and manufactures a false stale on a clean Windows checkout.
+// Normalize CRLF -> LF on both sides before comparing; a REAL content
+// difference (anything beyond the choice of line ending) still differs
+// after normalization and is still caught. Safe here specifically because
+// every DIST_ITEM is text (.json/.md/.mjs/.js) — never a binary asset.
+function contentEquals(pathA, pathB) {
+  const norm = (buf) => buf.toString('utf8').replace(/\r\n/g, '\n');
+  return norm(fs.readFileSync(pathA)) === norm(fs.readFileSync(pathB));
+}
+
+// Every source file under DIST_ITEMS must exist in distRoot AND match in
+// CONTENT (line-ending-agnostic — see contentEquals above), distRoot must
+// hold nothing under those items without a source (orphan), and no
+// top-level entry may exist that no DIST_ITEM accounts for. Returns [] when
+// in sync.
 export function checkDist(distRoot = dist) {
   const out = [];
   const filesUnder = (root, rel, item = rel) => {
@@ -94,7 +123,7 @@ export function checkDist(distRoot = dist) {
     for (const rel of filesUnder(repo, item)) {
       const d = path.join(distRoot, rel);
       if (!fs.existsSync(d)) out.push(`missing in plugin/: ${rel}`);
-      else if (fs.readFileSync(path.join(repo, rel)).compare(fs.readFileSync(d)) !== 0) out.push(`stale in plugin/: ${rel}`);
+      else if (!contentEquals(path.join(repo, rel), d)) out.push(`stale in plugin/: ${rel}`);
     }
     for (const rel of filesUnder(distRoot, item)) {
       if (!fs.existsSync(path.join(repo, rel))) out.push(`orphan in plugin/ (no source): ${rel}`);

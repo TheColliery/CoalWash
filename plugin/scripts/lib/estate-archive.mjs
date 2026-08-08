@@ -120,8 +120,68 @@ export function resolveEstateCfg(estate) {
 // consent, so the destination is always shown, never silent.
 export function resolveArchiveDir(estate, home = os.homedir()) {
   const cfg = resolveEstateCfg(estate);
-  if (cfg.archiveDir && path.isAbsolute(cfg.archiveDir)) return path.resolve(cfg.archiveDir);
+  if (cfg.archiveDir && path.isAbsolute(cfg.archiveDir)) {
+    // grad9 R8-F7: was a bare path.resolve() -- lexical only, never follows
+    // a symlink. The ULTRA consent bill shows THIS value before the human
+    // presses "run"; archiveSession's own write-containment below resolves
+    // the same string PHYSICALLY (fs.realpathSync-based). A symlinked
+    // archiveDir (or a symlinked ancestor of it) let the two diverge -- the
+    // human approves one location, the engine's later checks reason about
+    // another. `physicalForCreate` (already imported, used a few lines below
+    // for the per-file destination check) resolves the deepest EXISTING
+    // ancestor and reattaches the not-yet-created tail, so the bill and the
+    // eventual write target are the SAME real path -- "check one spelling,
+    // act on that same spelling", the room's own recurring rule. `null` (no
+    // existing ancestor at all -- an unresolvable root) fails CLOSED to the
+    // safe OS-citizen default rather than trusting a raw string.
+    const real = physicalForCreate(cfg.archiveDir);
+    if (real) return real;
+  }
   return path.join(claudeBaseDir(home), 'coal', 'coalwash', ESTATE_ARCHIVE_DIRNAME);
+}
+
+// board #55 AMENDMENT, ladder rung 6 — the ONLY thing persisted across runs for the estate
+// horizon ladder is whether cleanupPeriodDays RESOLVED last time, machine-wide (not
+// per-project — the key's own resolution has nothing to do with which project is asking).
+// Never the horizon itself (a cached horizon is the exact staleness defect the amendment
+// bans). Lives here, not in estate.mjs, because this file — not estate.mjs — is the one
+// chartered for mutation (this module's own header); estate.mjs's ladder function stays a
+// pure read that takes/returns this state as plain parameters, never touching disk itself.
+// Global (OS-citizen namespace, ~/.claude/coal/coalwash/) — fail-silent both ways: a missing
+// or corrupt marker degrades to "no prior state" (transition detection simply does not fire
+// this run), never a thrown error over a one-boolean side-channel.
+function estateKeyResolvedStatePath(home = os.homedir()) {
+  return path.join(claudeBaseDir(home), 'coal', 'coalwash', 'estate-cleanup-key.json');
+}
+export function readEstateKeyResolvedState(home = os.homedir()) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(estateKeyResolvedStatePath(home), 'utf8'));
+    return typeof raw.resolved === 'boolean' ? raw.resolved : null;
+  } catch { return null; }
+}
+export function writeEstateKeyResolvedState(resolved, home = os.homedir()) {
+  // Direct write, no tmp-then-atomic-move — this file's own EXDEV discipline
+  // (#57, the archive destination may sit on a different drive by design)
+  // bans that rename call ANYWHERE in this module, enforced by
+  // apply.test.mjs's own literal-string scan. A torn write, and the reader's
+  // own fail-silent catch on a corrupt read, both degrade to `null` (no
+  // history) rather than a wrong boolean. INSPECT F3 (2026-08-06): stated
+  // by DIRECTION, not just "costs nothing" — `null` means rung 4 (the
+  // small-constant fallback) never fires, so the horizon falls back to
+  // rung 2's larger documented-default-derived value instead of the
+  // smaller rung-4 constant. That is the SAFE side of the amendment's own
+  // asymmetry (never smaller than the honest read would have chosen — see
+  // resolveEstateHorizon's own worked proof that the floor path can never
+  // beat rung 4's constant), so this needs two coincident, rare events
+  // (a transition AND a torn/corrupt read on the very next run) and
+  // self-heals the run after — never worth the atomicity a tmp+rename
+  // would buy back at the cost of reintroducing a same-device assumption
+  // into a file whose whole point is not needing one.
+  try {
+    const p = estateKeyResolvedStatePath(home);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ resolved }), 'utf8');
+  } catch { /* fail-silent — informational side-channel, never blocks a report */ }
 }
 
 // CoalHearth in-progress journal signals for THIS project (MED-1 root-cause
@@ -154,6 +214,55 @@ export function chJournalGuard(projectRoot) {
       sessionId: typeof j.sessionId === 'string' && j.sessionId ? j.sessionId : null,
     };
   } catch { return none; }
+}
+
+// board #55 (owner-ordered) — a room following the department-head-contract
+// convention (TheColliery/.claude/DEPARTMENT-HEAD-CONTRACT.md) records live
+// resident sessions in a project-root `.claude/agent-roster.md`; WARM
+// archiving is copy-verify-then-DELETE, destructive to a resident's own
+// transcript — the 2026-08-05 NO-HANDOFF LAW treats a warm transcript AS the
+// seat's accumulated experience, so archiving one out from under a live seat
+// is the exact damage this guard exists to prevent, regardless of age.
+//
+// Deliberately PROJECT-RELATIVE, never a hardcoded absolute path — the
+// owner's dispatch named `TheColliery/.claude/agent-roster.md` as today's
+// concrete instance, but CoalWash ships to arbitrary projects with no such
+// convention at all. Reading `<projectRoot>/.claude/agent-roster.md`
+// degrades correctly either way: a project that never adopted the
+// convention has no such file, this guard is a silent no-op, and every
+// existing WARM/COLD/ACTIVE behavior is unchanged.
+//
+// EVERY UUID-shaped token found ANYWHERE in the file's text counts as
+// protected — not scoped to rows the file's own markdown marks "live" (a
+// `~~coder~~ RETIRED` row still names its old sid in prose).
+// ponytail: a markdown-aware live/retired classifier would be strictly more
+// precise, but over-protecting a retired sid costs nothing (its transcript
+// just isn't archived this run either) — the failure this guard exists to
+// prevent is destroying a LIVE seat's experience, and a coarser regex that
+// never under-protects closes that with far less surface to get wrong.
+//
+// "Fail toward SKIPPING if the roster is unreachable" (the owner's own
+// words): a MISSING roster file is the NORMAL case (no convention adopted)
+// and protects nothing — but a roster file that EXISTS and cannot be
+// read/is empty is a genuine "cannot confirm any sid's status" state, and
+// per this whole module's law ("uncertainty fails toward ACTIVE — never
+// compress on doubt"), that state protects EVERY session this run, not
+// zero. `unreachable: true` tells the caller exactly that.
+export function readRosterSids(projectRoot) {
+  const p = path.join(projectRoot, '.claude', 'agent-roster.md');
+  let text;
+  try {
+    text = fs.readFileSync(p, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { sids: new Set(), unreachable: false };
+    return { sids: null, unreachable: true }; // present but unreadable -- protect everything
+  }
+  if (!text) return { sids: null, unreachable: true }; // present but empty -- same fail-closed treatment
+  const sids = new Set();
+  for (const m of text.matchAll(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi)) {
+    sids.add(m[0].toLowerCase());
+  }
+  return { sids, unreachable: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -248,16 +357,18 @@ export function classifySessions({ projectRoot = process.cwd(), home = os.homedi
   // always writing a fresh journal while the run happens).
   const ch = chJournalGuard(projectRoot);
   const chFresh = ch.inProgress && (ch.mtimeMs === null || now - ch.mtimeMs < compressMs);
+  const roster = readRosterSids(projectRoot);
   const newestMtimeMs = listed.sessions.length ? Math.max(...listed.sessions.map((s) => s.newestMtimeMs)) : -Infinity;
   for (const s of listed.sessions) {
     const age = now - s.newestMtimeMs;
     const chProtected = (ch.sessionId !== null && s.id === ch.sessionId)
       || (chFresh && s.newestMtimeMs === newestMtimeMs);
-    if (s.id === currentSessionId || chProtected || !Number.isFinite(age) || age < compressMs) s.band = 'active';
+    const rosterProtected = roster.unreachable || roster.sids.has(s.id.toLowerCase());
+    if (s.id === currentSessionId || chProtected || rosterProtected || !Number.isFinite(age) || age < compressMs) s.band = 'active';
     else if (cfg.purgeAfterDays !== 0 && age >= purgeMs) s.band = 'cold';
     else s.band = 'warm';
   }
-  return { ...listed, cfg };
+  return { ...listed, cfg, roster: { unreachable: roster.unreachable, protectedCount: roster.sids ? roster.sids.size : 0 } };
 }
 
 // ---------------------------------------------------------------------------

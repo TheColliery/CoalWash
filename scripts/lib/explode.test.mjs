@@ -412,7 +412,7 @@ test('snapshot is byte-exact and recovery restores the original byte-for-byte', 
     assert.ok(fs.readFileSync(snap.snapshotPath).equals(buf), 'the snapshot blob is byte-exact');
     // recover to a fresh path
     const restored = path.join(dir, 'restored.jsonl');
-    const res = restoreFromSnapshot(snap.sha256, restored, { snapshotDir: snapDir });
+    const res = restoreFromSnapshot(snap.sha256, restored, { snapshotDir: snapDir, original: src });
     assert.strictEqual(res.ok, true);
     assert.ok(fs.readFileSync(restored).equals(buf), 'restore is byte-identical to the original');
   } finally { rm(dir); }
@@ -747,7 +747,7 @@ test('WAVE-7 L3-A (BREAK 2): a non-hash-named ref is REFUSED (never published un
     const snapDir = path.join(dir, 'snap');
     const src = write(dir, 's.jsonl', buildJsonl(CLAUDEISH).buf);
     const snap = snapshotSource(src, snapDir);
-    const r2 = restoreFromSnapshot(snap.sha256, path.join(dir, 'r2.out'), { snapshotDir: snapDir });
+    const r2 = restoreFromSnapshot(snap.sha256, path.join(dir, 'r2.out'), { snapshotDir: snapDir, original: src });
     assert.strictEqual(r2.ok, true, 'a sha-named blob restore succeeds');
     assert.strictEqual(r2.verified, true, 'a sha-named blob restore IS hash-verified');
     assert.ok(fs.readFileSync(path.join(dir, 'r2.out')).equals(buildJsonl(CLAUDEISH).buf), 'and is byte-exact');
@@ -949,7 +949,7 @@ test('L1 (WAVE-6, restore DESTINATION): a FOREIGN but hash-VALID ref restored to
     assert.strictEqual(sha256File(src), before, 'the source is byte-identical — the restore-destination guard held');
     // and the same restore to a SCRATCH toPath (not src) is still allowed + verified
     const scratch = path.join(dir, 'scratch.out');
-    const ok = restoreFromSnapshot(fsnap.sha256, scratch, { snapshotDir: snapDir, src });
+    const ok = restoreFromSnapshot(fsnap.sha256, scratch, { snapshotDir: snapDir, src, original: foreign });
     assert.strictEqual(ok.ok, true, 'restoring to a scratch path (not the protected src) still works');
     assert.strictEqual(ok.verified, true);
   } finally { rm(dir); }
@@ -1141,7 +1141,7 @@ test('#r3-2: restoreFromSnapshot FAILS CLOSED when snapshotDir is unresolvable (
     const s = write(dir, 's.jsonl', buildJsonl(CLAUDEISH).buf);
     const snap = snapshotSource(s, realStore);
     const restored = path.join(dir, 'restored.jsonl');
-    const r3 = restoreFromSnapshot(snap.sha256, restored, { snapshotDir: realStore });
+    const r3 = restoreFromSnapshot(snap.sha256, restored, { snapshotDir: realStore, original: s });
     assert.strictEqual(r3.ok, true, 'a legit in-store ref still restores');
     assert.ok(fs.readFileSync(restored).equals(buildJsonl(CLAUDEISH).buf), 'byte-exact');
   } finally { rm(dir); }
@@ -1363,7 +1363,7 @@ test('L3#1 (WAVE-5 restore fail-OPEN) — an ABSOLUTE ref OUTSIDE the declared s
     const snap = snapshotSource(src, snapDir);
     assert.strictEqual(snap.ok, true);
     assert.ok(path.isAbsolute(snap.snapshotPath) && snap.snapshotPath.startsWith(snapDir), 'the snapshot blob path is absolute + inside the store');
-    const r2 = restoreFromSnapshot(snap.snapshotPath, path.join(dir, 'ok.out'), { snapshotDir: snapDir });
+    const r2 = restoreFromSnapshot(snap.snapshotPath, path.join(dir, 'ok.out'), { snapshotDir: snapDir, original: src });
     assert.strictEqual(r2.ok, true, 'an absolute ref INSIDE the store still restores');
     assert.strictEqual(r2.verified, true, 'and is hash-verified (basename is the sha)');
   } finally { rm(dir); }
@@ -1402,12 +1402,12 @@ test('WAVE-7 L1 (BREAK 1): restoreFromSnapshot INTRINSICALLY refuses to clobber 
     assert.strictEqual(sha256File(src), before, 'source byte-identical — the intrinsic guard held with NO opt-in context');
     // (b) a FRESH scratch dest is unaffected (no false-refuse) and IS verified
     const fresh = path.join(dir, 'fresh.out');
-    const rFresh = restoreFromSnapshot(fsnap.sha256, fresh, { snapshotDir: snapDir });
+    const rFresh = restoreFromSnapshot(fsnap.sha256, fresh, { snapshotDir: snapDir, original: foreign });
     assert.strictEqual(rFresh.ok, true, 'restoring to a fresh path still works (the guard bites only a populated dest)');
     assert.strictEqual(rFresh.verified, true);
     // (c) force:true is the explicit override (calibrated, not lock-tight)
     const populated = write(dir, 'populated.out', Buffer.from('stale bytes to be replaced'));
-    const rForce = restoreFromSnapshot(fsnap.sha256, populated, { snapshotDir: snapDir, force: true });
+    const rForce = restoreFromSnapshot(fsnap.sha256, populated, { snapshotDir: snapDir, force: true, original: foreign });
     assert.strictEqual(rForce.ok, true, 'force:true overrides the clobber guard for an intentional overwrite');
     assert.ok(fs.readFileSync(populated).equals(fs.readFileSync(foreign)), 'and publishes the verified bytes');
   } finally { rm(dir); }
@@ -1560,6 +1560,131 @@ test('WAVE-8 L-META (resume anchor — source-desync): a source REWRITTEN betwee
     assert.strictEqual(r.ok, false, 'a source-desync resume is refused (pre-fix: ok:true, a torn v1+v2 splice)');
     assert.match(r.reason, /source .*changed|snapshot/i);
     assert.strictEqual(fs.statSync(out).size, w1.checkpoint.outLen, 'the committed partial is untouched by the refused resume');
+  } finally { rm(dir); }
+});
+
+test('rung-2 r8 Finding A [MED-HIGH]: a hand-driven resume verifies outPath\'s CONTENT, not just its LENGTH — an EQUAL-LENGTH substitution between waves is refused', () => {
+  const dir = tmp();
+  try {
+    const mk = (tag) => buildJsonl(Array.from({ length: 100 }, (_, i) => ({ type: i % 4 === 0 ? 'queue-operation' : 'user', i, tag: `${tag}${i}` }))).buf;
+    const src = write(dir, 'sess.jsonl', mk('REAL'));
+    const out = path.join(dir, 'out.jsonl');
+    const opts = { cutTypes: ['queue-operation'], outPath: out, snapshotDir: path.join(dir, 's'), maxLines: 20 };
+    const w1 = reduceFile(src, { ...opts, offset: 0, resume: null });
+    assert.strictEqual(w1.done, false, 'the fixture is set up to stop mid-file (multi-wave)');
+    const real = fs.readFileSync(out);
+    // ATTACK: the caller-supplied checkpoint is genuine (no forgery) — only outPath's ALREADY-COMMITTED
+    // bytes are replaced by equal-length garbage, exactly what a stray external writer or a hostile
+    // co-tenant with ordinary write access to outPath (no src/snapshotDir/manifest access needed) can do.
+    // CodeQL js/file-system-race (#37) — DISMISSED, same class + same reasoning as the WAVE-8 L-META
+    // dismissal above: this write/stat/read trio is not a check-then-act guard, it IS the simulated
+    // external writer this test exists to provoke. `out` lives in a per-test mkdtemp dir no other actor
+    // can name, the suite is single-process/synchronous, and the post-call read below is an ASSERTION
+    // about the tamper's persistence, not a precondition protecting anything. There is no second writer
+    // to race, so there is no flake.
+    const forged = Buffer.alloc(real.length, 'X'.charCodeAt(0));
+    fs.writeFileSync(out, forged);
+    assert.strictEqual(fs.statSync(out).size, real.length, 'the substitution preserves LENGTH exactly — the old length-only guard cannot see this');
+    const r = reduceFile(src, { ...opts, offset: w1.nextOffset, resume: w1.checkpoint });
+    assert.strictEqual(r.ok, false, 'a content-substituted committed prefix is refused (pre-fix: ok:true — the forged bytes survive and the real reduced prefix is silently gone)');
+    assert.match(r.reason, /content|mismatch|match/i);
+    assert.ok(fs.readFileSync(out).equals(forged), 'the refusal does not itself further corrupt the tampered file — nothing is appended over it');
+  } finally { rm(dir); }
+});
+
+test('rung-2 r8 Finding A CONTROL: a legitimate, UNTAMPERED hand-driven multi-wave resume still completes byte-identical (the content check does not false-positive on honest progress)', () => {
+  const dir = tmp();
+  try {
+    const objs = Array.from({ length: 100 }, (_, i) => ({ type: i % 4 === 0 ? 'queue-operation' : 'user', i, tag: `REAL${i}` }));
+    const { buf, lines } = buildJsonl(objs);
+    const src = write(dir, 'sess.jsonl', buf);
+    const out = path.join(dir, 'out.jsonl');
+    const opts = { cutTypes: ['queue-operation'], outPath: out, snapshotDir: path.join(dir, 's'), maxLines: 20 };
+    let w = reduceFile(src, { ...opts, offset: 0, resume: null });
+    let waves = 1;
+    while (!w.done) { w = reduceFile(src, { ...opts, offset: w.nextOffset, resume: w.checkpoint }); waves++; }
+    assert.ok(waves > 1, 'the fixture genuinely spans multiple hand-driven waves (a single-wave run proves nothing about resume content-checking)');
+    assert.strictEqual(w.ok, true, 'an honest, untampered multi-wave hand-driven resume still completes (pre- and post-fix)');
+    const expected = expectKept(lines, objs, 'type', ['queue-operation']);
+    assert.ok(fs.readFileSync(out).equals(expected), 'the final output is still byte-exact — the new content check never rejects genuine progress');
+  } finally { rm(dir); }
+});
+
+test('rung-2 r9 leaf1 [MEDIUM]: a hand-driven resume BINDS cutTypes to wave 1 — escalating to a type ABSENT from the processed prefix is refused, not silently applied to the tail', () => {
+  const dir = tmp();
+  try {
+    // 'secret' sits AFTER the wave-1 boundary — the escalation attack depends on the added type
+    // being absent from the already-processed prefix (present-in-prefix already refuses, see below).
+    const objs = [
+      { type: 'queue-operation', n: 0 },
+      { type: 'user', n: 1 },
+      { type: 'user', n: 2 },
+      { type: 'secret', n: 3 },
+      { type: 'user', n: 4 },
+    ];
+    const { buf, lines } = buildJsonl(objs);
+    const src = write(dir, 'sess.jsonl', buf);
+    const out = path.join(dir, 'out.jsonl');
+    const snapshotDir = path.join(dir, 's');
+    const w1 = reduceFile(src, { cutTypes: ['queue-operation'], outPath: out, snapshotDir, maxLines: 2 });
+    assert.strictEqual(w1.done, false, 'the fixture stops before reaching the secret record (multi-wave)');
+    assert.strictEqual(w1.unitsCut, 1, 'wave 1 processed exactly the queue-operation record — the secret record is not yet in the prefix');
+
+    // ATTACK: resume with an ESCALATED cutTypes — 'secret' was never authorised by wave 1.
+    const attack = reduceFile(src, { cutTypes: ['queue-operation', 'secret'], outPath: out, snapshotDir, offset: w1.nextOffset, resume: w1.checkpoint, maxLines: 100 });
+    assert.strictEqual(attack.ok, false, 'a resume escalating cutTypes beyond what wave 1 authorised is refused (pre-fix: ok:true — the secret record is silently cut from the tail with zero signal)');
+    assert.match(attack.reason, /cutTypes|cut-types|cut list|policy/i);
+
+    // CONTROL A (must still refuse, unaffected by this fix): escalating to a type PRESENT in the
+    // processed prefix was already refused by the pre-existing content check (the derivation diverges).
+    const w1b = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out2.jsonl'), snapshotDir: path.join(dir, 's2'), maxLines: 2 });
+    const controlPresent = reduceFile(src, { cutTypes: ['queue-operation', 'user'], outPath: path.join(dir, 'out2.jsonl'), snapshotDir: path.join(dir, 's2'), offset: w1b.nextOffset, resume: w1b.checkpoint, maxLines: 100 });
+    assert.strictEqual(controlPresent.ok, false, 'escalating to a type already present in the prefix is refused (pre-existing content-mismatch guard, unaffected by this fix)');
+
+    // CONTROL B (must succeed): an UNCHANGED cutTypes resume is unaffected by this fix.
+    const w1c = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out3.jsonl'), snapshotDir: path.join(dir, 's3'), maxLines: 2 });
+    const controlSame = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out3.jsonl'), snapshotDir: path.join(dir, 's3'), offset: w1c.nextOffset, resume: w1c.checkpoint, maxLines: 100 });
+    assert.strictEqual(controlSame.ok, true, 'an honest resume with the SAME cutTypes still completes (the fix does not false-positive on unchanged policy)');
+    const expected = expectKept(lines, objs, 'type', ['queue-operation']);
+    assert.ok(fs.readFileSync(path.join(dir, 'out3.jsonl')).equals(expected), 'the honest resume output is still byte-exact');
+
+    // CONTROL C (order/dedup independence, CALL side): re-ordering or duplicating the SAME set of
+    // types on the CALL's cutTypes must still be treated as unchanged, never a false refusal.
+    // (This side is deduped for free via cutSet — a Set — so it never reaches the checkpoint-side
+    // dedup path CONTROL D below exercises; kept as its own case rather than folded in, per
+    // INSPECT F1: the two sides are genuinely different code paths and a fix to one does not prove
+    // the other.)
+    const w1d = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out4.jsonl'), snapshotDir: path.join(dir, 's4'), maxLines: 2 });
+    const controlReordered = reduceFile(src, { cutTypes: ['queue-operation', 'queue-operation'], outPath: path.join(dir, 'out4.jsonl'), snapshotDir: path.join(dir, 's4'), offset: w1d.nextOffset, resume: w1d.checkpoint, maxLines: 100 });
+    assert.strictEqual(controlReordered.ok, true, 'a duplicate-but-set-equal cutTypes resume is not falsely refused on the CALL side (Set comparison, not array-equality)');
+
+    // CONTROL D (INSPECT F1, rung-2 r9 findings-back): the CHECKPOINT side must be deduped too — a
+    // hand-constructed checkpoint carrying a duplicate cutTypes entry is not falsely refused. This is
+    // the case CONTROL C's own claim (before this fix) could NOT actually verify: the call-side Set
+    // dedups its input before the comparator ever runs, so a call-side duplicate never reaches it —
+    // only a checkpoint-side duplicate does, and this is the fixture that exercises that path.
+    const w1e = reduceFile(src, { cutTypes: ['queue-operation'], outPath: path.join(dir, 'out5.jsonl'), snapshotDir: path.join(dir, 's5'), maxLines: 2 });
+    const controlCheckpointDup = reduceFile(src, {
+      cutTypes: ['queue-operation'], outPath: path.join(dir, 'out5.jsonl'), snapshotDir: path.join(dir, 's5'),
+      offset: w1e.nextOffset,
+      resume: { ...w1e.checkpoint, cutTypes: ['queue-operation', 'queue-operation'] },
+      maxLines: 100,
+    });
+    assert.strictEqual(controlCheckpointDup.ok, true, 'a duplicate-but-set-equal cutTypes CHECKPOINT is not falsely refused (both sides deduped, genuinely set-equal, not array-equal-after-sort)');
+  } finally { rm(dir); }
+});
+
+test('rung-2 r9 leaf1 CONTROL: reduceToCompletion (the trusted multi-wave loop) is unaffected — it always re-spreads the same cutTypes, never reaches the untrusted binding check', () => {
+  const dir = tmp();
+  try {
+    const objs = Array.from({ length: 60 }, (_, i) => ({ type: i % 3 === 0 ? 'queue-operation' : 'user', i, tag: `T${i}` }));
+    const { buf, lines } = buildJsonl(objs);
+    const src = write(dir, 'sess.jsonl', buf);
+    const out = path.join(dir, 'out.jsonl');
+    const r = reduceToCompletion(src, { cutTypes: ['queue-operation'], outPath: out, snapshotDir: path.join(dir, 's'), maxLines: 5 });
+    assert.strictEqual(r.ok, true, 'the trusted loop completes unaffected by the cutTypes-binding check');
+    const expected = expectKept(lines, objs, 'type', ['queue-operation']);
+    assert.ok(fs.readFileSync(out).equals(expected), 'byte-exact, unchanged from before this fix');
   } finally { rm(dir); }
 });
 
@@ -1867,7 +1992,7 @@ test('WAVE-11 L4 (forged/omitted-readAccum resume): a HAND-DRIVEN reduceFile dri
     fs.readSync = (...a) => { const n = realRead(...a); if (n > 0) readBytes += n; return n; };
     // each rebuilt checkpoint carries ONLY the fields a naive persist-then-resume caller would serialize — NO
     // internal counter (the OMITTED case, byte-for-byte identical to a deliberately FORGED reset).
-    const rebuild = (cp) => ({ srcOffset: cp.srcOffset, outLen: cp.outLen, structure: cp.structure, bomLen: cp.bomLen, snapshotPath: cp.snapshotPath });
+    const rebuild = (cp) => ({ srcOffset: cp.srcOffset, outLen: cp.outLen, structure: cp.structure, bomLen: cp.bomLen, snapshotPath: cp.snapshotPath, cutTypes: cp.cutTypes });
     let r, tripped = false, guard = 0;
     try {
       const opts = { cutTypes: ['cut'], outPath: path.join(dir, 'out.jsonl'), snapshotDir: path.join(dir, 's'), maxLines: 1 };
@@ -2089,7 +2214,7 @@ test('R3/TP-3: a SHORT-NAME snapshot store cannot slip past store containment �
 
     // and the recovery blob still restores byte-exact
     const out = path.join(dir, 'restored.jsonl');
-    const r = restoreFromSnapshot(snap.sha256, out, { snapshotDir: store });
+    const r = restoreFromSnapshot(snap.sha256, out, { snapshotDir: store, original: src });
     assert.strictEqual(r.ok, true, `restore still works: ${r.reason || ''}`);
     assert.strictEqual(sha256File(out), snap.sha256, 'recovery blob byte-exact — the undo net is available');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -2187,7 +2312,7 @@ test('RUNG5 A6 PRIMARY UNDO: restoring a snapshot back OVER its own source succe
     const snap = snapshotSource(src, store);
     fs.writeFileSync(src, 'CORRUPTED-BY-A-BAD-RUN'); // the disaster the undo net exists for
 
-    const r = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src, force: true });
+    const r = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src, force: true, original: src });
     assert.strictEqual(r.ok, true,
       'the PRIMARY undo must work. Pre-fix the src-alias branch fired unconditionally, so a caller who declared src (being explicit about what it protects) and set force:true was refused — by a message telling them to pass force:true, which they had already passed');
     assert.strictEqual(fs.readFileSync(src, 'utf8'), 'GOOD-ORIGINAL', 'the source really is restored');
@@ -2224,8 +2349,18 @@ test('RUNG5 A6 PRIMARY UNDO: restoring a snapshot back OVER its own source succe
 
 const REAPER_VICTIM = 'PRECIOUS-USER-BYTES-THE-ENGINE-NEVER-MADE\n';
 
-test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 sites, incl. the recovery path)', () => {
+test('the temp reaper NEVER deletes a file the engine did not create (4 sites, incl. the recovery path)', () => {
   const dir = tmp();
+  // F2 [MEDIUM, rung-2 R1 lab]: all 4 temps below are now UNPREDICTABLE (crypto.randomBytes(12)),
+  // which is the whole point — it removes the PRECONDITION this test's own collision technique
+  // relies on (pre-placing a file at a path the caller can guess in advance). To still exercise the
+  // reaper-ownership invariant under a real collision, `crypto.randomBytes` is stubbed to a FIXED
+  // value for the duration of this test ONLY (the file's own established convention — see the
+  // `real...`-backup stubs elsewhere in this suite) so the resulting temp path is predictable HERE,
+  // by the test, without reopening the predictability hole in the shipped engine.
+  const FIXED_SUFFIX = '0102030405060708090a0b0c'; // crypto.randomBytes(12).toString('hex') of a fixed buffer
+  const realRandomBytes = crypto.randomBytes;
+  crypto.randomBytes = (n) => (n === 12 ? Buffer.from(FIXED_SUFFIX, 'hex') : realRandomBytes(n));
   try {
     const survived = (p) => fs.existsSync(p) && fs.readFileSync(p, 'utf8') === REAPER_VICTIM;
     const ndjson = buildJsonl(Array.from({ length: 30 }, (_, i) => ({ type: i % 3 ? 'user' : 'mode', i }))).buf;
@@ -2236,7 +2371,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
       const d = path.join(dir, 's1'); fs.mkdirSync(d);
       const src = path.join(d, 's.jsonl'); fs.writeFileSync(src, ndjson);
       const outPath = path.join(d, 'o.jsonl');
-      const victim = `${outPath}.${process.pid}.tmp`;
+      const victim = `${outPath}.${FIXED_SUFFIX}.tmp`;
       fs.writeFileSync(victim, REAPER_VICTIM);
       const r = reduceFile(src, { cutTypes: ['mode'], outPath, snapshotDir: path.join(d, 'store') });
       assert.strictEqual(r.ok, false, 'site 1: O_EXCL refuses to write through the planted file');
@@ -2250,7 +2385,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
       // version of this leg read as covering site 2 while exercising site 1's code path.
       const src = path.join(d, 's.json'); fs.writeFileSync(src, JSON.stringify({ type: 'mode', a: 1 }, null, 2));
       const outPath = path.join(d, 'o.json');
-      const victim = `${outPath}.${process.pid}.tmp`;
+      const victim = `${outPath}.${FIXED_SUFFIX}.tmp`;
       fs.writeFileSync(victim, REAPER_VICTIM);
       const r = reduceFile(src, { cutTypes: ['mode'], outPath, snapshotDir: path.join(d, 'store') });
       assert.strictEqual(r.ok, false, 'site 2: O_EXCL refuses to write through the planted file');
@@ -2262,7 +2397,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
       const d = path.join(dir, 's3'); fs.mkdirSync(d);
       const src = path.join(d, 's.jsonl'); fs.writeFileSync(src, ndjson);
       const store = path.join(d, 'store'); fs.mkdirSync(store);
-      const victim = path.join(store, `${SNAPSHOT_MANIFEST}.${process.pid}.tmp`);
+      const victim = path.join(store, `${SNAPSHOT_MANIFEST}.${FIXED_SUFFIX}.tmp`);
       fs.writeFileSync(victim, REAPER_VICTIM);
       const r = snapshotSource(src, store);
       if (!survived(victim)) breaches.push('site 3 (snapshotSource manifest)');
@@ -2284,7 +2419,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
       const snap = snapshotSource(src, store);
       assert.strictEqual(snap.ok, true, 'site 4 setup: snapshot taken');
       const toPath = path.join(d, 'restored.jsonl');
-      const victim = `${toPath}.${process.pid}.tmp`;
+      const victim = `${toPath}.${FIXED_SUFFIX}.tmp`;
       fs.writeFileSync(victim, REAPER_VICTIM);
       const r = restoreFromSnapshot(snap.snapshotPath, toPath, {});
       assert.strictEqual(r.ok, false, 'site 4: EXCL refuses the planted temp');
@@ -2293,7 +2428,7 @@ test('the per-pid temp reaper NEVER deletes a file the engine did not create (4 
 
     assert.deepStrictEqual(breaches, [],
       `the engine DELETED a file it never created (no snapshot, no bin, no recovery) at:\n  ${breaches.join('\n  ')}`);
-  } finally { rm(dir); }
+  } finally { crypto.randomBytes = realRandomBytes; rm(dir); }
 });
 
 // THE CONTROL, and it is not optional: "never unlink anything" would pass the
@@ -2373,12 +2508,16 @@ test('CASE-FOLD: a genuinely case-sensitive directory is NOT folded — the stor
     assert.match(r.reason, /escapes the store/);
 
     // NOT VACUOUS, and this is the half that catches an over-refusing "fix": a
-    // genuinely in-store blob must still restore on this same directory.
-    const good = Buffer.from('legitimate\n');
-    const gsha = crypto.createHash('sha256').update(good).digest('hex');
-    fs.writeFileSync(path.join(cs.lower, gsha), good);
+    // genuinely in-store blob must still restore on this same directory. Taken through
+    // `snapshotSource` (not a raw blob write) so it also has the manifest row the F1
+    // ownership check (see restoreFromSnapshot's header) now requires — the realistic
+    // shape, since every real snapshot in this engine is created that way.
+    const goodSrc = path.join(cs.root, 'good-src.txt');
+    fs.writeFileSync(goodSrc, 'legitimate\n');
+    const goodSnap = snapshotSource(goodSrc, cs.lower);
+    assert.strictEqual(goodSnap.ok, true, 'sanity: the control snapshot itself succeeds');
     const okPath = path.join(cs.root, 'good.out');
-    const r2 = restoreFromSnapshot(gsha, okPath, { snapshotDir: cs.lower });
+    const r2 = restoreFromSnapshot(goodSnap.sha256, okPath, { snapshotDir: cs.lower, original: goodSrc });
     assert.strictEqual(r2.ok, true, `an in-store blob must still restore (got ${r2.reason})`);
     assert.strictEqual(fs.readFileSync(okPath, 'utf8'), 'legitimate\n');
   } finally { rm(cs.root); }
@@ -2422,3 +2561,709 @@ test('CASE-FOLD: PERMIT and REFUSE take OPPOSITE miss directions, and an OMITTED
     assert.notStrictEqual(containment(child, base), 'inside', 'unknown REFUSES at an `=== inside` guard');
   } finally { rm(root); }
 });
+
+// ---------------------------------------------------------------------------
+// F1 [HIGH, rung-2 R1 lab] — the content-addressed snapshot store had no ownership check.
+// The blob store is directly enumerable (readdirSync lists every hash, no manifest read
+// needed) and restoreFromSnapshot verified byte-integrity but never checked that `ref`
+// came from a file the restoring caller owns. MEASURED end-to-end, real run, not reasoned:
+// scratchpad/cw-lab-rung2-r1/coord-verify/verify-crosstenant.mjs — an ORDINARY, non-
+// adversarial "recover everything visible in the shared undo-net store" caretaker script
+// (not an attacker fixture) landed CODER role's secret content in REVIEWER role's own
+// recovery directory. This test reproduces that exact scenario directly against this
+// engine (not the frozen lab copy) and pins BOTH directions: the leak refused, and a
+// correctly-declared legitimate restore unaffected.
+test('F1 [HIGH]: a shared snapshotDir cannot be blindly recovered from — ownership must be declared and confirmed against the manifest', () => {
+  const dir = tmp();
+  try {
+    fs.mkdirSync(path.join(dir, 'agent-memory', 'coder'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'agent-memory', 'reviewer'), { recursive: true });
+    const roleA = write(dir, path.join('agent-memory', 'coder', 'MEMORY.md'), Buffer.from(
+      JSON.stringify({ type: 'mode', value: 'x' }) + '\n' +
+      JSON.stringify({ type: 'user', text: 'CODER role secret: prod DB password is hunter2' }) + '\n'));
+    const roleB = write(dir, path.join('agent-memory', 'reviewer', 'MEMORY.md'), Buffer.from(
+      JSON.stringify({ type: 'mode', value: 'y' }) + '\n' +
+      JSON.stringify({ type: 'user', text: 'REVIEWER role note: nothing sensitive' }) + '\n'));
+    // A plausible, UNREMARKABLE wiring choice — one shared snapshotDir per project, not an
+    // adversarial setup.
+    const sharedSnap = path.join(dir, '.claude', 'coalwash', 'snapshots');
+
+    const resA = reduceFile(roleA, { outPath: roleA + '.reduced', snapshotDir: sharedSnap, cutTypes: ['mode'] });
+    const resB = reduceFile(roleB, { outPath: roleB + '.reduced', snapshotDir: sharedSnap, cutTypes: ['mode'] });
+    assert.strictEqual(resA.ok, true);
+    assert.strictEqual(resB.ok, true);
+
+    // The REVIEWER's own recovery tooling discovers a hash by LISTING the shared store — no
+    // manifest read, no declared original. The exact shape of the lab's caretaker script.
+    const blobs = fs.readdirSync(sharedSnap).filter((f) => !f.endsWith('.tmp') && f !== 'manifest.jsonl');
+    assert.strictEqual(blobs.length, 2, 'sanity: both roles snapshotted');
+    const recoverDir = path.join(dir, 'agent-memory', 'reviewer', 'recovered');
+    fs.mkdirSync(recoverDir, { recursive: true });
+
+    const results = blobs.map((b) => restoreFromSnapshot(b, path.join(recoverDir, b + '.txt'), { snapshotDir: sharedSnap }));
+    // RED-FIRST: pre-fix, every one of these returned ok:true and the loop below found the
+    // secret. Post-fix, EVERY bare-hash-discovery restore is refused — ownership undeclared.
+    assert.ok(results.every((r) => r.ok === false), `every undeclared-ownership restore must refuse (got ${JSON.stringify(results.map((r) => r.ok))})`);
+    assert.ok(results.every((r) => /ownership not declared/.test(r.reason)), 'the refusal reason names the missing declaration, not a generic error');
+    const leaked = fs.existsSync(recoverDir) && fs.readdirSync(recoverDir).some((f) => fs.readFileSync(path.join(recoverDir, f), 'utf8').includes('hunter2'));
+    assert.strictEqual(leaked, false, 'CODER role secret content must NOT land in REVIEWER role recovery dir');
+
+    // NOT VACUOUS (a fix that just refuses everything proves nothing): the SAME blob restores
+    // when the caller correctly declares what it believes the original is, and the manifest
+    // confirms it — the legitimate, single-tenant restore path is unaffected. (roleA's own
+    // hash, resolved directly so the test doesn't assume array order from readdirSync.)
+    const roleAHash = sha256File(roleA);
+    assert.ok(blobs.includes(roleAHash), 'sanity: roleA really is one of the discovered blobs');
+    const legit = restoreFromSnapshot(roleAHash, path.join(dir, 'legit.out'), { snapshotDir: sharedSnap, original: roleA });
+    assert.strictEqual(legit.ok, true, `a correctly-declared legitimate restore must succeed (got ${legit.reason})`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'legit.out'), 'utf8'), fs.readFileSync(roleA, 'utf8'));
+
+    // IMPERSONATION: a caller that has READ the manifest and deliberately claims the WRONG
+    // original for a blob it does not own must still be refused — ownership is CONFIRMED
+    // against the manifest, never merely asserted.
+    const roleBHash = sha256File(roleB);
+    const impersonate = restoreFromSnapshot(roleBHash, path.join(dir, 'impersonate.out'), { snapshotDir: sharedSnap, original: roleA });
+    assert.strictEqual(impersonate.ok, false, 'a false ownership claim (right hash, wrong declared original) must be refused, not merely trusted');
+    // rung-2 F4: roleA genuinely EXISTS, so declaredDev/Ino are captured and this classifies as a
+    // devino CONTRADICTION (roleA's real identity disagrees with roleB's blob's recorded row) —
+    // a strictly more precise diagnosis than the old generic "unconfirmed", same refusal.
+    assert.match(impersonate.reason, /ownership contradicted|dev\/ino mismatch/);
+  } finally { rm(dir); }
+});
+
+// F2 [MEDIUM, rung-2 R1 lab]: STRUCTURAL proof of unpredictability (independent of the reaper
+// test's stubbed-collision technique above). Watches the directory DURING each write and asserts
+// the in-flight temp basename is never the OLD `${name}.${pid}.tmp` form at any of the 4 sites —
+// pinning the property the fix claims, not just its downstream effect.
+test('F2 [MEDIUM]: none of the 4 write-temp sites use the predictable ${name}.${pid}.tmp form', () => {
+  const dir = tmp();
+  const pidPattern = new RegExp(`\\.${process.pid}\\.tmp$`);
+  const seenTmp = [];
+  const realOpenSync = fs.openSync;
+  fs.openSync = (p, ...rest) => {
+    if (typeof p === 'string' && p.endsWith('.tmp')) seenTmp.push(path.basename(p));
+    return realOpenSync(p, ...rest);
+  };
+  try {
+    const ndjson = buildJsonl(Array.from({ length: 10 }, (_, i) => ({ type: i % 2 ? 'user' : 'mode', i }))).buf;
+    // site 1 (ndjson wave-1) + site 3 (manifest, via snapshotSource inside reduceFile)
+    const src1 = write(dir, 's1.jsonl', ndjson);
+    const store = path.join(dir, 'store');
+    const r1 = reduceFile(src1, { cutTypes: ['mode'], outPath: path.join(dir, 'o1.jsonl'), snapshotDir: store });
+    assert.strictEqual(r1.ok, true);
+    // site 2 (json-single)
+    const src2 = write(dir, 's2.json', JSON.stringify({ type: 'mode', a: 1 }));
+    const r2 = reduceFile(src2, { cutTypes: ['mode'], outPath: path.join(dir, 'o2.json'), snapshotDir: store });
+    assert.strictEqual(r2.ok, true);
+    // site 4 (restore)
+    const r4 = restoreFromSnapshot(r1.snapshotPath, path.join(dir, 'restored.jsonl'), { snapshotDir: store, original: src1 });
+    assert.strictEqual(r4.ok, true);
+
+    assert.ok(seenTmp.length >= 4, `sanity: at least 4 temps observed (got ${seenTmp.length}: ${seenTmp.join(', ')})`);
+    const predictable = seenTmp.filter((t) => pidPattern.test(t));
+    assert.deepStrictEqual(predictable, [], `predictable pid-suffixed temp(s) still in use: ${predictable.join(', ')}`);
+  } finally { fs.openSync = realOpenSync; rm(dir); }
+});
+
+// rung-2, board wave — F1's ownership check was gated on `if (snapshotDir)`; omitting that
+// arg let a caller who already holds the absolute blob path (the SAME caller, the SAME
+// enumerable store, a different call shape) skip ownership entirely. MEASURED end-to-end,
+// real run, not reasoned: scratchpad/cw-lab-rung2-r2/coord-verify/verify-bypass.mjs — the
+// exact F1 scenario, replayed with the blob path handed in directly instead of via
+// snapshotDir+ref. This test reproduces it directly against this engine.
+test('rung-2 F1 [HIGH]: the ownership check applies to the BLOB-PATH call shape too, not only when snapshotDir is named', () => {
+  const dir = tmp();
+  try {
+    fs.mkdirSync(path.join(dir, 'agent-memory', 'coder'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'agent-memory', 'reviewer'), { recursive: true });
+    const roleA = write(dir, path.join('agent-memory', 'coder', 'MEMORY.md'), Buffer.from(
+      JSON.stringify({ type: 'mode', value: 'x' }) + '\n' +
+      JSON.stringify({ type: 'user', text: 'CODER role secret: prod DB password is hunter2' }) + '\n'));
+    const roleB = write(dir, path.join('agent-memory', 'reviewer', 'MEMORY.md'), Buffer.from(
+      JSON.stringify({ type: 'mode', value: 'y' }) + '\n' +
+      JSON.stringify({ type: 'user', text: 'REVIEWER role note: nothing sensitive' }) + '\n'));
+    const sharedSnap = path.join(dir, '.claude', 'coalwash', 'snapshots');
+    assert.strictEqual(reduceFile(roleA, { outPath: roleA + '.reduced', snapshotDir: sharedSnap, cutTypes: ['mode'] }).ok, true);
+    assert.strictEqual(reduceFile(roleB, { outPath: roleB + '.reduced', snapshotDir: sharedSnap, cutTypes: ['mode'] }).ok, true);
+
+    // THE BYPASS SHAPE: the caller already knows the store's layout (it enumerated it, or
+    // simply constructed the path the same way the store itself does) and hands the
+    // FULL BLOB PATH to restoreFromSnapshot with NO snapshotDir at all.
+    const blobs = fs.readdirSync(sharedSnap).filter((f) => !f.endsWith('.tmp') && f !== SNAPSHOT_MANIFEST);
+    assert.strictEqual(blobs.length, 2, 'sanity: both roles snapshotted');
+    const recoverDir = path.join(dir, 'agent-memory', 'reviewer', 'recovered');
+    fs.mkdirSync(recoverDir, { recursive: true });
+
+    const results = blobs.map((b) => restoreFromSnapshot(path.join(sharedSnap, b), path.join(recoverDir, b + '.txt'), {}));
+    // RED-FIRST: pre-fix (f7bb4f2), every one of these returned ok:true — the `if (snapshotDir)`
+    // gate never engaged because no snapshotDir was passed. Independently re-verified against
+    // f7bb4f2's own explode.mjs (checked out via git show) in this same session: leaked=true.
+    assert.ok(results.every((r) => r.ok === false), `every undeclared-ownership blob-path restore must refuse (got ${JSON.stringify(results.map((r) => r.ok))})`);
+    assert.ok(results.every((r) => /ownership not declared/.test(r.reason)), 'the refusal reason names the missing declaration, not a generic error');
+    const leaked = fs.existsSync(recoverDir) && fs.readdirSync(recoverDir).some((f) => fs.readFileSync(path.join(recoverDir, f), 'utf8').includes('hunter2'));
+    assert.strictEqual(leaked, false, 'CODER role secret content must NOT land in REVIEWER role recovery dir via the blob-path call shape');
+
+    // NOT VACUOUS: the same blob-path call shape still succeeds when ownership is correctly
+    // declared — rung-2 F1-b now REQUIRES snapshotDir explicitly (no more path.dirname(blob)
+    // fallback; that fallback let an attacker-owned directory supply its own manifest), so the
+    // legitimate path stays open only when the caller names it, which this call does.
+    const roleAHash = sha256File(roleA);
+    const legit = restoreFromSnapshot(path.join(sharedSnap, roleAHash), path.join(dir, 'legit.out'), { snapshotDir: sharedSnap, original: roleA });
+    assert.strictEqual(legit.ok, true, `a correctly-declared legitimate blob-path restore must succeed (got ${legit.reason})`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'legit.out'), 'utf8'), fs.readFileSync(roleA, 'utf8'));
+  } finally { rm(dir); }
+});
+
+// rung-2 F1-b [HIGH] — `ownershipDir` used to fall back to `path.dirname(blob)` when `snapshotDir`
+// was omitted, and `blob` is the very reference being restored (untrusted input): an attacker who
+// copies a victim's blob into a directory they own and writes their own self-consistent manifest
+// row there (original/originalCanonical/originalDev/originalIno all matching a file the attacker
+// genuinely owns) gets a self-authorizing ownership oracle — the party being asked "is this really
+// a snapshot of `original`?" chooses the manifest that answers it. RED-FIRST re-verified live in
+// this session against a temp copy of this file's own pre-fix HEAD (git show), confirmed
+// ok:true/verified:true/the victim's secret landing at the attacker-chosen path — not reasoned.
+test('rung-2 F1-b [HIGH]: a self-authorizing manifest in an attacker-owned directory is refused when snapshotDir is omitted', () => {
+  const dir = tmp();
+  try {
+    // victim: a real secret, snapshotted into the VICTIM's own store
+    const victimStore = path.join(dir, 'victim-store'); fs.mkdirSync(victimStore, { recursive: true });
+    const victimSrc = write(dir, 'victim-memory.md', Buffer.from('CODER role secret: prod DB password is hunter2\n'));
+    const snap = snapshotSource(victimSrc, victimStore);
+    assert.strictEqual(snap.ok, true, 'setup: victim snapshot');
+
+    // attacker: their OWN directory + their OWN genuinely-owned file
+    const attackerDir = path.join(dir, 'attacker-dir'); fs.mkdirSync(attackerDir, { recursive: true });
+    const attackerOwnedFile = write(dir, 'attacker-owns-this.txt', Buffer.from('nothing sensitive, this is the attackers own file\n'));
+
+    // attacker copies the VICTIM's blob bytes into their own directory (identical content -> identical sha256)
+    const victimBlob = fs.readFileSync(snap.snapshotPath);
+    const sha = crypto.createHash('sha256').update(victimBlob).digest('hex');
+    const attackerBlobPath = path.join(attackerDir, sha);
+    fs.writeFileSync(attackerBlobPath, victimBlob);
+
+    // attacker writes a SELF-CONSISTENT manifest row: original/originalCanonical/originalDev/originalIno
+    // all genuinely matching the attacker's own file (would pass canonMatch/devinoMatch for real)
+    const declaredCanonical = physicalForCreate(attackerOwnedFile);
+    const st = fs.statSync(attackerOwnedFile, { bigint: true });
+    const row = JSON.stringify({
+      original: attackerOwnedFile, originalCanonical: declaredCanonical,
+      originalDev: st.dev.toString(), originalIno: st.ino.toString(),
+      sha256: sha, bytes: victimBlob.length, at: new Date().toISOString(), deduped: false,
+    }) + '\n';
+    fs.writeFileSync(path.join(attackerDir, SNAPSHOT_MANIFEST), row);
+
+    // THE ATTACK: blob path points into the attacker's directory, NO snapshotDir passed
+    const dest = path.join(dir, 'exfiltrated.out');
+    const result = restoreFromSnapshot(attackerBlobPath, dest, { original: attackerOwnedFile });
+    assert.strictEqual(result.ok, false, 'a blob-path restore with no snapshotDir must refuse, even with a self-consistent manifest sitting beside the blob');
+    assert.strictEqual(result.verified, false);
+    assert.match(result.reason, /snapshotDir/i, 'the refusal names the missing snapshotDir — never a generic ownership-unconfirmed message indistinguishable from an honest miss');
+    assert.strictEqual(fs.existsSync(dest), false, 'nothing was copied out to the attacker-chosen destination — the victims secret never lands anywhere the attack could read it back from');
+
+    // CONTROL: the identical attacker setup, but the caller declares the REAL snapshotDir — refused
+    // for the honest reason (manifest confirms nothing there), proving the gate isn't just eating
+    // every call: a legitimate restore against the real store still succeeds.
+    const legitDest = path.join(dir, 'legit.out');
+    const legit = restoreFromSnapshot(snap.sha256, legitDest, { snapshotDir: victimStore, original: victimSrc });
+    assert.strictEqual(legit.ok, true, `a correctly-declared legitimate restore must still succeed (got ${legit.reason})`);
+    assert.strictEqual(fs.readFileSync(legitDest, 'utf8'), fs.readFileSync(victimSrc, 'utf8'));
+  } finally { rm(dir); }
+});
+
+// rung-2 F3 [MEDIUM] — the ownership compare canonicalizes `original` before comparing, so a
+// legitimate restore is no longer refused merely because the caller spelled the same physical
+// path differently than the string recorded at snapshot time. Both legs below are WIN32 PATH
+// SYNTAX properties (drive-letter case is never volume-dependent; `/` vs `\` are interchangeable
+// separators in every Windows path API) — genuinely unconditional on win32, not a volume-capability
+// question, so they are gated on platform SHAPE (the feature does not exist on POSIX at all) rather
+// than probed.
+test('rung-2 F3 [MEDIUM]: a restore declaring the original with FORWARD SLASHES still confirms ownership', (t) => {
+  if (process.platform !== 'win32') { t.skip('backslash-vs-forward-slash is a win32 path-syntax property; POSIX has only one separator'); return; }
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    const src = write(dir, 'MEMORY.md', Buffer.from('content\n'));
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    const forwardSlashSpelling = src.replaceAll('\\', '/');
+    assert.notStrictEqual(forwardSlashSpelling, src, 'sanity: the spellings really differ as strings');
+    // RED-FIRST: pre-fix (row.original === original raw string compare), this refused —
+    // independently re-verified via git show f7bb4f2:scripts/lib/explode.mjs in this session.
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: forwardSlashSpelling });
+    assert.strictEqual(r.ok, true, `forward-slash spelling of the same physical file must confirm (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+test('rung-2 F3 [MEDIUM]: a restore declaring the original with a DIFFERENT DRIVE-LETTER CASE still confirms ownership', (t) => {
+  if (process.platform !== 'win32') { t.skip('drive-letter case is a win32 path-syntax property; POSIX has no drive letters'); return; }
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    const src = write(dir, 'MEMORY.md', Buffer.from('content\n'));
+    const swappedDrive = /^[A-Za-z]:/.test(src)
+      ? (src[0] === src[0].toUpperCase() ? src[0].toLowerCase() : src[0].toUpperCase()) + src.slice(1)
+      : null;
+    if (!swappedDrive) { t.skip('src did not resolve to a drive-letter path'); return; }
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    // RED-FIRST: pre-fix, this refused too (raw string compare, unequal drive-letter case).
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: swappedDrive });
+    assert.strictEqual(r.ok, true, `drive-letter-case variant of the same physical file must confirm (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+// CAPABILITY-GATED — filename case-fold is a VOLUME property, probed via the existing
+// `caseInsensitiveFS` helper, never `process.platform` (node/runtime.md §4, already the house rule
+// this file follows everywhere else).
+test('rung-2 F3 [MEDIUM]: a restore declaring the original with a different FILENAME CASE confirms ownership, on a volume that actually folds', (t) => {
+  const dir = tmp();
+  try {
+    if (!caseInsensitiveFS(dir)) { t.skip('this volume does not fold filename case — capability proven absent, not assumed'); return; }
+    const store = path.join(dir, 'store');
+    const src = write(dir, 'MEMORY.md', Buffer.from('content\n'));
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    const upperSpelling = src.toUpperCase();
+    assert.notStrictEqual(upperSpelling, src, 'sanity: the spellings really differ as strings');
+    assert.strictEqual(fs.existsSync(upperSpelling), true, 'sanity: the folding volume really resolves the uppercase spelling to the same file');
+    // RED-FIRST: pre-fix, this refused (raw string compare) — the anti-data-loss mechanism
+    // refusing on exactly the case difference a case-insensitive volume treats as the same file.
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: upperSpelling });
+    assert.strictEqual(r.ok, true, `case-variant spelling of the same physical file must confirm on a folding volume (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+// F3 rail 1 — canonicalization must not MERGE two genuinely different originals. Proved on the
+// SHARPEST fixture available: two case-VARIANT directories that are genuinely distinct inodes
+// (caseSensitiveDir(), the same builder R3/CASE-FOLD already use), each holding a DIFFERENT real
+// file. If canonicalization could ever collapse two distinct paths to one string, this is where
+// it would happen — two spellings that differ ONLY by case, on a volume that treats case as
+// significant.
+test('rung-2 F3 rail 1: canonicalization does not merge two genuinely different originals', (t) => {
+  const cs = caseSensitiveDir();
+  if (!cs) { t.skip('no case-sensitive directory can be built here (capability proven absent by distinct-inode check, not assumed)'); return; }
+  try {
+    const fileLower = path.join(cs.lower, 'MEMORY.md');
+    const fileUpper = path.join(cs.upper, 'MEMORY.md'); // same basename, DIFFERENT parent dir (case-variant, genuinely distinct inode)
+    fs.writeFileSync(fileLower, 'lower-store content — role A');
+    fs.writeFileSync(fileUpper, 'upper-store content — role B'); // different bytes -> different sha, but exercises the SAME canonicalization code path
+    assert.notStrictEqual(fs.statSync(fileLower, { bigint: true }).ino, fs.statSync(fileUpper, { bigint: true }).ino, 'sanity: genuinely distinct files');
+
+    const canonLower = physicalForCreate(fileLower);
+    const canonUpper = physicalForCreate(fileUpper);
+    assert.notStrictEqual(canonLower, canonUpper, 'two genuinely different originals must canonicalize to two DIFFERENT strings — a merge here would let a restore for one file confirm ownership of the other');
+
+    // End-to-end: a snapshot of fileLower, restored while declaring fileUpper's spelling, must
+    // still refuse — proving the MERGE never happens through the real restoreFromSnapshot path,
+    // not just at the canonicalization primitive in isolation.
+    const store = path.join(cs.root, 'store');
+    const snap = snapshotSource(fileLower, store);
+    assert.strictEqual(snap.ok, true);
+    const r = restoreFromSnapshot(snap.sha256, path.join(cs.root, 'out.txt'), { snapshotDir: store, original: fileUpper });
+    assert.strictEqual(r.ok, false, 'declaring the WRONG (case-variant, genuinely different) file as the original must still refuse — canonicalization must not collapse two distinct files into one confirmed identity');
+    // rung-2 F4: fileUpper genuinely EXISTS, so declaredDev/Ino are captured and this now
+    // classifies as a devino CONTRADICTION (a live identity check that actively disagreed),
+    // a strictly more precise diagnosis than the old generic "unconfirmed" — same refusal, sharper reason.
+    assert.match(r.reason, /ownership contradicted|dev\/ino mismatch/);
+  } finally { rm(cs.root); }
+});
+
+// CAPABILITY-GATED — an 8.3 short-name alias of the same file, confirmed real by `cmd` (the
+// SAME probe R3/TP-3 already uses), must still confirm ownership via realpath.native expansion.
+test('rung-2 F3 [MEDIUM]: a restore declaring the original via its 8.3 SHORT-NAME alias still confirms ownership', (t) => {
+  if (process.platform !== 'win32') { t.skip('8.3 is a win32 form'); return; }
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-F3-8DOT3-')));
+  try {
+    const longDirName = path.join(dir, 'AGENT-MEMORY-CODER-LONGNAME-DIRECTORY');
+    fs.mkdirSync(longDirName, { recursive: true });
+    const src = path.join(longDirName, 'MEMORY.md');
+    fs.writeFileSync(src, 'content\n');
+    let shortDir;
+    shortDir = execSync(`cmd /c for %I in ("${longDirName}") do @echo %~sI`, { encoding: 'utf8' }).trim();
+    if (shortDir === longDirName) { t.skip('8.3 creation disabled on this volume'); return; }
+    const shortSrc = path.join(shortDir, path.basename(src));
+
+    const store = path.join(dir, 'store');
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    // RED-FIRST: pre-fix (raw string compare, or even plain realpathSync which does not
+    // expand 8.3 — see node/runtime.md §4), this refused.
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: shortSrc });
+    assert.strictEqual(r.ok, true, `an 8.3 short-name alias of the same physical file must confirm (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+// CAPABILITY-GATED — a hardlink alias, which `physicalForCreate`'s realpath-string mechanism
+// CANNOT close on its own (collidesWithSource's own comment: "realpath is blind to a hardlink") —
+// this is the case the dev+ino fallback mechanism exists for specifically.
+test('rung-2 F3 [MEDIUM]: a restore declaring a HARDLINK ALIAS of the original confirms via dev+ino, not realpath alone', (t) => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    const src = write(dir, 'MEMORY.md', Buffer.from('content\n'));
+    const alias = path.join(dir, 'HardlinkAlias.md');
+    try {
+      fs.linkSync(src, alias);
+    } catch (e) {
+      t.skip(`cannot create a hardlink here (${e.code}) — capability genuinely absent, not assumed`);
+      return;
+    }
+    // Sanity: realpath alone does NOT merge the two names (the mechanism this test exists to
+    // prove is insufficient by itself — dev+ino is the one that closes it).
+    assert.notStrictEqual(fs.realpathSync.native(src), fs.realpathSync.native(alias), 'sanity: realpath keeps hardlinked names as distinct strings (measured this session — probe-hardlink.mjs)');
+    const snap = snapshotSource(src, store);
+    assert.strictEqual(snap.ok, true);
+    // RED-FIRST: pre-fix (raw string compare) AND a realpath-only fix (had one been built
+    // instead of the dev+ino fallback) would both refuse this — the alias's realpath string
+    // genuinely differs from src's.
+    const r = restoreFromSnapshot(snap.sha256, path.join(dir, 'out.txt'), { snapshotDir: store, original: alias });
+    assert.strictEqual(r.ok, true, `a hardlink alias of the same physical file must confirm via dev+ino (got ${r.reason})`);
+  } finally { rm(dir); }
+});
+
+// LEGACY MIGRATION — a manifest row written before this fix (no originalCanonical/originalDev/
+// originalIno fields at all) falls back to the OLD exact-string compare for THAT row only. This
+// pins the migration behaviour explicitly: an exact match still confirms (backward compat for a
+// manifest that outlives a code upgrade mid-batch), and a spelling variant against a LEGACY row
+// does NOT confirm (the canonical fallback is per-row, not a blanket amnesty).
+test('rung-2 F3: a pre-fix (legacy-shaped) manifest row still confirms an EXACT match, and does not gain the new tolerance', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    fs.mkdirSync(store, { recursive: true });
+    const src = write(dir, 'MEMORY.md', Buffer.from('legacy content\n'));
+    const sha = sha256File(src);
+    fs.writeFileSync(path.join(store, sha), fs.readFileSync(src)); // hand-place the blob (no snapshotSource — no manifest row yet)
+    const legacyRow = `${JSON.stringify({ original: src, sha256: sha, bytes: fs.statSync(src).size, at: new Date().toISOString(), deduped: false })}\n`; // OLD shape: no originalCanonical/originalDev/originalIno
+    fs.writeFileSync(path.join(store, SNAPSHOT_MANIFEST), legacyRow);
+
+    const exact = restoreFromSnapshot(sha, path.join(dir, 'out-exact.txt'), { snapshotDir: store, original: src });
+    assert.strictEqual(exact.ok, true, `an exact-string match against a legacy row must still confirm (got ${exact.reason})`);
+
+    if (caseInsensitiveFS(dir)) {
+      const variant = restoreFromSnapshot(sha, path.join(dir, 'out-variant.txt'), { snapshotDir: store, original: src.toUpperCase() });
+      assert.strictEqual(variant.ok, false, 'a spelling VARIANT against a legacy (no-canonical-field) row must NOT confirm — the legacy fallback is exact-string only, not a blanket tolerance upgrade');
+    }
+  } finally { rm(dir); }
+});
+
+// rot-canary self-catch (this dispatch): the SAME fallback must also cover a row where
+// canonicalization was ATTEMPTED at snapshot time but genuinely FAILED (`originalCanonical:
+// null`, not `undefined`) — a narrow race (src vanishing between the hash read and the
+// canonicalization call), but a real one: without this leg, such a row is confirmable by
+// NOTHING, not even its own exact original spelling, which the OLD raw-string-compare code
+// never had a problem with. `row.originalCanonical == null` (loose) covers both undefined
+// (legacy row) and null (failed-canonicalization row) with one condition.
+test('rung-2 F3 [self-catch]: a row whose canonicalization genuinely FAILED at snapshot time (null, not undefined) still confirms an exact match', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    fs.mkdirSync(store, { recursive: true });
+    const src = write(dir, 'MEMORY.md', Buffer.from('race-condition content\n'));
+    const sha = sha256File(src);
+    fs.writeFileSync(path.join(store, sha), fs.readFileSync(src));
+    // NEW-shaped row, but every identity field is explicitly null (as if physicalForCreate and
+    // the stat both failed at write time) — distinct from the legacy test above, which omits
+    // the fields entirely (undefined).
+    const failedCanonRow = `${JSON.stringify({ original: src, originalCanonical: null, originalDev: null, originalIno: null, sha256: sha, bytes: fs.statSync(src).size, at: new Date().toISOString(), deduped: false })}\n`;
+    fs.writeFileSync(path.join(store, SNAPSHOT_MANIFEST), failedCanonRow);
+
+    const exact = restoreFromSnapshot(sha, path.join(dir, 'out.txt'), { snapshotDir: store, original: src });
+    assert.strictEqual(exact.ok, true, `an exact match against a row with explicitly-null (not undefined) canonical fields must still confirm — a write-time canonicalization failure must not make the row permanently unconfirmable (got ${exact.reason})`);
+  } finally { rm(dir); }
+});
+
+// rung-2 F4 [HIGH] — canonMatch is a PATH-SPELLING compare; it says nothing about WHAT currently
+// occupies that path. dev/ino exist specifically to defend against spelling drift, but nothing
+// stopped canonMatch from authorizing a restore even when a LIVE, computable dev/ino comparison
+// disagreed with it. Delete the original, recreate a DIFFERENT file at the exact same path
+// (ordinary lifecycle — tenant rotation, a recycled temp name — no attacker required), and a row
+// still recording the OLD canonical string authorized a restore against the NEW file's location.
+test('rung-2 F4 [HIGH]: dev/ino confirms/refuses correctly on the two UNCONDITIONAL legs (control + legitimate delete)', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    fs.mkdirSync(store, { recursive: true });
+    const originalPath = path.join(dir, 'recycled.txt');
+
+    // --- Leg 1: CONTROL — original still exists, unmodified. Unaffected by the fix. ---
+    fs.writeFileSync(originalPath, 'first tenant secret\n');
+    const snap1 = snapshotSource(originalPath, store);
+    assert.strictEqual(snap1.ok, true, 'setup: control snapshot');
+    const control = restoreFromSnapshot(snap1.sha256, path.join(dir, 'control.out'), { snapshotDir: store, original: originalPath });
+    assert.strictEqual(control.ok, true, `control leg (original unchanged) must still succeed (got ${control.reason})`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'control.out'), 'utf8'), 'first tenant secret\n');
+
+    // --- Leg 2: LEGITIMATE DELETE — original genuinely gone, nothing recreated. Must NOT break. ---
+    const deletedPath = path.join(dir, 'deleted.txt');
+    fs.writeFileSync(deletedPath, 'a file that will be deleted\n');
+    const snap2 = snapshotSource(deletedPath, store);
+    assert.strictEqual(snap2.ok, true, 'setup: to-be-deleted snapshot');
+    fs.unlinkSync(deletedPath); // genuinely gone — no recreation
+    const legitDelete = restoreFromSnapshot(snap2.sha256, path.join(dir, 'legit-delete.out'), { snapshotDir: store, original: deletedPath });
+    assert.strictEqual(legitDelete.ok, true, `a restore of a genuinely-deleted original (declaredDev/Ino unavailable) must still confirm via canonMatch alone (got ${legitDelete.reason})`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'legit-delete.out'), 'utf8'), 'a file that will be deleted\n');
+  } finally { rm(dir); }
+});
+
+// rung-2 F4 [HIGH] Leg 3, split out per this room's own "one skippable leg per test" rule (the two
+// legs above are unconditional and must keep reporting honestly). CONFIRMED LIVE ON LINUX (CI run
+// 30937712605, ubuntu-latest node 22 AND 24) -- ext4 recycles a just-freed inode for the very next
+// file created at the same path under low allocation pressure, so declaredDev/declaredIno
+// coincidentally equal the row's recorded values and devinoMatch authorizes a restore that should
+// refuse. A tier-2 ctimeNs comparison was ATTEMPTED and REVERTED (2026-08-05, same day) -- it
+// directly regressed RUNG5 A6 (restoring a snapshot back over a since-modified source), because
+// `ctime` bumps on ANY write to an inode's content, not only when the inode is reused for a
+// different file: a recycled inode and a genuinely-modified original are structurally
+// indistinguishable by dev/ino+ctime alone. Confirmed by direct measurement, not reasoned. Full
+// diagnostic history (three CI runs: ms-precision collision, ns-precision separation, then the
+// ctime-regression finding) lives in explode.mjs's OWNERSHIP header, "rung-2 F4" paragraph -- read
+// it before touching this test. `test.todo()`, not `skip()`: this still RUNS on every platform,
+// still PRINTS its result, and node flags it if it unexpectedly starts passing -- it flips back to a
+// hard failure the moment a real closing mechanism lands. This is not muting; the finding stays live
+// in the places named in the OWNERSHIP header and this room's MEMORY.md, NOT the CHANGELOG, per this
+// room's own rule that a change reaching no shipped dist earns no entry there (explode.mjs is
+// UNWIRED_ENGINE).
+test.todo('rung-2 F4 [HIGH] Leg 3: recycled-path confidentiality -- LIVE ON LINUX, ctime tried and structurally cannot discriminate this (see explode.mjs OWNERSHIP header)', () => {
+  const dir = tmp();
+  try {
+    const store = path.join(dir, 'store');
+    fs.mkdirSync(store, { recursive: true });
+    const originalPath = path.join(dir, 'recycled.txt');
+    fs.writeFileSync(originalPath, 'first tenant secret\n');
+    const snap1 = snapshotSource(originalPath, store);
+    assert.strictEqual(snap1.ok, true, 'setup: control snapshot');
+
+    // THE ATTACK — delete, then recreate a DIFFERENT file at the SAME path (ordinary lifecycle —
+    // tenant rotation, a recycled temp name — no attacker required).
+    fs.unlinkSync(originalPath);
+    fs.writeFileSync(originalPath, 'second tenant UNRELATED content\n');
+    const recycled = restoreFromSnapshot(snap1.sha256, path.join(dir, 'recycled.out'), { snapshotDir: store, original: originalPath });
+    assert.strictEqual(recycled.ok, false, `a restore against a path whose live dev/ino disagrees with the recorded row must refuse, not serve the old (potentially secret) content (got ok:${recycled.ok})`);
+    assert.strictEqual(recycled.verified, false);
+    assert.match(recycled.reason, /dev|ino|identity|mismatch/i, 'the refusal names the dev/ino disagreement specifically, not a generic "unconfirmed" message indistinguishable from an honest miss');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'recycled.out')), false, 'nothing was copied out — the old secret never reaches the caller');
+  } finally { rm(dir); }
+});
+
+// rung-2 rail-5 [CRITICAL, round-6 discovery wave, coordinator-reproduced] -- rail 5's own promise
+// ("no snapshot, no destroy") was enforced only at offset===0. A direct `reduceFile(src, {offset>0,
+// resume:{snapshotPath: <anything>}})` -- a shipped, documented calling convention (see the
+// `_trustedResume` comment on reduceFile's own destructuring: "a bare / hand-driven / crash-recovery
+// reduceFile resume ... leaves it false") -- never required snapshotDir at all on that path, and the
+// returned `snapshotPath` was seeded straight from the caller-supplied `resume.snapshotPath` with no
+// existence check. Content was destroyed, ok:true, and the reported snapshotPath could name a blob
+// that was never created -- worse than a bare bypass, since a caller trusting that field acts as if
+// an undo net exists when none does. Two independent gaps, tested separately below: (1) no snapshotDir
+// requirement past wave 1; (2) even WITH a real store present, a forged snapshotPath was trusted
+// verbatim with zero existence/content-address check.
+test('rung-2 rail-5 [CRITICAL]: a hand-driven resume with NO snapshotDir at all is refused, not silently destructive', () => {
+  const dir = tmp();
+  try {
+    const src = write(dir, 'src.jsonl', Buffer.from(
+      JSON.stringify({ type: 'mode', value: 1 }) + '\n' + JSON.stringify({ type: 'user', text: 'SECRET that must survive' }) + '\n', 'utf8'));
+    const prefixLen = Buffer.byteLength(JSON.stringify({ type: 'mode', value: 1 }) + '\n', 'utf8');
+    const out = write(dir, 'out.jsonl', Buffer.from('', 'utf8'));
+    const hash = sha256File(src);
+    const r = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], offset: prefixLen,
+      resume: { srcSha256: hash, outLen: 0, snapshotPath: path.join(dir, 'NEVER-CREATED', hash) },
+    });
+    assert.strictEqual(r.ok, false, 'a resumed wave with no snapshotDir must refuse, exactly as an offset=0 wave already does');
+    assert.match(r.reason, /snapshotDir|snapshot/i);
+    assert.strictEqual(r.snapshotPath, null, 'no forged snapshotPath is echoed on the refusal path');
+  } finally { rm(dir); }
+});
+
+test('rung-2 rail-5 [CRITICAL]: a hand-driven resume WITH a real store, but a forged/never-written snapshotPath, is refused', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    fs.mkdirSync(snapshotDir, { recursive: true }); // the store genuinely exists — it is just empty for this src
+    const src = write(dir, 'src.jsonl', Buffer.from(
+      JSON.stringify({ type: 'mode', value: 1 }) + '\n' + JSON.stringify({ type: 'user', text: 'SECRET2 that must survive' }) + '\n', 'utf8'));
+    const prefixLen = Buffer.byteLength(JSON.stringify({ type: 'mode', value: 1 }) + '\n', 'utf8');
+    const out = write(dir, 'out.jsonl', Buffer.from('', 'utf8'));
+    const hash = sha256File(src); // attacker can compute this themselves -- sha256File is exported
+    const forgedPath = path.join(snapshotDir, hash); // plausible name; nobody ever wrote a blob there
+    const r = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], offset: prefixLen, snapshotDir,
+      resume: { srcSha256: hash, outLen: 0, snapshotPath: forgedPath },
+    });
+    assert.strictEqual(r.ok, false, 'a resumed wave whose claimed snapshot blob does not exist must refuse');
+    assert.match(r.reason, /verifiable|snapshot/i);
+    assert.notStrictEqual(r.snapshotPath, forgedPath, 'the forged path is never echoed back as authoritative');
+  } finally { rm(dir); }
+});
+
+// Must-break control, both directions: a LEGITIMATE hand-driven resume — a real snapshot taken at
+// wave 1, its real path carried into a genuinely resumed wave 2 — must still succeed. The fix closes
+// the untrusted-claim gap; it must not turn every hand-driven resume into a refusal.
+test('rung-2 rail-5 CONTROL: a legitimate hand-driven resume with a REAL wave-1 snapshot still succeeds', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    const src = write(dir, 'src.jsonl', Buffer.from(
+      JSON.stringify({ type: 'mode', value: 1 }) + '\n' + JSON.stringify({ type: 'user', text: 'kept line' }) + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    const w1 = reduceFile(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 1 });
+    assert.strictEqual(w1.ok, true);
+    assert.strictEqual(w1.done, false, 'setup: maxLines=1 forces a checkpoint so a real wave 2 is exercised');
+    assert.ok(w1.checkpoint, 'setup: a real checkpoint carries the real snapshotPath forward');
+    const w2 = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], snapshotDir,
+      offset: w1.checkpoint.srcOffset,
+      resume: { srcSha256: sha256File(src), outLen: w1.checkpoint.outLen, snapshotPath: w1.snapshotPath, structure: 'ndjson', bomLen: 0, cutTypes: w1.checkpoint.cutTypes },
+    });
+    assert.strictEqual(w2.ok, true, 'a genuine hand-driven resume with a real, verifiable snapshot is not caught by the fix');
+    assert.match(fs.readFileSync(out, 'utf8'), /kept line/, 'the kept record survives verbatim across the resumed wave');
+  } finally { rm(dir); }
+});
+
+// Must-break control: reduceToCompletion's own trusted internal loop (_trustedResume=true) must be
+// completely unaffected — it keeps carrying its own wave-1 snapshotPath across waves without the
+// per-wave re-verification the untrusted path now pays, matching the existing performance discipline
+// the resume ground-truth anchor already uses for the same flag.
+// rung-2 rail-5 F1 [MED, INSPECT-found, coordinator-reproduced] -- the first fix's trusted branch
+// (_trustedResume=true, offset>0) skipped BOTH the untrusted verification AND its own snapshot
+// gate whenever `snapshotPath` was falsy -- and `_trustedResume` is an ORDINARY opt on an EXPORTED
+// function, forgeable by any direct caller, not a real internal-only handoff. A direct call setting
+// `_trustedResume: true` with no real snapshotPath carried destroyed content, ok:true, no snapshot
+// anywhere -- rail 5 was still not universal after the first fix.
+test('rung-2 rail-5 F1 [MED]: a forged _trustedResume with NO carried snapshotPath is refused, not silently trusted', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    fs.mkdirSync(snapshotDir, { recursive: true });
+    const src = write(dir, 'src.jsonl', Buffer.from(
+      JSON.stringify({ type: 'mode', value: 1 }) + '\n' + JSON.stringify({ type: 'user', text: 'SECRET3 that must survive' }) + '\n', 'utf8'));
+    const prefixLen = Buffer.byteLength(JSON.stringify({ type: 'mode', value: 1 }) + '\n', 'utf8');
+    const out = write(dir, 'out.jsonl', Buffer.from('', 'utf8'));
+    // `_trustedResume` is a bare opt, not a capability token -- any caller of the exported
+    // `reduceFile` can set it. No `resume.snapshotPath` is carried at all here.
+    const r = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], offset: prefixLen, snapshotDir,
+      resume: { srcSha256: sha256File(src), outLen: 0 },
+      _trustedResume: true,
+    });
+    assert.strictEqual(r.ok, false, 'a forged trusted-resume with no real snapshot carried must refuse, exactly like the untrusted path does');
+    assert.match(r.reason, /snapshotPath|snapshot/i);
+  } finally { rm(dir); }
+});
+
+// rung-2 w7-leaf2 [reporting half, ROUND 7] -- `reduceToCompletion`'s `ok:false` on a later wave read
+// as "refused, nothing happened" while an EARLIER wave had already published real bytes to `outPath`
+// (and a real blob into the snapshot store). `acc.partialOutput` now distinguishes the two. Four
+// angles: the flag stays true through a normal multi-wave success (sanity) · stays false on an
+// immediate, zero-wave refusal (no false positive) · is correctly reset to false by the two internal
+// paths that already clean up their own partial · and, at the `reduceFile` level (the exact call
+// shape `reduceToCompletion` uses internally, `_trustedResume:true`), a genuine wave-2 failure leaves
+// wave 1's real bytes sitting at `outPath` -- the invariant the flag exists to report, reproduced
+// through the real region-hash desync mechanism rather than asserted.
+
+test('rung-2 w7-leaf2: partialOutput is true through a normal multi-wave SUCCESS (sanity)', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    const lines = [];
+    for (let i = 0; i < 20; i++) lines.push(JSON.stringify({ type: i % 2 === 0 ? 'mode' : 'user', i }));
+    const src = write(dir, 'src.jsonl', Buffer.from(lines.join('\n') + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    const r = reduceToCompletion(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 3 });
+    assert.strictEqual(r.ok, true);
+    assert.ok(r.waves > 1, 'setup: a genuine multi-wave drive');
+    assert.strictEqual(r.partialOutput, true, 'real bytes were published during this drive');
+  } finally { rm(dir); }
+});
+
+test('rung-2 w7-leaf2: partialOutput is false on an IMMEDIATE refusal — zero waves ever published', () => {
+  const dir = tmp();
+  try {
+    const src = write(dir, 'src.jsonl', Buffer.from(JSON.stringify({ type: 'mode' }) + '\n', 'utf8'));
+    // no snapshotDir -> rail 5 refuses before any wave runs at all.
+    const r = reduceToCompletion(src, { outPath: path.join(dir, 'out.jsonl'), cutTypes: ['mode'] });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.waves, 1, 'setup: the single call was made, but reduceFile itself refused before publishing');
+    assert.strictEqual(r.partialOutput, false, 'nothing was ever published — must not read as "something happened"');
+  } finally { rm(dir); }
+});
+
+test('rung-2 w7-leaf2: the re-read-ceiling refusal cleans up its own partial AND clears the flag', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    // WAVE-14's own note: a small dense file at a pathological per-wave budget (maxLines:1) re-reads
+    // many multiples of its own size and trips the SUB-CHUNK re-read ceiling without needing a
+    // multi-CHUNK fixture -- reused here rather than re-derived.
+    const lines = [];
+    for (let i = 0; i < 400; i++) lines.push(JSON.stringify({ type: 'user', i, pad: 'x'.repeat(40) }));
+    const src = write(dir, 'src.jsonl', Buffer.from(lines.join('\n') + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    const r = reduceToCompletion(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 1 });
+    assert.strictEqual(r.ok, false, 'setup: the re-read ceiling must actually trip for this test to mean anything');
+    assert.match(r.reason, /re-read/i);
+    assert.ok(r.waves > 1, 'setup: the ceiling trips mid-drive, not on wave 1 alone');
+    assert.strictEqual(r.partialOutput, false, 'the internal cleanup already unlinked the partial — the flag must agree with reality');
+    assert.strictEqual(fs.existsSync(out), false, 'confirms the cleanup actually ran, not just the flag');
+  } finally { rm(dir); }
+});
+
+test('rung-2 w7-leaf2: at the reduceFile level (the shape reduceToCompletion uses internally), a wave-2 failure leaves wave-1\'s real bytes published', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    // L1 is KEPT (not cutType 'mode') so wave 1's own output is genuinely non-empty; L2 is what
+    // wave 2 reads and where the corruption below lands.
+    const L1 = JSON.stringify({ type: 'user', text: 'wave-1 content that must survive on disk' });
+    const L2 = JSON.stringify({ type: 'user', value: 1 });
+    const src = write(dir, 'src.jsonl', Buffer.from(L1 + '\n' + L2 + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    // Wave 1, exactly the internal shape (_trustedResume:true), forced to checkpoint after one line.
+    const w1 = reduceFile(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 1, _trustedResume: true });
+    assert.strictEqual(w1.ok, true);
+    assert.strictEqual(w1.done, false, 'setup: a real wave 2 is exercised');
+    assert.strictEqual(fs.existsSync(out), true, 'wave 1 already published for real — this is the fact the flag exists to report');
+    const w1Bytes = fs.readFileSync(out, 'utf8');
+    assert.match(w1Bytes, /wave-1 content/, 'wave 1\'s real output is on disk, not a temp');
+    // Corrupt src in place, same byte length, so wave 2's region-hash re-read of [prevOffset, nextOffset)
+    // disagrees with the wave-1 snapshot -- the desync path reduceFile's own comment names.
+    const srcBuf = fs.readFileSync(src);
+    srcBuf.write('X', L1.length + 1); // one byte inside L2's region, length-preserving
+    fs.writeFileSync(src, srcBuf);
+    const w2 = reduceFile(src, {
+      outPath: out, cutTypes: ['mode'], snapshotDir,
+      offset: w1.checkpoint.srcOffset,
+      resume: { srcSha256: sha256File(src), outLen: w1.checkpoint.outLen, snapshotPath: w1.snapshotPath, structure: 'ndjson', bomLen: 0 },
+      _trustedResume: true,
+    });
+    assert.strictEqual(w2.ok, false, 'setup: the desync must actually fire');
+    assert.match(w2.reason, /source changed mid-reduction/);
+    // THE INVARIANT: wave 2 failing does not retroactively unpublish wave 1. This is exactly what
+    // reduceToCompletion's ok:false-with-no-cleanup return would hand a caller with no signal at all
+    // before this fix -- partialOutput exists so that signal is no longer silent.
+    assert.strictEqual(fs.existsSync(out), true, 'wave 1\'s real output is STILL on disk after wave 2 refused');
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), w1Bytes, 'unchanged — wave 2 never got to flush anything');
+  } finally { rm(dir); }
+});
+
+test('rung-2 rail-5 CONTROL: reduceToCompletion (trusted multi-wave loop) is unaffected by the fix', () => {
+  const dir = tmp();
+  try {
+    const snapshotDir = path.join(dir, 'store');
+    const lines = [];
+    for (let i = 0; i < 20; i++) lines.push(JSON.stringify({ type: i % 2 === 0 ? 'mode' : 'user', i }));
+    const src = write(dir, 'src.jsonl', Buffer.from(lines.join('\n') + '\n', 'utf8'));
+    const out = path.join(dir, 'out.jsonl');
+    const r = reduceToCompletion(src, { outPath: out, cutTypes: ['mode'], snapshotDir, maxLines: 3 });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.done, true);
+    assert.strictEqual(r.unitsCut, 10);
+    assert.strictEqual(r.unitsKept, 10);
+    // INSPECT F2 (LOW): pin the property this control is actually named for — a genuine multi-wave
+    // drive, not merely a correct single-wave result. Without this, a future change that made
+    // maxLines ineffective would stay green while no longer exercising the trusted resume path
+    // (the one this fix's comment above makes claims about) at all.
+    assert.ok(r.waves > 1, `expected a genuine multi-wave drive at maxLines:3/20 lines, got waves=${r.waves}`);
+  } finally { rm(dir); }
+});
+

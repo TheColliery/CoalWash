@@ -54,7 +54,7 @@
 // this engine. dryRun (no outPath) measures only. An outPath that aims at the
 // source by ANY route (case-variant / drive-case / symlink / hardlink) is refused
 // fail-closed BEFORE any write (collidesWithSource) — never a silent truncate-then-
-// ok:true; and the slim copy is written to a per-pid temp + atomic-renamed, so the
+// ok:true; and the slim copy is written to an unpredictable temp + atomic-renamed, so the
 // final path is never opened 'w'.
 //
 // NO ACTIVE-SESSION GUARD (by design, incomplete-by-design rail 1): this engine
@@ -727,22 +727,40 @@ export function reduceFile(src, opts = {}) {
   if (typeof maxBytes !== 'number' || !(maxBytes >= 1)) return fail(`maxBytes must be a number >= 1 (got a ${typeof maxBytes})`);
   let fd;
   try { fd = fs.openSync(src, 'r'); } catch (e) { return fail(`cannot open source: ${e.message}`); }
-  // #1/#7: the output fd + its per-pid temp are tracked at FUNCTION scope so the single catch/finally
+  // #1/#7: the output fd + its unpredictable temp are tracked at FUNCTION scope so the single catch/finally
   // below closes the fd and removes the unpublished temp on ANY throw — the documented exports never
   // propagate a raw fs error; they always return { ok:false }. The happy path nulls both once consumed
   // (fd closed, temp renamed), so the finally is a pure safety net that fires only on the throw path.
   let out = null;
   let tmpPath = null;
+  // F2 [MEDIUM, rung-2 R1 lab] — UNPREDICTABLE temp name, not `${outPath}.${pid}.tmp`. This is the
+  // SAME fix `snapshotSource`'s blob temp already carries (see its own comment for the full
+  // reasoning): a pid is guessable/observable, so a per-pid temp path can be PRE-PLACED by anyone
+  // able to write the destination directory. Lab W2 attacked all 5 structurally-identical
+  // `O_EXCL`-guarded write-temp sites in this file; only the blob temp had this fix, and the other
+  // 4 (this one, the json-single output temp, the ndjson-output temp, and restoreFromSnapshot's own
+  // temp) still used the predictable form. All 5 held under attack ON THIS BOX only because
+  // file-symlink creation is EPERM here without Developer Mode — the SAME limitation the blob
+  // temp's own comment already names as unconfirmed, not refuted. If that deeper claim is ever true
+  // on some box, it was true at all 4 unfixed sites, not just the one that had been fixed — closed
+  // here at all 4, one flock. Random naming removes the PRECONDITION (an attacker cannot pre-place
+  // at a path it cannot predict) rather than arguing about EXCL semantics; EXCL stays as the second
+  // belt (cross-nature: one guard defeats prediction, the other defeats a race).
+  // ONE suffix, generated ONCE per call (not per wave): wave-1 is the only wave that ever creates
+  // this temp (a resume wave appends to the already-published outPath, see below), and the SAME
+  // string must be used by the pre-flight collision/containment checks below AND the actual write —
+  // checking one candidate and writing a DIFFERENT one would validate a string that is never used.
+  const tmpSuffix = dryRun ? '' : crypto.randomBytes(12).toString('hex');
   try {
     // Refuse to write the slim copy over the SOURCE by ANY route a lexical
     // path.resolve compare misses (case-variant on a case-insensitive FS, c:/C:
     // drive-case, symlink, or a hardlink) — the wave-1 'w' open would TRUNCATE the
     // source BEFORE it is read, and the old lexical guard silently returned ok:true
     // after destroying it. Fail-closed, BOTH sides realpath'd (series hard-won rule)
-    // + a dev/ino check realpath cannot do. Also guards the per-pid temp so IT can
+    // + a dev/ino check realpath cannot do. Also guards the unpredictable temp so IT can
     // never alias the source either.
     if (!dryRun) {
-      const detail = collidesWithSource(outPath, src, fd) || collidesWithSource(`${outPath}.${process.pid}.tmp`, src, fd);
+      const detail = collidesWithSource(outPath, src, fd) || collidesWithSource(`${outPath}.${tmpSuffix}.tmp`, src, fd);
       if (detail) return fail(`outPath must differ from the source: ${detail} — writing over it would truncate the source before reading (in-place replace is the destruction ladder's gated step)`);
       // #6: the slim copy (and its temp) must never land INSIDE the snapshot store — writing over
       // manifest.jsonl or a content-addressed blob would corrupt the rail-5 recovery net the cut
@@ -751,7 +769,7 @@ export function reduceFile(src, opts = {}) {
       // the old `isContainedIn(...)` folded that unknown into false == ALLOW (rung-5 §1.2).
       if (snapshotDir) {
         const snapReal = physicalForCreate(snapshotDir);
-        if (containment(physicalForCreate(outPath), snapReal, true) !== 'outside' || containment(physicalForCreate(`${outPath}.${process.pid}.tmp`), snapReal, true) !== 'outside') { // REFUSE-polarity: a probe MISS folds (over-refuses)
+        if (containment(physicalForCreate(outPath), snapReal, true) !== 'outside' || containment(physicalForCreate(`${outPath}.${tmpSuffix}.tmp`), snapReal, true) !== 'outside') { // REFUSE-polarity: a probe MISS folds (over-refuses)
           return fail(`outPath must not resolve inside the snapshot store (${snapshotDir}), and must be resolvable enough to prove it — it would overwrite a recovery blob or manifest`);
         }
         // FIX 1 (source-sacred): src must not resolve INSIDE snapshotDir either. snapshotSource appends
@@ -828,16 +846,66 @@ export function reduceFile(src, opts = {}) {
       }
     }
 
-    // Rail 5: a real cut is snapshot-gated. Take the content-addressed snapshot
-    // on wave 1 only; carry its path across waves via `resume`.
+    // Rail 5: a real cut is snapshot-gated on EVERY wave, not wave 1 alone. Take the
+    // content-addressed snapshot on wave 1; a resumed wave carries its path via `resume`
+    // for the TRUSTED loop only (below) — an UNTRUSTED hand-driven resume never trusts
+    // that string.
+    //
+    // PRE-FIX DEFECT (rung-2 rail-5, CRITICAL, source-confirmed): this whole gate lived
+    // inside `if (!dryRun && offset === 0)`, so a direct `reduceFile(src, {offset:N>0, ...})`
+    // — a shipped, documented calling convention (see `_trustedResume`'s own comment above,
+    // naming exactly this as the untrusted surface) — never required `snapshotDir` at all,
+    // and `snapshotPath` below was seeded straight from the caller-supplied `resume.snapshotPath`
+    // with NO check that any blob existed there. Content was destroyed, `ok:true` returned, and
+    // the reported `snapshotPath` could name a blob nobody ever created — a caller reading that
+    // field believes an undo net exists when none does; worse than a bare bypass, since a bypass
+    // that REPORTS a net makes the caller act as if one is there.
     let snapshotPath = (resume && resume.snapshotPath) || null;
     let snapWasFresh = false; // L4 nit-b: true when THIS call COPIED a new blob (not a dedup of a shared one)
-    if (!dryRun && offset === 0) {
+    if (!dryRun) {
       if (!snapshotDir) return fail('refusing to reduce without snapshotDir (rail 5: no snapshot, no destroy)');
-      const snap = snapshotSource(src, snapshotDir);
-      if (!snap.ok) return fail(`snapshot failed: ${snap.reason}`);
-      snapshotPath = snap.snapshotPath;
-      snapWasFresh = !snap.deduped;
+      if (offset === 0) {
+        const snap = snapshotSource(src, snapshotDir);
+        if (!snap.ok) return fail(`snapshot failed: ${snap.reason}`);
+        snapshotPath = snap.snapshotPath;
+        snapWasFresh = !snap.deduped;
+      } else if (!_trustedResume) {
+        // UNTRUSTED resume: never trust the caller's `resume.snapshotPath` string — it is
+        // public input (`sha256File` is exported, so anyone can compute a plausible-looking
+        // name), and `src` is opened read-only for the whole reduce (never mutated by this
+        // engine across waves — the write goes to `outPath`, a different file by construction;
+        // `collidesWithSource` above already refuses `outPath === src`). So the true wave-1
+        // blob's content-address is INDEPENDENTLY RE-DERIVABLE from `src`'s current bytes; a
+        // legitimate multi-wave drive's source has not changed since the snapshot was taken,
+        // so this is exact, not a heuristic. Compute the expected path ourselves and require a
+        // REAL, self-consistent (filename === its own hash) blob to exist there — a forged,
+        // stale, or never-created claim refuses. The caller-supplied string is never read.
+        const expected = path.join(snapshotDir, sha256File(src));
+        let verified = false;
+        try { verified = fs.existsSync(expected) && sha256File(expected) === path.basename(expected); } catch { /* unreadable -> not verified */ }
+        if (!verified) return fail('resume: no verifiable snapshot blob for this source in the store (rail 5: no snapshot, no destroy)');
+        snapshotPath = expected;
+      } else {
+        // _trustedResume path (reduceToCompletion's own loop, offset>0): keeps the `snapshotPath`
+        // already carried from `resume` above, unchanged, and does NOT re-hash `src` to re-verify
+        // it — that would cost O(waves x size) for no added safety inside `reduceToCompletion`'s own
+        // internal drive, the same performance trade the resume ground-truth anchor below already
+        // makes for this exact flag.
+        //
+        // CORRECTED (rung-2 rail-5 INSPECT F1, MED): the prior comment here claimed the carried
+        // `snapshotPath` is "never caller-forgeable" — true of `reduceToCompletion`'s OWN internal
+        // call, false of `_trustedResume` itself, which is an ORDINARY opt on this EXPORTED function
+        // (underscore-prefixed by convention only — the leading `_` carries no enforcement; see its
+        // destructuring above) — any direct caller can pass `_trustedResume: true` and skip both this
+        // branch's snapshot AND the untrusted branch's verification. A caller doing that with
+        // `resume.snapshotPath: null` (or omitted) slips through here with `snapshotPath` staying
+        // null and still cuts, ok:true, no snapshot at all — rail 5 was not yet universal. One cheap
+        // check closes it without touching the performance trade: require SOMETHING was actually
+        // carried before trusting the skip.
+        if (!(typeof snapshotPath === 'string' && snapshotPath)) {
+          return fail('resume: no snapshotPath carried on a trusted resume — refusing to skip the snapshot check on nothing (rail 5: no snapshot, no destroy)');
+        }
+      }
     }
 
     // json-single: the whole (small, already-verified) file is exactly one unit.
@@ -859,8 +927,8 @@ export function reduceFile(src, opts = {}) {
         // AFTER the exclusive create RETURNS. Assigning it first made a non-null `tmpPath` mean
         // "a temp path was computed"; it now means "we created this file, so we may delete it".
         // See the reap comment in the finally for the measured defect this closes.
-        const candidate = `${outPath}.${process.pid}.tmp`;
-        out = fs.openSync(candidate, 'wx'); // per-pid temp, O_EXCL: a fresh inode, or EEXIST-fail-closed — never write THROUGH a pre-existing alias (hardlink/symlink) planted at tmpPath; the final path is never opened 'w'
+        const candidate = `${outPath}.${tmpSuffix}.tmp`;
+        out = fs.openSync(candidate, 'wx'); // unpredictable temp, O_EXCL: a fresh inode, or EEXIST-fail-closed — never write THROUGH a pre-existing alias (hardlink/symlink) planted at tmpPath; the final path is never opened 'w'
         tmpPath = candidate; // created by US → the reaper owns it
         if (!cut) writeFull(out, buf); // kept → byte-exact whole file; cut → empty (writeFull loops short writes)
         fs.fsyncSync(out);
@@ -948,25 +1016,62 @@ export function reduceFile(src, opts = {}) {
           if (sha256File(src) !== expectSha) {
             return fail('resume: the source changed since the checkpoint (its sha256 no longer matches the held snapshot) — refusing to splice a torn output across two source states (restore from the snapshot)');
           }
-          // (b) OFFSET↔OUTLEN: re-derive the committed length by reducing the source prefix [0, offset) with the
-          // SAME cut logic (the source is now proven == the snapshot). A forged/stale (offset, outLen) pair —
-          // individually valid but mutually inconsistent — reduces to a DIFFERENT length than claimed → refuse.
+          // (a2) CUTTYPES BINDING (rung-2 r9 leaf1, MEDIUM): the resume call's OWN cutTypes must be the
+          // EXACT SET wave 1 authorised — never a superset, subset, or any other divergence. Set-equal
+          // (sorted-and-compared, not array-equal), so re-ordering or duplicating the same types is not
+          // a false refusal (a caller re-serializing cutTypes from a Set/object has no reason to
+          // preserve array order). A checkpoint with no cutTypes field at all (pre-this-fix, forged, or
+          // hand-constructed) is refused fail-closed — same posture as the missing-snapshotPath guard
+          // three lines up: an incomplete checkpoint is an untrustworthy one, never a silent pass-through.
+          const resumeCutTypes = [...cutSet].sort();
+          if (!Array.isArray(resume.cutTypes)) {
+            return fail('resume: the checkpoint carries no cutTypes binding (missing or malformed — refused; a hand-driven resume must re-supply the checkpoint verbatim, never a hand-constructed one)');
+          }
+          // INSPECT F1 (LOW, rung-2 r9 findings-back): `resumeCutTypes` is deduped for free (it comes
+          // from `cutSet`, a Set) but a raw caller-supplied `resume.cutTypes` array is not — an
+          // undeduped checkpoint side made this comparator array-equal-after-sort rather than genuinely
+          // set-equal, refusing a checkpoint-side duplicate the comment's own "duplicating is not a
+          // false refusal" claim promised would pass. `new Set(...)` on this side too closes the gap: a
+          // duplicate carries no extra authority either way, since the APPLIED policy is always `cutSet`.
+          const checkpointCutTypes = [...new Set(resume.cutTypes)].sort();
+          if (resumeCutTypes.length !== checkpointCutTypes.length || resumeCutTypes.some((t, i) => t !== checkpointCutTypes[i])) {
+            return fail(`resume: cutTypes [${resumeCutTypes.join(',')}] does not match the checkpoint's authorised set [${checkpointCutTypes.join(',')}] — a resume cannot escalate, narrow, or otherwise change the destruction policy wave 1 established (refused)`);
+          }
+          // (b) OFFSET↔OUTLEN↔CONTENT: re-derive the committed length AND the committed BYTES by reducing the
+          // source prefix [0, offset) with the SAME cut logic (the source is now proven == the snapshot). A
+          // forged/stale (offset, outLen) pair — individually valid but mutually inconsistent — reduces to a
+          // DIFFERENT length than claimed → refuse. rung-2 r8 Finding A (MED-HIGH): the length check ALONE is
+          // not enough — it is satisfied by ANY equal-length bytes, so a caller with ordinary write access to
+          // `outPath` (no src/snapshotDir/manifest access needed) can substitute the already-committed prefix
+          // between waves and this block, pre-fix, never noticed. Fixed by hashing what SHOULD be at
+          // outPath[0, committed) as it is derived (same KEPT-line decisions as the length re-derivation,
+          // costing nothing extra beyond that scan) and comparing it below against outPath's ACTUAL bytes in
+          // that range. Untrusted path only — `_trustedResume` (reduceToCompletion's own loop) never reaches
+          // here, so an honest multi-wave drive never pays this; the cost lands only on the caller that needs
+          // proving, at O(committed) ⊆ O(offset), the same order already paid two lines below by the sha256File
+          // source-desync check.
           let derivedOutLen = struct.bomLen || 0; // BOM is preserved verbatim (outLen starts at the BOM length)
+          const derivedHash = crypto.createHash('sha256');
+          if (struct.bomLen) derivedHash.update(readRange(fd, 0, struct.bomLen));
           scanWave(fd, offset, struct.bomLen || 0, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, (lineBuf) => {
             const lt = lineText(lineBuf);
-            if (!lt.trim()) { derivedOutLen += lineBuf.length; return; } // blank line kept verbatim
+            if (!lt.trim()) { derivedOutLen += lineBuf.length; derivedHash.update(lineBuf); return; } // blank line kept verbatim
             let po = null, pOk = true;
             try { po = JSON.parse(lt); } catch { pOk = false; }
-            if (!(pOk && cutSet.has(unitType(po, typeField)))) derivedOutLen += lineBuf.length; // kept (unparseable/typeless/non-cut)
+            if (!(pOk && cutSet.has(unitType(po, typeField)))) { derivedOutLen += lineBuf.length; derivedHash.update(lineBuf); } // kept (unparseable/typeless/non-cut)
           });
           if (derivedOutLen !== committed) {
             return fail(`resume: checkpoint (offset ${offset}, outLen ${committed}) is inconsistent — the source prefix [0, ${offset}) reduces to ${derivedOutLen} bytes, not ${committed} (a forged/stale checkpoint would drop or duplicate records at the resume seam — refused)`);
+          }
+          const actual = sha256FileRange(outPath, 0, committed);
+          if (actual.read !== committed || actual.digest !== derivedHash.digest('hex')) {
+            return fail(`resume: the committed prefix in outPath (bytes [0, ${committed})) does not match what the source prefix [0, ${offset}) reduces to — content mismatch, not merely a length one (the output was altered independently of the source since the checkpoint was recorded; refused)`);
           }
         }
       }
     }
 
-    // Write setup: wave 1 → per-pid TEMP (atomic-renamed to outPath at wave end, so
+    // Write setup: wave 1 → an unpredictable TEMP (atomic-renamed to outPath at wave end, so
     // the final path is NEVER opened 'w'); resume waves append to the published
     // outPath (an 'a' after truncate-to-committed, not a truncate-to-zero).
     let outLen = 0; // out + tmpPath are function-scoped (declared above for the catch/finally)
@@ -976,7 +1081,7 @@ export function reduceFile(src, opts = {}) {
         // OWNERSHIP-AFTER-CREATE (same rule as the json-single site above): the reap target is set
         // only once the exclusive create has succeeded, so the finally can never unlink a file the
         // engine did not make.
-        const candidate = `${outPath}.${process.pid}.tmp`;
+        const candidate = `${outPath}.${tmpSuffix}.tmp`;
         out = fs.openSync(candidate, 'wx'); // O_EXCL fresh inode (source-sacred by construction — same class as the json-single temp + the manifest); wave-1 rename breaks any hardlink at outPath before a resume ever appends
         tmpPath = candidate; // created by US → the reaper owns it
         if (struct.bomLen) { writeFull(out, readRange(fd, 0, struct.bomLen)); outLen = struct.bomLen; } // BOM is structural — always preserved (writeFull loops short writes)
@@ -1076,7 +1181,7 @@ export function reduceFile(src, opts = {}) {
     // DATA-level no-op fast-path for ndjson (cluster 2C / WAVE-8 L4-C): a wave that processed the WHOLE file in
     // ONE pass (offset===0 → done) and cut NOTHING is a byte-identical no-op — do NOT publish a wasteful rewrite;
     // return skipped:true, uniform with the opaque/json-single skip. (A MULTI-wave all-absent reduce is caught at
-    // reduceToCompletion's completion level.) The unpublished per-pid temp is reaped by the finally.
+    // reduceToCompletion's completion level.) The unpublished temp is reaped by the finally.
     // L4 nit-b (WAVE-9): match json-single's no-op (which takes NO snapshot) — a streaming ndjson pass MUST
     // snapshot before it can know cut===0, so a blob was written; if it was FRESH this call (snapWasFresh —
     // NOT a dedup of a blob another source references) remove it so a no-op leaves no orphan, and report
@@ -1127,17 +1232,29 @@ export function reduceFile(src, opts = {}) {
       ok: true, skipped: false, structure: 'ndjson', dryRun,
       unitsSeen, unitsCut, unitsKept, unitsUnparsed, bytesSeen, bytesCut, bytesKept,
       done: r.done, nextOffset: r.nextOffset,
-      checkpoint: r.done ? null : { srcOffset: r.nextOffset, outLen, structure: 'ndjson', bomLen: struct.bomLen || 0, snapshotPath },
+      // rung-2 r9 leaf1 (MEDIUM): cutTypes is bound into the checkpoint (canonical sorted array,
+      // set-equal not array-equal — see the resume-side compare below) so a hand-driven resume
+      // cannot ESCALATE the destruction policy mid-file. Without this, a resume call could pass a
+      // cutTypes list that adds a type ABSENT from the already-processed prefix: the offset<->outLen
+      // content re-derivation (below) re-scans that SAME prefix under the NEW cutSet, produces an
+      // IDENTICAL result (the added type never appears there to diverge), passes, and the REST of
+      // the file is then cut under a policy wave 1 never authorised — silent over-destruction,
+      // ok:true, zero signal. Bound at wave 1 (this return), the ONLY point that knows what the
+      // caller actually authorised for THIS drive.
+      checkpoint: r.done ? null : { srcOffset: r.nextOffset, outLen, structure: 'ndjson', bomLen: struct.bomLen || 0, snapshotPath, cutTypes: [...cutSet].sort() },
       outPath: dryRun ? null : outPath, snapshotPath,
     };
   } catch (e) {
     return fail(`reduce failed: ${e.message}`); // #1: ANY fs error (bad outPath, ENOTDIR, rename race, disk full…) → ok:false, never a raw throw
   } finally {
     // Non-throwing cleanup (each op is individually caught so the finally can never mask the return):
-    // close the output fd and remove the unpublished per-pid temp if a throw left them behind. On the
+    // close the output fd and remove the unpublished temp if a throw left them behind. On the
     // happy path both are already null (fd closed, temp renamed) → this is inert. #7: a temp orphaned
-    // between write and rename is reaped here. (A DIFFERENT-pid stale temp is deliberately NOT swept —
-    // it may belong to a live process; the CoalWash lock prevents concurrent same-outPath runs.)
+    // between write and rename is reaped here. (A stale temp from an EARLIER crashed run is not swept
+    // here — this cleanup only knows and reaps the ONE randomly-suffixed `tmpPath` this call itself
+    // created; a leftover from a prior run carries a DIFFERENT random suffix and is simply invisible
+    // to this reap, not deliberately spared. The CoalWash lock prevents a concurrent same-outPath run
+    // from existing at all.)
     //
     // THE REAP TARGET IS AN OWNERSHIP CLAIM, NOT A COMPUTED PATH (lab-grad2 N4, measured). This
     // comment used to read "already renamed away, or never created" — a TWO-case comment for a
@@ -1162,6 +1279,18 @@ export function reduceToCompletion(src, opts = {}) {
     ok: true, skipped: false, structure: null, dryRun: !opts.outPath, waves: 0,
     unitsSeen: 0, unitsCut: 0, unitsKept: 0, unitsUnparsed: 0, bytesSeen: 0, bytesCut: 0, bytesKept: 0,
     snapshotPath: null, outPath: opts.outPath || null, done: false, reason: null,
+    // ROUND-7 w7-leaf2 (the second, separate HIGH — the REPORTING half, not the TOCTOU half): on a
+    // multi-wave drive, wave 1's real bytes are published at `outPath` the moment wave 1 completes
+    // (see the write-setup comment above `reduceFile`'s ndjson branch — "atomic-renamed to outPath
+    // at wave end", then EVERY later wave appends to that already-published file). If a LATER wave
+    // then fails, an early `ok:false` return here read as "refused, nothing happened" -- but wave 1
+    // had already written real bytes into `outPath` (and, on wave 1, a real blob into the snapshot
+    // store) before the failure. This flag distinguishes the two: true means at least one real,
+    // non-dry-run wave published before the run ended, whatever the final `ok` value says. Two
+    // internal failure paths below already clean up the partial file themselves (the overlong-wave
+    // and re-read-ceiling refusals) -- they explicitly clear this flag back to false, since nothing
+    // partial is left on disk once that cleanup runs.
+    partialOutput: false,
   };
   // BREAK 3-B (WAVE-7 L4 — the size-relative re-read-explosion floor lives on the DRIVE loop, where the
   // explosion happens; a single reduceFile wave can't explode). Stat once: a sub-CHUNK per-wave BYTE budget
@@ -1202,6 +1331,11 @@ export function reduceToCompletion(src, opts = {}) {
     acc.unitsSeen += r.unitsSeen; acc.unitsCut += r.unitsCut; acc.unitsKept += r.unitsKept; acc.unitsUnparsed += r.unitsUnparsed;
     acc.bytesSeen += r.bytesSeen; acc.bytesCut += r.bytesCut; acc.bytesKept += r.bytesKept;
     if (r.snapshotPath) acc.snapshotPath = r.snapshotPath;
+    // This wave genuinely wrote/appended real bytes to `outPath` (a dry-run writes nothing at all;
+    // reduceFile's own atomic-temp-then-rename or append-mode write already committed by the time it
+    // returns ok:true). Set unconditionally here, not just once — a later wave's failure must still
+    // read as "yes, something upstream already published," which is exactly what this flag is for.
+    if (!acc.dryRun) acc.partialOutput = true;
     if (r.done) {
       acc.done = true;
       acc.reductionPct = acc.bytesSeen ? Number((100 * acc.bytesCut / acc.bytesSeen).toFixed(2)) : 0;
@@ -1221,6 +1355,7 @@ export function reduceToCompletion(src, opts = {}) {
         acc.skipped = true;
         acc.reason = 'none of the requested cut-types are present in the file — nothing to cut (a no-op ndjson reduction is skipped; source untouched, no output written)';
         acc.outPath = null;
+        acc.partialOutput = false; // the byte-identical copy was just unlinked above — nothing partial remains
       }
       // LOOP SOURCE-ANCHOR (cluster 1 / L3, WAVE-9): the old end-ONLY whole-file re-hash lived here — it was
       // defeated by a mid-loop change reverted before completion, and caught a non-revert change only AFTER
@@ -1248,6 +1383,7 @@ export function reduceToCompletion(src, opts = {}) {
       if (advance > 0 && advance < CHUNK && (size / advance) * CHUNK > REREAD_AMPLIFICATION_CAP * size) { // WAVE-8 L4-B: filesize-relative
         if (!acc.dryRun && acc.outPath) { try { fs.unlinkSync(acc.outPath); } catch { /* best-effort cleanup of wave 1's partial */ } }
         acc.ok = false;
+        acc.partialOutput = false; // wave 1's partial was just unlinked above — nothing left on disk
         acc.reason = `per-wave budget too small for the ${size}-byte file — wave 1 advanced only ${advance} bytes, projecting ~${Math.ceil(size / advance)} waves each re-reading a full chunk (~${Math.ceil(CHUNK / advance)}× the filesize of re-reads, over the ${REREAD_AMPLIFICATION_CAP}× cap — an O(waves × CHUNK) re-read explosion); raise maxBytes/maxLines or omit them for the safe defaults`;
         return acc;
       }
@@ -1282,6 +1418,7 @@ export function reduceToCompletion(src, opts = {}) {
     if (reReadAccum > reReadCeiling) {
       if (!acc.dryRun && acc.outPath) { try { fs.unlinkSync(acc.outPath); } catch { /* best-effort cleanup of the partial */ } }
       acc.ok = false;
+      acc.partialOutput = false; // the accumulated partial was just unlinked above — nothing left on disk
       acc.reason = `per-wave budget too small for the ${size}-byte file — the drive has re-read ~${reReadAccum} bytes over ${acc.waves} waves (past the size-relative re-read ceiling ${reReadCeiling} B [${size > CHUNK ? REREAD_AMPLIFICATION_CAP : REREAD_SUBCHUNK_CAP}× filesize] — an O(waves × re-read) explosion that grinds a sub-budget on ANY file size, small files included); raise maxBytes/maxLines or omit them for the safe defaults`;
       return acc;
     }
@@ -1385,9 +1522,10 @@ export function snapshotSource(src, snapshotDir) {
       // check and falls straight into this branch, which is the write.
       // COPYFILE_EXCL alone is NOT the fix here (unlike the restore temp): dedup REQUIRES overwriting
       // a wrong-hash blob, and EXCL would refuse that. So use the manifest writer's idiom instead —
-      // an O_EXCL fresh inode at a per-pid temp, then an atomic rename that REPLACES the directory
-      // entry (rename does not follow a link at the destination). A stale same-pid temp fails the
-      // snapshot loudly, which is rail 5 behaving correctly: no snapshot, no destroy.
+      // an O_EXCL fresh inode at an unpredictable temp (see below), then an atomic rename that
+      // REPLACES the directory entry (rename does not follow a link at the destination). A stale
+      // temp at THIS suffix fails the snapshot loudly, which is rail 5 behaving correctly: no
+      // snapshot, no destroy.
       // UNPREDICTABLE temp name, not `<blob>.<pid>.tmp`. A pid is guessable and observable, so a
       // per-pid temp path can be PRE-PLACED by anyone able to write the store — and the lab reports
       // that on win32 a DANGLING symlink sitting there defeats COPYFILE_EXCL/`wx` (the existence
@@ -1419,7 +1557,7 @@ export function snapshotSource(src, snapshotDir) {
     // The source inode is NEVER opened for write; the only read of an aliased existing manifest reads src
     // bytes into `existing` = harmless (the garbage lands in the manifest-aid, never src). Any failure skips
     // the manifest (it is an aid, not a gate). Do NOT unlink-then-create on EEXIST — that reintroduces the
-    // race wx closes; a stale .pid.tmp from a crash simply skips the manifest that run (acceptable for an aid).
+    // race wx closes; a stale unpredictable-suffix temp from a crash simply skips the manifest that run (acceptable for an aid).
     //
     // GRADUATION-RECORD RESIDUAL (cost, KNOWN + ACCEPTED — a class-a-ultra prototype note): this read-whole +
     // rewrite + rename is O(M) in the manifest's current row count, so N snapshots to ONE shared store cost
@@ -1438,12 +1576,29 @@ export function snapshotSource(src, snapshotDir) {
     // not per row), or shard the manifest per run — a store-lifecycle change, never an inline per-snapshot swap
     // that trades this safety for speed. Under-fix over reopening a source-corruption hole.
     const manifestPath = path.join(snapshotDir, SNAPSHOT_MANIFEST);
-    const row = `${JSON.stringify({ original: src, sha256: sha, bytes, at: new Date().toISOString(), deduped })}\n`;
-    const manifestTmp = `${manifestPath}.${process.pid}.tmp`;
+    // rung-2 F3 — captured ONCE, at snapshot time, so a later restore's ownership check has something
+    // canonical to compare against without re-deriving it from a possibly-since-moved/deleted `src`.
+    // `originalCanonical` closes spelling drift (case/slash/8.3/UNC/trailing-separator); `originalDev`/
+    // `originalIno` close what realpath cannot (a hardlink alias, a same-volume rename) — see the
+    // OWNERSHIP comment on `restoreFromSnapshot` for the full mechanism + named residuals. Neither can
+    // fail this write: `physicalForCreate` returns null rather than throwing, and the stat is try/caught.
+    const originalCanonical = physicalForCreate(src);
+    let originalDev = null;
+    let originalIno = null;
+    try {
+      const st = fs.statSync(src, { bigint: true });
+      originalDev = st.dev.toString();
+      originalIno = st.ino.toString();
+    } catch { /* src unreadable at snapshot time -> dev/ino fallback unavailable; canonical string may still help */ }
+    const row = `${JSON.stringify({ original: src, originalCanonical, originalDev, originalIno, sha256: sha, bytes, at: new Date().toISOString(), deduped })}\n`;
+    // F2 [MEDIUM, rung-2 R1 lab] — UNPREDICTABLE temp name, matching the blob temp above (see its own
+    // comment for the full reasoning): the old `${manifestPath}.${pid}.tmp` was a guessable/observable
+    // pre-placement target, one of the 4 sites that still used it while only the blob temp had this fix.
+    const manifestTmp = `${manifestPath}.${crypto.randomBytes(12).toString('hex')}.tmp`;
     // OWNERSHIP-AFTER-CREATE + AN HONEST RETURN (lab-grad2 N5 — the same reaper defect as reduceFile's,
     // and this was its worst instance). The finally used to `existsSync → unlink` the temp path
-    // unconditionally, so a user file planted at `<store>/manifest.jsonl.<pid>.tmp` was DELETED by the
-    // cleanup after `wx` had correctly refused to write through it — and the function still returned a
+    // unconditionally, so a user file planted at the (then-predictable) manifest temp path was DELETED by
+    // the cleanup after `wx` had correctly refused to write through it — and the function still returned a
     // bare `{ok:true}`. Deleting a file with no snapshot and no bin is the furnace with no stop on the
     // way (house rule 2026-07-27: bins are not the furnace, but past the bin IS), and reporting success
     // over it is the same class as a rollback claiming clean over a partial.
@@ -1464,7 +1619,7 @@ export function snapshotSource(src, snapshotDir) {
       fs.renameSync(manifestTmp, manifestPath); // atomic: the fresh inode replaces any aliased manifest entry
       manifestOwned = null; // renamed away — nothing left to reap
     } catch { manifestSkipped = true; /* manifest is an aid, not a gate — any failure skips it, NEVER writes through src's inode */ }
-    finally { if (manifestOwned) { try { fs.unlinkSync(manifestOwned); } catch { /* best-effort reap of a mid-write temp so a stale one never blocks the next same-pid O_EXCL */ } } }
+    finally { if (manifestOwned) { try { fs.unlinkSync(manifestOwned); } catch { /* best-effort reap of a mid-write temp — pure hygiene: each call's fresh random suffix can never collide with a later call's O_EXCL regardless */ } } }
     // The snapshot itself STANDS on a skipped manifest — the blob is the undo net, the manifest is an
     // audit aid (that split is deliberate and unchanged). What changes is that the skip is SAID: a
     // caller can no longer read an unqualified ok:true as "the audit row landed".
@@ -1490,11 +1645,258 @@ function existsPopulated(p) {
 // safe. `src` (OPTIONAL, kept) only yields a sharper "you aimed at the protected source" diagnostic when a
 // caller declares one; the intrinsic clobber refusal is the load-bearing default guard. Restoring to a
 // fresh/empty scratch/target path is unaffected; overwriting a populated file is opt-in via force.
+//
+// OWNERSHIP (rung-2, HIGH — the PRIMITIVE must not lean on a caller's guard, the same posture
+// `snapshotSource`'s own L1 self-guard above already takes). The hash check proves BYTE-INTEGRITY —
+// this blob really is the bytes named by its hash. It proves NOTHING about AUTHORIZATION: the store
+// directory is directly enumerable (`readdirSync` lists every hash, no manifest read required) and,
+// pre-fix, ANY ref discoverable that way restored for ANY caller. MEASURED, not reasoned: a per-tenant
+// `snapshotDir` shared across two roles let an ORDINARY, non-adversarial "recover everything visible in
+// the shared undo-net store" caretaker script land role A's secret content in role B's own recovery
+// directory — no malice required, only the caretaker discipline a shared store invites (`scratchpad/
+// cw-lab-rung2-r1/coord-verify/verify-crosstenant.mjs`, real run).
+//
+// `original` is REQUIRED — UNCONDITIONALLY, not gated on whether the caller passed `snapshotDir`. An
+// earlier version of this comment claimed the explicit-blob-path mode "is not an enumerable shared space
+// and is already fully secured by the hash check" — MEASURED FALSE (`scratchpad/cw-lab-rung2-r2/
+// coord-verify/verify-bypass.mjs`, real run): the SAME caller, handing this function the absolute blob
+// path it already holds instead of naming the directory separately, is not an attack technique — it is
+// the identical call with a different, equally natural shape, and it walked straight past the `if
+// (snapshotDir)` gate. The gate is gone; `ownershipDir` (below) is `snapshotDir` when the caller named
+// one, else the directory the blob physically lives in (`blob` has already passed `existsSync` by this
+// point, so its `dirname` always resolves) — ONE code path, not two.
+//
+// The caller must ASSERT which source path it believes this blob is a snapshot OF, checked against the
+// manifest row `snapshotSource` wrote for that hash — an unconfirmed assertion, or a manifest that cannot
+// confirm it (absent / unreadable / no matching row), REFUSES. This converts "restore any blob you can
+// reach" into "prove you know what this blob is for."
+//
+// CANONICALIZED, not raw string equality (rung-2 F3). `row.original === original` refused the SAME
+// physical file on a case difference, a drive-letter-case difference, forward slashes, a trailing
+// separator, a `\\?\` prefix, or a confirmed-real 8.3 alias — the anti-data-loss mechanism refusing in
+// exactly the situations that produce data loss. Two independent, ALREADY-ESTABLISHED mechanisms in this
+// file close it, matched to what each can and cannot do:
+//   (1) REALPATH STRING (`physicalForCreate`, not the stricter `physicalOrNull`): closes every spelling
+//       variant above. `physicalForCreate` is used here — not the exists-or-null primitive — because a
+//       restore target commonly does NOT exist (the file is gone; that is the reason someone is
+//       restoring it) and an unresolvable side must fail closed, never throw, never fall back to a
+//       lexical compare (rung-2 F3 rail 2). `physicalForCreate` realpaths the deepest EXISTING ancestor
+//       and reattaches a missing tail LITERALLY — so a gone file whose PARENT still exists still gets its
+//       directory portion normalized, and an entirely unresolvable path (parent gone too, or a win32
+//       device/UNC shape) returns null, which this check treats as unconfirmable, never as a match.
+//   (2) DEV+INO (`{bigint:true}`, the SAME NTFS-64-bit-safe idiom `collidesWithSource` already uses for
+//       exactly this reason): closes what (1) CANNOT — MEASURED, not assumed (a hardlink alias and a
+//       same-volume rename/move both keep the SAME inode; realpath resolves each NAME independently and
+//       does not collapse them — `collidesWithSource`'s own comment already says realpath "is blind to a
+//       hardlink"). A hardlinked alias of the true original, or the original renamed/moved on the SAME
+//       volume, confirms via dev+ino even though its realpath string differs from the row's.
+//       WHAT THIS LEG OPENS, not just what it closes (INSPECT MED-LOW, named here; rung-2 F4, HIGH,
+//       was dispatched specifically to close it — see below for why it only narrows). dev+ino
+//       is recorded at SNAPSHOT time and compared against a stat taken at RESTORE time — an inode
+//       REUSED between those two moments grants ownership to a genuinely different file.
+//
+//       rung-2 F4 [HIGH, CORRECTED 2026-08-05] — `devinoContradicts` (below, in `restoreFromSnapshot`)
+//       was built to close this: when the declared original still exists, its LIVE dev+ino is checked
+//       against the row's, and a disagreement overrides a stale `canonMatch` instead of merely failing
+//       to help it. MEASURED FALSE AS A FULL CLOSE, not reasoned — real CI (GitHub Actions run
+//       30937712605, `ubuntu-latest` node 22 AND 24) proves the shipped fix (`6f261e4`) does not close
+//       the recycled-path case on ext4: `unlinkSync` immediately followed by `writeFileSync` at the same
+//       path, under low allocation pressure, lets the OS hand the NEW file the SAME inode number the
+//       OLD one held — `devinoMatch` then computes TRUE for a genuinely different file, same as
+//       `canonMatch` (same path string), and the row confirms. `windows-latest`/`macos-latest` stay
+//       green on the identical test because NTFS/APFS do not reproduce that recycling pattern in this
+//       CI matrix — the test is not flaky, it is honestly platform-dependent (master-loss-taxonomy
+//       class #57, FILESYSTEM-SEMANTICS-ASSUMPTION BREAK — the code assumed "a live dev/ino match
+//       reliably identifies the same file," which ext4 violates under exactly this access pattern).
+//
+//       CONFIRMED WITH RAW NUMBERS, not left as deduction from the test's pass/fail alone (GitHub
+//       Actions run 30939561156, a one-shot printing diagnostic, deleted after this landed):
+//         linux  (ubuntu, node 22): before.ino=8917289 after.ino=8917289  -> IDENTICAL (recycled)
+//         win32  (windows, node 22): before.ino=8162774324769855 after.ino=8444249301480511 -> DIFFERENT
+//         darwin (macos, node 24): before.ino=2882206 after.ino=2882207 -> DIFFERENT (sequential)
+//       Three platforms, one immediate unlink+recreate at one path: only Linux recycles the inode
+//       at CI scale. This is measured, not inferred from the assertion's own outcome.
+//
+//       Birthtime/ctime were considered and NOT added as a fix — CONFIRMED unreliable with a second
+//       diagnostic (run 30940310775, deleted after this landed), not left as a reasoned guess:
+//         ubuntu · node 24 (F4's own test RED here): sameIno=true sameBirthtime=true sameCtime=true —
+//           dev/ino, birthtime AND ctime all IDENTICAL. The whole unlink+recreate landed inside one
+//           millisecond tick; no stat-time field distinguishes the two files at that resolution.
+//         ubuntu · node 22 (F4's own test GREEN here, a DIFFERENT probe instance, same run): the
+//           diagnostic's own unlink+recreate DID recycle the inode (sameIno=true) yet birthtime
+//           differed by exactly 1ms — recycling is a per-attempt RACE against ext4's free-inode
+//           state, not a fixed property of one CI run; the same machine recycles on one attempt and
+//           not the next.
+//       Two consequences: (1) the sub-millisecond-collision risk this paragraph originally predicted
+//       is REAL, not hypothetical — node 24's run hit it exactly; (2) even where birthtime DOES
+//       differ, it cannot be trusted as a general fix because the SAME machine, SAME code, adjacent
+//       runs, produced BOTH outcomes. A signal that sometimes helps and sometimes doesn't is not a
+//       security boundary. No OS-reported stat field (dev, ino, birthtime, ctime) closes this
+//       reliably at this operation's natural timescale — AT MILLISECOND resolution.
+//
+//       A THIRD diagnostic (run 30941217882, deleted after this landed) checked whether the
+//       collision was a real physical tie or a DISPLAY-RESOLUTION artifact, by reading the SAME
+//       bigint stat's ctimeNs/birthtimeNs fields instead of its Ms ones:
+//         ubuntu · node 22: before.birthtimeNs=1785870006585535727 after=1785870006586474805
+//           -> DIFFER by ~939,078 ns (~0.94ms) -- genuinely two ticks, not one.
+//         ubuntu · node 24: before.birthtimeNs=1785870005367425059 after=1785870005368065787
+//           -> DIFFER by ~640,728 ns (~0.64ms) -- the SAME run whose Ms-truncated reading showed
+//           "IDENTICAL" above; at ns resolution the two operations were never actually simultaneous,
+//           only close enough to round into the same millisecond bucket.
+//       Read as MECHANISM, not luck: unlink+writeFileSync is a real kernel round-trip (VFS lookup,
+//       journal commit, page-cache update) costing hundreds of microseconds minimum on any real
+//       hardware -- the observed gap is that cost, not a coin-flip against clock-tick granularity.
+//       This is the OPPOSITE shape from the ms-level finding: there, "sometimes 0 sometimes not"
+//       meant genuine physical collision at that resolution; here, a single ns-resolution sample
+//       showing separation is consistent with a real, structural lower bound on inter-syscall
+//       latency -- encouraging, but ONE sample per platform is not the repeated-trial proof this
+//       room's own DIAG-#2 lesson (a favorable single sample IS NOT a security boundary) demands
+//       before trusting a timing signal. NOT adopted as the closing mechanism on that basis.
+//
+//       THE BELT WAS CONSIDERED AND DOES NOT FIT THIS CASE, stated so nobody re-tries it blind. The
+//       existing belt (see `collidesWithSource`/gate-4-shaped fail-closed refusals elsewhere in this
+//       file) fires when identity CANNOT BE COMPUTED AT ALL (e.g. `stat.ino === 0`, an inode-less
+//       volume) -- an ABSENCE trigger. Leg 3's attack is the opposite shape: dev/ino ARE computable
+//       and DO match (the row's recorded values and the live recreated file's values are identical,
+//       by inode recycling) -- a PRESENT-BUT-WRONG signal, not an absent one. The belt itself is
+//       UNCHANGED, and remains correct for its own, different (inode-less) case.
+//
+//       TIER 2 (ctimeNs) — ATTEMPTED AND REVERTED, 2026-08-05, SAME DAY. `ctimeNs` was tried as the
+//       tier-2 discriminator ("same dev/ino, does ctimeNs also disagree?"), following directly from
+//       the ns-measurement two paragraphs up. It directly REGRESSED a real, pre-existing legitimate
+//       case (`RUNG5 A6`: restoring a snapshot back over a since-modified source), caught by this
+//       room's own full-suite-before-commit discipline before it shipped. Root cause, MEASURED twice
+//       by direct isolated probe, not reasoned: `ctime` bumps on ANY write to an inode's content, not
+//       only when the inode is reused for a different file. A recycled inode (File B created fresh at
+//       a path File A used to occupy) and a genuinely-modified original (File A, same inode, content
+//       rewritten) both present the IDENTICAL signature — "same dev/ino, a later ctime than what the
+//       manifest recorded" — because both are, respectively, a creation event and a write event, and
+//       POSIX/NTFS ctime semantics do not distinguish "this inode's OWNER changed" from "this inode's
+//       CONTENT changed". No refinement of the ctime comparison closes this; the filesystem does not
+//       expose the fact tier 2 needed. This is a durable NEGATIVE finding, the same class as F2's own
+//       "not patchable at this layer" — reverted from both the manifest write side (`originalCtimeNs`
+//       is not recorded) and the restore side (no ctimeNs comparison exists), leaving no dead
+//       machinery behind.
+//
+//       DISPOSITION: NARROWED, NOT CLOSED — unchanged from before tier 2 was attempted. `6f261e4`
+//       correctly and verifiably (all 3 CI platforms, Legs 1-2 of the F4 test) closes the SIMPLER
+//       attack: an attacker declares a FALSE original while the TRUE original persists untouched. The
+//       recycled-path variant (Leg 3) is a confirmed-live residual on Linux, bounded exactly as this
+//       paragraph already said before F4 was attempted: under F2's own threat model (STEP 2, below) an
+//       attacker with store write can forge a row outright, so this adds nothing there; without store
+//       write they would additionally need the path recycled at them AND the row's exact values —
+//       narrower than F2's residual, but not closed by any dev/ino/ctime signal this function can read
+//       at restore time (tier 2 was the best-available metadata attempt, and it is now confirmed
+//       insufficient, not merely untried). Closing it fully needs one of: (a) an out-of-band,
+//       CoalWash-owned identity marker this stateless CLI does not currently maintain (a persistent
+//       watch/generation-counter, or a per-snapshot token that survives incidental recycling but not a
+//       deliberate copy — real new infrastructure, not a stat-field swap), or (b) extending F2's
+//       operational boundary (trusted-tenant-only store, operator-arranged isolation) to explicitly
+//       cover ordinary filesystem churn AT THE ORIGINAL PATH, not merely store-write access — since
+//       this residual needs no store access at all, only ordinary delete+recreate activity at a
+//       tracked path. NEITHER IS BUILT HERE — both are a design decision for whoever owns this engine's
+//       wiring, per the state-schema-guard convention (AGENTS.md), not something to build unilaterally
+//       under one dispatch. The `rung-2 F4 [HIGH]` test's Leg 3 stays `test.todo()` and stays RED on
+//       `ubuntu-latest` — that is the correct, honest state until one of the above lands. It still
+//       RUNS every gate on every platform and still PRINTS; it does not fail the build, but reading
+//       "does not fail the build" as "the gap is closed" would be exactly the mistake this whole
+//       investigation exists to prevent.
+// Both are recomputed fresh at restore time from the CALLER's declared `original` — the manifest row
+// carries its OWN canonical + dev/ino, captured once at snapshot time — and a match on EITHER mechanism
+// confirms. Neither can MERGE two genuinely different originals (rung-2 F3 rail 1): two distinct real
+// files canonicalize to two distinct realpath strings (MEASURED — `scratchpad/…/probe-canon.mjs`, no
+// collision across upper/lower/forward-slash spellings of one file vs a second, different file in the
+// same directory) and two distinct files never share a device+inode pair by construction. A LEGACY row
+// written before this fix (no `originalCanonical` field at all) falls back to the OLD exact-string
+// compare for THAT row only — a real migration concern for a manifest that outlives a code upgrade
+// mid-batch, not a new merge risk (still exact equality, nothing new to collide).
+//
+// NAMED RESIDUAL, NOT CLOSED: "source renamed" / "workspace moved" is closed ONLY when the file still
+// exists at the NEW location on the SAME volume (dev+ino survives a same-volume rename) and the caller
+// declares that new location. A CROSS-VOLUME move (a new inode by construction) or a fully DELETED file
+// declared under a spelling that differs from the one recorded at snapshot time has no available identity
+// signal — no mechanism here, or plausible without a rename/move-tracking log this file does not keep,
+// can recover it. Named, not built: out of scope for "canonicalize the compare."
+//
+// STEP 2 (F2, HIGH) — THE STORE'S THREAT MODEL, STATED AS A BOUNDARY, NOT A FOOTNOTE. A reviewer
+// tried to refute "not patchable at this layer" and could not: it enumerated SEVEN candidate fixes at
+// this layer and killed all seven with reasons (a disk cross-check — the attacker just declares their
+// own real file · blob-hash-equals-current-content — defeats the product, a restore exists BECAUSE the
+// original is gone · file uid/ACL — no per-row provenance, meaningless on win32, a shared store shares
+// the file · a hash-chained/append-only manifest — the chain is computable from PUBLIC data, only a
+// KEYED MAC resists forgery · blob metadata — the blob is genuine and victim-written, it says nothing
+// about who may restore it · refusing ambiguous same-sha rows — breaks the legitimate dedup case
+// (rot-canary self-catch: NOT F3 rail-1, which tests non-merge of DIFFERENT files — the real dedup
+// control is `attack3-manifest-path.mjs` §3d, two distinct originals sharing one deduped blob, both
+// restoring correctly) and the attacker has write access anyway · per-tenant isolation — this IS the
+// deployment-side answer below, not a code fix). The gap is AUTHENTICATION, and authentication needs a
+// secret or a trust boundary this store does not have.
+//
+// THE BOUNDARY, stated plainly for whoever is reading this to understand what the store actually
+// promises:
+//   1. THE STORE IS TRUSTED-TENANT-ONLY. CORRECTED 2026-08-05 (source: `cw-lab-rung2-r4/LAB-RECORD.md`
+//      §"The F1 sibling attempt" Attempt B) — this point used to state the precondition as "write
+//      access to snapshotDir's manifest"; that is SUFFICIENT but was never NECESSARY. The attack needs only
+//      (a) READ access to the victim's blob bytes, by ANY means (a direct copy, a listing — the
+//      store is content-addressed, so possessing the bytes IS possessing a valid ref), plus
+//      (b) ordinary WRITE access to any directory the restoring process can reach — the attacker's
+//      OWN, never the victim's. The attacker declares their own directory as `snapshotDir` and
+//      forges their own manifest there; F1-b's fix (snapshotDir now required) does not close this,
+//      since the attacker already owns a directory that satisfies the requirement. (MEASURED:
+//      `scratchpad/cw-lab-rung2-r2/w1/attack3-manifest-path.mjs` §3e, AND re-verified against a
+//      SCHEMA-AWARE forgery that also fabricates matching `originalCanonical`/`originalDev`/
+//      `originalIno` — both leak the victim's content, `ok:true`.) This is not a bug awaiting a
+//      fix; it is the boundary.
+//   1b. A SECOND, STRICTLY WEAKER ROUTE TO THE SAME BOUNDARY. CORRECTED 2026-08-05 (source:
+//      `cw-lab-rung2-r7/LAB-RECORD.md`, w7-leaf1, department-head-confirmed at source). The ownership
+//      check above confirms `original` against a manifest row — but `toPath` (where the verified
+//      bytes get published) is a THIRD, independent input this check never binds to `original` or the
+//      confirming row at all. A caller does not need to forge anything: reading a genuine,
+//      already-existing manifest row supplies a valid `original`, and `toPath` is the caller's own
+//      choice from the start. No write to the store, no forged row — READ access to the manifest is
+//      SUFFICIENT on its own, given ordinary write access to a directory the attacker already owns
+//      (the same (b) as point 1, but (a) drops from "possess the blob bytes" to "can read the
+//      manifest", a strictly weaker adversary). (MEASURED: `scratchpad/cw-lab-rung2-r7/coord-verify/
+//      verify-topath-decouple.mjs` — a wrong `original` refuses; the true, unmodified `original` plus
+//      an attacker-chosen `toPath` succeeds, `ok:true, verified:true`, manifest byte-unchanged.) Not a
+//      separate defect from point 1 — the SAME trust boundary, reached through the read-only door.
+//   2. THE MITIGATION IS ISOLATION, and it is the OPERATOR's to arrange, not the engine's to enforce —
+//      a `snapshotDir` per trust domain. CORRECTED 2026-08-05 (the 1b measurement above): isolating
+//      against co-tenant WRITE alone is NOT sufficient — point 1b needs only READ access to the
+//      manifest, no write anywhere. The isolation an operator arranges must keep a co-tenant from
+//      READING another tenant's `snapshotDir`, not merely from writing into it; a store mounted
+//      read-only across tenants is NOT safe under this boundary and was, until this correction,
+//      stated as if it were.
+//   3. WHAT OWNERSHIP CHECKING DOES BUY, so this is never read as "the check is worthless": it closes
+//      the CARETAKER-DISCIPLINE failure mode — the realistic one, and the one the lab actually
+//      reproduced first (an ordinary, non-adversarial "recover everything visible in a shared store"
+//      script) — and it forces a DETERMINED attacker's read of the manifest into an EXPLICIT,
+//      code-visible forged claim instead of a silent, undetectable enumeration. Both layers (the check
+//      here, and per-tenant isolation) hold at once, by design; neither substitutes for the other.
+//
+// REJECTED, so it is on record as weighed rather than invented after the fact: WRITER-IDENTITY /
+// signing infrastructure for manifest rows. This is real key-management infrastructure this codebase
+// has never had (no caller/session/tenant identity is threaded through any function in this file),
+// built for a threat that isolation already answers — over-build.
+//
+// LANDING PRECONDITION: this engine is UNWIRED in the shipped `plugin/` dist today (see the
+// UNWIRED_ENGINE mechanism in `scripts/build-plugin.mjs`), which is the only reason F2 is a landing
+// precondition rather than an already-shipped incident. THIS ENGINE MUST NOT BE WIRED INTO DIST until
+// EITHER per-tenant manifests exist (closing F2 in code) OR the three-point boundary above is in the
+// SHIPPED `SECURITY.md` text (closing F2 by disclosure) — the wiring decision is where that choice
+// gets made, not here.
+//
+// COST, inheriting a PRE-EXISTING accepted precedent, not a new one: a restore now ALWAYS reads the whole
+// manifest (was: only when `snapshotDir` given) — O(M) in its row count, the same order as
+// `snapshotSource`'s own already-accepted O(N²) manifest-write cost (see its comment: "the real
+// ULTRA/estate caller's store is per-batch/short-lived, few snapshots per run, the row count never
+// reaches the knee"). The same reasoning covers this read; a long-lived shared store hitting that knee is
+// the pre-existing upgrade trigger, not a new one this check introduces.
 export function restoreFromSnapshot(ref, toPath, opts) {
   // `= {}` only defaults `undefined`, so an explicit null third argument threw on
   // destructuring — the one caller shape that crashed a primitive whose own contract
   // (below) is that it never throws. Normalize first, destructure after.
-  const { snapshotDir = null, src = null, force = false } = (opts && typeof opts === 'object') ? opts : {};
+  const { snapshotDir = null, src = null, force = false, original = null } = (opts && typeof opts === 'object') ? opts : {};
   // A RECOVERY PRIMITIVE MUST NEVER THROW. Every other bad ref returns a fail-closed
   // {ok:false}, but a non-string ref reached path.isAbsolute and threw
   // ERR_INVALID_ARG_TYPE — the one input shape that crashes the caller instead of
@@ -1531,10 +1933,14 @@ export function restoreFromSnapshot(ref, toPath, opts) {
   if (!/^[0-9a-f]{64}$/.test(expect)) {
     return { ok: false, verified: false, reason: `snapshot ref is not a verifiable content-address (basename '${expect}' is not a sha256) — refused, never published unverified` };
   }
-  // #3 copy→verify→(guard)→rename: copy to a per-pid temp, hash-verify, guard the destination, THEN atomic
-  // rename — toPath is NEVER touched until the bytes are proven AND the clobber/alias guards pass. A mismatch
-  // or a refused destination leaves toPath (incl. a toPath===src) byte-intact.
-  const tmpPath = `${toPath}.${process.pid}.tmp`;
+  // #3 copy→verify→(guard)→rename: copy to an unpredictable temp, hash-verify, guard the destination, THEN
+  // atomic rename — toPath is NEVER touched until the bytes are proven AND the clobber/alias guards pass. A
+  // mismatch or a refused destination leaves toPath (incl. a toPath===src) byte-intact.
+  // F2 [MEDIUM, rung-2 R1 lab] — UNPREDICTABLE temp name, matching the blob temp in snapshotSource (see
+  // its own comment for the full reasoning): the old `${toPath}.${pid}.tmp` was guessable/observable and,
+  // being the RECOVERY path, a pre-placed alias here would have the undo net destroy a bystander while
+  // restoring — one of the 4 sites that still used it while only the blob temp had this fix.
+  const tmpPath = `${toPath}.${crypto.randomBytes(12).toString('hex')}.tmp`;
   // OWNERSHIP-AFTER-CREATE (the reduceFile/manifest reaper class, FOUND HERE BY GREPPING every
   // predictable temp rather than by a report — this site was not in the finding). It matters most
   // here: this is the RECOVERY path, so the failure mode was the undo net destroying a bystander
@@ -1550,9 +1956,11 @@ export function restoreFromSnapshot(ref, toPath, opts) {
     // a plain copyFileSync both overwrites an existing file AND follows a symlink planted at the
     // destination — so anyone able to write toPath's directory could aim the restored bytes
     // somewhere else, on the undo net itself. EXCL makes the temp a fresh inode or nothing.
-    // A stale same-pid temp from a crash now fails the restore loudly (EEXIST -> the catch below)
-    // instead of being silently reused; that matches the manifest writer's documented choice NOT to
-    // unlink-then-create, which would reopen the very race EXCL closes.
+    // A stale temp at THIS EXACT random suffix (vanishingly unlikely, but not the point) fails the
+    // restore loudly (EEXIST -> the catch below) instead of being silently reused; that matches the
+    // manifest writer's documented choice NOT to unlink-then-create, which would reopen the very race
+    // EXCL closes. (rung-2 findings-back item 3: this was the 5th of 5 "per-pid"/"same-pid" comments
+    // in the file, the one the previous sweep of 4 missed — the pattern was the finding, not the line.)
     fs.copyFileSync(blob, tmpPath, fs.constants.COPYFILE_EXCL);
     tmpOwned = tmpPath; // EXCL returned → this inode is ours → the catch may reap it
     const got = sha256File(tmpPath);
@@ -1596,7 +2004,105 @@ export function restoreFromSnapshot(ref, toPath, opts) {
       try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
       return { ok: false, verified: false, reason: `toPath exists and is non-empty — refusing to overwrite it without force:true (a restore never silently clobbers a populated destination, incl. the live source)` };
     }
-    fs.renameSync(tmpPath, toPath); // atomic publish — only content-verified, destination-guarded bytes land here
+    // (c) OWNERSHIP (rung-2, see the function header) — UNCONDITIONAL, not gated on whether the caller
+    // named `snapshotDir`. The caller must ASSERT `original` (the source path it believes this blob
+    // came from) AND declare `snapshotDir` (WHERE to consult the manifest that confirms it); the
+    // manifest must CONFIRM `original` via a CANONICALIZED compare (rung-2 F3, see the function
+    // header); any of the three missing/failing refuses. Placed LAST, after every existing guard: a
+    // ref that was already going to be refused (bad shape, traversal, hash mismatch, alias, clobber)
+    // keeps its own, more specific reason — this only additionally gates restores that would
+    // otherwise have SUCCEEDED.
+    //
+    // rung-2 F1-b: `ownershipDir` used to fall back to `path.dirname(blob)` when `snapshotDir` was
+    // omitted — the blob is UNTRUSTED INPUT (the very reference being restored), so that fallback let
+    // the ownership ORACLE be chosen by the same party being asked the question: copy a victim's blob
+    // into an attacker-owned directory, write a self-consistent single-row manifest beside it (the
+    // lab's `cw-lab-rung2-r3` construction — internally-consistent `original`/`originalCanonical`/
+    // `originalDev`/`originalIno`, all matching a file the attacker genuinely owns), and the engine
+    // consults the attacker's own manifest to authorize the attacker's own restore. `snapshotDir` is
+    // now REQUIRED — a caller that does not know its own snapshot directory has no business asking
+    // for a confirmed restore.
+    if (typeof original !== 'string' || !original) {
+      try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+      return { ok: false, verified: false, reason: `ownership not declared: opts.original is required — the store is a shared, enumerable content-address space (directly, or via its own directory), and a restore must assert which source it believes this blob is a snapshot of (refused, never served on a bare hash discovery)` };
+    }
+    if (typeof snapshotDir !== 'string' || !snapshotDir) {
+      try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+      return { ok: false, verified: false, reason: `ownership oracle undeclared: opts.snapshotDir is required — deriving the manifest directory from the untrusted blob reference lets whoever controls that path also supply the manifest that confirms it (refused, never derived from the restored reference itself)` };
+    }
+    const ownershipDir = snapshotDir;
+    // rung-2 F3 rail 2: unresolvable fails CLOSED (declaredCanonical/declaredDev/declaredIno stay null,
+    // never a lexical fallback) — the declared original may legitimately be GONE (that is the point of
+    // a restore), so `physicalForCreate` degrades gracefully rather than `physicalOrNull`'s hard refuse.
+    const declaredCanonical = physicalForCreate(original);
+    let declaredDev = null;
+    let declaredIno = null;
+    try {
+      const dst = fs.statSync(original, { bigint: true });
+      declaredDev = dst.dev.toString();
+      declaredIno = dst.ino.toString();
+    } catch { /* declared original does not exist (or is unreadable) at restore time -> dev/ino unavailable */ }
+    const manifestPath = path.join(ownershipDir, SNAPSHOT_MANIFEST);
+    let manifestText = null;
+    try { manifestText = fs.readFileSync(manifestPath, 'utf8'); } catch { /* absent/unreadable -> cannot confirm */ }
+    let confirmed = false;
+    let devinoContradicted = false; // rung-2 F4: at least one row's live dev/ino disagreed with its own canonMatch
+    if (manifestText !== null) {
+      for (const line of manifestText.split('\n')) {
+        if (!line) continue;
+        let row; try { row = JSON.parse(line); } catch { continue; } // a malformed row confirms nothing, never crashes the restore
+        if (!row || row.sha256 !== expect) continue;
+        const canonMatch = row.originalCanonical != null && declaredCanonical != null && row.originalCanonical === declaredCanonical;
+        const devinoAvailable = row.originalDev != null && row.originalIno != null && declaredDev != null && declaredIno != null;
+        const devinoMatch = devinoAvailable && row.originalDev === declaredDev && row.originalIno === declaredIno;
+        // rot-canary self-catch: fall back to the OLD exact-string compare whenever the row has NO
+        // usable canonical identity to compare against — either a row written before this fix
+        // (`originalCanonical === undefined`, the key never existed) OR a row where snapshot-time
+        // canonicalization genuinely FAILED (`originalCanonical === null`, `physicalForCreate`
+        // returned null for `src` at snapshot time — a narrow race, src vanishing between the hash
+        // read and the canonicalization call). Without this second leg, such a row is confirmable by
+        // NOTHING — not canonical (never captured), not dev/ino (also failed, or absent) — even for
+        // its own exact original spelling, which is a genuine AVAILABILITY regression vs the OLD
+        // code (a bare string compare that never depended on canonicalization succeeding at all).
+        // Still exact equality either way, no new merge risk.
+        const legacyExactMatch = row.originalCanonical == null && row.original === original;
+        // rung-2 F4 [HIGH]: canonMatch is a PATH-SPELLING compare and says nothing about WHAT
+        // currently occupies that path. When the declared original still exists (dev/ino were
+        // captured live), a dev/ino comparison is available and authoritative — the identity of the
+        // FILE, not the string naming it. A row whose recorded dev/ino disagrees with that live
+        // reading describes a DIFFERENT file that used to live at this path (deleted, then a new
+        // file recreated at the same name — ordinary lifecycle, no attacker required) and must
+        // override a stale canonMatch, not merely fail to help it. When the original is genuinely
+        // gone (the point of a restore), declaredDev/declaredIno stay null, devinoAvailable is
+        // false, and canonMatch alone authorizes exactly as before — this leg only bites when a
+        // live, computable identity check contradicts the path string.
+        // rung-2 F4 TIER 2 — ATTEMPTED, REVERTED (2026-08-05). A ctimeNs comparison was built here
+        // and directly REGRESSED a legitimate case, caught by this room's own full-suite-before-commit
+        // discipline (RUNG5 A6, restoring a snapshot back over a since-MODIFIED source): `ctime`
+        // updates on ANY write to an inode's content, not only when the inode is reused for a
+        // different file — confirmed twice by direct measurement (two isolated probes, both platforms
+        // of this box), not merely reasoned. A recycled inode and a genuinely-modified original are
+        // therefore STRUCTURALLY INDISTINGUISHABLE by dev/ino + ctime alone: both present as "same
+        // dev/ino, later ctime". This is a durable negative finding, not a bug in the check's
+        // wiring — no refinement of the ctime comparison closes it, because the filesystem does not
+        // record the information tier 2 needed (whether the inode's OWNER changed, only that its
+        // content did). See the OWNERSHIP header above for the full writeup and what remains true.
+        const devinoContradicts = devinoAvailable && !devinoMatch;
+        if (devinoContradicts) { devinoContradicted = true; continue; }
+        if (canonMatch || devinoMatch || legacyExactMatch) { confirmed = true; break; }
+      }
+    }
+    if (!confirmed) {
+      try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+      // rung-2 F4: a devino contradiction gets its OWN reason, never the generic "unconfirmed"
+      // message — that message reads identically to an honest manifest miss, and this is not one;
+      // it is a live, computable identity check that actively DISAGREED with a row's path string.
+      const reason = devinoContradicted
+        ? `ownership contradicted: '${original}' currently resolves to a different file (dev/ino mismatch) than the one the manifest row for this blob (sha256 ${expect}) describes — refused (the path was recycled since the snapshot was taken)`
+        : `ownership unconfirmed: the store's manifest does not record '${original}' as the source of this blob (sha256 ${expect}) — refused (the manifest is absent, unreadable, or has no matching row)`;
+      return { ok: false, verified: false, reason };
+    }
+    fs.renameSync(tmpPath, toPath); // atomic publish — only content-verified, destination-guarded, OWNERSHIP-confirmed bytes land here
     return { ok: true, sha256: got, verified: true };
   } catch (e) {
     // ONLY our own inode. The EEXIST that lands here is precisely the case where the temp path

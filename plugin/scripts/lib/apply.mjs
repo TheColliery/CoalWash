@@ -95,6 +95,22 @@ import { unreferencedTopics } from './retier.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
+// grad10-round-2 LOW-7: test-only regression counters. Read by nobody in any
+// production code path — a plain integer increment costs nothing measurable,
+// and it exists because wall-clock could not isolate the KEEPS-GATE's own
+// memoization signal from applyPlan's own I/O at any fixture scale (see
+// apply.test.mjs's CALL COUNT tests for the measurement that established
+// this). Reset to 0 by a test before the call it is measuring.
+//
+// GATE COST RULING (main-cmd, CI red at 14deee8 across three platforms):
+// wall-clock could not isolate THIS signal either, for the identical reason
+// — 19.2 MB of incidental applyPlan file I/O dominates any fixture large
+// enough to make normPostTexts's own cost visible, and disk I/O varies by
+// runner in a way a fixed ms bound cannot absorb. `normPostTextsBuilds`
+// counts real builds of the round-9 Root B memo (apply.test.mjs's CALL
+// COUNT test at the KEEPS-GATE, same file, same reason as linePartsMapCalls
+// above) — a count does not vary by runner, disk, or load.
+export const __testHooks = { linePartsMapCalls: 0, normPostTextsBuilds: 0 };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -161,6 +177,448 @@ function atomicWrite(target, content) {
 function removedLines(origText, newText) {
   const next = new Set(String(newText).split(/\r?\n/));
   return String(origText).split(/\r?\n/).filter((l) => l.trim() && !next.has(l));
+}
+
+// SHARED whitespace-normalized substring survival — grad7 ruling Root B: the
+// merge-pair content-containment check (below, in applyPlan) reused this
+// technique via a comment ("reusing the KEEPS-GATE's own technique") but the
+// KEEPS-GATE's own `norm` was a LOCAL const the merge-pair block never saw —
+// the author believed they had copied it; two divergent copies of one
+// intended helper is the exact twin-drift shape this file's own case-fold
+// primitives were already fixed for (see config-load.mjs). Hoisted to module
+// scope so there is now ONE function, not a belief that two matched.
+// Collapses all whitespace runs (incl. line-ending differences: CRLF vs LF,
+// re-indentation) to a single space — survives the transforms round-8 named
+// (CRLF-normalize, re-indent). Does NOT survive a transform that removes
+// content outright (frontmatter-strip-before-absorb, section-reorder that
+// drops a section) — those are content changes, not whitespace reshaping,
+// and no substring check of any shape can distinguish "reshaped" from
+// "shortened" without a real diff; named as the fix's honest limit, not
+// silently claimed closed.
+// grad7 findings-back (round 9 dispatch): the hoist above closed the twin-
+// drift but paid for it — a caller with a hot loop over MANY needles against
+// the SAME haystacks (the KEEPS-GATE below: one call per keep, per action)
+// re-ran normWhitespace() over every haystack on EVERY call, even though the
+// haystacks themselves are constant for the whole loop. Measured: 98ms ->
+// 3,183ms at 1.2MB of post-texts / 500 miss-path calls (20 keeps x 25
+// actions) — a 32.5x regression on the apply hot path. Fix: an OPTIONAL
+// third argument lets a hot-loop caller pre-normalize its haystacks ONCE and
+// pass them in; textSurvives stays the single shared helper (the whole point
+// of the hoist) rather than growing a second, drifting copy for "the fast
+// case". A caller that doesn't pass it (the merge-pair check, a bounded,
+// cold call) keeps the old lazy-normalize-per-call behavior unchanged.
+const normWhitespace = (s) => String(s).replace(/\s+/g, ' ').trim();
+
+// grad9 F2 [HIGH, content-loss]: the flatten-everything normalizer above is
+// blind to semantic indentation BY CONSTRUCTION — collapsing every run of
+// `\s+` (newlines included) into one space erases the difference between
+// "the whole block shifted by a constant amount" (round 8's own CRLF/
+// re-indent tolerance target, legitimate) and "one line moved to a
+// DIFFERENT relative depth than its neighbors" (a Python statement dedented
+// out of a loop, a YAML key re-parented — same tokens, different program,
+// per grad9's own fixtures). Fix the CLASS: a needle spanning MORE THAN ONE
+// LINE is checked with a window-relative indentation match instead — every
+// contiguous run of haystack lines the same length as the needle is tried;
+// each line's own internal whitespace is collapsed (still tolerates reflow/
+// CRLF), but a haystack line's indentation RELATIVE TO ITS OWN WINDOW must
+// equal the needle's indentation relative to ITS OWN first line, exactly. A
+// uniform shift of the whole block passes (every line's relative offset is
+// unchanged, whichever window start it lands on); a shift of ONE line
+// relative to its neighbors fails, at every possible window. Single-line
+// needles have no relative structure to defend (there is nothing to be
+// relative TO) and fall through to the flatten-everything check below,
+// preserving the pre-existing cross-newline prose-reflow tolerance (a
+// sentence hard-wrapped mid-phrase) that a multi-line algorithm would break.
+function lineParts(s) {
+  return String(s).replace(/\r\n?/g, '\n').split('\n').map((line) => {
+    const m = /^([ \t]*)(.*)$/s.exec(line);
+    return { indent: m[1].length, text: m[2].replace(/[ \t]+/g, ' ').trimEnd() };
+  });
+}
+// grad10 F8 [MEDIUM, false-refusal x3]: exact character-DELTA equality was
+// too strict. A uniform tabs->spaces reformat SCALES every level's delta
+// (1 tab = 1 char at level 1, 2 tabs = 2 chars at level 2; converted to
+// 4-space indents that becomes +4 vs +8 -- proportional, not additive), so
+// the exact-delta check refused an ordinary reformat; the same shape hit a
+// cosmetic 2-space-vs-3-space list re-indent. Dense RANK of each line's
+// indent, not the raw delta: two sequences carrying the SAME relative order
+// (line i more/equally/less indented than line j, for every pair) rank
+// identically regardless of the absolute unit or scale. A REAL structural
+// change (a line moving to a DIFFERENT relative depth than its neighbors --
+// the python-dedent / yaml-reparent shapes round 9's fix targets) changes
+// at least one pairwise relationship and therefore the rank sequence too --
+// cheap O(n log n) stand-in for the O(n^2) pairwise-sign comparison it is
+// equivalent to.
+function denseRank(indents) {
+  const sorted = [...new Set(indents)].sort((a, b) => a - b);
+  const rankOf = new Map(sorted.map((v, i) => [v, i]));
+  return indents.map((v) => rankOf.get(v));
+}
+// grad10 F9 [perf, off-subject]: the needle side of a multi-line comparison
+// is CONSTANT across every haystack in one `.some()` sweep (one needle, N
+// haystacks) — parsing/ranking it inside the per-haystack function meant
+// re-doing that work N times for the SAME needle on every single call.
+// Hoisted out: `textSurvives` computes it once and hands the pre-computed
+// needle down; `indentRelativeSurvives` never re-derives it. This closed a
+// second instance of the SAME class the haystack-side fix (below) closes —
+// found while proving the haystack-side fix's own perf test, not in the
+// dispatch's findings; same root cause, same commit, worth fixing together
+// rather than leaving a matching hole one parameter over.
+function needleIndentShape(needle, origParts) {
+  const n = lineParts(needle);
+  const nRanks = denseRank(n.map((l) => l.indent));
+  // grad10 F8: an ABSOLUTE-INDENT-EQUALITY gate here (round-10-round-2's
+  // HIGH-1 fix) is RETIRED as of grad11 STEP 2 -- RULING-LAYER-3 Amendment 4
+  // proved it is a classifier-cell guard, not an invariant guard: F4 showed a
+  // trailing blank line (parses to indent 0) makes an otherwise-uniform
+  // needle classify as non-uniform "by construction", routing it around the
+  // gate entirely, and F9 showed the gate false-refuses a legitimate whole-
+  // document reindent (absolute indent changes; the RELATIVE structure to
+  // what encloses it does not). `uniform`/`atZero` still classify the needle
+  // (used below to choose which structural check applies), but neither
+  // bucket carries its own indent-magnitude rule anymore -- see
+  // `ancestorChain`/`flattenSurvives` above for the replacement.
+  const uniform = new Set(nRanks).size <= 1;
+  const atZero = uniform && n[0].indent === 0;
+  const shape = { n, nRanks, uniform, atZero, indent0: n[0].indent, flatNeedle: atZero ? normWhitespace(needle) : null, origChain: null };
+  // grad11 STEP 2: locate the anchor's TRUE position in the file's OWN
+  // original bytes (origParts = lineParts(origBuf), passed by the KEEPS-GATE
+  // call site ONLY when checking a keep against ITS OWN file -- never for the
+  // cross-file migration sweep, where no "original position in THIS file"
+  // exists to derive a chain from). -1 (not located) degrades to no chain,
+  // which callers below treat as "cannot verify structurally" -- never a
+  // silent pass, see indentRelativeSurvives's own fallback ordering.
+  if (origParts) {
+    const pos = locateStructural(shape, origParts);
+    // round-12 lab F1 [CRITICAL, content-loss], root cause: this used to
+    // pass n[0].indent -- the ANCHOR STRING'S OWN recorded indent -- as the
+    // reference depth ancestorChain walks against. For an anchor recorded
+    // FLUSH-LEFT (indent 0, as literally written in keeps.json) whose REAL
+    // position in the file is nested (e.g. indent 2 under a loop header),
+    // this asks "find ancestors shallower than 0", which is impossible --
+    // origChain silently comes back [] (empty, not null), and an EMPTY
+    // chain vacuously "preserves" against any candidate (chainPreserved's
+    // own i===normOrig.length check passes trivially at length 0). Every
+    // downstream consumer (both indentRelativeSurvives's own loop AND
+    // flattenSurvives, once F1's signature fix threads it through) then
+    // treats this exactly like "no origChain available" -- silently, with
+    // no signal that a chain SHOULD have existed. `locateStructural`
+    // already found the anchor's TRUE position by rank+text match;
+    // `origParts[pos].indent` is that position's REAL indent and is what
+    // ancestorChain needs as its reference depth, independent of however
+    // the anchor happened to be recorded.
+    if (pos !== -1) shape.origChain = ancestorChain(origParts, pos, origParts[pos].indent);
+  }
+  return shape;
+}
+function indentRelativeSurvives(shape, haystack, haystackParts, strict = true) {
+  const { n, nRanks, atZero, flatNeedle, origChain } = shape;
+  const h = haystackParts || lineParts(haystack);
+  // grad11 STEP 2 perf (bonus, pre-existing loop): same head-line-text
+  // pre-filter as locateStructural's own header comment -- reject the cheap
+  // way (one string compare) before paying for denseRank at a position that
+  // was always going to fail on `h[start+0].text !== n[0].text` anyway.
+  // Pre-existing from round 9/10, not introduced this round; folded in here
+  // because it directly reduces the cost this round's own perf check found.
+  for (let start = 0; start + n.length <= h.length; start++) {
+    if (h[start].text !== n[0].text) continue;
+    const hRanks = denseRank(h.slice(start, start + n.length).map((l) => l.indent));
+    let ok = true;
+    for (let j = 0; j < n.length && ok; j++) {
+      if (h[start + j].text !== n[j].text || hRanks[j] !== nRanks[j]) ok = false;
+    }
+    // grad11 STEP 2: replaces round-10-round-2's absolute-indent gate. When
+    // this shape's origin chain is known (checking the anchor against ITS
+    // OWN file), a candidate window must preserve that SAME chain among its
+    // own enclosing lines -- new ancestors (deeper nesting) are tolerated,
+    // dropping an original one is not. When no origChain is available
+    // (cross-file migration; the anchor could never have had "an original
+    // position" in a file it did not come from), this check is a no-op and
+    // the rank+text match above is the whole test -- unchanged behaviour for
+    // the migration case, named as a residual in the round's own return.
+    //
+    // round-12 lab F2 [CRITICAL, content-loss]: this loop used to `continue`
+    // past a rank+text match whose chain FAILED, hunting for a later window
+    // whose chain happened to pass -- a `.some()` over candidate windows,
+    // answering "does ANY window survive" where the invariant needs "does
+    // THE window this keep protects survive". A shallow, structurally-
+    // identical DECOY elsewhere in the haystack (its own valid chain, from
+    // its own position) satisfied the loop before the deep, genuinely-
+    // escaped occurrence was ever reached. Fixed: a rank+text match whose
+    // chain does NOT preserve is itself a positive signal that an instance
+    // of this anchor's shape has escaped its enclosing structure --
+    // refuse immediately rather than let a later, unrelated window paper
+    // over it. NAMED RESIDUAL (over-refusal, never content-loss, see the
+    // room's own acceptance rule): a legitimate rewrite where an UNRELATED
+    // occurrence of the same anchor text sits, by coincidence, earlier in
+    // document order than the keep's real (safe) content can now be
+    // refused too -- the frame carries no signal to distinguish "the real
+    // content escaped, masked by a decoy" from "an unrelated decoy sits
+    // beside a safe original" without a position-correlation mechanism
+    // this fix does not add. Tested and accepted as the round's return.
+    if (ok && origChain) {
+      if (!chainPreserved(origChain, ancestorChain(h, start, h[start].indent))) return false;
+    }
+    if (ok) return true;
+  }
+  // grad11 STEP 2 [F3]: the flatten fallback ITSELF is where a needle whose
+  // OWN lines are all flush-left (atZero) gets checked once the exact
+  // rank+text loop above finds no match -- which is exactly what happens
+  // when an interior line has been REPARENTED (its own rank changed, so the
+  // rank loop correctly fails), and the old code then re-matched on
+  // flattened text alone, discarding that failure entirely. `flattenSurvives`
+  // additionally requires the matched span's contributing lines to share ONE
+  // indent value -- true for a genuine reflow (indentation was never
+  // introduced), false for an in-place reparent (one line's indent changed
+  // while its neighbours' did not).
+  if (atZero) return flattenSurvives(flatNeedle, h, strict, origChain); // round-12 lab F1
+  return false;
+}
+// grad11 STEP 2 [CRITICAL, F3+F4+F9 — one predicate, not three]: RULING-LAYER-3
+// Amendment 4's construction proved no partition over {needle, post-text} can
+// separate a legitimate whole-block move from content escaping its enclosing
+// scope -- the two produce BYTE-IDENTICAL windows when the distinguishing
+// line (what used to come immediately before the anchor) sits outside both
+// inputs. The fix is not a smarter bucket; it is a wider FRAME: locate the
+// anchor's own TRUE position in the file's ORIGINAL bytes (origBuf, already
+// staged 120+ lines above this file's KEEPS-GATE and unread by it until now),
+// derive its ANCESTOR CHAIN (the stack of enclosing lines, outer-to-inner, by
+// indent), and require the SAME chain to survive -- by text, in order -- among
+// whatever encloses the matched window in the new text. New ancestors may be
+// INSERTED (nesting deeper is F9/H4's own legitimate shape); no ORIGINAL
+// ancestor may be DROPPED (losing the enclosing line is exactly what content
+// escaping a loop/section does). Blank lines carry no structure and are
+// skipped when walking for ancestors, closing F4's own bypass (a blank line
+// parses to indent 0 and used to make an otherwise-uniform anchor classify as
+// non-uniform "by construction", routing it around the absolute-indent gate
+// entirely -- the gate this replaces).
+function ancestorChain(parts, spanStart, spanIndent) {
+  const chain = [];
+  // FOUND-DURING-BUILD: seeding `shallowest` at Infinity let a line at the
+  // SAME (or greater) indent as the span's own first line register as an
+  // "ancestor" -- a SIBLING statement, not an enclosing one. A body dedented
+  // to sit flush with its own former loop header (the header text unchanged,
+  // only the body's indent dropped) then read as "still enclosed by that
+  // header", because the header was merely the shallowest line SEEN, never
+  // checked against the span's OWN depth. Seeding with `spanIndent` makes
+  // the walk ask the right question from line one: is this STRICTLY
+  // SHALLOWER than what it is supposed to enclose?
+  let shallowest = spanIndent;
+  for (let i = spanStart - 1; i >= 0; i--) {
+    const l = parts[i];
+    if (!l.text) continue; // blank line -- no structure to record
+    if (l.indent < shallowest) { chain.unshift(l.text); shallowest = l.indent; }
+    if (shallowest === 0) break; // top-level reached; nothing can enclose it further
+  }
+  return chain;
+}
+// Is `origChain` a (possibly proper) SUBSEQUENCE of `candChain`, matched by
+// exact line text, in the SAME relative order? A candidate chain may carry
+// EXTRA entries (deepened nesting, fine); it may not be missing any original
+// entry (an enclosing line that vanished, the loss this check exists to
+// catch) or have them out of order (a reordering this codebase has never
+// observed but which a stack-based ancestor walk makes free to also reject).
+function chainPreserved(origChain, candChain) {
+  // FOUND-DURING-BUILD (F9/FR3): an exact-text compare here is TOO STRICT --
+  // it refuses a legitimate reflow of the ancestor line ITSELF (e.g. a list
+  // marker widened from "- " to "-   ", the F9 list-continuation-shift
+  // fixture), because the two spellings of the SAME enclosing line are not
+  // byte-identical even though nothing structural moved. Compare each
+  // ancestor entry the same way the whole file already tolerates whitespace
+  // reflow elsewhere (normWhitespace) -- membership/order is still exact
+  // (a missing or reordered ancestor still fails), only its own internal
+  // spacing is forgiven.
+  let i = 0;
+  const normOrig = origChain.map(normWhitespace);
+  for (const t of candChain) {
+    const nt = normWhitespace(t);
+    if (i < normOrig.length && normOrig[i] === nt) i++;
+  }
+  return i === normOrig.length;
+}
+// Locate the needle's own exact structural position within `parts` (the SAME
+// text+rank match indentRelativeSurvives uses below) -- called ONCE, against
+// a file's OWN original lineParts, to derive where the anchor TRULY sat. -1
+// if not found (a keep whose anchor does not verbatim-appear in its own
+// recorded original -- defensive; should not happen for a real keep, whose
+// anchor names literal original content, but the caller degrades safely).
+function locateStructural(shape, parts) {
+  const { n, nRanks } = shape;
+  // grad11 STEP 2 perf: check the cheap head-line TEXT match before paying
+  // for `denseRank` (an O(N) allocation+sort) at every candidate position.
+  // A needle genuinely absent from `parts` (the common shape on a large,
+  // unrelated document -- the round's own worst-case perf probe) rejects on
+  // this one comparison at nearly every position instead of building and
+  // ranking the whole window first. Measured: ~28% of the round's total
+  // fixture cost was this scan running to completion needlessly; this cuts
+  // it back toward a single linear pass. Behavior-identical -- `ok` would
+  // have gone false at j=0 anyway on a head mismatch.
+  for (let start = 0; start + n.length <= parts.length; start++) {
+    if (parts[start].text !== n[0].text) continue;
+    const ranks = denseRank(parts.slice(start, start + n.length).map((l) => l.indent));
+    let ok = true;
+    for (let j = 0; j < n.length && ok; j++) {
+      if (parts[start + j].text !== n[j].text || ranks[j] !== nRanks[j]) ok = false;
+    }
+    if (ok) return start;
+  }
+  return -1;
+}
+// The atZero/flatten path's own structural guard (F3's fix): map the
+// flattened haystack's character offsets back to the ORIGINAL lines that
+// contributed them, so a substring match can be checked for INTERNAL indent
+// uniformity across whatever span it covers. A reflow (F8-prose-reflow,
+// LEGIT-A) never introduces indentation -- every contributing line stays at
+// its own flat 0 (or one shared value) -- so a uniform span is safe. A
+// reparent WITHIN the anchor's own captured lines (F3's exact shape: a
+// flush-left multi-key YAML/statement block where one interior line gets
+// indented under its neighbour, text order otherwise untouched) shows up as
+// a NON-uniform span even though the flattened text still matches exactly --
+// that mismatch is the signal the old raw `.includes()` check discarded.
+function flattenWithLineMap(parts) {
+  const chunks = [];
+  let flat = '';
+  for (let i = 0; i < parts.length; i++) {
+    const t = parts[i].text;
+    if (!t) continue; // blank lines contribute nothing to the flattened text
+    if (flat.length) flat += ' ';
+    const startAt = flat.length;
+    flat += t;
+    chunks.push({ lineIndex: i, start: startAt, end: flat.length });
+  }
+  return { flat, chunks };
+}
+// WAVE-6 HIGH (cw-class-b-reviewer, INSPECT on 36e4bfa): the uniformity
+// requirement below is CONSUMER-SPECIFIC, not a universal property of "did
+// this text survive". `strict` (default true) gates it: the KEEPS-GATE
+// asks whether an exact protected span's MEANING survives, and a reparent
+// changes meaning even when the flattened text still matches -- refuse.
+// The merge-pair check (apply.mjs's own applyPlan, ~line 1197) asks only
+// whether a deleted file's content was ABSORBED somewhere, so nothing was
+// silently destroyed -- a reparent during absorption loses no bytes, and
+// refusing there was the actual bug: it makes the merge-pair check
+// wrongly conclude "not absorbed", letting BOTH halves proceed
+// independently (source survives + destination also gets the content) --
+// two copies, the exact defect grad6 §1b exists to prevent. This was
+// round 11's own regression: `flattenSurvives` did not exist before that
+// round (the merge-pair path only ever went through `textSurvives`'s
+// plain single-line-style flatten), so the merge-pair consumer inherited
+// a NEW gate it never asked for, silently, through the shared helper.
+// round-12 lab F1 [CRITICAL, content-loss]: this function never received
+// shape.origChain -- an anchor recorded FLUSH-LEFT (indent 0, as literally
+// written in the keeps.json anchor string, regardless of its real indent in
+// the file) always routes here via indentRelativeSurvives's atZero branch,
+// and the ancestor-chain frame round 11 widened the OTHER branch with was
+// silently discarded. A loop body escaping its loop, when the anchor
+// protecting it happened to be recorded flush-left, was silently allowed.
+// Fixed the same way the exact-match loop already does it: when origChain
+// is known, locate which line of `haystackParts` the matched span STARTS
+// on (via flattenWithLineMap's own chunk->lineIndex map, already built for
+// the uniformity check below) and require that line's own ancestor chain
+// to preserve origChain -- same predicate, same direction, now on both
+// branches instead of one.
+function flattenSurvives(flatNeedle, haystackParts, strict = true, origChain = null) {
+  const { flat, chunks } = flattenWithLineMap(haystackParts);
+  const idx = flat.indexOf(flatNeedle);
+  if (idx === -1) return false;
+  const end = idx + flatNeedle.length;
+  if (origChain) {
+    const first = chunks.find((c) => c.start < end && c.end > idx);
+    if (!first) return false; // defensive: a match with no contributing line is unreachable, refuse rather than assume
+    if (!chainPreserved(origChain, ancestorChain(haystackParts, first.lineIndex, haystackParts[first.lineIndex].indent))) return false;
+  }
+  if (!strict) return true;
+  const spanIndents = new Set();
+  for (const c of chunks) { if (c.start < end && c.end > idx) spanIndents.add(haystackParts[c.lineIndex].indent); }
+  return spanIndents.size <= 1;
+}
+// WAVE-6 HIGH: `strict` (default true, the KEEPS-GATE's own need) threads
+// through to flattenSurvives's uniformity check -- see that function's own
+// header for the two consumers' different questions. The merge-pair check
+// (applyPlan, ~:1197) is the one caller that passes `false`.
+function textSurvives(needle, haystacks, normHaystacks, haystackLineParts, strict = true) {
+  if (haystacks.some((t) => t.includes(needle))) return true;
+  // grad10 F3 [HIGH, content-loss]: was `.includes('\n')`, LF-only -- a
+  // needle whose lines are joined by a bare CR (no LF anywhere) classified
+  // as single-line and fell through to the old flatten check, restoring
+  // the EXACT pre-round-9 behaviour for that one line-ending shape.
+  // `lineParts` itself already normalizes CRLF *and* bare CR to LF
+  // (`replace(/\r\n?/g, '\n')`); the CLASSIFICATION test needs the same
+  // breadth or it never reaches code that already handles the shape.
+  if (/\r|\n/.test(String(needle))) {
+    // grad10 F9 [perf, off-subject]: pass the precomputed lineParts (if the
+    // caller memoized them) instead of re-parsing every haystack on every
+    // call -- the multi-line path used to branch BEFORE ever touching the
+    // memo the KEEPS-GATE below already builds for the single-line path,
+    // so a multi-line keep re-parsed every haystack on every one of its
+    // (keep x action) calls. Same class as the regression round 9 paid for
+    // once already (that one was normWhitespace; this is lineParts). The
+    // needle side is hoisted once per textSurvives() call too (see
+    // needleIndentShape's own header) — same haystack-vs-needle split the
+    // single-line branch below already makes for normWhitespace.
+    const shape = needleIndentShape(needle);
+    return haystacks.some((t, i) => indentRelativeSurvives(shape, t, haystackLineParts && haystackLineParts[i], strict));
+  }
+  const normNeedle = normWhitespace(needle);
+  const norms = normHaystacks || haystacks.map(normWhitespace);
+  return norms.some((t) => t.includes(normNeedle));
+}
+
+// grad11 STEP 2: the STRICT, ancestor-chain-aware check -- used ONLY when
+// checking a keep's anchor against the SAME file it was recorded against
+// (origText = that file's own original bytes, read once already for the
+// staging/fidelity baseline). Never applied to any OTHER file's content: a
+// migrated anchor has no "original position" in a file it did not come
+// from, so the chain check would be meaningless there and would FALSE-REFUSE
+// a legitimate merge (rail #2) -- the KEEPS-GATE call site below falls back
+// to the existing, unchanged, cross-file `textSurvives` sweep for that case.
+//
+// WAVE-8 (cw-class-b-reviewer): the single-line branch that used to sit here
+// was DELETED, not merely left unreachable. `b3a9893` gates this function's
+// ONE call site on `/\r|\n/.test(k.anchor)`, so a single-line anchor is now
+// NEVER routed here at all -- the branch had become dead code, and a
+// mutation proved it: inverting its answer to `return false` left the whole
+// suite green (1095/1095), because nothing could reach it to notice.
+//
+// The equivalence claim that branch existed to preserve -- "the fallback's
+// whole-plan scan is a SUPERSET of the own-file-only check, so nothing the
+// strict check would have found is lost" -- is NOT carried by a dead twin;
+// dead code cannot fail when the thing it claims to mirror changes. What
+// DOES carry it is predicate identity: for a single-line anchor, this
+// function's own deleted branch and `textSurvives`'s single-line branch ran
+// the IDENTICAL two checks (`includes`, then `normWhitespace(...).includes`)
+// -- so removing the twin and routing single-line anchors through the one
+// remaining implementation (the fallback, `textSurvives`) does not narrow
+// coverage, it just stops maintaining a second copy of the same test.
+//
+// The real backstop -- verified by mutation, not asserted -- is that a
+// FUTURE tightening of `textSurvives`'s single-line branch (:493-498) is
+// caught by the KEEPS-GATE's own single-line ACCEPTANCE tests, which the
+// WAVE-7 sweep made non-vacuous: "a whitespace-reflowed anchor still
+// matches" (pins the HAYSTACK-side normWhitespace tolerance), "an
+// IRREGULAR-whitespace anchor still matches a clean rewritten haystack"
+// (pins the NEEDLE-side tolerance -- normNeedle = normWhitespace(needle),
+// :496; added at WAVE-8 RE-INSPECT after a six-mutation sweep found the
+// haystack-side test alone left the needle side uncovered: an irregular
+// anchor whose clause was reflowed-and-kept would be wrongly REFUSED under
+// a needle-side-only tightening, with the whole suite green), "an anchor
+// MIGRATED to another file... passes", and the CALL COUNT single-line-only
+// test. Tested directly, both sides: stripping textSurvives's normWhitespace
+// tolerance on either side (haystack-only or needle-only) reddens its
+// matching test immediately -- restored after confirming.
+//
+// A future caller of THIS function with a single-line anchor (violating the
+// one precondition the current call site enforces) does not crash -- it
+// falls through to the ancestor-chain-aware multi-line path below. Measured
+// across six single-line cases (incl. reindented and nested): the fallthrough
+// agreed with the deleted shortcut on all six -- NO LOOSER, never observed
+// stricter. If a new call site needs the old single-line shortcut back, gate
+// it the same way the existing one does, rather than reintroducing an
+// untested twin.
+function survivesOwnFile(anchor, newContent, origText) {
+  if (String(newContent).includes(anchor)) return true; // exact substring -- unambiguous either way
+  const shape = needleIndentShape(anchor, lineParts(origText));
+  return indentRelativeSurvives(shape, newContent);
 }
 
 // ---------------------------------------------------------------------------
@@ -836,11 +1294,13 @@ export function applyPlan(plan, opts = {}) {
     // but src itself survives (refused, not deleted) — two copies of the same
     // text, reported ok:true, on a tool whose product is de-duplication.
     // Detect the pairing the only way available without a schema change,
-    // reusing the KEEPS-GATE's own technique a few lines below (a substring
-    // survival check): a rewrite whose CONTENT still contains an excluded
-    // delete's ORIGINAL bytes is presumed to be that delete's merge target,
-    // and is excluded in the SAME pass — scoped to just the matched pair,
-    // never the whole plan (every other per-file gate in this function
+    // reusing the KEEPS-GATE's shared `textSurvives` helper (module scope,
+    // above): a rewrite whose CONTENT still contains an excluded delete's
+    // ORIGINAL bytes — exact, or whitespace-normalized (survives CRLF
+    // normalization and re-indentation; see textSurvives's own header for
+    // what it does NOT survive) — is presumed to be that delete's merge
+    // target, and is excluded in the SAME pass — scoped to just the matched
+    // pair, never the whole plan (every other per-file gate in this function
     // already fails this way; a merge is not special-cased to fail harder).
     if (unprovable.size) {
       const excludedDeleteTexts = [...unprovable]
@@ -851,7 +1311,12 @@ export function applyPlan(plan, opts = {}) {
         const pairedOut = new Set();
         for (const a of actionable) {
           if (a.type === 'delete' || typeof a.content !== 'string') continue;
-          if (excludedDeleteTexts.some((t) => a.content.includes(t))) {
+          // WAVE-6 HIGH: strict=false -- this check asks "was the deleted
+          // text absorbed at all" (data-loss prevention), never "does its
+          // exact structural meaning survive" (the keeps-gate's own,
+          // stricter question). See flattenSurvives's header for why the
+          // two must not share a default.
+          if (excludedDeleteTexts.some((t) => textSurvives(t, [a.content], undefined, undefined, false))) {
             pairedOut.add(a);
             flagged.push({
               path: a.phys,
@@ -881,7 +1346,6 @@ export function applyPlan(plan, opts = {}) {
     // zero behavior change for existing stores.
     const txDir = opts.txDir || txDirFor(projectRoot);
     {
-      const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
       // #36 demand 10: this compare decides whether a pinned keep BINDS the action
       // about to delete or rewrite the file it names, and it used to fold case on
       // `process.platform === 'win32'` — the exact defect the #36 pair retires
@@ -920,16 +1384,184 @@ export function applyPlan(plan, opts = {}) {
       // rewrite) — re-check until stable. Each pass strictly shrinks
       // `actionable`, so this terminates in <= actions.length passes.
       while (keeps.length) {
-        const postTexts = actionable.filter((a) => a.type !== 'delete').map((a) => a.content);
-        const normTexts = postTexts.map(norm);
-        const survives = (anchor) => postTexts.some((t) => t.includes(anchor)) || normTexts.some((t) => t.includes(norm(anchor)));
+        // grad11 STEP 2: kept PARALLEL to postTexts (same filter, same order)
+        // so the fallback sweep below can exclude ONE action's own entry by
+        // reference -- rather than by string equality, which would wrongly
+        // exclude every action sharing byte-identical content.
+        const postActionable = actionable.filter((a) => a.type !== 'delete');
+        const postTexts = postActionable.map((a) => a.content);
+        // grad7 ruling Root B/twin-drift: the module-level `textSurvives` above
+        // is the SAME helper the merge-pair check now calls — one function, not
+        // a belief that two hand-copies matched.
+        // round-9 perf fix: postTexts is constant for the rest of this while-
+        // iteration (it only changes across iterations, after an exclusion
+        // shrinks `actionable`) — normalize it ONCE here and hand the memo to
+        // every textSurvives() call below, instead of paying normWhitespace()
+        // per haystack on every one of the (keeps x actions) calls.
+        // grad10 F9: same memoization, same reason, for the multi-line path's
+        // own per-haystack parse — round 9 memoized normWhitespace() but the
+        // multi-line branch (added the same round) never touched it, so a
+        // multi-line keep re-parsed every haystack with lineParts() on every
+        // call while the single-line path reused its precompute.
+        //
+        // grad10-round-2 LOW-7: the memo above was built UNCONDITIONALLY,
+        // every while-iteration, even when every keep this iteration is
+        // single-line and `getLinePostTexts()` would never be read at all —
+        // measured cost on the common (single-line-only) path: ~898-1055ms
+        // depending on run, up ~16% for work that produces nothing. Made
+        // lazy: `postTexts.map(lineParts)` runs at most once per iteration,
+        // on the FIRST anchor that is actually multi-line, and never at all
+        // when none are. The multi-line-heavy case is unaffected (same one
+        // build, amortized across every multi-line anchor this iteration);
+        // only the single-line-only case stops paying for a memo it never
+        // consumes. `__testHooks.linePartsMapCalls` counts real builds —
+        // wall-clock could not isolate this signal (two independent
+        // attempts confirmed `applyPlan`'s own I/O dominates total time at
+        // any fixture scale large enough to also show `lineParts()`'s cost;
+        // see the regression test's own header for the measurements), so
+        // the regression protection is a call count, not a clock.
+        const normPostTexts = postTexts.map(normWhitespace);
+        __testHooks.normPostTextsBuilds++; // GATE COST RULING: one build per while-iteration is the invariant this counts
+        let linePostTextsMemo = null;
+        const getLinePostTexts = () => (linePostTextsMemo ||= (__testHooks.linePartsMapCalls++, postTexts.map(lineParts)));
+        // grad11 STEP 2: `excludeAction`, when it names an entry actually IN
+        // postTexts (a rewrite that already tried and failed the strict
+        // own-file check, above), is left OUT of this sweep's own haystack
+        // set. Without this, the fallback re-scans that SAME file's content
+        // through the looser rank-only logic and can "rescue" a genuinely
+        // structural loss the strict check just correctly refused -- the
+        // exact bug this exclusion closes (found red-first while proving
+        // this fix: a body-dedented-out-of-its-loop case matched again via
+        // this path alone). A delete (never in postTexts to begin with) or
+        // any action not found here degrades to the FULL, unexcluded sweep,
+        // unchanged from before this round.
+        const survives = (anchor, excludeAction) => {
+          const idx = excludeAction ? postActionable.indexOf(excludeAction) : -1;
+          if (idx === -1) {
+            return textSurvives(anchor, postTexts, normPostTexts,
+              /\r|\n/.test(String(anchor)) ? getLinePostTexts() : undefined);
+          }
+          const texts = postTexts.filter((_, i) => i !== idx);
+          const norms = normPostTexts.filter((_, i) => i !== idx);
+          return textSurvives(anchor, texts, norms); // rarer path (fallback only) -- no lazy multi-line memo here, not the hot loop
+        };
         const excluded = new Set();
         for (const k of keeps) {
           const kf = k.anchorFile;
           for (const a of actionable) {
             if (a.type === 'create' || excluded.has(a)) continue; // a create is never "the keep's file"
             if (!samePathForKeep(a.phys, kf)) continue;
-            if (survives(k.anchor)) continue;
+            // grad11 STEP 2: try the STRICT, ancestor-chain-aware check
+            // against this action's OWN original bytes first (a.origBuf,
+            // staged well above this gate and unread by it until now) --
+            // this is where F3/F4/F9 all live, and it is the only place the
+            // check can mean anything (a "where did this sit originally"
+            // question needs an original to ask it about). A delete has no
+            // new `.content` to check structurally, so it skips straight to
+            // the fallback below, unchanged.
+            //
+            // grad11 CI-RED FOLLOW-UP: gated on `/\r|\n/.test(k.anchor)` --
+            // a SINGLE-LINE anchor has no ancestor chain of its own to
+            // defend (nothing is "inside" one line; survivesOwnFile's own
+            // single-line branch already says this), so routing it through
+            // this strict check bought it nothing and cost it a FRESH
+            // `normWhitespace(a.content)` on every (keep x action) pair --
+            // duplicate work the fallback below's `normPostTexts` memo
+            // already paid for once per file at the top of this iteration.
+            // Windows CI measured the regression directly: 4 consecutive
+            // green commits at ~1800ms threshold, then 2117ms on the commit
+            // that added this call unconditionally (25 files/~768KB each,
+            // 20 single-line keeps -- 20 redundant O(768KB) normalizations).
+            // Skipping straight to the fallback for a single-line anchor
+            // loses nothing -- but the reason is PREDICATE IDENTITY, not
+            // scope alone (WAVE-8, cw-class-b-reviewer: a wider haystack
+            // under a LOOSER predicate would be a weakening, the direction
+            // that matters on a gate whose job is to refuse; naming scope
+            // as the reason licenses exactly that in a future edit). What
+            // actually carries the claim: `survivesOwnFile`'s deleted
+            // single-line branch and `textSurvives`'s single-line branch
+            // (used below) ran the IDENTICAL two checks (`includes`, then
+            // `normWhitespace(...).includes`), in the same order, over
+            // haystack sets that partition the exact same total: {own file}
+            // union {every other file} either way. Same predicate, same
+            // union -- provably the same accept/reject verdict, by
+            // exhausting both branches (see `survivesOwnFile`'s own header,
+            // above this file's KEEPS-GATE, for the deleted branch and the
+            // test that now backstops this claim). It also, as a
+            // consequence and not the reason, tolerates the SAME cross-file
+            // migration a multi-line anchor gets via the fallback path
+            // below, which single-line anchors are safe to inherit for
+            // free (they never had a structural "original position" to
+            // defend in the first place).
+            const triedOwnFile = a.type === 'rewrite' && a.origBuf && /\r|\n/.test(String(k.anchor));
+            if (triedOwnFile && survivesOwnFile(k.anchor, a.content, a.origBuf.toString('utf8'))) continue;
+            // Fallback: the EXISTING, unchanged, whole-plan sweep -- an
+            // anchor legitimately MIGRATED to a different file in this same
+            // plan is still found here (rail #2's own migration case; this
+            // path carries zero of the new structural guard by design, since
+            // no "original position in file X" question is answerable for
+            // content that never lived in file X). NAMED RESIDUAL: this is
+            // also the reachable surface of LAB-RECORD's F6 (a floor-
+            // clearing generic anchor coincidentally present elsewhere in
+            // the same plan).
+            //
+            // WAVE-6 MED-1 (cw-class-b-reviewer, re-judged, not merely
+            // re-stated): the CHANNEL is unchanged from before this round --
+            // true. But the POPULATION reaching it is NOT: pre-round-11, an
+            // F3/F4/F9-shaped anchor (a reparent, a blank-line-defeated
+            // dedent) PASSED the old, weaker own-file check and never
+            // reached this sweep at all. Post-round-11, that same anchor now
+            // FAILS the new strict check above and falls INTO this sweep --
+            // where F6's coincidence (a sibling file in the same plan
+            // happening to carry the same text) can rescue it silently. So
+            // round 11's headline CRITICAL fixes hold unconditionally only
+            // while no other file in the plan coincidentally carries the
+            // anchor's text; when one does, the loss this round exists to
+            // catch is again silent. "Unchanged from before this round" was
+            // true of the mechanism and incomplete about its exposure.
+            //
+            // RE-JUDGED: still the right trade, stated with the reason
+            // rather than assumed. Closing it here would mean giving the
+            // fallback the SAME ancestor-chain check the strict path uses --
+            // which is exactly what rail #2 (the legitimate cross-file
+            // migration case F9's own fixtures rely on) forbids: a migrated
+            // anchor has no "original position" in a file it never lived in,
+            // so a structural check there is not stricter, it is
+            // MEANINGLESS, and would false-refuse real merges. F6 itself
+            // predates this round and needs a design answer at the ANCHOR
+            // layer (a more distinctive anchor, or a real per-anchor
+            // provenance field) that this call site cannot supply. Declared,
+            // with the grown population named, not silently fixed.
+            //
+            // WAVE-7 (cw-class-b-reviewer, offered not demanded): a NARROWER
+            // option exists and was named, not built -- disqualify a specific
+            // ACTION from the F6 fallback rescue when its own strict own-file
+            // check FAILED (rather than never having been attempted). The
+            // real trade, stated plainly: this breaks the legitimate case of
+            // restructuring AND migrating in the same plan (an action that
+            // fails its own reparent check while a sibling file elsewhere in
+            // the SAME edit genuinely absorbs its content). F6's coincidence
+            // is rare (needs an unrelated sibling to happen to carry matching
+            // text); a restructure-and-migrate plan is not. Trading a rare
+            // false-negative for a more common false-positive is the wrong
+            // direction for a fail-closed tool whose own bias throughout is
+            // "flag and let a human decide," not "silently refuse more."
+            // Not built.
+            //
+            // grad11 CI-RED FOLLOW-UP: `excludeAction` is passed ONLY when
+            // `triedOwnFile` is true -- i.e. only when survivesOwnFile was
+            // ACTUALLY ATTEMPTED (and failed) above. Passing it unconditionally
+            // was a SECOND correctness bug the single-line perf fix almost
+            // shipped: a single-line anchor that legitimately survives ONLY
+            // in its own file (never routed through survivesOwnFile at all
+            // now) was having that very file excluded from this sweep's
+            // haystack, so it found nothing and was wrongly refused -- caught
+            // by re-running the round-11 suite, not by the perf fixture
+            // (which uses anchors absent everywhere by design and could not
+            // see this). Exclusion is only sound relative to a check that
+            // actually ran against that file; with no such check, the fallback
+            // must see every file, exactly as it did before this round.
+            if (survives(k.anchor, triedOwnFile ? a : undefined)) continue;
             excluded.add(a);
             // 80 chars = display truncation only (keeps the flag line one-line
             // readable); the full anchor stays in keeps.json, nothing decided on it.

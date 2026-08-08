@@ -87,6 +87,7 @@ import { estateReport } from './estate.mjs';
 import {
   estateUltraScan, ultraBillLine, runEstate, runEstateReport,
   searchIndex, searchLines, restoreSession, resolveArchiveDir, collectTombstones,
+  readEstateKeyResolvedState, writeEstateKeyResolvedState,
 } from './estate-archive.mjs';
 import { retierScan, retierScanLines, runRetier, runRetierReport } from './retier.mjs';
 
@@ -211,9 +212,21 @@ export function gaugeLine(g) {
   // belongs in --json, which the SKILL text now points at. The line's job is to
   // make the reader ASK.
   const rec = g.recover || {};
-  const recovered = rec.recovered && rec.recovered !== 'none'
-    ? ` · recovered dangling run: ${rec.recovered}`
-    : (rec.error ? ' · dangling run REFUSED, left for inspection (--json for the reason)' : '');
+  // grad9 R8-F6: 'partial' (some restore FAILED or a target was REFUSED,
+  // journal + snapshot KEPT for a human — apply.mjs's own `recoverDangling`
+  // still sets `error` alongside `recovered:'partial'`) was truthy and
+  // !=='none', so it fell into the SAME "recovered dangling run: partial"
+  // branch as a clean 'cleaned'/'rolled-back'/'no-mutation' success — the
+  // one case that most needs the reader's attention (a mixed on-disk state)
+  // read exactly like full success and rec.error, the field carrying the
+  // actual detail, was never surfaced. Same root cause the comment above
+  // already names for 'none'+error: a real event silently read as nothing
+  // notable. Give 'partial' its own branch before the general success check.
+  const recovered = rec.recovered === 'partial'
+    ? ' · dangling run PARTIALLY recovered — some item(s) failed/refused, journal + snapshot kept for inspection (--json for detail)'
+    : (rec.recovered && rec.recovered !== 'none'
+        ? ` · recovered dangling run: ${rec.recovered}`
+        : (rec.error ? ' · dangling run REFUSED, left for inspection (--json for the reason)' : ''));
   return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${recovered}`;
 }
 
@@ -304,8 +317,23 @@ function main() {
     const name = args[1];
     if (!name) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const r = readWriteguardSnapshot(findProjectRoot(process.cwd(), os.homedir()), name, { home: os.homedir() });
-      if (!r) { console.error(`writeguard-restore: snapshot '${name}' not found`); process.exitCode = 1; return; }
+      const projectRoot = findProjectRoot(process.cwd(), os.homedir());
+      const r = readWriteguardSnapshot(projectRoot, name, { home: os.homedir() });
+      if (!r) {
+        // grad10-round-2 MED-5: readWriteguardSnapshot returns null for TWO
+        // different reasons — no row of that name exists at all, or a row
+        // exists but failed verifyBlobIntegrity (F1) — and "not found" was
+        // said for both. A genuine tamper then reads as a missing file,
+        // exactly the wrong message at the moment it matters most. Re-check
+        // listWriteguard (the same source writeguard-list itself reads) to
+        // tell the two apart before choosing the message.
+        const existed = listWriteguard(projectRoot, { home: os.homedir() }).some((row) => row.name === name);
+        console.error(existed
+          ? `writeguard-restore: snapshot '${name}' exists but FAILED integrity verification (tampered, or unreadable) — refusing to serve unverified bytes`
+          : `writeguard-restore: snapshot '${name}' not found`);
+        process.exitCode = 1;
+        return;
+      }
       process.stdout.write(r.content); // the byte-exact ORIGINAL — code-moved, model-untouched
       console.error(`[CoalWash] restored write-guard snapshot ${r.name} (${r.bytes} bytes, session ${r.session}) — byte-exact original on stdout; redirect it to the file, never re-type it`);
     } catch (e) {
@@ -327,8 +355,14 @@ function main() {
     }
   } else if (cmd === 'estate') {
     try {
-      const projectRoot = findProjectRoot(process.cwd(), os.homedir());
-      const r = estateReport({ projectRoot, home: os.homedir() });
+      const home = os.homedir();
+      const projectRoot = findProjectRoot(process.cwd(), home);
+      // board #55 AMENDMENT, ladder rung 6: read the prior run's transition marker, pass it
+      // into the (pure) report, then persist whatever THIS run found — the only place this
+      // tiny side-channel is read or written; estate.mjs itself never touches disk for it.
+      const priorKeyResolved = readEstateKeyResolvedState(home);
+      const r = estateReport({ projectRoot, home, priorKeyResolved });
+      writeEstateKeyResolvedState(r.horizon.keyResolvedNow, home);
       console.log(args.includes('--json') ? JSON.stringify(r, null, 1) : r.text);
     } catch (e) {
       console.error(`estate failed: ${e.message}`);

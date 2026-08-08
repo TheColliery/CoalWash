@@ -58,17 +58,17 @@ console.log(JSON.stringify({ verified: v.verified.length, rejected: v.rejected, 
 
 Report ONE line only when `drift` (onlyInParcel) is non-empty — "parcel drift: the platform loads X the adapter doesn't list" (adapter rot / a new platform surface → flag for the adapter update). Silent when clean. `notSeen` is informational (recall-store entries are expected-absent and already excluded). **Honest limits (verbatim class from the ledger):** L2 costs agent tokens — L1 stays the every-session path on CC; a platform whose parcel blocks carry no path labels degrades to fuzzy content-match = propose-only, the human confirms; recall-store coverage still rides the parcel's own pointer. L2 feeds MEASUREMENT only — it never feeds the knife (capture-all → filter order law); fail direction = undercount (unseen = unmeasured = uncut, safe).
 
-## 1. Quick tier — the deterministic op list
+## 1. Quick tier — the mechanical op list (AGENT-RUN — no cutter exists in code)
 
-Mechanical only; each op is definable without judgment. Compute the new text per file, then gate + apply (below).
+Mechanical only; each op is definable without judgment — but **every row below is something YOU, the agent, compute and edit by hand.** No code in this engine dedups, collapses whitespace, or rebuilds an index. The only CODE presence in this tier is `mechFatFromText` (`caliper.mjs`, §0 above): it MEASURES exact-duplicate lines and excess blank runs to drive the band verdict, and it never edits a file. Broom.mjs once carried two real text-mutators (an exact-residue sweep, an empty-table strip); both were retired to flag-only 2026-07-24, safety-over-yield — a false auto-cut was judged worse than no auto-cut, and no replacement cutter was built. Compute the new text per file yourself, then gate + apply (below) exactly as if the wizard's insider had proposed it.
 
-| Op | Definition |
-|---|---|
-| exact-dedup | Byte-identical repeated paragraph/block within one file → keep the first occurrence. NOT near-duplicates (that is Full). |
-| dead-link fix | A `[[target]]` whose target file no longer exists in the store → FLAG it. A repoint (changing the link value) mechanically registers as a wikilink-drop at the gate — carry it in the plan's `approvedDrops` as a named drop; never silently drop or rewrite a link. |
-| whitespace | Collapse 3+ blank lines to 2; strip trailing spaces. Never touch content lines. |
-| index rebuild | Regenerate the memory index's entry list to match the files actually present (missing entry → add; entry for a deleted file → remove). Keep the index's own prose untouched. |
-| oversize / stale | A file past `fileMaxSizeKb`, or TTL-stale by its own dates → FLAG ONLY (a Full candidate), never rewritten by Quick. |
+| Op | Run by | Definition |
+|---|---|---|
+| exact-dedup | agent | Byte-identical repeated paragraph/block within one file → keep the first occurrence. NOT near-duplicates (that is Full). `mechFatFromText` already told you the token count if this is why the band armed — cut to that number, don't re-count by eye. |
+| dead-link fix | agent (flag), code (post-delete advisory) | A `[[target]]` whose target file no longer exists in the store → FLAG it. A repoint (changing the link value) mechanically registers as a wikilink-drop at the gate — carry it in the plan's `approvedDrops` as a named drop; never silently drop or rewrite a link. `apply.mjs`'s `deadLinkLine` additionally surfaces a receipt advisory automatically whenever your plan deletes a topic file another survivor still references — that one line is real code, everything else in this row is you. |
+| whitespace | agent | Collapse 3+ blank lines to 2; strip trailing spaces. Never touch content lines. |
+| index rebuild | agent | Regenerate the memory index's entry list to match the files actually present (missing entry → add; entry for a deleted file → remove). Keep the index's own prose untouched. |
+| oversize / stale | agent | A file past `fileMaxSizeKb`, or TTL-stale by its own dates → FLAG ONLY (a Full candidate), never rewritten by Quick. `fileMaxSizeKb` is a config threshold with no code reader today — apply it by eye. |
 
 Encoding is load-bearing: preserve the file's line endings, UTF-8 no-BOM, never decompose Thai U+0E33 — the gate trips on introduced corruption, but do not rely on tripping it.
 
@@ -212,7 +212,7 @@ node [LIB]/cli.mjs writeguard-list                       # name · bytes · sess
 node [LIB]/cli.mjs writeguard-restore [SNAP_NAME] > [FILE]   # byte-exact original -> file; NEVER re-type it
 ```
 
-(Or a plain `cp <snapshotPath> <file>` — the snapshot IS the original bytes.) `writeguard-restore` is `isBareId`-contained (a traversal name is a clean not-found); the bytes go stdout→file, never through the model's context.
+**Never a plain `cp <snapshotPath> <file>`.** That reads correct-looking bytes off disk, but it skips `writeguard-restore`'s own identity check entirely — a snapshot's on-disk bytes can be tampered in place without touching its filename, and `writeguard-restore` refuses to serve exactly that (verified against the sidecar's recorded digest; a raw `cp` has no such check and cannot tell tampered bytes from real ones). Always go through the CLI command above. `writeguard-restore` is `isBareId`-contained (a traversal name is a clean not-found); the bytes go stdout→file, never through the model's context.
 
 ## 9. Wizard — engine snippets
 
@@ -389,3 +389,15 @@ node [LIB]/cli.mjs retier-run             # the transactional pass; REFUSES belo
 **Choice 4 = THREE layers (① ULTRA engine [§10, `estate-run`] + ② this RE-TIER engine [`retier-run`] + ③ ONE agent clone — MAX one inside CoalWash):** ③ is the MANUAL-tier semantic half — topic/overflow files ONLY, class-B prose under the SAME Full-tier contract (outsider-grade judgment, `keeps.json` honored, the 4 washability tests) — the agent NEVER touches class-A (①'s bytes) and NEVER rewrites the index slot (②'s jurisdiction; the table's shrink-via-gate cell means the WASH tiers do it, adjudicated — never ③ freehand). Sequence inside ③: **③a merge/regroup duplicate-topic files FIRST, THEN ③b condense (compress/shrink)** — regrouping changes what deserves condensing, so condensing first wastes the work; on any one file set the two jobs are pipelined by the same actor, never split across concurrent actors (§9b). Every ③ rewrite passes `gateFiles`; every ③ move passes MOVE-VERIFY; everything lands in ONE `applyPlan` transaction (snapshot → external-writer guard → deletes LAST → whole-run rollback), `origin: 'wizard-cut'`. `localOnly` blocks ③ (content-bearing) — ①② still run; the choice degrades to engine-only with a one-line note. The pressure rail is unchanged: the envelope never escalates a treatment — ③ runs because the USER CHOSE choice 4, never because pressure demanded it. Bill + hand-off inputs → §9c; workload past the hand-off gates → offer `/coalface` ONCE (§9c), never more workers inside CoalWash.
 
 Undo: the run's snapshot (kept 3) + the wizard bin (`store.old`) + the estate archive (`estate-search`/`estate-restore`). Demoted index lines re-promote by moving the line back from `retier-overflow.md` by hand — a plain text move, no tool needed.
+
+## 12. Ledger authoring — how a row earns its place (maintainer note, not a reader instruction)
+
+The SKILL.md Prohibitions ledger's INTENT is a complete, already-decided set a reader transcribes rather than re-derives — **treat that as the goal, not an achieved fact.** Run 29 (`SKILL-VARIANCE-WALK.md`) found real prohibition-shaped clauses outside the ledger; the three it named by source are closed as of that findings-back round, but no full line-by-line audit of the rest of the body has been run — a future strong-tier walk finding a fourth gap would not be a surprise. This section is for whoever ADDS or EDITS a row.
+
+**What makes a sentence a PROHIBITION, not a guideline:** rewrite it as "you must never `<verb the agent performs>`." If that preserves the meaning AND names a concrete action the agent could otherwise choose to take, it earns a row. A sentence describing what CODE refuses (not an agent choice) does not — unless the agent could independently attempt the same forbidden thing by hand (this room's agents hand-compose plan JSON and node snippets, so most code-enforced rules still earn one).
+
+**Bundling:** a sentence naming several DIFFERENT decision points (different subject, different pipeline moment) becomes several rows. A sentence naming several verbs/instances of the SAME decision point (e.g. "no box-art, no progress narration" — one decision: what the run's output looks like) stays ONE row.
+
+**Overlap with the Consent ledger:** a line lives in exactly one ledger. Consent ledger = "must I ask a human here?" Prohibitions ledger = "what is forbidden regardless of consent?" The Consent ledger's "Standing consent" footnote NAMES `obeseAutoQuick`/`forceAuto`/`externalizeAdvisory` to mark them as non-gates — a cross-reference, not a row — so the actual forbidding rule for each still earns its own Prohibitions row, once, without double-counting.
+
+**Lane column:** an exception is a rail, and a rail needs a countable home — never a parenthetical folded into the prohibition's own wording. Values: `ALL` · `AMBIENT` (session-triggered runs only) · `WIZARD` (any `/coalwash` manual entry) · `WIZARD-2/4` (choices 2 or 4) · `WIZARD-3/4` (ULTRA, choices 3/4) · `WIZARD-4` (RE-TIER/③ only) · `FULL TIER` (the outsider spawn, reached from ambient escalation or wizard 2/4) · `PLATFORM` (cross-agent claims).
