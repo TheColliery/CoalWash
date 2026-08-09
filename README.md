@@ -171,7 +171,7 @@ Install one, it stands alone; install all, they compose without conflict (CoalWa
 
 Shared doctrine: Phoenix-13 hooks (zero-dependency, no network, fail-silent), single-source-of-truth config schemas, consent-gated spend, and a strict no-overkill discipline. Series doctrine: [`TheColliery/.github`](https://github.com/TheColliery).
 
-Zero-dependency, offline, no API keys.
+Zero-dependency, offline by default, no API keys — "by default" because the consent-gated self-update check (`/coalwash:update`) goes online; the hook never does.
 
 ---
 
