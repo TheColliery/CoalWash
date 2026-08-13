@@ -343,15 +343,20 @@ test('hysteresis: certain fat must fall to FAT_REARM_TOKENS or below to actually
   try {
     muteUpdate(home);
     seedClassB(home, proj, { claudeMdText: fatText(60) + '\n' + muscleText(40), indexBytes: 0 });
-    run(proj, home, { hook_event_name: 'SessionStart' }); // arms OBESE
-    assert.strictEqual(readProjState(home, proj).lastVerdict.overCeiling, true);
+    const r1 = run(proj, home, { hook_event_name: 'SessionStart' }); // arms OBESE
+    assertGraceful(r1);
+    const st1 = readProjState(home, proj);
+    assert.ok(st1.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st1)})`);
+    assert.strictEqual(st1.lastVerdict.overCeiling, true);
 
     // Drop to ~170 tok of fat — at/under the 200-tok low-water mark -> clears.
     // This is the CONTINUOUS episode reset task #4 shipped: Quick removing
     // the measured fat ends the episode by measurement, no stamp involved.
     fs.writeFileSync(path.join(proj, 'CLAUDE.md'), fatText(9) + '\n' + muscleText(40), 'utf8');
-    run(proj, home, { hook_event_name: 'SessionStart' });
+    const r2 = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r2);
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
     assert.strictEqual(st.lastVerdict.overCeiling, false);
     assert.strictEqual(st.lastCrossing, undefined, 'LEAN clears the crossing outright');

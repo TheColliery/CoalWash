@@ -36,7 +36,15 @@ const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs']);
 console.log('lib roster drift:');
 try {
   const onDisk = fs.readdirSync(path.join(repo, 'scripts', 'lib'))
-    .filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs') && !UNLISTED_OK.has(f));
+    // A dot-prefixed name is this repo's own established convention for a
+    // non-product per-pid temp fixture (`.cw-reqfold-probe-*`,
+    // `.cw-reexport-hop-*`) — root-provenance.test.mjs excludes the same class
+    // from its own walk for the same reason. Without this, a run of
+    // config-load.test.mjs (which creates and finally-removes such a fixture
+    // beside its target) races a concurrent verify.mjs and reddens the gate on
+    // a file the codebase treats as transient. Measured: intermittent
+    // `FAIL 1 lib(s) on disk but NOT in verify.mjs LIBS — .cw-reexport-hop-<pid>.mjs`.
+    .filter((f) => f.endsWith('.mjs') && !f.startsWith('.') && !f.endsWith('.test.mjs') && !UNLISTED_OK.has(f));
   const unlisted = onDisk.filter((f) => !LIBS.includes(f));
   if (unlisted.length) fail(`${unlisted.length} lib(s) on disk but NOT in verify.mjs LIBS — ${unlisted.join(', ')}`);
   else ok(`every scripts/lib/*.mjs is on the LIBS roster (${onDisk.length} checked)`);
