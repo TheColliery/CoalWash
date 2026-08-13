@@ -43,7 +43,7 @@ test('ccMemoryDir derives <base>/projects/<slug>/memory under the given home', (
 });
 
 test('parseImports: line-start @tokens only; ~/, absolute, and relative forms', () => {
-  const { home } = sandbox();
+  const { home, proj } = sandbox();
   try {
     const text = ['@AGENTS.md', '  @~/global.md', 'not @inline.md', '@' + path.join(os.tmpdir(), 'abs.md'), '@two tokens ignored extra'].join('\n');
     const got = parseImports(text, '/base', home);
@@ -52,7 +52,7 @@ test('parseImports: line-start @tokens only; ~/, absolute, and relative forms', 
       path.join(home, 'global.md'),
       path.join(os.tmpdir(), 'abs.md'),
     ]);
-  } finally { clean(home); }
+  } finally { clean(home, proj); }
 });
 
 test('discoverClassB (CC): governance walk + @import closure + rules + memory store', () => {

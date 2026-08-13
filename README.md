@@ -12,14 +12,14 @@
 
 **Compatibility** ·
 ![Claude Code](https://img.shields.io/badge/Claude_Code-validated-brightgreen)
-![Antigravity](https://img.shields.io/badge/Antigravity-manual-blue)
-![Cursor](https://img.shields.io/badge/Cursor-manual-blue)
-![Codex](https://img.shields.io/badge/Codex-manual-blue)
-![Gemini CLI](https://img.shields.io/badge/Gemini_CLI-manual-blue)
-![Cline](https://img.shields.io/badge/Cline-manual-blue)
-![Copilot](https://img.shields.io/badge/Copilot-manual-blue)
+![Antigravity: works with](https://img.shields.io/badge/Antigravity-works_with-blue)
+![Cursor: works with](https://img.shields.io/badge/Cursor-works_with-blue)
+![Codex: works with](https://img.shields.io/badge/Codex-works_with-blue)
+![Gemini CLI: works with](https://img.shields.io/badge/Gemini_CLI-works_with-blue)
+![Cline: works with](https://img.shields.io/badge/Cline-works_with-blue)
+![Copilot: works with](https://img.shields.io/badge/Copilot-works_with-blue)
 
-<sub>The auto layer — the session-start gauge and the enforce/airbag hooks — runs on **Claude Code** only today; every other platform sits at the **manual** rung of the capability-keyed activation ladder (hooks → best-effort agent-driven offer → manual): `/coalwash` by hand after a file-copy install. `validated` = ran end-to-end on that platform · `manual` = the documented file-copy install — designed-degrade-safe, not yet run there.</sub>
+<sub>The auto layer — the session-start gauge and the enforce/airbag hooks — runs on **Claude Code** only today; every other platform sits at the **manual** rung of the capability-keyed activation ladder (hooks → best-effort agent-driven offer → manual): `/coalwash` by hand after a file-copy install. `validated` = ran end-to-end on that platform · `works with` = the documented file-copy install — designed-degrade-safe, not yet run there.</sub>
 
 [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Releases](https://github.com/TheColliery/CoalWash/releases)
 
@@ -88,7 +88,7 @@ One standing gauge sits at the chokepoint — memory loads every session, so a s
 
 | Aspect | Detail |
 |---|---|
-| **Validation** | Cross-agent by design — zero-dependency Node scripts any agent can run, class-B layout *discovered* per platform, never hardcoded — but **validated end-to-end on Claude Code only**; every other platform is the **manual** tier — designed-degrade-safe, not yet validated. Unknown platform: the agent proposes files it can *see* auto-loaded in its context, code certifies each, a human confirms — still never auto-delete |
+| **Validation** | Cross-agent by design — zero-dependency Node scripts any agent can run, class-B layout *discovered* per platform, never hardcoded — but **validated end-to-end on Claude Code only**; every other platform **works with** CoalWash — designed-degrade-safe, not yet validated; report what you find at [Issues](https://github.com/TheColliery/CoalWash/issues). Unknown platform: the agent proposes files it can *see* auto-loaded in its context, code certifies each, a human confirms — still never auto-delete |
 | **Activation ladder** | Capability-keyed: lifecycle hooks → the gauge runs automatically (Claude Code today); no hooks → best-effort agent-driven offer (probabilistic, not hook parity); always → manual `/coalwash`. Band crossings resolve on the `Stop` hook (the same blocking channel `rot-canary` uses), so whatever surfaces is enforced, not suggested — edge-triggered, never a repeating nag. Hookless platform: one best-effort offer, no repeat |
 | **The list is a mirror, not a list** | CoalWash keeps no hand-maintained inventory of always-loaded memory — the list *mirrors* the real load list: whatever the platform delivers into the agent's context is class-B, whether company-wired, user-wired, or a future update adds a surface that doesn't exist today. A new auto-loaded file enters the measurement by definition, no code change. On known platforms this runs as a cheap drift-check at wizard entry (agent-seen vs adapter-listed, flagging adapter rot the day it happens); every candidate is code-certified — exists, contained in the home/project trees, on-disk head matches what the agent actually saw load — so a hallucinated or spoofed entry can never join the measurement. Fail direction: undercount — unseen is unmeasured is uncut |
 | **A well-behaved guest on your disk** | CoalWash keeps its own per-project bookkeeping (the session gauge's state) *inside* the platform's own project directory — on Claude Code, beside the memory folder it measures — so the platform's lifecycle carries it: remove a project, its state goes too, for free. Every path CoalWash derives is realpath-contained to the config root (`~/.claude`) and fails closed — never a byte outside it. Validated on Claude Code's layout; other platforms get the same one-namespace discipline, designed-for, not yet validated |
@@ -154,7 +154,7 @@ Full series matrix + the must-fail set: [Permission Matrix](https://github.com/T
 
 ## 📊 Benchmark
 
-CoalWash's claims are measured, not asserted, by fixture-based benchmarks with a runnable mechanical scorer: **sawtooth-vs-bloat** (clean-at-threshold vs let-it-bloat over N sessions — the cumulative always-loaded saving Δ%, the headline) plus the **infinity-loop fact-loss** and **consecutive-run ceiling** measurements behind the warning above. Headline digest: [`benchmarks/CoalWash/RESULTS.md`](https://github.com/TheColliery/.github/blob/main/benchmarks/CoalWash/RESULTS.md).
+CoalWash's claims are measured, not asserted, by fixture-based benchmarks with a runnable mechanical scorer: **sawtooth-vs-bloat** (clean-at-threshold vs let-it-bloat over N sessions — the cumulative always-loaded saving Δ%, the headline), **controlled-fidelity** (hold output size constant, measure what each arm loses — CoalWash vs a naive compress at the same saving), plus the **infinity-loop fact-loss** and **consecutive-run ceiling** measurements behind the warning above. Headline digest: [`benchmarks/CoalWash/RESULTS.md`](https://github.com/TheColliery/.github/blob/main/benchmarks/CoalWash/RESULTS.md).
 
 ## 🧭 Part of TheColliery
 
@@ -171,7 +171,7 @@ Install one, it stands alone; install all, they compose without conflict (CoalWa
 
 Shared doctrine: Phoenix-13 hooks (zero-dependency, no network, fail-silent), single-source-of-truth config schemas, consent-gated spend, and a strict no-overkill discipline. Series doctrine: [`TheColliery/.github`](https://github.com/TheColliery).
 
-Zero-dependency, offline, no API keys.
+Zero-dependency, offline by default, no API keys — "by default" because the consent-gated self-update check (`/coalwash:update`) goes online; the hook never does.
 
 ---
 

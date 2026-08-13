@@ -312,12 +312,12 @@ test('W2-1: a project MAY quieten deleteCold true->false (turning it off is alwa
 });
 
 test('W2-1: NO global config at all -- the schema default (false) still blocks a project deleteCold:true', () => {
-  const { proj } = sandbox();
+  const { home: sandboxHome, proj } = sandbox();
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-home-'))); // no .claude dir at all
   try {
     fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ estate: { deleteCold: true } }));
     assert.strictEqual(loadMergedConfig({ cwd: proj, home }).estate.deleteCold, false);
-  } finally { clean(home, proj); }
+  } finally { clean(home, proj, sandboxHome); }
 });
 
 test('W2-1: a junk deleteCold value gets no say -- the effective global stands (K1\'s own rule, one level deeper)', () => {
@@ -368,10 +368,10 @@ test('W2-5: a relative CLAUDE_CONFIG_DIR is rejected -- claudeBaseDirs falls bac
   const prev = process.env.CLAUDE_CONFIG_DIR;
   try {
     process.env.CLAUDE_CONFIG_DIR = '.';
-    const { home } = sandbox();
+    const { home, proj } = sandbox();
     try {
       assert.deepStrictEqual(claudeBaseDirs(home), [path.join(home, '.claude')], 'a relative entry must not survive into the base-dir list');
-    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    } finally { clean(home, proj); }
   } finally {
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
   }
@@ -380,11 +380,11 @@ test('W2-5: a relative CLAUDE_CONFIG_DIR is rejected -- claudeBaseDirs falls bac
 test('W2-5/LOW: a DRIVE-RELATIVE entry (isAbsolute()===true, no drive/UNC root) is rejected on win32 -- resolution still depends on the current drive', { skip: process.platform !== 'win32' && 'win32-only shape' }, () => {
   const prev = process.env.CLAUDE_CONFIG_DIR;
   try {
-    const { home } = sandbox();
+    const { home, proj } = sandbox();
     try {
       process.env.CLAUDE_CONFIG_DIR = '/repo'; // isAbsolute() is true here, but there is no drive letter
       assert.deepStrictEqual(claudeBaseDirs(home), [path.join(home, '.claude')], 'a drive-relative entry must not survive -- path.resolve("/repo") depends on the CURRENT drive');
-    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    } finally { clean(home, proj); }
   } finally {
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
   }
@@ -393,12 +393,12 @@ test('W2-5/LOW: a DRIVE-RELATIVE entry (isAbsolute()===true, no drive/UNC root) 
 test('W2-5: an ABSOLUTE CLAUDE_CONFIG_DIR entry still passes through unchanged (only relative shapes are refused)', () => {
   const prev = process.env.CLAUDE_CONFIG_DIR;
   try {
-    const { home } = sandbox();
+    const { home, proj } = sandbox();
     try {
       const abs = path.join(home, 'alt-config');
       process.env.CLAUDE_CONFIG_DIR = abs;
       assert.deepStrictEqual(claudeBaseDirs(home), [abs]);
-    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    } finally { clean(home, proj); }
   } finally {
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
   }

@@ -118,14 +118,14 @@ test('config: resolveEstateCfg ordering guard — an inverted purge<compress cla
 });
 
 test('config: resolveArchiveDir — "" and a RELATIVE dir both fall back to ~/.claude/coal/coalwash/estate-archive; an absolute dir is honored', () => {
-  const { home } = sandbox();
+  const { home, proj } = sandbox();
   try {
     const def = path.join(home, '.claude', 'coal', 'coalwash', 'estate-archive');
     assert.strictEqual(resolveArchiveDir(estateCfg(), home), def);
     assert.strictEqual(resolveArchiveDir(estateCfg({ archiveDir: 'rel/dir' }), home), def, 'relative -> default (fail-safe)');
     const abs = path.join(home, 'elsewhere');
     assert.strictEqual(resolveArchiveDir(estateCfg({ archiveDir: abs }), home), path.resolve(abs));
-  } finally { clean(home); }
+  } finally { clean(home, proj); }
 });
 
 // grad9 R8-F7: resolveArchiveDir used a bare path.resolve() -- lexical only,

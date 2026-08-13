@@ -117,6 +117,22 @@ for (const [label, p, isSkill] of descTargets) {
   } catch (e) { fail(`${label} description check: ${e.message}`); }
 }
 
+// board #64: DESC_CAP above only walked skill/command FRONTMATTER — the
+// plugin's OWN description field in .claude-plugin/plugin.json (plain JSON,
+// not YAML frontmatter) was never checked against the same cap at all.
+// Non-string-but-truthy (123, {}, ['a']) must FAIL LOUD, not silently read as
+// 0 chars and pass — that's the exact hole the exemplar's first draft had.
+console.log('plugin.json description cap:');
+try {
+  let pjText = fs.readFileSync(path.join(repo, '.claude-plugin', 'plugin.json'), 'utf8');
+  if (pjText.charCodeAt(0) === 0xFEFF) pjText = pjText.slice(1);
+  const pj = JSON.parse(pjText);
+  if (typeof pj.description !== 'string') fail(`.claude-plugin/plugin.json: description is not a string (${pj.description === undefined ? 'missing' : typeof pj.description})`);
+  else if (pj.description.length === 0) fail('.claude-plugin/plugin.json: description missing');
+  else if (pj.description.length > DESC_CAP) fail(`.claude-plugin/plugin.json: description ${pj.description.length} chars exceeds the ${DESC_CAP}-char cap`);
+  else ok(`.claude-plugin/plugin.json: ${pj.description.length} chars (cap ${DESC_CAP})`);
+} catch (e) { fail(`.claude-plugin/plugin.json description check: ${e.message}`); }
+
 console.log('version pins (.github issue templates):');
 try {
   const pj = JSON.parse(fs.readFileSync(path.join(repo, '.claude-plugin', 'plugin.json'), 'utf8'));

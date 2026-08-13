@@ -56,3 +56,66 @@ test('verify.mjs REPORTS missing scripts/lib files instead of dying on them', ()
     assert.match(stdout, /\nVERIFY: FAIL \(\d+\)/, `the run must reach its own summary line\n${stdout}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// board #64: DESC_CAP walked skill/command frontmatter only; plugin.json's own
+// description field was unchecked. This runs the REAL verify.mjs against a
+// full-tree copy (every top-level path verify.mjs itself reads — see the
+// `path.join(repo, ...)` enumeration this list is drawn from) so both the
+// pristine-passes and the over-cap-fails legs exercise the actual gate, not a
+// stand-in. Proved RED first, by hand, before this test existed — see
+// desccap-cw-return.md for the manual transcript.
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the gate', () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-')));
+  try {
+    for (const rel of [
+      '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
+      'platform-configs', 'plugin', 'scripts', 'skills',
+    ]) {
+      const src = path.join(REPO, rel);
+      if (!fs.existsSync(src)) continue;
+      fs.cpSync(src, path.join(root, rel), { recursive: true });
+    }
+    const dest = path.join(root, 'scripts', 'verify.mjs');
+    const run = () => spawnSync(process.execPath, [dest], { encoding: 'utf8' });
+
+    const clean = run();
+    assert.strictEqual(clean.status, 0, `pristine copy must PASS\n${clean.stdout}${clean.stderr}`);
+    assert.match(clean.stdout, /ok\s+\.claude-plugin\/plugin\.json: \d+ chars \(cap 1024\)/,
+      `pristine PASS line must name the real char count\n${clean.stdout}`);
+
+    const pjPath = path.join(root, '.claude-plugin', 'plugin.json');
+    const pj = JSON.parse(fs.readFileSync(pjPath, 'utf8'));
+    pj.description = 'x'.repeat(1100);
+    fs.writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n', 'utf8');
+
+    const over = run();
+    assert.strictEqual(over.status, 1, 'an over-cap plugin.json description must FAIL with exit 1');
+    assert.match(over.stdout, /FAIL\s+\.claude-plugin\/plugin\.json: description 1100 chars exceeds the 1024-char cap/,
+      `the FAIL line must name the file, the exact length, and the cap\n${over.stdout}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never silently reads as 0 chars', () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-nonstring-')));
+  try {
+    for (const rel of [
+      '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
+      'platform-configs', 'plugin', 'scripts', 'skills',
+    ]) {
+      const src = path.join(REPO, rel);
+      if (!fs.existsSync(src)) continue;
+      fs.cpSync(src, path.join(root, rel), { recursive: true });
+    }
+    const pjPath = path.join(root, '.claude-plugin', 'plugin.json');
+    const pj = JSON.parse(fs.readFileSync(pjPath, 'utf8'));
+    pj.description = 123; // truthy non-string — must never read as 0 chars and pass
+    fs.writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n', 'utf8');
+
+    const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8' });
+    assert.strictEqual(r.status, 1, 'a non-string description must FAIL, not silently pass as 0 chars');
+    assert.match(r.stdout, /FAIL\s+\.claude-plugin\/plugin\.json: description is not a string \(number\)/,
+      `must name the actual type, not silently report 0 chars\n${r.stdout}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

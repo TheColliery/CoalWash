@@ -461,14 +461,14 @@ test('(b3) legacy-file drain also prunes a since-deleted project\'s stale entry 
 });
 
 test('(c) containment: containedNewPath accepts an in-sandbox path, rejects an out-of-sandbox one', () => {
-  const { home } = sandbox();
+  const { home, proj } = sandbox();
   const base = path.join(home, '.claude');
   fs.mkdirSync(base, { recursive: true });
   try {
     assert.strictEqual(containedNewPath(path.join(base, 'projects', 'x', 'coalwash', 'state.json'), base), true, 'a to-be-created path under base passes');
     assert.strictEqual(containedNewPath(path.join(home, 'elsewhere', 'evil.json'), base), false, 'a sibling-of-base path is rejected (lexical ..)');
     assert.strictEqual(containedNewPath(path.join(os.tmpdir(), 'far', 'evil.json'), base), false, 'a fully-outside path is rejected');
-  } finally { clean(home); }
+  } finally { clean(home, proj); }
 });
 
 test('(c2) containment fail-closed: a projects/<slug> dir symlinked OUT of ~/.claude → statePath falls back to coal/, never writes outside', (t) => {
@@ -530,7 +530,8 @@ test('(f) config file untouched by migration: ~/.claude/.coalwash.json is byte-i
 });
 
 test('(g) update stamp → coal/coalwash/: write lands there + drops the old root stamp; read migrates old→new', () => {
-  const { home } = sandbox();
+  const { home, proj } = sandbox();
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-empty-'));
   try {
     // old stamp only → read finds it via fallback
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
@@ -543,8 +544,8 @@ test('(g) update stamp → coal/coalwash/: write lands there + drops the old roo
     assert.ok(fs.existsSync(updateStampPath(home)), 'new stamp at coal/coalwash/');
     assert.strictEqual(fs.existsSync(oldUpdateStampPath(home)), false, 'old root stamp deleted (no-old-version-leftover)');
     assert.strictEqual(readUpdateStamp(home), 222, 'reads the new stamp');
-    assert.strictEqual(readUpdateStamp(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-empty-'))), 0, 'neither stamp → 0');
-  } finally { clean(home); }
+    assert.strictEqual(readUpdateStamp(empty), 0, 'neither stamp → 0');
+  } finally { clean(home, proj, empty); }
 });
 
 // ---------------------------------------------------------------------------
