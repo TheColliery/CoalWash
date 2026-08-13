@@ -19,6 +19,7 @@ const TESTS = [
   'scripts/lib/caliper.test.mjs',
   'scripts/lib/fidelity-gate.test.mjs',
   'scripts/lib/apply.test.mjs',
+  'scripts/lib/input-contract.test.mjs',
   'scripts/lib/keeps.test.mjs',
   'scripts/lib/retention-policy.test.mjs',
   'scripts/lib/cli.test.mjs',

@@ -39,7 +39,7 @@ snapshot (verified-at-creation) → external-writer re-read (any foreign change 
 
 **The pin gate is two-tier**, and both tiers refuse — they differ only in blast radius:
 - **MARKER** — `pinned: true` is actually present and read (matched directly in the block, or as a parsed top-level key — either is enough). This refuses the file **and aborts the whole plan** (a plan containing an action against an explicit pin is malformed; nothing else in it runs either).
-- **INCAPACITY** — the file's frontmatter block cannot be certified readable (see §6's six refusal classes), or the read itself fails. This refuses **that file only**; the rest of the plan proceeds unaffected. **No pin needs to be present for this to fire** — an ordinary file can be incapacity-refused purely on the shape of its bytes.
+- **INCAPACITY** — the file's bytes cannot be certified safe to read or rewrite: a NUL byte, a byte that fails the whole-file UTF-8 round trip, an unclean 64-character head, an unclosed or malformed opening fence line, the frontmatter block failing one of §6's six block-readability classes, or the read itself failing. This refuses **that file only**; the rest of the plan proceeds unaffected. **No pin needs to be present for this to fire** — an ordinary file can be incapacity-refused purely on the shape of its bytes.
 
 Either way the refused file is left untouched and safe; nothing is silently degraded. Recovery is by REFERENCE (a bin id / snapshot restores byte-exact; content is never re-authored from memory). Per-project, session-exclusive (`.coalwash.lock`).
 
