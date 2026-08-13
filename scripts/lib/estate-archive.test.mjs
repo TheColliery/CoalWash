@@ -135,7 +135,7 @@ test('config: resolveArchiveDir — "" and a RELATIVE dir both fall back to ~/.c
 // estate-archive.mjs to HEAD (pre-fix), this test must fail (the lexical
 // link path returned, not the real target).
 test('RED-FIRST/R8-F7: resolveArchiveDir resolves a symlinked archiveDir to its REAL target, not the lexical link path', (t) => {
-  const { home } = sandbox();
+  const { home, proj } = sandbox();
   try {
     const realTarget = path.join(home, 'real-archive-target');
     fs.mkdirSync(realTarget, { recursive: true });
@@ -150,16 +150,16 @@ test('RED-FIRST/R8-F7: resolveArchiveDir resolves a symlinked archiveDir to its 
     const trueReal = fs.realpathSync.native(realTarget);
     assert.strictEqual(resolved, trueReal, 'must be the REAL target, not the symlink\'s own lexical path');
     assert.notStrictEqual(resolved, path.resolve(link), 'the pre-fix lexical answer must NOT be what we return');
-  } finally { clean(home); }
+  } finally { clean(home, proj); }
 });
 
 test('RED-FIRST/R8-F7 control: an ordinary (non-symlinked) absolute archiveDir with no existing ancestor still resolves exactly as before (no over-refusal)', () => {
-  const { home } = sandbox();
+  const { home, proj } = sandbox();
   try {
     const abs = path.join(home, 'brand-new', 'nested', 'archive');
     const resolved = resolveArchiveDir(estateCfg({ archiveDir: abs }), home);
     assert.strictEqual(resolved, path.resolve(abs), 'an ordinary path with no symlinks resolves identically to the old path.resolve() behavior');
-  } finally { clean(home); }
+  } finally { clean(home, proj); }
 });
 
 // ---------------------------------------------------------------------------
@@ -781,12 +781,13 @@ test('estate-restore: round-trips every file byte-exact to a scratch dir OUTSIDE
     const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
 
     const r = restoreSession('sess-warm', { archiveDir: res.archiveDir });
-    assert.strictEqual(r.ok, true);
-    assert.strictEqual(r.files.length, 3);
-    assert.ok(!r.dir.startsWith(path.join(home, '.claude')), 'default target is a scratch dir, never the live tree');
-    assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm.jsonl')).equals(origJsonl), 'transcript byte-exact');
-    assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm', 'tool-results', 'r1.txt')).equals(origTool), 'overflow byte-exact');
-    clean(r.dir);
+    try {
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.files.length, 3);
+      assert.ok(!r.dir.startsWith(path.join(home, '.claude')), 'default target is a scratch dir, never the live tree');
+      assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm.jsonl')).equals(origJsonl), 'transcript byte-exact');
+      assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm', 'tool-results', 'r1.txt')).equals(origTool), 'overflow byte-exact');
+    } finally { clean(r.dir); }
 
     const to = path.join(home, 'chosen-restore');
     const r2 = restoreSession('sess-warm', { archiveDir: res.archiveDir, to });
