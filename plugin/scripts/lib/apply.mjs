@@ -827,12 +827,18 @@ const pinKey = (k) => unquote(String(k).trim()).trim().toLowerCase() === 'pinned
 // "something pin-like") landed 42 of 63 on INCAPACITY, not the marker path,
 // BECAUSE `parsed.unreadable` (the incapacity check, just below) runs BEFORE
 // the parsed-entry check and intercepts anything the block-reader cannot
-// fully account for -- which is most real-world junk. So "via the floor or a
-// parsed entry" is a NARROW, exact-conforming trigger (the whole frontmatter
-// block must be cleanly, completely parseable), not a broad catch for
-// anything that merely resembles a pin; the common case for messy/malformed
-// content is the gentler per-file incapacity refusal below, not a whole-plan
-// abort.
+// fully account for -- which is most real-world junk. So the marker tier is
+// a NARROW trigger, not a broad catch for anything that merely resembles a
+// pin -- but the two paths are narrow for DIFFERENT reasons. Only the
+// parsed-entry check requires the whole block to be cleanly, completely
+// parseable (`parsed.unreadable` gates it before `entries.some` runs); the
+// floor (RETIRED_PIN_FLOOR, above) is a raw regex over the untouched block
+// text that runs BEFORE any parse is attempted, so it has no parseability
+// precondition at all -- a block that is otherwise unparseable junk still
+// hits the floor if one line matches `pinned: true` exactly, by design (a
+// monotone widening, see its own comment above). The common case for
+// messy/malformed content is still the gentler per-file incapacity refusal
+// below, not a whole-plan abort.
 function pinVerdict(file) {
   try {
     const fd = fs.openSync(file, 'r');
