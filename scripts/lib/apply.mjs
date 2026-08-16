@@ -311,31 +311,54 @@ function needleIndentShape(needle, origParts) {
     // by scan order, silently, when the anchor's own text+rank pattern
     // legitimately recurs at a SECOND position under a DIFFERENT parent --
     // the first-found position may not be the one that actually needs
-    // protecting, and the wrong (e.g. shallower/top-level) occurrence can
-    // derive an EMPTY chain that then vacuously "preserves" against ANY
-    // candidate below. `locateStructural` now returns the sentinel below
-    // when it finds MORE THAN ONE match, and a caller that supplied
-    // origParts but cannot get ONE unambiguous position is told exactly
-    // that (`origChainUnknown`) -- the honest answer to unresolvable
-    // ambiguity is refusal, never a guess.
+    // protecting, and picking the wrong (e.g. shallower/top-level) one of
+    // TWO OR MORE matches can derive an EMPTY chain that then vacuously
+    // "preserves" against ANY candidate below. `locateStructural` now
+    // returns the sentinel below when it finds MORE THAN ONE match, and a
+    // caller that supplied origParts but cannot get ONE unambiguous
+    // position is told exactly that (`origChainUnknown`) -- the honest
+    // answer to unresolvable ambiguity is refusal, never a guess.
     //
-    // NARROWER than the board's own literal wording, deliberately: the
-    // board's finding also named plain NOT-FOUND (pos === -1) as a case
-    // that "degrades silently" and should refuse the same way. Escalating
-    // -1 too breaks a real, pre-existing, load-bearing case --
-    // RED-FIRST/F8-prose-reflow -- where a PROSE anchor is recorded across
-    // an arbitrary hard-wrap point that need not align with the file's own
-    // physical line boundaries (e.g. a prefix like "Notes: " merges the
-    // anchor's own first line onto a longer physical line), so
-    // locateStructural correctly finds ZERO matches even though nothing is
-    // ambiguous or wrong -- there was simply never a line-aligned position
-    // to find. That is indistinguishable, in this data shape, from a
-    // genuine "anchor absent from its own file" case the pre-existing
-    // fallback (rank+text/flatten matching with no positional check) was
-    // built to tolerate. AMBIGUITY (two or more real matches) is a
-    // different, unambiguous signal -- multiple positions were found and
-    // the anchor string cannot say which one is real -- and is the only
-    // one escalated here.
+    // STILL OPEN, NOT CLOSED HERE (board recommendation (2), INSPECT
+    // finding 2 on this round, 2026-08-16): board 2a is closed ONLY for
+    // the multi-match case above. When an anchor has EXACTLY ONE match and
+    // that single, unambiguous position genuinely sits at (or near) top
+    // level, `ancestorChain` still derives a legitimately empty chain, and
+    // `chainPreserved([], anyCandidateChain)` still passes vacuously --
+    // this sentinel never fires (`found` stays a single value, never
+    // LOCATE_AMBIGUOUS), so that anchor gets zero structural protection.
+    // Re-parenting it under a brand-new heading/section still applies with
+    // no flag. NOT fixed here -- naming it, not guessing at it.
+    //
+    // ALSO STILL OPEN: plain NOT-FOUND (pos === -1). Board recommendation
+    // (2) named this explicitly ("locate === -1 must refuse, never
+    // silently degrade through null") and this round did not act on that
+    // half -- only the ambiguous-match half above is closed. `pos === -1`
+    // leaves `origChain` at its default `null`, so the chain check below
+    // is skipped entirely and the rank+text/flatten match alone becomes
+    // the verdict for any anchor `locateStructural` cannot line-locate at
+    // all -- with F1's own `.includes()` shortcut now removed, this path
+    // is the SOLE authorizer for that whole class. This round narrowed the
+    // escalation to AMBIGUITY only, because escalating -1 too broke a
+    // real, pre-existing, load-bearing test -- RED-FIRST/F8-prose-reflow
+    // -- where a PROSE anchor is recorded across an arbitrary hard-wrap
+    // point that need not align with the file's own physical line
+    // boundaries (e.g. a prefix like "Notes: " merges the anchor's own
+    // first line onto a longer physical line), so locateStructural
+    // correctly finds ZERO matches though nothing is ambiguous or wrong --
+    // there was simply never a line-aligned position to find, and that is
+    // indistinguishable in this data shape from a genuine "anchor absent
+    // from its own file" case the pre-existing fallback was built to
+    // tolerate. That is a real, load-bearing reason to narrow the FIX --
+    // it is not a reason the underlying board item is closed. A NAMED
+    // LEAD, not built or tested here: `flattenWithLineMap` (below, in this
+    // file) already maps a flattened-text character offset back to its
+    // contributing line index; locating the anchor in the ORIGINAL's
+    // flattened text (rather than only via line-aligned `locateStructural`)
+    // could derive an `origChain` even when the line-aligned search finds
+    // nothing, which would close this half without re-breaking F8 (F8's
+    // own anchor DOES locate via the flatten path, and its reflow
+    // preserves the chain) -- untried, a design change, not a one-liner.
     if (pos === LOCATE_AMBIGUOUS) shape.origChainUnknown = true;
     else if (pos !== -1) shape.origChain = ancestorChain(origParts, pos, origParts[pos].indent);
   }
@@ -399,12 +422,23 @@ function indentRelativeSurvives(shape, haystack, haystackParts, strict = true) {
     // refuse immediately rather than let a later, unrelated window paper
     // over it. NAMED RESIDUAL (over-refusal, never content-loss, see the
     // room's own acceptance rule): a legitimate rewrite where an UNRELATED
-    // occurrence of the same anchor text sits, by coincidence, earlier in
-    // document order than the keep's real (safe) content can now be
+    // occurrence of the same anchor text sits, by coincidence, ANYWHERE in
+    // the haystack alongside the keep's real (safe) content can now be
     // refused too -- the frame carries no signal to distinguish "the real
     // content escaped, masked by a decoy" from "an unrelated decoy sits
     // beside a safe original" without a position-correlation mechanism
     // this fix does not add. Tested and accepted as the round's return.
+    //
+    // RUNG1 F3 (CoalBoard 2026-08-04) WIDENED this residual and this
+    // paragraph is corrected to say so: the bound used to be "earlier in
+    // document order" -- a consequence of the loop's own early `return
+    // true`, which meant a decoy AFTER the real content was never reached
+    // and so never triggered the residual. F3 removed that early return
+    // (see this function's own header comment), so the residual now bites
+    // regardless of the decoy's position, before or after. Direction is
+    // unchanged (over-refusal, never content-loss) and still inside the
+    // room's own acceptance rule -- only the SCOPE this paragraph used to
+    // claim was stale.
     if (origChain) {
       if (!chainPreserved(origChain, ancestorChain(h, start, h[start].indent))) return false;
     }
