@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readFrontmatter, frontmatterBlockParse, frontmatterKeys } from './fidelity-gate.mjs';
+import { readFrontmatter, frontmatterKeys } from './fidelity-gate.mjs';
 import { sniffUnrewritable, isPinned } from './apply.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
