@@ -3805,6 +3805,132 @@ test('F2 residual, named not hidden (round-12 lab): a legitimate rewrite with an
   } finally { clean(proj); }
 });
 
+// RUNG1 (CoalBoard 2026-08-04, board record: CoalWash/MEMORY.md "2026-08-04
+// -- THE FULL COALBOARD RAN") -- a 4-seat investigation run AFTER WAVE-8
+// shipped, against the shipped 2ea8480 state, found three more live escapes
+// in the same own-file KEEPS-GATE machinery. Independently reconstructed
+// fixtures below (not the board's own literal constructions) -- same attack
+// SHAPE, own numbers.
+
+test('RUNG1 F1 [CRITICAL, content-loss]: survivesOwnFile\'s raw substring pre-check authorized a re-parented loop body under a DIFFERENT enclosing block, byte-identical text', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'for a in xs:\n    do_x()\n    do_y()\nfor b in ys:\n    other()\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_x()\n    do_y()', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      // do_x()/do_y() are byte-identical, same indent, still present
+      // somewhere in the new content -- the old `.includes(anchor)`
+      // pre-check at survivesOwnFile's own opening line matched this
+      // immediately and returned true before the ancestor-chain frame
+      // ever ran. They have moved out from under "for a in xs:" to under
+      // the UNRELATED "for b in ys:".
+      { type: 'rewrite', path: f, content: 'for a in xs:\n    placeholder()\nfor b in ys:\n    do_x()\n    do_y()\n    other()\n' },
+    ]));
+    assert.strictEqual(r.ok, false, 'the anchor moved to a different enclosing block -- raw substring presence must not authorize survival on its own');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'for a in xs:\n    do_x()\n    do_y()\nfor b in ys:\n    other()\n', 'file left untouched');
+  } finally { clean(proj); }
+});
+
+test('RUNG1 F1 control: the SAME re-parent WITHOUT the raw-substring shortcut\'s bait (text also reflowed, not byte-identical) already refused pre-fix too -- proves F1 is about the SHORTCUT, not a new detection capability', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'for a in xs:\n    do_x()\n    do_y()\nfor b in ys:\n    other()\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_x()\n    do_y()', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      // reflowed onto one line so the raw substring pre-check could never
+      // have matched even before this fix -- the ancestor-chain frame was
+      // always the one doing the work here.
+      { type: 'rewrite', path: f, content: 'for a in xs:\n    placeholder()\nfor b in ys:\n    do_x() do_y()\n    other()\n' },
+    ]));
+    assert.strictEqual(r.ok, false, r.error);
+  } finally { clean(proj); }
+});
+
+test('RUNG1 F2 [CRITICAL, content-loss]: locateStructural\'s first-match semantics derived origChain from a coincidental shallower occurrence, vacuously exempting a real escape', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    // TWO occurrences of the anchor's text+rank pattern in the ORIGINAL
+    // file: an unrelated top-level pair (lines 1-2, no enclosing structure)
+    // and the REAL, nested pair this keep actually protects (under
+    // "section:"). locateStructural's old first-match semantics picks the
+    // top-level one (scan order), and ancestorChain from a spanStart of 0
+    // returns [] -- an EMPTY chain, which chainPreserved then vacuously
+    // "preserves" against ANY candidate.
+    write(f, 'do_a()\ndo_b()\n\nsection:\n    do_a()\n    do_b()\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_a()\n    do_b()', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      // the real nested pair escapes "section:" (heading removed, dedented
+      // to top-level); the coincidental top-level pair is kept unchanged
+      // so the ambiguity that produced the wrong origChain is still latent
+      // in the original file regardless of what the new content does.
+      { type: 'rewrite', path: f, content: 'do_a()\ndo_b()\n\ndo_a()\ndo_b()\n' },
+    ]));
+    assert.strictEqual(r.ok, false, 'the anchor text+rank pattern is ambiguous in the original file -- an unresolvable position must refuse, never silently pick the first match');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'do_a()\ndo_b()\n\nsection:\n    do_a()\n    do_b()\n', 'file left untouched');
+  } finally { clean(proj); }
+});
+
+test('RUNG1 F2 control: the SAME nested pair with NO coincidental top-level twin in the original file already refuses -- unaffected by the fix, proves F2 needs the ambiguity to exploit', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'section:\n    do_a()\n    do_b()\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_a()\n    do_b()', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'do_a()\ndo_b()\n' },
+    ]));
+    assert.strictEqual(r.ok, false, r.error);
+  } finally { clean(proj); }
+});
+
+test('RUNG1 F3 [CRITICAL, content-loss]: indentRelativeSurvives accepted the first chain-preserving window in the NEW content without ruling out a later escaped occurrence sharing the same anchor shape', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    // a single, unambiguous original occurrence -- isolates F3 from F2's
+    // own ambiguity mechanism (origChain here is a clean, non-empty,
+    // unique chain: ["Section A:"]).
+    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      // window A (still under "Section A:", earlier in document order)
+      // preserves origChain and is a chain-preserving DECOY for the old
+      // loop's own "return true at the first ok+preserved window"
+      // semantics; window B (later, at document top-level) is a SECOND
+      // occurrence of the same text+rank shape that has genuinely escaped
+      // any enclosing structure -- the old loop never reached it.
+      { type: 'rewrite', path: f, content: 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\nkeep_line_one: alpha\nkeep_line_two: beta\n' },
+    ]));
+    assert.strictEqual(r.ok, false, 'a later occurrence of the same anchor shape escaped its enclosing structure -- an earlier chain-preserving window must not mask it');
+    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n', 'file left untouched');
+  } finally { clean(proj); }
+});
+
+test('RUNG1 F3 control: the SAME content with the trailing escaped duplicate removed already survives cleanly -- proves F3 needs the second, later occurrence to exploit', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'MEMORY.md');
+    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
+    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
+    assertAnchorStored(proj, 'MEMORY.md');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\nafter\n' },
+    ]));
+    assert.strictEqual(r.ok, true, r.error);
+  } finally { clean(proj); }
+});
+
 // WAVE-6 HIGH (INSPECT on 36e4bfa, cw-class-b-reviewer): round 11's
 // flattenSurvives gained a uniformity requirement -- correct for the
 // KEEPS-GATE (F3), silently inherited by the merge-pair check (:1197,

@@ -280,14 +280,12 @@ function needleIndentShape(needle, origParts) {
   // `ancestorChain`/`flattenSurvives` above for the replacement.
   const uniform = new Set(nRanks).size <= 1;
   const atZero = uniform && n[0].indent === 0;
-  const shape = { n, nRanks, uniform, atZero, indent0: n[0].indent, flatNeedle: atZero ? normWhitespace(needle) : null, origChain: null };
+  const shape = { n, nRanks, uniform, atZero, indent0: n[0].indent, flatNeedle: atZero ? normWhitespace(needle) : null, origChain: null, origChainUnknown: false };
   // grad11 STEP 2: locate the anchor's TRUE position in the file's OWN
   // original bytes (origParts = lineParts(origBuf), passed by the KEEPS-GATE
   // call site ONLY when checking a keep against ITS OWN file -- never for the
   // cross-file migration sweep, where no "original position in THIS file"
-  // exists to derive a chain from). -1 (not located) degrades to no chain,
-  // which callers below treat as "cannot verify structurally" -- never a
-  // silent pass, see indentRelativeSurvives's own fallback ordering.
+  // exists to derive a chain from).
   if (origParts) {
     const pos = locateStructural(shape, origParts);
     // round-12 lab F1 [CRITICAL, content-loss], root cause: this used to
@@ -307,12 +305,49 @@ function needleIndentShape(needle, origParts) {
     // `origParts[pos].indent` is that position's REAL indent and is what
     // ancestorChain needs as its reference depth, independent of however
     // the anchor happened to be recorded.
-    if (pos !== -1) shape.origChain = ancestorChain(origParts, pos, origParts[pos].indent);
+    //
+    // RUNG1 F2 (CoalBoard 2026-08-04, live against the shipped WAVE-8
+    // state): `locateStructural` used to return the FIRST rank+text match
+    // by scan order, silently, when the anchor's own text+rank pattern
+    // legitimately recurs at a SECOND position under a DIFFERENT parent --
+    // the first-found position may not be the one that actually needs
+    // protecting, and the wrong (e.g. shallower/top-level) occurrence can
+    // derive an EMPTY chain that then vacuously "preserves" against ANY
+    // candidate below. `locateStructural` now returns the sentinel below
+    // when it finds MORE THAN ONE match, and a caller that supplied
+    // origParts but cannot get ONE unambiguous position is told exactly
+    // that (`origChainUnknown`) -- the honest answer to unresolvable
+    // ambiguity is refusal, never a guess.
+    //
+    // NARROWER than the board's own literal wording, deliberately: the
+    // board's finding also named plain NOT-FOUND (pos === -1) as a case
+    // that "degrades silently" and should refuse the same way. Escalating
+    // -1 too breaks a real, pre-existing, load-bearing case --
+    // RED-FIRST/F8-prose-reflow -- where a PROSE anchor is recorded across
+    // an arbitrary hard-wrap point that need not align with the file's own
+    // physical line boundaries (e.g. a prefix like "Notes: " merges the
+    // anchor's own first line onto a longer physical line), so
+    // locateStructural correctly finds ZERO matches even though nothing is
+    // ambiguous or wrong -- there was simply never a line-aligned position
+    // to find. That is indistinguishable, in this data shape, from a
+    // genuine "anchor absent from its own file" case the pre-existing
+    // fallback (rank+text/flatten matching with no positional check) was
+    // built to tolerate. AMBIGUITY (two or more real matches) is a
+    // different, unambiguous signal -- multiple positions were found and
+    // the anchor string cannot say which one is real -- and is the only
+    // one escalated here.
+    if (pos === LOCATE_AMBIGUOUS) shape.origChainUnknown = true;
+    else if (pos !== -1) shape.origChain = ancestorChain(origParts, pos, origParts[pos].indent);
   }
   return shape;
 }
 function indentRelativeSurvives(shape, haystack, haystackParts, strict = true) {
-  const { n, nRanks, atZero, flatNeedle, origChain } = shape;
+  const { n, nRanks, atZero, flatNeedle, origChain, origChainUnknown } = shape;
+  // RUNG1 F2: origParts was supplied (verification was expected) but
+  // locateStructural could not resolve ONE unambiguous position in the
+  // original file -- "cannot verify structurally" is the honest answer,
+  // never a silent fall-through to an unverified rank+text-only match.
+  if (origChainUnknown) return false;
   const h = haystackParts || lineParts(haystack);
   // grad11 STEP 2 perf (bonus, pre-existing loop): same head-line-text
   // pre-filter as locateStructural's own header comment -- reject the cheap
@@ -320,6 +355,19 @@ function indentRelativeSurvives(shape, haystack, haystackParts, strict = true) {
   // was always going to fail on `h[start+0].text !== n[0].text` anyway.
   // Pre-existing from round 9/10, not introduced this round; folded in here
   // because it directly reduces the cost this round's own perf check found.
+  //
+  // RUNG1 F3 (CoalBoard 2026-08-04): this used to `return true` on the
+  // FIRST window whose rank+text AND chain both checked out -- answering
+  // "does SOME window survive" where the invariant needs "does EVERY window
+  // matching this shape survive" (a later, genuinely-escaped occurrence
+  // sharing the same text+rank pattern was never reached once an earlier,
+  // chain-preserving window satisfied the loop). Fixed the same direction
+  // as round-12 lab F2 already fixed the chain-FAILURE case: keep scanning
+  // the WHOLE haystack: any window whose chain fails still refuses
+  // immediately (F2's own fix, unchanged), and a window that passes only
+  // marks `anyMatch` rather than returning -- so a later failing window is
+  // never masked by an earlier passing one.
+  let anyMatch = false;
   for (let start = 0; start + n.length <= h.length; start++) {
     if (h[start].text !== n[0].text) continue;
     const hRanks = denseRank(h.slice(start, start + n.length).map((l) => l.indent));
@@ -327,6 +375,7 @@ function indentRelativeSurvives(shape, haystack, haystackParts, strict = true) {
     for (let j = 0; j < n.length && ok; j++) {
       if (h[start + j].text !== n[j].text || hRanks[j] !== nRanks[j]) ok = false;
     }
+    if (!ok) continue;
     // grad11 STEP 2: replaces round-10-round-2's absolute-indent gate. When
     // this shape's origin chain is known (checking the anchor against ITS
     // OWN file), a candidate window must preserve that SAME chain among its
@@ -356,11 +405,12 @@ function indentRelativeSurvives(shape, haystack, haystackParts, strict = true) {
     // content escaped, masked by a decoy" from "an unrelated decoy sits
     // beside a safe original" without a position-correlation mechanism
     // this fix does not add. Tested and accepted as the round's return.
-    if (ok && origChain) {
+    if (origChain) {
       if (!chainPreserved(origChain, ancestorChain(h, start, h[start].indent))) return false;
     }
-    if (ok) return true;
+    anyMatch = true;
   }
+  if (anyMatch) return true;
   // grad11 STEP 2 [F3]: the flatten fallback ITSELF is where a needle whose
   // OWN lines are all flush-left (atZero) gets checked once the exact
   // rank+text loop above finds no match -- which is exactly what happens
@@ -442,8 +492,17 @@ function chainPreserved(origChain, candChain) {
 // if not found (a keep whose anchor does not verbatim-appear in its own
 // recorded original -- defensive; should not happen for a real keep, whose
 // anchor names literal original content, but the caller degrades safely).
+// RUNG1 F2 (CoalBoard 2026-08-04): LOCATE_AMBIGUOUS if the text+rank pattern
+// matches at MORE THAN ONE position -- the anchor string alone cannot
+// disambiguate which occurrence is the one this shape's ancestor chain
+// should be derived from, and silently taking the first (scan-order) match
+// let the wrong occurrence's chain stand in for the real one, including
+// deriving a vacuously-empty chain from a coincidental shallower match. See
+// needleIndentShape's own call site for how the two sentinels are handled.
+const LOCATE_AMBIGUOUS = -2;
 function locateStructural(shape, parts) {
   const { n, nRanks } = shape;
+  let found = -1;
   // grad11 STEP 2 perf: check the cheap head-line TEXT match before paying
   // for `denseRank` (an O(N) allocation+sort) at every candidate position.
   // A needle genuinely absent from `parts` (the common shape on a large,
@@ -453,6 +512,12 @@ function locateStructural(shape, parts) {
   // fixture cost was this scan running to completion needlessly; this cuts
   // it back toward a single linear pass. Behavior-identical -- `ok` would
   // have gone false at j=0 anyway on a head mismatch.
+  //
+  // RUNG1 F2: no early return on the first match any more -- the whole file
+  // is scanned so a second match can be detected. This trades the round-11
+  // perf win back for correctness on the security-relevant own-file check;
+  // the cheap head-line pre-filter above still bounds the common (needle
+  // absent) case to one comparison per position.
   for (let start = 0; start + n.length <= parts.length; start++) {
     if (parts[start].text !== n[0].text) continue;
     const ranks = denseRank(parts.slice(start, start + n.length).map((l) => l.indent));
@@ -460,9 +525,12 @@ function locateStructural(shape, parts) {
     for (let j = 0; j < n.length && ok; j++) {
       if (parts[start + j].text !== n[j].text || ranks[j] !== nRanks[j]) ok = false;
     }
-    if (ok) return start;
+    if (ok) {
+      if (found !== -1) return LOCATE_AMBIGUOUS;
+      found = start;
+    }
   }
-  return -1;
+  return found;
 }
 // The atZero/flatten path's own structural guard (F3's fix): map the
 // flattened haystack's character offsets back to the ORIGINAL lines that
@@ -615,8 +683,16 @@ function textSurvives(needle, haystacks, normHaystacks, haystackLineParts, stric
 // stricter. If a new call site needs the old single-line shortcut back, gate
 // it the same way the existing one does, rather than reintroducing an
 // untested twin.
+// RUNG1 F1 (CoalBoard 2026-08-04): the old opening line here --
+// `if (String(newContent).includes(anchor)) return true;` -- treated raw
+// substring presence as a VERDICT, not an input, and the board proved it
+// live: a loop body re-parented under a DIFFERENT enclosing block, byte-
+// identical text, has its exact bytes present SOMEWHERE in the new content
+// regardless of where they now sit, so that line authorized survival before
+// the ancestor-chain frame below it ever ran. The structural check is now
+// unconditional and IS the verdict; raw substring presence carries no
+// authority of its own.
 function survivesOwnFile(anchor, newContent, origText) {
-  if (String(newContent).includes(anchor)) return true; // exact substring -- unambiguous either way
   const shape = needleIndentShape(anchor, lineParts(origText));
   return indentRelativeSurvives(shape, newContent);
 }
