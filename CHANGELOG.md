@@ -4,6 +4,10 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+### Changed
+
+- **Ship-text now states plainly that a keep's `anchor`/`anchorFile`-based structural re-check is lab-only (board #18, owner-ruled 2026-08-04; this sweep landed it 12 days late).** The mechanism (`needleIndentShape`/`indentRelativeSurvives`/`flattenSurvives`/`survivesOwnFile` in `apply.mjs`) verifies an old keep's anchor text still sits where it was recorded before honoring the keep — it is not wired into any shipped write path, since `recordKeep` (the only function capable of writing an anchor-bearing record) has zero production callers anywhere in `scripts/`/`hooks/` non-test code, confirmed again this session. Every live keep on this machine and in the shipped engine is the plain `{target, reason, date}` form; the declaration closes a theoretical gap in a dormant record type, not a live one. **`pinned: true`'s file-level gate (`isPinned`/`pinVerdict`) is a separate, wired, fully-exercised mechanism, untouched by this note.** Landed in `README.md` and `skills/coalwash/references/method.md`; full detail, including four measured escapes in the anchor-check mechanism itself (three CRITICAL content-loss, one HIGH structural-mismatch — live-executed, reproduced, or constructed per-finding, all currently zero-blast for the same dormant-record reason above) — see `MEMORY.md`'s "2026-08-04 — DECLARED LAB-ONLY: the anchor-based structural keep path" entry.
+
 ## [1.1.0] - 2026-08-08
 
 ### Added

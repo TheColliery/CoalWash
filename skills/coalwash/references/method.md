@@ -92,6 +92,7 @@ Per flag, decide: **accept** (keep-0%, genuinely garbage — schedule the cut) �
 
 - The owner-blindness asymmetry is WHY the outsider exists: your instinct rates everything "necessary" — reject only with a concrete reason, not a feeling.
 - A rejection (keep) with its concrete reason appends `{target, reason, date}` to `.claude/coalwash/keeps.json` — an adjudicated keep is not re-flagged next run without new evidence; decision-fatigue is real, a settled item stays settled.
+- `anchor`/`anchorFile` — optional fields the same record could also carry — feed a structural re-check (`needleIndentShape`/`indentRelativeSurvives`/`flattenSurvives`/`survivesOwnFile` in `apply.mjs`) that verifies the anchor text still sits where it was recorded before honoring an old keep. That check is **lab-only**, declared 2026-08-04, and not wired into any shipped write path — `recordKeep` never sets these fields today, so every live keep is the plain `{target, reason, date}` form above. `pinned: true`'s file-level gate is a separate, wired, fully-exercised mechanism, unaffected.
 - A `superseded` accept must name WHERE the superseding statement lives (it must survive).
 - `done-point-in-time` with a durable LESSON inside → trim to the lesson, don't delete.
 - Cuts are `rewrite` actions (trim/compact) wherever possible; whole-file `delete` and N→1 `merge` carry the most weight — get the call right; the safety net is UNDO (snapshot + whole-run rollback), not a pre-approval gate.
