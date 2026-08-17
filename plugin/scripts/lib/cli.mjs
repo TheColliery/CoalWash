@@ -193,11 +193,27 @@ export function gauge(opts = {}) {
 
 // The terse one-line gauge (method.md §0's reporting shape).
 export function gaugeLine(g) {
-  // task #4: BMI = footprint / MEASURED muscle now (1.00 = provably-pure
-  // muscle), informational only — the certain-fat figure beside it is what
-  // the band actually acts on.
-  const fatBit = g.breakEven && Number.isFinite(g.breakEven.fatTokens) ? ` · certain fat ~${Math.round(g.breakEven.fatTokens)} tok` : '';
-  const bmi = (g.verdict.bmi ? `BMI ${g.verdict.bmi.toFixed(2)}` : 'BMI n/a') + fatBit;
+  // THE FAT FIGURE IS A LOWER BOUND, AND THIS LINE USED TO READ AS A CLEAN
+  // BILL OF HEALTH. `certain fat ~0 tok` was rendered as a finding when it is
+  // only the floor of what `mechFatFromText` can PROVE (exact-duplicate
+  // substance lines + excess blank runs); unread and unprovable content counts
+  // as muscle by design, so a store with real semantic bloat reads ~0 and looks
+  // clean. Wording lifted from commands/stats.md:9, this room's own already-
+  // approved phrasing for the identical fact — not newly authored here.
+  //
+  // AND BMI IS A TAUTOLOGY WHENEVER FAT IS 0. muscle = footprint - fat and
+  // bmi = footprint / muscle, so fat=0 forces exactly 1.00 by arithmetic — it
+  // carries zero independent information while sitting beside the fat figure
+  // looking like a second, corroborating measurement. Two numbers that are the
+  // same number, printed as agreement. So it is SUPPRESSED at fat=0 and shown
+  // only where it can actually vary.
+  const fatTok = g.breakEven && Number.isFinite(g.breakEven.fatTokens) ? Math.round(g.breakEven.fatTokens) : null;
+  const bmiBit = g.verdict.bmi ? `BMI ${g.verdict.bmi.toFixed(2)}` : 'BMI n/a';
+  const bmi = fatTok === null
+    ? bmiBit
+    : fatTok === 0
+      ? 'no provable fat (lower bound — unread/unprovable counts as muscle)'
+      : `${bmiBit} · certain fat ~${fatTok} tok (lower bound)`;
   // A REFUSAL IS AN EVENT, AND SILENCE MADE IT INDISTINGUISHABLE FROM NOTHING.
   // Every refusal returns recovered:'none' + an error, so the old `!== 'none'`
   // test dropped ALL of them: a user with a poisoned journal sitting in a fresh

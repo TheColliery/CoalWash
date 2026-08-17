@@ -270,9 +270,40 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
             m.index.bytes = e.bytes;
             m.index.lines = text.split('\n').length;
           }
-        } catch { /* stat-based estimate stands; unread => 0 certain fat (muscle) */ }
+        } catch {
+          // stat-based estimate stands; unread => 0 certain fat (muscle).
+          // The index CAP legs are a different question from fat, though: bytes
+          // is a stat fact, knowable without reading. Setting it here keeps the
+          // bytes leg alive on a read error instead of silently zeroing BOTH
+          // index legs (a capacity wall that dies quietly is worse than one
+          // that fires); lines stays 0, which is the safe direction for the
+          // one leg we genuinely cannot compute.
+          if (e.kind === 'memory-index') m.index.bytes = e.bytes;
+        }
       } else if (e.kind === 'memory-index') {
+        // THE CAP LEGS MUST NOT DEPEND ON DISCOVERY ORDER. `bytes` was always
+        // set here; `lines` was not, so the `indexLines >= CC_INDEX_CAP_LINES`
+        // leg of capHit silently read 0 and could never fire for an index
+        // entry sitting past the read budget. That is exactly backwards: the
+        // memory-index entry is LAST in discovery order, so it is the FIRST
+        // pushed out as the corpus grows — the leg died precisely as the
+        // corpus grew toward the wall it guards.
+        //
+        // The line count is recovered with a BOUNDED read, never by widening
+        // the global budget: an index over CC_INDEX_CAP_BYTES already trips
+        // the bytes leg unconditionally, so the lines leg only decides
+        // anything BELOW that cap — which bounds this read at 25 KB, once,
+        // for the single memory-index entry. `readSoFar` is deliberately not
+        // charged: this is a cap check, not part of the fat scan, and the
+        // overage is bounded by construction rather than by inspection.
+        // The text is used for newlines ONLY and never reaches
+        // mechFatFromText — the fat definition is untouched.
         m.index.bytes = e.bytes;
+        if (e.bytes <= CC_INDEX_CAP_BYTES) {
+          try {
+            m.index.lines = fs.readFileSync(e.path, 'utf8').split('\n').length;
+          } catch { /* unreadable: lines stays 0, same safe direction as the read-error path above */ }
+        }
       }
       m.alwaysLoaded.tokensEst += tok;
     }
@@ -357,8 +388,16 @@ export function bandVerdict({
     indexBytes >= CC_INDEX_CAP_BYTES ||
     indexLines >= CC_INDEX_CAP_LINES;
   // bmi survives as an INFORMATIONAL ratio only — footprint over MEASURED
-  // muscle (1.0 = provably-pure muscle), no longer footprint over a stamped
-  // floor and no longer a band driver. Kept because stats/receipts render it.
+  // muscle, no longer footprint over a stamped floor and no longer a band
+  // driver. Kept because stats/receipts render it.
+  //
+  // IT DOES NOT MEAN "provably-pure muscle", which is what this comment used
+  // to claim. muscle = footprint - fat, so fat=0 forces bmi to exactly 1.00 by
+  // arithmetic — 1.00 reports that the estimator PROVED NOTHING, never that the
+  // corpus was proven clean. The distinction matters because the estimator's
+  // floor is a lower bound: unread and unprovable content counts as muscle, so
+  // a store full of semantic bloat also lands on 1.00. gaugeLine suppresses the
+  // ratio at fat=0 for exactly this reason.
   const bmi = muscleTokens > 0 ? footprintTokens / muscleTokens : null;
   // Schmitt-trigger hysteresis, re-axed onto CERTAIN FAT (tokens, not a
   // ratio): once armed, fat must fall to the LOW mark to disarm; once

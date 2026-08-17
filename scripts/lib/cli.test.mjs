@@ -222,7 +222,13 @@ test('gauge() direct call: honors an explicit home/cwd — and a poisoned stored
     const g = gauge({ cwd: proj, home });
     assert.ok(['LEAN', 'OBESE', 'FULL'].includes(g.verdict.band), 'the gauge ran on the explicit home/cwd');
     assert.strictEqual(g.breakEven.floorUnmeasured, undefined, 'no floor is consulted, poisoned or not');
-    assert.match(gaugeLine(g), /certain fat ~\d+ tok/);
+    // The fat figure is a LOWER BOUND and the line must say so in EITHER
+    // shape — `certain fat ~N tok (lower bound)` when something was proven,
+    // or `no provable fat (lower bound — ...)` when nothing was. Pinning the
+    // bound label rather than one phrasing is stricter than the old
+    // `/certain fat ~\d+ tok/`: that regex passed on a line making a bare
+    // clean-bill claim, which is the defect this wording fixes.
+    assert.match(gaugeLine(g), /\(lower bound/);
   } finally {
     if (savedEnv !== undefined) process.env.CLAUDE_CONFIG_DIR = savedEnv;
     clean(home, proj);

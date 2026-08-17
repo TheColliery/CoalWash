@@ -130,6 +130,86 @@ test('measureEntries respects the read budget (over-budget always-loaded falls b
   } finally { clean(home, proj); }
 });
 
+// board #117-adjacent (BMI trace, item 1): the memory-index entry is LAST in
+// discovery order, so it is the FIRST thing pushed past the read budget as the
+// corpus ahead of it grows — and the over-budget branch used to set only
+// `index.bytes`. `index.lines` stayed 0, so capHit's
+// `indexLines >= CC_INDEX_CAP_LINES` leg silently died exactly as the corpus
+// grew toward the wall it guards. Both halves are asserted: the measurement,
+// and the capHit verdict that consumes it.
+test('capacity wall: the index LINES leg survives the index entry falling past the read budget (it used to silently read 0)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(home, 'CLAUDE.md');
+    const idx = path.join(home, 'MEMORY.md');
+    // A governance file big enough to eat the whole budget ahead of the index.
+    fs.writeFileSync(gov, 'g'.repeat(5000), 'utf8');
+    // 250 short lines: OVER CC_INDEX_CAP_LINES (200), UNDER CC_INDEX_CAP_BYTES
+    // (25 KB) — so the LINES leg is the only one that can fire, which is what
+    // makes this fixture discriminate rather than pass via the bytes leg.
+    fs.writeFileSync(idx, Array.from({ length: 250 }, (_, i) => `row ${i}`).join('\n'), 'utf8');
+    const idxBytes = fs.statSync(idx).size;
+    assert.ok(idxBytes < CC_INDEX_CAP_BYTES, 'fixture must sit UNDER the bytes cap or it proves the wrong leg');
+    const entries = [
+      { path: gov, bytes: fs.statSync(gov).size, scope: 'project', kind: 'governance', alwaysLoaded: true },
+      { path: idx, bytes: idxBytes, scope: 'project', kind: 'memory-index', alwaysLoaded: true },
+    ];
+    // Budget admits the governance file and pushes the index entry out.
+    const m = measureEntries(entries, { readBudgetBytes: 5000 });
+    assert.strictEqual(m.index.bytes, idxBytes, 'bytes was always set here — unchanged');
+    assert.ok(m.index.lines >= CC_INDEX_CAP_LINES, `the over-budget index must still yield its line count (got ${m.index.lines})`);
+    // The leg it feeds must actually fire — measurement alone is not the claim.
+    // `capHit` is INTERNAL to bandVerdict, so the observable is the verdict it
+    // produces: fat=0 is un-armed, and an un-armed capHit is FULL/externalize.
+    const v = bandVerdict({
+      footprintTokens: 1000, mechFatTokens: 0, capacityTokens: CAPACITY_TOKENS,
+      indexBytes: m.index.bytes, indexLines: m.index.lines,
+    });
+    assert.strictEqual(v.band, 'FULL', 'the wall must fire on the lines leg alone');
+    assert.strictEqual(v.reason, 'externalize', 'un-armed capHit routes to externalize');
+  } finally { clean(home, proj); }
+});
+
+// The bounded-read contract: an index entry OVER the bytes cap is not read at
+// all (the bytes leg already fires unconditionally), so no arbitrarily large
+// file can be pulled in by the fix above.
+test('capacity wall: an over-budget index ABOVE the bytes cap is not read for lines — the bytes leg already fires', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(home, 'CLAUDE.md');
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(gov, 'g'.repeat(5000), 'utf8');
+    fs.writeFileSync(idx, 'x'.repeat(CC_INDEX_CAP_BYTES + 1), 'utf8'); // one byte over the cap, ZERO newlines
+    const entries = [
+      { path: gov, bytes: fs.statSync(gov).size, scope: 'project', kind: 'governance', alwaysLoaded: true },
+      { path: idx, bytes: fs.statSync(idx).size, scope: 'project', kind: 'memory-index', alwaysLoaded: true },
+    ];
+    const m = measureEntries(entries, { readBudgetBytes: 5000 });
+    assert.ok(m.index.bytes > CC_INDEX_CAP_BYTES, 'the bytes leg carries this case');
+    assert.strictEqual(m.index.lines, 0, 'no read was attempted above the cap');
+    const v = bandVerdict({
+      footprintTokens: 1000, mechFatTokens: 0, capacityTokens: CAPACITY_TOKENS,
+      indexBytes: m.index.bytes, indexLines: m.index.lines,
+    });
+    assert.strictEqual(v.band, 'FULL', 'the wall still fires — via bytes, not lines');
+  } finally { clean(home, proj); }
+});
+
+// A read ERROR must degrade safely AND keep the stat-knowable leg alive.
+test('capacity wall: an UNREADABLE index still yields its stat-known bytes (only lines, which needs the read, stays 0)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(idx, 'row\n'.repeat(10), 'utf8');
+    const realBytes = fs.statSync(idx).size;
+    fs.rmSync(idx); // the entry's stat is already captured; the READ will now fail
+    const entries = [{ path: idx, bytes: realBytes, scope: 'project', kind: 'memory-index', alwaysLoaded: true }];
+    const m = measureEntries(entries); // in-budget: takes the read branch, which throws
+    assert.strictEqual(m.index.bytes, realBytes, 'bytes is a stat fact — it must survive a read error');
+    assert.strictEqual(m.index.lines, 0, 'lines genuinely needs the read; 0 is the safe direction');
+  } finally { clean(home, proj); }
+});
+
 // ---------------------------------------------------------------------------
 // bandVerdict — beta.12 BAND COLLAPSE: ONE ceiling (CEILING_BMI/CEILING_REARM_BMI,
 // hysteresis-gated) replaces the old PLUMP/OBESE ladder + FAT_BUDGET_TOKENS
