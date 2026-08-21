@@ -133,6 +133,18 @@ Lane: `ALL` · `AMBIENT` (session-triggered runs only) · `WIZARD` (any `/coalwa
 | 50 | On an unverifiable contradiction, change nothing until the human decides | ALL |
 | 51 | The activation ladder is capability-keyed — never route by platform name | PLATFORM |
 
+## Grants & denials (CLASSIFY-BLOCK — declared, `skill-authoring.md` §5b/board #93)
+
+| class | step it powers | grant | on denial |
+|---|---|---|---|
+| read | Session-start gauge (`measureEntries`) · outsider file review (§2) · `applyPlan`'s pre-mutation staging read (§4) · `dig-gauge`'s stat-only tollgate | `Read`·`Grep`·`Glob` (the outsider); Node `fs` reads inside Bash-run engine scripts (gauge/apply/dig-gauge) | Engine reads fail CLOSED, never a clean bill: `applyPlan`'s staging read refuses that action outright on failure (`ok:false`, "cannot read ... to stage it (fail-closed)"); the gauge's index-read failure degrades to a stat-known lower bound, never silence. The outsider is prose-orchestrated, not code-enforced — an unreadable assigned file is named as unread in its flag output; a missing read is never returned as "reviewed, nothing to flag." |
+| write | `applyPlan` mutations (rewrite/create/delete, the pre-mutation snapshot, the bins) · `keeps.json` appends (§3) · the write-path guard's own airbag snapshot (§8b) · ULTRA/estate archive moves | `Write`·`Edit`; `Bash` for the engine scripts holding the real `fs` writes (applyPlan/bins/keeps) | **`applyPlan` fails closed, verified at source:** its whole body is one try/catch (`apply.mjs`) — a write failure anywhere, including the snapshot itself, returns `{ok:false, error}` before any mutation lands; report + courier the intended plan to whoever can execute it, never claim applied. **The write-path guard's airbag is the one exception, and it is named as one:** it is a fail-silent PreToolUse hook (Phoenix #4) that runs BEFORE an ordinary edit by any hand — its own snapshot write can fail silently WITHOUT blocking the edit it exists to protect (a PreToolUse hook only gates by explicitly emitting `{decision:'block'}`, and this one never does). A denied or failed airbag write means the real mutation still lands, with no undo net for that edit — say so; do not assume every write path here fails closed the way `applyPlan` does. |
+| spawn | The Full-tier zero-context outsider (§2) · the wizard's background clone (§9b) · choice-4's ③ agent block | `Agent`/`Task` (the no-spawn outsider type; Claude Code: `Explore`) | Must read distinctly from `localOnly`'s deliberate no-spawn (§6) — `localOnly` is a config flag CoalWash reads and DECIDES not to spawn; a spawn DENIAL is a tool-grant refusal reaching the agent as an error on the Agent/Task call. Report it as exactly that ("spawn denied — falling back to manual review, not a `localOnly` skip") and degrade to the SAME manual-flag fallback §4 already names for `localOnly`/no-spawn platforms — but state the reason; never let the observable output collapse into the identical silent "no sub ran" line either case produces today. |
+
+`network` — dropped: CoalWash is offline/zero-dependency by design (frontmatter; `SECURITY.md`); no step in this skill fetches from the network.
+
+A denial reaches the WORKER as a visible message and propagates NO further — not to the dispatcher, not as a catchable condition. Every row above states a branch or an explicit refusal; a step that dies says so in the output. Never report a denied step as done, skipped, or clean.
+
 ## Asks (Stop hook — CODE-built templates, `ask.mjs`)
 
 Render exactly the template's two-button question or one-line directive (prohibition #28; the why: `ask.mjs` header).
