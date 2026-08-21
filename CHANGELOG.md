@@ -4,6 +4,8 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-21
+
 ### Added
 
 - **SKILL.md now declares a CLASSIFY-BLOCK — what happens on a denied read/write/spawn grant, per `skill-authoring.md` §5b (board #93, gold-standard finding F22, retrofit strength `prefer`).** A new "Grants & denials" ledger, placed beside the existing Consent and Prohibitions ledgers, states the grant each step class needs and the branch a denial takes — `network` is dropped with a one-line reason (CoalWash is offline/zero-dependency by design; no step fetches). Two genuinely new rails land alongside the mostly-descriptive read/write rows: (1) a spawned outsider that cannot read an assigned file must name it as unread, never fold a missed read into a silent "nothing to flag"; (2) a spawn-tool DENIAL must be reported as distinct from `localOnly`'s deliberate no-spawn — both degrade to the same manual-flag fallback, but the reason is now stated, where the two previously collapsed into the identical silent "no sub ran" output. The write row separately names the write-path guard's airbag (§8b) as the ONE write path that does **not** fail closed the way `applyPlan` does — a fail-silent PreToolUse hook (Phoenix #4) never blocks the edit it snapshots, so a denied/failed airbag write leaves the real mutation landing with no undo net for that edit; `applyPlan` itself is unaffected (its whole body is one try/catch, verified at source — a write failure anywhere, including the snapshot, returns `{ok:false}` before any mutation lands). No engine code changed; this is a declaration, not a new mechanism.
