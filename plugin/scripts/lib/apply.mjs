@@ -254,6 +254,43 @@ function denseRank(indents) {
   const rankOf = new Map(sorted.map((v, i) => [v, i]));
   return indents.map((v) => rankOf.get(v));
 }
+// ═══ RETIRED (board #7, 2026-08-22) — read this before touching anything below. ═══
+// This whole cluster (needleIndentShape/locateStructural/ancestorChain/
+// chainPreserved/indentRelativeSurvives/flattenSurvives/survivesOwnFile) is
+// the structural re-check a keep's `anchor`/`anchorFile` fields were meant
+// to drive. It is WIRED into the KEEPS-GATE below — not merely built and
+// shelved — at the real call site (~line 1638-1639, `triedOwnFile = a.type
+// === 'rewrite' && a.origBuf && /\r|\n/.test(String(k.anchor))`), gated on
+// THREE conditions: a rewrite action, an origBuf, and a MULTI-LINE anchor.
+// A bare truthy `k.anchor` is only the earlier keeps-FILTER's own
+// precondition to enter the loop at all (a single-line anchor passes that
+// filter and still never reaches this cluster — :704-708's own comment
+// already proved it dead by mutation). Either way nothing fires today:
+// recordKeep/recordGlobalKeep have ZERO production callers anywhere
+// in the shipped tree that ever pass `anchor` (every hit for the field is
+// a test fixture) — the 26 live keeps on this machine are 0-for-26 on
+// carrying one, because keeps.json is hand-authored per method.md §3's
+// documented `{target, reason, date}` shape. Discipline-and-measurement,
+// not structural impossibility — a hand-written multi-line anchor would
+// activate this cluster tomorrow. Board #7 ran two free reads before
+// ruling: (1) the
+// writer is dead-and-stays-dead, confirmed at source, not merely relayed;
+// (2) the shipped fidelity-diff gate (fidelity-gate.mjs) does NOT already
+// cover the escape this cluster targeted (relocation into a fenced code
+// block — a plain-prose sentence with no other structured token registers
+// on neither side of that gate's positionless diff; a real, still-open
+// gap, named so it is not mistaken for closed). Read #1 alone settles it:
+// docket-0v (the positional-provenance fix CoalBoard's formal proof said
+// this cluster needs to be sound) would harden a mechanism nothing reaches
+// — RETIRE, not graduate. The rung-1 discovery loop is CLOSED: no further
+// escape-hunting rounds against this cluster, no further fix rounds, no
+// docket-0v build. The code stays — it is real, tested, harmless sitting
+// unreachable, and ripping it out is a bigger, riskier change than what
+// this ruling asks for — but nothing here is a someday-wire. A future
+// caller wiring `anchor` back up inherits a mechanism CoalBoard already
+// proved cannot distinguish two keeps at different positions sharing
+// identical anchor text; that precondition does not change by disuse.
+//
 // grad10 F9 [perf, off-subject]: the needle side of a multi-line comparison
 // is CONSTANT across every haystack in one `.some()` sweep (one needle, N
 // haystacks) — parsing/ranking it inside the per-haystack function meant
