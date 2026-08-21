@@ -4,6 +4,9 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+### Changed
+- `references/method.md` §3's `anchor`/`anchorFile` status corrected from "lab-only, declared 2026-08-04" (implying a someday-wire) to **RETIRED** (board #7, 2026-08-22) — the structural re-check they were built to drive has zero production callers anywhere in the shipped tree (every `anchor`-passing call site is a test fixture), so the proposed positional-provenance fix (`docket-0v`) would have hardened a mechanism nothing ever reaches. The shipped fidelity-diff gate does not independently close the escape class the mechanism targeted (relocation into a fenced code block) — named as a real, still-open gap rather than smoothed over. No code/API change; `recordKeepAt` still accepts both fields unchanged, `pinned: true` is unaffected.
+
 ## [1.2.0] - 2026-08-21
 
 ### Added
