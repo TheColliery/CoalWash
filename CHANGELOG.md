@@ -4,6 +4,8 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-22
+
 ### Added
 
 - **`/coalwash:stats` now reports the ADJUDICATION RATE — the one direction the apparatus never measured (board #120).** False DELETES have two independent guards (the fidelity gate on dropped tokens, the claim-strength outsider on softened meaning); false KEEPS had none, and no surface anywhere reported how often the tool actually cuts, so a 100%-reject run was as quiet as a healthy one. The report is built entirely from data that already persists — `keeps.json` (one durable record per adjudicated keep) against the two bin manifests (one entry per banked cut, with `bytes` and `origin`) — so it needs no new state and no engine change; `apply.mjs` deliberately persists no run outcome, and `receipt.mjs`'s removed/trimmed/kept counters are transient render-time values, which makes the bins plus `keeps.json` the only honest durable record. Shows keeps count + oldest keep's date, per-bin cut count and bytes split by origin, and the resulting `N kept / M cut`. Counts and bytes are deterministic and are NOT `~est`-labelled. **The bin count is stated as a LOWER BOUND, not lifetime truth:** a bin is retention-bounded, so items swept past their horizon have left the index and live only in that bin's `death.log`.
