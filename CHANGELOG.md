@@ -4,6 +4,13 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-08-22
+
+### Changed
+
+- **SKILL.md body lean — the CLASSIFY-BLOCK denial cells' MECHANISM moves to `references/method.md` §13; every rail stays in the body (`skill-authoring.md` §5, campaign #6 unit 3).** The Grants & denials table grew +4,145 characters across three findings-back rounds in one day, each round appending its own war story *into* the cell — textbook §5 REGROWTH RATCHET, whose cure is that a dogfood fix adds its explanation to the REFERENCE and the body keeps only the rail the incident proved. What stayed: all three rows, all three grants, and every denial branch — engine reads fail closed and never a clean bill · `applyPlan`/estate moves fail closed while `keeps.json` appends fail SILENT and the airbag is more permissive still (the edit lands with no undo net) · a spawn denial is reported as distinct from a `localOnly` no-spawn. What moved: the per-path source citations and the provenance of each branch. **Body 28,102 → 27,000 LF chars, frontmatter excluded (−1,102, −3.9%).**
+- **HONEST FRAME, stated because the number is the finding and not a failure to cut harder.** Measured with the platform's own projection on an install verified byte-identical to source first (`git hash-object`, src == installed — a stale install makes this reading plausible and wrong): **on-invoke ~11.2k against the ~5k guide, ≈2.24×.** Residue accounting says the remainder is overwhelmingly RAIL, not explanation: the two ledgers ARE the enumerability mechanism §3b's own measurement identifies (their COUNT and MEMBERSHIP are the pass condition, so cutting rows is the failure mode, not the fix) · the wizard section is the four-choice menu an agent must actually render · the run pipeline is step ORDER · Hard rules, the Asks branches and the Activation ladder rungs are all behaviour. **A body brought under budget by removing what the agent needs is a §5 violation, not a §3b win** (minimal ≠ short, vendor-verbatim), so the residual ≈2.2× is reported as this skill's honest size rather than chased. **Declared bound, BODY-ONLY, frontmatter excluded, LF-normalized** — re-derive rather than trust: `node -e "const l=require('fs').readFileSync('skills/coalwash/SKILL.md','utf8').replace(/\r\n/g,'\n');console.log(l.slice(l.match(/^---\n[\s\S]*?\n---\n/)[0].length).length)"`
+
 ## [1.3.0] - 2026-08-22
 
 ### Added

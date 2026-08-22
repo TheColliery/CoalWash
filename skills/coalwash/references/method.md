@@ -405,3 +405,27 @@ The SKILL.md Prohibitions ledger's INTENT is a complete, already-decided set a r
 **Overlap with the Consent ledger:** a line lives in exactly one ledger. Consent ledger = "must I ask a human here?" Prohibitions ledger = "what is forbidden regardless of consent?" The Consent ledger's "Standing consent" footnote NAMES `obeseAutoQuick`/`forceAuto`/`externalizeAdvisory` to mark them as non-gates — a cross-reference, not a row — so the actual forbidding rule for each still earns its own Prohibitions row, once, without double-counting.
 
 **Lane column:** an exception is a rail, and a rail needs a countable home — never a parenthetical folded into the prohibition's own wording. Values: `ALL` · `AMBIENT` (session-triggered runs only) · `WIZARD` (any `/coalwash` manual entry) · `WIZARD-2/4` (choices 2 or 4) · `WIZARD-3/4` (ULTRA, choices 3/4) · `WIZARD-4` (RE-TIER/③ only) · `FULL TIER` (the outsider spawn, reached from ambient escalation or wizard 2/4) · `PLATFORM` (cross-agent claims).
+
+## 13. CLASSIFY-BLOCK — why each denial branch is what it is (the SKILL table's reference half)
+
+SKILL.md's **Grants & denials** table carries the RAIL: every class, every grant, and the branch you take when a grant is denied. This section carries the MECHANISM behind those branches — the source-verified reasons, which live here because they change what you UNDERSTAND, not what you DO (`skill-authoring.md` §5). The table is authoritative for behaviour; if the two ever disagree, the table wins and this section has the bug.
+
+**Provenance, stated because it is the reason this section exists:** the SKILL table's denial cells grew +4,145 characters across three findings-back rounds, each round appending its own war story INTO the cell. That is §5's REGROWTH RATCHET case verbatim — *a dogfood fix that adds an explanation routes it to the REFERENCE, never the body*. The rails those rounds proved necessary stayed in the table; the narratives moved here.
+
+### read — why "fail CLOSED, never a clean bill"
+
+- `applyPlan`'s pre-mutation staging read refuses that action outright on failure — `ok:false`, *"cannot read ... to stage it (fail-closed)"*. The action does not proceed on an unread file.
+- The gauge's index-read failure degrades to a **stat-known lower bound**, never to silence: `index.bytes` is a stat fact and survives a failed read, while `index.lines` (which genuinely needs the read) stays 0, the safe direction for a capacity leg.
+- The outsider path is the one that binds YOU rather than the engine, which is why its rail sits in the table: a listed file the outsider cannot read comes back `class=unsure, reason=unread`, and a flag list shorter than the file list is a GAP, not a clean bill.
+
+### write — the three shapes, and why they genuinely differ
+
+**Do not generalize from `applyPlan` to the other two.** This was the finding that produced the table's "three shapes, distinct" rail:
+
+1. **`applyPlan` fails closed — verified at source.** Its whole body is one try/catch (`apply.mjs`): a write failure anywhere, including the snapshot itself, returns `{ok:false, error}` before any mutation lands. `verifySnapshot` confirms every copy restores before the completion marker is written. **ULTRA/estate archive moves fail closed the SAME way** (`archiveSession`, `estate-archive.mjs`): an archive-write failure rolls back its own partial copy and returns `{ok:false, reason: "... — original kept"}` — the source file is never touched until its archive copy is verified.
+2. **`keeps.json` appends do NOT fail closed.** `recordKeepAt` swallows a write failure and returns `false` — no throw, no abort — and nothing else in the engine surfaces it. That is why the table tells you to check the return value yourself: a silently-lost append means the adjudicated *stand* is gone, and the item re-flags on the next run as though it had never been decided.
+3. **The airbag is the most permissive of the three.** It never emits a block decision and never exits non-zero — the only two channels a Claude Code hook has (`hooks-safety.md` §1.0) — so its own snapshot write can fail silently WITHOUT stopping the edit it exists to protect. The consequence the table makes you report: the real mutation still lands, with no undo net for that edit.
+
+### spawn — why a denial must never be reported as a `localOnly` skip
+
+The two produce the same observable output today (a run with no sub in it) and mean opposite things. `localOnly` is a **config flag CoalWash reads and then DECIDES not to spawn** — an intended, configured absence. A spawn **denial** is a **tool-grant refusal**, reaching the agent as an error on the Agent/Task call, at whichever of the three named sites it hits. Collapsing them loses the fact that a capability the run wanted was refused, which is why the table requires the reason to be stated rather than the fallback merely taken.
