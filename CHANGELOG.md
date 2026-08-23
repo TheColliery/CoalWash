@@ -4,7 +4,14 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
-## [1.3.1] - 2026-08-22
+## [1.4.0] - 2026-08-23
+
+### Added
+
+- **`keeps.json` gains a `pendingUser` field (+ `pendingSince`), and `keeps.mjs` gains `pendingUserKeeps()` (board #129, AGENTS.md's THE USER-OWNED CLASS).** The room's own store had 7 of 26 keep entries whose own `reason` text NAMES THE USER as the decision-holder ("USER own tradeoff", "deliberate user instructions", "USER-HELD", two "defer to a user-routed pass") — and every one recorded an agent-written *permanent* exemption instead of routing that call up, standing violations written before the rule existed. Fixed structurally, not by rewording: an insider recording a keep whose reason names the user now passes `pendingUser: true`, which still fully protects the target (no enforcement change — nothing is deleted, no keep is reversed) but stays a RETURNED decision rather than a settled one. Clearing semantics are the deliberate MIRROR of the existing anchor/anchorFile merge, not a copy: `undefined` (an ordinary re-affirm that has never heard of this mechanism) PRESERVES the flag — the whole point is that silence must not re-settle a standing violation — and only an EXPLICIT `pendingUser: false` clears it, the one signal that the user's decision actually landed.
+- **The receipt surfaces the count.** `buildReceipt` renders `N keep(s) await YOUR decision` when `pendingUserKeeps > 0` — metrics only, per this room's own §9b data-leak rule (the targets live in `keeps.json` for the human to open, never inline in a receipt). `method.md` §5 now instructs filling it from `pendingUserKeeps(loadKeeps(projectRoot))` on every run this store carries any, not only a wizard run. §3's keep-recording rule gets the same exception named at the point of recording, so the next insider does not repeat the 7.
+- **The 7 standing entries in `TheColliery/.claude/coalwash/keeps.json` marked `pendingUser: true` this release** (re-derived at source before marking, not accepted from the board's own citation — `grep`-equivalent: `data.keeps.filter(k => /user/i.test(k.reason))`, 7 of 26, 10 raw occurrences when not deduplicated per entry — both numbers agree with board #129's own derivation). No separate ratification was found for any of the 7 (checked `MEMORY.md` for a later user response to each — none exists); all 7 land in the RETURNED state, none is annotated as already-ratified.
+- **Adjacency to board #128 (0ac): deliberately NOT the same mechanism.** 0ac's `owner: user|agent` field (not yet built) is the PERMANENT end state once a decision is actually made; this release's `pendingUser` is the transitional bridge that gets a standing violation IN FRONT OF the user once. A future `owner`-field build converts a cleared `pendingUser` entry, it does not replace this release's mechanism.
 
 ### Changed
 

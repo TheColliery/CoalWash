@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { keepsPath, loadKeeps, recordKeep, globalKeepsPath, loadGlobalKeeps, recordGlobalKeep } from './keeps.mjs';
+import { keepsPath, loadKeeps, recordKeep, globalKeepsPath, loadGlobalKeeps, recordGlobalKeep, pendingUserKeeps } from './keeps.mjs';
 import { txDirFor } from './apply.mjs';
 
 function sandbox() {
@@ -215,4 +215,62 @@ test('recordKeep: a re-affirm that DOES supply a new anchor overrides (an intent
     assert.strictEqual(entry.anchor, 'new span');
     assert.strictEqual(entry.anchorFile, 'C:/store/f2.md');
   } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// PENDING-USER (board #129, THE USER-OWNED CLASS): a keep whose own reason
+// names the user as decision-holder must not settle silently. Opposite
+// clearing rule from anchor/anchorFile on purpose (see keeps.mjs's own
+// comment) -- undefined preserves, explicit false clears, explicit true sets.
+// ---------------------------------------------------------------------------
+
+test('recordKeep: pendingUser:true persists with a pendingSince date; plain keeps carry neither field', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'user-owned-thing', reason: 'this is the user own tradeoff', pendingUser: true, pendingSince: '2026-08-23' });
+    recordKeep(proj, { target: 'plain', reason: 'ordinary agent-decided keep' });
+    const keeps = loadKeeps(proj);
+    const pending = keeps.find((k) => k.target === 'user-owned-thing');
+    assert.strictEqual(pending.pendingUser, true);
+    assert.strictEqual(pending.pendingSince, '2026-08-23');
+    const plain = keeps.find((k) => k.target === 'plain');
+    assert.ok(!('pendingUser' in plain) && !('pendingSince' in plain), 'no field pollution on an ordinary keep');
+  } finally { clean(proj); }
+});
+
+test('recordKeep: re-affirming WITHOUT mentioning pendingUser PRESERVES it (the standing violation must not silently re-settle)', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'x', reason: 'user own tradeoff', pendingUser: true, pendingSince: '2026-08-23' });
+    // an ordinary re-affirm from a caller that has never heard of this mechanism
+    const reAffirmed = recordKeep(proj, { target: 'x', reason: 'user own tradeoff, re-reviewed', date: '2026-09-01' });
+    assert.strictEqual(reAffirmed, true);
+    const entry = loadKeeps(proj).find((k) => k.target === 'x');
+    assert.strictEqual(entry.reason, 'user own tradeoff, re-reviewed', 'the new reason must still land');
+    assert.strictEqual(entry.pendingUser, true, 'pendingUser must survive an omit -- this is the whole point of the mechanism');
+    assert.strictEqual(entry.pendingSince, '2026-08-23', 'the ORIGINAL pendingSince survives too, never reset by an unrelated re-affirm');
+  } finally { clean(proj); }
+});
+
+test('recordKeep: pendingUser:false EXPLICITLY clears it (the only way -- the user actually answered)', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'x', reason: 'user own tradeoff', pendingUser: true, pendingSince: '2026-08-23' });
+    recordKeep(proj, { target: 'x', reason: 'user confirmed keep, 2026-09-01', pendingUser: false });
+    const entry = loadKeeps(proj).find((k) => k.target === 'x');
+    assert.ok(!('pendingUser' in entry) && !('pendingSince' in entry), 'an explicit false clears both fields');
+  } finally { clean(proj); }
+});
+
+test('pendingUserKeeps: filters to exactly the pending entries, [] on none/malformed input', () => {
+  assert.deepStrictEqual(pendingUserKeeps([]), []);
+  assert.deepStrictEqual(pendingUserKeeps(null), []);
+  assert.deepStrictEqual(pendingUserKeeps(undefined), []);
+  const list = [
+    { target: 'a', pendingUser: true },
+    { target: 'b' },
+    { target: 'c', pendingUser: false },
+    { target: 'd', pendingUser: 'true' }, // truthy string is NOT the boolean -- must not match
+  ];
+  assert.deepStrictEqual(pendingUserKeeps(list).map((k) => k.target), ['a']);
 });

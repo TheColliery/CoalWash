@@ -6,6 +6,16 @@
 // sub) instructs the outsider to consult this store and not re-flag on no new
 // evidence; this module only stores/reads the record.
 //
+// PENDING-USER (board #129, THE USER-OWNED CLASS): a keep whose own `reason`
+// text names the USER as the decision-holder is NOT settled by an agent
+// recording it — AGENTS.md's rule is that such a call STOPS and RETURNS to
+// the human. `pendingUser: true` (+ `pendingSince`, an ISO date — when the
+// remediation flagged it, never overwriting the original `date`) marks a
+// keep that still protects its target (unchanged enforcement) but has not
+// yet had its underlying decision actually put in front of the user. It is
+// cleared (both fields removed) the moment the user answers, per §3's own
+// upsert path — see `pendingUserKeeps` below.
+//
 // File shape: { v: 1, keeps: [{ target, reason, date }] }. The schema-version
 // field ports XP-deletes-Vista-restore-points: an OLDER CoalWash meeting a
 // NEWER keeps.json (v > 1) treats it as READ-ONLY — loadKeeps returns [] (we
@@ -70,7 +80,16 @@ const loadKeepsFrom = loadKeepsAt;
 // store file it lives in. A keep carrying both is mechanically enforced at
 // applyPlan; a keep without them stays advisory (the pre-beta.12 shape,
 // unchanged behavior).
-function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anchorFile } = {}) {
+//
+// Optional `pendingUser` (board #129): same preserve-unless-explicit rule as
+// anchor/anchorFile, ONE DIRECTION DIFFERENT ON PURPOSE. `undefined` (not
+// passed) preserves the prior value — an ordinary re-affirm that knows
+// nothing about this mechanism must not silently clear a standing return-to-
+// user. `true` sets it (+ `pendingSince`, defaulting like `date` does).
+// `false` — passed EXPLICITLY, never inferred — is the ONLY way to clear it:
+// the deliberate signal that the user's decision was actually recorded, not
+// merely that this call happened to omit the field.
+function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anchorFile, pendingUser, pendingSince } = {}) {
   if (typeof target !== 'string' || !target) return false;
   try {
     const raw = rawKeepsOrNull(file);
@@ -94,12 +113,24 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
     // built feature, not this fix's job.
     const mergedAnchor = (typeof anchor === 'string' && anchor) ? anchor : (prior && typeof prior.anchor === 'string' ? prior.anchor : undefined);
     const mergedAnchorFile = (typeof anchorFile === 'string' && anchorFile) ? anchorFile : (prior && typeof prior.anchorFile === 'string' ? prior.anchorFile : undefined);
+    // pendingUser DOES have a "wants it cleared" signal, unlike anchor above
+    // — pendingUser === false, checked before falling back to the prior
+    // value. undefined (never mentioned) preserves; true sets fresh.
+    const mergedPendingUser = pendingUser === false
+      ? undefined
+      : pendingUser === true
+        ? true
+        : (prior && prior.pendingUser === true ? true : undefined);
+    const mergedPendingSince = mergedPendingUser
+      ? (typeof pendingSince === 'string' && pendingSince ? pendingSince : (prior && typeof prior.pendingSince === 'string' ? prior.pendingSince : new Date().toISOString().slice(0, 10)))
+      : undefined;
     keeps.push({
       target,
       reason: String(reason || ''),
       date: date || new Date().toISOString().slice(0, 10),
       ...(mergedAnchor ? { anchor: mergedAnchor } : {}),
       ...(mergedAnchorFile ? { anchorFile: mergedAnchorFile } : {}),
+      ...(mergedPendingUser ? { pendingUser: true, pendingSince: mergedPendingSince } : {}),
     });
     const tmp = file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), 'utf8');
@@ -116,6 +147,13 @@ export function loadKeeps(projectRoot) {
 export function recordKeep(projectRoot, opts = {}) {
   const dir = txDirFor(projectRoot);
   return recordKeepAt(keepsPath(projectRoot), () => { fs.mkdirSync(dir, { recursive: true }); ensureSelfIgnore(dir); }, opts);
+}
+
+// board #129: the keeps still awaiting an actual user decision — never a
+// wash-time filter (a pending keep protects its target exactly like any
+// other), only a REPORTING view for the receipt/wizard to surface.
+export function pendingUserKeeps(keeps) {
+  return Array.isArray(keeps) ? keeps.filter((k) => k && k.pendingUser === true) : [];
 }
 
 // Global-scope variants — identical shape/schema/upsert-by-target semantics,
