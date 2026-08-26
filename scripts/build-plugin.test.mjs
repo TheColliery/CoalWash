@@ -64,9 +64,11 @@ test('checkDist fails loud in both directions: stale file and orphan', () => {
 
 // board #56 (both fixtures below): a blind `.replace(/\n/g, '\r\n')` assumes the
 // input is currently LF. On a CRLF working copy every existing `\r\n` becomes
-// `\r\r\n`, which contentEquals's own `\r\n -> \n` normalization then collapses
-// to a lone stray `\r` per line — a real, permanent divergence from the true
-// source, independent of the working tree's own line-ending state. Fix: always
+// `\r\r\n`, which contentEquals's own single-pass `\r\n -> \n` normalization
+// does not fully collapse — the pass matches the SECOND pair and consumes it,
+// leaving a stray `\r` immediately ahead of the surviving `\n`, not a bare `\r`
+// standing alone. That is a real, permanent divergence from the true source,
+// independent of the working tree's own line-ending state. Fix: always
 // normalize to a clean LF baseline FIRST, then re-encode in whichever style the
 // REAL source is NOT currently using — so the fixture never starts from an
 // ambiguous "is this already CRLF?" state and never glues `\r\r\n`.
@@ -89,7 +91,7 @@ test('board #56: a CRLF-vs-LF-only difference is NOT stale — content parity, n
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
-test('board #56: a REAL content difference under CRLF line endings still fails loud — the normalization must not mask an actual edit', () => {
+test('board #56: a REAL content difference across differing line-ending styles still fails loud — the normalization must not mask an actual edit', () => {
   const dist = scratchDist();
   try {
     buildDist(dist);
