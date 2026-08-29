@@ -17,7 +17,6 @@
 // exists to DIAGNOSE a flake, not become one (CWK-012 site 1's own lesson).
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
