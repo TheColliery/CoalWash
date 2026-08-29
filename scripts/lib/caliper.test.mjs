@@ -1883,10 +1883,18 @@ test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is
     const strayFile = path.join(strayDir, 'coalwash', 'state.json');
     fs.writeFileSync(strayFile, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: strayCwd }), 'utf8');
 
-    const t0 = process.hrtime.bigint();
+    // CWK-012 site 1: a wall-clock `ms < 50` assertion used to stand here as a
+    // PROXY for "write #2 skipped the O(dirs) sweep" — under host contention
+    // it blows its budget for reasons that have nothing to do with the sweep
+    // (CPU scheduling, not code). Board #24 already ruled this instrument out
+    // (GATE COST: reject wall-clock, keep the PROPERTY). Here the property is
+    // already pinned directly, one line below: if write #2 had walked
+    // projects/, it would have swept and deleted strayFile (that IS the
+    // sweep's own removal condition — see pruneStrayStateDirs), so
+    // existsSync(strayFile) is a strictly stronger, load-independent proof
+    // that the one-shot held. No replacement counter is needed; the existing
+    // assertion already is one.
     setLeanFloor(home, proj, 20);                                    // write #2 must skip the sweep
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
     assert.ok(fs.existsSync(strayFile), 'write #2 did not walk projects/ (one-shot held)');
-    assert.ok(ms < 50, `a post-migration write stays far under the hook budget (was ${ms.toFixed(1)}ms with 22 dirs)`);
   } finally { clean(home, proj); }
 });
