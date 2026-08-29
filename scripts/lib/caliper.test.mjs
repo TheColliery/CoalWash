@@ -15,6 +15,7 @@ import {
   FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   FAT_ARM_TOKENS, FAT_REARM_TOKENS, mechFatFromText,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
+  __testHooks,
 } from './caliper.mjs';
 import { discoverClassB } from './class-b.mjs';
 
@@ -1872,10 +1873,24 @@ test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is
     // caught the cost because every other fixture starts with an EMPTY projects/.
     for (let i = 0; i < 21; i++) fs.mkdirSync(path.join(projectsDir, `C--other-project-${i}`), { recursive: true });
 
+    __testHooks.reset();
     setLeanFloor(home, proj, 10);                                    // write #1 sweeps
     assert.strictEqual(loadState(proj, home).strayPruneDone, true, 'the sweep is marked done in state');
+    assert.strictEqual(__testHooks.strayPruneCalls, 1, 'write #1 calls the sweep exactly once');
 
-    // Prove write #2 does NOT sweep: plant a stray that write #1 would have removed.
+    // Prove write #2 does NOT sweep. NOTE (CWK-012 INSPECT F1, board-verified
+    // by mutation): a planted stray at <proj>/sub is NOT a usable oracle for
+    // this — pruneStrayStateDirs' own guard 4 skips it regardless of whether
+    // the sweep runs at all (`findProjectRoot('<proj>/sub', home)` never
+    // resolves back to `<proj>`, since this fixture's sandbox() writes no
+    // ROOT_MARKER anywhere, so the stray is never a delete candidate). An
+    // existsSync(strayFile) assertion here is VACUOUS — it cannot fail either
+    // way — which is exactly what made the original wall-clock proxy this
+    // test used to carry LOOK replaceable by it. It is not. The call-count
+    // counter below is the actual pin (fidelity-gate.mjs's __testHooks
+    // precedent — a wall-clock bound replaced by a load-independent count,
+    // board #24), proven by mutation to redden when the one-shot regresses
+    // (see the sibling MUTATION PROOF test just below).
     const strayCwd = path.join(proj, 'sub');
     fs.mkdirSync(strayCwd, { recursive: true });
     const strayDir = ccSlugDir(home, strayCwd);
@@ -1883,18 +1898,7 @@ test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is
     const strayFile = path.join(strayDir, 'coalwash', 'state.json');
     fs.writeFileSync(strayFile, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: strayCwd }), 'utf8');
 
-    // CWK-012 site 1: a wall-clock `ms < 50` assertion used to stand here as a
-    // PROXY for "write #2 skipped the O(dirs) sweep" — under host contention
-    // it blows its budget for reasons that have nothing to do with the sweep
-    // (CPU scheduling, not code). Board #24 already ruled this instrument out
-    // (GATE COST: reject wall-clock, keep the PROPERTY). Here the property is
-    // already pinned directly, one line below: if write #2 had walked
-    // projects/, it would have swept and deleted strayFile (that IS the
-    // sweep's own removal condition — see pruneStrayStateDirs), so
-    // existsSync(strayFile) is a strictly stronger, load-independent proof
-    // that the one-shot held. No replacement counter is needed; the existing
-    // assertion already is one.
     setLeanFloor(home, proj, 20);                                    // write #2 must skip the sweep
-    assert.ok(fs.existsSync(strayFile), 'write #2 did not walk projects/ (one-shot held)');
+    assert.strictEqual(__testHooks.strayPruneCalls, 1, 'write #2 must NOT call the sweep again — the one-shot held');
   } finally { clean(home, proj); }
 });

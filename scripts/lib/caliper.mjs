@@ -814,6 +814,23 @@ function rmdirIfEmpty(dir) {
   try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* not empty / gone */ }
 }
 
+// Test-only perf-regression counter (press 2: wall-clock -> count conversion,
+// the fidelity-gate.mjs __testHooks precedent — parseNumTokenCalls et al.).
+// R2/TP-6 (Phoenix #3): the O(dirs in projects/) sweep below must run AT MOST
+// ONCE per project across its whole write history, not once per write. A
+// wall-clock bound on ONE call is the wrong instrument (an environment
+// property, not a code one, board #24) and a state-effect assert on the
+// SWEEP'S OWN fixture proves nothing when that fixture is never a delete
+// candidate in the first place (CWK-012 INSPECT F1, verified by mutation —
+// the planted stray's `projectRoot` resolves to itself under
+// `findProjectRoot`, so guard 4 in pruneStrayStateDirs skips it whether or
+// not the sweep runs at all). Counting INVOCATIONS of the function is the
+// one thing that is both load-independent and cannot pass vacuously.
+export const __testHooks = {
+  strayPruneCalls: 0,
+  reset() { this.strayPruneCalls = 0; },
+};
+
 // Self-clean CW's OWN pre-fix scatter (no-old-version-leftover, rc.3 precedent):
 // slug dirs minted for a NON-root cwd before the layer-1/layer-2 fix.
 //
@@ -843,6 +860,7 @@ function rmdirIfEmpty(dir) {
 // Touches ONLY `coalwash/state.json` + the dirs it leaves empty — never a foreign
 // file, never a non-empty dir (the recovery-paths lesson). Fail-silent.
 function pruneStrayStateDirs(projectRoot, home) {
+  __testHooks.strayPruneCalls++;
   try {
     const base = claudeBaseDir(home);
     const projectsDir = path.join(base, 'projects');
