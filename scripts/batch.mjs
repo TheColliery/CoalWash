@@ -15,6 +15,13 @@
 // untested — scripts-quality.md §2 binds scripts/lib/ shared logic, not a
 // top-level CLI). No wall-clock assertions anywhere below: this instrument
 // exists to DIAGNOSE a flake, not become one (CWK-012 site 1's own lesson).
+//
+// KNOWN BOUND, not a fix: there is no SIGINT/SIGTERM handler, so a batch
+// process that is itself signalled (Ctrl-C, a harness tool-timeout kill)
+// skips the `finally` block below entirely and stopContention() never runs.
+// Observed once: the children died with the parent anyway on this host, so
+// the theoretical leak has not materialized -- but that is a property of
+// this host's process-group behaviour, not a guarantee this file makes.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
@@ -65,14 +72,34 @@ function startContention(k) {
   return children;
 }
 
-function stopContention(children) {
+// CWK-019 bounce F2: `child.killed` is set when the signal is successfully
+// SENT, not when the child actually dies -- checking it immediately after
+// kill() made the "did it die" question always answer yes, so the warning
+// branch below could never fire (measured: killed=true exitCode=null
+// signalCode=null right after kill(), for a process that was still very
+// much alive). The real signal is the 'exit' event -- fired only once the
+// OS has reaped the process -- so this WAITS for it, bounded, rather than
+// sampling a flag that lies. A bounded wait for a real event is not a
+// wall-clock ASSERTION (the rail this file itself declares) -- it never
+// passes/fails a test on elapsed time; it only decides how long to keep
+// checking before reporting "still alive" honestly.
+function waitForExit(child, timeoutMs) {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(true); return; }
+    const timer = setTimeout(() => { child.removeListener('exit', onExit); resolve(false); }, timeoutMs);
+    function onExit() { clearTimeout(timer); resolve(true); }
+    child.once('exit', onExit);
+  });
+}
+
+async function stopContention(children, timeoutMs = 2000) {
   for (const c of children) {
     try { c.kill(); } catch { /* already gone */ }
   }
-  // Best-effort reap confirmation -- do not block the batch on it, but
-  // surface anything that refused to die so a leaked spinner is visible,
+  // Surface anything that refused to die so a leaked spinner is visible,
   // never silent (CWK-019's own rail: a leaked spinner is worse than none).
-  const stillAlive = children.filter((c) => c.exitCode === null && c.signalCode === null && !c.killed);
+  const exited = await Promise.all(children.map((c) => waitForExit(c, timeoutMs)));
+  const stillAlive = children.filter((c, i) => !exited[i]);
   return stillAlive.length;
 }
 
@@ -107,6 +134,21 @@ function shapeLine(shape) {
   return `${shape.tests} tests / ${shape.pass} pass / ${shape.fail} fail / ${shape.skipped} skipped / ${shape.todo} todo`;
 }
 
+// CWK-019 bounce F1: when a whole test FILE aborts (node:test reports the
+// FILE itself as the ✖, e.g. `✖ scripts\lib\conductor.test.mjs`, `'test
+// failed'`), every test inside it is counted neither pass nor fail -- the
+// `tests` figure silently shrinks and shapeLine alone never shows it. Run
+// 1's own `tests` count is the batch's expected denominator; any later run
+// that disagrees is flagged by name, never silently absorbed into a smaller
+// "N tests" line.
+function collapsedNote(shape, baselineTests) {
+  if (baselineTests === null || !Number.isFinite(shape.tests) || shape.tests === baselineTests) return null;
+  const diff = baselineTests - shape.tests;
+  return diff > 0
+    ? `⚠ ${shape.tests} tests, ${diff} FEWER than run 1 (${baselineTests}): a file likely aborted`
+    : `⚠ ${shape.tests} tests, ${-diff} MORE than run 1 (${baselineTests}): unexpected -- investigate`;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help || !Number.isFinite(args.runs) || args.runs < 1) { usage(); process.exitCode = args.help ? 0 : 1; return; }
@@ -121,6 +163,7 @@ async function main() {
   }
 
   const results = [];
+  let baselineTests = null; // set from run 1's own `tests` count -- the batch's expected denominator
   try {
     for (let i = 1; i <= args.runs; i++) {
       const t0 = Date.now();
@@ -131,18 +174,21 @@ async function main() {
       fs.writeFileSync(logPath, combined, 'utf8'); // captured from run 1, unconditionally -- never only-on-failure
 
       const { shape, failNames } = summarize(combined);
-      const gateFailed = r.status !== 0 || (shape.fail ?? 1) !== 0;
-      results.push({ run: i, gateFailed, shape, failNames, logPath, elapsedMs, status: r.status });
+      if (baselineTests === null && Number.isFinite(shape.tests)) baselineTests = shape.tests;
+      const collapse = collapsedNote(shape, baselineTests);
+      const gateFailed = r.status !== 0 || (shape.fail ?? 1) !== 0 || collapse !== null;
+      results.push({ run: i, gateFailed, shape, failNames, collapse, logPath, elapsedMs, status: r.status });
 
       console.log(`[batch] run ${i}/${args.runs}: ${shapeLine(shape)} (${(elapsedMs / 1000).toFixed(1)}s, exit ${r.status}) -> ${logPath}`);
+      if (collapse) console.log(`[batch]   ${collapse}`); // printed regardless of gateFailed -- a collapsed denominator is its own signal
       if (gateFailed) {
         for (const name of failNames) console.log(`[batch]   ✖ ${name}`);
-        if (failNames.length === 0) console.log('[batch]   (gate exited non-zero but no ✖ line matched -- read the log directly)');
+        if (failNames.length === 0 && !collapse) console.log('[batch]   (gate exited non-zero but no ✖ line matched -- read the log directly)');
       }
     }
   } finally {
     if (burners.length) {
-      const leaked = stopContention(burners);
+      const leaked = await stopContention(burners);
       if (leaked > 0) console.log(`[batch] WARNING: ${leaked}/${burners.length} contention process(es) did not confirm exit after kill() -- check the OS process list`);
       else console.log(`[batch] contention reaped: ${burners.length}/${burners.length}`);
     }
@@ -153,8 +199,11 @@ async function main() {
   console.log('');
   console.log(`[batch] ${results.length} runs, ${clean} clean, ${dirty.length} with failures. Logs: ${logDir}`);
   for (const r of dirty) {
-    const names = r.failNames.length ? r.failNames.join(' | ') : '(unnamed -- read ' + r.logPath + ')';
-    console.log(`[batch]   run ${r.run}: ${names}`);
+    const parts = [];
+    if (r.collapse) parts.push(r.collapse);
+    if (r.failNames.length) parts.push(...r.failNames);
+    if (parts.length === 0) parts.push('(unnamed -- read ' + r.logPath + ')');
+    console.log(`[batch]   run ${r.run}: ${parts.join(' | ')}`);
   }
   process.exitCode = dirty.length > 0 ? 1 : 0;
 }
