@@ -1885,12 +1885,15 @@ test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is
     // resolves back to `<proj>`, since this fixture's sandbox() writes no
     // ROOT_MARKER anywhere, so the stray is never a delete candidate). An
     // existsSync(strayFile) assertion here is VACUOUS — it cannot fail either
-    // way — which is exactly what made the original wall-clock proxy this
-    // test used to carry LOOK replaceable by it. It is not. The call-count
-    // counter below is the actual pin (fidelity-gate.mjs's __testHooks
-    // precedent — a wall-clock bound replaced by a load-independent count,
-    // board #24), proven by mutation to redden when the one-shot regresses
-    // (see the sibling MUTATION PROOF test just below).
+    // way, which is exactly what made the deleted wall-clock proxy LOOK
+    // replaceable by it. It is not. The call-count counter is the actual
+    // pin (fidelity-gate.mjs's __testHooks precedent — a wall-clock bound
+    // replaced by a load-independent count, board #24); the two asserts
+    // that carry it are `write #1 calls the sweep exactly once` above and
+    // `write #2 must NOT call the sweep again` below — proven by mutation
+    // (both directions: alreadySwept forced false reddens write #2's
+    // assert at actual:2 expected:1; the sweep call itself gated off
+    // reddens write #1's at actual:0 expected:1).
     const strayCwd = path.join(proj, 'sub');
     fs.mkdirSync(strayCwd, { recursive: true });
     const strayDir = ccSlugDir(home, strayCwd);

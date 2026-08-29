@@ -4,6 +4,12 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-08-29
+
+### Changed
+
+- `caliper.mjs` gains a test-only `__testHooks.strayPruneCalls` counter (the fidelity-gate.mjs `__testHooks` precedent — a wall-clock bound replaced by a load-independent count), incremented on every `pruneStrayStateDirs()` invocation. Closes a vacuous regression test: `R2/TP-6`'s one-shot-sweep pin used to assert `existsSync(strayFile)`, which can never fail for that fixture's planted stray (it is never a delete candidate under `pruneStrayStateDirs`' own containment guard, proven by mutation). The counter is test-only in effect — zero non-test consumers, zero shipped-behaviour change — but the export itself ships in `caliper.mjs`, a real `DIST_ITEMS` member, so the artifact changed and earns the version.
+
 ## [1.4.0] - 2026-08-23
 
 ### Added
