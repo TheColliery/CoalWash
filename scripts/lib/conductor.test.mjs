@@ -560,6 +560,7 @@ test('round trip: a FULL force-run followed by a FULL plateau (still over cap, q
     const rs2 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(rs2);
     const st2 = readProjState(home, proj);
+    assert.ok(st2.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st2)})`);
     assert.strictEqual(st2.lastCrossing.band, 'FULL');
     assert.strictEqual(st2.lastCrossing.escalation, true, 'the plateau after a tried Quick arms the wizard-escalation crossing');
 
@@ -591,6 +592,7 @@ test('0g round trip: an armed store past the break-even (well under the wall) ve
     assertGraceful(rs);
     assert.strictEqual(rs.stdout, '');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.reason, 'economic');
     assert.strictEqual(st.lastVerdict.economical, true);
@@ -614,6 +616,7 @@ test('0g Q2 round trip: the latch holds FULL across real SessionStarts through a
     seedState(home, proj, seedUsageStamps({}));
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st1 = readProjState(home, proj);
+    assert.ok(st1.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st1)})`);
     assert.strictEqual(st1.lastVerdict.reason, 'economic');
     assert.strictEqual(st1.lastVerdict.econLatched, true);
     const crossingAt = st1.lastCrossing.at;
@@ -626,6 +629,7 @@ test('0g Q2 round trip: the latch holds FULL across real SessionStarts through a
     seedBigRecall(mem);
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st2 = readProjState(home, proj);
+    assert.ok(st2.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st2)})`);
     assert.strictEqual(st2.lastVerdict.band, 'FULL', 'Q2: the latch holds the band through the dip');
     assert.strictEqual(st2.lastVerdict.reason, 'economic');
     assert.strictEqual(st2.lastVerdict.econLatched, true);
@@ -639,6 +643,7 @@ test('0g Q2 round trip: the latch holds FULL across real SessionStarts through a
     fs.writeFileSync(path.join(proj, 'CLAUDE.md'), muscleText(100), 'utf8');
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st3 = readProjState(home, proj);
+    assert.ok(st3.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st3)})`);
     assert.strictEqual(st3.lastVerdict.band, 'LEAN');
     assert.strictEqual(st3.lastVerdict.econLatched, false, 'the LEAN reset clears the latch');
     assert.strictEqual(st3.lastCrossing, undefined, 'LEAN clears the pending crossing outright');
@@ -810,6 +815,7 @@ test('0m round trip (the user\'s live scenario, at true capacity): over the TRUE
     fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), 'a'.repeat(2400800), 'utf8');
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st1 = readProjState(home, proj);
+    assert.ok(st1.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st1)})`);
     assert.strictEqual(st1.leanFloorTokens, undefined, 'task #4: no floor stamp, day one or ever');
     assert.strictEqual(st1.lastVerdict.reason, 'absolute-cap');
     assert.ok(st1.lastVerdict.fatTokens >= 500, 'the fat that arms the cap route is MEASURED, not inferred');
@@ -834,6 +840,7 @@ test('0m round trip (the user\'s live scenario, at true capacity): over the TRUE
     // wall) -> still over + quickTried -> the ONE wizard ask arms (0f leg).
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st2 = readProjState(home, proj);
+    assert.ok(st2.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st2)})`);
     assert.strictEqual(st2.lastCrossing.band, 'FULL');
     assert.strictEqual(st2.lastCrossing.escalation, true, 'still over + quickTried -> the ONE wizard ask arms');
 
@@ -849,6 +856,7 @@ test('0m round trip (the user\'s live scenario, at true capacity): over the TRUE
     fs.writeFileSync(path.join(proj, 'CLAUDE.md'), muscleText(40), 'utf8');
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st3 = readProjState(home, proj);
+    assert.ok(st3.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st3)})`);
     assert.strictEqual(st3.lastVerdict.band, 'LEAN');
     assert.strictEqual(st3.lastCrossing, undefined, 'LEAN clears the episode');
     const rp3 = run(proj, home, { hook_event_name: 'Stop' });
@@ -895,6 +903,7 @@ test('WARP-HOLE: a within-session spike (a file grown well past REGAUGE_DELTA_TO
     assert.ok(reason.includes('standing config authorizes'), reason);
 
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'OBESE', 'the cached verdict was refreshed by the gated re-gauge');
     assert.ok(st.lastVerdict.alwaysLoadedBytes > 160, 'the WARP-HOLE baseline was updated to the fresh measurement');
     assert.strictEqual(st.lastCrossing.consumed, true, 'delivered and consumed in the SAME Stop call');
@@ -918,6 +927,7 @@ test('WARP-HOLE: a small/incidental change (well under REGAUGE_DELTA_TOKENS) nev
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'the cheap gate did not trip -> no full re-gauge, no crossing, silent');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.alwaysLoadedBytes, 160, 'the cached baseline is UNTOUCHED — no re-gauge ran at all');
   } finally { clean(home, proj); }
 });
@@ -984,6 +994,7 @@ test('rc.2 LONG SESSION (grown): fat grows PAST lastEscalationFat within ONE ses
     assert.ok(reason.includes('question tool'), 'the wizard ask fired mid-session on fat growth: ' + reason);
     assert.ok(reason.includes('no cutter for this class of fat'), reason);
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.ok(st.lastEscalationFat > 28200, 'the escalation re-armed at the NEW higher fat (branch 3 fired in the Stop path), not the seeded level');
     assert.strictEqual(st.lastCrossing.escalation, true, 'a wizard-escalation crossing (0f), armed + consumed the same turn');
   } finally { clean(home, proj); }
@@ -1146,6 +1157,7 @@ test('0m: a LEGACY config carrying forceMode:"off" is likewise IGNORED — there
     assert.ok(reason.includes('non-optional at FULL'), 'the OS-maintenance model: no veto — the only full stop is coalwashMode:off');
     assert.ok(!reason.includes('question tool'), 'force never asks');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastCrossing.consumed, true, 'consumed at emission, same as every other surfaced crossing');
     const r2 = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r2);
@@ -1262,6 +1274,7 @@ test('round trip: a FULL-economical SessionStart records a crossing the followin
     assert.strictEqual(rs.stdout, '');
 
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.economical, true);
     assert.strictEqual(st.lastCrossing.band, 'FULL', 'the bootstrap rise (no prior verdict -> LEAN default) armed a crossing');
@@ -1285,6 +1298,7 @@ test('round trip: a LEAN SessionStart records economical:false and no crossing, 
     assert.strictEqual(rs.stdout, '');
 
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
     assert.strictEqual(st.lastVerdict.economical, false);
     assert.strictEqual(st.lastCrossing, undefined, 'LEAN never arms a crossing');
@@ -1306,11 +1320,15 @@ test('round trip: two SessionStarts at the SAME band record only ONE crossing (n
     seedBigRecall(mem);
     const r1 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r1);
-    const at1 = readProjState(home, proj).lastCrossing.at;
+    const stA = readProjState(home, proj);
+    assert.ok(stA.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(stA)})`);
+    const at1 = stA.lastCrossing.at;
 
     const r2 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r2);
-    const crossing2 = readProjState(home, proj).lastCrossing;
+    const stB = readProjState(home, proj);
+    assert.ok(stB.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(stB)})`);
+    const crossing2 = stB.lastCrossing;
     assert.strictEqual(crossing2.at, at1, 'the second SessionStart at the identical band must not re-arm/overwrite the crossing');
     assert.strictEqual(crossing2.consumed, false);
 
@@ -1349,6 +1367,7 @@ test('round trip: an externalize-FULL SessionStart arms a crossing the following
     assert.strictEqual(rs.stdout, '');
 
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.reason, 'externalize');
     assert.strictEqual(st.lastCrossing.band, 'FULL');
 
@@ -1700,6 +1719,7 @@ test('a poisoned/implausible stored leanFloor is IGNORED — task #4 reads no fl
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.reason, 'externalize', 'capHit with NO measured fat routes externalize — same as a floor-free store');
     assert.strictEqual(st.leanFloorTokens, 999999999, 'the stored bytes are untouched — ignored, not clobbered');
@@ -1721,7 +1741,9 @@ test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no sta
       const r = run(proj, home, { hook_event_name: 'SessionStart' });
       assertGraceful(r);
       assert.strictEqual(r.stdout, '');
-      return readProjState(home, proj).lastVerdict;
+      const stG2 = readProjState(home, proj);
+      assert.ok(stG2.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(stG2)})`);
+      return stG2.lastVerdict;
     } finally { clean(home, proj); }
   };
   const baseline = runWithStateContent(undefined); // no state file at all
