@@ -80,6 +80,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 // findProjectRoot/physicalDir: the room's ONE root resolver — the stray-state
 // detector re-uses it rather than hand-rolling a second walk.
 import { claudeBaseDir, findProjectRoot, physicalDir } from './config-load.mjs';
@@ -784,8 +785,16 @@ function dropOldRootEntry(projectRoot, home) {
     if (Object.keys(all.projects).length === 0) {
       fs.rmSync(p, { force: true }); // last entry gone → drop the legacy file
     } else {
-      const tmp = p + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(all), 'utf8');
+      // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
+      // carries (read its comment for the full reasoning; this module cannot import
+      // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
+      // derivable `<dest>.tmp` can be pre-placed by anyone able to write that
+      // directory, and a plain writeFileSync FOLLOWS an alias sitting there. Random
+      // naming removes the precondition; 'wx' is the cross-nature second belt. No
+      // fsync is added here on purpose: this closes a security hole, it does not
+      // change this path's durability posture.
+      const tmp = `${p}.${crypto.randomBytes(12).toString('hex')}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(all), { encoding: 'utf8', flag: 'wx' });
       fs.renameSync(tmp, p);
     }
   } catch { /* fail-silent — migration is best-effort, never blocks a write */ }
@@ -905,8 +914,16 @@ function saveState(proj, projectRoot, home) {
     // change, so no STATE_SCHEMA bump (this file's own rule).
     const alreadySwept = base.strayPruneDone === true;
     const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true };
-    const tmp = p + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(toWrite), 'utf8');
+    // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
+    // carries (read its comment for the full reasoning; this module cannot import
+    // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
+    // derivable `<dest>.tmp` can be pre-placed by anyone able to write that
+    // directory, and a plain writeFileSync FOLLOWS an alias sitting there. Random
+    // naming removes the precondition; 'wx' is the cross-nature second belt. No
+    // fsync is added here on purpose: this closes a security hole, it does not
+    // change this path's durability posture.
+    const tmp = `${p}.${crypto.randomBytes(12).toString('hex')}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(toWrite), { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmp, p);
     dropOldRootEntry(projectRoot, home); // no-old-version-leftover (the rc.2-era legacy file)
     // EXACTLY ONE LIVE HOME. loadState reads the slug-dir path then the coal/

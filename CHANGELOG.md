@@ -4,6 +4,18 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-08-31
+
+### Security
+
+- **class-B arbitrary write through an alias planted at a write temp (CB board U7, HIGH) — the class-B twin of the class-A blob-symlink bug closed at `5ba5254`, missed when that fix never crossed lanes.** `writeDurable` opened its DESTINATION with a plain `'w'`, which follows a symlink sitting there, and `atomicWrite` handed it a fully derivable temp (`<target>.coalwash-tmp`). Anyone able to write the directory holding a class-B memory file could pre-place an alias at that path and have the wash push the file's bytes through it, outside every approved root, with the run still reporting `ok:true`. Reproduced live before the fix (an unprivileged hardlink stands in for the file symlink, which is EPERM on Windows without Developer Mode): a file outside every root came back holding the memory content. Now every durable write opens an O_EXCL fresh inode at an unpredictable (12-byte CSPRNG) temp and `renameSync`s it into place — rename REPLACES a directory entry instead of writing through whatever sits there, so the destination is never opened for write at all. The two guards are cross-nature on purpose: the random name removes the precondition, O_EXCL defeats a race that guesses right anyway. `atomicWrite` is gone, folded into `writeDurable`; its one caller calls that directly. — test: scripts/lib/apply.test.mjs
+- **The same class swept at the four other derivable write temps the board's sweep clause points at, not just the one it named** — `caliper.mjs` (state save + the legacy-root migration), `keeps.mjs` (the keeps store), `tailings.mjs` (the recovery-bin index). All four already renamed into place, so their destination was never exposed; the defect was the derivable temp name plus a plain `writeFileSync`, which follows an alias planted there. Each now uses a CSPRNG suffix and `flag: 'wx'`. Deliberately NOT routed through `writeDurable`: that would add an fsync pair to the conductor's own state path (Phoenix #3 latency), and `caliper.mjs` cannot import `apply.mjs` at all — the module cycle runs the other way. — test: scripts/lib/keeps.test.mjs, scripts/lib/apply.test.mjs (class guard)
+- **A standing class guard, so the seventh site cannot reintroduce this silently.** The board's own pattern finding was that the belt closes make→gate but has no propagate→twins step; this is that step made mechanical. It scans every engine module for a temp path derivable from its destination (literal glue, a single interpolation, or a `process.pid` segment) and fails naming the file and line. Its class-A exclusion is read from `build-plugin.mjs`'s own `UNWIRED_ENGINE` list rather than hardcoded, so the day class-A is wired the guard starts covering it with no edit. — test: scripts/lib/apply.test.mjs
+
+### Changed
+
+- **A stranded write temp no longer counts toward `rollback-failed`.** The per-action `<phys>.coalwash-tmp` sweep in the rollback path is removed: the temp name is now unpredictable, so a name-derived sweep at a distance cannot find it, and `writeDurable` reaps its own temp in its own catch — at the site that created it, reaching every in-process failure the old sweep reached. A leftover scratch sibling was never the class the remaining counters exist for (those count a mixed STATE of the user's data: a snapshot restore that failed, a plan-created file still present); it sits beside an untouched target, and a process crash skipped the old sweep just as completely.
+
 ## [1.4.1] - 2026-08-29
 
 ### Changed

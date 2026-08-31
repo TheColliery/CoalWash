@@ -54,6 +54,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zero-dep builtin)
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
@@ -117,14 +118,58 @@ export function globalLockPath(home = os.homedir()) {
 // (estate-archive -> apply -> retier -> estate-archive): both are function
 // DECLARATIONS bound at CALL time, so ESM resolves it safely — identical
 // reasoning to the keeps/bins/retier cycles documented in the header.
+// U7 HIGH (CB board 2026-08-31, judge-confirmed at source on `017d998`) — the
+// class-B TWIN of the class-A blob-symlink arbitrary-write already closed at
+// `5ba5254`. This was `fs.openSync(p, 'w')` straight onto the destination, and a
+// 'w' open FOLLOWS a symlink sitting there; `atomicWrite` (now folded in below)
+// additionally handed it a fully DERIVABLE temp, `<target>.coalwash-tmp`. So
+// anyone able to write the directory holding a class-B memory file could
+// pre-place an alias at that path and have the wash push the file's bytes
+// through it, outside every approved root, with the run still reporting ok:true.
+// Reproduced live before the fix with an unprivileged hardlink stand-in
+// (apply.test.mjs's U7 HIGH test — file symlinks are EPERM on this box).
+//
+// THE CURE IS THE ONE THIS ROOM ALREADY PROVED, ported not reinvented
+// (node/runtime.md §5; explode.mjs's four write sites): open an O_EXCL fresh
+// inode at an UNPREDICTABLE temp, then `renameSync` it into place — rename
+// REPLACES a directory entry instead of writing through whatever sits there, so
+// the destination is never opened for write at all.
+//
+// WHY THE EXCL SITS ON THE TEMP AND NOT ON `p` — the trap that makes the naive
+// fix wrong: callers legitimately OVERWRITE (writeJournal rewrites the same path
+// on every step; the estate `.gz` recovery write re-lands a dest), and 'wx' on
+// the destination would fail closed on a CORRECT operation. On the temp, a
+// pre-existing entry is genuinely an error. Same split `5ba5254` argued.
+//
+// The two guards are CROSS-NATURE by design: the random name removes the
+// PRECONDITION (nothing can be pre-placed at a path an attacker cannot predict),
+// O_EXCL defeats a race that guesses right anyway. The `.coalwash-tmp` marker is
+// kept so a crash-stranded scratch file is still attributable to this tool.
+//
+// #57 FILESYSTEM-SEMANTICS-ASSUMPTION (MASTER-LOSS-TAXONOMY) moves HERE with the
+// rename it governs: rename is atomic ONLY within one directory on one
+// filesystem — cross-device it throws EXDEV (the Claude Code #32533 class). The
+// temp is a string SUFFIX on `p`, so same-directory holds BY CONSTRUCTION, not
+// by inspection. An EXDEV (or any other failure) reaps the temp HERE, at the
+// site that created it — a name-based sweep at a distance cannot find an
+// unpredictable name — and surfaces to applyPlan's step catch -> whole-run
+// rollback: fail-closed, destination untouched, no stranded temp.
 export function writeDurable(p, data) {
-  const fd = fs.openSync(p, 'w');
+  const tmp = `${p}.${crypto.randomBytes(12).toString('hex')}.coalwash-tmp`;
+  let fd = null;
   try {
+    fd = fs.openSync(tmp, 'wx');
     fs.writeSync(fd, data);
     fs.fsyncSync(fd);
-  } finally {
     fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmp, p);
+  } catch (e) {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* best-effort */ } }
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* best-effort reap */ }
+    throw e;
   }
+  fsyncDirBestEffort(path.dirname(p));
 }
 export function fsyncDirBestEffort(dir) {
   // POSIX: makes the rename itself durable. Windows: opening a dir fd throws —
@@ -134,23 +179,11 @@ export function fsyncDirBestEffort(dir) {
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   } catch { /* best-effort */ }
 }
-// Atomic replace: write sibling .tmp -> fsync -> rename over target.
-// #57 FILESYSTEM-SEMANTICS-ASSUMPTION (MASTER-LOSS-TAXONOMY): rename is atomic
-// ONLY within one directory on one filesystem — cross-device it throws EXDEV
-// (the Claude Code #32533 class). tmp derives from target, so same-dir holds
-// by construction; the assert keeps the invariant EXPLICIT against a future
-// edit pointing tmp at os.tmpdir(). An EXDEV (or any rename failure) surfaces
-// to applyPlan's step catch -> whole-run rollback, which also sweeps the
-// `.coalwash-tmp` sibling — fail-closed, target untouched, no stranded tmp.
-function atomicWrite(target, content) {
-  const tmp = target + '.coalwash-tmp';
-  if (path.dirname(tmp) !== path.dirname(target)) {
-    throw new Error(`atomicWrite invariant: tmp must be a same-directory sibling of ${target}`);
-  }
-  writeDurable(tmp, content);
-  fs.renameSync(tmp, target);
-  fsyncDirBestEffort(path.dirname(target));
-}
+// `atomicWrite` is GONE, folded into writeDurable above (U7): its whole body —
+// sibling temp, fsync, rename over the target, dir fsync — is now what every
+// durable write does, so a separate wrapper was one derivable-temp footgun with
+// a second name on it. The one caller (the rewrite step) calls writeDurable
+// directly; the #57 EXDEV invariant moved with the rename that owns it.
 
 // 0h: what a rewrite CUT — the lines present in the gated original and
 // absent from the rewritten text (blank lines skipped; set-membership, so a
@@ -1105,15 +1138,25 @@ export function applyPlan(plan, opts = {}) {
         for (const m of manifest) {
           try { fs.copyFileSync(path.join(snapDir, m.snap), m.original); } catch { failed++; /* keep restoring the rest */ }
         }
-        // A created file (or a stranded .coalwash-tmp sibling) the rollback CANNOT
-        // remove LINGERS in the store = a mixed state, exactly like a failed
-        // snapshot restore — count it (EPERM/EBUSY: AV or cloud-sync holding a
-        // no-FILE_SHARE_DELETE handle, the win32 hazard) so the status below is
-        // honestly rollback-failed, never a clean rolledBack:true over a lingering
-        // file. force:true never throws on a missing target, so a throw here means
-        // a real removal failure; the existsSync belt counts it ONLY if it lingers.
+        // A created file the rollback CANNOT remove LINGERS in the store = a mixed
+        // state, exactly like a failed snapshot restore — count it (EPERM/EBUSY: AV
+        // or cloud-sync holding a no-FILE_SHARE_DELETE handle, the win32 hazard) so
+        // the status below is honestly rollback-failed, never a clean
+        // rolledBack:true over a lingering file. force:true never throws on a
+        // missing target, so a throw here means a real removal failure; the
+        // existsSync belt counts it ONLY if it lingers.
+        //
+        // U7: the companion per-action `<phys>.coalwash-tmp` sweep is GONE, not
+        // forgotten. Two reasons, and the second is the one that matters: (1) the
+        // temp name is now unpredictable, so a name-derived sweep at a distance
+        // cannot find it — writeDurable reaps its own temp in its own catch, at the
+        // site that created it, which reaches every in-process failure the old
+        // sweep reached; (2) a stranded scratch sibling was never the class the two
+        // counters above exist for — those count a mixed STATE of the user's data
+        // (a restore that failed, a plan-created file still present). A leftover
+        // temp is cosmetic litter beside an UNTOUCHED target, and a process crash
+        // skipped the old sweep just as completely.
         for (const p of createdPaths) { try { fs.rmSync(p, { force: true }); } catch { if (fs.existsSync(p)) failed++; } }
-        for (const a of actionable) { const tmp = a.phys + '.coalwash-tmp'; try { fs.rmSync(tmp, { force: true }); } catch { if (fs.existsSync(tmp)) failed++; } }
         // A PARTIAL rollback must NOT be marked terminal-clean, or a cold-start
         // recoverDangling would clear the journal over a mixed on-disk state.
         journal.status = failed ? 'rollback-failed' : 'rolled-back';
@@ -1142,7 +1185,7 @@ export function applyPlan(plan, opts = {}) {
             throw new Error(`external writer detected: create target ${a.phys} appeared mid-transaction`);
           }
           if (a.type === 'rewrite' || a.type === 'create') {
-            atomicWrite(a.phys, a.content);
+            writeDurable(a.phys, a.content); // U7: temp is O_EXCL + unpredictable; the destination is never opened for write
             if (a.type === 'create') createdPaths.push(a.phys);
             // verify: what landed is byte-for-byte what the plan said (blueprint step 3 "verify")
             const back = fs.readFileSync(a.phys);

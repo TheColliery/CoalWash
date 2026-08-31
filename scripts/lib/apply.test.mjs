@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
-import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine } from './apply.mjs';
+import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, writeDurable } from './apply.mjs';
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
@@ -1587,14 +1587,17 @@ test('SHRINK is an ordinary rewrite: a shrink that accidentally drops a fact (an
 // rename-atomicity and O_EXCL-exclusivity are LOCAL-filesystem semantics.
 // ---------------------------------------------------------------------------
 
-test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mid-apply FAILS CLOSED — whole-run rollback, target unchanged, no stranded .coalwash-tmp', () => {
+test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mid-apply FAILS CLOSED -- whole-run rollback, target unchanged, no stranded temp', () => {
   const { proj, store } = sandbox();
   const f1 = path.join(store, 'f1.md');
   write(f1, 'original bytes');
   const origRename = fs.renameSync;
-  // Monkey-patch the shared fs object: the ONLY renameSync in the txn path is
-  // atomicWrite's tmp->target hop (journal/snapshot writes never rename).
-  fs.renameSync = () => {
+  // Monkey-patch the shared fs object, SCOPED to this step's own target: since
+  // U7 every durable write renames (the journal included), so a blanket throw
+  // would kill the journal write before a step ever ran and this test would stop
+  // exercising the mid-apply failure it is named for.
+  fs.renameSync = (from, to) => {
+    if (to !== f1) return origRename(from, to);
     const e = new Error('EXDEV: cross-device link not permitted');
     e.code = 'EXDEV';
     throw e;
@@ -1608,7 +1611,7 @@ test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mi
     assert.strictEqual(r.rolledBack, true, 'the step failure takes the rollback path');
     assert.match(r.error, /EXDEV/, 'the error surfaces, never silent');
     assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'original bytes', 'target unchanged');
-    assert.strictEqual(fs.readdirSync(store).some((n) => n.includes('.coalwash-tmp')), false, 'no stranded tmp (rollback sweeps the sibling)');
+    assert.strictEqual(fs.readdirSync(store).some((n) => n.includes('.coalwash-tmp')), false, 'no stranded temp -- since U7 writeDurable reaps its own temp in its own catch, at the site that made it (a name-derived sweep at a distance cannot find an unpredictable name)');
   } finally { clean(proj); }
 });
 
@@ -2988,4 +2991,181 @@ test('DEMAND-10/keeps-gate POSITIVE: a keep recorded with a spelling that does N
       `the keep must still BIND despite its recorded spelling not resolving on this volume — a keep whose exact case falls out of sync with the real file must not silently stop protecting it (got: ${r.error})`);
     assert.strictEqual(fs.readFileSync(real, 'utf8'), 'The pinned clause: never trust a raw floor value.', 'file left untouched');
   } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// U7 HIGH (CB board 2026-08-31, adversary H1, judge-confirmed at source on
+// `017d998`): the class-B TWIN of the class-A blob-symlink arbitrary-write
+// already closed at `5ba5254`. `writeDurable` opened its DESTINATION with 'w'
+// (which FOLLOWS a symlink there) and `atomicWrite` handed it a fully
+// PREDICTABLE temp (`<target>.coalwash-tmp`), so anyone able to write the
+// directory holding a class-B memory file could pre-place an alias at that
+// temp path and have the wash push the file's bytes through it, outside every
+// approved root, reported ok:true. A live violation of this room's own
+// node/runtime.md section 5.
+//
+// THE UNPRIVILEGED STAND-IN, and its honest ceiling: file-symlink creation is
+// EPERM on Windows without Developer Mode (measured on this box: file symlink
+// BLOCKED/EPERM, dir junction ok, hardlink ok) -- the same ceiling the class-A
+// fix's own comments name, and the reason the board could not live-repro. A
+// HARDLINK planted at the temp path is the same class of pre-placed alias and
+// needs no privilege: openSync(p, w) on it truncates and writes the victim's
+// inode exactly as a symlink would. It proves the mechanism and the cure; it
+// does NOT prove the win32 dangling-symlink-defeats-O_EXCL claim explode.mjs
+// records as unconfirmed-not-refuted, which stays unproven here either way.
+// ---------------------------------------------------------------------------
+function hardlinkCapable() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-hlprobe-'));
+  try {
+    const a = path.join(d, 'a');
+    fs.writeFileSync(a, 'x');
+    fs.linkSync(a, path.join(d, 'b'));
+    return true;
+  } catch {
+    return false;
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+}
+
+test('U7 HIGH: an alias pre-placed at the write temp NEVER receives the content -- the file outside every approved root is untouched and the run fails closed', (t) => {
+  // ONE skippable leg, capability-PROBED (never platform-named): without
+  // hardlink creation the plant itself cannot be built, so the test would pass
+  // vacuously instead of proving anything.
+  if (!hardlinkCapable()) { t.skip('this volume refuses hardlink creation -- the unprivileged stand-in for the EPERM-blocked file symlink cannot be planted here'); return; }
+  const { proj, store } = sandbox();
+  const victim = path.join(proj, 'VICTIM-outside-every-root.txt');
+  write(victim, 'VICTIM ORIGINAL');
+  const target = path.join(store, 'MEMORY.md');
+  write(target, 'target original');
+  const realOpen = fs.openSync;
+  let planted = null;
+  // The attacker wins the race: an alias appears at the exact temp path the
+  // implementation chose, immediately before it is opened.
+  fs.openSync = (p, ...rest) => {
+    if (planted === null && typeof p === 'string' && p.includes('.coalwash-tmp')) {
+      planted = p;
+      try { fs.linkSync(victim, p); } catch { /* a pre-existing entry is itself the fail-closed case */ }
+    }
+    return realOpen(p, ...rest);
+  };
+  let r;
+  try {
+    r = apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'ATTACKER-VISIBLE MEMORY CONTENT' }]));
+  } finally { fs.openSync = realOpen; }
+  try {
+    assert.ok(planted, 'the plant fired (a temp path was opened) -- otherwise this test proves nothing');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM ORIGINAL', 'ARBITRARY WRITE: the file outside every approved root must be untouched (pre-fix the destination open follows the planted alias and truncates it)');
+    assert.strictEqual(r.ok, false, 'the run fails closed on EEXIST at the O_EXCL temp, never silently writes through the alias');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'target original', 'target unchanged');
+  } finally { clean(proj); }
+});
+
+test('U7: NOTHING is ever opened with a plain w -- every durable write lands on an O_EXCL temp and is renamed into place (rename REPLACES a directory entry; it does not write through an alias at the destination)', () => {
+  const { proj, store } = sandbox();
+  const target = path.join(store, 'MEMORY.md');
+  write(target, 'target original');
+  const realOpen = fs.openSync;
+  const opens = [];
+  fs.openSync = (p, flags, ...rest) => {
+    if (typeof p === 'string' && typeof flags === 'string') opens.push({ p, flags });
+    return realOpen(p, flags, ...rest);
+  };
+  try {
+    apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'new bytes' }]));
+  } finally { fs.openSync = realOpen; }
+  try {
+    // NON-VACUITY: the run really did open files. Asserting only "no plain w"
+    // would pass on a run that opened nothing at all.
+    assert.ok(opens.length > 0, 'the run opened files -- otherwise this proves nothing');
+    const written = opens.filter((o) => o.flags.startsWith('w') || o.flags.startsWith('a'));
+    assert.ok(written.length > 0, 'the run WROTE -- otherwise this proves nothing');
+    // A plain 'w' FOLLOWS an alias at the destination. O_EXCL ('wx') refuses a
+    // pre-existing entry instead, which is the whole cure -- so the property is
+    // not "the destination is never opened w", it is that a plain w never
+    // happens AT ALL, anywhere in the transaction.
+    const plainW = written.filter((o) => o.flags === 'w');
+    assert.deepStrictEqual(plainW, [], `a plain-w open follows whatever alias sits at that path: ${plainW.map((o) => o.p).join(', ')}`);
+    const journal = path.join(txDirFor(proj), 'journal.json');
+    for (const live of [target, journal]) {
+      assert.strictEqual(written.some((o) => o.p === live), false, `${path.basename(live)} is never opened for write -- content reaches it only through a rename`);
+    }
+  } finally { clean(proj); }
+});
+
+test('U7: the write temp is UNPREDICTABLE -- two writes to one target pick two different names, and neither is the old derivable sibling (random naming removes the PRECONDITION; O_EXCL stays the second, cross-nature belt)', () => {
+  const { proj, store } = sandbox();
+  const target = path.join(store, 'MEMORY.md');
+  write(target, 'v0');
+  const realOpen = fs.openSync;
+  const temps = [];
+  fs.openSync = (p, ...rest) => {
+    if (typeof p === 'string' && p.includes('.coalwash-tmp')) temps.push(p);
+    return realOpen(p, ...rest);
+  };
+  try {
+    apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'v1' }]));
+    apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'v2' }]));
+  } finally { fs.openSync = realOpen; }
+  try {
+    assert.ok(temps.length >= 2, `both writes used a temp (saw ${temps.length})`);
+    assert.strictEqual(new Set(temps).size, temps.length, `every temp name is distinct: ${temps.join(', ')}`);
+    assert.strictEqual(temps.some((p) => p === target + '.coalwash-tmp'), false, 'the old fully-derivable name is gone');
+    // The collector also sees the JOURNAL's temp, in its own directory and
+    // correctly so: every temp is a sibling of ITS OWN destination, which is the
+    // #57 no-EXDEV invariant now holding for every durable write, not just this one.
+    for (const p of temps) assert.match(path.basename(p), /\.[0-9a-f]{24}\.coalwash-tmp$/, `a CSPRNG segment sits between the destination name and the marker: ${p}`);
+    const mine = temps.filter((p) => path.dirname(p) === path.dirname(target));
+    assert.ok(mine.length >= 2, `the target's own two writes each used a temp (saw ${mine.length})`);
+  } finally { clean(proj); }
+});
+
+test('U7 CONTROL (passes on BOTH engines by design -- it proves the fix did not BREAK the overwrite contract): writeDurable still replaces an existing destination, because O_EXCL sits on the TEMP and rename does the overwrite', () => {
+  const { proj, store } = sandbox();
+  const p = path.join(store, 'already-there.json');
+  try {
+    write(p, 'OLD CONTENT');
+    writeDurable(p, 'NEW CONTENT');
+    assert.strictEqual(fs.readFileSync(p, 'utf8'), 'NEW CONTENT', 'an existing destination is replaced -- the journal caller rewrites the same path every step');
+    writeDurable(p, 'NEWER');
+    assert.strictEqual(fs.readFileSync(p, 'utf8'), 'NEWER', 'and again');
+    assert.strictEqual(fs.readdirSync(store).filter((n) => n.includes('.coalwash-tmp')).length, 0, 'no temp litter left behind on the success path');
+  } finally { clean(proj); }
+});
+
+test('U7 CLASS GUARD (the propagate-check the board asked for): no engine module builds a write temp DERIVABLY from its destination -- the seventh site cannot reintroduce the class silently', () => {
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  // A temp is SAFE when an unpredictable segment sits between the destination
+  // and the marker. Flagged shapes, all fully derivable by anyone who can see
+  // the destination path (and, for a pid, the process list):
+  //   x + '.tmp'   |   `${x}.tmp`   |   `${x}.${process.pid}.tmp`
+  const CONCAT = /\+\s*['"]\.(coalwash-)?tmp['"]/;
+  const TEMPLATE = /`[^`]*\$\{[^}]+\}\.(coalwash-)?tmp`/;
+  const offenders = [];
+  for (const name of fs.readdirSync(libDir).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs'))) {
+    const src = fs.readFileSync(path.join(libDir, name), 'utf8');
+    src.split(/\r?\n/).forEach((line, i) => {
+      const t = line.trim();
+      if (t.startsWith('//') || t.startsWith('*')) return;
+      const template = TEMPLATE.exec(line);
+      const interpolations = template ? (template[0].match(/\$\{/g) || []).length : 0;
+      const derivable = CONCAT.test(line)
+        || (template && interpolations < 2)
+        || (template && /process\.pid/.test(template[0]));
+      if (derivable) offenders.push(`${name}:${i + 1}: ${t}`);
+    });
+  }
+  // detonate.mjs is class-A and UNWIRED (build-plugin.mjs's UNWIRED_ENGINE keeps
+  // both class-A engines out of the shipped dist). Its one hit is a STALE probe
+  // reference, not a write site: it checks `${outPath}.${process.pid}.tmp` for a
+  // source collision, while the writer it mirrors (explode.mjs) moved to a CSPRNG
+  // suffix at F2 and detonate never followed -- the same propagate-gap one lane
+  // over, reported to the head rather than fixed here (different lane, and
+  // nothing it guards ever reaches a user). Derived from the build's OWN list, so
+  // the day class-A is wired this guard starts covering it automatically.
+  const buildSrc = fs.readFileSync(path.join(libDir, '..', 'build-plugin.mjs'), 'utf8');
+  const unwired = [...buildSrc.matchAll(/'(\w+\.mjs)'/g)]
+    .map((m) => m[1])
+    .filter((n) => buildSrc.slice(buildSrc.indexOf('UNWIRED_ENGINE'), buildSrc.indexOf('isUnwiredEngine')).includes(n));
+  assert.ok(unwired.length >= 2, `the UNWIRED_ENGINE list was read, not assumed (saw ${unwired.join(', ')})`);
+  const shipped = offenders.filter((o) => !unwired.some((u) => o.startsWith(`${u}:`)));
+  assert.deepStrictEqual(shipped, [], `a derivable write temp is the U7 precondition -- put an unpredictable segment before the marker and open it O_EXCL:\n${shipped.join('\n')}`);
 });

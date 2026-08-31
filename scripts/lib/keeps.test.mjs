@@ -274,3 +274,52 @@ test('pendingUserKeeps: filters to exactly the pending entries, [] on none/malfo
   ];
   assert.deepStrictEqual(pendingUserKeeps(list).map((k) => k.target), ['a']);
 });
+
+// U7 (CB board 2026-08-31) -- the same alias-at-the-temp class apply.mjs's
+// writeDurable carries, at the SECONDARY sites the board's sweep clause points
+// at. keeps.json lives in the PROJECT tree (txDirFor), the same trust zone as a
+// class-B memory file: anything with project write access can pre-place an
+// alias. The old temp was `<file>.tmp`, fully derivable, written with a plain
+// writeFileSync -- which follows it. Cure = CSPRNG suffix + flag 'wx'.
+//
+// A hardlink is the unprivileged stand-in for the EPERM-blocked file symlink on
+// this box; it aliases an inode the same way for a write.
+function hardlinkCapable() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-hlprobe-'));
+  try {
+    const a = path.join(d, 'a');
+    fs.writeFileSync(a, 'x');
+    fs.linkSync(a, path.join(d, 'b'));
+    return true;
+  } catch {
+    return false;
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+}
+
+test('U7: recordKeep never writes THROUGH an alias planted at its temp -- the file outside the project is untouched and the record fails closed', (t) => {
+  // ONE skippable leg, capability-PROBED: without hardlink creation the plant
+  // cannot be built, so the test would pass vacuously rather than prove anything.
+  if (!hardlinkCapable()) { t.skip('this volume refuses hardlink creation -- the unprivileged stand-in for the EPERM-blocked file symlink cannot be planted here'); return; }
+  const proj = sandbox();
+  const victim = path.join(proj, 'VICTIM-outside-the-store.txt');
+  fs.writeFileSync(victim, 'VICTIM ORIGINAL', 'utf8');
+  const realWrite = fs.writeFileSync;
+  let planted = null;
+  fs.writeFileSync = (p, ...rest) => {
+    if (planted === null && typeof p === 'string' && p.includes('.tmp')) {
+      planted = p;
+      try { fs.linkSync(victim, p); } catch { /* a pre-existing entry is itself the fail-closed case */ }
+    }
+    return realWrite(p, ...rest);
+  };
+  let ok;
+  try {
+    ok = recordKeep(proj, { target: 'MEMORY.md', reason: 'u7' });
+  } finally { fs.writeFileSync = realWrite; }
+  try {
+    assert.ok(planted, 'the plant fired (a temp path was written) -- otherwise this test proves nothing');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM ORIGINAL', 'the file outside the project is UNTOUCHED (pre-fix the plain write follows the planted alias and truncates it)');
+    assert.strictEqual(ok, false, 'the record fails closed on EEXIST at the O_EXCL temp, never silently through the alias');
+    assert.deepStrictEqual(loadKeeps(proj), [], 'and nothing was recorded');
+  } finally { clean(proj); }
+});
