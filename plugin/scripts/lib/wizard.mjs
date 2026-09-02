@@ -37,7 +37,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { measureEntries, readBudgetFor, tokensEst } from './caliper.mjs';
 import { ccProjectSlug, discoverClassB } from './class-b.mjs';
-import { findProjectRoot, loadMergedConfig } from './config-load.mjs';
+import { findProjectRoot, loadMergedConfig, mergeSafety } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
 import { classifyRetier, collectStores } from './retier.mjs';
 
@@ -75,11 +75,29 @@ export function neutralScan(opts) {
   const { projectRoot, home, managedPaths } = opts || {};
   // CWK-057: resolved IN CODE from the clamped cascade, not handed in by the
   // SKILL snippet that calls this. hooks-safety §9's own lesson -- a config read
-  // that depends on an agent remembering to pass a flag is a prose guard; an
-  // explicit opts value still wins so a test can drive both sides directly.
-  const scanEverything = opts && opts.scanEverything !== undefined
-    ? opts.scanEverything
-    : clampedRead(loadMergedConfig({ cwd: projectRoot, home }), 'scanEverything');
+  // that depends on an agent remembering to pass a flag is a prose guard.
+  //
+  // F1 (INSPECT, LOW): the opt is a TEST SEAM, never a second read path. The
+  // first version branched -- an explicit `opts.scanEverything` was used RAW,
+  // so it reached the decision by a route mergeSafety never saw. That is the
+  // exact §9 shape: a PROJECT-side value defeating a GLOBAL stance one layer
+  // above where the clamp can look. Unreached today (method.md:232 passes
+  // projectRoot alone, and no test uses the opt), which is the same "unreached
+  // until it was the mechanism in a HIGH" story `_trustedResume` already wrote
+  // in this room.
+  //
+  // So the seam stays and the VALUE gets clamped: the opt is fed to
+  // mergeSafety as one more PROJECT-side layer over the already-merged config,
+  // through the SAME SAFER_FALSE rule and not a second copy of it. There is
+  // exactly ONE path by which scanEverything reaches this decision. The seam
+  // still drives OFF unconditionally, and drives ON only where the effective
+  // global already permits it -- which is what "goes through the same clamp"
+  // means, and is the only honest way to test the ON side anyway.
+  const merged = loadMergedConfig({ cwd: projectRoot, home });
+  const effective = opts && opts.scanEverything !== undefined
+    ? mergeSafety(merged, { scanEverything: opts.scanEverything })
+    : merged;
+  const scanEverything = clampedRead(effective, 'scanEverything');
   const readBudgetBytes = readBudgetFor(scanEverything);
   const disc = discoverClassB({ projectRoot, home, managedPaths });
   const m = measureEntries(disc.entries, { withGzip: false, readBudgetBytes });
