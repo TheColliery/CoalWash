@@ -133,10 +133,12 @@
   "writeGuard": "on",
 
   // CWK-057 SCAN-SCOPE OVERRIDE — one key lifts every cut on what is SEEN.
-  // true = read EVERY always-loaded entry (the 262144 B read budget is lifted,
-  // so an entry past it has its certain fat MEASURED instead of counting as
-  // muscle by default) and keep the full always-loaded path list in state (the
-  // 200-path cap on the Stop hook's cheap re-stat baseline is not applied).
+  // true = the 262144 B always-loaded read budget is lifted, so no
+  // always-loaded entry is skipped for budget and its certain fat is measured
+  // instead of counting as muscle by default (an entry whose read FAILS still
+  // contributes nothing — that path is unchanged), and the full always-loaded
+  // path list is kept in state (the 200-path cap on the Stop hook's cheap
+  // re-stat baseline is not applied).
   //
   // IT WIDENS SEEING, NEVER DESTROYING. keeps.json, the KEEPS-GATE, every other
   // delete gate, localOnly and every consent gate are untouched: nothing is
