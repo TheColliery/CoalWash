@@ -4,7 +4,7 @@ CoalWash is verified under the same framework as its TheColliery siblings — Ph
 
 ## Reporting a Vulnerability
 
-Open an issue on this repository. For a sensitive PoC (especially anything that could aim a write/delete outside the memory sandbox), request a private channel in the issue before posting details.
+Report a security issue in this repo through GitHub's private vulnerability reporting — [Security → Report a vulnerability](https://github.com/TheColliery/CoalWash/security/advisories/new) — never a public issue; enabled and verified live at press. In scope: anything that aims a write or delete outside the memory sandbox (a containment or anchor-gate bypass), anything that defeats the undo net (snapshot, recovery bins, rollback) so a delete becomes unrecoverable, a `pinned: true` file getting rewritten or deleted anyway, a fidelity-gate bypass that lets a structured token drop silently, and prompt-injection through poisoned memory content that makes the tool act on it as an instruction rather than data. This is a one-person-maintained project: expect the report to be read and acknowledged, triaged against the scope above, and disclosed once a fix ships, with no fixed response-time SLA. A public GitHub issue remains the right channel for an ordinary, non-security bug.
 
 ## Commit & Tag Signatures
 
