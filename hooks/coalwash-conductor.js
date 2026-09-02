@@ -199,10 +199,12 @@ async function handleSessionStart(input) {
   // scheduler below still runs (its own off-switch is updateMode — standard
   // system #3 is orthogonal to the gauge).
   const managedPaths = clampedRead(cfg, 'managedPaths');
-  // CWK-057: read ONCE here, in handleSessionStart's own scope -- the gauge
-  // block below is conditional on disc.entries.length, and the disclosure line
-  // is not, so a declaration inside that block is a ReferenceError on an empty
-  // store. On a fail-silent hook that would kill the whole gauge in silence.
+  // CWK-057: read ONCE here, in handleSessionStart's own scope. BOTH consumers
+  // sit in different blocks -- recordVerdict inside the gauge block below, the
+  // disclosure after it -- and a declaration inside the gauge block would be a
+  // ReferenceError for the second one on an empty store, which on a fail-silent
+  // hook kills the whole gauge in silence. Hoisting is about SCOPE only: it
+  // never decides whether the disclosure fires (see its own gate below).
   const scanEverything = clampedRead(cfg, 'scanEverything') === true;
   const disc = mode === 'auto' ? classB.discoverClassB({ projectRoot, home, managedPaths }) : { entries: [] };
   if (disc.entries.length) {
@@ -282,11 +284,25 @@ async function handleSessionStart(input) {
     caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now, { quickTried, fatTokens, session: input && input.session_id });
   }
 
-  if (scanEverything) {
-    // Names the two cuts BY NAME and what stays out of reach. CoalMine shipped a
-    // LOW for an unbounded "every scope cut was bypassed" claim (ee15ade); this
-    // one is bounded on both sides -- what was lifted, and what was not.
-    out.push('[CoalWash] Scan scope: scanEverything is ON — both SCAN-scope cuts were bypassed this run: (1) the always-loaded READ BUDGET (262144 B) is lifted, so every always-loaded entry is actually read and its certain fat measured instead of counting as muscle by default; (2) the 200-path cap on the Stop hook\'s cheap re-stat baseline is not applied. It widens only what is SEEN: keeps.json, the KEEPS-GATE, every other delete gate, localOnly and every consent gate are untouched — nothing is deleted, merged or mutated that would not have been. Still narrower than "everything": recall-tier entries are sized from stat bytes and never read, and a file the platform never surfaced as class-B is not here. Costs more than a normal gauge by design. Set scanEverything to false to restore the normal scan scope.');
+  // CWK-057 rot-canary MEDIUM (self-found, shipped in 2c6cad0, fixed here):
+  // `disc.entries.length` is REQUIRED, not decoration. Gated on the flag alone
+  // this line fired on two paths where NO SCAN RAN AT ALL -- coalwashMode
+  // 'manual' (the gauge is deliberately silent, so disc is {entries: []}) and
+  // auto with an empty class-B store -- and said "were bypassed this run" about
+  // an event that did not occur. CoalMine's own LOW here (ee15ade) over-stated a
+  // SCOPE; this over-stated an EVENT, on the one surface whose whole job is
+  // telling a user what this tool just did to their memory. The gauge block
+  // above is the only thing that bypasses anything, so the disclosure states
+  // what it did, never what the config would have allowed.
+  if (scanEverything && disc.entries.length) {
+    // Bounded on BOTH sides: what was lifted, and what stays out of reach.
+    // Second over-claim caught in the same pass: this used to say "every
+    // always-loaded entry is actually read", which is false whenever a read
+    // THROWS -- measureEntries catches it and that entry contributes 0 certain
+    // fat, the same fail-toward-silence path the budget takes. What the bypass
+    // actually guarantees is that nothing is skipped FOR BUDGET, so that is
+    // what it now claims.
+    out.push('[CoalWash] Scan scope: scanEverything is ON — both SCAN-scope cuts were bypassed for the gauge that just ran: (1) the always-loaded READ BUDGET (262144 B) is lifted, so no always-loaded entry is skipped for budget and its certain fat is measured instead of counting as muscle by default (an entry whose read FAILS still contributes nothing — that path is unchanged); (2) the 200-path cap on the Stop hook\'s cheap re-stat baseline is not applied. It widens only what is SEEN: keeps.json, the KEEPS-GATE, every other delete gate, localOnly and every consent gate are untouched — nothing is deleted, merged or mutated that would not have been. Still narrower than "everything": recall-tier entries are sized from stat bytes and never read, and a file the platform never surfaced as class-B is not here. Costs more than a normal gauge by design. Set scanEverything to false to restore the normal scan scope.');
   }
 
   if (updateDue(cfg, clampedRead, caliper)) {

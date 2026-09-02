@@ -1769,3 +1769,54 @@ test('no class-B at all (empty project, no memory dir): silent, exit 0', () => {
     assert.strictEqual(r.stdout, '');
   } finally { clean(home, proj); }
 });
+
+// CWK-057 rot-canary MEDIUM (self-found, shipped in 2c6cad0, fixed the next
+// turn): the scanEverything disclosure was gated on the FLAG alone, so it
+// announced "both SCAN-scope cuts were bypassed this run" on two paths where no
+// scan ran at all. A disclosure that reports an event which did not occur is
+// worse than no disclosure -- this is the surface whose entire job is telling a
+// user what the tool just did to their memory. The gauge block is the only
+// thing that bypasses anything, so the line must ride disc.entries.length.
+test('CWK-057 disclosure: fires when the gauge ACTUALLY RAN', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: true });
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# p\n' + 'a duplicated substance line that is provable fat\n'.repeat(40), 'utf8');
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'cwk57-a' });
+    assert.strictEqual(r.status, 0, 'exit 0 (Phoenix #4)');
+    assert.match(r.stdout, /scanEverything is ON/, 'a real gauge discloses');
+    assert.match(r.stdout, /bypassed for the gauge that just ran/, 'and it says WHAT it did, not what the config allows');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-057 disclosure: SILENT in coalwashMode manual — the gauge is deliberately quiet, so nothing was bypassed and the line must not claim it was', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: true, coalwashMode: 'manual' });
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# p\n' + 'a duplicated substance line that is provable fat\n'.repeat(40), 'utf8');
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'cwk57-b' });
+    assert.strictEqual(r.status, 0, 'exit 0 (Phoenix #4)');
+    assert.doesNotMatch(r.stdout, /scanEverything is ON/, 'no scan ran, so no scan is claimed');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-057 disclosure: SILENT on an EMPTY class-B store — auto mode, but the gauge block never executes, so nothing was bypassed', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: true });
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'cwk57-c' });
+    assert.strictEqual(r.status, 0, 'exit 0 (Phoenix #4)');
+    assert.doesNotMatch(r.stdout, /scanEverything is ON/, 'nothing to measure, nothing to disclose');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-057 disclosure: OFF is silent even with a real store — the control that keeps the three above from passing for the wrong reason', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: false });
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# p\n' + 'a duplicated substance line that is provable fat\n'.repeat(40), 'utf8');
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'cwk57-d' });
+    assert.strictEqual(r.status, 0, 'exit 0 (Phoenix #4)');
+    assert.doesNotMatch(r.stdout, /scanEverything is ON/, 'off means silent');
+  } finally { clean(home, proj); }
+});
