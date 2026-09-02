@@ -130,5 +130,19 @@
   // delete is legitimate; the advisory just flags it and points at the
   // byte-exact snapshot to restore from. snapshot-only = keep the airbag undo
   // net, silence the advisory. off = disabled. coalwashMode:"off" kills it too.
-  "writeGuard": "on"
+  "writeGuard": "on",
+
+  // CWK-057 SCAN-SCOPE OVERRIDE — one key lifts every cut on what is SEEN.
+  // true = read EVERY always-loaded entry (the 262144 B read budget is lifted,
+  // so an entry past it has its certain fat MEASURED instead of counting as
+  // muscle by default) and keep the full always-loaded path list in state (the
+  // 200-path cap on the Stop hook's cheap re-stat baseline is not applied).
+  //
+  // IT WIDENS SEEING, NEVER DESTROYING. keeps.json, the KEEPS-GATE, every other
+  // delete gate, localOnly and every consent gate are untouched: nothing is
+  // deleted, merged or mutated that would not have been at false. Costs more
+  // than a normal gauge by design, and says so on SessionStart while it is on.
+  // Safer-value-wins on merge: a project config can never turn this ON past a
+  // global that is off (or unreadable) — it can only turn it off.
+  "scanEverything": false
 }

@@ -15,6 +15,7 @@ import {
   FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   FAT_ARM_TOKENS, FAT_REARM_TOKENS, mechFatFromText,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
+  readBudgetFor, READ_BUDGET_DEFAULT,
   __testHooks,
 } from './caliper.mjs';
 import { discoverClassB } from './class-b.mjs';
@@ -1904,4 +1905,72 @@ test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is
     setLeanFloor(home, proj, 20);                                    // write #2 must skip the sweep
     assert.strictEqual(__testHooks.strayPruneCalls, 1, 'write #2 must NOT call the sweep again — the one-shot held');
   } finally { clean(home, proj); }
+});
+
+// CWK-057 -- the SEEING half, proven at the two cuts themselves. RED-FIRST: on
+// the pre-fix engine measureEntries had no way to be told "no budget" and
+// recordVerdict always sliced at 200, so both assertions below fail.
+test('CWK-057 bypass 1/2: the read budget is a real SCAN cut — past it, an entry is never read, so its certain fat counts as MUSCLE; ON reads every always-loaded entry and MEASURES that fat', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-budget-'));
+  try {
+    // Two always-loaded entries. The first alone exhausts a small budget, so the
+    // SECOND is never read at the default -- and the second is the one carrying
+    // provable duplicate-line fat.
+    const filler = path.join(dir, 'a.md');
+    const fatty = path.join(dir, 'b.md');
+    // The filler must EXHAUST THE REAL DEFAULT BUDGET, not a small number
+    // passed in by this test. Sabotage s1 (readBudgetFor always returns the
+    // default) left the first version of this test GREEN: its 4KB fixture fit
+    // inside 262144 either way, so the fatty file was read even with the bypass
+    // dead -- it passed for a reason unrelated to what it names.
+    fs.writeFileSync(filler, 'x'.repeat(READ_BUDGET_DEFAULT), 'utf8');
+    const dupLine = 'this exact substance line repeats and is therefore provable fat';
+    fs.writeFileSync(fatty, new Array(40).fill(dupLine).join('\n'), 'utf8');
+    const entries = [filler, fatty].map((p) => ({ path: p, bytes: fs.statSync(p).size, alwaysLoaded: true, kind: 'memory' }));
+
+    const budgeted = measureEntries(entries, { readBudgetBytes: READ_BUDGET_DEFAULT });
+    assert.strictEqual(budgeted.mechFat.tokensEst, 0, 'PRECONDITION: at the budget the fatty file is never read, so its fat is invisible and counts as muscle');
+
+    const everything = measureEntries(entries, { readBudgetBytes: readBudgetFor(true) });
+    assert.ok(everything.mechFat.tokensEst > 0, 'ON: the same fat is now MEASURED — this is the cut being genuinely bypassed, not a renamed default');
+    assert.ok(everything.mechFat.dupTokens > 0, 'and it is the duplicate-line fat specifically');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CWK-057 bypass 1/2 (control): readBudgetFor is strict — only a real boolean true lifts the budget, so truthy junk can never widen the scan', () => {
+  assert.strictEqual(readBudgetFor(true), Infinity);
+  for (const junk of [false, undefined, null, 1, 'true', {}]) {
+    assert.strictEqual(readBudgetFor(junk), READ_BUDGET_DEFAULT, `${JSON.stringify(junk)} must not lift the budget`);
+  }
+  assert.strictEqual(readBudgetFor(false, 999), 999, 'an explicit fallback (the hook\'s own constant) is honored when OFF');
+});
+
+test('CWK-057 bypass 2/2: the 200-path cap truncates the Stop hook re-stat baseline; ON keeps the whole list', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-cap-home-'));
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-cap-proj-'));
+  try {
+    const paths = Array.from({ length: ALWAYS_LOADED_PATHS_CAP + 25 }, (_, i) => path.join(proj, `f${i}.md`));
+    const verdict = { band: 'LEAN', reason: 'fat', alwaysLoadedPaths: paths, alwaysLoadedBytes: 1 };
+
+    recordVerdict(home, proj, verdict);
+    const capped = loadState(proj, home).lastVerdict.alwaysLoadedPaths;
+    assert.strictEqual(capped.length, ALWAYS_LOADED_PATHS_CAP, 'PRECONDITION: the cut is real — 25 paths are invisible to the cheap re-stat gate');
+
+    recordVerdict(home, proj, verdict, Date.now(), { scanEverything: true });
+    const full = loadState(proj, home).lastVerdict.alwaysLoadedPaths;
+    assert.strictEqual(full.length, paths.length, 'ON: the whole baseline is kept, so a size change past #200 is visible to the cheap gate too');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(proj, { recursive: true, force: true }); }
+});
+
+test('CWK-057: ON widens SEEING only — recordVerdict still writes the same verdict SHAPE, no new field and no changed meaning (so no stateSchema bump is owed)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-shape-home-'));
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-shape-proj-'));
+  try {
+    const verdict = { band: 'LEAN', reason: 'fat', alwaysLoadedPaths: [path.join(proj, 'a.md')], alwaysLoadedBytes: 1 };
+    recordVerdict(home, proj, verdict);
+    const off = Object.keys(loadState(proj, home).lastVerdict).sort();
+    recordVerdict(home, proj, verdict, Date.now(), { scanEverything: true });
+    const on = Object.keys(loadState(proj, home).lastVerdict).sort();
+    assert.deepStrictEqual(on, off, 'identical field set — the mode changes how much is SEEN, never what is recorded about it');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(proj, { recursive: true, force: true }); }
 });

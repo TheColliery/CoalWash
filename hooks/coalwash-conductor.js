@@ -199,9 +199,22 @@ async function handleSessionStart(input) {
   // scheduler below still runs (its own off-switch is updateMode — standard
   // system #3 is orthogonal to the gauge).
   const managedPaths = clampedRead(cfg, 'managedPaths');
+  // CWK-057: read ONCE here, in handleSessionStart's own scope -- the gauge
+  // block below is conditional on disc.entries.length, and the disclosure line
+  // is not, so a declaration inside that block is a ReferenceError on an empty
+  // store. On a fail-silent hook that would kill the whole gauge in silence.
+  const scanEverything = clampedRead(cfg, 'scanEverything') === true;
   const disc = mode === 'auto' ? classB.discoverClassB({ projectRoot, home, managedPaths }) : { entries: [] };
   if (disc.entries.length) {
-    const m = caliper.measureEntries(disc.entries, { readBudgetBytes: READ_BUDGET_BYTES, withGzip: false });
+    // CWK-057: ON lifts the read budget on the gauge path too. Phoenix #3 is
+    // NOT breached and is not being quietly stretched: #3 binds PostToolUse to
+    // <=5ms of ADDED work, and this is the SessionStart gauge, which already
+    // does a full discoverClassB + a 256KB read by design. ON deliberately
+    // costs more than that, which is why it is a user-set opt-in that discloses
+    // itself below, never a default. Withholding it from the hook would make
+    // the key silently partial on its own primary consumer -- the "guard that
+    // looks covered" failure hooks-safety §9 exists to stop.
+    const m = caliper.measureEntries(disc.entries, { readBudgetBytes: caliper.readBudgetFor(scanEverything, READ_BUDGET_BYTES), withGzip: false });
     const proj = caliper.recordStamp(home, projectRoot, m.alwaysLoaded.tokensEst) || {};
     // Read BEFORE recordVerdict below overwrites it — the band + hysteresis
     // ("overCeiling") this project was in as of the LAST recorded verdict. No
@@ -255,7 +268,7 @@ async function handleSessionStart(input) {
       hardCeilingTokens: verdict.hardCeilingTokens,
       alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
       storeTotalBytes: m.totalBytes, // the WHOLE measured store — the bin-retention budget base (P5/P8)
-    }, now);
+    }, now, { scanEverything }); // CWK-057: ON lifts the 200-path cap on the Stop re-stat baseline
     // Uniform once-per-crossing arming on the band itself — no more
     // reason-based carve for externalize (beta.10's old F1 rule): Stop now
     // dispatches on the CACHED reason within the FULL band (see handleStop),
@@ -267,6 +280,13 @@ async function handleSessionStart(input) {
     // grown since — see recordCrossing. OBESE never arms this any more (0d:
     // auto-Quick-silent only).
     caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now, { quickTried, fatTokens, session: input && input.session_id });
+  }
+
+  if (scanEverything) {
+    // Names the two cuts BY NAME and what stays out of reach. CoalMine shipped a
+    // LOW for an unbounded "every scope cut was bypassed" claim (ee15ade); this
+    // one is bounded on both sides -- what was lifted, and what was not.
+    out.push('[CoalWash] Scan scope: scanEverything is ON — both SCAN-scope cuts were bypassed this run: (1) the always-loaded READ BUDGET (262144 B) is lifted, so every always-loaded entry is actually read and its certain fat measured instead of counting as muscle by default; (2) the 200-path cap on the Stop hook\'s cheap re-stat baseline is not applied. It widens only what is SEEN: keeps.json, the KEEPS-GATE, every other delete gate, localOnly and every consent gate are untouched — nothing is deleted, merged or mutated that would not have been. Still narrower than "everything": recall-tier entries are sized from stat bytes and never read, and a file the platform never surfaced as class-B is not here. Costs more than a normal gauge by design. Set scanEverything to false to restore the normal scan scope.');
   }
 
   if (updateDue(cfg, clampedRead, caliper)) {
@@ -351,7 +371,8 @@ async function handleStop(input) {
       const deltaTokens = caliper.tokensEstFromBytes(Math.abs(freshBytes - cachedBytes));
       if (deltaTokens > caliper.REGAUGE_DELTA_TOKENS) {
         const disc = classB.discoverClassB({ projectRoot, home, managedPaths });
-        const m = caliper.measureEntries(disc.entries, { readBudgetBytes: READ_BUDGET_BYTES, withGzip: false });
+        const scanEverything = clampedRead(cfg, 'scanEverything') === true; // CWK-057, same clamped cascade
+        const m = caliper.measureEntries(disc.entries, { readBudgetBytes: caliper.readBudgetFor(scanEverything, READ_BUDGET_BYTES), withGzip: false });
         // task #4: same measured-not-stamped gauge as SessionStart — fat and
         // muscle come from THIS measure's certain-fat scan; the 0j
         // provisional-floor door this block used to share is retired with
@@ -368,7 +389,7 @@ async function handleStop(input) {
           reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
           hardCeilingTokens: gv.verdict.hardCeilingTokens, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
           storeTotalBytes: m.totalBytes, // same base as SessionStart (P5/P8)
-        }, now);
+        }, now, { scanEverything }); // CWK-057, same clamped flag as the gauge above
         caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens, session: input && input.session_id });
         proj = caliper.loadState(projectRoot, home); // re-read what we just (maybe) armed
         lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};

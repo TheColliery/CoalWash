@@ -160,6 +160,16 @@ export const REGAUGE_DELTA_TOKENS = 500;
 // among the excess never widens past the existing next-SessionStart catch),
 // never breaks anything.
 export const ALWAYS_LOADED_PATHS_CAP = 200;
+
+// CWK-057 -- the two SCAN-scope cuts this room actually has, and the ONE place
+// the "ON = no cut" rule lives. Kept as a pure function of a BOOLEAN (never of
+// the config object) so caliper stays free of a config-schema import, and so a
+// caller is forced to have already read the key through the clamped cascade.
+// Strict `=== true`: only a real boolean arms it, never truthy junk.
+export const READ_BUDGET_DEFAULT = 262144;
+export function readBudgetFor(scanEverything, fallback = READ_BUDGET_DEFAULT) {
+  return scanEverything === true ? Infinity : fallback;
+}
 const DAY_MS = 86400000;
 
 // ---------------------------------------------------------------------------
@@ -1112,7 +1122,7 @@ export function sanitizeLeanFloor(rawLeanFloorTokens, footprintTokens) {
 // false, so the LEAN reset clears it with no special code);
 // `perDay`/`breakEvenDays` (breakEven()'s output,
 // optional) back the Stop hook's payback line on ANY ask, not just FULL's.
-export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
+export function recordVerdict(home, projectRoot, verdict, now = Date.now(), { scanEverything = false } = {}) {
   const proj = loadState(projectRoot, home);
   const perDay = Number(verdict && verdict.perDay);
   const breakEvenDays = Number(verdict && verdict.breakEvenDays);
@@ -1144,7 +1154,14 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
     // a truncated list only narrows the delta gate's visibility, never breaks
     // anything (fail-safe: undercounting just delays a re-gauge to the next
     // SessionStart, the EXISTING behavior this feature is additive to).
-    alwaysLoadedPaths: rawPaths.filter((p) => typeof p === 'string').slice(0, ALWAYS_LOADED_PATHS_CAP),
+    // CWK-057: ON lifts the truncation. Note precisely WHAT this cut hides, so
+    // nobody re-reads it as a report cut: this list is the Stop hook's cheap
+    // re-stat baseline (statOnlyFootprintBytes), so a path past #200 is never
+    // re-stat'd and a size change there is invisible to the CHEAP gate -- the
+    // next SessionStart's full gauge still catches it. Lifting it grows the
+    // persisted array; that is the declared cost of the mode, and the field's
+    // MEANING is unchanged, so no stateSchema bump (this file's own rule).
+    alwaysLoadedPaths: rawPaths.filter((p) => typeof p === 'string').slice(0, scanEverything === true ? Infinity : ALWAYS_LOADED_PATHS_CAP),
     alwaysLoadedBytes: Number.isFinite(alwaysLoadedBytes) ? Math.round(alwaysLoadedBytes) : 0,
     // The WHOLE measured class-B store (measureEntries m.totalBytes: always-
     // loaded + recall tiers) — the bin-retention budget base (P5/P8 fix: the

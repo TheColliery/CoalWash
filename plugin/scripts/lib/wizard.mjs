@@ -35,9 +35,10 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { measureEntries, tokensEst } from './caliper.mjs';
+import { measureEntries, readBudgetFor, tokensEst } from './caliper.mjs';
 import { ccProjectSlug, discoverClassB } from './class-b.mjs';
 import { findProjectRoot, loadMergedConfig } from './config-load.mjs';
+import { clampedRead } from './config-schema.mjs';
 import { classifyRetier, collectStores } from './retier.mjs';
 
 export const PARTITION_FILES = 150;
@@ -72,8 +73,16 @@ function band(n) {
 // it deliberately asks the gauge for one (a SEPARATE call, not this one).
 export function neutralScan(opts) {
   const { projectRoot, home, managedPaths } = opts || {};
+  // CWK-057: resolved IN CODE from the clamped cascade, not handed in by the
+  // SKILL snippet that calls this. hooks-safety §9's own lesson -- a config read
+  // that depends on an agent remembering to pass a flag is a prose guard; an
+  // explicit opts value still wins so a test can drive both sides directly.
+  const scanEverything = opts && opts.scanEverything !== undefined
+    ? opts.scanEverything
+    : clampedRead(loadMergedConfig({ cwd: projectRoot, home }), 'scanEverything');
+  const readBudgetBytes = readBudgetFor(scanEverything);
   const disc = discoverClassB({ projectRoot, home, managedPaths });
-  const m = measureEntries(disc.entries, { withGzip: false });
+  const m = measureEntries(disc.entries, { withGzip: false, readBudgetBytes });
   return { platform: disc.platform, flags: disc.flags, measure: m };
 }
 

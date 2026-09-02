@@ -1168,3 +1168,45 @@ test('clamp-unchanged regression: the safer-value-wins clamp applies identically
     assert.strictEqual(merged.coalwashMode, 'off', 'a project may not escalate past a deliberate global off, regardless of which candidate file the value came from -- only the ADDRESS moved, the clamp semantics did not');
   } finally { clean(home, proj); }
 });
+
+// CWK-057 -- scanEverything's clamp is the MIRROR of localOnly's, and the
+// polarity is the whole point: here `true` is the ESCALATED value (a project
+// file making us read MORE of the user's memory than their global stance
+// allowed), so it lives in SAFER_FALSE, not SAFER_TRUE. hooks-safety §9's blast
+// test reads the DIRECTION OF ESCALATION, never the key's name. Each of the four
+// properties below is a hole this file has actually shipped before.
+test('CWK-057 clamp 1/4: a project SILENCE never clamps a global true away', () => {
+  const out = mergeSafety({ scanEverything: true }, {});
+  assert.strictEqual(out.scanEverything, true, 'the user turned it on globally and the project said nothing');
+});
+
+test('CWK-057 clamp 2/4: an ABSENT global reads as the schema DEFAULT (false), never a continue — the factory-default hole (W2-3/R2), and the COMMON case is a user with no global config at all', () => {
+  const out = mergeSafety({}, { scanEverything: true });
+  assert.strictEqual(out.scanEverything, false, 'a cloned project config cannot escalate against an unwritten global');
+});
+
+test('CWK-057 clamp 3/4: a project may still QUIETEN true -> false', () => {
+  const out = mergeSafety({ scanEverything: true }, { scanEverything: false });
+  assert.strictEqual(out.scanEverything, false, 'quietening is always allowed');
+});
+
+test('CWK-057 clamp 4/4: an unreadable GLOBAL FILE assumes the SAFE value unconditionally — not the schema default, which can be weaker than what the user really had', () => {
+  const out = mergeSafety({ scanEverything: true }, { scanEverything: true }, { globalUnreadable: true });
+  assert.strictEqual(out.scanEverything, false);
+});
+
+test('CWK-057 clamp: junk on EITHER side gets no say, and the stored value is a REAL boolean (K1 — check one spelling, act on that same spelling)', () => {
+  for (const junk of ['true', 1, {}, [], null, ' true ']) {
+    assert.strictEqual(mergeSafety({}, { scanEverything: junk }).scanEverything, false, `project junk ${JSON.stringify(junk)} must not escalate`);
+    assert.strictEqual(mergeSafety({ scanEverything: junk }, { scanEverything: true }).scanEverything, false, `global junk ${JSON.stringify(junk)} is not a global true`);
+  }
+  // and a truthy-junk project value against a REAL global true is still coerced
+  assert.strictEqual(mergeSafety({ scanEverything: true }, { scanEverything: 'yes' }).scanEverything, false, 'truthy junk is not a boolean true');
+});
+
+test('CWK-057 clamp: localOnly keeps its OPPOSITE polarity — the two lists must not be merged', () => {
+  // localOnly: a global true wins and a project cannot turn it off.
+  assert.strictEqual(mergeSafety({ localOnly: true }, { localOnly: false }).localOnly, true);
+  // scanEverything: a global true is honored, but a project can turn it OFF.
+  assert.strictEqual(mergeSafety({ scanEverything: true }, { scanEverything: false }).scanEverything, false);
+});

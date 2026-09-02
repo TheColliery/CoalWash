@@ -72,7 +72,7 @@ import { pathToFileURL } from 'node:url';
 import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
 import {
-  measureEntries, gaugeVerdict,
+  measureEntries, readBudgetFor, gaugeVerdict,
   loadState, armDigGauge,
 } from './caliper.mjs';
 import { envelopeFor } from './retier.mjs';
@@ -111,7 +111,10 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
   const disc = discoverClassB({ projectRoot, home, managedPaths });
-  const m = measureEntries(disc.entries, { withGzip: true });
+  // CWK-057: read through the SAME clamped cascade as every other key -- never a
+  // second read path (hooks-safety §9's SCOPE test).
+  const readBudgetBytes = readBudgetFor(clampedRead(cfg, 'scanEverything'));
+  const m = measureEntries(disc.entries, { withGzip: true, readBudgetBytes });
   const proj = loadState(projectRoot, home);
   // Read-only hysteresis + latch state — the gauge CONSUMES these and never
   // stamps or records them (the conductor's SessionStart/Stop are the stamping
@@ -145,7 +148,7 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   // calls this "context-cost-not-room-fat": it is real per-session cost the reader
   // should see, and it is not this room's to wash or externalize. Same
   // measureEntries, so the number is comparable to the room's own.
-  const inherited = measureEntries(disc.inherited, { withGzip: false });
+  const inherited = measureEntries(disc.inherited, { withGzip: false, readBudgetBytes });
   return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, inherited, verdict, breakEven: econ, roleMemories: disc.roleMemories };
 }
 
