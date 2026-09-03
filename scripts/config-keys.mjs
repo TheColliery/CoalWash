@@ -13,18 +13,58 @@
 // be larger than the schema itself and would be a bypass with no author.
 //
 // So we locate by STRUCTURE instead of by shape. Three markdown locators plus
-// one hook locator, measured together at 1 false positive, not 72:
+// two runtime-text locators, measured together at 2 false positives, not 72:
 //   L1 TABLE   -- the first cell of a markdown table row (our README key table)
 //   L2 DOTTED  -- `container.leaf` where container is a known object/bandmap key
 //   L3 CONFIG  -- a backticked ident on a line naming .coalwash.json, or under a
 //                 heading whose text contains "Configure"
 //   L4 NOTICE  -- a string literal inside an out.push(...) call in the conductor
+//   L5 BUILDER -- every string literal in a notice-BUILDER file, comments stripped
 //
 // L4 REPLACES the exemplar's noticeRegion(text, 'TRANSLATIONS'). We have NO
 // such block -- our conductor's top-level consts are numbers and Sets. Ported
 // literally, noticeRegion would find start === -1, return '', scan zero bytes
 // and report clean. That is the exact failure the first adopter hit. An
 // out.push(...) call is self-delimiting, so it has no end sentinel to overrun.
+//
+// L5 EXISTS BECAUSE THE CONDUCTOR HAS **TWO** SANCTIONED CHANNELS AND L4 READS
+// ONE. `console.log(out.join(...))` (the SessionStart context injection) is
+// L4's. `process.stdout.write(JSON.stringify({decision:'block', reason}))` (the
+// Stop blocking feedback) is not: its `reason` is built entirely in ask.mjs, by
+// forceAuto / wizardEscalation / obeseAutoQuick / externalizeAdvisory. That file
+// is a pure notice BUILDER -- every export returns user-facing prose -- so the
+// whole file is the notice surface and the locator is every string literal in
+// it, not a call-shaped region.
+//
+// COMMENT-STRIPPING IS LOAD-BEARING IN L5, NOT HYGIENE. Measured on ask.mjs:
+// with comments stripped, 2 candidates / 1 real / 1 false positive. With them
+// kept, 4 / 1 / 3 -- `breakEven` and `ceilingAsk` are named only in prose
+// comments. A separate naive scan that stripped nothing measured 38 false
+// positives, because an apostrophe inside a prose comment opens a fake string
+// literal that swallows the code after it until the next apostrophe. That 38
+// was the number used to justify leaving this channel unscanned; it was a
+// property of the naive scan, not of the file.
+//
+// WHAT L5 DOES NOT BUY, stated so nobody over-claims it: this gate tests
+// EXISTENCE. `externalizeAdvisory` shipped "raise `fatMultiple`" while that
+// key's BEHAVIOUR was retired, but the key is still in CONFIG_SCHEMA
+// (read-tolerated, ignored), so it resolves and no red fires. L5 catches a
+// notice naming a key that does not exist -- not one naming a key that exists
+// and no longer does anything. That second class needs a liveness check this
+// gate does not attempt.
+//
+// The conductor is deliberately NOT scanned with L5's every-literal rule.
+// Measured, it would be 7 candidates / 7 real / 0 false positives -- cheap, and
+// still wrong: those 7 come from code like `clampedRead(cfg, 'coalwashMode')`,
+// so it would widen the gate from SHIP-TEXT drift to code-vs-schema drift, a
+// different and unstated purpose. L4 stays bounded to the notice channel.
+//
+// EXCLUDED SURFACES. Five root docs are gitignored internal working records
+// (MEMORY.md, COALWASH_BLUEPRINT.md, LAB-ARCHIVE.md, ASSEMBLY-LINE.md,
+// SENIOR-INCIDENT-AUDIT.md) -- verified per file with `git check-ignore`, not
+// assumed. CHANGELOG.md is TRACKED and is excluded for a different and stronger
+// reason: it names retired and planned keys BY DESIGN, so a red there would
+// fire on accurate history. That makes including it wrong, not merely noisy.
 
 const SHAPE = /^[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*$/;
 const TICK = String.fromCharCode(96);
@@ -50,6 +90,10 @@ export const PENDING_KEYS = Object.freeze({});
  * a config locator at all -- a bare string here would be a bypass with no author.
  */
 export const NOT_CONFIG = Object.freeze({
+  oneLineResult:
+    "receipt.mjs's exported one-line receipt builder. ask.mjs's forceAuto names it inside the "
+    + 'directive text so the agent knows which function produces the line it must push, which is '
+    + 'why L5 reaches it: it is a function name deliberately printed in user-facing prose.',
   projectConfigPath:
     'a function in config-load.mjs that RESOLVES the per-project config path. It is named in '
     + "references/platform-cc.md's config-location prose, which is precisely why L3's "
@@ -146,11 +190,51 @@ export function noticeKeys(text) {
   return { keys: out, lines: hit.length, chars: hit.reduce((n, l) => n + l.length, 0), total: all.length };
 }
 
+const BS = String.fromCharCode(92);
+// Every string literal: single, double, or template -- escape-aware so a quote
+// inside a literal does not end it early.
+const ANY_LITERAL = new RegExp(
+  "'((?:[^'" + BS + BS + ']|' + BS + BS + ".)*)'"
+  + '|"((?:[^"' + BS + BS + ']|' + BS + BS + '.)*)"'
+  + '|' + TICK + '((?:[^' + TICK + BS + BS + ']|' + BS + BS + '.)*)' + TICK,
+  'g',
+);
+
+/**
+ * Strip comments BEFORE harvesting literals. Not hygiene: an apostrophe in a
+ * prose comment ("the hook's own") opens a literal that swallows the code after
+ * it, which is what made a naive scan of ask.mjs measure 38 false positives.
+ * A `//` preceded by `:` is left alone so a URL inside a literal survives.
+ */
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split(/\r?\n/).map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1')).join('\n');
+}
+
+/**
+ * L5: every string literal in a notice-BUILDER file (one whose exports return
+ * user-facing prose). Returns { keys, literals } so the caller can PRINT the
+ * literal count -- zero literals means the locator matched nothing, which reads
+ * exactly like a clean file and must FAIL instead.
+ */
+export function builderKeys(text) {
+  const out = new Set();
+  const src = stripComments(text);
+  let literals = 0;
+  for (const m of src.matchAll(ANY_LITERAL)) {
+    literals++;
+    const body = (m[1] || m[2] || m[3] || '').replace(INTERP, ' ');
+    for (const w of body.matchAll(/[A-Za-z][A-Za-z0-9]{2,}/g)) if (SHAPE.test(w[0])) out.add(w[0]);
+  }
+  return { keys: out, literals };
+}
+
 /**
  * @returns {{findings: {level:'FAIL'|'SKIP', msg:string}[], scanned:number, coverage:object}}
  */
 export function checkConfigKeys({
-  schema, retiredKeys = [], mdFiles = [], hookFiles = [], read,
+  schema, retiredKeys = [], mdFiles = [], hookFiles = [], builderFiles = [], read,
   // Injectable so a test can exercise the LOCATORS against a fixture schema
   // without also having to satisfy the live allowlists. Production callers pass
   // none of these and get the real, shipped lists.
@@ -182,7 +266,17 @@ export function checkConfigKeys({
     const r = noticeKeys(text);
     notice.lines += r.lines; notice.chars += r.chars; notice.total += r.total;
     for (const k of r.keys) note(k, f);
-    if (!r.lines) findings.push({ level: 'FAIL', msg: `config keys: the notice locator matched ZERO out.push( sites in ${f} — a locator that finds nothing reports clean, so this is a broken locator, not a clean file` });
+    if (!r.lines) findings.push({ level: 'FAIL', msg: `config keys: the L4 notice locator matched ZERO out.push( sites in ${f} — a locator that finds nothing reports clean, so this is a broken locator, not a clean file` });
+  }
+  const builder = { literals: 0, files: 0 };
+  for (const f of builderFiles) {
+    let text;
+    try { text = read(f); } catch (e) { complete = false; findings.push({ level: 'FAIL', msg: `config keys: cannot read ${f} (${e.message})` }); continue; }
+    scanned++;
+    const r = builderKeys(text);
+    builder.literals += r.literals; builder.files++;
+    for (const k of r.keys) note(k, f);
+    if (!r.literals) findings.push({ level: 'FAIL', msg: `config keys: the L5 builder locator matched ZERO string literals in ${f} — a locator that finds nothing reports clean, so this is a broken locator, not a clean file` });
   }
 
   // PRECONDITION: a schema key the shape rule cannot see must be DECLARED.
@@ -227,6 +321,7 @@ export function checkConfigKeys({
       retiredSeen: [...seen.keys()].filter((k) => retired.has(k)),
       unknown,
       notice,
+      builder,
       blind: Object.keys(blind).length,
     },
   };

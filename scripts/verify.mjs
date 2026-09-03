@@ -219,10 +219,12 @@ try {
     ...fs.readdirSync(cmdDir).filter((n) => n.endsWith('.md')).map((n) => path.join('commands', n)),
   ];
   const hookFiles = [path.join('hooks', 'coalwash-conductor.js')];
+  // The Stop channel's `reason` text is built here, not in the conductor.
+  const builderFiles = [path.join('scripts', 'lib', 'ask.mjs')];
   const r = checkConfigKeys({
     schema: CONFIG_SCHEMA,
     retiredKeys: RETIRED_KEYS,
-    mdFiles, hookFiles,
+    mdFiles, hookFiles, builderFiles,
     read: (p) => fs.readFileSync(path.join(repo, p), 'utf8'),
   });
   for (const x of r.findings) { if (x.level === 'FAIL') fail(x.msg); }
@@ -230,7 +232,9 @@ try {
   const hard = r.findings.filter((x) => x.level !== 'SKIP');
   const n = r.coverage.notice;
   // PRINT what the scan covered. A locator that matches nothing reports clean.
-  ok(`notice locator: ${n.lines} out.push( site(s) / ${n.total} lines, ${n.chars} chars across ${hookFiles.length} hook file(s)`);
+  const b = r.coverage.builder;
+  ok(`L4 notice locator: ${n.lines} out.push( site(s) / ${n.total} lines, ${n.chars} chars across ${hookFiles.length} hook file(s)`);
+  ok(`L5 builder locator: ${b.literals} string literal(s) across ${b.files} notice-builder file(s)`);
   if (!hard.length) {
     const q = r.coverage.blind ? 'every DETECTABLE config key' : 'every config key';
     ok(`${q} named in ${r.scanned} ship-text surface(s) resolves (${r.coverage.resolved} of ${r.coverage.candidates} candidates real, ${r.coverage.retiredSeen.length} retired-by-name: ${r.coverage.retiredSeen.join(', ') || 'none'}, ${skips.length} declared blind)`);

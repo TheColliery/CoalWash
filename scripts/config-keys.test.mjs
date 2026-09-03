@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { checkConfigKeys, noticeKeys, tableKeys, dottedKeys, configProseKeys, schemaKeyNames, BLIND_KEYS, NOT_CONFIG } from './config-keys.mjs';
+import { checkConfigKeys, noticeKeys, builderKeys, tableKeys, dottedKeys, configProseKeys, schemaKeyNames, BLIND_KEYS, NOT_CONFIG } from './config-keys.mjs';
 
 // A miniature schema with the same SHAPES the real one has: a plain camelCase
 // key, an all-lowercase key (blind), an object container, and a bandmap.
@@ -188,6 +188,57 @@ test('the notice locator REPORTS what it covered (lines/chars/total), so a silen
   assert.strictEqual(r.lines, 1);
   assert.strictEqual(r.total, 5);
   assert.ok(r.chars > 0);
+});
+
+test('L5 reads the SECOND sanctioned channel: a key named in a notice-BUILDER literal is a candidate', () => {
+  // The conductor has two sanctioned channels. L4 reads console.log(out.join());
+  // the {decision:'block', reason} channel's text is built in ask.mjs, so the
+  // builder file IS the notice surface for it.
+  const src = 'export function forceAuto() { return ' + TICK + 'set turboMode to off' + TICK + '; }';
+  assert.deepStrictEqual([...builderKeys(src).keys], ['turboMode']);
+});
+
+test('L5 strips comments FIRST -- a quote in prose must not desync literal parsing', () => {
+  // Load-bearing, not hygiene, and the mechanism is precise: TWO apostrophes in
+  // prose ("the hook's ... the user's") delimit a FAKE string literal spanning
+  // the text between them, so anything camelCase in there is harvested as if it
+  // had been quoted. That is what made a naive scan of ask.mjs measure 38 false
+  // positives. The fixture puts an identifier BETWEEN the two apostrophes: with
+  // comments stripped only the real literal is read; without, someInternalName
+  // is harvested too.
+  const Q = String.fromCharCode(39);
+  const src = '// the hook' + Q + 's someInternalName is the user' + Q + 's problem\n'
+    + 'export const A = ' + TICK + 'real coalwashMode text' + TICK + ';';
+  assert.deepStrictEqual([...builderKeys(src).keys], ['coalwashMode']);
+});
+
+test('L5 strips ${...} interpolations -- an interpolated expression is CODE, not notice text', () => {
+  // L4 has its own interpolation test; this one pins L5's separate call site,
+  // which a mutation of L4 alone leaves untouched.
+  const D = String.fromCharCode(36), L = String.fromCharCode(123), R = String.fromCharCode(125);
+  const src = 'export const A = ' + TICK + 'store ' + D + L + 'Math.round(m.someInternalName)' + R
+    + ' -- set coalwashMode to off' + TICK + ';';
+  assert.deepStrictEqual([...builderKeys(src).keys], ['coalwashMode']);
+});
+
+test('L5 MIS-PORTED LOCATOR GUARD: a builder file with no string literal FAILs, never reports clean', () => {
+  const r = checkConfigKeys({
+    schema: SCHEMA, retiredKeys: RETIRED, mdFiles: [], hookFiles: [],
+    builderFiles: ['scripts/lib/ask.mjs'],
+    read: () => 'export const N = 1; // nothing quoted here at all',
+    pending: {}, notConfig: {}, blind: BLIND_KEYS,
+  });
+  assert.ok(fails(r).some((m) => m.includes('ZERO string literals')), 'a silent locator must fail loud');
+});
+
+test('a builder file naming a key the schema does not have FAILs, and the FAIL names the file', () => {
+  const r = run({
+    'README.md': '## Configure\n\n',
+    'hooks/c.js': HOOK_OK,
+    'scripts/lib/ask.mjs': 'export const A = ' + TICK + 'raise turboMode to fix it' + TICK + ';',
+  }, { builderFiles: ['scripts/lib/ask.mjs'], hookFiles: ['hooks/c.js'] });
+  const f = fails(r);
+  assert.ok(f.some((m) => m.includes("'turboMode'") && m.includes('ask.mjs')), JSON.stringify(f));
 });
 
 test('L1 reads the FIRST table cell only -- a key named in a description cell is not a claim', () => {
