@@ -191,25 +191,56 @@ export function noticeKeys(text) {
 }
 
 const BS = String.fromCharCode(92);
-// Every string literal: single, double, or template -- escape-aware so a quote
-// inside a literal does not end it early.
-const ANY_LITERAL = new RegExp(
-  "'((?:[^'" + BS + BS + ']|' + BS + BS + ".)*)'"
-  + '|"((?:[^"' + BS + BS + ']|' + BS + BS + '.)*)"'
-  + '|' + TICK + '((?:[^' + TICK + BS + BS + ']|' + BS + BS + '.)*)' + TICK,
-  'g',
-);
+const SQ = String.fromCharCode(39);
+const DQ = String.fromCharCode(34);
 
 /**
- * Strip comments BEFORE harvesting literals. Not hygiene: an apostrophe in a
- * prose comment ("the hook's own") opens a literal that swallows the code after
- * it, which is what made a naive scan of ask.mjs measure 38 false positives.
- * A `//` preceded by `:` is left alone so a URL inside a literal survives.
+ * ONE left-to-right pass that returns every string literal's body and skips
+ * comments, rather than stripping comments first and matching literals second.
+ *
+ * The ORDER is the whole point, and both orders are wrong in one direction:
+ *   - literals first, comments never stripped: an apostrophe in prose ("the
+ *     hook's ... the user's") delimits a FAKE literal spanning the code between
+ *     them, so ordinary identifiers are harvested as if quoted. That is the
+ *     38-false-positive measurement on ask.mjs.
+ *   - comments first, literals second: a `//` or `/*` INSIDE a real literal is
+ *     read as a comment and TRUNCATES it, so anything after it is never
+ *     harvested. Measured on a probe -- `ratio a // b then set quickVsFull`
+ *     yielded nothing at all. That direction is worse: the gate under-detects
+ *     and reports clean.
+ * A scanner that knows which state it is in has neither failure, and it costs
+ * fewer moving parts than the two regexes it replaces.
+ *
+ * RESIDUAL, named: a REGEX LITERAL containing a quote (`/it's/`) would desync
+ * the scanner into string state. The two-regex version had the identical
+ * exposure, so this is not a regression, and no builder file carries one today
+ * -- a notice builder returns prose. Closing it needs real
+ * regex-vs-division disambiguation, which is a parser, not a scanner.
  */
-function stripComments(src) {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .split(/\r?\n/).map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1')).join('\n');
+export function scanLiterals(src) {
+  const out = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (c === '/' && next === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (c === '/' && next === '*') { i += 2; while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++; i += 2; continue; }
+    if (c === SQ || c === DQ || c === TICK) {
+      const quote = c;
+      let body = '';
+      i++;
+      while (i < src.length && src[i] !== quote) {
+        if (src[i] === BS) { i += 2; continue; } // an escaped char can never close the literal
+        body += src[i];
+        i++;
+      }
+      i++; // past the closing quote (or past end, if unterminated)
+      out.push(body);
+      continue;
+    }
+    i++;
+  }
+  return out;
 }
 
 /**
@@ -220,14 +251,12 @@ function stripComments(src) {
  */
 export function builderKeys(text) {
   const out = new Set();
-  const src = stripComments(text);
-  let literals = 0;
-  for (const m of src.matchAll(ANY_LITERAL)) {
-    literals++;
-    const body = (m[1] || m[2] || m[3] || '').replace(INTERP, ' ');
+  const bodies = scanLiterals(text);
+  for (const raw of bodies) {
+    const body = raw.replace(INTERP, ' ');
     for (const w of body.matchAll(/[A-Za-z][A-Za-z0-9]{2,}/g)) if (SHAPE.test(w[0])) out.add(w[0]);
   }
-  return { keys: out, literals };
+  return { keys: out, literals: bodies.length };
 }
 
 /**

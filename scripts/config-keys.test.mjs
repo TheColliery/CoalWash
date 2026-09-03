@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { checkConfigKeys, noticeKeys, builderKeys, tableKeys, dottedKeys, configProseKeys, schemaKeyNames, BLIND_KEYS, NOT_CONFIG } from './config-keys.mjs';
+import { checkConfigKeys, noticeKeys, builderKeys, scanLiterals, tableKeys, dottedKeys, configProseKeys, schemaKeyNames, BLIND_KEYS, NOT_CONFIG } from './config-keys.mjs';
 
 // A miniature schema with the same SHAPES the real one has: a plain camelCase
 // key, an all-lowercase key (blind), an object container, and a bandmap.
@@ -209,6 +209,32 @@ test('L5 strips comments FIRST -- a quote in prose must not desync literal parsi
   const Q = String.fromCharCode(39);
   const src = '// the hook' + Q + 's someInternalName is the user' + Q + 's problem\n'
     + 'export const A = ' + TICK + 'real coalwashMode text' + TICK + ';';
+  assert.deepStrictEqual([...builderKeys(src).keys], ['coalwashMode']);
+
+  // Both comment forms, or the block branch is unpinned -- the sabotage ledger
+  // caught exactly that: disabling the /* */ skip reddened nothing.
+  const block = '/* the hook' + Q + 's someInternalName is the user' + Q + 's problem */\n'
+    + 'export const B = ' + TICK + 'real quickVsFull text' + TICK + ';';
+  assert.deepStrictEqual([...builderKeys(block).keys], ['quickVsFull']);
+});
+
+test('L5 does NOT truncate a literal containing // or /* -- the fail-OPEN direction', () => {
+  // The mirror of the comment test above, and the more dangerous half: strip
+  // comments BEFORE parsing literals and a `//` inside real notice prose reads
+  // as a comment, silently dropping everything after it. Measured on a probe of
+  // the pre-scanner version, `ratio a // b then set quickVsFull` yielded NOTHING
+  // -- the gate under-detects and reports clean.
+  const withSlashes = 'export const A = ' + TICK + 'ratio a // b then set quickVsFull' + TICK + ';';
+  assert.deepStrictEqual([...builderKeys(withSlashes).keys], ['quickVsFull']);
+  const withBlock = 'export const B = ' + TICK + 'glob /* not a comment */ then localOnly' + TICK + ';';
+  assert.deepStrictEqual([...builderKeys(withBlock).keys], ['localOnly']);
+});
+
+test('scanLiterals: an ESCAPED quote does not close the literal early', () => {
+  const Q = String.fromCharCode(39), B = String.fromCharCode(92);
+  // 'it\'s coalwashMode' -- the escaped quote must not end the string, or the
+  // rest of the notice text is lost and the key with it.
+  const src = 'const A = ' + Q + 'it' + B + Q + 's coalwashMode' + Q + ';';
   assert.deepStrictEqual([...builderKeys(src).keys], ['coalwashMode']);
 });
 
