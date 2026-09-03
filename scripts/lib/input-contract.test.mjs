@@ -185,7 +185,24 @@ async function withMutant(sourceFile, patches, run) {
   }
   assert.notStrictEqual(mutated, original, 'mutation must actually change the source');
   const stamp = `${process.pid}-${Math.random().toString(36).slice(2)}`;
-  const mutantPath = path.join(__dirname, `${sourceFile}.mutant-${stamp}.mjs`);
+  // DOT-PREFIXED, and that is load-bearing, not cosmetic (CWK-066 F1).
+  // scripts/lib/ is both a SOURCE directory other tests copy and walk, and a
+  // scratch directory tests write transients into. node --test runs files as
+  // concurrent processes, so build-plugin.test.mjs's buildDist() can be
+  // cpSync-ing this very directory while this mutant is created and deleted.
+  // fs.cpSync enumerates, then lstats: a transient that vanishes in that window
+  // throws ENOENT and reddens an unrelated test (measured -- see the commit).
+  // The room already settled this with a dot-prefix convention that every
+  // reader honours (build-plugin.mjs's hasStrayDotDir at :83 and :116/:148,
+  // verify.mjs:47, root-provenance.test.mjs:111 -- all naming
+  // `.cw-reexport-hop-*`, the sibling transient that lives here for the same
+  // reason). cpSync consults its filter BEFORE the lstat, so a dot-prefixed
+  // name is skipped and never stat'd. This mutant simply had not joined the
+  // convention. It must stay IN this directory: apply.mjs has 8 relative
+  // imports that only resolve beside their siblings.
+  const mutantName = `.mutant-${sourceFile}-${stamp}.mjs`;
+  assert.ok(mutantName.startsWith('.'), 'the mutant name must be dot-prefixed or every dist walk can race it');
+  const mutantPath = path.join(__dirname, mutantName);
   fs.writeFileSync(mutantPath, mutated, 'utf8');
   try {
     const mod = await import(pathToFileURL(mutantPath).href);
