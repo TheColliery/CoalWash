@@ -72,6 +72,11 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
     for (const rel of [
       '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
       'platform-configs', 'plugin', 'scripts', 'skills',
+      // The config-key drift gate NAMES its ship-text surfaces rather than
+      // existsSync-filtering them, so an absent one is REPORTED as unreadable
+      // instead of silently shrinking the scan. That is the property worth
+      // having, so the fixture grows to match rather than the gate softening.
+      'README.md', 'SECURITY.md', 'PRIVACY.md', 'CONTRIBUTING.md', 'INPUT-CONTRACT.md',
     ]) {
       const src = path.join(REPO, rel);
       if (!fs.existsSync(src)) continue;
@@ -103,6 +108,11 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
     for (const rel of [
       '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
       'platform-configs', 'plugin', 'scripts', 'skills',
+      // The config-key drift gate NAMES its ship-text surfaces rather than
+      // existsSync-filtering them, so an absent one is REPORTED as unreadable
+      // instead of silently shrinking the scan. That is the property worth
+      // having, so the fixture grows to match rather than the gate softening.
+      'README.md', 'SECURITY.md', 'PRIVACY.md', 'CONTRIBUTING.md', 'INPUT-CONTRACT.md',
     ]) {
       const src = path.join(REPO, rel);
       if (!fs.existsSync(src)) continue;

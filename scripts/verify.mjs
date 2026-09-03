@@ -203,6 +203,40 @@ try {
   if (CONFIG_SCHEMA.every((s) => s.key in cfg && JSON.stringify(cfg[s.key]) === JSON.stringify(s.def))) ok('factory template carries every schema key at its default');
 } catch (e) { fail(`factory config: ${e.message}`); }
 
+console.log('config keys (ship-text vs schema):');
+try {
+  const lib = (l) => import(pathToFileURL(path.join(repo, 'scripts', 'lib', l)).href);
+  const { CONFIG_SCHEMA, RETIRED_KEYS } = await lib('config-schema.mjs');
+  const { checkConfigKeys } = await import(pathToFileURL(path.join(repo, 'scripts', 'config-keys.mjs')).href);
+  // Surfaces are NAMED, never existsSync-filtered: a file that vanished must be
+  // REPORTED as unreadable, not silently dropped into a smaller clean scan.
+  const refsDir = path.join(repo, 'skills', 'coalwash', 'references');
+  const cmdDir = path.join(repo, 'commands');
+  const mdFiles = [
+    'README.md', 'SECURITY.md', 'PRIVACY.md', 'CONTRIBUTING.md', 'INPUT-CONTRACT.md',
+    path.join('skills', 'coalwash', 'SKILL.md'),
+    ...fs.readdirSync(refsDir).filter((n) => n.endsWith('.md')).map((n) => path.join('skills', 'coalwash', 'references', n)),
+    ...fs.readdirSync(cmdDir).filter((n) => n.endsWith('.md')).map((n) => path.join('commands', n)),
+  ];
+  const hookFiles = [path.join('hooks', 'coalwash-conductor.js')];
+  const r = checkConfigKeys({
+    schema: CONFIG_SCHEMA,
+    retiredKeys: RETIRED_KEYS,
+    mdFiles, hookFiles,
+    read: (p) => fs.readFileSync(path.join(repo, p), 'utf8'),
+  });
+  for (const x of r.findings) { if (x.level === 'FAIL') fail(x.msg); }
+  const skips = r.findings.filter((x) => x.level === 'SKIP');
+  const hard = r.findings.filter((x) => x.level !== 'SKIP');
+  const n = r.coverage.notice;
+  // PRINT what the scan covered. A locator that matches nothing reports clean.
+  ok(`notice locator: ${n.lines} out.push( site(s) / ${n.total} lines, ${n.chars} chars across ${hookFiles.length} hook file(s)`);
+  if (!hard.length) {
+    const q = r.coverage.blind ? 'every DETECTABLE config key' : 'every config key';
+    ok(`${q} named in ${r.scanned} ship-text surface(s) resolves (${r.coverage.resolved} of ${r.coverage.candidates} candidates real, ${r.coverage.retiredSeen.length} retired-by-name: ${r.coverage.retiredSeen.join(', ') || 'none'}, ${skips.length} declared blind)`);
+  }
+} catch (e) { fail(`config keys: ${e.message}`); }
+
 console.log('libs (import check):');
 for (const l of LIBS) {
   try { await import(pathToFileURL(path.join(repo, 'scripts', 'lib', l)).href); ok(`${l} imports`); }

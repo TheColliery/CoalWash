@@ -45,6 +45,7 @@ const TESTS = [
   'scripts/lib/root-provenance.test.mjs',
   'scripts/build-plugin.test.mjs',
   'scripts/verify.test.mjs',
+  'scripts/config-keys.test.mjs',
 ];
 
 const missing = TESTS.filter((t) => !fs.existsSync(path.join(repo, t)));
