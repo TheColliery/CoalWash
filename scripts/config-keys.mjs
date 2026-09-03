@@ -32,10 +32,13 @@ const BACKTICKED = TICK + '([A-Za-z][A-Za-z0-9_.]*)' + TICK;
 // A dotted token ending in a file extension is a MODULE, never a key path
 // (`retier.mjs` is the live example this exists for).
 const FILE_EXT = /\.(mjs|cjs|js|json|md|yml|yaml|ps1|sh|txt)$/;
-// A `${...}` interpolation inside a notice template literal. Built from char
-// codes rather than written inline: this room's own recorded hazard is that a
-// backslash-escaped regex does not survive a bash heredoc, and it bit twice
-// while writing this file.
+// A `${...}` interpolation inside a notice template literal. Written as a plain
+// literal ON PURPOSE, after a char-code build of the same pattern shipped a live
+// bug: assembled from String.fromCharCode the `$` is not escaped, so the engine
+// reads it as the end-of-input ANCHOR and `${` can never match. The regex looked
+// right, compiled fine, and stripped nothing. Escape the `$` and `{` here; the
+// bash-heredoc hazard that motivated the char-code trick is avoided by editing
+// this file with a file-writing tool, never by weakening the pattern.
 const INTERP = /\$\{[^}]*\}/g;
 
 /** Keys documented before they exist. Rule 1: an entry that now RESOLVES fails. */

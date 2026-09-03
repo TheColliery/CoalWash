@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { checkConfigKeys, noticeKeys, tableKeys, dottedKeys, configProseKeys, BLIND_KEYS, NOT_CONFIG } from './config-keys.mjs';
+import { checkConfigKeys, noticeKeys, tableKeys, dottedKeys, configProseKeys, schemaKeyNames, BLIND_KEYS, NOT_CONFIG } from './config-keys.mjs';
 
 // A miniature schema with the same SHAPES the real one has: a plain camelCase
 // key, an all-lowercase key (blind), an object container, and a bandmap.
@@ -36,6 +36,34 @@ const fails = (r) => r.findings.filter((f) => f.level === 'FAIL').map((f) => f.m
 // Every fixture that must not FAIL still needs the notice locator to match, or
 // its own guard fires; this is the minimum viable conductor stand-in.
 const HOOK_OK = 'function h(){ out.push(' + TICK + '[CoalWash] nothing to say' + TICK + '); }';
+
+test('schemaKeyNames recurses to THREE levels -- the live schema nests that deep', () => {
+  // The live schema really is three deep: estate.digCrush.singleFileTok and
+  // estate.runBudget.maxSessionsPerRun. Nothing else pins it -- a rot-canary
+  // mutation flattening walk() to one level left all other tests GREEN and the
+  // real gate PASSING, because those leaves are not candidates in today's docs.
+  // The day one is documented in the README key table, a flattened walk would
+  // FAIL on a real key. This is the test that goes red instead.
+  const deep = [{
+    key: 'estate',
+    type: 'object',
+    fields: {
+      indexEnabled: { type: 'bool', def: true },
+      digCrush: { type: 'object', fields: { singleFileTok: { type: 'int', def: 1 } }, def: { singleFileTok: 1 } },
+    },
+  }];
+  const names = schemaKeyNames(deep);
+  assert.ok(names.has('estate'), 'level 1');
+  assert.ok(names.has('digCrush'), 'level 2');
+  assert.ok(names.has('singleFileTok'), 'level 3 -- the leaf a one-level walk drops');
+});
+
+test('schemaKeyNames reads a bandmap leaf out of its `def`, not a `fields` block', () => {
+  // The shape the dispatch's own enumeration missed: exercisePerBand is a
+  // bandmap, so its leaves live in def{} and an object-only walk skips them.
+  const names = schemaKeyNames([{ key: 'exercisePerBand', type: 'bandmap', def: { obese: 'quick', full: 'full' } }]);
+  assert.deepStrictEqual([...names].sort(), ['exercisePerBand', 'full', 'obese']);
+});
 
 test('RED-FIRST (SYNTHETIC): ship-text naming a key the schema does not have FAILs', () => {
   // Synthetic BY NECESSITY, and stated as such: a 54-commit sweep of this
