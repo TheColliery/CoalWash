@@ -201,7 +201,13 @@ async function withMutant(sourceFile, patches, run) {
   // convention. It must stay IN this directory: apply.mjs has 8 relative
   // imports that only resolve beside their siblings.
   const mutantName = `.mutant-${sourceFile}-${stamp}.mjs`;
-  assert.ok(mutantName.startsWith('.'), 'the mutant name must be dot-prefixed or every dist walk can race it');
+  // Asserted against the REAL exclusion predicate, not against a hand-copied
+  // rule. `mutantName.startsWith('.')` would be constant-true -- the name is a
+  // literal beginning with a dot -- so it could never fail and proved nothing.
+  // This fires if the name changes OR if build-plugin.mjs's own exclusion moves.
+  const { hasStrayDotDir } = await import(pathToFileURL(path.join(__dirname, '..', 'build-plugin.mjs')).href);
+  assert.ok(hasStrayDotDir(mutantName),
+    `the mutant name must be excluded by build-plugin.mjs's own filter, or every dist copy can race it: ${mutantName}`);
   const mutantPath = path.join(__dirname, mutantName);
   fs.writeFileSync(mutantPath, mutated, 'utf8');
   try {

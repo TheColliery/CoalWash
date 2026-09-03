@@ -85,8 +85,17 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // same directory is a CHILD. The transients are all dot-prefixed files directly
 // under scripts/lib -- .cw-reexport-hop-* (config-load.test.mjs) and .mutant-*
 // (input-contract.test.mjs) -- so that, and only that, is what is skipped.
-const SCRATCH = /^scripts[\/]lib[\/]\./;
-const notScratch = (s) => !SCRATCH.test(path.relative(REPO, s));
+// SEGMENT COMPARISON, NOT A REGEX, and that is deliberate. The first version of
+// this was /^scripts[\\/]lib[\\/]\./ written through a shell heredoc, which ate
+// the backslash and shipped /^scripts[\/]lib[\/]\./ -- a class containing only
+// the forward slash. path.relative returns BACKSLASHES on Windows, so the
+// predicate matched nothing and the fix was inert on the platform it was
+// measured on. Caught by the session-end canary. Splitting on path.sep has no
+// escape to lose.
+const notScratch = (s) => {
+  const seg = path.relative(REPO, s).split(path.sep);
+  return !(seg[0] === 'scripts' && seg[1] === 'lib' && (seg[2] || '').startsWith('.'));
+};
 
 test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the gate', () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-')));

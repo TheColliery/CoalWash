@@ -72,7 +72,11 @@ const isUnwiredEngine = (rel) => UNWIRED_ENGINE.includes(rel);
 // skipped it in both checkDist walks, verify still printed PASS. Caught here
 // before commit; it is the identical exclusion-becomes-blind-spot shape this
 // very fix exists to close, which is why `sub` is measured from the item root.
-const hasStrayDotDir = (sub) => sub.split(/[\\/]/).some((seg) => seg.startsWith('.') && seg !== '.' && seg !== '..');
+// EXPORTED so a test that WRITES a transient into a DIST_ITEM can assert its own
+// name is excluded by the real predicate rather than by a hand-copied rule. A
+// constant-true `name.startsWith('.')` check proves nothing; asserting against
+// this function fails loud if either side moves (CWK-066 F2).
+export const hasStrayDotDir = (sub) => sub.split(/[\\/]/).some((seg) => seg.startsWith('.') && seg !== '.' && seg !== '..');
 
 export function buildDist(distRoot = dist) {
   fs.rmSync(distRoot, { recursive: true, force: true });
