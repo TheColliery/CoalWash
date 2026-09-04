@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { checkConfigKeys, noticeKeys, builderKeys, scanLiterals, tableKeys, dottedKeys, configProseKeys, schemaKeyNames, BLIND_KEYS, NOT_CONFIG } from './config-keys.mjs';
+import { checkConfigKeys, noticeKeys, builderKeys, tableKeys, dottedKeys, configProseKeys, schemaKeyNames, BLIND_KEYS, NOT_CONFIG } from './config-keys.mjs';
 
 // A miniature schema with the same SHAPES the real one has: a plain camelCase
 // key, an all-lowercase key (blind), an object container, and a bandmap.
