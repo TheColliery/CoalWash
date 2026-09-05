@@ -121,13 +121,15 @@ export const PENDING_POINTERS = [
   // { path: 'scripts/thing.mjs', reason: 'CWK-000 — landing next unit' },
 ];
 
-// A path that was CORRECT ON THE DAY IT WAS WRITTEN and is not a defect now. Ships
-// EMPTY. The distinction from PENDING_POINTERS is not cosmetic: a renamed file was a
-// correct citation once, a scratchpad path never was — which is why a history-only
-// surface is still checked for the gitignored case and nothing else.
-export const HISTORY_ONLY_POINTERS = [
-  // { path: 'scripts/old-name.mjs', reason: 'renamed at <sha>; the entry describes that day' },
-];
+// HISTORY-ONLY IS A PROPERTY OF THE SURFACE, NOT A LIST OF PATHS — stated here because
+// the obvious second list is the wrong shape and was briefly shipped as one. A caller
+// marks a whole surface `historyOnly: true` (a CHANGELOG, a dated record) and every
+// citation in it is then checked for the gitignored case and nothing else: a renamed
+// file was a correct citation once, a gitignored path never was. There is no
+// per-PATH history allowlist, deliberately — "this one path is forgiven everywhere"
+// is not a thing this gate can mean, and an exported constant implying otherwise
+// would be a name pointing at a mechanism that does not exist, which is precisely
+// the defect this gate exists to catch.
 
 const GLOB = /[*?[\]{}|]/;
 const OUTSIDE = /^([~/]|[A-Za-z]:|[a-z][a-z0-9+.-]*:\/\/)/;

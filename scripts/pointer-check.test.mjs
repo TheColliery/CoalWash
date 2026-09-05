@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'node:path';
-import { pointerCandidates, checkPointers, PENDING_POINTERS, HISTORY_ONLY_POINTERS } from './pointer-check.mjs';
+import { pointerCandidates, checkPointers, PENDING_POINTERS } from './pointer-check.mjs';
 
 // FIXTURES ARE INPUT, NOT CLAIMS. Every backticked path below is DATA this test feeds
 // the gate, never a statement this repo makes about its own tree. They keep their
@@ -214,9 +214,16 @@ test('WIRING: no resolve() supplied FAILs loud rather than reporting clean', () 
   assert.match(msgs(f)[0], /cannot answer its own question/);
 });
 
-test('WIRING: both declaration lists ship EMPTY, and the empty list is the measurement', () => {
+test('WIRING: PENDING_POINTERS ships EMPTY, and the empty list is the measurement', () => {
   assert.deepStrictEqual(PENDING_POINTERS, []);
-  assert.deepStrictEqual(HISTORY_ONLY_POINTERS, []);
+});
+
+test('WIRING: history-only is a SURFACE property, never a per-path allowlist', () => {
+  // There is deliberately no HISTORY_ONLY_POINTERS list. The flag rides the surface,
+  // and this pins that the mechanism reached by that flag actually works -- so nobody
+  // re-adds an exported constant naming a mechanism that does not exist.
+  const f = checkPointers({ ...base, surfaces: [S('CHANGELOG.md', '`scripts/gone.mjs`', { historyOnly: true })] });
+  assert.deepStrictEqual(msgs(f), [], 'a stale-but-once-correct path is forgiven on a history surface');
 });
 
 // ---------------------------------------------------------------- NON-CIRCULARITY
