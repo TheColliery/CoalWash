@@ -22,7 +22,7 @@
 // exist YET, never one that exists and is unreachable from a clone.
 //
 // ============================================================================
-// DETECTION RULE — every step MEASURED on THIS room's own 9 ship-text surfaces before
+// DETECTION RULE — every step MEASURED on THIS room's own 10 ship-text surfaces before
 // it was chosen, because cry-wolf is the failure mode this room has already paid for
 // once (tripwireMaxLines firing on compliant code).
 //
@@ -42,9 +42,14 @@
 //     - first segment beside the citer      resolve from the citing file's own dir
 //       (or its parent)                     (structural, so never circular)
 //
-//   MEASURED on this room, 9 ship-text surfaces: 674 backticked tokens with fenced
-//   code stripped -> 58 survive the shape funnel -> 36 IN SCOPE -> 36 tracked, 0
+//   MEASURED on this room, 10 ship-text surfaces: 695 backticked tokens with fenced
+//   code stripped -> 59 survive the shape funnel -> 37 IN SCOPE -> 37 tracked, 0
 //   non-resolving. Re-derive with the walk in verify.mjs; never quote these forward.
+//   (The 10th surface, INPUT-CONTRACT.md, was added at findings-back: it had been
+//   dropped from this walk while the config-key gate in the same file already read it,
+//   an unnamed divergence between two gates over one tracked ship-text file. Its cost
+//   was one citation and zero findings, which is exactly what made it worth naming —
+//   the pass line read as ship-text coverage while a ship-text surface went unread.)
 //
 // TWO FILTERS THE ADOPTION BRIEF PROPOSED AS ROOM-SPECIFIC ARE NOT SHIPPED, because
 // both measured ZERO once the inherited funnel ran:
@@ -66,9 +71,14 @@
 // EVERY PLATFORM. This module therefore contains no platform branch at all, which is
 // what its POSIX test asserts through path.win32 and path.posix explicitly rather than
 // assuming the property carried across the port.
-// MEASURED before choosing: 0 backslash-bearing backticked tokens across the 9
-// surfaces. NAMED BLIND SPOT, not a denial: a legitimate Windows-style citation would
-// be dropped unchecked. Population today: zero.
+// MEASURED before choosing: exactly ONE backslash-bearing backticked token across the
+// walked surfaces — `/\r|\n/.test(...)` in references/method.md, a regex literal, and
+// it never reaches this rule because GLOB drops it first on the `|`. (An earlier
+// revision of this comment said zero; the token was always there, hidden behind the
+// filter that runs before this one — a population counted at the wrong point in the
+// funnel.) So the rejection removes nothing that reaches the scope tests today.
+// NAMED BLIND SPOT, not a denial: a legitimate Windows-style citation would be dropped
+// unchecked. Population of THOSE today: zero.
 //
 // NAMED BLIND SPOTS — what is UNCOVERED, each with its measured cost, never a denial.
 //
@@ -84,10 +94,15 @@
 //      documentation of a blind spot must not manufacture one.
 //
 //   2. A SPAN CROSSING A NEWLINE IS INVISIBLE. The span pattern is [^`\n]+, so a
-//      backticked path broken across two lines is never a candidate. MEASURED on the 9
-//      surfaces: 0 lines carry an odd backtick count, so the uncovered population is
-//      empty in ship-text. It is NOT empty in source comments, which is one reason
-//      those are out of scope below.
+//      backticked path broken across two lines is never a candidate. MEASURED on the 10
+//      surfaces with an odd-backtick-count proxy: 1 line, and inspection says the proxy
+//      over-counted — it is INPUT-CONTRACT.md's double-backtick span quoting literal
+//      backtick and YAML-indicator characters on ONE line, not a span crossing a
+//      newline. Genuine newline-crossing spans in ship-text: 0. Stated this way because
+//      the proxy and the thing it proxies are not the same population, and reporting
+//      the proxy's 1 as a real blind-spot hit would be the false number.
+//      It is NOT zero in source comments (3 of explode.mjs's 5 citation sites), which
+//      is one reason those are out of scope below.
 //
 //   3. SECTIONS AND SYMBOLS ARE NOT RESOLVED AT ALL. Ruled un-mechanised upstream on
 //      two all-false measurements; not re-litigated and not built. The pass line says
@@ -102,6 +117,18 @@
 //     slug-collision example), and a deliberately-nonexistent example path proving a
 //     walk was blind (build-plugin.mjs's planted-orphan examples). Reported as a
 //     finding, not silenced by a filter — the 5 real ones are their own unit.
+//
+//     TWO THINGS THAT UNIT NEEDS, stated here because it is where it will look.
+//     (a) THE EVIDENCE, PRECISELY, replacing an earlier over-claim of mine that read
+//     "all three cited dirs are GONE": scratchpad/cw-lab-rung2-r2 is GONE (with its
+//     cited w1/attack3-manifest-path.mjs) and scratchpad/cw-lab-rung2-r7 is PRESENT
+//     while its cited coord-verify/ is GONE; a third citation is a literal ellipsis
+//     rather than a path at all. The finding stands — every cited ARTEFACT is
+//     unreachable — but "the dirs are gone" was not the true sentence.
+//     (b) A GATE POINTED AT SOURCE COMMENTS CANNOT BUILD THAT UNIT'S OWN WORKLIST.
+//     Of the 5 citation sites, 3 are backticked spans broken across a newline, which
+//     blind spot 2 below makes invisible: a single-line extractor enumerates 2 of 5.
+//     Anyone trusting a gate-derived count there would act on 40% of the problem.
 //   - CHANGELOG.md. The exemplar walks it as history-only for the gitignored case.
 //     MEASURED here: 2 gitignored-root citations, 2 of them FALSE — both the same
 //     slug-collision example quoted from a comment, where our generic `work/` root

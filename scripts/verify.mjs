@@ -315,7 +315,15 @@ try {
     for (const f of [...walkMd(path.join(repo, 'skills')), ...walkMd(path.join(repo, 'commands'))]) {
       surfaces.push({ label: rel(f), text: readOrNull(f) });
     }
-    for (const d of ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'PRIVACY.md']) {
+    // INPUT-CONTRACT.md is walked for the same reason block 2.9's config-key gate walks
+    // it (same file, ~100 lines up): it is TRACKED, outward-facing ship-text a partner
+    // builds against, moved out of a gitignored scratchpad at 455631c (board #21)
+    // precisely so it could not drift unseen. Two gates in one file reading the same
+    // surface set is the default; a divergence would need a stated reason, and there is
+    // none — this list was simply narrower by one, unnamed, which is this gate's own
+    // class one level up (a pass line reading as ship-text coverage while a tracked
+    // ship-text surface goes unread).
+    for (const d of ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'PRIVACY.md', 'INPUT-CONTRACT.md']) {
       surfaces.push({ label: d, text: readOrNull(path.join(repo, d)) });
     }
 

@@ -7,8 +7,8 @@ import { pointerCandidates, checkPointers, PENDING_POINTERS } from './pointer-ch
 // the gate, never a statement this repo makes about its own tree. They keep their
 // backticks on purpose: stripping them to keep some future scan quiet would launder the
 // fixtures and leave the gate untested on exactly the shapes it exists to catch. There
-// is no conflict today by construction — the shipped walk reads the 9 ship-text
-// surfaces (skills/**.md, commands/*.md, and four root docs) and no source file at all.
+// is no conflict today by construction — the shipped walk reads the 10 ship-text
+// surfaces (skills/**.md, commands/*.md, and five root docs) and no source file at all.
 
 const S = (label, text, extra = {}) => ({ label, text, ...extra });
 const base = {
