@@ -12,7 +12,9 @@
 // Real: a sparse caretaker bench (scripts/lib/ minus config-schema.mjs)
 // reported nothing at all. Pinned by scripts/verify.test.mjs.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -240,6 +242,110 @@ try {
     ok(`${q} named in ${r.scanned} ship-text surface(s) resolves (${r.coverage.resolved} of ${r.coverage.candidates} candidates real, ${r.coverage.retiredSeen.length} retired-by-name: ${r.coverage.retiredSeen.join(', ') || 'none'}, ${skips.length} declared blind)`);
   }
 } catch (e) { fail(`config keys: ${e.message}`); }
+
+// POINTERS (CWK-075). Ship-text naming something unreachable from a clone. Sibling of
+// the config-key gate above: same family, different resolver -- that one resolves KEYS
+// against the schema, this one asks whether the thing a path NAMES is reachable.
+//
+// SURFACES: the 9 shipped ship-text files (walked, never existsSync-filtered -- an
+// unreadable surface is REPORTED, never silently dropped into a smaller clean scan).
+// Source comments, CHANGELOG.md and the plugin/ mirror are deliberately NOT walked,
+// each with its measured reason in scripts/pointer-check.mjs.
+console.log('pointers (ship-text vs the tree):');
+try {
+  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8' });
+  if (lsAll.error || lsAll.status !== 0) {
+    // A VISIBLE skip, never a silent carve-out: no git means no durability answer.
+    console.log('  --   pointer check: git unavailable — cannot tell a tracked path from an untracked one; skipped');
+  } else {
+    const { checkPointers } = await import(pathToFileURL(path.join(repo, 'scripts', 'pointer-check.mjs')).href);
+    const { projectConfigCandidates } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'config-load.mjs')).href);
+    const tracked = new Set(lsAll.stdout.split('\n').filter(Boolean));
+    const trackedDirs = new Set();
+    for (const f of tracked) {
+      const parts = f.split('/');
+      for (let i = 1; i < parts.length; i++) trackedDirs.add(parts.slice(0, i).join('/'));
+    }
+
+    // AGENT INSTALL HOMES, DERIVED from the tool's own candidate map rather than
+    // enumerated, so the set cannot rot the day that order changes.
+    const agentHomes = new Set();
+    for (const c of projectConfigCandidates(repo, os.homedir())) {
+      const r = path.relative(repo, c).split(path.sep).join('/');
+      if (!r || r.startsWith('..') || path.isAbsolute(r) || !r.includes('/')) continue;
+      const first = r.split('/')[0];
+      if (first.startsWith('.') && first.length > 1) agentHomes.add(first);
+    }
+
+    // THE FULL TOP-LEVEL ENUMERATION, INCLUDING FILES AND HIDDEN ENTRIES. This is the
+    // hazard the adoption brief singled out for THIS room and it is not hypothetical:
+    // a dirs-only, non-hidden enumeration (the exemplar's shape) misses every one of
+    // our top-level gitignored FILES -- CLAUDE.md, MEMORY.md, AGENTS.md,
+    // COALWASH_BLUEPRINT.md, ASSEMBLY-LINE.md, LAB-ARCHIVE.md, SENIOR-INCIDENT-AUDIT.md
+    // -- and both gitignored dot-dirs. A citation into one would then fall out of scope
+    // SILENTLY rather than FAILing, which is the quieter and worse symptom.
+    const topAll = fs.readdirSync(repo, { withFileTypes: true }).map((e) => e.name).filter((n) => n !== '.git');
+    const ourRoots = new Set();
+    for (const f of tracked) ourRoots.add(f.split('/')[0]);
+    for (const n of topAll) ourRoots.add(n);
+
+    // IGNORED ROOTS: asked of git, never parsed out of .gitignore. Agent homes are
+    // excluded BEFORE the question is asked -- .claude/ and .agents/ are gitignored
+    // here AND are the user-tree paths our shipped prose names, so leaving them in
+    // would FAIL a correct citation.
+    const ignoredRoots = new Set();
+    for (const name of topAll) {
+      if (tracked.has(name) || trackedDirs.has(name) || agentHomes.has(name)) continue;
+      const ci = spawnSync('git', ['check-ignore', '-q', '--', name], { cwd: repo, encoding: 'utf8' });
+      if (!ci.error && ci.status === 0) ignoredRoots.add(name);
+    }
+
+    const rel = (p) => path.relative(repo, p).split(path.sep).join('/');
+    const walkMd = (dir, out = []) => {
+      if (!fs.existsSync(dir)) return out;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walkMd(p, out);
+        else if (e.name.endsWith('.md')) out.push(p);
+      }
+      return out;
+    };
+    const readOrNull = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } };
+    const surfaces = [];
+    for (const f of [...walkMd(path.join(repo, 'skills')), ...walkMd(path.join(repo, 'commands'))]) {
+      surfaces.push({ label: rel(f), text: readOrNull(f) });
+    }
+    for (const d of ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'PRIVACY.md']) {
+      surfaces.push({ label: d, text: readOrNull(path.join(repo, d)) });
+    }
+
+    const findings = checkPointers({
+      surfaces,
+      ourRoots,
+      ignoredRoots,
+      agentHomes,
+      // Structural, never circular: does the token's FIRST SEGMENT exist beside the
+      // citing file? That is what puts `references/method.md` in scope from its own
+      // skill dir, where a repo-root-anchored rule skips it in silence.
+      hasEntry: (relDir, name) => {
+        try { return fs.existsSync(path.join(repo, relDir, name)); } catch { return false; }
+      },
+      resolve: (p) => (tracked.has(p) || trackedDirs.has(p) ? 'tracked'
+        : fs.existsSync(path.join(repo, p)) ? 'untracked' : 'missing'),
+    });
+    // PRINT the derived enumeration. A set that comes back wrong (or empty) is the
+    // failure mode this room was warned about, and it is invisible unless it is shown.
+    ok(`top-level entries fed to git check-ignore: ${topAll.length} (files + hidden included) — ${ignoredRoots.size} gitignored, ${agentHomes.size} agent home(s): ${[...agentHomes].sort().join(' ')}`);
+    const hard = findings.filter((f) => f.level !== 'SKIP');
+    if (!hard.length) {
+      ok(`every path this repo points at from ${surfaces.length} ship-text surface(s) (${findings.checked} in-scope citations) resolves to a TRACKED file — sections and symbols are NOT checked, see scripts/pointer-check.mjs`);
+    }
+    for (const f of findings) {
+      if (f.level === 'SKIP') console.log('  --   ' + f.msg);
+      else fail(f.msg);
+    }
+  }
+} catch (e) { fail(`pointer check: ${e.message}`); }
 
 console.log('libs (import check):');
 for (const l of LIBS) {
