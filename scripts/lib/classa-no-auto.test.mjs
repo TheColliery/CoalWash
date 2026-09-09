@@ -55,7 +55,12 @@
 // Skipped dirs: `plugin/` is a byte-verified copy of source (verify.mjs
 // checkDist) so scanning it only double-reports; `.claude/`+`.agents/` hold
 // RUNTIME artifacts (CoalHearth's journal, CoalWash's own sandbox), not product
-// declarations.
+// declarations; `scratchpad/` is per-session dispatch/debug scratch (gitignored
+// transport captures, one-shot probes) for the identical reason — a `-p
+// --output-format json` capture embeds a real tool call's own `"command":` key
+// (CWK-080's transport rule redirects a dispatch's stdout there), which is a
+// MENTION of an invocation inside a session record, never a DECLARATION of one
+// this repo would ever run unattended.
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
@@ -89,7 +94,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 // one surfacing is the violation.)
 const HUMAN_ONLY = ['explode.mjs', 'detonate.mjs'];
 
-const SKIP_DIRS = new Set(['.git', 'node_modules', 'plugin', 'work', '.claude', '.agents']);
+const SKIP_DIRS = new Set(['.git', 'node_modules', 'plugin', 'work', '.claude', '.agents', 'scratchpad']);
 
 // A nested git worktree or clone (its root holds a `.git` ENTRY — a FILE holding a
 // `gitdir:` pointer for a worktree, a dir for a clone) is a DUPLICATE VIEW of files
