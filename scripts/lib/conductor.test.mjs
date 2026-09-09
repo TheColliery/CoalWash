@@ -22,7 +22,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1818,5 +1818,57 @@ test('CWK-057 disclosure: OFF is silent even with a real store — the control t
     const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'cwk57-d' });
     assert.strictEqual(r.status, 0, 'exit 0 (Phoenix #4)');
     assert.doesNotMatch(r.stdout, /scanEverything is ON/, 'off means silent');
+  } finally { clean(home, proj); }
+});
+
+
+// ---------------------------------------------------------------------------
+// AL-1 / CWK-072 — the stdin budget is an IDLE gap, never a total deadline.
+//
+// The retired budget was a TOTAL deadline armed at process start: 30 ms later it
+// resolved {} whatever had or had not arrived, so a well-formed payload whose
+// first byte landed late was DROPPED — main() then matched no branch and the hook
+// exited 0 having done nothing (no gauge, no state, no directive). Measured on
+// this box at 40 concurrent spawners: the first byte lands after 30 ms on 25% of
+// invocations, and 34 of 4000 payloads were lost.
+//
+// The delay below is the ATTACK, not a tolerance — it is the condition the fix
+// exists to survive, made deterministic so no contention is needed to observe it.
+// It is bounded by STDIN_HANG_CEILING_MS, which this case must never approach.
+function runDelayed(cwd, home, input, delayMs) {
+  return new Promise((resolve) => {
+    const c = spawn(process.execPath, [HOOK], {
+      cwd,
+      env: { ...process.env, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, CLAUDE_CONFIG_DIR: '' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    c.stdout.setEncoding('utf8');
+    c.stderr.setEncoding('utf8');
+    c.stdout.on('data', (d) => { stdout += d; });
+    c.stderr.on('data', (d) => { stderr += d; });
+    // A hook that gives up early destroys its stdin; the still-pending write then
+    // gets EPIPE. That is the DEFECT surfacing in the harness, not a harness bug.
+    c.stdin.on('error', () => {});
+    const t = setTimeout(() => { if (c.stdin.writable) c.stdin.end(JSON.stringify(input)); }, delayMs);
+    c.on('close', (status, signal) => { clearTimeout(t); resolve({ status, signal, stdout, stderr }); });
+  });
+}
+
+test('AL-1: a payload whose first byte lands 200 ms after spawn is READ, not dropped (the budget is an IDLE gap, not a total deadline)', async () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
+    const r = await runDelayed(proj, home, { hook_event_name: 'SessionStart' }, 200);
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+    const st = readProjState(home, proj);
+    // The positive STATE EFFECT is the liveness proof — exit 0 proves nothing here,
+    // Phoenix #4 guarantees it on the dropped-payload path too (hooks-safety.md §7).
+    assert.ok(st.lastVerdict, `late payload dropped: the hook exited 0 having done nothing (raw: ${JSON.stringify(st)})`);
+    assert.strictEqual(st.lastVerdict.band, 'LEAN');
+    assert.strictEqual(st.stamps.length, 1, 'the gauge ran for this session');
   } finally { clean(home, proj); }
 });

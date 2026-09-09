@@ -91,7 +91,33 @@ const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 
 const READ_BUDGET_BYTES = 262144; // max always-loaded content read on the hook path
-const STDIN_BUDGET_MS = 30; // never let an absent/stalled stdin block the hook past this
+// The stdin budget is an IDLE gap, armed on the FIRST BYTE and re-armed on every
+// chunk after it -- NOT a total deadline, and NOT armed at t=0. The retired total
+// deadline (STDIN_BUDGET_MS = 30, measured from process start) failed as a function
+// of how LATE the FIRST byte arrived, which is a property of host contention rather
+// than of anything this hook does: under concurrent spawners the parent's write to
+// our pipe slips past 30 ms and a well-formed payload was dropped, so the hook exited
+// 0 having done nothing (CWK-072). Measured here at K=40 spawners, 4000 invocations:
+// the first byte lands after 30 ms on 25% of invocations (p50 19.5 ms, max 141.9 ms).
+// "Idle" therefore means silence since the last PROGRESS -- before the first byte
+// there is no progress to measure, and arming this timer at t=0 reproduces the total
+// deadline exactly (measured: 31/4000 dropped, against the deadline's own 34/4000).
+const STDIN_IDLE_MS = 30;
+// ANTI-HANG BACKSTOP -- NOT a delivery-latency threshold, and never to be read as the
+// retired 30 ms deadline in a larger costume. It bounds two pathologies only: a writer
+// that trickles one byte per idle window forever, and a pipe that is opened, never
+// written and never closed. A fail-silent hook that hangs blocks the user's session,
+// so the bound must exist; it is deliberately far above any plausible delivery latency
+// (observed worst end-of-payload at K=40: 180.8 ms, i.e. ~8x under this number) so that
+// crossing it means something is genuinely wrong rather than merely busy. It is a
+// ceiling on pathology, not a budget for lateness, and must never be tuned downward to
+// "tighten" the read -- that is the retired deadline, rebuilt.
+// WHAT THIS COSTS, stated rather than buried: an absent stdin still resolves at once
+// (the pipe is closed, so "end" fires) and a TTY stdin resolves at once (see below),
+// but a pipe held open in silence now costs this ceiling where it once cost 30 ms.
+// That case has never been observed from Claude Code; the 30 ms version of it was
+// dropping real payloads roughly 1% of the time under contention.
+const STDIN_HANG_CEILING_MS = 1500;
 const DAY_MS = 86400000;
 
 function lib(name) {
@@ -101,30 +127,46 @@ function lib(name) {
 // Read this invocation's hook JSON from stdin ({session_id, hook_event_name,
 // ...} per the CC hook contract) — this is how main() tells the SessionStart
 // and Stop branches apart. Fail-safe: an absent/short/malformed/
-// never-closing stdin resolves to {} within STDIN_BUDGET_MS rather than ever
-// blocking the hook (Phoenix #3/#4) — an unrecognized/missing event name is
+// never-closing stdin resolves to {} within STDIN_IDLE_MS of the last byte (and
+// within STDIN_HANG_CEILING_MS overall) rather than ever blocking the hook
+// (Phoenix #3/#4) — an unrecognized/missing event name is
 // then silently skipped by main() (Phoenix #12/#13: a read failure must
 // never be guessed as the loudest branch; see main()'s closing comment).
 function readStdinJson() {
   return new Promise((resolve) => {
     let data = '';
     let done = false;
+    let idle = null;
+    let ceiling = null;
     const finish = () => {
       if (done) return;
       done = true;
+      if (idle) clearTimeout(idle);
+      if (ceiling) clearTimeout(ceiling);
       try { resolve(JSON.parse(data)); } catch { resolve({}); }
       // Release stdin so a still-open pipe can't keep the event loop alive past
       // the budget (the promise resolved, but a flowing stdin would otherwise
       // hold the process to EOF — observed 3.05s vs 0.125s; Phoenix #3/#4).
       try { if (process.stdin.unref) process.stdin.unref(); process.stdin.destroy(); } catch { /* fail-silent */ }
     };
+    // Armed by the data handler only — never here, never at t=0 (see STDIN_IDLE_MS).
+    const armIdle = () => {
+      if (done) return;
+      if (idle) clearTimeout(idle);
+      idle = setTimeout(finish, STDIN_IDLE_MS);
+      if (idle.unref) idle.unref();
+    };
     try {
       process.stdin.setEncoding('utf8');
-      process.stdin.on('data', (c) => { data += c; });
+      // A TTY stdin carries no hook payload and never ends, so waiting out the
+      // anti-hang ceiling would buy nothing — that is a hand-run of this file, never
+      // an invocation by the agent, which always pipes.
+      if (process.stdin.isTTY) { finish(); return; }
+      process.stdin.on('data', (c) => { data += c; armIdle(); });
       process.stdin.on('end', finish);
       process.stdin.on('error', finish);
-      const t = setTimeout(finish, STDIN_BUDGET_MS);
-      if (t.unref) t.unref();
+      ceiling = setTimeout(finish, STDIN_HANG_CEILING_MS);
+      if (ceiling.unref) ceiling.unref();
     } catch { finish(); }
   });
 }
