@@ -49,23 +49,44 @@ const TESTS = [
   'scripts/pointer-check.test.mjs',
 ];
 
-const missing = TESTS.filter((t) => !fs.existsSync(path.join(repo, t)));
-if (missing.length) {
-  console.error(`test runner: ${missing.length} listed test file(s) MISSING — ${missing.join(', ')}`);
-  process.exit(1);
-}
-
-const onDisk = [];
-for (const dir of ['scripts', 'scripts/lib', 'hooks']) {
-  for (const f of fs.readdirSync(path.join(repo, dir))) {
-    if (f.endsWith('.test.mjs') || f.endsWith('.test.js')) onDisk.push(`${dir}/${f}`);
+// CWK-071 (node/runtime.md §7): process.exitCode + a natural exit at all three
+// sites, never process.exit() — it 'forces the process to exit as quickly as
+// possible even with asynchronous operations pending, including I/O to
+// process.stdout and process.stderr'.
+//
+// WRAPPED IN main() rather than converted in place, and the wrap is what keeps
+// the SEMANTICS identical: these were three EARLY EXITS at module top level,
+// so setting exitCode alone would have let a missing-file run fall straight
+// through into the orphan scan and then SPAWN the suite anyway. `return`
+// reproduces the stop; the flag carries the code.
+//
+// The spawn site is the one worth stating: the child runs with
+// stdio:'inherit', so it writes to OUR stdout directly and this process has no
+// pending output of its own to lose — the natural exit still carries the
+// child's status because nothing else sets exitCode afterwards. Proven by
+// running it both ways rather than assumed (see the CWK-071 commit).
+function main() {
+  const missing = TESTS.filter((t) => !fs.existsSync(path.join(repo, t)));
+  if (missing.length) {
+    console.error(`test runner: ${missing.length} listed test file(s) MISSING — ${missing.join(', ')}`);
+    process.exitCode = 1;
+    return;
   }
-}
-const orphans = onDisk.filter((f) => !TESTS.includes(f));
-if (orphans.length) {
-  console.error(`test runner: ${orphans.length} on-disk test(s) NOT in the suite — ${orphans.join(', ')}. Add to scripts/test.mjs.`);
-  process.exit(1);
-}
 
-const r = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: repo, stdio: 'inherit' });
-process.exit(r.status ?? 1);
+  const onDisk = [];
+  for (const dir of ['scripts', 'scripts/lib', 'hooks']) {
+    for (const f of fs.readdirSync(path.join(repo, dir))) {
+      if (f.endsWith('.test.mjs') || f.endsWith('.test.js')) onDisk.push(`${dir}/${f}`);
+    }
+  }
+  const orphans = onDisk.filter((f) => !TESTS.includes(f));
+  if (orphans.length) {
+    console.error(`test runner: ${orphans.length} on-disk test(s) NOT in the suite — ${orphans.join(', ')}. Add to scripts/test.mjs.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const r = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: repo, stdio: 'inherit' });
+  process.exitCode = r.status ?? 1;
+}
+main();

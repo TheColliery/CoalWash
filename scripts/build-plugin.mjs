@@ -206,8 +206,16 @@ export function checkDist(distRoot = dist) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (process.argv.includes('--check')) {
     const f = checkDist();
-    if (f.length) { console.error('plugin/ dist OUT OF SYNC:\n' + f.map((x) => '  ' + x).join('\n') + '\n-> run: node scripts/build-plugin.mjs'); process.exit(1); }
-    console.log('plugin/ dist in sync with source.');
+    // CWK-071 (node/runtime.md §7): exitCode + natural exit. The ELSE is
+    // load-bearing, not style — process.exit(1) used to be what stopped the
+    // success line below from also printing, so dropping the exit without it
+    // would report "in sync" on an out-of-sync tree.
+    if (f.length) {
+      console.error('plugin/ dist OUT OF SYNC:\n' + f.map((x) => '  ' + x).join('\n') + '\n-> run: node scripts/build-plugin.mjs');
+      process.exitCode = 1;
+    } else {
+      console.log('plugin/ dist in sync with source.');
+    }
   } else {
     buildDist();
     console.log('plugin/ dist built (plugin.json + commands + hooks + skills + scripts/lib) from source.');

@@ -403,4 +403,11 @@ try {
 } catch (e) { fail(`plugin/ dist check: ${e.message}`); }
 
 console.log(fails ? `\nVERIFY: FAIL (${fails})` : '\nVERIFY: PASS');
-process.exit(fails ? 1 : 0);
+// CWK-071 (node/runtime.md §7): process.exitCode + a NATURAL exit, never
+// process.exit() — which 'forces the process to exit as quickly as possible
+// even with asynchronous operations pending, including I/O to process.stdout
+// and process.stderr'. This gate prints its whole per-item report to stdout
+// immediately above, so it is exactly the shape that would lose output.
+// Fail-loud is UNCHANGED (§1.0: a gate must be able to exit non-zero) — only
+// the mechanism moves.
+process.exitCode = fails ? 1 : 0;
