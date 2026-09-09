@@ -107,11 +107,23 @@ const STDIN_IDLE_MS = 30;
 // retired 30 ms deadline in a larger costume. It bounds two pathologies only: a writer
 // that trickles one byte per idle window forever, and a pipe that is opened, never
 // written and never closed. A fail-silent hook that hangs blocks the user's session,
-// so the bound must exist; it is deliberately far above any plausible delivery latency
-// (observed worst end-of-payload at K=40: 180.8 ms, i.e. ~8x under this number) so that
-// crossing it means something is genuinely wrong rather than merely busy. It is a
-// ceiling on pathology, not a budget for lateness, and must never be tuned downward to
-// "tighten" the read -- that is the retired deadline, rebuilt.
+// so the bound must exist.
+// WHY THIS NUMBER -- argued from what two independent instruments AGREE on, never from
+// a safety factor they do not. Both timed end-of-payload at K=40 with a timer-free
+// child, and their worst cases are ~6x apart: the builder's probe
+// (scratchpad/al1/probe-timing.mjs, clock started at the top of the child script,
+// N=4000) read max 180.8 ms; the reviewer's independent rebuild
+// (scratchpad/al1/cr-harness/firstbyte.mjs, its own origin and its own self-load,
+// N=2000) read max 1189 ms, p99 760 ms. Neither is the other's error -- a latency
+// measured from a different origin under a different load is a different quantity --
+// so NO multiple derived from either instrument survives the other, and none is
+// claimed here. What both DO agree on is the only property this number needs:
+// nothing crossed 1500 ms in any cell either of them ran (0/4000 and 0/2000 in the
+// timing cells; 0 losses across 4000 post-fix real-hook invocations). The ceiling has
+// never cut a real payload -- and THAT, not a headroom factor, is why it must never be
+// tuned downward to "tighten" the read: tightening it is the retired deadline rebuilt,
+// and on one of the two instruments the measured worst case already sits close enough
+// to 1500 ms that a smaller number would begin cutting real payloads.
 // WHAT THIS COSTS, stated rather than buried: an absent stdin still resolves at once
 // (the pipe is closed, so "end" fires) and a TTY stdin resolves at once (see below),
 // but a pipe held open in silence now costs this ceiling where it once cost 30 ms.
