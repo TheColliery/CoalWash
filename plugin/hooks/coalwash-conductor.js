@@ -30,10 +30,12 @@
 //                   economic AND absolute-cap, no proof gate, no off
 //                   switch), the OBESE auto-Quick directive (0d — standing
 //                   config, never an ask), or ONE OF THE TWO capacity
-//                   outcomes (CWK-081): after a gate-passed Full clean landed
-//                   this episode, the FULL(externalize) pure-information
-//                   advisory — never an ask, since washing cannot help
-//                   ~all-muscle over capacity; BEFORE one, the Full-tier
+//                   outcomes (CWK-081): after a Full-tier pass REMOVED
+//                   something this episode, the FULL(externalize)
+//                   pure-information advisory — never an ask, since washing
+//                   cannot help ~all-muscle over capacity, and the advisory
+//                   reports only what that pass did, never a verdict over the
+//                   rest of the store (round-2 F1); BEFORE one, the Full-tier
 //                   consent instead, because "muscle" is then a claim nothing
 //                   has measured. Either way, at most ONCE per session.
 //                   Mirrors
@@ -58,8 +60,8 @@
 // WALL is the REAL capacity line only (capacityTokens -- DISCOVERED per machine
 // where the platform exposes a window, else the derived conservative default,
 // CWK-081 -- plus the CC index caps): wash-first when armed; when ~all-muscle,
-// the externalize advice only AFTER a gate-passed Full clean this episode,
-// otherwise the Full-tier consent first. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
+// the externalize advice only AFTER a Full-tier pass removed something this
+// episode, otherwise the Full-tier consent first. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
 // A DICTATOR"): every FULL crossing force-runs the FREE Quick pass under
 // the same standing consent as OBESE's auto-Quick — no economic proof
 // needed for the free tier (the break-even proof governs the PAID wizard;
@@ -506,9 +508,12 @@ async function handleStop(input) {
     // capacity branch used to assert "muscle, not bloat" off a MECHANICAL
     // lower-bound reading and steer the user into relocating content that
     // nothing had judged. The semantic pass is the instrument that turns
-    // unknown text into known muscle, so: no gate-passed Full clean this
-    // episode -> this is the Full-tier CONSENT, not an advisory. (owner
+    // unknown text into known muscle, so: no Full-tier pass removed anything
+    // this episode -> this is the Full-tier CONSENT, not an advisory. (owner
     // ruling 2026-09-06 — decide delete/shrink/stand BEFORE moving things.)
+    // The flag is per-TRANSACTION, not per-store (round-2 F1), so it gates only
+    // WHICH text speaks; the advisory itself disclaims what the pass did not
+    // touch rather than this branch pretending to know the coverage.
     const fullCleaned = Number.isFinite(Number(proj.fullCleanAt));
     // CWK-081 (3) — and either way this surface speaks at most ONCE per
     // session. Measured: 4 consecutive Stops during one live wizard run,

@@ -98,14 +98,29 @@ test('externalizeAdvisory: pure info, no question-tool/ask wording, names WHY wa
   // asserted a semantic verdict the MECHANICAL estimator never produces — it
   // proves exact duplicates and spacing and calls everything else muscle by
   // construction. The line now states the instrument and its bound, and names
-  // the Full-tier pass that DID adjudicate the rest (this template is only
-  // reachable after one has landed this episode).
+  // the Full-tier pass by what it actually did — RAN and REMOVED something —
+  // never by a verdict over the rest of the store (INSPECT round-2 F1).
   assert.ok(!/muscle, not bloat/.test(r), 'the unmeasured "muscle, not bloat" claim is retired');
   assert.ok(r.includes('LOWER BOUND'), 'says what the mechanical tier actually proves');
-  assert.match(r, /Full-tier pass/, 'and names the instrument that judged the rest');
+  assert.match(r, /Full-tier \(semantic\) pass ran and REMOVED/, 'names the instrument by what it did, not by a verdict it never reached');
   assert.ok(r.includes('EXTERNALIZE') || r.includes('externalize'));
   assert.ok(!r.includes('question tool'), 'externalize is information, never an ask');
   assert.ok(r.includes('AFTER'), 'still tells the agent to sequence after the actual reply');
+});
+
+// CWK-081 F1 (INSPECT round 2, cell C1) — the PREDICATE moved to "something was
+// removed" and the SENTENCE did not. `applyPlan` sees a PLAN, never a PASS: a
+// wizard-cut plan that rewrites one file of three, removing one unique line,
+// stamps the record while the other two store files were judged by nothing. The
+// advisory then told the user "the semantic pass that judges the rest RAN and
+// kept this content" — false in exactly that case. The claim is narrowed to what
+// the record can establish; the coverage question is not answerable here.
+test('CWK-081 F1: the advisory claims only what the record establishes (a pass RAN and REMOVED under the gate) and explicitly disclaims the rest', () => {
+  const r = externalizeAdvisory({ hardCeilingTokens: 167000 });
+  assert.ok(!/judges the rest/.test(r), 'no whole-store adjudication claim: applyPlan sees a plan, not a pass');
+  assert.ok(!/what remains is muscle/.test(r), 'and no "the remainder is muscle" verdict either');
+  assert.match(r, /REMOVED content under the fidelity gate/, 'says what the episode actually established');
+  assert.match(r, /NOTHING about files the pass never touched/, 'and names the coverage limit it cannot see past');
 });
 
 test('externalizeAdvisory: a missing hardCeilingTokens degrades to a "?" placeholder, never throws', () => {

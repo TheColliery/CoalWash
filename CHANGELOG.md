@@ -17,6 +17,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ### Fixed
 
+- **The FULL(externalize) advisory told you a semantic pass had "judged the rest" of your memory — a claim the record behind it cannot support.** That record is per-TRANSACTION, not per-store: a Full pass that rewrites one file of three and removes one line from it is recorded, while the other two files were judged by nothing. The advisory now states only what the episode actually established — a Full (semantic) pass ran and REMOVED content under the fidelity gate, which refuses any drop the plan did not name — and says outright that it establishes nothing about files that pass never touched. **When it can no longer support a claim, it under-claims:** the eligibility rule is unchanged, only the sentence narrowed, so at worst you re-run a pass you did not need. — test: `scripts/lib/ask.test.mjs` (`CWK-081 F1`)
 - **A Full-pass run that removed nothing could still mark your store as "adjudicated".** A transaction that only creates files, rewrites a file to identical content, or appends, committed successfully and was recorded as a completed semantic pass — after which CoalWash would tell you a pass had judged your memory and kept it. The record now requires that something was actually removed. — test: `scripts/lib/apply.test.mjs` (`CWK-081 H1`)
 - The capacity probe now refuses a malformed `modelUsage` array instead of reading values out of it. — test: `scripts/lib/caliper.test.mjs` (`CWK-081 L1`)
 

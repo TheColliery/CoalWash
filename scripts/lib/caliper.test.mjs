@@ -2084,7 +2084,7 @@ test('CWK-081 adapter: gaugeVerdict JUDGES against the supplied capacity and REP
 });
 
 // ---------------------------------------------------------------------------
-// CWK-081 (1)+(3) — the episode's gate-passed Full clean, and the
+// CWK-081 (1)+(3) — the episode's Full-tier pass, and the
 // once-per-session dedup on the capacity surface
 // ---------------------------------------------------------------------------
 

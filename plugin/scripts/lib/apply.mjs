@@ -1275,9 +1275,10 @@ export function applyPlan(plan, opts = {}) {
       // very function: a PURE-CREATE plan, a NO-OP rewrite and an APPEND-ONLY
       // rewrite all returned ok:true and all stamped the record — three ordinary
       // shapes an honest wizard emits, none of them forgery. The advisory then
-      // tells the user "the semantic pass that judges the rest RAN and kept this
+      // TOLD the user "the semantic pass that judges the rest RAN and kept this
       // content", which is the assertion-without-measurement that change (1)
-      // exists to remove, restored through its own eligibility fact.
+      // exists to remove, restored through its own eligibility fact. That
+      // sentence is gone as of round-2 F1 — see the COVERAGE residue below.
       //
       // So the record keys on `removedCount` — at least one action whose
       // baseline carried content the result does not. A semantic pass that
@@ -1293,6 +1294,19 @@ export function applyPlan(plan, opts = {}) {
       // "never judged", so it declines to assert the stronger of the two. A
       // delete of an already-empty file counts as nothing removed for the same
       // reason (`cut.length` is 0), same direction.
+      //
+      // RESIDUE, COVERAGE — INSPECT round-2 F1, and it is the one this list did
+      // NOT name until it was found. `removedCount` counts ACTIONS, never files
+      // judged: a plan that rewrites one file of three and removes one line from
+      // it stamps, while the other two were judged by nothing (INSPECT's cell C1,
+      // 777 on both engines). This function is handed a PLAN and can never see
+      // whether a PASS covered the store, so the fix landed on the CLAIM instead
+      // — the advisory now says a pass ran and removed something under the gate,
+      // and states outright that it establishes nothing about files that pass
+      // never touched. The predicate is unchanged, deliberately: widening it
+      // toward coverage needs an adjudication receipt from the wizard layer that
+      // does not exist, and a wider predicate over-claims on a consent-adjacent
+      // surface where under-claiming is the safe direction.
       //
       // STILL NOT CLOSED, and unchanged: `plan.origin` is untrusted plan data,
       // so a forged origin on a plan that DOES remove something still stamps

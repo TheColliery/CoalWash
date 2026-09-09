@@ -3172,13 +3172,16 @@ test('U7 CLASS GUARD (the propagate-check the board asked for): no engine module
 
 
 // ---------------------------------------------------------------------------
-// CWK-081 (1) — THE GATE-PASSED FULL CLEAN, recorded here because this is the
-// only place it is a FACT: applyPlan refuses any unapproved structured-token
-// drop before it commits, so a wizard-cut transaction that returns ok:true has
-// passed the fidelity gate by construction.
+// CWK-081 (1) — THE EPISODE'S FULL-TIER PASS, recorded here because this is the
+// only place the REMOVAL is a fact: applyPlan refuses any unapproved
+// structured-token drop before it commits, so a wizard-cut transaction that
+// actually cut something cut it under the gate. NOT "ok:true is a gate-passed
+// clean" — that equivalence was refuted (H1), and what survives it is narrower
+// still: the fact is per-TRANSACTION, so it never says the pass covered the
+// store (round-2 F1, and the advisory's own sentence now says so).
 // ---------------------------------------------------------------------------
 
-test("CWK-081: a committed origin:'wizard-cut' plan records the episode's gate-passed Full clean; a program cut does NOT", () => {
+test("CWK-081: a committed origin:'wizard-cut' plan that REMOVED something records the episode's Full-tier pass; a program cut does NOT", () => {
   const { proj, store } = sandbox();
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   try {
@@ -3186,7 +3189,7 @@ test("CWK-081: a committed origin:'wizard-cut' plan records the episode's gate-p
     write(f, 'fact stays\nverbose wording the outsider dropped');
     const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'fact stays' }], { origin: 'wizard-cut' }), { home, now: 777 });
     assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(loadState(proj, home).fullCleanAt, 777, 'the Full tier landed, gate-passed — the fact is on the record');
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777, 'the Full tier landed and removed something — that transaction fact is on the record');
     assert.strictEqual(loadState(proj, home).fullCleanSession, 't-session');
   } finally { clean(proj, home); }
 });

@@ -1167,8 +1167,8 @@ test('0m: a LEGACY config carrying forceMode:"off" is likewise IGNORED — there
 test('Stop: a FULL(externalize) crossing delivers the pure-information advisory — never an ask, never force', () => {
   const { home, proj } = sandbox();
   try {
-    // CWK-081 (1): the advisory is now ELIGIBLE only after a gate-passed Full
-    // clean landed this episode — `fullCleanAt` is that fact. Seeded here so
+    // CWK-081 (1): the advisory is now ELIGIBLE only after a Full-tier pass
+    // removed something this episode — `fullCleanAt` is that fact. Seeded here so
     // this case keeps testing what it was written for (the advisory's own
     // shape); the INELIGIBLE route has its own case below.
     seedState(home, proj, {
@@ -1882,7 +1882,7 @@ test('AL-1: a payload whose first byte lands 200 ms after spawn is READ, not dro
 // CWK-081 — the FULL(capacity) surface: eligibility (1) and once-per-session (3)
 // ---------------------------------------------------------------------------
 
-test('CWK-081 (1): a FULL(externalize) crossing with NO gate-passed Full clean this episode routes to the Full-tier CONSENT, never the advisory', () => {
+test('CWK-081 (1): a FULL(externalize) crossing with NO Full-tier pass this episode routes to the Full-tier CONSENT, never the advisory', () => {
   const { home, proj } = sandbox();
   try {
     // the measured incident's own shape: FULL, certain fat ~3 tok (under the

@@ -845,8 +845,7 @@ export const STATE_SCHEMA = 1;
 // trustworthy. Resetting it is the SAFE direction (worst case: one extra FREE
 // mechanical sweep). Its ADDITION is not itself a schema bump — no existing
 // field's meaning changed, per this file's own rule above.
-// CWK-081 adds `fullCleanAt`/`fullCleanSession` (the episode's gate-passed Full
-// clean) and `externalizeSession`/`externalizeAt` (the once-per-session dedup)
+// CWK-081 adds `fullCleanAt`/`fullCleanSession` (the episode's Full-tier pass) and `externalizeSession`/`externalizeAt` (the once-per-session dedup)
 // for the SAME reason `lastObeseFat` is here: they are episode/crossing-family
 // state, and a value written by a version with different eligibility semantics
 // is not trustworthy. Resetting is the SAFE direction — a spurious reset makes
@@ -1352,12 +1351,19 @@ export function armDigGauge(home, projectRoot, session, now = Date.now()) {
   return { surface: true };
 }
 
-// CWK-081 (1) — THE GATE-PASSED FULL CLEAN, recorded. The externalize advisory
-// asserts "this store is muscle", and the ONLY instrument in this system that
-// can turn unknown text into KNOWN muscle is the Full tier's semantic pass; the
-// mechanical estimator proves a LOWER BOUND and nothing else. So the advisory
-// becomes eligible only after a Full clean has actually landed this episode,
-// and this is the fact that records one.
+// CWK-081 (1) — THE EPISODE'S FULL-TIER PASS, recorded. The externalize advisory
+// steers a user into relocating real content, and the ONLY instrument in this
+// system that judges text semantically is the Full tier's pass; the mechanical
+// estimator proves a LOWER BOUND and nothing else. So the advisory becomes
+// eligible only after a Full pass has actually landed this episode, and this is
+// the fact that records one.
+//
+// WHAT THIS FACT DOES NOT CARRY, and the header used to imply it did (round-2
+// F1): it is per-TRANSACTION, never per-STORE. It says a pass ran and removed
+// something. It says nothing about how much of the store that pass covered, and
+// applyPlan — the one writer — is handed a PLAN, so it has no input that could.
+// The advisory's own sentence was NARROWED to match rather than this record
+// widened toward a coverage figure nothing here can compute.
 //
 // WHAT COUNTS AS ONE — and the FIRST version of this paragraph got it WRONG, so
 // the correction is written where the wrong argument stood rather than quietly
