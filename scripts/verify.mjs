@@ -326,9 +326,17 @@ try {
     // SCANNED USER's own tree probes that name against OUR .gitignore; if a pattern of
     // ours ever shares it, a citation that was never ours to be wrong about FAILs as
     // "not reachable from a clone". Measured population on this tree today: ZERO of 17
-    // shape-qualified first segments. EXPOSURE, which is the number that actually moves:
-    // 6 of those 17 are ordinary one-word names, so one ordinary directory line added to
-    // `.gitignore` is all it takes for this class to fire. Deliberately NOT narrowed —
+    // shape-qualified first segments. EXPOSURE, which is the number that actually moves,
+    // and it carries a PREDICATE this sentence used to leave unstated (INSPECT F1 —
+    // "6 of 17 are ordinary one-word names" re-derives as 12 and reads as rotted):
+    // 12 of the 17 are ordinary one-word names, and **6 of those 12 are also NOT ROOTS OF
+    // OURS** — `TheColliery` `benchmarks` `memory` `projects` `references` `subagents`.
+    // SIX is the exposure figure and the second half is why: this class is FOREIGN-name
+    // collision, so a FAIL is only WRONG when the segment describes the scanned user's
+    // tree rather than ours. A one-word name that IS one of our roots collides with our
+    // own `.gitignore` on our own file, which is a true FAIL, not this class. So one
+    // ordinary directory line added to `.gitignore` is all it takes for this class to
+    // fire — on any of those six. Deliberately NOT narrowed —
     // any existence- or ourRoots-based test would re-open the exact vacuity this ticket
     // removes — and the miss is LOUD by design: a wrong FAIL names the file and the
     // token, unlike a dead citation falling silently out of scope.

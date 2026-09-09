@@ -274,6 +274,18 @@ test('SHAPE-079 residue: a trailing slash is accepted with NO check on what prec
 test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never check-exempt', () => {
   assert.strictEqual(looksPathShaped('scripts/lib'), false,
     'excluded from DISCOVERY only — the NON-LOCAL pair below is why that is not the same as exempt');
+  // INSPECT F5 — THE SEAM, asserted in the cell that already owns this residue rather
+  // than in a new one (a hygiene round should not move the suite count). looksPathShaped
+  // segments on '/' ALONE, so a Windows-separator token would be mis-segmented: measured
+  // on the shipped function, a backslash token reads as ONE segment. That is unreachable
+  // ONLY because pointerCandidates drops backslash tokens outright — a guarantee that
+  // lives in the POSIX block far above and was connected to this function by nothing.
+  // Asserted, not commented, so a future relaxation of that rule (or a second caller that
+  // bypasses pointerCandidates) goes RED here instead of silently mis-segmenting.
+  assert.deepStrictEqual(pointerCandidates('see `scripts' + String.fromCharCode(92) + 'lib' + String.fromCharCode(92) + 'apply.mjs` here'), [],
+    'the backslash rule is what keeps looksPathShaped POSIX-only-safe');
+  assert.strictEqual(looksPathShaped('scripts' + String.fromCharCode(92) + 'lib'), false,
+    'and this is what it would do with one — mis-segmented, not evaluated');
 });
 
 // ---------------------------------------------------------- CWK-079: DERIVATION
@@ -283,7 +295,14 @@ test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never
 function gitFixture(gitignoreText) {
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-079-')));
   const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8' });
-  if (r.error || r.status !== 0) return null; // git unavailable — caller SKIPs visibly
+  if (r.error || r.status !== 0) {
+    // INSPECT F3 — the dir exists BEFORE git is probed, and on this path the caller gets
+    // null, so its own finally{} holds no handle to remove. Leaving it re-opens board
+    // #107's litter class on the one path nobody here runs (git is present on this box).
+    // Cleaned HERE because this is the only scope that still has the name.
+    fs.rmSync(dir, { recursive: true, force: true });
+    return null; // git unavailable — caller SKIPs visibly
+  }
   fs.writeFileSync(path.join(dir, '.gitignore'), gitignoreText);
   return dir;
 }

@@ -201,10 +201,14 @@ export function pointerCandidates(text) {
 // WHY A SHAPE TEST AT ALL — MEASURED HERE, not inherited. Deriving the probe set from
 // CITED first segments (the CWK-079 fix) removes the old existence dependence and, in
 // exchange, lets a token that is not a path at all reach `git check-ignore`. On this
-// room's own 10 ship-text surfaces that population is REAL and is 11 tokens / 6 distinct
+// room's own 10 ship-text surfaces that population is REAL and is 11 tokens / 7 distinct
 // first segments: EVIDENCE=n over a, n over a, beforeBytes over afterBytes,
 // alwaysBeforeTokens over alwaysAfterTokens, and two WIZARD step ratios — arithmetic and
-// identifier pairs, none of them a directory in any namespace. Every one is an ordinary
+// identifier pairs — PLUS ONE THAT IS NOT (INSPECT F2, and the earlier "6 distinct / none
+// of them a directory" read as measured while covering only 10 of the 11): CONTRIBUTING's
+// own TheColliery/.github/benchmarks/CoalWash/fixtures, a REAL directory that is
+// shape-rejected because its last segment is extensionless and it carries no trailing
+// slash. Ten of the eleven are ordinary
 // name a `.gitignore` could plausibly carry, so leaving them in the probe set means one
 // ordinary ignore line can FAIL a citation whose remedy ("commit the file") is
 // incoherent for a ratio. (Written WITHOUT backticks on purpose: this file is not a
@@ -217,10 +221,17 @@ export function pointerCandidates(text) {
 //     here today: ZERO. And the last-segment test accepts an all-digit "extension",
 //     so a version-shaped token could pass as filename-shaped. Also ZERO here today.
 //   - DISCOVERY-EXCLUDED: an extensionless real path with no trailing slash no longer
-//     contributes its own root. Measured here: the 11 rejected tokens above are all
-//     non-paths, so this direction costs ZERO real citations on this tree today —
-//     a number that moves the day a real extensionless path is cited, which is why the
-//     non-locality above is pinned rather than described.
+//     contributes its own root. Measured here: ZERO real citations lost on this tree
+//     today — but state WHY, because the reason is a COINCIDENCE and not the enumeration
+//     (INSPECT F2: the old wording rested this ZERO on "the 11 rejected tokens are all
+//     non-paths", which is false — one of them is a real directory). The ZERO holds on
+//     two independent facts, EITHER of which moving ends it: (a) that citation's first
+//     segment TheColliery is not one of our roots, so the scope test drops it before the
+//     ignore branch is even reached; and (b) the same segment is armed non-locally anyway
+//     by README's own TheColliery/... citations, so its exclusion from DISCOVERY costs
+//     nothing while (a) holds. A residue whose stated basis is wrong reads as MEASURED
+//     when it is coincidental — hence both facts named, and the non-locality above pinned
+//     by a test rather than described.
 export function looksPathShaped(tok) {
   const t = String(tok).replace(/:\d+(-\d+)?$/, '');
   if (t.endsWith('/')) return true;
@@ -257,6 +268,20 @@ export function looksPathShaped(tok) {
 // So the probe runs `-v` and DROPS any row whose matched pattern is EMPTY: an empty
 // pattern cannot legitimately ignore anything, so such a row is a parse artefact, never
 // a rule. Artefacts are RETURNED, never swallowed, so a caller can print the count.
+//
+// THE DROP IS FAIL-OPEN, AND HERE IS THE BOUND ON THE PROOF THAT IT IS SAFE. Dropping a
+// row REMOVES a name from the ignored set, so if git ever reported the CR artefact as the
+// DECIDING pattern for a path a real rule also ignores, this would discard a TRUE ignore
+// and that citation would fall silently out of scope — the exact failure this gate
+// exists to catch, re-introduced by its own fix. gitignore is last-match-wins, so pattern
+// ORDER is the variable. ATTACKED at INSPECT across four CRLF orderings — real rule
+// first, real rule after the blank, blank LAST, and interleaved blanks — and the real
+// match beat the artefact in all four: the empty-pattern row appears only for paths no
+// real rule matches. BOUND, stated so the next reader inherits the LIMIT and not the
+// comfort: n=4 orderings, ONE git version (2.55.0.windows.5), CRLF-vs-LF only. Negated
+// (!) patterns, .git/info/exclude and a global core.excludesFile were NOT exercised.
+// Safe in the measured space; not proven safe universally. Widening that proof is its own
+// unit, deliberately not folded into a comment-hygiene round.
 //
 // An unparseable `-v` row is treated as IGNORED (loud), not skipped: this gate's own
 // doctrine is that a wrong FAIL names its file and token and gets investigated, while a
