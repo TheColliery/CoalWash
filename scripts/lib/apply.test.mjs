@@ -3215,3 +3215,60 @@ test('CWK-081: a wizard plan that FAILS the fidelity gate records NO Full clean 
     assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'a refused run is not a clean, however wizard-shaped its origin tag');
   } finally { clean(proj, home); }
 });
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 H1 — `ok:true` is NOT evidence of adjudication. Three ordinary plan
+// shapes an honest wizard emits reach the single ok:true return having judged
+// nothing; each stamped the Full-clean record before this predicate changed.
+// ---------------------------------------------------------------------------
+
+test('CWK-081 H1: a wizard-cut plan that REMOVES NOTHING does not record a Full clean — pure-create, no-op rewrite, append-only', () => {
+  const cases = [
+    ['A1 pure create (no rewrite at all — the fidelity loop skips every non-rewrite)',
+      (store) => [{ type: 'create', path: path.join(store, 'made.md'), content: 'brand new destination file' }]],
+    ['A2 no-op rewrite (drops nothing BECAUSE it changes nothing — passes the gate vacuously)',
+      (store) => { const f = path.join(store, 'same.md'); write(f, 'unchanged body'); return [{ type: 'rewrite', path: f, content: 'unchanged body' }]; }],
+    ['A3 append-only rewrite (a gate that only checks DROPS has nothing to check)',
+      (store) => { const f = path.join(store, 'grown.md'); write(f, 'kept line'); return [{ type: 'rewrite', path: f, content: 'kept line\nadded line' }]; }],
+  ];
+  for (const [label, build] of cases) {
+    const { proj, store } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+    try {
+      const r = apply(planFor(proj, store, build(store), { origin: 'wizard-cut' }), { home, now: 777 });
+      assert.strictEqual(r.ok, true, label + ': the transaction itself is legitimate and must still commit');
+      assert.strictEqual(loadState(proj, home).fullCleanAt, undefined,
+        label + ': committed, but nothing was adjudicated — the advisory must not be told a semantic pass judged this store');
+    } finally { clean(proj, home); }
+  }
+});
+
+test('CWK-081 H1 control (non-vacuity): the SAME predicate still records a clean when the wizard actually REMOVED something', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'shrunk.md');
+    write(f, 'fact stays\nverbose wording the outsider judged and dropped');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'fact stays' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777, 'a real cut IS the evidence the record exists to carry');
+  } finally { clean(proj, home); }
+});
+
+test('CWK-081 H1 residue, PINNED so it is not later mistaken for a bug: an all-KEEP Full pass records nothing', () => {
+  // A pass that judged every file and decided to keep all of it removes nothing,
+  // so from in here it is indistinguishable from a pass that never ran. The code
+  // declines to assert the stronger of the two, and the next FULL(capacity)
+  // crossing renders the ASK rather than the advisory. INTENDED, safe direction.
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'all-kept.md');
+    write(f, 'every line here was judged and kept');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'every line here was judged and kept' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined,
+      'indistinguishable from "never judged" in here — so it asks instead of asserting');
+  } finally { clean(proj, home); }
+});

@@ -149,7 +149,22 @@ export const FLOOR_MIN_TOKENS = 2500;
 //   (b) 33,000 — the AUTO-COMPACT RESERVE, measured by this room's own record:
 //       a 1M-window model reports 967k usable in the platform's own /context
 //       readout. The denominator is the USABLE window, never the raw one, so
-//       the reserve is subtracted here once and every consumer inherits it.
+//       the reserve is subtracted here once and every consumer inherits it —
+//       INCLUDING discoverCapacity()'s discovery branch, which takes the same
+//       absolute figure off whatever raw window it finds.
+//       THE TRANSFER IS THE UNTRACEABLE STEP, and INSPECT M1 is right that
+//       calling both terms "sourced" hid it. The reserve is TREATED AS ABSOLUTE
+//       — the same 33,000 subtracted from a 200,000 window as from a 1,000,000
+//       one — and the evidence for absoluteness is n=1, AT 1M. Nothing in the
+//       cited source establishes that the reserve does not scale with the
+//       window. If it were instead PROPORTIONAL (~3.3%), the usable 200k window
+//       would be ~193,400 and this default is ~26,400 tok more conservative
+//       than its own arithmetic implies. That is the SAFE direction (it
+//       over-fires FULL, which routes to a free sweep and one ask, never to
+//       data loss), so it is not a live defect — it is a step a reader must be
+//       able to trace, and now can. Re-derive it the moment a second window
+//       size can be measured; until then this term is a HYPOTHESIS exactly as
+//       the constant below already says of itself.
 //
 // WHY 600000 IS RETIRED AND THIS IS NOT "GUESSING LOWER". The 2026-07-09
 // recalibration raised the stand-in to 600k because the 200k-era number
@@ -743,8 +758,14 @@ export function discoverCapacity({ home = os.homedir() } = {}) {
   try {
     const raw = fs.readFileSync(path.join(claudeBaseDir(home), 'stats-cache.json'), 'utf8');
     const j = parseJsonc(raw);
-    const usage = j && typeof j === 'object' ? j.modelUsage : null;
-    if (!usage || typeof usage !== 'object') return fallback;
+    const usage = j && typeof j === 'object' && !Array.isArray(j) ? j.modelUsage : null;
+    // INSPECT L1: `typeof [] === 'object'`, so an ARRAY used to pass this guard
+    // and Object.values() would happily yield its elements. No measured
+    // exposure — the platform emits an object and every value stays bounded by
+    // the range check below — but this function's own comment promises "any
+    // doubt falls back (fail-closed)", and an array is doubt. Fixed rather than
+    // bounded, because the fix is four tokens.
+    if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return fallback;
     let smallest = null;
     for (const v of Object.values(usage)) {
       const w = Number(v && v.contextWindow);

@@ -1228,6 +1228,10 @@ export function applyPlan(plan, opts = {}) {
       // recovery copy and NO report line, indistinguishable from a clean run.
       const binName = plan.origin === 'wizard-cut' ? STORE_OLD_NAME : FAT_BIN_NAME;
       const binOrigin = plan.origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut';
+      // CWK-081 H1 — how many actions actually REMOVED content. This loop
+      // already derives that per action for the bin (`cut`); counting it costs
+      // one integer and is the evidence the Full-clean record needs below.
+      let removedCount = 0;
       for (const a of actionable) {
         if (a.type === 'create') continue; // an addition cut nothing
         // A DELETE banks the BUFFER, never a decode of it (G3-3). `baseBuf` is
@@ -1240,6 +1244,7 @@ export function applyPlan(plan, opts = {}) {
         // type there and recordBinItem encodes it once, at the boundary.
         const cut = a.type === 'delete' ? a.baseBuf : removedLines(a.baseBuf.toString('utf8'), a.content).join('\n');
         if (!cut.length) continue;
+        removedCount++; // CWK-081 H1: this action removed something
         const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
         if (binId === null) {
           flagged.push({
@@ -1255,17 +1260,50 @@ export function applyPlan(plan, opts = {}) {
       let deadLinks = [];
       try { deadLinks = deadLinkScan(actionable, physRoots, txDir); } catch { /* advisory only */ }
 
-      // CWK-081 (1) — record the GATE-PASSED FULL CLEAN. Reaching this line on a
-      // `wizard-cut` plan means the Full tier's transaction committed AFTER the
-      // fidelity block above refused every unapproved structured-token drop, so
-      // this is the one place in the system where "a semantic pass actually
-      // landed, gate-passed" is a fact rather than an inference. The conductor's
+      // CWK-081 (1) — record the GATE-PASSED FULL CLEAN. The conductor's
       // FULL(capacity) branch reads it: before it exists, the store's muscle is
       // UNMEASURED and the advisory that asserts otherwise is ineligible.
+      //
+      // ⚠️ THE PREDICATE IS "SOMETHING WAS REMOVED", NOT "ok:true" — INSPECT H1,
+      // and the first version of this block got the equivalence WRONG. It argued
+      // that an `ok:true` return on a wizard-cut plan IS a gate-passed Full-tier
+      // transaction, because the fidelity block refuses every unapproved drop.
+      // That proves the gate did not REFUSE. It never proved anything was
+      // ADJUDICATED: the fidelity loop skips every non-rewrite
+      // (`if (a.type !== 'rewrite') continue`), and a rewrite that drops nothing
+      // BECAUSE IT CHANGES NOTHING passes it vacuously. MEASURED through this
+      // very function: a PURE-CREATE plan, a NO-OP rewrite and an APPEND-ONLY
+      // rewrite all returned ok:true and all stamped the record — three ordinary
+      // shapes an honest wizard emits, none of them forgery. The advisory then
+      // tells the user "the semantic pass that judges the rest RAN and kept this
+      // content", which is the assertion-without-measurement that change (1)
+      // exists to remove, restored through its own eligibility fact.
+      //
+      // So the record keys on `removedCount` — at least one action whose
+      // baseline carried content the result does not. A semantic pass that
+      // judged text and acted on it removes something by construction; a
+      // transaction that removed nothing has adjudicated nothing this function
+      // can see.
+      //
+      // RESIDUE, named rather than implied away: a Full pass that genuinely
+      // judged every file and decided to KEEP all of it removes nothing, so it
+      // does not stamp, and the next FULL(capacity) crossing renders the ASK
+      // instead of the advisory. That is the SAFE direction and the honest one —
+      // this function cannot distinguish "judged and kept everything" from
+      // "never judged", so it declines to assert the stronger of the two. A
+      // delete of an already-empty file counts as nothing removed for the same
+      // reason (`cut.length` is 0), same direction.
+      //
+      // STILL NOT CLOSED, and unchanged: `plan.origin` is untrusted plan data,
+      // so a forged origin on a plan that DOES remove something still stamps
+      // (INSPECT's A4). Blast is bounded to WHICH ADVISORY TEXT one FULL
+      // crossing renders — never a delete, never a spend — and a second trusted
+      // channel for a cosmetic routing bit costs more than it protects.
+      //
       // Post-commit and fail-silent by construction (same discipline as the
       // advisory above): a state-write failure must never un-commit a run that
       // already succeeded — it only costs the next crossing one ask.
-      if (plan.origin === 'wizard-cut') {
+      if (plan.origin === 'wizard-cut' && removedCount > 0) {
         try { markFullClean(home, projectRoot, now, plan.sessionId); } catch { /* never un-commits */ }
       }
 

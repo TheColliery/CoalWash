@@ -2117,3 +2117,15 @@ test('CWK-081 (3): armExternalize surfaces ONCE per session id, and a NEW sessio
     assert.strictEqual(JSON.stringify(loadState(proj, home)), before, 'the no-id path writes nothing at all');
   } finally { clean(home, proj); }
 });
+
+
+test('CWK-081 L1: a modelUsage ARRAY is refused by the shape guard (typeof [] === "object" is the trap)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: [{ contextWindow: 300000 }] }), 'utf8');
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.discovered, false, 'an array is doubt, and this function fails closed on doubt');
+    assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
+  } finally { clean(home, proj); }
+});

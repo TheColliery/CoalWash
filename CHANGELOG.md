@@ -4,6 +4,22 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- **CoalWash now works out what your machine's context ceiling actually is, instead of using one fixed number for every install (the capacity adapter).** The FULL band has always had a "capacity wall" — the point where your always-loaded memory is crowding the session itself, and the honest advice stops being *wash* and becomes *move something out*. Until now that wall was a single placeholder shared by every user on every model. It now looks for a real per-machine figure first (`~/.claude/stats-cache.json`, the platform's own model stats), and when it finds one it uses it — and says so.
+- **The gauge line tells you WHERE the ceiling came from.** A ceiling that was actually discovered on your machine reads `capacity ~N tok (discovered: ...)`; a fallback reads `capacity ~N tok (CONSERVATIVE DEFAULT — no platform figure discovered)`, and only where it matters (a FULL store). A LEAN store is not told about a ceiling it is nowhere near. **On today's Claude Code the platform reports the field but leaves it empty, so most installs will see the conservative default — that is the honest answer, not a failure, and the day the platform fills the field CoalWash picks it up with no update needed.**
+
+### Changed
+
+- **A store between roughly 167,000 and 600,000 tokens of always-loaded memory will now read FULL where it used to read LEAN.** This is the one user-visible consequence of the release and it is deliberate. The old placeholder assumed ~600k of usable room; the new conservative default assumes the smallest window a supported session actually runs on, minus the reserve the platform holds back for auto-compaction (200,000 − 33,000 = 167,000). If your governance and memory files add up to 167k tokens on a 200k-token session, there is essentially no room left for the conversation — the old number said that was fine and it was not. **Nothing is deleted and nothing runs automatically because of this**: a FULL crossing runs the free mechanical pass and, at most, asks you one question.
+- **CoalWash no longer tells you your memory is "muscle, not bloat" until something has actually looked at it.** The FULL(externalize) advisory used to say a store was muscle on the strength of the MECHANICAL scan, which only ever proves exact duplicates and spacing — it never reads meaning. That advisory now appears only after a Full (semantic) pass has genuinely removed something in the same episode. Before that, the same crossing offers you the Full pass instead of advising you to go relocate files. Both messages now say what was actually measured.
+- **The capacity message appears at most once per session** instead of on every turn while a store sits over the ceiling.
+
+### Fixed
+
+- **A Full-pass run that removed nothing could still mark your store as "adjudicated".** A transaction that only creates files, rewrites a file to identical content, or appends, committed successfully and was recorded as a completed semantic pass — after which CoalWash would tell you a pass had judged your memory and kept it. The record now requires that something was actually removed. — test: `scripts/lib/apply.test.mjs` (`CWK-081 H1`)
+- The capacity probe now refuses a malformed `modelUsage` array instead of reading values out of it. — test: `scripts/lib/caliper.test.mjs` (`CWK-081 L1`)
+
 ## [1.5.1] - 2026-09-10
 
 ### Fixed
