@@ -292,9 +292,28 @@ test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never
 
 // A real git repo, because the whole point of the change is what GIT answers for a path
 // that is not on disk. A fake runCheckIgnore would prove only that our parser parses.
+// HERMETIC ENV — the fixture's own worst failure, MEASURED not imagined. git
+// exports GIT_DIR (and GIT_INDEX_FILE) to every hook it runs, so a suite run
+// from `.githooks/pre-commit` hands these git calls the CALLER's repository.
+// From the main worktree GIT_DIR is the relative ".git", which re-resolves
+// harmlessly against `cwd: dir`; from a LINKED WORKTREE it is ABSOLUTE, and
+// then `git init` in this fixture RE-INITIALISES THE REAL REPOSITORY instead
+// of the temp dir — observed live: the parent repo's core.bare flipped to true
+// and `check-ignore` answered against the real .gitignore, so a fixture cell
+// that expects 2 ignored roots read 0. A test that can reconfigure the
+// developer's own repo is not a hermetic test, whatever it asserts.
+// Scrubbed rather than overridden: an inherited value we do not know about is
+// exactly the class that produced this, so the list is DELETED, never re-set.
+const GIT_ENV_KEYS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_OBJECT_DIRECTORY', 'GIT_PREFIX'];
+function hermeticGitEnv() {
+  const env = { ...process.env };
+  for (const k of GIT_ENV_KEYS) delete env[k];
+  return env;
+}
+
 function gitFixture(gitignoreText) {
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-079-')));
-  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8' });
+  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8', env: hermeticGitEnv() });
   if (r.error || r.status !== 0) {
     // INSPECT F3 — the dir exists BEFORE git is probed, and on this path the caller gets
     // null, so its own finally{} holds no handle to remove. Leaving it re-opens board
@@ -307,8 +326,10 @@ function gitFixture(gitignoreText) {
   return dir;
 }
 const runner = (dir) => (names) => {
+  // Same scrub as gitFixture above, same reason: an inherited GIT_DIR makes this
+  // answer for the caller's repository rather than the fixture's.
   const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-    { cwd: dir, encoding: 'utf8', input: names.map((n) => n + "/").join('\n') + '\n' });
+    { cwd: dir, encoding: 'utf8', env: hermeticGitEnv(), input: names.map((n) => n + "/").join('\n') + '\n' });
   return ci.error ? '' : ci.stdout;
 };
 
