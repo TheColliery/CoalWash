@@ -187,7 +187,11 @@ export function seatbeltAdvisory(opts) {
 
 // The FULL(externalize) advisory — pure information, never an ask (a wash
 // cannot help ~all-muscle over capacity; the growable-full invariant forbids
-// steering the user into washing legitimate muscle). Fixed-template for the
+// steering the user into washing legitimate muscle). REACHABILITY, CWK-081:
+// the conductor routes here only after a gate-passed Full clean landed this
+// episode; before one, the same crossing goes to wizardEscalation's
+// 'capacity-unmeasured' cause instead. This template may therefore SAY a Full
+// pass adjudicated the content — at every site that can reach it, one did. Fixed-template for the
 // same program-side-text reason as the asks above. #21 EXTERNALIZE-TEMPLATE:
 // externalize is pure INFORMATION (a wash cannot shrink muscle), so CoalWash
 // never auto-moves it — the template names the hand-move steps (cluster ->

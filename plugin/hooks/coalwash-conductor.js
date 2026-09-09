@@ -29,9 +29,14 @@
 //                   site, 0f), the UNCONDITIONAL FULL force directive (0m —
 //                   economic AND absolute-cap, no proof gate, no off
 //                   switch), the OBESE auto-Quick directive (0d — standing
-//                   config, never an ask), or the FULL(externalize)
-//                   pure-information advisory — never an ask, since washing
-//                   cannot help ~all-muscle over capacity. Mirrors
+//                   config, never an ask), or ONE OF THE TWO capacity
+//                   outcomes (CWK-081): after a gate-passed Full clean landed
+//                   this episode, the FULL(externalize) pure-information
+//                   advisory — never an ask, since washing cannot help
+//                   ~all-muscle over capacity; BEFORE one, the Full-tier
+//                   consent instead, because "muscle" is then a claim nothing
+//                   has measured. Either way, at most ONCE per session.
+//                   Mirrors
 //                   rot-canary-stop.js's exact output mechanism — a
 //                   structured `{decision:'block', reason}` JSON write, not
 //                   plain console.log — because THAT is what makes Stop a
@@ -50,8 +55,11 @@
 // which is now CONTINUOUS: whatever actually cuts the fat — a hand edit,
 // the wizard, never Quick itself, which has no cutter — drops the next
 // gauge's re-measured fat under the disarm mark); the
-// WALL is the REAL capacity line only (capacityTokens + the CC index caps):
-// wash-first when armed, externalize when ~all-muscle. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
+// WALL is the REAL capacity line only (capacityTokens -- DISCOVERED per machine
+// where the platform exposes a window, else the derived conservative default,
+// CWK-081 -- plus the CC index caps): wash-first when armed; when ~all-muscle,
+// the externalize advice only AFTER a gate-passed Full clean this episode,
+// otherwise the Full-tier consent first. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
 // A DICTATOR"): every FULL crossing force-runs the FREE Quick pass under
 // the same standing consent as OBESE's auto-Quick — no economic proof
 // needed for the free tier (the break-even proof governs the PAID wizard;
