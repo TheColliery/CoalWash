@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'node:path';
-import { pointerCandidates, checkPointers, PENDING_POINTERS } from './pointer-check.mjs';
+import { pointerCandidates, checkPointers, looksPathShaped, deriveIgnoredRoots, PENDING_POINTERS } from './pointer-check.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 // FIXTURES ARE INPUT, NOT CLAIMS. Every backticked path below is DATA this test feeds
 // the gate, never a statement this repo makes about its own tree. They keep their
@@ -238,4 +241,138 @@ test('NON-CIRCULAR: membership and verdict are SEPARATE predicates', () => {
   assert.strictEqual(good.checked, bad.checked, 'membership does not depend on the verdict');
   assert.strictEqual(msgs(good).length, 0);
   assert.strictEqual(msgs(bad).length, 1);
+});
+
+
+// ---------------------------------------------------------------- CWK-079: SHAPE
+//
+// looksPathShaped feeds the IGNORE PROBE's candidate DISCOVERY only. The exhibits below
+// are this room's own measured non-path population, taken from the 10 walked surfaces
+// (11 tokens, 6 distinct first segments) — arithmetic and identifier pairs, not paths.
+
+test('SHAPE-079: looksPathShaped rejects this room\'s own measured non-path tokens', () => {
+  for (const tok of ['n/a', 'EVIDENCE=n/a', 'beforeBytes/afterBytes', 'alwaysBeforeTokens/alwaysAfterTokens', 'WIZARD-2/4', 'WIZARD-3/4']) {
+    assert.strictEqual(looksPathShaped(tok), false, `${tok} is not a path and must not reach the probe`);
+  }
+});
+
+test('SHAPE-079: looksPathShaped accepts a filename-shaped token, including one with a :line ref', () => {
+  for (const tok of ['scripts/lib/apply.mjs', 'skills/coalwash/SKILL.md', 'scripts/verify.mjs:259']) {
+    assert.strictEqual(looksPathShaped(tok), true, `${tok} is filename-shaped and must reach the probe`);
+  }
+});
+
+test('SHAPE-079: looksPathShaped accepts an explicit trailing-slash directory reference', () => {
+  assert.strictEqual(looksPathShaped('scripts/lib/'), true);
+});
+
+test('SHAPE-079 residue: a trailing slash is accepted with NO check on what precedes it', () => {
+  assert.strictEqual(looksPathShaped('os.tmpdir()/coalwash/'), true,
+    'named residue, not an oversight — see the function\'s own comment');
+});
+
+test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never check-exempt', () => {
+  assert.strictEqual(looksPathShaped('scripts/lib'), false,
+    'excluded from DISCOVERY only — the NON-LOCAL pair below is why that is not the same as exempt');
+});
+
+// ---------------------------------------------------------- CWK-079: DERIVATION
+
+// A real git repo, because the whole point of the change is what GIT answers for a path
+// that is not on disk. A fake runCheckIgnore would prove only that our parser parses.
+function gitFixture(gitignoreText) {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-079-')));
+  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8' });
+  if (r.error || r.status !== 0) return null; // git unavailable — caller SKIPs visibly
+  fs.writeFileSync(path.join(dir, '.gitignore'), gitignoreText);
+  return dir;
+}
+const runner = (dir) => (names) => {
+  const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
+    { cwd: dir, encoding: 'utf8', input: names.map((n) => n + "/").join('\n') + '\n' });
+  return ci.error ? '' : ci.stdout;
+};
+
+test('DERIVE-079: the ignore set is EXISTENCE-INDEPENDENT — an absent gitignored root is still found', (t) => {
+  const dir = gitFixture('throwaway-build/\n');
+  if (!dir) return t.skip('git unavailable');
+  try {
+    assert.strictEqual(fs.existsSync(path.join(dir, 'throwaway-build')), false,
+      'the fixture must NOT create the directory — absence is the whole point');
+    const ign = deriveIgnoredRoots({
+      surfaces: [S('README.md', 'see `throwaway-build/readme.md`')],
+      runCheckIgnore: runner(dir),
+    });
+    assert.deepStrictEqual([...ign.ignored], ['throwaway-build'],
+      'a disk-derived probe reads ZERO here, which is the defect CWK-079 removes');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('DERIVE-079: a CRLF .gitignore\'s blank line must not ignore EVERYTHING (the exemplar\'s shape does)', (t) => {
+  const dir = gitFixture('docs/\r\n\r\nskills-lock.json\r\n');
+  if (!dir) return t.skip('git unavailable');
+  try {
+    const ign = deriveIgnoredRoots({
+      surfaces: [S('README.md', '`docs/x.md` and `zzz/y.md`')],
+      runCheckIgnore: runner(dir),
+    });
+    assert.ok(ign.ignored.has('docs'), 'the REAL pattern must still match');
+    assert.ok(!ign.ignored.has('zzz'), 'an unrelated root must NOT be ignored by a blank CRLF line');
+    assert.strictEqual(ign.artefacts.length, 1, "the dropped row is REPORTED, never silently swallowed");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('DERIVE-079: agent homes are held out BEFORE the probe, and counted separately', () => {
+  const ign = deriveIgnoredRoots({
+    surfaces: [S('README.md', '`.claude/coalwash/keeps.json` and `scripts/lib/apply.mjs`')],
+    agentHomes: new Set(['.claude', '.agents']),
+    runCheckIgnore: () => '',
+  });
+  assert.deepStrictEqual([...ign.probed], ['scripts'], 'the agent home never reaches git');
+  assert.strictEqual(ign.homesPresent, 1);
+  assert.strictEqual(ign.cited.size, 2, 'CITED counts what the surfaces name; PROBED counts what git was asked');
+});
+
+test('DERIVE-079: CITED and PROBED are separate numbers, and a non-path token is in NEITHER', () => {
+  const ign = deriveIgnoredRoots({
+    surfaces: [S('README.md', '`scripts/lib/apply.mjs` `WIZARD-2/4` `n/a`')],
+    runCheckIgnore: () => '',
+  });
+  assert.deepStrictEqual([...ign.cited], ['scripts']);
+  assert.deepStrictEqual(ign.probed, ['scripts']);
+});
+
+// ------------------------------------------------------------ CWK-079: NON-LOCAL
+//
+// THE PROPERTY THE SHAPE TEST MUST NOT BE READ PAST. `looksPathShaped` gates DISCOVERY,
+// never JUDGEMENT: an extensionless citation under a gitignored root is exempt only from
+// contributing its OWN root. Alone it is silent; the moment ANY unrelated shape-qualified
+// citation shares that root, it FAILs with it. Proven with a two-plant pair through the
+// real derivation and the real checker — the verdict for plant A depends on plant B.
+
+test('NON-LOCAL-079: an extensionless citation under a gitignored root is checked non-locally, not exempt', (t) => {
+  const dir = gitFixture('throwaway-build/\n');
+  if (!dir) return t.skip('git unavailable');
+  try {
+    const plantA = S('commands/stats.md', 'Notes: `throwaway-build/notes`.');
+    const plantB = S('commands/update.md', 'Reference: `throwaway-build/readme.md`.');
+    const check = (surfaces) => {
+      const ign = deriveIgnoredRoots({ surfaces, runCheckIgnore: runner(dir) });
+      return checkPointers({
+        ...base, surfaces, ignoredRoots: ign.ignored, ourRoots: new Set(['commands']),
+      });
+    };
+
+    // A ALONE: shape-rejected at discovery, nothing else names that root -> SILENT.
+    assert.deepStrictEqual(msgs(check([plantA])), [],
+      'plant A alone must stay silent — extensionless, so it discovers no root of its own');
+
+    // A + B: B is filename-shaped, arms the root, and now BOTH are judged.
+    const both = msgs(check([plantA, plantB]));
+    assert.strictEqual(both.length, 2, `both plants must FAIL once the root is armed, got: ${both.join(" | ")}`);
+    assert.ok(both.some((m) => m.includes('throwaway-build/notes') && /gitignored/.test(m)),
+      'plant A was never exempt from the CHECK — only from discovering its own root');
+    assert.ok(both.some((m) => m.includes('throwaway-build/readme.md') && /gitignored/.test(m)),
+      'plant B, the citation that armed the root, must FAIL too');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

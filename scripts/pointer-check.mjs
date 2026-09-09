@@ -184,6 +184,123 @@ export function pointerCandidates(text) {
   return out;
 }
 
+// SHAPE TEST FOR THE IGNORE PROBE ONLY (CWK-079). It decides which first segments a
+// CALLER may DISCOVER and feed to `git check-ignore`. It is NEVER consulted by
+// `checkPointers`' own `ignoredRoots.has(first)` branch, which judges every token
+// reaching it regardless of shape.
+//
+// THE PROPERTY IS NON-LOCAL, and reading past that is the mistake this comment exists
+// to prevent: a token this test REJECTS is not exempt from the check — it is exempt
+// only from CONTRIBUTING ITS OWN ROOT to the set the check runs against. So a rejected
+// citation is checked IF AND ONLY IF some OTHER, unrelated, shape-qualified citation
+// anywhere in the surface set shares its first segment. Pinned by a two-plant pair in
+// pointer-check.test.mjs. Do NOT "fix" the asymmetry by applying this test inside
+// `checkPointers` too: that would silently stop FAILing a real gitignored citation that
+// happens to be extensionless. Keep the wider catch; state the residue instead.
+//
+// WHY A SHAPE TEST AT ALL — MEASURED HERE, not inherited. Deriving the probe set from
+// CITED first segments (the CWK-079 fix) removes the old existence dependence and, in
+// exchange, lets a token that is not a path at all reach `git check-ignore`. On this
+// room's own 10 ship-text surfaces that population is REAL and is 11 tokens / 6 distinct
+// first segments: EVIDENCE=n over a, n over a, beforeBytes over afterBytes,
+// alwaysBeforeTokens over alwaysAfterTokens, and two WIZARD step ratios — arithmetic and
+// identifier pairs, none of them a directory in any namespace. Every one is an ordinary
+// name a `.gitignore` could plausibly carry, so leaving them in the probe set means one
+// ordinary ignore line can FAIL a citation whose remedy ("commit the file") is
+// incoherent for a ratio. (Written WITHOUT backticks on purpose: this file is not a
+// walked surface today, and keeping the exhibits inert costs nothing if it ever becomes
+// one — the same convention the blind-spot notes above already use.)
+//
+// THE RESIDUE, both directions, named rather than hidden:
+//   - STILL LETS THROUGH: a token ending `/` is accepted with no check on what precedes
+//     it, so a function-call-shaped token would reach the probe. Measured population
+//     here today: ZERO. And the last-segment test accepts an all-digit "extension",
+//     so a version-shaped token could pass as filename-shaped. Also ZERO here today.
+//   - DISCOVERY-EXCLUDED: an extensionless real path with no trailing slash no longer
+//     contributes its own root. Measured here: the 11 rejected tokens above are all
+//     non-paths, so this direction costs ZERO real citations on this tree today —
+//     a number that moves the day a real extensionless path is cited, which is why the
+//     non-locality above is pinned rather than described.
+export function looksPathShaped(tok) {
+  const t = String(tok).replace(/:\d+(-\d+)?$/, '');
+  if (t.endsWith('/')) return true;
+  return /\.[A-Za-z0-9]{1,10}$/.test(t.split('/').pop());
+}
+
+// DERIVE THE IGNORE SET FROM THE CITED PATHS, NEVER FROM THE CALLER'S DISK (CWK-079).
+//
+// THE DEFECT THIS REPLACES, measured on this room before the change: the caller built
+// its probe list from `fs.readdirSync(repo)`, so the set was a listing of what the
+// machine running the gate happened to have. A clean clone carries no gitignored entry
+// BY DEFINITION, so on a clone — and on every CI leg — the set ran at ZERO and a
+// citation into a gitignored tree fell out of scope SILENTLY rather than FAILing. Both
+// halves measured here: 15 ignored roots on this maintainer box, 0 of which any
+// ship-text surface actually cites, against 0 on a clean checkout.
+//
+// `.gitignore` is TRACKED, so `git check-ignore` answers for an ABSENT path exactly as
+// it does for a present one — the PATTERN is what matters, never the directory listing.
+//
+// TRAILING SLASH: a `dir/`-anchored pattern does not match the bare name of a path git
+// cannot see on disk (git will not infer that an absent path is a directory), so each
+// candidate is fed as `name + '/'`.
+//
+// DEVIATION FROM THE EXEMPLAR, and it is REQUIRED here rather than a preference: the
+// exemplar reads plain `check-ignore --stdin` output, where every returned line means
+// IGNORED. That is unsound on any checkout whose `.gitignore` has CRLF line endings —
+// git parses a blank `\r\n` line as a pattern of a lone CR, and that pattern matches
+// EVERY trailing-slash path. Reproduced minimally (git 2.55.0.windows.5): a fresh repo
+// whose `.gitignore` is `docs/`, a blank line and one more entry, all CRLF, reports an
+// arbitrary `zzz/` as ignored at the blank line with an EMPTY pattern. This is not
+// hypothetical here — this repo commits `.gitignore` as LF and `.gitattributes` asks
+// for `eol=lf`, yet the working copy on this box is CRLF (board #56 checkout class),
+// so the exemplar's shape measured 7 ignored roots and 10 FALSE FAILs on a clean tree.
+// So the probe runs `-v` and DROPS any row whose matched pattern is EMPTY: an empty
+// pattern cannot legitimately ignore anything, so such a row is a parse artefact, never
+// a rule. Artefacts are RETURNED, never swallowed, so a caller can print the count.
+//
+// An unparseable `-v` row is treated as IGNORED (loud), not skipped: this gate's own
+// doctrine is that a wrong FAIL names its file and token and gets investigated, while a
+// dead citation falling silently out of scope is the failure it exists to catch.
+export function deriveIgnoredRoots({
+  surfaces = [],
+  agentHomes = new Set(),
+  runCheckIgnore,           // (names[]) => stdout string of `git check-ignore -v --stdin`
+} = {}) {
+  const cited = new Set();
+  for (const s of surfaces) {
+    if (typeof s?.text !== 'string') continue;
+    for (const tok of pointerCandidates(s.text)) {
+      if (!looksPathShaped(tok)) continue;
+      cited.add(tok.split('/')[0]);
+    }
+  }
+  // Agent homes are held out BEFORE the question is asked: `.claude/` and `.agents/`
+  // are gitignored here AND are the user-tree paths our shipped prose names, so probing
+  // them would FAIL a correct citation.
+  let homesPresent = 0;
+  const probed = [];
+  for (const name of cited) {
+    if (agentHomes.has(name)) { homesPresent++; continue; }
+    probed.push(name);
+  }
+  const ignored = new Set();
+  const artefacts = [];
+  if (probed.length && typeof runCheckIgnore === 'function') {
+    const out = runCheckIgnore(probed);
+    for (const line of String(out == null ? '' : out).split('\n')) {
+      if (!line.trim()) continue;
+      const tab = line.lastIndexOf('\t');
+      if (tab < 0) continue;
+      const p = line.slice(tab + 1).trim().replace(/[/]+$/, '');
+      if (!p) continue;
+      const m = /^(.*):(\d+):(.*)$/.exec(line.slice(0, tab));
+      if (m && m[3] === '') { artefacts.push(`${p} <- ${m[1]}:${m[2]} matched an EMPTY pattern`); continue; }
+      ignored.add(p);
+    }
+  }
+  return { cited, probed, ignored, artefacts, homesPresent };
+}
+
 // `docs/x.md:12` and `scripts/` both name a real thing; the line suffix and the
 // trailing slash are punctuation, not part of the path.
 function normalise(tok) {
@@ -193,7 +310,10 @@ function normalise(tok) {
 export function checkPointers({
   surfaces = [],            // [{ label, text, historyOnly? }]
   ourRoots = new Set(),     // top-level names that belong to THIS repo
-  ignoredRoots = new Set(), // top-level names git ignores (files AND hidden dirs)
+  // FIRST SEGMENTS OF CITED PATHS that .gitignore matches — never a listing of what the
+  // caller has on disk (CWK-079). Build it with `deriveIgnoredRoots` above; a set derived
+  // from a directory listing reads ZERO on every clean clone and every CI leg.
+  ignoredRoots = new Set(),
   agentHomes = new Set(),   // first segments this tool writes INTO A USER's tree
   hasEntry = () => false,   // (relDir, name) => boolean
   resolve,                  // (relPath) => 'tracked' | 'untracked' | 'missing'
