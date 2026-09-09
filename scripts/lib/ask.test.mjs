@@ -123,6 +123,28 @@ test('CWK-081 F1: the advisory claims only what the record establishes (a pass R
   assert.match(r, /NOTHING about files the pass never touched/, 'and names the coverage limit it cannot see past');
 });
 
+// CWK-082 L2 — prohibition #31 stands (the move is a HAND move, CW owns nothing
+// in the estate), so the fix is ACCOUNTING: the advisory names WHERE the weight
+// is, and names the bound it cannot see past.
+test('CWK-082 L2: the advisory NAMES the externalizable residue and the bound it cannot see past', () => {
+  const r = externalizeAdvisory({
+    hardCeilingTokens: 167000,
+    residue: [
+      { path: '/proj/CLAUDE.md', tokensEst: 9000 },
+      { path: '/home/.claude/projects/x/memory/MEMORY.md', tokensEst: 4000 },
+    ],
+  });
+  assert.match(r, /CLAUDE\.md ~9000 tok/, 'the largest always-loaded entry is named with its weight');
+  assert.match(r, /MEMORY\.md ~4000 tok/, 'and so is the next one');
+  assert.match(r, /moved OUT of the store leaves this gauge/, 'and the bound is stated, not papered');
+});
+
+test('CWK-082 L2: with no residue cached the advisory says nothing about weight — it never invents a list', () => {
+  const r = externalizeAdvisory({ hardCeilingTokens: 167000 });
+  assert.ok(!/WHERE THE WEIGHT IS/.test(r), 'absent data -> no section, never a fabricated one');
+  assert.match(r, /moved OUT of the store leaves this gauge/, 'the BOUND is unconditional — it is true whether or not a list exists');
+});
+
 test('externalizeAdvisory: a missing hardCeilingTokens degrades to a "?" placeholder, never throws', () => {
   assert.doesNotThrow(() => externalizeAdvisory({}));
   assert.ok(externalizeAdvisory({}).includes('~? tok'));

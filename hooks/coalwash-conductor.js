@@ -321,6 +321,12 @@ async function handleSessionStart(input) {
     // the Stop hook's cheap re-stat baseline for catching a within-session
     // spike without paying for a full re-gauge on every turn.
     const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
+    // CWK-082 L2: computed HERE, where the entries and their sizes already exist,
+    // so the Stop path can NAME the residue off the cache instead of re-walking
+    // the store (Phoenix #3). One implementation, and it lives in the lib. The
+    // gated re-gauge below threads it too — a fix at one of two caching sites
+    // would let the OTHER one blank the list it is about to render.
+    const externalizable = caliper.externalizableResidue(disc.entries);
 
     // Cache everything the Stop hook needs to act WITHOUT re-measuring
     // (Phoenix #3): the verdict itself, the ceiling's hysteresis bit
@@ -337,7 +343,7 @@ async function handleSessionStart(input) {
       muscleTokens: gv.muscleTokens, demotableTokens: gv.demotableTokens,
       reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
       hardCeilingTokens: verdict.hardCeilingTokens, capacitySource: gv.capacitySource,
-      alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
+      alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes, externalizable,
       storeTotalBytes: m.totalBytes, // the WHOLE measured store — the bin-retention budget base (P5/P8)
     }, now, { scanEverything }); // CWK-057: ON lifts the 200-path cap on the Stop re-stat baseline
     // Uniform once-per-crossing arming on the band itself — no more
@@ -466,13 +472,14 @@ async function handleStop(input) {
         // comment for why it does NOT live in the RE-TIER module).
         const gv = caliper.gaugeVerdict({ measure: m, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps, envelope: envelopeForConfig(cfg), capacity: caliper.discoverCapacity({ home }) }); // CWK-081: the gated re-gauge is the OTHER full-measure site, so the adapter rides it too
         const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
+        const externalizable = caliper.externalizableResidue(disc.entries); // CWK-082 L2, same as the SessionStart gauge
         caliper.recordVerdict(home, projectRoot, {
           band: gv.verdict.band, reason: gv.verdict.reason, economical: gv.economical, fatTokens: gv.fatTokens,
           overCeiling: gv.verdict.over, econLatched: gv.verdict.econLatched,
           perDay: gv.perDay, breakEvenDays: gv.breakEvenDays,
           muscleTokens: gv.muscleTokens, demotableTokens: gv.demotableTokens,
           reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
-          hardCeilingTokens: gv.verdict.hardCeilingTokens, capacitySource: gv.capacitySource, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
+          hardCeilingTokens: gv.verdict.hardCeilingTokens, capacitySource: gv.capacitySource, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes, externalizable,
           storeTotalBytes: m.totalBytes, // same base as SessionStart (P5/P8)
         }, now, { scanEverything }); // CWK-057, same clamped flag as the gauge above
         caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens, session: input && input.session_id });
@@ -527,7 +534,7 @@ async function handleStop(input) {
       return;
     }
     reason = fullCleaned
-      ? ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens, capacitySource: lastVerdict.capacitySource })
+      ? ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens, capacitySource: lastVerdict.capacitySource, residue: lastVerdict.externalizable })
       : ask.wizardEscalation({
         cause: 'capacity-unmeasured',
         fatTokens, breakEven, reorg, spawns,

@@ -636,6 +636,37 @@ export function gaugeVerdict({ measure, wasOver = false, wasEconLatched = false,
   };
 }
 
+// CWK-082 L2 — THE EXTERNALIZABLE RESIDUE. The FULL(externalize) advisory tells
+// a user to relocate muscle out of the always-loaded set BY HAND, and that is
+// doctrine, not a defect: prohibition #31 (SKILL.md:37/:157, method.md:30) says
+// externalize is pure INFORMATION because CoalWash owns nothing in the estate.
+// SKILL.md:157 already states the exposure in ship-text — "content moved by hand
+// leaves the always-loaded set with no report line". So the missing half was
+// never a GUARD on the move; it was that nothing COUNTED or NAMED the residue
+// afterwards. This is that accounting: which always-loaded entries actually
+// carry the weight a hand-move would have to come out of, largest first.
+//
+// Deliberately ALWAYS-LOADED ONLY. A recall-tier file already costs the session
+// nothing, so naming it would invite a move that saves zero tokens and only
+// makes the store harder to find things in.
+//
+// A DISPLAY field with no decision branching on it, so it rides lastVerdict the
+// same way capacitySource does; the cap is small because that cache is
+// persisted state, not a report.
+export function externalizableResidue(entries, { top = 3 } = {}) {
+  const src = Array.isArray(entries) ? entries : [];
+  const out = [];
+  for (const e of src) {
+    if (!e || e.alwaysLoaded !== true || typeof e.path !== 'string') continue;
+    const bytes = Number(e.bytes);
+    // An unreadable size is DROPPED, never rendered as "~0 tok" — a zero on
+    // this surface reads as "nothing to move here", which is a claim.
+    if (!Number.isFinite(bytes) || bytes <= 0) continue;
+    out.push({ path: e.path, tokensEst: tokensEstFromBytes(bytes) });
+  }
+  out.sort((a, b) => b.tokensEst - a.tokensEst);
+  return out.slice(0, Math.max(0, Number(top) || 0));
+}
 // ---------------------------------------------------------------------------
 // OS-CITIZEN STATE LAYOUT (task #13, "well-behaved OS citizen — one namespace").
 // PER-PROJECT state RIDES the CC memory dir: it lives BESIDE the platform's own
@@ -1306,6 +1337,16 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now(), { sc
     // existing field changed meaning, and the absence self-heals in one
     // SessionStart).
     storeTotalBytes: Number.isFinite(storeTotalBytes) ? Math.round(storeTotalBytes) : 0,
+    // CWK-082 L2: the externalizable residue AT this gauge, so the Stop hook can
+    // NAME where the weight is without re-measuring (Phoenix #3 — the same class
+    // as hardCeilingTokens/capacitySource: a per-gauge DISPLAY field, no branch
+    // reads it, and absence degrades to an advisory that omits the section rather
+    // than inventing one). Shape-filtered on the way IN: this is persisted state,
+    // and a malformed cache must never reach a user-facing template.
+    externalizable: (Array.isArray(verdict && verdict.externalizable) ? verdict.externalizable : [])
+      .filter((e) => e && typeof e.path === 'string' && Number.isFinite(Number(e.tokensEst)))
+      .slice(0, 3)
+      .map((e) => ({ path: e.path, tokensEst: Math.round(Number(e.tokensEst)) })),
     at: now,
   };
   return saveState(proj, projectRoot, home);

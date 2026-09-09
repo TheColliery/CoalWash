@@ -213,8 +213,20 @@ export function seatbeltAdvisory(opts) {
 // AIRBAG (0p) snapshots that hand-move. Precedent = the CoalPortal record
 // (memory -> a durable file, a pointer left behind).
 export function externalizeAdvisory(opts) {
-  const { hardCeilingTokens, capacitySource } = opts || {};
+  const { hardCeilingTokens, capacitySource, residue } = opts || {};
   const cap = Number.isFinite(hardCeilingTokens) ? hardCeilingTokens : '?';
+  // CWK-082 L2 — the ACCOUNTING half. Prohibition #31 stands and is untouched:
+  // this template still never moves anything, and still names no destination
+  // that would dodge the gauge. What it adds is what nothing said before — WHERE
+  // the weight actually is, and the bound this gauge cannot see past. Rendered
+  // ONLY when a residue was cached: an absent list omits the section rather than
+  // fabricating one.
+  const weight = Array.isArray(residue)
+    ? residue.filter((e) => e && typeof e.path === 'string' && Number.isFinite(Number(e.tokensEst)))
+    : [];
+  const weightLine = weight.length
+    ? ` WHERE THE WEIGHT IS (the always-loaded entries a hand-move would have to come out of, largest first): ${weight.map((e) => `${String(e.path).split(/[\\/]/).pop()} ~${Math.round(Number(e.tokensEst))} tok`).join(' · ')}.`
+    : '';
   // CWK-081 (2): the old headline asserted "~no reclaimable fat (muscle, not
   // bloat)". The instrument behind that sentence is the MECHANICAL estimator,
   // which proves exact duplicates and excess spacing and nothing else — a lower
@@ -229,7 +241,7 @@ export function externalizeAdvisory(opts) {
   const capProv = capacitySource === 'conservative-default'
     ? ', a CONSERVATIVE DEFAULT — this platform exposes no context-window figure, so the ceiling is the smallest supported window minus the auto-compact reserve, not a discovered one'
     : (typeof capacitySource === 'string' && capacitySource ? `, discovered from ${capacitySource}` : ', a rough placeholder');
-  return `[CoalWash] memory gauge: FULL (externalize) — this store exceeds the machine's working-capacity ceiling (~${cap} tok${capProv}). WHAT THIS EPISODE ESTABLISHED, and nothing beyond it: a Full-tier (semantic) pass ran and REMOVED content under the fidelity gate, which refuses any drop the plan did not name. The mechanical tier proves exact duplicates and excess spacing only — a LOWER BOUND on fat, never a verdict that the rest is muscle — and this record cannot see how much of the store that pass covered, so it establishes NOTHING about files the pass never touched. SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. A wash cannot shrink muscle — the only move is to EXTERNALIZE (relocate muscle OUT of the always-loaded set). CoalWash NEVER auto-moves it (externalize is pure information; the write-path airbag snapshots your hand-move). The template: (1) CLUSTER the muscle by topic (largest cohesive block first); (2) pick a DESTINATION per cluster — a project doc / blueprint / design file that loads on demand, not every session; (3) MOVE it there by hand, leaving a one-line POINTER behind in the always-loaded file (title + where it went) so recall still reaches it. Precedent: the CoalPortal record moved from memory to a durable file with a pointer left behind. (task #4: the old "raise fatMultiple" escape is gone with the floor-multiple wall itself — the capacity line is real, and the only honest lever against it is moving muscle out.)`;
+  return `[CoalWash] memory gauge: FULL (externalize) — this store exceeds the machine's working-capacity ceiling (~${cap} tok${capProv}). WHAT THIS EPISODE ESTABLISHED, and nothing beyond it: a Full-tier (semantic) pass ran and REMOVED content under the fidelity gate, which refuses any drop the plan did not name. The mechanical tier proves exact duplicates and excess spacing only — a LOWER BOUND on fat, never a verdict that the rest is muscle — and this record cannot see how much of the store that pass covered, so it establishes NOTHING about files the pass never touched. SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. A wash cannot shrink muscle — the only move is to EXTERNALIZE (relocate muscle OUT of the always-loaded set). CoalWash NEVER auto-moves it (externalize is pure information; the write-path airbag snapshots your hand-move). The template: (1) CLUSTER the muscle by topic (largest cohesive block first); (2) pick a DESTINATION per cluster — a project doc / blueprint / design file that loads on demand, not every session; (3) MOVE it there by hand, leaving a one-line POINTER behind in the always-loaded file (title + where it went) so recall still reaches it. Precedent: the CoalPortal record moved from memory to a durable file with a pointer left behind.${weightLine} ACCOUNTING, so the number stays honest either way: a file moved WITHIN the store still counts here — it left the always-loaded set, not the store — while a file moved OUT of the store leaves this gauge's sight entirely and no line anywhere will report it; CoalWash cannot see past that boundary and does not claim to. (task #4: the old "raise fatMultiple" escape is gone with the floor-multiple wall itself — the capacity line is real, and the only honest lever against it is moving muscle out.)`;
 }
 
 // The dig-gauge ULTRA offer (ULTRA trigger #2, dig-gauge.mjs) — fired on a

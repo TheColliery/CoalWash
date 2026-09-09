@@ -16,7 +16,7 @@ import {
   FAT_ARM_TOKENS, FAT_REARM_TOKENS, mechFatFromText,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
   readBudgetFor, READ_BUDGET_DEFAULT,
-  discoverCapacity, markFullClean, armExternalize,
+  discoverCapacity, markFullClean, armExternalize, externalizableResidue,
   CAPACITY_STANDARD_WINDOW_TOKENS, CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, CAPACITY_DISCOVERY_MIN_TOKENS,
   __testHooks,
 } from './caliper.mjs';
@@ -2081,6 +2081,36 @@ test('CWK-081 adapter: gaugeVerdict JUDGES against the supplied capacity and REP
   assert.strictEqual(hi.verdict.band, 'LEAN');
   assert.strictEqual(hi.capacityTokens, 967000);
   assert.strictEqual(hi.capacitySource, 'stats-cache');
+});
+
+// ---------------------------------------------------------------------------
+// CWK-082 L2 — the ACCOUNTING half. A hand-move is doctrine (prohibition #31:
+// externalize is pure information, CW owns nothing in the estate), so the cure
+// is never a guard on the move — it is that nothing NAMED the residue or the
+// bound afterwards.
+// ---------------------------------------------------------------------------
+
+test('CWK-082 L2: externalizableResidue ranks the ALWAYS-LOADED entries by weight and ignores the recall tier', () => {
+  const entries = [
+    { path: '/p/small.md', bytes: 400, alwaysLoaded: true },
+    { path: '/p/huge.md', bytes: 40000, alwaysLoaded: true },
+    { path: '/p/mid.md', bytes: 8000, alwaysLoaded: true },
+    { path: '/p/recall.md', bytes: 99999, alwaysLoaded: false },
+  ];
+  const r = externalizableResidue(entries);
+  assert.deepStrictEqual(r.map((e) => e.path), ['/p/huge.md', '/p/mid.md', '/p/small.md'],
+    'largest first, and the 99,999-byte RECALL file is absent — it costs no session, so moving it saves nothing');
+  assert.ok(r[0].tokensEst > r[1].tokensEst && r[1].tokensEst > r[2].tokensEst, 'each carries its own estimate');
+});
+
+test('CWK-082 L2: externalizableResidue caps its list and survives junk without throwing', () => {
+  const many = [];
+  for (let i = 0; i < 40; i++) many.push({ path: '/p/f' + i + '.md', bytes: 1000 + i, alwaysLoaded: true });
+  assert.strictEqual(externalizableResidue(many).length, 3, 'a default cap — this rides a persisted cache');
+  assert.strictEqual(externalizableResidue(many, { top: 1 }).length, 1);
+  assert.deepStrictEqual(externalizableResidue(null), [], 'no entries -> no claim');
+  assert.deepStrictEqual(externalizableResidue([{ path: '/p/x.md', bytes: 'nonsense', alwaysLoaded: true }]), [],
+    'an unreadable size is dropped rather than rendered as 0 tok');
 });
 
 // ---------------------------------------------------------------------------

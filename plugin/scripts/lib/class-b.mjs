@@ -380,20 +380,65 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   if (homePhys) walkRulesTree(path.join(claudeBaseDir(home), 'rules'), 'global');
 
   // 4. Memory store: ~/.claude/projects/<slug>/memory/ — MEMORY.md is the
-  //    always-loaded index; sibling *.md files load on recall.
+  //    always-loaded index; every OTHER *.md in the tree loads on recall.
+  //
+  //    RECURSIVE since CWK-082 L1, and the flat readdir it replaces was a free
+  //    exit from the gauge — not a theory. MEASURED (INSPECT §3a, four arms,
+  //    identical bytes on disk, through the SHIPPED discover->measure pair):
+  //    the same 49,515 bytes read 12,384 tok as memory/big-notes.md and 631 tok
+  //    as memory/notes/big-notes.md. 11,753 tok invisible, and flags EMPTY on
+  //    BOTH arms, so nothing anywhere said content had left. Step 3
+  //    (walkRulesTree) recurses but is anchored at .claude/rules; steps 1-2
+  //    reach a file only through an @import closure; so a *.md one directory
+  //    down was reachable by NO step. A band computed on that is not
+  //    "undercounting in the safe direction" — it reports LEAN on a store that
+  //    never shrank, which is a different failure. 0l capture-all is the law
+  //    being restored: MEASURE everything, THEN filter jurisdiction.
+  //
+  //    IT CANNOT INFLATE THE MAIN'S BMI, and that is this change's own bound:
+  //    only the TOP-LEVEL MEMORY.md is the index (depth === 0), so every entry
+  //    the widening adds carries alwaysLoaded:false and lands in m.total ONLY,
+  //    never m.alwaysLoaded — the same split the room already ruled for role
+  //    memories. Pinned by its own invariant test rather than argued here
+  //    (class-b.test.mjs, "the widening lands in m.total ONLY").
+  //
+  //    Capped on files AND dirs with a FLAG when it trips — deliberately the
+  //    SAME shape and the SAME constant as walkRulesTree above rather than a
+  //    second number to keep in step: a capped walk that says nothing is a
+  //    silently partial gauge. Symlink safety rides the same Dirent property
+  //    step 3 documents (a junction reports isSymbolicLink(), never
+  //    isDirectory()/isFile(), so it is skipped by construction) — which is
+  //    also why this now reads with { withFileTypes: true }.
+  //
+  //    RESIDUE, NAMED not closed — this closes the SUBDIR shape and nothing
+  //    wider. Recursion reaches only INSIDE memDir, so a class-B-shaped .md
+  //    placed ADJACENT to the store (INSPECT's OUTSIDE arm,
+  //    <project>/notes/big-notes.md) is still reachable by no step, and content
+  //    moved fully OUT of the store is beyond this gauge BY DESIGN. Do not read
+  //    this walk as covering either.
   {
     const memDir = ccMemoryDir(projectRoot, home);
-    let names = [];
-    try { names = fs.readdirSync(memDir); } catch { /* no memory dir yet — fine */ }
-    for (const name of names) {
-      if (!name.endsWith('.md')) continue;
-      const isIndex = name === 'MEMORY.md';
-      add(path.join(memDir, name), {
-        scope: 'project',
-        kind: isIndex ? 'memory-index' : 'memory',
-        alwaysLoaded: isIndex,
-      });
+    const stack = [{ dir: memDir, depth: 0 }];
+    let count = 0, dirs = 0;
+    while (stack.length && count < RULES_FILE_CAP && dirs < RULES_FILE_CAP) {
+      const { dir, depth } = stack.pop();
+      dirs++;
+      let names;
+      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; /* no memory dir yet — fine */ }
+      for (const d of names) {
+        const p = path.join(dir, d.name);
+        if (d.isDirectory()) { stack.push({ dir: p, depth: depth + 1 }); continue; }
+        if (!d.isFile() || !d.name.endsWith('.md')) continue;
+        const isIndex = depth === 0 && d.name === 'MEMORY.md';
+        add(p, {
+          scope: 'project',
+          kind: isIndex ? 'memory-index' : 'memory',
+          alwaysLoaded: isIndex,
+        });
+        count++;
+      }
     }
+    if (count >= RULES_FILE_CAP || dirs >= RULES_FILE_CAP) flags.push(`memory store capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP})`);
   }
 
   // ---------------------------------------------------------------------

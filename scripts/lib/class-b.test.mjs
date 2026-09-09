@@ -34,6 +34,80 @@ test('ccProjectSlug: every non-alphanumeric char becomes a dash, deterministical
   }
 });
 
+// ---------------------------------------------------------------------------
+// CWK-082 L1 — the memory store's discovery walk. Step 4 was a FLAT readdir, so
+// a *.md one directory down was reachable by NO step (step 3 is recursive but
+// anchored at .claude/rules; steps 1-2 reach a file only through an @import
+// closure). MEASURED by INSPECT §3a: the same 49,515 bytes read 12,384 tok as a
+// SIBLING and 631 tok in a SUBDIR — 11,753 tok invisible, flags EMPTY on both.
+// ---------------------------------------------------------------------------
+
+test('CWK-082 L1: a *.md in a memory SUBDIRECTORY is discovered — the same file one dir down is not a free exit from the gauge', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# index');
+    write(path.join(mem, 'sibling.md'), 'flat recall file');
+    write(path.join(mem, 'notes', 'deep.md'), 'moved one directory down');
+    write(path.join(mem, 'notes', 'deeper', 'deepest.md'), 'moved two directories down');
+    const d = discoverClassB({ projectRoot: proj, home });
+    const paths = d.entries.map((e) => e.path);
+    assert.ok(paths.includes(path.join(mem, 'notes', 'deep.md')), 'a nested recall file is discovered');
+    assert.ok(paths.includes(path.join(mem, 'notes', 'deeper', 'deepest.md')), 'and so is one two levels down');
+    assert.ok(paths.includes(path.join(mem, 'sibling.md')), 'the flat sibling still works (control: the widening did not replace step 4)');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-082 L1 INVARIANT: the widening lands in m.total ONLY — m.alwaysLoaded is byte-identical with and without a nested file', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# index\n' + 'index muscle line\n'.repeat(40));
+    const before = measureEntries(discoverClassB({ projectRoot: proj, home }).entries);
+    // 40 KB of DISTINCT content one directory down — big enough that any leak
+    // into the always-loaded slice would be unmissable.
+    let big = '';
+    for (let i = 0; i < 1200; i++) big += `nested distinct muscle line ${i}\n`;
+    write(path.join(mem, 'notes', 'big.md'), big);
+    const after = measureEntries(discoverClassB({ projectRoot: proj, home }).entries);
+    assert.strictEqual(after.alwaysLoaded.bytes, before.alwaysLoaded.bytes,
+      'the nested file must NOT inflate the main BMI: alwaysLoaded bytes unchanged');
+    assert.strictEqual(after.alwaysLoaded.tokensEst, before.alwaysLoaded.tokensEst,
+      'nor its token estimate');
+    assert.strictEqual(after.alwaysLoaded.files, before.alwaysLoaded.files, 'nor its file count');
+    assert.ok(after.totalBytes > before.totalBytes + 30000,
+      'and the bytes DO land in m.total — the non-vacuity control, without which the three equalities above would pass on a walk that found nothing');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-082 L1: a nested MEMORY.md is a RECALL file, never a second always-loaded index', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# the real index');
+    write(path.join(mem, 'archive', 'MEMORY.md'), '# a moved-aside copy, NOT loaded by the platform');
+    const d = discoverClassB({ projectRoot: proj, home });
+    const nested = d.entries.find((e) => e.path === path.join(mem, 'archive', 'MEMORY.md'));
+    assert.ok(nested, 'it is discovered');
+    assert.strictEqual(nested.alwaysLoaded, false, 'but only the TOP-LEVEL MEMORY.md is the index');
+    assert.strictEqual(nested.kind, 'memory');
+    const top = d.entries.find((e) => e.path === path.join(mem, 'MEMORY.md'));
+    assert.strictEqual(top.alwaysLoaded, true, 'control: the real index is still the index');
+    assert.strictEqual(top.kind, 'memory-index');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-082 L1: a runaway memory tree is CAPPED and the cap FLAGS — a capped walk is never silently partial', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# index');
+    for (let i = 0; i < 520; i++) write(path.join(mem, 'many', `f${i}.md`), 'x');
+    const d = discoverClassB({ projectRoot: proj, home });
+    assert.ok(d.flags.some((f) => /memory store capped/.test(f)), `the cap announces itself: ${JSON.stringify(d.flags)}`);
+  } finally { clean(home, proj); }
+});
+
 test('ccMemoryDir derives <base>/projects/<slug>/memory under the given home', () => {
   const { home, proj } = sandbox();
   try {

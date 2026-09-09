@@ -1758,11 +1758,21 @@ test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no sta
   // (beta.13 item 3 — each runWithStateContent() call is its OWN sandbox with
   // a unique tmpdir, so the cached absolute path LIST is necessarily
   // sandbox-specific even though the byte counts it feeds match).
-  const { at: _base, alwaysLoadedPaths: _pbase, ...baselineRest } = baseline;
+  // CWK-082 L2 added `externalizable`, the SECOND path-bearing field on this
+  // cache, so it takes the same exclusion — but on its PATHS ONLY. Its token
+  // estimates are sandbox-invariant, so they are compared below rather than
+  // dropped: an exclusion that swallowed the whole field would turn this
+  // equivalence test into a hole the next path-bearing field falls through.
+  const shape = (v) => (Array.isArray(v.externalizable) ? v.externalizable.map((e) => e.tokensEst) : null);
+  const { at: _base, alwaysLoadedPaths: _pbase, externalizable: _xbase, ...baselineRest } = baseline;
   for (const content of ['', '{ definitely not json', '{"projects": {"C:\\\\foo": {"leanFloorTok', '[1,2,3]', 'null']) {
-    const { at: _c, alwaysLoadedPaths: _pc, ...rest } = runWithStateContent(content);
+    const v = runWithStateContent(content);
+    const { at: _c, alwaysLoadedPaths: _pc, externalizable: _xc, ...rest } = v;
     assert.deepStrictEqual(rest, baselineRest, `state content ${JSON.stringify(content)} must gauge identically to no state file`);
+    assert.deepStrictEqual(shape(v), shape(baseline), `state content ${JSON.stringify(content)}: the externalizable residue must weigh the same too (paths are sandbox-specific, the token estimates are not)`);
   }
+  assert.ok(Array.isArray(shape(baseline)) && shape(baseline).length > 0,
+    'non-vacuity: the residue comparison above is only meaningful because this fixture HAS an always-loaded residue');
 });
 
 test('no class-B at all (empty project, no memory dir): silent, exit 0', () => {
