@@ -649,6 +649,20 @@ const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit']);
 
 // The touched file path from an Edit/Write/MultiEdit tool_input (the stable CC
 // arg key, confirmed vs rot-canary/CoalHearth's shipped hooks).
+//
+// RESIDUE, BY DESIGN, NAMED SO IT IS NOT RE-DERIVED (CWK-082 L3): this is the
+// exact reason the airbag cannot cover a SHELL-mediated write. A Bash payload
+// carries a command STRING, not a file_path, so this function has nothing to
+// read and no correct answer to give — locating a write target inside an
+// arbitrary shell string is not something it can do, and a parser that
+// half-works would produce an airbag that fires SOMETIMES, which is worse than
+// one that admits it is absent (a user told "protected" who is protected part
+// of the time stops taking their own precautions). Widening WRITE_TOOLS or the
+// hooks.json matcher to Bash would also put a hook on the hottest path in a
+// session for a narrow case — Phoenix #3. So the LIMIT is disclosed in the
+// externalize template instead (ask.mjs), which steers the move toward the
+// channel the airbag genuinely covers. Do not "fix" this by adding a shell
+// parser here.
 function touchedPath(input) {
   const inp = input && input.tool_input;
   return inp && typeof inp.file_path === 'string' ? inp.file_path : '';

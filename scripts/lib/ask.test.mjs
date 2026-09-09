@@ -158,10 +158,28 @@ test('#21 externalize-template: the muscle-only/wall-hit advisory renders the ha
   assert.match(r, /POINTER/, 'step 3: leave a pointer behind so recall still reaches it');
   assert.match(r, /by hand/, 'the user/agent moves it by hand');
   assert.match(r, /CoalPortal/, 'cites the memory->durable-file precedent');
-  assert.match(r, /airbag/, 'the write-path airbag snapshots the hand-move');
+  assert.match(r, /airbag/, 'the write-path airbag is named — CONDITIONED on the channel since L3, pinned by its own cell below');
   assert.ok(!r.includes('question tool'), 'still pure information, never an ask');
 });
 
+// CWK-082 L3 — the airbag claim was UNCONDITIONAL and is false on one channel.
+// MEASURED (INSPECT §3b, the real conductor, one PreToolUse payload per tool):
+// Write/Edit/MultiEdit each produce 3 snapshot files; Bash produces 0 and the
+// writeguard/ dir is never created. Two independent gates exclude Bash —
+// hooks.json's PreToolUse matcher AND the in-code WRITE_TOOLS belt — so a move
+// made with mv/sed/a heredoc/a script has NO undo net while the advisory said
+// one existed. The ruling: condition the claim and STEER, never extend the
+// airbag to Bash (a PreToolUse(Bash) hook would fire on the hottest path in a
+// session and would have to parse a shell string to find a target — an airbag
+// that fires SOMETIMES misleads more than one that admits it is absent).
+test('CWK-082 L3: the advisory CONDITIONS the airbag claim on the channel and STEERS toward the covered one', () => {
+  const r = externalizeAdvisory({ hardCeilingTokens: 167000 });
+  assert.match(r, /file-edit tools/i, "names the channel the airbag actually covers");
+  assert.match(r, /shell|Bash/i, "and names the channel it does not");
+  assert.match(r, /NOT covered|unprotected|no snapshot/i, "the absence is stated, not implied");
+  assert.ok(!/airbag snapshots your hand-move/.test(r),
+    'the retired UNCONDITIONAL sentence is gone — the pre-fix text ended in a parenthesis, not a period, so the anchor deliberately carries neither; a claim true on one channel and false on another is worse than none on a safety surface');
+});
 // ---------------------------------------------------------------------------
 // obeseAutoQuick (queue 0d, "OBESE AUTO-QUICK, NO ASK")
 // ---------------------------------------------------------------------------

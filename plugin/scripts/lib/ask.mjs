@@ -209,9 +209,25 @@ export function seatbeltAdvisory(opts) {
 // same program-side-text reason as the asks above. #21 EXTERNALIZE-TEMPLATE:
 // externalize is pure INFORMATION (a wash cannot shrink muscle), so CoalWash
 // never auto-moves it — the template names the hand-move steps (cluster ->
-// destination -> pointer), the USER/agent relocates by hand, and the write-path
-// AIRBAG (0p) snapshots that hand-move. Precedent = the CoalPortal record
-// (memory -> a durable file, a pointer left behind).
+// destination -> pointer) and the USER/agent relocates by hand. Precedent = the
+// CoalPortal record (memory -> a durable file, a pointer left behind).
+//
+// THE AIRBAG CLAIM IS CONDITIONED, AND THIS PARAGRAPH USED TO CARRY IT
+// UNCONDITIONALLY (CWK-082 L3). It read: "the write-path AIRBAG (0p) snapshots
+// that hand-move" — true for Edit/Write/MultiEdit, FALSE for a shell-mediated
+// one. Two independent gates exclude Bash (hooks.json's PreToolUse matcher and
+// the conductor's own WRITE_TOOLS belt), and INSPECT §3b measured the
+// consequence through the real hook: Write/Edit/MultiEdit produce 3 snapshot
+// files each, Bash produces 0 and the writeguard/ dir is never created.
+// So the template now STATES the condition and STEERS — an honest limit is
+// worth more when it is actionable, and the covered channel is one the agent
+// can simply choose. NOT closed by extending the airbag to Bash: that hook
+// would fire on every shell call (Phoenix #3, the hottest path in a session)
+// and would have to parse a command string to find a target, so it would fire
+// SOMETIMES — and a user told "protected" who is protected part of the time is
+// misled MORE than one told "unprotected", because they stop taking their own
+// precautions. The residue is stated where the mechanism lives (the conductor's
+// touchedPath) and in writeguard.mjs's own header.
 export function externalizeAdvisory(opts) {
   const { hardCeilingTokens, capacitySource, residue } = opts || {};
   const cap = Number.isFinite(hardCeilingTokens) ? hardCeilingTokens : '?';
@@ -241,7 +257,7 @@ export function externalizeAdvisory(opts) {
   const capProv = capacitySource === 'conservative-default'
     ? ', a CONSERVATIVE DEFAULT — this platform exposes no context-window figure, so the ceiling is the smallest supported window minus the auto-compact reserve, not a discovered one'
     : (typeof capacitySource === 'string' && capacitySource ? `, discovered from ${capacitySource}` : ', a rough placeholder');
-  return `[CoalWash] memory gauge: FULL (externalize) — this store exceeds the machine's working-capacity ceiling (~${cap} tok${capProv}). WHAT THIS EPISODE ESTABLISHED, and nothing beyond it: a Full-tier (semantic) pass ran and REMOVED content under the fidelity gate, which refuses any drop the plan did not name. The mechanical tier proves exact duplicates and excess spacing only — a LOWER BOUND on fat, never a verdict that the rest is muscle — and this record cannot see how much of the store that pass covered, so it establishes NOTHING about files the pass never touched. SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. A wash cannot shrink muscle — the only move is to EXTERNALIZE (relocate muscle OUT of the always-loaded set). CoalWash NEVER auto-moves it (externalize is pure information; the write-path airbag snapshots your hand-move). The template: (1) CLUSTER the muscle by topic (largest cohesive block first); (2) pick a DESTINATION per cluster — a project doc / blueprint / design file that loads on demand, not every session; (3) MOVE it there by hand, leaving a one-line POINTER behind in the always-loaded file (title + where it went) so recall still reaches it. Precedent: the CoalPortal record moved from memory to a durable file with a pointer left behind.${weightLine} ACCOUNTING, so the number stays honest either way: a file moved WITHIN the store still counts here — it left the always-loaded set, not the store — while a file moved OUT of the store leaves this gauge's sight entirely and no line anywhere will report it; CoalWash cannot see past that boundary and does not claim to. (task #4: the old "raise fatMultiple" escape is gone with the floor-multiple wall itself — the capacity line is real, and the only honest lever against it is moving muscle out.)`;
+  return `[CoalWash] memory gauge: FULL (externalize) — this store exceeds the machine's working-capacity ceiling (~${cap} tok${capProv}). WHAT THIS EPISODE ESTABLISHED, and nothing beyond it: a Full-tier (semantic) pass ran and REMOVED content under the fidelity gate, which refuses any drop the plan did not name. The mechanical tier proves exact duplicates and excess spacing only — a LOWER BOUND on fat, never a verdict that the rest is muscle — and this record cannot see how much of the store that pass covered, so it establishes NOTHING about files the pass never touched. SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. A wash cannot shrink muscle — the only move is to EXTERNALIZE (relocate muscle OUT of the always-loaded set). CoalWash NEVER auto-moves it (externalize is pure information). MAKE THE MOVE WITH THE FILE-EDIT TOOLS (Edit/Write/MultiEdit): the write-path airbag snapshots a hand-move made through those, and only those. A move made through the SHELL instead (mv, sed, a heredoc, a script) is NOT covered — no snapshot is taken and there is no undo net if the rewrite loses content. The template: (1) CLUSTER the muscle by topic (largest cohesive block first); (2) pick a DESTINATION per cluster — a project doc / blueprint / design file that loads on demand, not every session; (3) MOVE it there by hand, leaving a one-line POINTER behind in the always-loaded file (title + where it went) so recall still reaches it. Precedent: the CoalPortal record moved from memory to a durable file with a pointer left behind.${weightLine} ACCOUNTING, so the number stays honest either way: a file moved WITHIN the store still counts here — it left the always-loaded set, not the store — while a file moved OUT of the store leaves this gauge's sight entirely and no line anywhere will report it; CoalWash cannot see past that boundary and does not claim to. (task #4: the old "raise fatMultiple" escape is gone with the floor-multiple wall itself — the capacity line is real, and the only honest lever against it is moving muscle out.)`;
 }
 
 // The dig-gauge ULTRA offer (ULTRA trigger #2, dig-gauge.mjs) — fired on a
