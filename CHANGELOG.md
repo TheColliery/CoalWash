@@ -4,7 +4,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
-## [1.5.1] - 2026-09-09
+## [1.5.1] - 2026-09-10
 
 ### Fixed
 
