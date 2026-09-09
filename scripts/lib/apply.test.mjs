@@ -9,7 +9,7 @@ import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDi
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
-import { recordVerdict } from './caliper.mjs';
+import { recordVerdict, loadState } from './caliper.mjs';
 import { ccMemoryDir } from './class-b.mjs';
 
 function sandbox() {
@@ -3168,4 +3168,50 @@ test('U7 CLASS GUARD (the propagate-check the board asked for): no engine module
   assert.ok(unwired.length >= 2, `the UNWIRED_ENGINE list was read, not assumed (saw ${unwired.join(', ')})`);
   const shipped = offenders.filter((o) => !unwired.some((u) => o.startsWith(`${u}:`)));
   assert.deepStrictEqual(shipped, [], `a derivable write temp is the U7 precondition -- put an unpredictable segment before the marker and open it O_EXCL:\n${shipped.join('\n')}`);
+});
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 (1) — THE GATE-PASSED FULL CLEAN, recorded here because this is the
+// only place it is a FACT: applyPlan refuses any unapproved structured-token
+// drop before it commits, so a wizard-cut transaction that returns ok:true has
+// passed the fidelity gate by construction.
+// ---------------------------------------------------------------------------
+
+test("CWK-081: a committed origin:'wizard-cut' plan records the episode's gate-passed Full clean; a program cut does NOT", () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'wizard.md');
+    write(f, 'fact stays\nverbose wording the outsider dropped');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'fact stays' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777, 'the Full tier landed, gate-passed — the fact is on the record');
+    assert.strictEqual(loadState(proj, home).fullCleanSession, 't-session');
+  } finally { clean(proj, home); }
+});
+
+test('CWK-081 control (non-vacuity): a DEFAULT (program-cut) plan records no Full clean — the mechanical tier never adjudicated anything', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'program.md');
+    write(f, 'dup line\ndup line');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'dup line' }]), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'Quick/Force is the MECHANICAL tier — it proves duplicates, it judges nothing');
+  } finally { clean(proj, home); }
+});
+
+test('CWK-081: a wizard plan that FAILS the fidelity gate records NO Full clean (the claim rides the gate, not the intent)', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'lossy.md');
+    write(f, 'see https://example.com/spec for the contract');
+    // an unapproved structured-token drop -> applyPlan refuses the whole run
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'see the contract' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, false, 'the gate refused this run');
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'a refused run is not a clean, however wizard-shaped its origin tag');
+  } finally { clean(proj, home); }
 });

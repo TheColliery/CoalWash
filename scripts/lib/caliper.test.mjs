@@ -16,6 +16,8 @@ import {
   FAT_ARM_TOKENS, FAT_REARM_TOKENS, mechFatFromText,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
   readBudgetFor, READ_BUDGET_DEFAULT,
+  discoverCapacity, markFullClean, armExternalize,
+  CAPACITY_STANDARD_WINDOW_TOKENS, CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, CAPACITY_DISCOVERY_MIN_TOKENS,
   __testHooks,
 } from './caliper.mjs';
 import { discoverClassB } from './class-b.mjs';
@@ -315,11 +317,22 @@ test('ACCEPTANCE (task #4): an all-muscle store replaying the live false-positiv
     wasOver = v.over;
     wasEconLatched = v.econLatched;
   }
-  // and far beyond the sequence: 10x growth of pure muscle, still silent
-  // (only the REAL capacity line may ever speak, and that says externalize,
-  // never a wizard ask)
-  const big = bandVerdict({ footprintTokens: 500000, mechFatTokens: 0 });
+  // and far beyond the sequence: pure muscle growth, still silent — the
+  // fixture is CAPACITY-RELATIVE (CWK-081) rather than the old hardcoded
+  // 500000, which only read LEAN because the capacity stand-in was 600000.
+  // The PROPERTY under test is unchanged and is not about a number: pure
+  // muscle must never ARM the fat band. Anchoring it to the constant keeps it
+  // true at any capacity the adapter discovers.
+  const big = bandVerdict({ footprintTokens: CAPACITY_TOKENS - 1, mechFatTokens: 0 });
   assert.strictEqual(big.band, 'LEAN');
+  // and the test's own parenthetical, now ASSERTED instead of only asserted-
+  // about: past the REAL capacity line the band DOES speak, and what it says
+  // is externalize — never a wizard ask, never an armed fat band.
+  const wall = bandVerdict({ footprintTokens: CAPACITY_TOKENS, mechFatTokens: 0 });
+  assert.strictEqual(wall.band, 'FULL');
+  assert.strictEqual(wall.reason, 'externalize');
+  assert.strictEqual(wall.over, false, 'pure muscle never arms the fat band, even over the wall');
+  assert.strictEqual(wall.econLatched, false, 'and never latches the economic FULL that carries the wizard ask');
 });
 
 test('ACCEPTANCE control (non-vacuity): the SAME sequence with real measured fat arms and escalates — the silence above is the definition, not a dead band', () => {
@@ -1675,11 +1688,14 @@ test('rc.2 SCHEMA (f): a FRESH install (no state file) → loadState is {} and w
 });
 
 test('rc.2 SCHEMA (e): the reset-list constant matches the fields actually cleared (the mechanism a future ruling extends)', () => {
-  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict']);
+  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'externalizeSession', 'externalizeAt']);
   // STATE_SCHEMA stays 1 even though the OBESE re-loop (2026-07-25) added
-  // `lastObeseFat` to the list: adding a NEW field is not a semantics change to
+  // `lastObeseFat` to the list, and CWK-081 (2026-09-10) added the four
+  // episode fields after it: adding a NEW field is not a semantics change to
   // any EXISTING one, which is this file's own stated bump rule. A pre-existing
-  // rc-era state simply has no watermark and starts its loop from zero.
+  // rc-era state simply has no watermark and starts its loop from zero — and,
+  // for the CWK-081 four, has no recorded Full clean, so the capacity surface
+  // routes to the ASK rather than asserting muscle. Safe direction either way.
   assert.strictEqual(STATE_SCHEMA, 1);
   // every write stamps the schema (round-trip through the public write API)
   const { home, proj } = sandbox();
@@ -1973,4 +1989,131 @@ test('CWK-057: ON widens SEEING only — recordVerdict still writes the same ver
     const on = Object.keys(loadState(proj, home).lastVerdict).sort();
     assert.deepStrictEqual(on, off, 'identical field set — the mode changes how much is SEEN, never what is recorded about it');
   } finally { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(proj, { recursive: true, force: true }); }
+});
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 — THE CAPACITY ADAPTER (blueprint:115's own contract: discover ->
+// concrete ceiling; unknown -> conservative AND FLAGGED, never a silent guess)
+// ---------------------------------------------------------------------------
+
+test('CWK-081 adapter: the conservative default is DERIVED from its two terms, never a standing magic number', () => {
+  // The whole point of the row: 600000 was inherited, unexamined. The default
+  // is now an arithmetic identity a reader can check in one line.
+  assert.strictEqual(CAPACITY_TOKENS, CAPACITY_STANDARD_WINDOW_TOKENS - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS);
+  // and it is the AUTO-COMPACT window, not the raw one — the reserve is
+  // subtracted, so the constant is strictly smaller than the raw window.
+  assert.ok(CAPACITY_TOKENS < CAPACITY_STANDARD_WINDOW_TOKENS);
+  assert.ok(CAPACITY_AUTOCOMPACT_RESERVE_TOKENS > 0);
+});
+
+test('CWK-081 adapter: no discoverable figure -> the conservative default, FLAGGED discovered:false (the blueprint branch this box actually lands on)', () => {
+  const { home, proj } = sandbox();
+  try {
+    // a sandbox home with no stats-cache at all — the "platform exposes
+    // nothing" case, which is ALSO the measured live case on this box (the
+    // real cache carries the key with value 0 for every model).
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
+    assert.strictEqual(c.source, 'conservative-default');
+    assert.strictEqual(c.discovered, false, 'unknown must be FLAGGED, never silently indistinguishable from a discovery');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 adapter: a stats-cache whose contextWindow is 0 for every model is NOT a discovery (the live shape on this box)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({
+      modelUsage: { 'claude-opus-5': { contextWindow: 0, maxOutputTokens: 0 }, 'claude-sonnet-5': { contextWindow: 0 } },
+    }), 'utf8');
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.discovered, false, 'present-but-unpopulated is an ABSENT figure, not a zero-token window');
+    assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 adapter: a POPULATED contextWindow is discovered, takes the MIN across models, and the auto-compact reserve comes off it', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({
+      modelUsage: {
+        'claude-opus-5': { contextWindow: 1000000 },
+        'claude-haiku-4-5': { contextWindow: 200000 }, // the smallest = the conservative reading
+        'claude-fable-5-1': { contextWindow: 0 },      // unpopulated, ignored
+      },
+    }), 'utf8');
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.discovered, true);
+    assert.strictEqual(c.source, 'stats-cache');
+    assert.strictEqual(c.rawWindowTokens, 200000, 'MIN across models — a hook has no model identity to key on');
+    assert.strictEqual(c.capacityTokens, 200000 - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, 'the denominator is the USABLE window');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 adapter: an out-of-range or corrupt figure falls back to the conservative default (fail-closed, never a throw)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const write = (o) => fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), typeof o === 'string' ? o : JSON.stringify(o), 'utf8');
+    write({ modelUsage: { m: { contextWindow: 12 } } });                 // absurdly small
+    assert.strictEqual(discoverCapacity({ home }).discovered, false);
+    write({ modelUsage: { m: { contextWindow: 99000000 } } });           // absurdly large
+    assert.strictEqual(discoverCapacity({ home }).discovered, false);
+    write({ modelUsage: { m: { contextWindow: CAPACITY_DISCOVERY_MIN_TOKENS + 10 } } }); // in range RAW, under range once the reserve comes off
+    assert.strictEqual(discoverCapacity({ home }).discovered, false);
+    write('{ not json at all');                                          // corrupt
+    assert.doesNotThrow(() => discoverCapacity({ home }));
+    assert.strictEqual(discoverCapacity({ home }).capacityTokens, CAPACITY_TOKENS);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 adapter: gaugeVerdict JUDGES against the supplied capacity and REPORTS which one it used', () => {
+  const measure = { alwaysLoaded: { tokensEst: 300000, bytes: 1200000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 300000, totalBytes: 1200000, mechFat: { tokensEst: 0 } };
+  // default (the conservative derivation): 300k is OVER the wall
+  const lo = gaugeVerdict({ measure });
+  assert.strictEqual(lo.verdict.band, 'FULL');
+  assert.strictEqual(lo.capacityTokens, CAPACITY_TOKENS);
+  assert.strictEqual(lo.capacitySource, 'conservative-default');
+  // a DISCOVERED 1M window: the same store is nowhere near the wall
+  const hi = gaugeVerdict({ measure, capacity: { capacityTokens: 967000, source: 'stats-cache', discovered: true } });
+  assert.strictEqual(hi.verdict.band, 'LEAN');
+  assert.strictEqual(hi.capacityTokens, 967000);
+  assert.strictEqual(hi.capacitySource, 'stats-cache');
+});
+
+// ---------------------------------------------------------------------------
+// CWK-081 (1)+(3) — the episode's gate-passed Full clean, and the
+// once-per-session dedup on the capacity surface
+// ---------------------------------------------------------------------------
+
+test('CWK-081 (1): markFullClean records the episode fact; a LEAN crossing CLEARS it (episode-scoped, not permanent)', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'nothing claims a clean before one happens');
+    markFullClean(home, proj, 4242, 'sess-a');
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 4242);
+    assert.strictEqual(loadState(proj, home).fullCleanSession, 'sess-a');
+    // the LEAN reset is the episode boundary — the same one that clears
+    // quickTried; a store that drifts back to FULL has not been cleaned in the
+    // episode it is now in.
+    recordCrossing(home, proj, 'LEAN', 'FULL', 5000);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'LEAN ends the episode, so the Full-clean fact ends with it');
+    assert.strictEqual(loadState(proj, home).fullCleanSession, undefined);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 (3): armExternalize surfaces ONCE per session id, and a NEW session re-arms it', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.strictEqual(armExternalize(home, proj, 's1', 1).surface, true, 'first fire of a session speaks');
+    assert.strictEqual(armExternalize(home, proj, 's1', 2).surface, false, 'a second Stop in the SAME session is silent');
+    assert.strictEqual(armExternalize(home, proj, 's1', 3).surface, false);
+    assert.strictEqual(armExternalize(home, proj, 's2', 4).surface, true, 'a NEW session may say it once');
+    // no session id -> nothing to dedup on -> always surface, and no write
+    const before = JSON.stringify(loadState(proj, home));
+    assert.strictEqual(armExternalize(home, proj, null, 5).surface, true);
+    assert.strictEqual(JSON.stringify(loadState(proj, home)), before, 'the no-id path writes nothing at all');
+  } finally { clean(home, proj); }
 });

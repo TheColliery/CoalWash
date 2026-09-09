@@ -85,7 +85,7 @@ import { TIER1_KEEP_ALL_MS } from './retention.mjs'; // the keep-all floor, for 
 // from the session gauge's cached verdict (caliper state; zero new I/O
 // beyond one small state read). caliper imports only config-load/jsonc, so
 // this adds no module cycle.
-import { loadState } from './caliper.mjs';
+import { loadState, markFullClean } from './caliper.mjs';
 // Wikilink-orphan advisory (the git filter-branch cross-reference lesson):
 // ONE reference-detection implementation, shared with RE-TIER — never
 // duplicated. NOTE the same deliberate module-cycle shape as keeps.mjs/
@@ -1254,6 +1254,20 @@ export function applyPlan(plan, opts = {}) {
       // un-commits the run; the fields just stay empty.
       let deadLinks = [];
       try { deadLinks = deadLinkScan(actionable, physRoots, txDir); } catch { /* advisory only */ }
+
+      // CWK-081 (1) — record the GATE-PASSED FULL CLEAN. Reaching this line on a
+      // `wizard-cut` plan means the Full tier's transaction committed AFTER the
+      // fidelity block above refused every unapproved structured-token drop, so
+      // this is the one place in the system where "a semantic pass actually
+      // landed, gate-passed" is a fact rather than an inference. The conductor's
+      // FULL(capacity) branch reads it: before it exists, the store's muscle is
+      // UNMEASURED and the advisory that asserts otherwise is ineligible.
+      // Post-commit and fail-silent by construction (same discipline as the
+      // advisory above): a state-write failure must never un-commit a run that
+      // already succeeded — it only costs the next crossing one ask.
+      if (plan.origin === 'wizard-cut') {
+        try { markFullClean(home, projectRoot, now, plan.sessionId); } catch { /* never un-commits */ }
+      }
 
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };
     } finally {

@@ -274,11 +274,10 @@ test('SessionStart: FULL(externalize) is cached (reason + hardCeilingTokens) and
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // 0r: post-floor the wall is fatMultiple x leanFloor clamped at the TRUE
-    // capacity ceiling (caliper.mjs CAPACITY_TOKENS = 600000 tok) — so
-    // un-armed capHit now needs a floor near capacity itself. footprint
-    // 600200 tok; floor 600000 -> bmi ~1.0003 (well under 1.5, NOT armed) but
-    // the footprint clears the capacity clamp -> externalize.
+    // task #4: the wall is the RAW capacity line (caliper.mjs CAPACITY_TOKENS,
+    // DERIVED since CWK-081 — the 600000 stand-in this comment used to quote is
+    // retired). footprint ~600200 tok clears it with room to spare and carries
+    // zero certain fat -> un-armed capHit -> externalize.
     seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 });
     seedState(home, proj, { leanFloorTokens: 600000 });
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
@@ -1168,8 +1167,13 @@ test('0m: a LEGACY config carrying forceMode:"off" is likewise IGNORED — there
 test('Stop: a FULL(externalize) crossing delivers the pure-information advisory — never an ask, never force', () => {
   const { home, proj } = sandbox();
   try {
+    // CWK-081 (1): the advisory is now ELIGIBLE only after a gate-passed Full
+    // clean landed this episode — `fullCleanAt` is that fact. Seeded here so
+    // this case keeps testing what it was written for (the advisory's own
+    // shape); the INELIGIBLE route has its own case below.
     seedState(home, proj, {
       lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      fullCleanAt: Date.now(),
       lastVerdict: { band: 'FULL', reason: 'externalize', economical: false, fatTokens: 200, hardCeilingTokens: 36000, at: Date.now() },
     });
     const r = run(proj, home, { hook_event_name: 'Stop' });
@@ -1177,7 +1181,8 @@ test('Stop: a FULL(externalize) crossing delivers the pure-information advisory 
     const reason = parseBlock(r.stdout);
     assert.ok(reason.includes('FULL (externalize)'), reason);
     assert.ok(reason.includes('~36000 tok'), reason);
-    assert.ok(reason.includes('no reclaimable fat'), 'names WHY washing cannot help');
+    assert.ok(!/muscle, not bloat/.test(reason), 'CWK-081 (2): the unmeasured "muscle, not bloat" claim is retired');
+    assert.ok(reason.includes('LOWER BOUND'), 'says what the mechanical tier actually proves');
     assert.ok(!reason.includes('question tool'), 'externalize is information, never an ask');
     assert.ok(!reason.includes('standing config authorizes'), 'externalize never force-runs');
   } finally { clean(home, proj); }
@@ -1361,7 +1366,7 @@ test('round trip: an externalize-FULL SessionStart arms a crossing the following
     // 0r: un-armed capHit now only fires at the TRUE capacity clamp (see the
     // SessionStart externalize test above) — a floor near CAPACITY_TOKENS pins it.
     seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 });
-    seedState(home, proj, { leanFloorTokens: 600000 });
+    seedState(home, proj, { leanFloorTokens: 600000, fullCleanAt: Date.now() }); // CWK-081 (1): a Full clean landed this episode -> the advisory is eligible
     const rs = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(rs);
     assert.strictEqual(rs.stdout, '');
@@ -1870,5 +1875,61 @@ test('AL-1: a payload whose first byte lands 200 ms after spawn is READ, not dro
     assert.ok(st.lastVerdict, `late payload dropped: the hook exited 0 having done nothing (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
     assert.strictEqual(st.stamps.length, 1, 'the gauge ran for this session');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-081 — the FULL(capacity) surface: eligibility (1) and once-per-session (3)
+// ---------------------------------------------------------------------------
+
+test('CWK-081 (1): a FULL(externalize) crossing with NO gate-passed Full clean this episode routes to the Full-tier CONSENT, never the advisory', () => {
+  const { home, proj } = sandbox();
+  try {
+    // the measured incident's own shape: FULL, certain fat ~3 tok (under the
+    // arm mark), and no Full pass has ever run on this store.
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'FULL', reason: 'externalize', economical: false, fatTokens: 3, hardCeilingTokens: 167000, capacitySource: 'conservative-default', at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop', session_id: 'sess-1' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('FULL (capacity — muscle not yet measured)'), reason);
+    assert.ok(reason.includes('question tool'), 'the un-measured case is an ASK, not an advisory');
+    assert.ok(/NO semantic pass has run this episode/.test(reason));
+    assert.ok(!reason.includes('CLUSTER'), 'and never hands out the relocate-by-hand template before anything judged the content');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 (3): the FULL(capacity) surface speaks at most ONCE per session — a second Stop in the same session is SILENT', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      fullCleanAt: Date.now(),
+      lastVerdict: { band: 'FULL', reason: 'externalize', economical: false, fatTokens: 3, hardCeilingTokens: 167000, at: Date.now() },
+    });
+    // RE-ARM IN PLACE — the live re-arm branches PATCH the crossing on the
+    // existing state; a wholesale re-seed would also wipe the dedup field this
+    // test exists to measure, and the test would pass for the wrong reason.
+    const rearm = () => {
+      const st = readProjState(home, proj);
+      st.lastCrossing = { band: 'FULL', at: Date.now(), consumed: false };
+      fs.writeFileSync(projStatePath(home, proj), JSON.stringify(st), 'utf8');
+    };
+    const first = run(proj, home, { hook_event_name: 'Stop', session_id: 'sess-A' });
+    assertGraceful(first);
+    assert.ok(parseBlock(first.stdout).includes('FULL (externalize)'), 'the first fire of a session speaks');
+    rearm();
+    const second = run(proj, home, { hook_event_name: 'Stop', session_id: 'sess-A' });
+    assertGraceful(second);
+    assert.strictEqual(second.stdout, '', 'the measured 4-consecutive-Stop repeat is closed: same session = silent');
+    // and the crossing is consumed rather than left dangling
+    assert.strictEqual(readProjState(home, proj).lastCrossing.consumed, true);
+    // a NEW session may say it once more (the low-disk-warning model survives)
+    rearm();
+    const third = run(proj, home, { hook_event_name: 'Stop', session_id: 'sess-B' });
+    assertGraceful(third);
+    assert.ok(parseBlock(third.stdout).includes('FULL (externalize)'), 'a new session re-arms the reminder');
   } finally { clean(home, proj); }
 });

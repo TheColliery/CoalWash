@@ -94,7 +94,15 @@ test('externalizeAdvisory: pure info, no question-tool/ask wording, names WHY wa
   const r = externalizeAdvisory({ hardCeilingTokens: 36000 });
   assert.ok(r.includes('FULL (externalize)'), r);
   assert.ok(r.includes('~36000 tok'));
-  assert.ok(r.includes('no reclaimable fat'));
+  // CWK-081 (2): the retired claim. "~no reclaimable fat (muscle, not bloat)"
+  // asserted a semantic verdict the MECHANICAL estimator never produces — it
+  // proves exact duplicates and spacing and calls everything else muscle by
+  // construction. The line now states the instrument and its bound, and names
+  // the Full-tier pass that DID adjudicate the rest (this template is only
+  // reachable after one has landed this episode).
+  assert.ok(!/muscle, not bloat/.test(r), 'the unmeasured "muscle, not bloat" claim is retired');
+  assert.ok(r.includes('LOWER BOUND'), 'says what the mechanical tier actually proves');
+  assert.match(r, /Full-tier pass/, 'and names the instrument that judged the rest');
   assert.ok(r.includes('EXTERNALIZE') || r.includes('externalize'));
   assert.ok(!r.includes('question tool'), 'externalize is information, never an ask');
   assert.ok(r.includes('AFTER'), 'still tells the agent to sequence after the actual reply');
@@ -189,4 +197,37 @@ test('every builder tolerates missing/malformed input without throwing', () => {
     assert.doesNotThrow(() => fn({}));
     assert.doesNotThrow(() => fn(null));
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 (1) — the SECOND cause of the Full-tier consent: a capacity crossing
+// whose muscle nothing has measured yet.
+// ---------------------------------------------------------------------------
+
+test("CWK-081: wizardEscalation cause 'capacity-unmeasured' names the ceiling, states what was MEASURED, and refuses to recommend relocating first", () => {
+  const r = wizardEscalation({ cause: 'capacity-unmeasured', fatTokens: 3, hardCeilingTokens: 167000, capacitySource: 'conservative-default' });
+  assert.ok(r.includes('~167000 tok'), r);
+  assert.ok(r.includes('CONSERVATIVE DEFAULT'), 'the adapter flag reaches the reader');
+  assert.ok(r.includes('LOWER BOUND'), 'says what the mechanical tier proves');
+  assert.ok(/NO semantic pass has run this episode/.test(r), 'and says plainly what has NOT been measured');
+  assert.ok(!/muscle, not bloat/.test(r), 'never asserts the verdict the instrument did not produce');
+  assert.ok(r.includes('question tool'), 'this cause IS an ask — the Full-tier consent');
+  assert.ok(r.includes('once per session'), 'and states its own re-emission rule');
+});
+
+test('CWK-081: the DEFAULT wizardEscalation text is untouched by the new cause (no cause = the pre-CWK-081 template)', () => {
+  const r = wizardEscalation({ fatTokens: 900, breakEven: { perDay: 100, breakEvenDays: 2 } });
+  assert.ok(r.includes('certain fat (~900 tok, measured'), r);
+  assert.ok(!r.includes('NO semantic pass has run this episode'));
+  assert.ok(r.includes('GROWS further'), 'the fat-cause re-emission rule is growth, unchanged');
+});
+
+test('CWK-081: a DISCOVERED capacity is labelled as discovered on both capacity surfaces, never as the conservative default', () => {
+  const ask = wizardEscalation({ cause: 'capacity-unmeasured', hardCeilingTokens: 967000, capacitySource: 'stats-cache' });
+  assert.ok(ask.includes('discovered from stats-cache'), ask);
+  assert.ok(!ask.includes('CONSERVATIVE DEFAULT'));
+  const adv = externalizeAdvisory({ hardCeilingTokens: 967000, capacitySource: 'stats-cache' });
+  assert.ok(adv.includes('discovered from stats-cache'), adv);
+  assert.ok(!adv.includes('CONSERVATIVE DEFAULT'));
 });

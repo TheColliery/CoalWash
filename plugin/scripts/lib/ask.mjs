@@ -133,8 +133,18 @@ export function obeseAutoQuick(opts) {
 // numbers and the reorganize half's demotable-muscle numbers. `reorg` =
 // { demotableTokens, perDay, breakEvenDays }, the envelope-overflow proof
 // cached beside the fat proof by recordVerdict.
+// CWK-081 (1) — THE SECOND CAUSE. A FULL crossing whose fat sits UNDER the arm
+// mark used to route straight to the capacity advisory, which told the user to
+// go relocate content on the strength of a measurement that never looked at it.
+// It now routes HERE instead, until a gate-passed Full clean has landed this
+// episode. Same ask, same two options, same tier — a DIFFERENT headline,
+// because the reason is different and the old one would be false here: no
+// mechanical fat remains to name, no force preceded this ask, and the honest
+// statement is that the muscle is UNMEASURED, not that it is muscle.
+// `cause: 'capacity-unmeasured'` selects it; absent/anything else keeps the
+// pre-CWK-081 text byte-for-byte, so every existing caller and pin is unmoved.
 export function wizardEscalation(opts) {
-  const { fatTokens, breakEven, reorg, spawns } = opts || {};
+  const { fatTokens, breakEven, reorg, spawns, cause, hardCeilingTokens, capacitySource } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
   const payback = paybackLine(breakEven, 'wizard');
   const spawnBill = spawnBillLine(spawns); // 0o: absent when zero spawns
@@ -143,6 +153,13 @@ export function wizardEscalation(opts) {
   const reorgLine = demotable > 0
     ? ` The reorganize half pays too: ~${demotable} tok of always-loaded index is demotable to the recall tier (the retier envelope's own overflow), paying back in ${reorgBe}.`
     : '';
+  if (cause === 'capacity-unmeasured') {
+    const cap = Number.isFinite(hardCeilingTokens) ? hardCeilingTokens : '?';
+    const capProv = capacitySource === 'conservative-default'
+      ? ', a CONSERVATIVE DEFAULT — this platform exposes no context-window figure, so the ceiling is the smallest supported window minus the auto-compact reserve'
+      : (typeof capacitySource === 'string' && capacitySource ? `, discovered from ${capacitySource}` : '');
+    return `[CoalWash] memory gauge: FULL (capacity — muscle not yet measured) — this store exceeds the machine's working-capacity ceiling (~${cap} tok${capProv}). WHAT WAS ACTUALLY MEASURED: the mechanical tier proves exact duplicates and excess spacing only, and found ~${fat} tok of them — a LOWER BOUND, never a clean bill. NO semantic pass has run this episode, so nothing has yet measured whether the rest is muscle or bloat, and CoalWash will not tell you to go relocate content on a measurement that never read it.${payback}${reorgLine}${spawnBill} Offer the user via your question tool, exactly two options: ทำ (open the /coalwash wizard now, "Fat + reorganize muscle" tier — the zero-context outsider judges what the mechanical tier structurally cannot) / later (dismiss; carries forward — this ask returns at most once per session, never on a timer). If the user picks ทำ: run the wizard per the coalwash skill. Once a Full pass lands, THEN the capacity advisory (externalize) becomes eligible — moving muscle out is the honest last move only after something has established that it IS muscle. This crossing is marked consumed the moment this ask fires. ${ANSWER_FIRST_REMINDER}`;
+  }
   return `[CoalWash] certain fat (~${fat} tok, measured — exact duplicates and spacing the mechanical tier can prove) remains this episode: a free mechanical Quick pass was forced this episode (the FULL-band force that precedes every ask here), but the mechanical tier has no cutter for this class of fat — it can only PROVE the measurement, not remove it. Clearing it needs a human or the wizard's semantic tier, not another automatic pass.${payback}${reorgLine}${spawnBill} Offer the user via your question tool, exactly two options: ทำ (open the /coalwash wizard now, "Fat + reorganize muscle" tier — the zero-context outsider reviews what no automatic pass can touch) / later (dismiss; carries forward — this same ask returns only once the measured fat GROWS further, never on a timer). If the user picks ทำ: run the wizard per the coalwash skill. This crossing is marked consumed the moment this ask fires. ${ANSWER_FIRST_REMINDER}`;
 }
 
@@ -178,9 +195,22 @@ export function seatbeltAdvisory(opts) {
 // AIRBAG (0p) snapshots that hand-move. Precedent = the CoalPortal record
 // (memory -> a durable file, a pointer left behind).
 export function externalizeAdvisory(opts) {
-  const { hardCeilingTokens } = opts || {};
+  const { hardCeilingTokens, capacitySource } = opts || {};
   const cap = Number.isFinite(hardCeilingTokens) ? hardCeilingTokens : '?';
-  return `[CoalWash] memory gauge: FULL (externalize) — this store has ~no reclaimable fat (muscle, not bloat) but exceeds the machine's working-capacity ceiling (~${cap} tok, a rough placeholder). SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. A wash cannot shrink muscle — the only move is to EXTERNALIZE (relocate muscle OUT of the always-loaded set). CoalWash NEVER auto-moves it (externalize is pure information; the write-path airbag snapshots your hand-move). The template: (1) CLUSTER the muscle by topic (largest cohesive block first); (2) pick a DESTINATION per cluster — a project doc / blueprint / design file that loads on demand, not every session; (3) MOVE it there by hand, leaving a one-line POINTER behind in the always-loaded file (title + where it went) so recall still reaches it. Precedent: the CoalPortal record moved from memory to a durable file with a pointer left behind. (task #4: the old "raise fatMultiple" escape is gone with the floor-multiple wall itself — the capacity line is real, and the only honest lever against it is moving muscle out.)`;
+  // CWK-081 (2): the old headline asserted "~no reclaimable fat (muscle, not
+  // bloat)". The instrument behind that sentence is the MECHANICAL estimator,
+  // which proves exact duplicates and excess spacing and nothing else — a lower
+  // bound. "Muscle" was a claim it never measured. It now says what WAS
+  // measured, and it can only fire at all after a gate-passed Full clean landed
+  // this episode (the conductor's own eligibility check), so the semantic half
+  // is named as the fact it is rather than assumed.
+  // CWK-081 (1)/adapter: the ceiling's PROVENANCE rides the line too — a
+  // conservative default and a discovered window are different claims, and a
+  // reader deciding whether to move real content deserves to know which.
+  const capProv = capacitySource === 'conservative-default'
+    ? ', a CONSERVATIVE DEFAULT — this platform exposes no context-window figure, so the ceiling is the smallest supported window minus the auto-compact reserve, not a discovered one'
+    : (typeof capacitySource === 'string' && capacitySource ? `, discovered from ${capacitySource}` : ', a rough placeholder');
+  return `[CoalWash] memory gauge: FULL (externalize) — this store exceeds the machine's working-capacity ceiling (~${cap} tok${capProv}), and what remains is muscle a Full-tier pass has already adjudicated this episode: the mechanical tier proves only exact duplicates and excess spacing (a LOWER BOUND on fat), and the semantic pass that judges the rest RAN and kept this content. SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. A wash cannot shrink muscle — the only move is to EXTERNALIZE (relocate muscle OUT of the always-loaded set). CoalWash NEVER auto-moves it (externalize is pure information; the write-path airbag snapshots your hand-move). The template: (1) CLUSTER the muscle by topic (largest cohesive block first); (2) pick a DESTINATION per cluster — a project doc / blueprint / design file that loads on demand, not every session; (3) MOVE it there by hand, leaving a one-line POINTER behind in the always-loaded file (title + where it went) so recall still reaches it. Precedent: the CoalPortal record moved from memory to a durable file with a pointer left behind. (task #4: the old "raise fatMultiple" escape is gone with the floor-multiple wall itself — the capacity line is real, and the only honest lever against it is moving muscle out.)`;
 }
 
 // The dig-gauge ULTRA offer (ULTRA trigger #2, dig-gauge.mjs) — fired on a

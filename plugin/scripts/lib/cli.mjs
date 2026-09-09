@@ -73,7 +73,7 @@ import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
 import {
   measureEntries, readBudgetFor, gaugeVerdict,
-  loadState, armDigGauge,
+  loadState, armDigGauge, discoverCapacity,
 } from './caliper.mjs';
 import { envelopeFor } from './retier.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
@@ -130,12 +130,18 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   // fatMultiple wall is computed (both retired). The reorg envelope resolves
   // from the same merged config, via retier's own resolver — same composition
   // as the conductor's two gauge sites.
+  // CWK-081: the capacity ADAPTER — same composition as the conductor's two
+  // gauge sites, so the CLI gauge and the hook can never disagree about the
+  // ceiling they judged against (the "a second call site re-derived it by hand"
+  // bug this file's own header names).
+  const capacity = discoverCapacity({ home });
   const gv = gaugeVerdict({
     measure: m,
     wasOver,
     wasEconLatched,
     stamps: proj.stamps,
     envelope: envelopeFor(cfg.retier),
+    capacity,
   });
   const verdict = gv.verdict;
   const econ = {
@@ -149,7 +155,7 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   // should see, and it is not this room's to wash or externalize. Same
   // measureEntries, so the number is comparable to the room's own.
   const inherited = measureEntries(disc.inherited, { withGzip: false, readBudgetBytes });
-  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, inherited, verdict, breakEven: econ, roleMemories: disc.roleMemories };
+  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, inherited, verdict, breakEven: econ, roleMemories: disc.roleMemories, capacity: { capacityTokens: gv.capacityTokens, source: gv.capacitySource, discovered: !!capacity.discovered } };
 }
 
 // The full gauge = measureOnly + the recovery preflight. Importable (tests and
@@ -234,7 +240,19 @@ export function gaugeLine(g) {
   const recovered = rec.recovered && rec.recovered !== 'none'
     ? ` · recovered dangling run: ${rec.recovered}`
     : (rec.error ? ' · dangling run REFUSED, left for inspection (--json for the reason)' : '');
-  return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${recovered}`;
+  // CWK-081 — THE ADAPTER'S FLAG, on the one line a reader actually sees. The
+  // blueprint's capacity contract ends in "unknown -> conservative estimate +
+  // FLAG", and a flag that never reaches a surface is not a flag. Shown only
+  // where the ceiling is load-bearing (a FULL band judged against it) or where
+  // the ceiling was genuinely DISCOVERED — a LEAN store does not need to hear
+  // about a ceiling it is nowhere near.
+  const cap = g.capacity || {};
+  const capBit = !Number.isFinite(cap.capacityTokens)
+    ? ''
+    : cap.discovered
+      ? ` · capacity ~${cap.capacityTokens} tok (discovered: ${cap.source})`
+      : (g.verdict.band === 'FULL' ? ` · capacity ~${cap.capacityTokens} tok (CONSERVATIVE DEFAULT — no platform figure discovered)` : '');
+  return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${capBit}${recovered}`;
 }
 
 // The 0-token human recovery lookup (importable, pure read): searches BOTH

@@ -402,3 +402,32 @@ test('gaugeLine SURFACES a refused recovery, and stays silent when there was sim
   const partial = gaugeLine({ ...base, recover: { recovered: 'partial', restored: 1, error: 'x' } });
   assert.match(partial, /recovered dangling run: partial/, "'partial' reports as itself, never as a refusal");
 });
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 — the capacity adapter's flag, on the one line a reader sees
+// ---------------------------------------------------------------------------
+
+test('CWK-081: gaugeLine NAMES a conservative-default ceiling where it is load-bearing (FULL), stays quiet about it where it is not (LEAN)', () => {
+  const base = { measure: { alwaysLoaded: { tokensEst: 200000 } }, capacity: { capacityTokens: 167000, source: 'conservative-default', discovered: false } };
+  const full = gaugeLine({ ...base, verdict: { band: 'FULL', bmi: 1 } });
+  assert.match(full, /capacity ~167000 tok/, 'the number the band was judged against');
+  assert.match(full, /CONSERVATIVE DEFAULT/, 'and that it is a DEFAULT, not a discovery — the blueprint flag, surfaced');
+  const lean = gaugeLine({ ...base, verdict: { band: 'LEAN', bmi: 1 } });
+  assert.ok(!/capacity ~/.test(lean), 'a store nowhere near the ceiling is not told about the ceiling');
+});
+
+test('CWK-081: a DISCOVERED ceiling is named on every band — it is a measurement, not a caveat', () => {
+  const line = gaugeLine({
+    verdict: { band: 'LEAN', bmi: 1 },
+    measure: { alwaysLoaded: { tokensEst: 1000 } },
+    capacity: { capacityTokens: 967000, source: 'stats-cache', discovered: true },
+  });
+  assert.match(line, /capacity ~967000 tok \(discovered: stats-cache\)/, line);
+  assert.ok(!/CONSERVATIVE DEFAULT/.test(line));
+});
+
+test('CWK-081: a gauge object with NO capacity block renders exactly as before (every pre-CWK-081 caller unmoved)', () => {
+  const line = gaugeLine({ verdict: { band: 'FULL', bmi: 1 }, measure: { alwaysLoaded: { tokensEst: 1000 } } });
+  assert.ok(!/capacity ~/.test(line), line);
+});

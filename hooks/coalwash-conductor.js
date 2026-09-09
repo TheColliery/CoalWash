@@ -300,7 +300,11 @@ async function handleSessionStart(input) {
     // economics run BEFORE the band, because the band IS the break-even) —
     // see caliper.mjs for why this is factored out rather than re-derived by
     // hand at a second call site.
-    const gv = caliper.gaugeVerdict({ measure: m, wasOver, wasEconLatched, stamps: proj.stamps, envelope });
+    // CWK-081: the capacity ADAPTER runs HERE and only here on this path —
+    // SessionStart already pays for a full discovery+measure, so one small
+    // in-sandbox JSON read rides along free; the Stop hot path never calls it
+    // (Phoenix #3), it renders the cached number instead.
+    const gv = caliper.gaugeVerdict({ measure: m, wasOver, wasEconLatched, stamps: proj.stamps, envelope, capacity: caliper.discoverCapacity({ home }) });
     const { verdict, fatTokens, economical, perDay, breakEvenDays } = gv;
 
     // WARP-HOLE (beta.13 item 3): the always-loaded path list + byte total —
@@ -322,7 +326,7 @@ async function handleSessionStart(input) {
       // lastVerdict is a per-gauge cache overwritten fresh at every gauge).
       muscleTokens: gv.muscleTokens, demotableTokens: gv.demotableTokens,
       reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
-      hardCeilingTokens: verdict.hardCeilingTokens,
+      hardCeilingTokens: verdict.hardCeilingTokens, capacitySource: gv.capacitySource,
       alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
       storeTotalBytes: m.totalBytes, // the WHOLE measured store — the bin-retention budget base (P5/P8)
     }, now, { scanEverything }); // CWK-057: ON lifts the 200-path cap on the Stop re-stat baseline
@@ -450,7 +454,7 @@ async function handleStop(input) {
         // the floor-driven band. The reorg envelope resolves via
         // config-schema's envelope resolver (see the SessionStart site's
         // comment for why it does NOT live in the RE-TIER module).
-        const gv = caliper.gaugeVerdict({ measure: m, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps, envelope: envelopeForConfig(cfg) });
+        const gv = caliper.gaugeVerdict({ measure: m, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps, envelope: envelopeForConfig(cfg), capacity: caliper.discoverCapacity({ home }) }); // CWK-081: the gated re-gauge is the OTHER full-measure site, so the adapter rides it too
         const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
         caliper.recordVerdict(home, projectRoot, {
           band: gv.verdict.band, reason: gv.verdict.reason, economical: gv.economical, fatTokens: gv.fatTokens,
@@ -458,7 +462,7 @@ async function handleStop(input) {
           perDay: gv.perDay, breakEvenDays: gv.breakEvenDays,
           muscleTokens: gv.muscleTokens, demotableTokens: gv.demotableTokens,
           reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
-          hardCeilingTokens: gv.verdict.hardCeilingTokens, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
+          hardCeilingTokens: gv.verdict.hardCeilingTokens, capacitySource: gv.capacitySource, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
           storeTotalBytes: m.totalBytes, // same base as SessionStart (P5/P8)
         }, now, { scanEverything }); // CWK-057, same clamped flag as the gauge above
         caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens, session: input && input.session_id });
@@ -490,15 +494,38 @@ async function handleStop(input) {
 
   let reason;
   if (crossing.band === 'FULL' && lastVerdict.reason === 'externalize') {
-    // Pure information — never an ask, never force: washing cannot help
-    // ~all-muscle over capacity (the growable-full invariant's forbidden
-    // "wash harder on muscle" move). Re-emitted once per NEW session while
-    // still over (the session-id re-arm reaches externalize too, and it has
-    // no lastEscalationFat to growth-gate) — a recurring "externalize your
-    // store" reminder, the Windows low-disk-warning model; safe by
-    // construction (reason==='externalize' is checked FIRST, so it can only
-    // ever route here — never a force, never a wizard ask, muscle untouched).
-    reason = ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens });
+    // CWK-081 (1) — ELIGIBILITY, checked before the advisory can speak. The
+    // capacity branch used to assert "muscle, not bloat" off a MECHANICAL
+    // lower-bound reading and steer the user into relocating content that
+    // nothing had judged. The semantic pass is the instrument that turns
+    // unknown text into known muscle, so: no gate-passed Full clean this
+    // episode -> this is the Full-tier CONSENT, not an advisory. (owner
+    // ruling 2026-09-06 — decide delete/shrink/stand BEFORE moving things.)
+    const fullCleaned = Number.isFinite(Number(proj.fullCleanAt));
+    // CWK-081 (3) — and either way this surface speaks at most ONCE per
+    // session. Measured: 4 consecutive Stops during one live wizard run,
+    // because a consumed FULL crossing can be re-armed inside the same session
+    // and this branch is checked first, so consume-at-emission does not bound
+    // it. Suppressed => consume the crossing and stay silent (Phoenix #13):
+    // the crossing must not dangle, and repeating pure information is the
+    // defect being closed.
+    if (!caliper.armExternalize(home, projectRoot, input && input.session_id, now).surface) {
+      caliper.consumeCrossing(home, projectRoot, now);
+      return;
+    }
+    reason = fullCleaned
+      ? ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens, capacitySource: lastVerdict.capacitySource })
+      : ask.wizardEscalation({
+        cause: 'capacity-unmeasured',
+        fatTokens, breakEven, reorg, spawns,
+        hardCeilingTokens: lastVerdict.hardCeilingTokens,
+        capacitySource: lastVerdict.capacitySource,
+      });
+    // Neither outcome is a force and neither touches muscle: the ELIGIBLE side
+    // is pure information (a wash cannot shrink muscle — the growable-full
+    // invariant's forbidden "wash harder on muscle" move), the INELIGIBLE side
+    // is a two-button consent. reason==='externalize' is still checked FIRST,
+    // so this branch remains the only route either can take.
   } else if (crossing.band === 'FULL' && crossing.escalation) {
     // case (c) — 0f "AUTHORITATIVE 3-FLOW": a force-run already tried Quick
     // this episode and the store is STILL over FULL — only the wizard's
