@@ -19,6 +19,14 @@ on:
 permissions:
   contents: read
 
+# CWK-058 concurrency. cancel-in-progress: TRUE, and this is the case that shows the test is
+# ATOMICITY rather than publishes-vs-not: codeql.yml DOES publish (a SARIF upload), and still
+# cancels — a killed run simply never uploads, leaving the PRIOR analysis standing intact.
+# Stale, never corrupt. Contrast scorecard.yml, which cancels NOT for exactly this reason.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   analyze:
     name: analyze (javascript)

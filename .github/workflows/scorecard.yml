@@ -13,6 +13,16 @@ on:
 permissions:
   contents: read
 
+# CWK-058 concurrency. cancel-in-progress: FALSE — the ONE never-cancel case here, and the
+# reason is ATOMICITY, not that it publishes: scorecard.yml uploads a SARIF *and* posts to the
+# OpenSSF API, so unlike codeql.yml's atomic upload-or-nothing, a run killed mid-flight can
+# leave a PARTIALLY-APPLIED publish. It is also schedule-driven, so overlap is rare and
+# queueing costs nothing. Cross-reference codeql.yml above, which cancels TRUE while also
+# publishing — a reader who notices the difference should find the reason, not a contradiction.
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   analysis:
     name: Scorecard analysis

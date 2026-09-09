@@ -14,6 +14,20 @@ on: pull_request
 permissions:
   contents: read
 
+# CWK-058 concurrency. Grouped PER PULL REQUEST, never per-ref or per-workflow: two different
+# Dependabot PRs must not serialise behind each other, so the KEY is wrong before the flag is
+# even considered. WITHIN one PR's own group, cancel-in-progress: TRUE — enabling auto-merge
+# is IDEMPOTENT (the same atomicity discriminator applied here), so a cancelled run corrupts
+# nothing and the next push to that same PR re-enables it.
+#
+# NOTE FOR A READER COMPARING ROOMS: CoalMine ships FALSE here. That is the canon's own
+# RETIRED reasoning (it argued from the shared-group case, which cannot apply once the key is
+# scoped per-PR) still standing in that room — the canon bullet names the retirement
+# explicitly. This room follows the canon; CoalMine's copy is that room's to reconcile.
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   auto-merge:
     if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
