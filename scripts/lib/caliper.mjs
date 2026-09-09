@@ -1359,19 +1359,32 @@ export function armDigGauge(home, projectRoot, session, now = Date.now()) {
 // becomes eligible only after a Full clean has actually landed this episode,
 // and this is the fact that records one.
 //
-// WHY applyPlan's wizard-cut success IS "gate-passed", exactly and not
-// approximately: applyPlan runs checkFidelity over every rewrite and ABORTS the
-// whole transaction on any drop the plan did not name in `approvedDrops`
-// (apply.mjs, the fidelity block) — so an `ok:true` return from a
-// `origin:'wizard-cut'` plan is a Full-tier transaction that passed the gate.
-// No new gate, no new claim: the fact already existed and nothing wrote it down.
+// WHAT COUNTS AS ONE — and the FIRST version of this paragraph got it WRONG, so
+// the correction is written where the wrong argument stood rather than quietly
+// swapped out. It used to read: "applyPlan runs checkFidelity over every rewrite
+// and ABORTS on any unapproved drop, so an `ok:true` return from a wizard-cut
+// plan IS a Full-tier transaction that passed the gate, exactly and not
+// approximately." That proves the gate did not REFUSE. It never proved anything
+// was ADJUDICATED — the fidelity loop skips every non-rewrite, and a rewrite that
+// drops nothing BECAUSE IT CHANGES NOTHING passes it vacuously. MEASURED through
+// the real applyPlan (INSPECT H1): a pure-create plan, a no-op rewrite and an
+// append-only rewrite all returned ok:true and all stamped this record, none of
+// them forgery, all of them shapes an honest wizard emits.
+//
+// So the WRITER (apply.mjs) now calls this only when the transaction actually
+// REMOVED something — at least one action whose baseline carried content the
+// result does not. A semantic pass that judged text and acted on it removes
+// something by construction. This function does not re-check that: the predicate
+// lives at the one call site that can see it, and this note exists so a reader
+// here is not told the retired story.
 //
 // EPISODE-SCOPED, not permanent: recordCrossing's LEAN branch clears it with the
 // rest of the episode state. A store that was cleaned, drifted back up and is
 // FULL again has not been cleaned THIS episode, and the advisory is ineligible
 // again — which is the ruling's own "in the same episode" clause, mechanized.
 //
-// KNOWN AND NAMED: `plan.origin` is untrusted plan data (apply.mjs already
+// STILL KNOWN AND NAMED, and NARROWED rather than closed: `plan.origin` is
+// untrusted plan data (apply.mjs already
 // routes the recovery bin on it), so a forged plan can set this flag. Blast is
 // bounded to WHICH ADVISORY TEXT one FULL crossing renders — never a delete,
 // never a spend; the alternative (a second trusted channel for a cosmetic
