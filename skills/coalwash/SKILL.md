@@ -34,7 +34,7 @@ The conductor measures at session start; the CLI gauge reports the band (`cli.mj
 |---|---|---|
 | LEAN | Fat-hysteresis disarmed (certain fat under `FAT_ARM_TOKENS`/`FAT_REARM_TOKENS`, 500/200 tok) and the capacity wall un-hit | Silent — a run would no-op (prohibition #14). |
 | OBESE | Fat-hysteresis armed (certain fat ≥ 500 tok, until it falls back to 200 tok), but washing does not yet pay for itself | Auto-runs the mechanical Quick pass under standing config, **no ask** (prohibition #15) — pushes `oneLineResult` every time, including a zero cut. Re-arms on each genuinely new wave of certain fat past the hysteresis mark (not a clock), so a store that keeps accreting garbage keeps getting swept; an unchanged plateau stays silent. The wizard door lives at FULL only. |
-| FULL | Fat-hysteresis armed AND **BOTH** break-evens hold — cutting the certain fat pays, AND reorganizing the RE-TIER envelope's demotable muscle pays too (`economic`, latched per episode) — OR the capacity wall is hit (`absolute-cap` / `externalize`) | `economic`/`absolute-cap`: **force-runs the mechanical Quick pass**, numbers SHOWN every fire (both break-even proofs), every cut snapshot-backed. Still over FULL after that Quick ran this episode → **ONE run/later wizard ask** (re-armed only once certain fat grows past the last-flagged level). `externalize` (~all muscle): reachable only after a gate-passed Full clean this episode — before that, this same crossing takes the Full-tier consent (`wizardEscalation`) instead. Once eligible: pure information (prohibition #31). |
+| FULL | Fat-hysteresis armed AND **BOTH** break-evens hold — cutting the certain fat pays, AND reorganizing the RE-TIER envelope's demotable muscle pays too (`economic`, latched per episode) — OR the capacity wall is hit (`absolute-cap` / `externalize`) | `economic`/`absolute-cap`: **force-runs the mechanical Quick pass**, numbers SHOWN every fire (both break-even proofs), every cut snapshot-backed. Still over FULL after that Quick ran this episode → **ONE run/later wizard ask** (re-armed only once certain fat grows past the last-flagged level). `externalize` (~all muscle): reachable only after a Full (semantic) pass has genuinely removed something this episode — before that, this same crossing takes the Full-tier consent (`wizardEscalation`) instead. Once eligible: pure information (prohibition #31). |
 
 ## The run pipeline (every `/coalwash` run — ordered; mechanics in method)
 
@@ -73,7 +73,7 @@ Advisory nets for every OTHER hand editing a class-B governance/memory file (mai
 | 9 | CoalFace hand-off offer (ONCE) | choice-4 ③ past both size ∧ count gates |
 | 10 | dig-gauge CRUSHING → ULTRA offer (ONCE) | before a raw transcript dig |
 
-**Standing consent — NOT a gate, no ask:** `obeseAutoQuick` (OBESE, no ask) · `forceAuto` (every FULL crossing, no off switch) · `externalizeAdvisory` (information only, never asks or forces — reachable only after this episode's gate-passed Full clean; before that the crossing takes the Full-tier consent instead).
+**Standing consent — NOT a gate, no ask:** `obeseAutoQuick` (OBESE, no ask) · `forceAuto` (every FULL crossing, no off switch) · `externalizeAdvisory` (information only, never asks or forces — reachable only after a Full pass has genuinely removed something this episode; before that the crossing takes the Full-tier consent instead).
 
 ## Prohibitions ledger (count this, not prose)
 
@@ -154,7 +154,7 @@ Render exactly the template's two-button question or one-line directive (prohibi
 - **`obeseAutoQuick`** — the OBESE default, NO ask (standing config): run Quick NOW, push `oneLineResult` only; marks the episode "Quick tried"; re-arms on the next genuinely new wave of fat past a growth watermark, not on an unchanged plateau.
 - **`wizardEscalation`** — the **ONE ask site in the system** (Consent ledger #1; prohibition #33). OBESE never reaches it.
 - **`forceAuto`** — every FULL crossing (`economic` and `absolute-cap`) force-runs Quick under the same standing consent, **non-optional, NO off switch** (the only full stop is `coalwashMode: off`); numbers shown every fire (prohibition #30).
-- **`externalizeAdvisory`** — reachable only after this episode's gate-passed Full clean; before that the crossing takes `wizardEscalation` (cause `capacity-unmeasured`) instead. Once eligible, FULL(externalize) is pure information (prohibition #31 — a wash cannot shrink muscle); content moved by hand leaves the always-loaded set with no report line (method's Externalize section).
+- **`externalizeAdvisory`** — reachable only after a Full pass has genuinely removed something this episode; before that the crossing takes `wizardEscalation` (cause `capacity-unmeasured`) instead. Once eligible, FULL(externalize) is pure information (prohibition #31 — a wash cannot shrink muscle); content moved by hand leaves the always-loaded set with no report line (method's Externalize section).
 - A crossing is **consumed the instant it surfaces** (prohibition #32 — post-force the receipt is FULL's surfacing).
 
 ## The wizard (`/coalwash`, manual entry)
