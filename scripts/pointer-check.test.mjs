@@ -304,7 +304,25 @@ test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never
 // developer's own repo is not a hermetic test, whatever it asserts.
 // Scrubbed rather than overridden: an inherited value we do not know about is
 // exactly the class that produced this, so the list is DELETED, never re-set.
-const GIT_ENV_KEYS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_OBJECT_DIRECTORY', 'GIT_PREFIX'];
+// A DENY-LIST, against this room's own allowlist-over-denylist rule, and the
+// departure is stated rather than silent: git needs a real environment to run at
+// all on Windows (PATH, SystemRoot, USERPROFILE, TEMP, ...), so an allowlist here
+// would enumerate the OS rather than git and would break the moment a platform
+// wanted one more. So: scrub every git variable that can REDIRECT which
+// repository, object store, ref namespace or config a call resolves — the whole
+// set with that power — and NAME THE RESIDUE instead of implying completeness.
+// RESIDUE: a git environment variable outside this list that redirects
+// resolution. The list covers everything git exports to a hook (GIT_DIR,
+// GIT_INDEX_FILE, GIT_PREFIX) plus every documented redirect of the gitdir,
+// worktree, config, object store, ref namespace and discovery walk; a variable
+// that only changes formatting, paging or authorship cannot move which repo is
+// read and is deliberately left alone.
+const GIT_ENV_KEYS = [
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX',
+  'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
+  'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
+  'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+];
 function hermeticGitEnv() {
   const env = { ...process.env };
   for (const k of GIT_ENV_KEYS) delete env[k];
