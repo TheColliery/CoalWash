@@ -110,11 +110,12 @@ const STDIN_IDLE_MS = 30;
 // so the bound must exist.
 // WHY THIS NUMBER -- argued from what two independent instruments AGREE on, never from
 // a safety factor they do not. Both timed end-of-payload at K=40 with a timer-free
-// child, and their worst cases are ~6x apart: the builder's probe
-// (scratchpad/al1/probe-timing.mjs, clock started at the top of the child script,
-// N=4000) read max 180.8 ms; the reviewer's independent rebuild
-// (scratchpad/al1/cr-harness/firstbyte.mjs, its own origin and its own self-load,
-// N=2000) read max 1189 ms, p99 760 ms. Neither is the other's error -- a latency
+// child, and their worst cases are ~6x apart: the BUILDER's probe (clock started at
+// the top of the child script, N=4000) read max 180.8 ms; the REVIEWER's independent
+// rebuild (its own origin and its own self-load, N=2000) read max 1189 ms, p99 760 ms.
+// Both were AL-1 scratch instruments and are named by ROLE, not by path -- they lived
+// under an untracked scratchpad and are in no clean checkout, so the numbers here are
+// the durable half. Neither is the other's error -- a latency
 // measured from a different origin under a different load is a different quantity --
 // so NO multiple derived from either instrument survives the other, and none is
 // claimed here. What both DO agree on is the only property this number needs:
