@@ -810,7 +810,7 @@ test('CWK-082 F2-R2: a role STORE that refuses to canonicalize FLAGS — the ref
     const sink = [];
     const denied = discoverRoleMemories({ projectRoot: proj, home, flags: sink });
     assert.strictEqual(denied.length, 0, 'PRECONDITION: the store really did leave the measure');
-    assert.ok(sink.some((f) => /unresolvable path \(role store coder\)/.test(f)),
+    assert.ok(sink.some((f) => /refused path \(role store coder\)/.test(f)),
       `a whole role store leaving the measure must be ANNOUNCED: ${JSON.stringify(sink)}`);
     assert.ok(sink.every((f) => !/[A-Za-z]:[\\/]/.test(f)), `and the flag stays sandbox-invariant: ${JSON.stringify(sink)}`);
   } finally { if (undo) undo(); clean(home, proj); }
@@ -832,7 +832,7 @@ test('CWK-082 F2-R2: a governance FILE that refuses to canonicalize FLAGS — it
     const denied = discoverClassB({ projectRoot: proj, home });
     assert.ok(denied.entries.length < before.entries.length,
       'PRECONDITION: content really did leave the measure');
-    assert.ok(denied.flags.some((f) => /unresolvable path \(governance\): CLAUDE\.md/.test(f)),
+    assert.ok(denied.flags.some((f) => /refused path \(governance\): CLAUDE\.md/.test(f)),
       `the loss must be ANNOUNCED, and NAME the file: ${JSON.stringify(denied.flags)}`);
   } finally { if (undo) undo(); clean(home, proj); }
 });
@@ -852,7 +852,7 @@ test('CWK-082 F2-R2: a single role FILE that refuses to canonicalize FLAGS — o
     const sink = [];
     const denied = discoverRoleMemories({ projectRoot: proj, home, flags: sink });
     assert.strictEqual(denied[0].files, 1, 'PRECONDITION: the file really did leave the store total');
-    assert.ok(sink.some((f) => /unresolvable path \(role store coder\): coder\/craft\.md/.test(f)),
+    assert.ok(sink.some((f) => /refused path \(role store coder\): coder\/craft\.md/.test(f)),
       `a file leaving a store total must be ANNOUNCED by name: ${JSON.stringify(sink)}`);
   } finally { if (undo) undo(); clean(home, proj); }
 });
@@ -869,8 +869,88 @@ test('CWK-082 F2-R2 CONTROL: an ABSENT candidate stays SILENT — fail-closed on
     write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@does-not-exist.md\ngovernance');
     write(path.join(proj, 'MEMORY.md'), 'memory');
     const d = discoverClassB({ projectRoot: proj, home });
-    assert.deepStrictEqual(d.flags.filter((f) => /unresolvable path/.test(f)), [],
+    assert.deepStrictEqual(d.flags.filter((f) => /(unresolvable|refused) path/.test(f)), [],
       `an @import target that was never created is not content that was lost: ${JSON.stringify(d.flags)}`);
     assert.ok(d.entries.some((e) => e.path.endsWith('MEMORY.md')), 'and the rest of the closure still resolved');
   } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// R3 findings-back on cdfd519.
+// ---------------------------------------------------------------------------
+
+test('R3-F1: a candidate whose PARENT refuses is REFUSED, not absent — lstat needs traverse permission on the parent, so the boolean probe read it as missing', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@sub/NOTES.md\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    write(path.join(proj, 'sub', 'NOTES.md'), 'notes');
+    const before = discoverClassB({ projectRoot: proj, home });
+    assert.ok(before.entries.some((e) => e.path.endsWith('NOTES.md')),
+      'PRECONDITION: the nested @import target IS discovered while its parent is readable');
+    undo = makeUnresolvable(path.join(proj, 'sub'));
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const denied = discoverClassB({ projectRoot: proj, home });
+    assert.ok(!denied.entries.some((e) => e.path.endsWith('NOTES.md')),
+      'PRECONDITION: the child really did leave the measure');
+    assert.ok(denied.flags.some((f) => /refused path \(governance\): sub\/NOTES\.md/.test(f)),
+      `a child behind a denied parent is REFUSED, not absent: ${JSON.stringify(denied.flags)}`);
+  } finally { if (undo) undo(); clean(home, proj); }
+});
+
+// R3-F3 in BOTH directions. One direction alone would pass on a flag builder
+// that had simply swapped one hardcoded noun for another; only the pair proves
+// the word FOLLOWS the code. UNCOMPARABLE is reachable end-to-end because
+// canonicalOrNull refuses a `\\?\` spelling at its INPUT shape check WITHOUT
+// throwing, so physicalOrNull goes null while lstat and realpath both succeed.
+test('R3-F3: the flag NOUN follows the CODE — a non-throwing refusal keeps `unresolvable`, and it is the only case that does', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const notes = path.join(proj, 'NOTES.md');
+    write(notes, 'notes');
+    const ns = path.toNamespacedPath(notes);
+    let lstatOk = false;
+    try { fs.lstatSync(ns); lstatOk = true; } catch { lstatOk = false; }
+    if (!(lstatOk && physicalOrNull(ns) === null)) {
+      t.skip('this platform does not produce a non-throwing canonicalization refusal — the arm would be vacuous');
+      return;
+    }
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@' + ns + '\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    const d = discoverClassB({ projectRoot: proj, home });
+    assert.ok(d.flags.some((f) => /unresolvable path .*\[UNCOMPARABLE\]/.test(f)),
+      `the genuine non-throwing case KEEPS the word: ${JSON.stringify(d.flags)}`);
+    assert.ok(!d.flags.some((f) => /refused path .*\[UNCOMPARABLE\]/.test(f)),
+      'and never calls it refused — nothing denied it, there was simply nothing comparable to resolve to');
+  } finally { clean(home, proj); }
+});
+
+// The invariant behind both, stated as its own cell so a future third code path
+// cannot pick the wrong noun quietly: the ONLY flag that may say `unresolvable`
+// is the one whose code is UNCOMPARABLE, and every error-code flag says
+// `refused`. This is a property of the whole flag set, not of one site.
+test('R3-F3 INVARIANT: no flag pairs the word `unresolvable` with an ERROR code, on any site', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    write(path.join(proj, '.claude', 'agent-memory', 'coder', 'MEMORY.md'), 'index');
+    undo = makeUnresolvable(path.join(proj, '.claude', 'agent-memory', 'coder'));
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const sink = [];
+    discoverRoleMemories({ projectRoot: proj, home, flags: sink });
+    const d = discoverClassB({ projectRoot: proj, home });
+    const all = [...sink, ...d.flags];
+    assert.ok(all.length > 0, `the fixture must PRODUCE flags or this cell measures nothing: ${JSON.stringify(all)}`);
+    const wrong = all.filter((f) => /unresolvable path/.test(f) && !/\[UNCOMPARABLE\]/.test(f));
+    assert.deepStrictEqual(wrong, [],
+      `every error-code flag must say 'refused'; 'unresolvable' belongs to the non-throwing case alone`);
+  } finally { if (undo) undo(); clean(home, proj); }
 });

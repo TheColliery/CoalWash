@@ -70,19 +70,67 @@ export const UNKNOWN_PLATFORM_FLAG = 'unknown platform: conservative — no auto
 // stays fail-closed; only the SILENCE changes. This function never produces a
 // physical path, so nothing downstream can be admitted by it.
 //
-// `pathExists` is config-load's own "absent vs present-but-unresolvable"
-// primitive (already imported) and decides the silent case. The CODE is read by
-// re-provoking the throw — a second syscall on a COLD path by construction,
-// since it only runs where the first call already returned null. That is a READ
-// of the error, never a second decision.
+// THE SILENT CASE IS DECIDED BY THE lstat ERROR CODE, NOT BY A BOOLEAN — R3-F1,
+// and this line used to ask `pathExists` instead. `lstat` needs TRAVERSE
+// permission on the candidate's PARENT: deny the parent and it throws,
+// `pathExists` returns false, and the old first line took the branch reserved
+// for "genuinely absent" on a candidate that is not absent at all — it exists
+// and is unreachable, which is exactly the condition this helper was built to
+// separate. Measured on the shipped engine with a restore control: a project
+// whose CLAUDE.md carries `@sub/NOTES.md` with `sub` denied went 4 entries -> 3
+// with `flags: []`, and back to 4 when the deny came off; on that child, `lstat`
+// reported EPERM while `pathExists` reported false.
+//
+// ENOENT and ENOTDIR are the ONLY silent codes — the same pair `noteUnreadable`
+// already carves out at a walk root, for the same reason: nothing exists behind
+// the path, so nothing was lost. Every other code means we were REFUSED before
+// we could look, which is not absence.
+//
+// THIS DOES NOT RE-IMPLEMENT `pathExists`, which stays the right primitive for
+// its own callers (physicalForCreate still uses it): that answers a yes/no about
+// EXISTENCE for a trust decision, this reads an ERROR CODE for a report. Same
+// syscall, different question — and a boolean provably cannot answer this one.
+//
+// The CODE for the resolve step is read by re-provoking the throw — a second
+// syscall on a COLD path by construction, since the whole function runs only
+// where `physicalOrNull` already returned null. That is a READ of the error,
+// never a second decision.
+//
+// TOCTOU, BOUNDED (R3-F2 — the reasoning above was here and the bound was not).
+// These are two syscalls on one path and they CAN disagree; that disagreement is
+// the very mechanism this helper is built on (lstat succeeds where realpath
+// throws), so a path that changes BETWEEN them is the same shape, not a new one.
+// THE BOUND: a divergence can only mis-name a CODE or drop one gauge's flag. It
+// cannot admit anything — the function returns no path. It cannot change a skip
+// — that was already decided by the caller before this ran. And nothing
+// downstream consumes the value: it reaches a flag string and stops, and the
+// next gauge re-derives from scratch. That is why the two calls need no lock and
+// no re-check. If a later change ever makes this return feed a DECISION, this
+// bound is void and the pair needs one.
 //
 // UNCOMPARABLE is a real, separate case, not a fallback: `canonicalOrNull` also
 // returns null WITHOUT throwing — a `\\?\` device or UNC spelling on win32, and
 // a mapped network drive that native RESOLVES to a UNC form. Content is dropped
 // there too, so it flags, under its own word rather than borrowed from an error.
 function refusalCode(candidate) {
-  if (!pathExists(candidate)) return null; // genuinely absent — the legitimate silent case
+  try { fs.lstatSync(candidate); } catch (err) {
+    const code = (err && err.code) || 'UNKNOWN';
+    return (code === 'ENOENT' || code === 'ENOTDIR') ? null : code; // absent = silent; refused = named
+  }
   try { fs.realpathSync.native(candidate); return 'UNCOMPARABLE'; } catch (err) { return (err && err.code) || 'UNKNOWN'; }
+}
+
+// R3-F3 — THE NOUN FOLLOWS THE CODE. This unit's whole contribution is
+// separating UNRESOLVABLE (nothing to resolve; deliberately silent, fail-closed)
+// from REFUSED (it exists, access denied), and a user-facing line reading
+// "unresolvable path … [EPERM]" re-blurs the two at the one surface a user
+// actually reads — the noun saying the path could not be resolved while the code
+// says permission was denied. The neighbouring `unreadable directory (…)` family
+// already gets this right, so the two had started disagreeing with each other.
+// Only the genuine non-throwing case keeps the word `unresolvable`.
+function refusalFlag(what, label, code) {
+  const word = code === 'UNCOMPARABLE' ? 'unresolvable' : 'refused';
+  return `${word} path (${what}): ${label} [${code}] — its contents are NOT counted`;
 }
 
 // A label for a flag: RELATIVE to a known root wherever possible, never an
@@ -308,7 +356,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   for (const [label, raw, phys] of [['home', home, homePhys], ['projectRoot', projectRoot, projPhys]]) {
     if (phys) continue;
     const code = refusalCode(raw);
-    if (code) flags.push(`unresolvable path (${label}): . [${code}] — its contents are NOT counted`);
+    if (code) flags.push(refusalFlag(label, '.', code));
   }
   const roots = [homePhys, projPhys].filter(Boolean);
   const seen = new Set();
@@ -361,7 +409,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       // it SAYS SO when the candidate exists — a refused governance file takes
       // its entire @import closure out of the measure with it.
       const code = refusalCode(candidate);
-      if (code) flags.push(`unresolvable path (governance): ${relLabel(candidate, [projPhys, homePhys])} [${code}] — its contents are NOT counted`);
+      if (code) flags.push(refusalFlag('governance', relLabel(candidate, [projPhys, homePhys]), code));
       return null;
     }
     if (!containedIn(phys, roots)) {
@@ -641,7 +689,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
 export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.homedir(), flags = [] } = {}) {
   // F2-R2, the same class at every door of this function. Each skip is
   // UNCHANGED and still fail-closed; each now says which case it took.
-  const note = (what, label, code) => flags.push(`unresolvable path (${what}): ${label} [${code}] — its contents are NOT counted`);
+  const note = (what, label, code) => flags.push(refusalFlag(what, label, code));
   const projPhys = physicalOrNull(projectRoot);
   if (!projPhys) {
     const code = refusalCode(projectRoot);
