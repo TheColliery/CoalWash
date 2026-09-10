@@ -226,8 +226,11 @@ export function seatbeltAdvisory(opts) {
 // argument, which is answerable — an airbag on Bash could snapshot the whole
 // guarded set unconditionally and parse nothing, and would still pay the cost).
 // A PreToolUse(Bash) matcher puts one conductor PROCESS SPAWN on EVERY shell
-// call: ~85 ms median, n=25, with an Edit-payload control proving the floor is
-// the spawn. Phoenix #3, the hottest path in a session, for a narrow case.
+// call: a median of 82-89 ms across two independent instruments (n=25 each),
+// with an Edit-payload control proving the floor is the spawn. The SPAN is
+// quoted deliberately — a single rounded figure here would be a number neither
+// instrument produced, attached to an n that makes it read as a measurement.
+// Phoenix #3, the hottest path in a session, for a narrow case.
 // SAID ONCE: the figures, the control and the instrument live where the
 // mechanism lives — the conductor's touchedPath note — and are deliberately not
 // restated here, so one of the two cannot go stale against the other.

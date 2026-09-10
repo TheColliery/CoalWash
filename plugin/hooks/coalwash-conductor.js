@@ -691,9 +691,12 @@ const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit']);
 // 3 snapshot files. Instrument: scratchpad/r31/probe-fb2-spawn.mjs. INSPECT
 // measured the same arm on its own separate instrument (78.804 / 82.106 /
 // 103.652, n=25) and agrees; two harnesses, same order of magnitude, cited as
-// two rather than merged into one. ~85 ms on EVERY shell call, to cover a
+// two rather than merged into one — and the figure is quoted as the SPAN the
+// two produced, 82-89 ms at the median, never a midpoint neither of them
+// measured. Roughly eighty-odd milliseconds on EVERY shell call, to cover a
 // narrow case, is the trade this refuses — Phoenix #3, the hottest path in a
-// session.
+// session. The exact per-arm distributions are the tables above; do not
+// re-round them into one number.
 //
 // THE PARSER ARGUMENT IS TRUE AND IS *NOT* WHAT DECIDES IT. A Bash payload
 // carries a command STRING, not a file_path, so this function has nothing to
