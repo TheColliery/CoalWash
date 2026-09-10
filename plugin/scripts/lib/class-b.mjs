@@ -447,7 +447,32 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true, upTree });
       if (!phys || depth >= IMPORT_DEPTH_MAX) continue;
       let text;
-      try { text = fs.readFileSync(phys, 'utf8'); } catch { continue; }
+      try { text = fs.readFileSync(phys, 'utf8'); } catch (err) {
+        // r32, THE (a) FORK. This `continue` dropped the whole @import closure
+        // of a governance file whose CONTENT could not be read, with flags: [].
+        // Pre-existing since cec4a4d (beta.1); measured in r31 at 4 entries -> 2.
+        //
+        // WHY refusalCode() IS THE WRONG INSTRUMENT HERE, stated because the
+        // obvious reading is to reuse it: refusalCode RE-PROBES with lstat and
+        // realpathSync.native, and on exactly the fixture that produces this loss
+        // BOTH succeed — the path resolves, only the READ is denied — so it
+        // returns null and no flag would ever fire. The error's own code is the
+        // only witness to a failure that happens at the read itself.
+        //
+        // NO ENOENT/ENOTDIR CARVE-OUT, and that is deliberate rather than an
+        // omission: the silence carve-out exists for a candidate that never
+        // existed. `phys` canonicalized one call ago, so the file DID exist a
+        // moment ago and an ENOENT now is a real mid-walk loss — identical
+        // reasoning to the `unstattable file` sibling directly above, which
+        // likewise carves nothing out.
+        //
+        // THE MESSAGE IS NOT WIDER THAN THE TRUTH: add() already succeeded, so
+        // the file's OWN bytes ARE counted. What vanishes is everything it
+        // imports.
+        const code = (err && err.code) || 'UNKNOWN';
+        flags.push(`unreadable governance file: ${relLabel(phys, [projPhys, homePhys])} [${code}] — its own bytes ARE counted, its @import closure is NOT`);
+        continue;
+      }
       for (const imp of parseImports(text, path.dirname(phys), home)) {
         queue.push({ file: imp, depth: depth + 1 });
       }

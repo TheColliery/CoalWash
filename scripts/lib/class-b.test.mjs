@@ -954,3 +954,89 @@ test('R3-F3 INVARIANT: no flag pairs the word `unresolvable` with an ERROR code,
       `every error-code flag must say 'refused'; 'unresolvable' belongs to the non-throwing case alone`);
   } finally { if (undo) undo(); clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// r32, THE (a) FORK — the READ-CHANNEL silent drop. r31's release gate
+// FALSIFIED BY EXECUTION the headline "a file you don't have permission to read
+// could vanish with no warning": a narrow read-deny leaves lstat, stat and
+// realpathSync.native all OK, so physicalOrNull returns a path, refusalCode is
+// never reached, and add() counts the file's own bytes normally. The loss is one
+// frame further in and it is the @import CLOSURE, not the file.
+// ---------------------------------------------------------------------------
+
+// Deny a FILE's CONTENT while its PATH still resolves. This is a DIFFERENT
+// capability from makeUnresolvable above, and conflating the two is exactly the
+// F-T4 finding: that helper accepts an attempt only when physicalOrNull goes
+// null, i.e. only when the denial broke CANONICALIZATION. This one accepts the
+// opposite state, and asserts BOTH halves of it — readFileSync throws AND
+// physicalOrNull still returns a path — so a box that cannot express this exact
+// case skips instead of producing a vacuous green.
+//
+// The Windows attempt uses (RD) alone, NOT (RX): (RX) removes Read AND Execute
+// and takes realpath down with it, which is the state the OTHER helper wants.
+function makeUnreadableFile(target) {
+  const attempts = [
+    () => { const m = fs.statSync(target).mode; fs.chmodSync(target, 0o000); return () => { try { fs.chmodSync(target, m); } catch { /* best effort */ } }; },
+    () => {
+      const who = process.env.USERNAME || process.env.USER || '';
+      if (!who) return null;
+      spawnSync('icacls', [target, '/deny', `${who}:(RD)`], { stdio: 'ignore' });
+      return () => { try { spawnSync('icacls', [target, '/remove:d', who], { stdio: 'ignore' }); } catch { /* best effort */ } };
+    },
+  ];
+  for (const attempt of attempts) {
+    let restore = null;
+    try { restore = attempt(); } catch { restore = null; }
+    if (!restore) continue;
+    let threw = false;
+    try { fs.readFileSync(target, 'utf8'); } catch { threw = true; }
+    if (threw && physicalOrNull(target) !== null) return restore;
+    restore();
+  }
+  return null;
+}
+
+test('r32 (a): a governance file whose CONTENT is denied FLAGS — its own bytes are counted, its @import closure is NOT', (t) => {
+  const { home, proj } = sandbox();
+  let restore = null;
+  try {
+    // Capability probe FIRST, on a throwaway outside the fixture: the skip
+    // decision must precede every assertion (ONE SKIPPABLE LEG PER TEST).
+    const probe = path.join(proj, 'probe-deny-read.md');
+    write(probe, 'probe');
+    const probeUndo = makeUnreadableFile(probe);
+    if (!probeUndo) {
+      t.skip('this volume/account cannot deny a FILE READ while leaving its path resolvable — the arm would be vacuous');
+      return;
+    }
+    probeUndo();
+
+    write(path.join(home, '.claude', 'CLAUDE.md'), 'global');
+    const claude = path.join(proj, 'CLAUDE.md');
+    write(claude, '@sub/NOTES.md' + String.fromCharCode(10));
+    write(path.join(proj, 'sub', 'NOTES.md'), 'imported content the closure carries');
+
+    const names = (r) => r.entries.map((e) => path.basename(e.path)).sort();
+    const before = discoverClassB({ projectRoot: proj, home });
+    assert.ok(names(before).includes('NOTES.md'), 'PRECONDITION: the closure is reachable while the parent is readable');
+
+    restore = makeUnreadableFile(claude);
+    assert.ok(restore, 'the probe said this box CAN deny a file read, so this must not fail');
+
+    const denied = discoverClassB({ projectRoot: proj, home });
+    assert.ok(!names(denied).includes('NOTES.md'), 'PRECONDITION: the closure really did leave the measure');
+    assert.ok(names(denied).includes('CLAUDE.md'),
+      'the DENIED FILE ITSELF is still counted — add() succeeded, only the content read failed');
+    assert.ok(denied.flags.some((f) => /unreadable governance file/.test(f)),
+      'the dropped closure must be FLAGGED, never silent — flags: ' + JSON.stringify(denied.flags));
+
+    restore();
+    restore = null;
+    const after = discoverClassB({ projectRoot: proj, home });
+    assert.deepStrictEqual(names(after), names(before),
+      'RESTORE CONTROL: un-deny and the closure returns — a cell that reads the same on both arms measures the harness, not the engine');
+  } finally {
+    if (restore) restore();
+    clean(home, proj);
+  }
+});

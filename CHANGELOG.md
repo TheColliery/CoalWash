@@ -2,6 +2,12 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Fixed
+
+- **The one permission case 1.6.0 explicitly did NOT cover is now closed: a governance file you can still SEE but are not allowed to READ.** 1.6.0 closed every case where a path could not be resolved at all, and said so in its own entry — it also said, in the same breath, that a narrower block (the path resolves and stats fine, only the CONTENT is denied) still dropped that file's entire `@import` closure in silence. That was accurate for 1.6.0 and its entry below is left exactly as written. It is no longer true here. Measured on this box with a restore control: a project `CLAUDE.md` importing one file, with a read-only-denied parent, dropped the imported file from the reading entirely while nothing at all was flagged. **The file's own bytes were always counted and still are — what vanished was everything it imports**, and the new flag says precisely that: `unreadable governance file: <path> [<code>] — its own bytes ARE counted, its @import closure is NOT`. Pre-existing since `beta.1`. — test: `scripts/lib/class-b.test.mjs` (`r32 (a)`)
+
 ## [1.6.0] - 2026-09-10
 
 ### Added
