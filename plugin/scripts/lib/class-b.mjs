@@ -413,6 +413,15 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       return null;
     }
     if (!containedIn(phys, roots)) {
+      // THE ABSOLUTE PATH HERE IS DELIBERATE, and this note exists because two of
+      // my own returns NAMED it as the one flag in this file that is not
+      // sandbox-invariant, without checking whether it CAN be relativized. It
+      // cannot. This flag fires precisely BECAUSE the candidate escaped every
+      // root, so `relLabel` finds no root to relativize against and falls through
+      // to a bare basename — which, on a path the reader has to go and FIND
+      // outside their own trees, is strictly worse than the absolute form (the
+      // same disambiguation lesson as the residue/coverage lines, pointing the
+      // other way here). RULED, not a residue: do not "fix" this into a basename.
       flags.push(`skipped (outside home/project trees): ${candidate}`);
       return null;
     }
