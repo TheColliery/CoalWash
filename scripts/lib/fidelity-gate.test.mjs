@@ -1230,7 +1230,8 @@ test('GATE COST control: the FIRST coarser survivor in inventory order is still 
 // resolve on the first backtrack — a fixture with NO valid extension anywhere
 // forces the full backtrack per restart point instead, which is the shape
 // that actually reproduces the cost (measured on the unfixed engine: ~5.6s at
-// 256 KiB — Phoenix #3's PostToolUse seatbelt budget is 100ms).
+// 256 KiB — Phoenix #3's PostToolUse gate is <=5ms of ADDED work; the 100ms
+// total-wall-clock figure this line used to name is RETIRED, board #24).
 test('GATE COST: an unbroken [\\w.-] run with NO valid file extension gates in bounded time (grad6 #6)', () => {
   const next = ('a'.repeat(9) + '.').repeat(Math.floor((256 * 1024) / 10));
   __testHooks.reset();

@@ -49,6 +49,7 @@
 // leftover dust waits for the next pass, never a false "destroyed").
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { txDirFor, ensureSelfIgnore, acquireLock } from './apply.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
 
@@ -119,8 +120,16 @@ function saveIndex(dir, index) {
   try {
     fs.mkdirSync(dir, { recursive: true });
     ensureSelfIgnore(dir);
-    const tmp = path.join(dir, INDEX_NAME + '.tmp');
-    fs.writeFileSync(tmp, JSON.stringify(index), 'utf8');
+    // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
+    // carries (read its comment for the full reasoning; this module cannot import
+    // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
+    // derivable `<dest>.tmp` can be pre-placed by anyone able to write that
+    // directory, and a plain writeFileSync FOLLOWS an alias sitting there. Random
+    // naming removes the precondition; 'wx' is the cross-nature second belt. No
+    // fsync is added here on purpose: this closes a security hole, it does not
+    // change this path's durability posture.
+    const tmp = path.join(dir, `${INDEX_NAME}.${crypto.randomBytes(12).toString('hex')}.tmp`);
+    fs.writeFileSync(tmp, JSON.stringify(index), { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmp, path.join(dir, INDEX_NAME));
     return true;
   } catch {
@@ -221,9 +230,16 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
       lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now, staleMs: BIN_LOCK_STALE_MS });
     }
     if (!lock.acquired) return null;
-    const id = `${now}-${Math.random().toString(36).slice(2, 8)}`;
+    // U7 (7th site — found by apply.test.mjs's own FINAL-path guard, not by the
+    // board enumeration): this id doubles as a WRITE PATH, so its unpredictability
+    // is a security property, not just a name. Math.random() is not a CSPRNG
+    // (security.md: never Math.random for anything security-relevant).
+    const id = `${now}-${crypto.randomBytes(6).toString('hex')}`;
     const body = Buffer.isBuffer(content) ? content : Buffer.from(typeof content === 'string' ? content : '', 'utf8');
-    fs.writeFileSync(path.join(dir, id), body); // NO encoding argument: raw bytes
+    // 'wx' = a fresh inode, or EEXIST-fail-closed — never write THROUGH an alias
+    // planted at the blob path. A pre-existing entry at a brand-new id IS an error,
+    // so O_EXCL here costs no legitimate operation (the U7 temp/destination split).
+    fs.writeFileSync(path.join(dir, id), body, { flag: 'wx' }); // NO encoding argument: raw bytes
     const index = loadIndex(dir);
     // bytes (0i): the size-cap layer's weight — recorded at birth so the
     // sweep never has to re-stat the common case.

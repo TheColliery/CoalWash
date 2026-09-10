@@ -12,7 +12,9 @@
 // Real: a sparse caretaker bench (scripts/lib/ minus config-schema.mjs)
 // reported nothing at all. Pinned by scripts/verify.test.mjs.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -203,6 +205,189 @@ try {
   if (CONFIG_SCHEMA.every((s) => s.key in cfg && JSON.stringify(cfg[s.key]) === JSON.stringify(s.def))) ok('factory template carries every schema key at its default');
 } catch (e) { fail(`factory config: ${e.message}`); }
 
+console.log('config keys (ship-text vs schema):');
+try {
+  const lib = (l) => import(pathToFileURL(path.join(repo, 'scripts', 'lib', l)).href);
+  const { CONFIG_SCHEMA, RETIRED_KEYS } = await lib('config-schema.mjs');
+  const { checkConfigKeys } = await import(pathToFileURL(path.join(repo, 'scripts', 'config-keys.mjs')).href);
+  // Surfaces are NAMED, never existsSync-filtered: a file that vanished must be
+  // REPORTED as unreadable, not silently dropped into a smaller clean scan.
+  const refsDir = path.join(repo, 'skills', 'coalwash', 'references');
+  const cmdDir = path.join(repo, 'commands');
+  const mdFiles = [
+    'README.md', 'SECURITY.md', 'PRIVACY.md', 'CONTRIBUTING.md', 'INPUT-CONTRACT.md',
+    path.join('skills', 'coalwash', 'SKILL.md'),
+    ...fs.readdirSync(refsDir).filter((n) => n.endsWith('.md')).map((n) => path.join('skills', 'coalwash', 'references', n)),
+    ...fs.readdirSync(cmdDir).filter((n) => n.endsWith('.md')).map((n) => path.join('commands', n)),
+  ];
+  const hookFiles = [path.join('hooks', 'coalwash-conductor.js')];
+  // The Stop channel's `reason` text is built here, not in the conductor.
+  const builderFiles = [path.join('scripts', 'lib', 'ask.mjs')];
+  const r = checkConfigKeys({
+    schema: CONFIG_SCHEMA,
+    retiredKeys: RETIRED_KEYS,
+    mdFiles, hookFiles, builderFiles,
+    read: (p) => fs.readFileSync(path.join(repo, p), 'utf8'),
+  });
+  for (const x of r.findings) { if (x.level === 'FAIL') fail(x.msg); }
+  const skips = r.findings.filter((x) => x.level === 'SKIP');
+  const hard = r.findings.filter((x) => x.level !== 'SKIP');
+  const n = r.coverage.notice;
+  // PRINT what the scan covered. A locator that matches nothing reports clean.
+  const b = r.coverage.builder;
+  ok(`L4 notice locator: ${n.lines} out.push( site(s) / ${n.total} lines, ${n.chars} chars across ${hookFiles.length} hook file(s)`);
+  ok(`L5 builder locator: ${b.literals} string literal(s) across ${b.files} notice-builder file(s)`);
+  if (!hard.length) {
+    const q = r.coverage.blind ? 'every DETECTABLE config key' : 'every config key';
+    ok(`${q} named in ${r.scanned} ship-text surface(s) resolves (${r.coverage.resolved} of ${r.coverage.candidates} candidates real, ${r.coverage.retiredSeen.length} retired-by-name: ${r.coverage.retiredSeen.join(', ') || 'none'}, ${skips.length} declared blind)`);
+  }
+} catch (e) { fail(`config keys: ${e.message}`); }
+
+// POINTERS (CWK-075). Ship-text naming something unreachable from a clone. Sibling of
+// the config-key gate above: same family, different resolver -- that one resolves KEYS
+// against the schema, this one asks whether the thing a path NAMES is reachable.
+//
+// SURFACES: the 9 shipped ship-text files (walked, never existsSync-filtered -- an
+// unreadable surface is REPORTED, never silently dropped into a smaller clean scan).
+// Source comments, CHANGELOG.md and the plugin/ mirror are deliberately NOT walked,
+// each with its measured reason in scripts/pointer-check.mjs.
+console.log('pointers (ship-text vs the tree):');
+try {
+  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8' });
+  if (lsAll.error || lsAll.status !== 0) {
+    // A VISIBLE skip, never a silent carve-out: no git means no durability answer.
+    console.log('  --   pointer check: git unavailable — cannot tell a tracked path from an untracked one; skipped');
+  } else {
+    const { checkPointers, deriveIgnoredRoots } = await import(pathToFileURL(path.join(repo, 'scripts', 'pointer-check.mjs')).href);
+    const { projectConfigCandidates } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'config-load.mjs')).href);
+    const tracked = new Set(lsAll.stdout.split('\n').filter(Boolean));
+    const trackedDirs = new Set();
+    for (const f of tracked) {
+      const parts = f.split('/');
+      for (let i = 1; i < parts.length; i++) trackedDirs.add(parts.slice(0, i).join('/'));
+    }
+
+    // AGENT INSTALL HOMES, DERIVED from the tool's own candidate map rather than
+    // enumerated, so the set cannot rot the day that order changes.
+    const agentHomes = new Set();
+    for (const c of projectConfigCandidates(repo, os.homedir())) {
+      const r = path.relative(repo, c).split(path.sep).join('/');
+      if (!r || r.startsWith('..') || path.isAbsolute(r) || !r.includes('/')) continue;
+      const first = r.split('/')[0];
+      if (first.startsWith('.') && first.length > 1) agentHomes.add(first);
+    }
+
+    // OUR ROOTS — tracked names PLUS every top-level entry on disk. This set feeds the
+    // SCOPE test only (does a token name something of ours at all), never the ignore
+    // probe: the probe moved to a CITATION-derived set below at CWK-079 precisely
+    // because a disk listing is a property of the machine running the gate. Keeping the
+    // on-disk half here is deliberate and harmless — it can only WIDEN what is checked,
+    // and a gitignored-but-present root now FAILs on the ignore branch before scope is
+    // ever consulted.
+    const topAll = fs.readdirSync(repo, { withFileTypes: true }).map((e) => e.name).filter((n) => n !== '.git');
+    const ourRoots = new Set();
+    for (const f of tracked) ourRoots.add(f.split('/')[0]);
+    for (const n of topAll) ourRoots.add(n);
+
+    const rel = (p) => path.relative(repo, p).split(path.sep).join('/');
+    const walkMd = (dir, out = []) => {
+      if (!fs.existsSync(dir)) return out;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walkMd(p, out);
+        else if (e.name.endsWith('.md')) out.push(p);
+      }
+      return out;
+    };
+    const readOrNull = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } };
+    const surfaces = [];
+    for (const f of [...walkMd(path.join(repo, 'skills')), ...walkMd(path.join(repo, 'commands'))]) {
+      surfaces.push({ label: rel(f), text: readOrNull(f) });
+    }
+    // INPUT-CONTRACT.md is walked for the same reason block 2.9's config-key gate walks
+    // it (same file, ~100 lines up): it is TRACKED, outward-facing ship-text a partner
+    // builds against, moved out of a gitignored scratchpad at 455631c (board #21)
+    // precisely so it could not drift unseen. Two gates in one file reading the same
+    // surface set is the default; a divergence would need a stated reason, and there is
+    // none — this list was simply narrower by one, unnamed, which is this gate's own
+    // class one level up (a pass line reading as ship-text coverage while a tracked
+    // ship-text surface goes unread).
+    for (const d of ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'PRIVACY.md', 'INPUT-CONTRACT.md']) {
+      surfaces.push({ label: d, text: readOrNull(path.join(repo, d)) });
+    }
+
+    // IGNORED ROOTS, DERIVED FROM THE CITED PATHS (CWK-079). Must run AFTER `surfaces`
+    // exists — the candidates it needs do not exist before that. The full reasoning, the
+    // shape test it applies, and the CRLF deviation from the exemplar all live at the
+    // function, not restated here: scripts/pointer-check.mjs, `deriveIgnoredRoots`.
+    //
+    // NAMED BOUND — FOREIGN-NAME COLLISION, open, not narrowed. The probe set is now fed
+    // from every shape-qualified CITED first segment, so a citation describing the
+    // SCANNED USER's own tree probes that name against OUR .gitignore; if a pattern of
+    // ours ever shares it, a citation that was never ours to be wrong about FAILs as
+    // "not reachable from a clone". Measured population on this tree today: ZERO of 17
+    // shape-qualified first segments. EXPOSURE, which is the number that actually moves,
+    // and it carries a PREDICATE this sentence used to leave unstated (INSPECT F1 —
+    // "6 of 17 are ordinary one-word names" re-derives as 12 and reads as rotted):
+    // 12 of the 17 are ordinary one-word names, and **6 of those 12 are also NOT ROOTS OF
+    // OURS** — `TheColliery` `benchmarks` `memory` `projects` `references` `subagents`.
+    // SIX is the exposure figure and the second half is why: this class is FOREIGN-name
+    // collision, so a FAIL is only WRONG when the segment describes the scanned user's
+    // tree rather than ours. A one-word name that IS one of our roots collides with our
+    // own `.gitignore` on our own file, which is a true FAIL, not this class. So one
+    // ordinary directory line added to `.gitignore` is all it takes for this class to
+    // fire — on any of those six. Deliberately NOT narrowed —
+    // any existence- or ourRoots-based test would re-open the exact vacuity this ticket
+    // removes — and the miss is LOUD by design: a wrong FAIL names the file and the
+    // token, unlike a dead citation falling silently out of scope.
+    const ign = deriveIgnoredRoots({
+      surfaces,
+      agentHomes,
+      runCheckIgnore: (names) => {
+        const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
+          { cwd: repo, encoding: 'utf8', input: names.map((n) => n + '/').join('\n') + '\n' });
+        // Exit 1 means nothing fed was ignored — not an error. git was already proven
+        // reachable by the ls-files probe this whole block is gated on.
+        return ci.error ? '' : ci.stdout;
+      },
+    });
+    const ignoredRoots = ign.ignored;
+
+    const findings = checkPointers({
+      surfaces,
+      ourRoots,
+      ignoredRoots,
+      agentHomes,
+      // Structural, never circular: does the token's FIRST SEGMENT exist beside the
+      // citing file? That is what puts `references/method.md` in scope from its own
+      // skill dir, where a repo-root-anchored rule skips it in silence.
+      hasEntry: (relDir, name) => {
+        try { return fs.existsSync(path.join(repo, relDir, name)); } catch { return false; }
+      },
+      resolve: (p) => (tracked.has(p) || trackedDirs.has(p) ? 'tracked'
+        : fs.existsSync(path.join(repo, p)) ? 'untracked' : 'missing'),
+    });
+    // PRINT the derived enumeration. A set that comes back wrong (or empty) is the
+    // failure mode this room was warned about, and it is invisible unless it is shown.
+    // TWO COUNTS, NEVER ONE. `cited` is how many distinct first segments the surfaces
+    // name and the shape test qualified; `probed` is how many of those actually reached
+    // git after the agent homes were held out. One number standing for both is the
+    // shape that let the old disk-derived set read as coverage while it measured the
+    // caller's directory listing. The artefact count is printed whenever it is non-zero
+    // rather than hidden: a checkout whose `.gitignore` is CRLF is not an error, but a
+    // reader is owed the fact that rows were dropped.
+    ok(`gitignored-root citations: ${ign.cited.size} distinct first segment(s) cited and shape-qualified, ${ign.probed.length} probed through one git check-ignore call (${ign.homesPresent} of ${agentHomes.size} agent home(s) held out: ${[...agentHomes].sort().join(' ')}) — ${ignoredRoots.size} gitignored${ign.artefacts.length ? `, ${ign.artefacts.length} empty-pattern row(s) dropped (CRLF .gitignore)` : ''}`);
+    const hard = findings.filter((f) => f.level !== 'SKIP');
+    if (!hard.length) {
+      ok(`every path this repo points at from ${surfaces.length} ship-text surface(s) (${findings.checked} in-scope citations) resolves to a TRACKED file — sections and symbols are NOT checked, see scripts/pointer-check.mjs`);
+    }
+    for (const f of findings) {
+      if (f.level === 'SKIP') console.log('  --   ' + f.msg);
+      else fail(f.msg);
+    }
+  }
+} catch (e) { fail(`pointer check: ${e.message}`); }
+
 console.log('libs (import check):');
 for (const l of LIBS) {
   try { await import(pathToFileURL(path.join(repo, 'scripts', 'lib', l)).href); ok(`${l} imports`); }
@@ -218,4 +403,11 @@ try {
 } catch (e) { fail(`plugin/ dist check: ${e.message}`); }
 
 console.log(fails ? `\nVERIFY: FAIL (${fails})` : '\nVERIFY: PASS');
-process.exit(fails ? 1 : 0);
+// CWK-071 (node/runtime.md §7): process.exitCode + a NATURAL exit, never
+// process.exit() — which 'forces the process to exit as quickly as possible
+// even with asynchronous operations pending, including I/O to process.stdout
+// and process.stderr'. This gate prints its whole per-item report to stdout
+// immediately above, so it is exactly the shape that would lose output.
+// Fail-loud is UNCHANGED (§1.0: a gate must be able to exit non-zero) — only
+// the mechanism moves.
+process.exitCode = fails ? 1 : 0;

@@ -247,7 +247,13 @@ test('gauge() direct call: honors an explicit home/cwd — and a poisoned stored
     const g = gauge({ cwd: proj, home });
     assert.ok(['LEAN', 'OBESE', 'FULL'].includes(g.verdict.band), 'the gauge ran on the explicit home/cwd');
     assert.strictEqual(g.breakEven.floorUnmeasured, undefined, 'no floor is consulted, poisoned or not');
-    assert.match(gaugeLine(g), /certain fat ~\d+ tok/);
+    // The fat figure is a LOWER BOUND and the line must say so in EITHER
+    // shape — `certain fat ~N tok (lower bound)` when something was proven,
+    // or `no provable fat (lower bound — ...)` when nothing was. Pinning the
+    // bound label rather than one phrasing is stricter than the old
+    // `/certain fat ~\d+ tok/`: that regex passed on a line making a bare
+    // clean-bill claim, which is the defect this wording fixes.
+    assert.match(gaugeLine(g), /\(lower bound/);
   } finally {
     if (savedEnv !== undefined) process.env.CLAUDE_CONFIG_DIR = savedEnv;
     clean(home, proj);
@@ -445,4 +451,33 @@ test('RED-FIRST/R8-F6 control: a clean success (rolled-back/cleaned/no-mutation)
     assert.match(line, new RegExp(`recovered dangling run: ${recovered}`), `${recovered} must still read as a plain success`);
     assert.doesNotMatch(line, /PARTIALLY/i);
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 — the capacity adapter's flag, on the one line a reader sees
+// ---------------------------------------------------------------------------
+
+test('CWK-081: gaugeLine NAMES a conservative-default ceiling where it is load-bearing (FULL), stays quiet about it where it is not (LEAN)', () => {
+  const base = { measure: { alwaysLoaded: { tokensEst: 200000 } }, capacity: { capacityTokens: 167000, source: 'conservative-default', discovered: false } };
+  const full = gaugeLine({ ...base, verdict: { band: 'FULL', bmi: 1 } });
+  assert.match(full, /capacity ~167000 tok/, 'the number the band was judged against');
+  assert.match(full, /CONSERVATIVE DEFAULT/, 'and that it is a DEFAULT, not a discovery — the blueprint flag, surfaced');
+  const lean = gaugeLine({ ...base, verdict: { band: 'LEAN', bmi: 1 } });
+  assert.ok(!/capacity ~/.test(lean), 'a store nowhere near the ceiling is not told about the ceiling');
+});
+
+test('CWK-081: a DISCOVERED ceiling is named on every band — it is a measurement, not a caveat', () => {
+  const line = gaugeLine({
+    verdict: { band: 'LEAN', bmi: 1 },
+    measure: { alwaysLoaded: { tokensEst: 1000 } },
+    capacity: { capacityTokens: 967000, source: 'stats-cache', discovered: true },
+  });
+  assert.match(line, /capacity ~967000 tok \(discovered: stats-cache\)/, line);
+  assert.ok(!/CONSERVATIVE DEFAULT/.test(line));
+});
+
+test('CWK-081: a gauge object with NO capacity block renders exactly as before (every pre-CWK-081 caller unmoved)', () => {
+  const line = gaugeLine({ verdict: { band: 'FULL', bmi: 1 }, measure: { alwaysLoaded: { tokensEst: 1000 } } });
+  assert.ok(!/capacity ~/.test(line), line);
 });

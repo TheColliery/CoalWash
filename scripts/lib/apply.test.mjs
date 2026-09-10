@@ -5,11 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
-import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks } from './apply.mjs';
+import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks, writeDurable } from './apply.mjs';
 import { recordKeep, recordGlobalKeep, loadKeeps } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
-import { recordVerdict } from './caliper.mjs';
+import { recordVerdict, loadState } from './caliper.mjs';
 import { ccMemoryDir } from './class-b.mjs';
 
 function sandbox() {
@@ -1411,6 +1411,20 @@ test('KEEPS-GATE: a rewrite erasing an adjudicated keep anchor is EXCLUDED (file
   } finally { clean(proj); }
 });
 
+// Non-vacuity guard for every anchored-keep test below: an anchor silently
+// dropped at record time (the grad9-11 substance floor refusing it) makes the
+// probe that follows vacuous — the keep is filtered out of enforcement
+// entirely and every plan then "survives" with nothing checking it.
+// Defined here rather than beside the tests it serves because the block it
+// used to live in was the anchor-check cluster's, removed at the r33 ascent;
+// its SIX callers are not cluster work and stay.
+function assertAnchorStored(proj, target) {
+  const k = loadKeeps(proj).find((e) => e.target === target);
+  assert.ok(k, `no keep entry recorded for target "${target}"`);
+  assert.strictEqual(typeof k.anchor, 'string', 'anchor field must be a stored string, not dropped (F5)');
+  assert.ok(k.anchor.length > 0, 'anchor field must be non-empty -- a dropped anchor makes this probe vacuous (F5)');
+}
+
 test('KEEPS-GATE: an anchor MIGRATED to another file in the same txn passes (a merge keeps the fact alive)', () => {
   const { proj, store } = sandbox();
   try {
@@ -1572,285 +1586,6 @@ test('KEEPS-GATE fixpoint CASCADE: excluding file A removes the text that satisf
   } finally { clean(proj); }
 });
 
-// grad9 F2 [HIGH, content-loss, mainline]: the whitespace normalizer was
-// blind to semantic indentation — same tokens, different program, judged as
-// "the anchor survives" and left unflagged. Both fixtures are the lab's own
-// (LAB-RECORD.md F2 / w1/harness.mjs), driven through the real KEEPS-GATE.
-test('RED-FIRST/F2-python: print(i*2) DEDENTED out of the loop (same tokens, runs once instead of 3x) is caught — the anchor no longer "survives"', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const origBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    print(i)\n    print(i*2)\nprint("done")\nTail notes.';
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = 'for i in range(3):\n    print(i)\n    print(i*2)\nprint("done")';
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    // print(i*2) dedented OUT of the loop — same tokens, different program.
-    const newBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    print(i)\nprint(i*2)\nprint("done")\nTail notes — rewritten.';
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.ok, true, r.error); // per-file exclusion, not a plan-fatal abort
-    assert.strictEqual(r.applied, 1, 'the OTHER file still applies — only the keep-protected one is excluded');
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody, 'the file must be left UNTOUCHED (the semantic-indent change is refused)');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-  } finally { clean(proj); }
-});
-
-test('RED-FIRST/F2-python control: a genuinely DIFFERENT token (i*2 -> i*3) is still correctly excluded — isolates the finding to the whitespace-only case', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const origBody = 'Ops snippet:\nfor i in range(3):\n    print(i)\n    print(i*2)\nTail.';
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = 'for i in range(3):\n    print(i)\n    print(i*2)';
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    const newBody = 'Ops snippet:\nfor i in range(3):\n    print(i)\n    print(i*3)\nTail changed.';
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.applied, 1, 'a real token change must still be excluded');
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
-  } finally { clean(proj); }
-});
-
-test('RED-FIRST/F3-yaml: `cache: redis` re-parented from a SIBLING of db to a CHILD of db (2-space indent, same tokens) is caught', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const origBody = 'Config (load-bearing):\nservice:\n  db:\n    host: primary\n  cache: redis\nTail notes.';
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = 'service:\n  db:\n    host: primary\n  cache: redis';
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    // cache: redis re-parented to be a CHILD of db — same tokens, different config.
-    const newBody = 'Config (load-bearing):\nservice:\n  db:\n    host: primary\n    cache: redis\nTail notes — reformatted.';
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(r.applied, 1, 'the rewrite must be EXCLUDED — the re-parenting is a real config change');
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-  } finally { clean(proj); }
-});
-
-test('RED-FIRST/F3-yaml control: a genuinely different value (redis -> memcached) is still correctly excluded', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const origBody = 'Config:\nservice:\n  db:\n    host: primary\n  cache: redis\nTail.';
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = 'service:\n  db:\n    host: primary\n  cache: redis';
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    const newBody = 'Config:\nservice:\n  db:\n    host: primary\n    cache: memcached\nTail changed.';
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.applied, 1);
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
-  } finally { clean(proj); }
-});
-
-// grad10 F3 [HIGH, content-loss]: `String(needle).includes('\n')` is LF
-// ONLY — a needle whose lines are joined by a BARE CR (no LF anywhere)
-// contains no '\n' character at all, so it classified as single-line and
-// fell through to the old flatten check, restoring the EXACT round-9 python-
-// dedent bypass for this one line-ending shape. Same fixture as F2-python
-// above, CR instead of LF throughout.
-test('RED-FIRST/F3-barecr: the SAME python-dedent bypass, joined by a bare CR instead of LF, is still caught', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const CR = '\r';
-    const origBody = `Ops snippet (load-bearing):${CR}for i in range(3):${CR}    print(i)${CR}    print(i*2)${CR}print("done")${CR}Tail notes.`;
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = `for i in range(3):${CR}    print(i)${CR}    print(i*2)${CR}print("done")`;
-    assert.ok(!anchor.includes('\n'), 'setup sanity: the anchor genuinely contains NO LF character');
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    const newBody = `Ops snippet (load-bearing):${CR}for i in range(3):${CR}    print(i)${CR}print(i*2)${CR}print("done")${CR}Tail notes — rewritten.`;
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(r.applied, 1, 'the OTHER file still applies — only the keep-protected one is excluded');
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody, 'the file must be left UNTOUCHED');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-  } finally { clean(proj); }
-});
-
-test('RED-FIRST/F3-barecr control: a real token change (i*2 -> i*3), bare-CR joined, is still correctly excluded', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const CR = '\r';
-    const origBody = `Ops snippet:${CR}for i in range(3):${CR}    print(i)${CR}    print(i*2)${CR}Tail.`;
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = `for i in range(3):${CR}    print(i)${CR}    print(i*2)`;
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    const newBody = `Ops snippet:${CR}for i in range(3):${CR}    print(i)${CR}    print(i*3)${CR}Tail changed.`;
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.applied, 1);
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
-  } finally { clean(proj); }
-});
-
-// grad10 F8 [MEDIUM, false-refusal x3]: exact indent-delta equality blocked
-// legitimate reformats. All three are the "gate fires on harmless work"
-// class — the proof here is that legitimate edits PASS, not that bad ones
-// are blocked (round 9's own F2/F3 tests above already prove the latter,
-// unaffected by this fix).
-test('RED-FIRST/F8-tabs2spaces: a uniform TABS-to-SPACES reformat (delta SCALES, does not shift) still matches — must NOT be refused', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const T = '\t';
-    const origBody = `Config (load-bearing):\nservice:\n${T}db:\n${T}${T}host: primary\nTail notes.`;
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = `service:\n${T}db:\n${T}${T}host: primary`;
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    // WAVE-7 sweep: "must NOT be refused" is ACCEPTANCE-shaped -- proven
-    // non-vacuous before the plan applies (a dropped anchor also applies).
-    assertAnchorStored(proj, 'protected.md:anchor');
-    // every tab replaced by 4 spaces -- a real editor "convert indentation"
-    // action. Level-1 delta goes from +1 char (1 tab) to +4 chars (4
-    // spaces); level-2 goes from +2 to +8 -- SCALED, not shifted by a
-    // constant, which is exactly what the old exact-delta check refused.
-    const S4 = '    ';
-    const newBody = `Config (load-bearing):\nservice:\n${S4}db:\n${S4}${S4}host: primary\nTail notes — reformatted.`;
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(r.applied, 2, 'BOTH files must apply — the tabs-to-spaces reformat is harmless and must not be refused');
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), newBody, 'the reformatted file must actually land');
-  } finally { clean(proj); }
-});
-
-test('RED-FIRST/F8-cosmetic-reindent: a cosmetic list re-indent (2-space -> 3-space per level) still matches — must NOT be refused', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const origBody = 'Notes (load-bearing):\ntop:\n  mid:\n    leaf: value\nTail notes.';
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = 'top:\n  mid:\n    leaf: value';
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    // WAVE-7 sweep: same class as F8-tabs2spaces above -- proven non-vacuous.
-    assertAnchorStored(proj, 'protected.md:anchor');
-    const newBody = 'Notes (load-bearing):\ntop:\n   mid:\n      leaf: value\nTail notes — reformatted.';
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(r.applied, 2, 'BOTH files must apply — the cosmetic re-indent is harmless and must not be refused');
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), newBody);
-  } finally { clean(proj); }
-});
-
-test('RED-FIRST/F8-prose-reflow: a PROSE anchor captured spanning a hard wrap still matches after a DIFFERENT reflow — must NOT be refused', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    // the anchor itself was captured with an embedded hard wrap (multi-line
-    // by construction) — no indentation variation at all, purely prose.
-    const anchor = 'the exact wording that must survive\nany future rewrap of this paragraph';
-    const origBody = `Notes: ${anchor}. Tail.`;
-    write(f, origBody);
-    write(other, 'trim me');
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    // WAVE-7 sweep: same class as F8-tabs2spaces above -- proven non-vacuous.
-    assertAnchorStored(proj, 'protected.md:anchor');
-    // reflowed at a DIFFERENT wrap point — same words, same order, the wrap
-    // now lands one word earlier.
-    const newBody = 'Notes: the exact wording that must\nsurvive any future rewrap of this paragraph. Tail — reformatted.';
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(r.applied, 2, 'BOTH files must apply — a reflowed prose anchor with no structure to lose must not be refused');
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), newBody);
-  } finally { clean(proj); }
-});
-
-test('RED-FIRST/F8 must-break control (non-uniform needle): a genuine multi-line dedent is still refused via the dense-rank sliding window — this anchor has real internal indentation variation, never reaches the uniform/atZero fallback at all', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const origBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    print(i)\n    print(i*2)\nprint("done")\nTail notes.';
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = 'for i in range(3):\n    print(i)\n    print(i*2)\nprint("done")';
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    const newBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    print(i)\nprint(i*2)\nprint("done")\nTail notes — rewritten.';
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.applied, 1, 'the dedent must still be REFUSED — this anchor (4 lines, depths 0/4/4/0) is non-uniform and never reaches the uniform/atZero fallback');
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody);
-  } finally { clean(proj); }
-});
-
-// grad10-round-2 HIGH-1 [content-loss, F8's own uniform fallback reopened
-// round 9's python-dedent for a NARROWER anchor]: the control above cannot
-// reach F8's uniform/atZero branch at all (its anchor is non-uniform, depths
-// 0/4/4/0) — "a control that cannot reach the branch it names is not a
-// control." THIS control captures ONLY the 2-line loop body (both lines at
-// the SAME depth — genuinely uniform, and genuinely indented, indent0=4>0),
-// then dedents that body whole OUT of the loop (both lines move together to
-// indent 0 — still mutually uniform, at a DIFFERENT absolute depth). Dense
-// rank alone cannot see this: a uniform sequence collapses to the identical
-// rank pattern regardless of magnitude, so the attack needs variation in the
-// HAYSTACK's absolute placement, not the needle's internal structure — the
-// absolute-indent gate in indentRelativeSurvives exists for exactly this.
-test('RED-FIRST/F8-round2-HIGH1 must-break control (uniform, indented needle): a loop body captured ALONE, dedented whole out of its loop, is still refused — genuinely reaches the uniform/atZero branch, and atZero is false (indent0=4), so the fallback is never used either', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'protected.md');
-    const other = path.join(store, 'other.md');
-    const origBody = 'Ops snippet (load-bearing):\nfor i in range(3):\n    process_item(i)\n    process_item(i*2)\nprint("done")\nTail notes.';
-    write(f, origBody);
-    write(other, 'trim me');
-    const anchor = '    process_item(i)\n    process_item(i*2)';
-    recordKeep(proj, { target: 'protected.md:anchor', reason: 'test', anchor, anchorFile: f });
-    const newBody = 'Ops snippet (load-bearing):\nfor i in range(3):\nprocess_item(i)\nprocess_item(i*2)\nprint("done")\nTail notes — rewritten.';
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: newBody },
-      { type: 'rewrite', path: other, content: 'trimmed' },
-    ]));
-    assert.strictEqual(r.applied, 1, 'the body-only dedent must be REFUSED — the anchor is uniform (both lines depth 4) but that indent is non-zero, so the absolute-indent gate fires and the flatten fallback is never reached');
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), origBody, 'the file must be left UNTOUCHED');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-  } finally { clean(proj); }
-});
-
 // grad7 findings-back (round 9 dispatch), MED: hoisting textSurvives to
 // module scope (Root B) closed the twin-drift but re-ran normWhitespace()
 // over EVERY post-text on EVERY textSurvives() call — and the KEEPS-GATE
@@ -1914,82 +1649,7 @@ test('CALL COUNT (GATE COST RULING, main-cmd): KEEPS-GATE normalizes post-texts 
   } finally { clean(proj); }
 });
 
-// grad10-round-2 LOW-7: F9's own fix (memoize the multi-line haystack parse)
-// paid its memoization UNCONDITIONALLY every while-iteration, including the
-// common case where every keep is single-line and the memo is never read.
-// Reviewer-measured ~+16% on the single-line-only path via wall-clock. THAT
-// INSTRUMENT DOES NOT SURVIVE HERE: two independent attempts (this round)
-// to isolate the effect through a real `apply()` call both failed --
-// `applyPlan`'s own I/O (file writes, the fidelity gate's diff pass, the
-// airbag/seatbelt) dominates total time at ANY fixture scale large enough
-// to also make `lineParts()`'s cost visible (confirmed: a 25-file/25-keep
-// version cost >2s on EITHER engine; a 3-file/30MB version cost ~2.9s on
-// the ALREADY-FIXED lazy engine alone -- the KEEPS-GATE's own share was
-// never the majority of either number). `getLinePostTexts` is now LAZY --
-// built at most once per while-iteration, only when an anchor actually
-// needs it (`/\r|\n/.test(anchor)`) -- and the regression protection for
-// THAT claim is a CALL COUNT, not a clock: `__testHooks.linePartsMapCalls`
-// increments once per `postTexts.map(lineParts)` build. Zero production
-// cost (one integer increment, read by nobody outside a test).
-test('CALL COUNT (round-10-round-2 LOW-7): a KEEPS-GATE pass with ONLY single-line anchors never builds the multi-line memo at all', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f1 = path.join(store, 'a.md');
-    const f2 = path.join(store, 'b.md');
-    write(f1, 'orig-a anchor-a-present here');
-    write(f2, 'orig-b anchor-b-present here');
-    recordKeep(proj, { target: 'a.md:span', anchor: 'anchor-a-present', anchorFile: f1 });
-    recordKeep(proj, { target: 'b.md:span', anchor: 'anchor-b-present', anchorFile: f2 });
-    // WAVE-7 sweep: `linePartsMapCalls===0` is achievable EITHER because no
-    // anchor here is multi-line (the claim), OR because both anchors were
-    // silently dropped and the KEEPS-GATE loop never ran at all -- the two
-    // states are indistinguishable by this assertion alone. Proven non-vacuous.
-    assertAnchorStored(proj, 'a.md:span');
-    assertAnchorStored(proj, 'b.md:span');
-    __testHooks.linePartsMapCalls = 0;
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f1, content: 'new-a anchor-a-present here' },
-      { type: 'rewrite', path: f2, content: 'new-b anchor-b-present here' },
-    ]));
-    assert.strictEqual(r.applied, 2, r.error); // both keeps survive, nothing excluded
-    assert.strictEqual(__testHooks.linePartsMapCalls, 0, 'no anchor here is multi-line -- the memo must never be built');
-  } finally { clean(proj); }
-});
 
-test('CALL COUNT (round-10-round-2 LOW-7) control: a mixed pass with ONE multi-line anchor builds the memo EXACTLY ONCE, shared across the whole iteration', () => {
-  // grad11 STEP 2 note: this fixture was redesigned. The old one rewrote
-  // c.md with content that contained the multi-line anchor as a raw
-  // substring -- `survivesOwnFile`'s own first check (a plain `.includes`)
-  // now catches that BEFORE the structural/memo machinery is ever reached,
-  // so the memo build count went to 0 and this control stopped exercising
-  // what it names. The memo is now built ONLY by the fallback cross-file
-  // sweep (`survives()`, idx===-1) -- reached by a DELETE (never in
-  // `postActionable`, so never eligible for the own-file strict check at
-  // all) whose anchor migrates, non-verbatim (indent shifted, so the raw
-  // substring check also fails), into a SURVIVING file elsewhere in the
-  // plan. This is exactly rail #2's declared migration case, and it is the
-  // one remaining path that still needs `haystackLineParts`.
-  const { proj, store } = sandbox();
-  try {
-    const f1 = path.join(store, 'a.md');
-    const f2 = path.join(store, 'b.md');
-    const f3 = path.join(store, 'c.md');
-    write(f1, 'orig-a anchor-a-present here');
-    write(f2, 'orig-b anchor-b-present here');
-    write(f3, 'orig-c\nmulti\nline\nanchor-c-present here\nmore text');
-    recordKeep(proj, { target: 'a.md:span', anchor: 'anchor-a-present', anchorFile: f1 }); // single-line
-    recordKeep(proj, { target: 'b.md:span', anchor: 'anchor-b-present', anchorFile: f2 }); // single-line
-    recordKeep(proj, { target: 'c.md:span', anchor: 'multi\nline\nanchor-c-present', anchorFile: f3 }); // multi-line
-    __testHooks.linePartsMapCalls = 0;
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f1, content: 'new-a anchor-a-present here\n  multi\n  line\n  anchor-c-present here' },
-      { type: 'rewrite', path: f2, content: 'new-b anchor-b-present here' },
-      { type: 'delete', path: f3 }, // migrated, not verbatim: forces the structural memo path, not the raw-includes shortcut
-    ]));
-    assert.strictEqual(r.applied, 3, r.error); // all three survive, one iteration
-    assert.strictEqual(__testHooks.linePartsMapCalls, 1, 'ONE multi-line anchor still needs the memo -- built once, not once per anchor and not skipped');
-  } finally { clean(proj); }
-});
 
 // ---------------------------------------------------------------------------
 // beta.12 item 4: the fat-bin/store.old retention sweep piggybacks on
@@ -2140,14 +1800,17 @@ test('SHRINK is an ordinary rewrite: a shrink that accidentally drops a fact (an
 // rename-atomicity and O_EXCL-exclusivity are LOCAL-filesystem semantics.
 // ---------------------------------------------------------------------------
 
-test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mid-apply FAILS CLOSED — whole-run rollback, target unchanged, no stranded .coalwash-tmp', () => {
+test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mid-apply FAILS CLOSED -- whole-run rollback, target unchanged, no stranded temp', () => {
   const { proj, store } = sandbox();
   const f1 = path.join(store, 'f1.md');
   write(f1, 'original bytes');
   const origRename = fs.renameSync;
-  // Monkey-patch the shared fs object: the ONLY renameSync in the txn path is
-  // atomicWrite's tmp->target hop (journal/snapshot writes never rename).
-  fs.renameSync = () => {
+  // Monkey-patch the shared fs object, SCOPED to this step's own target: since
+  // U7 every durable write renames (the journal included), so a blanket throw
+  // would kill the journal write before a step ever ran and this test would stop
+  // exercising the mid-apply failure it is named for.
+  fs.renameSync = (from, to) => {
+    if (to !== f1) return origRename(from, to);
     const e = new Error('EXDEV: cross-device link not permitted');
     e.code = 'EXDEV';
     throw e;
@@ -2161,7 +1824,7 @@ test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mi
     assert.strictEqual(r.rolledBack, true, 'the step failure takes the rollback path');
     assert.match(r.error, /EXDEV/, 'the error surfaces, never silent');
     assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'original bytes', 'target unchanged');
-    assert.strictEqual(fs.readdirSync(store).some((n) => n.includes('.coalwash-tmp')), false, 'no stranded tmp (rollback sweeps the sibling)');
+    assert.strictEqual(fs.readdirSync(store).some((n) => n.includes('.coalwash-tmp')), false, 'no stranded temp -- since U7 writeDurable reaps its own temp in its own catch, at the site that made it (a name-derived sweep at a distance cannot find an unpredictable name)');
   } finally { clean(proj); }
 });
 
@@ -3543,493 +3206,457 @@ test('DEMAND-10/keeps-gate POSITIVE: a keep recorded with a spelling that does N
   } finally { clean(proj); }
 });
 
-// grad11 STEP 2 -- F3/F4/F9, the board's own w1/ fixtures (RULING-LAYER-3
-// Amendment 4), reproduced through the real recordKeep()+applyPlan() door,
-// never the lab's own throwaway harness. Every case first proves NON-VACUITY
-// (the anchor was actually STORED, not silently dropped by F5) before
-// asserting the outcome -- LAB-RECORD's own warning: "an F3/F4 probe passes
-// VACUOUSLY" when the anchor field is empty, because an anchor-less keep is
-// filtered out of enforcement entirely and every plan just "survives" with
-// nothing checking it.
-function assertAnchorStored(proj, target) {
-  const k = loadKeeps(proj).find((e) => e.target === target);
-  assert.ok(k, `no keep entry recorded for target "${target}"`);
-  assert.strictEqual(typeof k.anchor, 'string', 'anchor field must be a stored string, not dropped (F5)');
-  assert.ok(k.anchor.length > 0, 'anchor field must be non-empty -- a dropped anchor makes this probe vacuous (F5)');
+// ---------------------------------------------------------------------------
+// U7 HIGH (CB board 2026-08-31, adversary H1, judge-confirmed at source on
+// `017d998`): the class-B TWIN of the class-A blob-symlink arbitrary-write
+// already closed at `5ba5254`. `writeDurable` opened its DESTINATION with 'w'
+// (which FOLLOWS a symlink there) and `atomicWrite` handed it a fully
+// PREDICTABLE temp (`<target>.coalwash-tmp`), so anyone able to write the
+// directory holding a class-B memory file could pre-place an alias at that
+// temp path and have the wash push the file's bytes through it, outside every
+// approved root, reported ok:true. A live violation of this room's own
+// node/runtime.md section 5.
+//
+// THE UNPRIVILEGED STAND-IN, and its honest ceiling: file-symlink creation is
+// EPERM on Windows without Developer Mode (measured on this box: file symlink
+// BLOCKED/EPERM, dir junction ok, hardlink ok) -- the same ceiling the class-A
+// fix's own comments name, and the reason the board could not live-repro. A
+// HARDLINK planted at the temp path is the same class of pre-placed alias and
+// needs no privilege: openSync(p, w) on it truncates and writes the victim's
+// inode exactly as a symlink would. It proves the mechanism and the cure; it
+// does NOT prove the win32 dangling-symlink-defeats-O_EXCL claim explode.mjs
+// records as unconfirmed-not-refuted, which stays unproven here either way.
+// ---------------------------------------------------------------------------
+function hardlinkCapable() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-hlprobe-'));
+  try {
+    const a = path.join(d, 'a');
+    fs.writeFileSync(a, 'x');
+    fs.linkSync(a, path.join(d, 'b'));
+    return true;
+  } catch {
+    return false;
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
 }
 
-test('F3 (F-A1, RULING-LAYER-3 Amdt.4): a flush-left multi-key needle refuses an IN-PLACE reparent the flatten fallback used to mask', () => {
+test('U7 HIGH: an alias pre-placed at the write temp NEVER receives the content -- the file outside every approved root is untouched and the run fails closed', (t) => {
+  // ONE skippable leg, capability-PROBED (never platform-named): without
+  // hardlink creation the plant itself cannot be built, so the test would pass
+  // vacuously instead of proving anything.
+  if (!hardlinkCapable()) { t.skip('this volume refuses hardlink creation -- the unprivileged stand-in for the EPERM-blocked file symlink cannot be planted here'); return; }
   const { proj, store } = sandbox();
+  const victim = path.join(proj, 'VICTIM-outside-every-root.txt');
+  write(victim, 'VICTIM ORIGINAL');
+  const target = path.join(store, 'MEMORY.md');
+  write(target, 'target original');
+  const realOpen = fs.openSync;
+  let planted = null;
+  // The attacker wins the race: an alias appears at the exact temp path the
+  // implementation chose, immediately before it is opened.
+  fs.openSync = (p, ...rest) => {
+    if (planted === null && typeof p === 'string' && p.includes('.coalwash-tmp')) {
+      planted = p;
+      try { fs.linkSync(victim, p); } catch { /* a pre-existing entry is itself the fail-closed case */ }
+    }
+    return realOpen(p, ...rest);
+  };
+  let r;
   try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'a: 1\nb: 2\nc: 3\nd: 4\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: 'a: 1\nb: 2\nc: 3', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'a: 1\n  b: 2\nc: 3\nd: 4\n' }, // "b" reparented under "a", text order unchanged
-    ]));
-    assert.strictEqual(r.ok, false, 'an in-place reparent inside the anchor span must refuse, not silently pass on flattened text');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'a: 1\nb: 2\nc: 3\nd: 4\n', 'file left untouched');
+    r = apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'ATTACKER-VISIBLE MEMORY CONTENT' }]));
+  } finally { fs.openSync = realOpen; }
+  try {
+    assert.ok(planted, 'the plant fired (a temp path was opened) -- otherwise this test proves nothing');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM ORIGINAL', 'ARBITRARY WRITE: the file outside every approved root must be untouched (pre-fix the destination open follows the planted alias and truncates it)');
+    assert.strictEqual(r.ok, false, 'the run fails closed on EEXIST at the O_EXCL temp, never silently writes through the alias');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'target original', 'target unchanged');
   } finally { clean(proj); }
 });
 
-test('F3 (F-A2, RULING-LAYER-3 Amdt.4): the same reparent shape on plain code statements refuses too', () => {
+test('U7: NOTHING is ever opened with a plain w -- every durable write lands on an O_EXCL temp and is renamed into place (rename REPLACES a directory entry; it does not write through an alias at the destination)', () => {
   const { proj, store } = sandbox();
+  const target = path.join(store, 'MEMORY.md');
+  write(target, 'target original');
+  const realOpen = fs.openSync;
+  const opens = [];
+  fs.openSync = (p, flags, ...rest) => {
+    if (typeof p === 'string' && typeof flags === 'string') opens.push({ p, flags });
+    return realOpen(p, flags, ...rest);
+  };
   try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'setup()\nrun_task()\ncleanup()\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: 'setup()\nrun_task()\ncleanup()', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'setup()\n    run_task()\ncleanup()\n' }, // run_task() reparented under setup()
-    ]));
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+    apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'new bytes' }]));
+  } finally { fs.openSync = realOpen; }
+  try {
+    // NON-VACUITY: the run really did open files. Asserting only "no plain w"
+    // would pass on a run that opened nothing at all.
+    assert.ok(opens.length > 0, 'the run opened files -- otherwise this proves nothing');
+    const written = opens.filter((o) => o.flags.startsWith('w') || o.flags.startsWith('a'));
+    assert.ok(written.length > 0, 'the run WROTE -- otherwise this proves nothing');
+    // A plain 'w' FOLLOWS an alias at the destination. O_EXCL ('wx') refuses a
+    // pre-existing entry instead, which is the whole cure -- so the property is
+    // not "the destination is never opened w", it is that a plain w never
+    // happens AT ALL, anywhere in the transaction.
+    const plainW = written.filter((o) => o.flags === 'w');
+    assert.deepStrictEqual(plainW, [], `a plain-w open follows whatever alias sits at that path: ${plainW.map((o) => o.p).join(', ')}`);
+    const journal = path.join(txDirFor(proj), 'journal.json');
+    for (const live of [target, journal]) {
+      assert.strictEqual(written.some((o) => o.p === live), false, `${path.basename(live)} is never opened for write -- content reaches it only through a rename`);
+    }
   } finally { clean(proj); }
 });
 
-test('F3 control (F-A3, MUST-BREAK): outright deletion of the flush-left needle still refuses -- the bucket is not simply broken for everything', () => {
+test('U7: the write temp is UNPREDICTABLE -- two writes to one target pick two different names, and neither is the old derivable sibling (random naming removes the PRECONDITION; O_EXCL stays the second, cross-nature belt)', () => {
   const { proj, store } = sandbox();
+  const target = path.join(store, 'MEMORY.md');
+  write(target, 'v0');
+  const realOpen = fs.openSync;
+  const temps = [];
+  fs.openSync = (p, ...rest) => {
+    if (typeof p === 'string' && p.includes('.coalwash-tmp')) temps.push(p);
+    return realOpen(p, ...rest);
+  };
   try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'setup()\nrun_task()\ncleanup()\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: 'setup()\nrun_task()\ncleanup()', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'setup()\ncleanup()\n' }, // run_task() fully removed
-    ]));
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+    apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'v1' }]));
+    apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'v2' }]));
+  } finally { fs.openSync = realOpen; }
+  try {
+    assert.ok(temps.length >= 2, `both writes used a temp (saw ${temps.length})`);
+    assert.strictEqual(new Set(temps).size, temps.length, `every temp name is distinct: ${temps.join(', ')}`);
+    assert.strictEqual(temps.some((p) => p === target + '.coalwash-tmp'), false, 'the old fully-derivable name is gone');
+    // The collector also sees the JOURNAL's temp, in its own directory and
+    // correctly so: every temp is a sibling of ITS OWN destination, which is the
+    // #57 no-EXDEV invariant now holding for every durable write, not just this one.
+    for (const p of temps) assert.match(path.basename(p), /\.[0-9a-f]{24}\.coalwash-tmp$/, `a CSPRNG segment sits between the destination name and the marker: ${p}`);
+    const mine = temps.filter((p) => path.dirname(p) === path.dirname(target));
+    assert.ok(mine.length >= 2, `the target's own two writes each used a temp (saw ${mine.length})`);
   } finally { clean(proj); }
 });
 
-test('F4 (F-B1, RULING-LAYER-3 Amdt.4): a trailing blank line inside the needle no longer defeats the structural refusal on a real dedent', () => {
+test('U7 CONTROL (passes on BOTH engines by design -- it proves the fix did not BREAK the overwrite contract): writeDurable still replaces an existing destination, because O_EXCL sits on the TEMP and rename does the overwrite', () => {
   const { proj, store } = sandbox();
+  const p = path.join(store, 'already-there.json');
   try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'for outer in xs:\n    for item in items:\n        do_a()\n        do_b()\n\nafter\n');
-    // trailing \n in the anchor itself parses to a third, blank line -- the
-    // exact shape that flipped `uniform` to false and skipped the old
-    // absolute-indent gate entirely.
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '        do_a()\n        do_b()\n', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'for item in items:\n  do_a()\n  do_b()\n\nafter\n' }, // depth 8 -> depth 2, one loop level lost
-    ]));
-    assert.strictEqual(r.ok, false, 'a blank line inside the needle must not exempt it from the structural check');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
+    write(p, 'OLD CONTENT');
+    writeDurable(p, 'NEW CONTENT');
+    assert.strictEqual(fs.readFileSync(p, 'utf8'), 'NEW CONTENT', 'an existing destination is replaced -- the journal caller rewrites the same path every step');
+    writeDurable(p, 'NEWER');
+    assert.strictEqual(fs.readFileSync(p, 'utf8'), 'NEWER', 'and again');
+    assert.strictEqual(fs.readdirSync(store).filter((n) => n.includes('.coalwash-tmp')).length, 0, 'no temp litter left behind on the success path');
   } finally { clean(proj); }
 });
 
-test('F4 control (F-B2, MUST-BREAK): the same dedent WITHOUT the blank line still refuses -- confirms F-B1 tests the blank-line seam specifically', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'for outer in xs:\n    for item in items:\n        do_a()\n        do_b()\nafter\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '        do_a()\n        do_b()', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'for item in items:\n  do_a()\n  do_b()\nafter\n' },
-    ]));
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-  } finally { clean(proj); }
+test('U7 CLASS GUARD (the propagate-check the board asked for): no engine module builds a write temp DERIVABLY from its destination -- the seventh site cannot reintroduce the class silently', () => {
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  // A temp is SAFE when an unpredictable segment sits between the destination
+  // and the marker. Flagged shapes, all fully derivable by anyone who can see
+  // the destination path (and, for a pid, the process list):
+  //   x + '.tmp'   |   `${x}.tmp`   |   `${x}.${process.pid}.tmp`
+  const CONCAT = /\+\s*['"]\.(coalwash-)?tmp['"]/;
+  const TEMPLATE = /`[^`]*\$\{[^}]+\}\.(coalwash-)?tmp`/;
+  const offenders = [];
+  for (const name of fs.readdirSync(libDir).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs'))) {
+    const src = fs.readFileSync(path.join(libDir, name), 'utf8');
+    src.split(/\r?\n/).forEach((line, i) => {
+      const t = line.trim();
+      if (t.startsWith('//') || t.startsWith('*')) return;
+      const template = TEMPLATE.exec(line);
+      const interpolations = template ? (template[0].match(/\$\{/g) || []).length : 0;
+      const derivable = CONCAT.test(line)
+        || (template && interpolations < 2)
+        || (template && /process\.pid/.test(template[0]));
+      if (derivable) offenders.push(`${name}:${i + 1}: ${t}`);
+    });
+  }
+  // detonate.mjs is class-A and UNWIRED (build-plugin.mjs's UNWIRED_ENGINE keeps
+  // both class-A engines out of the shipped dist). Its one hit is a STALE probe
+  // reference, not a write site: it checks `${outPath}.${process.pid}.tmp` for a
+  // source collision, while the writer it mirrors (explode.mjs) moved to a CSPRNG
+  // suffix at F2 and detonate never followed -- the same propagate-gap one lane
+  // over, reported to the head rather than fixed here (different lane, and
+  // nothing it guards ever reaches a user). Derived from the build's OWN list, so
+  // the day class-A is wired this guard starts covering it automatically.
+  const buildSrc = fs.readFileSync(path.join(libDir, '..', 'build-plugin.mjs'), 'utf8');
+  const unwired = [...buildSrc.matchAll(/'(\w+\.mjs)'/g)]
+    .map((m) => m[1])
+    .filter((n) => buildSrc.slice(buildSrc.indexOf('UNWIRED_ENGINE'), buildSrc.indexOf('isUnwiredEngine')).includes(n));
+  assert.ok(unwired.length >= 2, `the UNWIRED_ENGINE list was read, not assumed (saw ${unwired.join(', ')})`);
+  const shipped = offenders.filter((o) => !unwired.some((u) => o.startsWith(`${u}:`)));
+  assert.deepStrictEqual(shipped, [], `a derivable write temp is the U7 precondition -- put an unpredictable segment before the marker and open it O_EXCL:\n${shipped.join('\n')}`);
 });
 
-test('F9 (FR1, RULING-LAYER-3 Amdt.4): a legitimate whole-doc reindent under a NEW enclosing heading now survives (ancestor chain grows, does not drop)', () => {
+
+// ---------------------------------------------------------------------------
+// CWK-081 (1) — THE EPISODE'S FULL-TIER PASS, recorded here because this is the
+// only place the REMOVAL is a fact: applyPlan refuses any unapproved
+// structured-token drop before it commits, so a wizard-cut transaction that
+// actually cut something cut it under the gate. NOT "ok:true is a gate-passed
+// clean" — that equivalence was refuted (H1), and what survives it is narrower
+// still: the fact is per-TRANSACTION, so it never says the pass covered the
+// store (round-2 F1, and the advisory's own sentence now says so).
+// ---------------------------------------------------------------------------
+
+test("CWK-081: a committed origin:'wizard-cut' plan that REMOVED something records the episode's Full-tier pass; a program cut does NOT", () => {
   const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'section:\n    do_a()\n    do_b()\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_a()\n    do_b()', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'section:\n  under_new_heading:\n        do_a()\n        do_b()\n' },
-    ]));
+    const f = path.join(store, 'wizard.md');
+    write(f, 'fact stays\nverbose wording the outsider dropped');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'fact stays' }], { origin: 'wizard-cut' }), { home, now: 777 });
     assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(r.applied, 1);
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'section:\n  under_new_heading:\n        do_a()\n        do_b()\n');
-  } finally { clean(proj); }
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777, 'the Full tier landed and removed something — that transaction fact is on the record');
+    assert.strictEqual(loadState(proj, home).fullCleanSession, 't-session');
+  } finally { clean(proj, home); }
 });
 
-test('F9 (FR2, RULING-LAYER-3 Amdt.4): tabs-to-spaces conversion survives -- no absolute char-count comparison left to false-refuse it', () => {
+test('CWK-081 control (non-vacuity): a DEFAULT (program-cut) plan records no Full clean — the mechanical tier never adjudicated anything', () => {
   const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, '\tdo_a()\n\tdo_b()\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '\tdo_a()\n\tdo_b()', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: '    do_a()\n    do_b()\n' },
-    ]));
+    const f = path.join(store, 'program.md');
+    write(f, 'dup line\ndup line');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'dup line' }]), { home, now: 777 });
     assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(r.applied, 1);
-  } finally { clean(proj); }
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'Quick/Force is the MECHANICAL tier — it proves duplicates, it judges nothing');
+  } finally { clean(proj, home); }
 });
 
-test('F9 (FR3, RULING-LAYER-3 Amdt.4): a list-continuation whitespace shift survives -- chainPreserved tolerates a reflowed (not missing) ancestor line', () => {
+// CWK-081 residue (b), COVERAGE — the stamp said a Full pass ran and said
+// nothing about WHAT it covered, so a plan touching one file of three minted
+// the same eligibility as one that judged the whole store (INSPECT cell C1,
+// 777 on both engines). applyPlan is handed a PLAN and can never see whether a
+// PASS covered the store — but it CAN see, exactly, which files it removed
+// content from. Recording that turns an unbounded claim into a bounded one.
+test('CWK-081 (b): a Full clean records WHICH files it removed content from, not merely that it happened', () => {
   const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, '- item\n  cont line one\n  cont line two\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '  cont line one\n  cont line two', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: '-   item\n    cont line one\n    cont line two\n' }, // marker widened "- " -> "-   ", pure reflow
-    ]));
+    const a = path.join(store, 'one.md'); const b = path.join(store, 'two.md'); const c = path.join(store, 'three.md');
+    write(a, 'kept\ndropped unique line'); write(b, 'untouched two'); write(c, 'untouched three');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: a, content: 'kept' }], { origin: 'wizard-cut' }), { home, now: 777 });
     assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(r.applied, 1);
-  } finally { clean(proj); }
+    const st = loadState(proj, home);
+    assert.strictEqual(st.fullCleanAt, 777, 'the pass still stamps — eligibility is SCOPED, never broken into always-false');
+    assert.deepStrictEqual(st.fullCleanFiles, [a], 'and the record now NAMES the one file it actually cut, so the other two are visibly outside it');
+  } finally { clean(proj, home); }
 });
 
-// round 12 lab (LAB-RECORD.md, F1/F2) -- the input-frame widening (F3/F4/F9
-// above) closed the construction that motivated it and left the CLASS: two
-// branches of indentRelativeSurvives reach a verdict without consulting
-// origChain at all.
-test('F1 [CRITICAL, content-loss] (round-12 lab): a keep anchor recorded FLUSH-LEFT bypasses the own-file chain check -- the atZero fallback never consults origChain', () => {
+test('CWK-081 (b): the list is what was CUT, never what the plan merely touched — a no-op action in the same plan is absent', () => {
   const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'for item in items:\n  value_x: 100\n  value_y: 200\nafter loop\n');
-    // the anchor is recorded WITHOUT its real leading indent -- needleIndentShape
-    // parses the ANCHOR STRING itself (not its context in the file), so both
-    // lines read as indent 0: uniform=true, indent0=0, atZero=true. That routes
-    // this keep through flattenSurvives, whose OLD signature never received
-    // shape.origChain at all.
-    recordKeep(proj, { target: 'MEMORY.md', anchor: 'value_x: 100\nvalue_y: 200', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
+    const cutFile = path.join(store, 'cut.md'); const noop = path.join(store, 'noop.md');
+    write(cutFile, 'kept\ngone unique'); write(noop, 'unchanged');
     const r = apply(planFor(proj, store, [
-      // the loop header is GONE, and the body is REFLOWED onto one physical
-      // line (not merely dedented) -- this is deliberate: survivesOwnFile's
-      // OWN raw `.includes(anchor)` pre-check (an EARLIER, unrelated
-      // short-circuit, line ~602) would trivially match a byte-identical
-      // 2-line dedent before either fix's code ever ran. Reflowing onto one
-      // line makes the raw check miss (the anchor's own recorded newline
-      // no longer appears verbatim) AND makes the exact-match rank+text
-      // loop miss too (n.length=2 physical lines vs h's one merged line),
-      // forcing the ONLY remaining path: atZero -> flattenSurvives, which
-      // is exactly the branch F1 is about.
-      { type: 'rewrite', path: f, content: 'value_x: 100 value_y: 200\nafter loop\n' },
-    ]));
-    assert.strictEqual(r.ok, false, 'the loop header enclosing this anchor is gone -- must refuse, not allow the escape');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'for item in items:\n  value_x: 100\n  value_y: 200\nafter loop\n', 'file left untouched');
-  } finally { clean(proj); }
-});
-
-test('F1 control (round-12 lab): the SAME reflow-escape with the anchor recorded WITH its real indent already refuses -- proves the fix is needle-recording-specific, not a new capability', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'for item in items:\n  value_x: 100\n  value_y: 200\nafter loop\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '  value_x: 100\n  value_y: 200', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'value_x: 100 value_y: 200\nafter loop\n' },
-    ]));
-    assert.strictEqual(r.ok, false, r.error);
-  } finally { clean(proj); }
-});
-
-test('F2 [CRITICAL, content-loss] (round-12 lab, atZero deliberately excluded): a decoy occurrence elsewhere in the haystack masks an escape on the strict chain path', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    // TWO structurally-identical blocks under the SAME header text in the
-    // ORIGINAL file -- locateStructural finds the FIRST ("Section A:") and
-    // derives origChain from it; the second is a genuine duplicate.
-    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\nSection A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      // the FIRST block's content escapes its header (moved to top, header
-      // dropped); the SECOND, untouched, structurally-identical block is the
-      // decoy -- the loop's OLD .some() semantics accepts on the decoy and
-      // never has to explain the first block's own missing header. The
-      // decoy's spacing after each colon is doubled (normalizes identically
-      // via lineParts, so the STRUCTURAL match is unaffected) so the FULL
-      // rewritten content is not byte-identical to the recorded anchor --
-      // otherwise survivesOwnFile's own EARLIER raw `.includes(anchor)`
-      // pre-check would find the untouched decoy's exact bytes and short-
-      // circuit before either fix's code ever ran, testing nothing.
-      { type: 'rewrite', path: f, content: 'keep_line_one: alpha\nkeep_line_two: beta\nSection A:\n  keep_line_one:  alpha\n  keep_line_two:  beta\n' },
-    ]));
-    assert.strictEqual(r.ok, false, 'the first block escaped its header -- a decoy elsewhere must not mask it');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\nSection A:\n  keep_line_one: alpha\n  keep_line_two: beta\n', 'file left untouched');
-  } finally { clean(proj); }
-});
-
-test('F2 control (round-12 lab): the SAME escape with NO decoy present already refuses -- unaffected by the fix, proves F2 needs the second occurrence to exploit', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'keep_line_one: alpha\nkeep_line_two: beta\n' },
-    ]));
-    assert.strictEqual(r.ok, false, r.error);
-  } finally { clean(proj); }
-});
-
-test('F2 residual, named not hidden (round-12 lab): a legitimate rewrite with an UNRELATED decoy positioned BEFORE the real content in document order can be over-refused -- accepted trade, over-refusal not content-loss', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    // the keep's real content sits under "Section A:" (its true origChain);
-    // "Section C:" holds an UNRELATED block sharing the same anchor text by
-    // construction -- a coincidence this test deliberately manufactures to
-    // measure the residual, not a realistic accident. Both copies carry the
-    // doubled-colon-spacing perturbation (see F2's attack comment) so the
-    // raw substring pre-check does not short-circuit either one.
-    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      // the real content survives, untouched in MEANING, under Section A --
-      // but a legitimately-added reference copy under Section C now sits
-      // BEFORE it in document order, and Section C's own chain does not
-      // satisfy origChain (['Section A:']).
-      { type: 'rewrite', path: f, content: 'Section C:\n  keep_line_one:  alpha\n  keep_line_two:  beta\nSection A:\n  keep_line_one:  alpha\n  keep_line_two:  beta\n' },
-    ]));
-    // NAMED RESIDUAL: this refuses even though the real content is intact.
-    // The fix cannot distinguish "an escape masked by a later decoy" (F2)
-    // from "an unrelated earlier decoy beside a safe original" without a
-    // position-correlation signal the frame does not carry -- see the
-    // fix's own header comment. Direction is over-refusal (file untouched,
-    // flagged), never content loss.
-    assert.strictEqual(r.ok, false, 'accepted residual: an earlier unrelated decoy over-refuses a legitimate edit -- see the fix comment');
-  } finally { clean(proj); }
-});
-
-// RUNG1 (CoalBoard 2026-08-04, board record: CoalWash/MEMORY.md "2026-08-04
-// -- THE FULL COALBOARD RAN") -- a 4-seat investigation run AFTER WAVE-8
-// shipped, against the shipped 2ea8480 state, found three more live escapes
-// in the same own-file KEEPS-GATE machinery. Independently reconstructed
-// fixtures below (not the board's own literal constructions) -- same attack
-// SHAPE, own numbers.
-
-test('RUNG1 F1 [CRITICAL, content-loss]: survivesOwnFile\'s raw substring pre-check authorized a re-parented loop body under a DIFFERENT enclosing block, byte-identical text', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'for a in xs:\n    do_x()\n    do_y()\nfor b in ys:\n    other()\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_x()\n    do_y()', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      // do_x()/do_y() are byte-identical, same indent, still present
-      // somewhere in the new content -- the old `.includes(anchor)`
-      // pre-check at survivesOwnFile's own opening line matched this
-      // immediately and returned true before the ancestor-chain frame
-      // ever ran. They have moved out from under "for a in xs:" to under
-      // the UNRELATED "for b in ys:".
-      { type: 'rewrite', path: f, content: 'for a in xs:\n    placeholder()\nfor b in ys:\n    do_x()\n    do_y()\n    other()\n' },
-    ]));
-    assert.strictEqual(r.ok, false, 'the anchor moved to a different enclosing block -- raw substring presence must not authorize survival on its own');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'for a in xs:\n    do_x()\n    do_y()\nfor b in ys:\n    other()\n', 'file left untouched');
-  } finally { clean(proj); }
-});
-
-test('RUNG1 F1 control: the SAME re-parent WITHOUT the raw-substring shortcut\'s bait (text also reflowed, not byte-identical) already refused pre-fix too -- proves F1 is about the SHORTCUT, not a new detection capability', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'for a in xs:\n    do_x()\n    do_y()\nfor b in ys:\n    other()\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_x()\n    do_y()', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      // reflowed onto one line so the raw substring pre-check could never
-      // have matched even before this fix -- the ancestor-chain frame was
-      // always the one doing the work here.
-      { type: 'rewrite', path: f, content: 'for a in xs:\n    placeholder()\nfor b in ys:\n    do_x() do_y()\n    other()\n' },
-    ]));
-    assert.strictEqual(r.ok, false, r.error);
-  } finally { clean(proj); }
-});
-
-test('RUNG1 F2 [CRITICAL, content-loss]: locateStructural\'s first-match semantics derived origChain from a coincidental shallower occurrence, vacuously exempting a real escape', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    // TWO occurrences of the anchor's text+rank pattern in the ORIGINAL
-    // file: an unrelated top-level pair (lines 1-2, no enclosing structure)
-    // and the REAL, nested pair this keep actually protects (under
-    // "section:"). locateStructural's old first-match semantics picks the
-    // top-level one (scan order), and ancestorChain from a spanStart of 0
-    // returns [] -- an EMPTY chain, which chainPreserved then vacuously
-    // "preserves" against ANY candidate.
-    write(f, 'do_a()\ndo_b()\n\nsection:\n    do_a()\n    do_b()\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_a()\n    do_b()', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      // the real nested pair escapes "section:" (heading removed, dedented
-      // to top-level); the coincidental top-level pair is kept unchanged
-      // so the ambiguity that produced the wrong origChain is still latent
-      // in the original file regardless of what the new content does.
-      { type: 'rewrite', path: f, content: 'do_a()\ndo_b()\n\ndo_a()\ndo_b()\n' },
-    ]));
-    assert.strictEqual(r.ok, false, 'the anchor text+rank pattern is ambiguous in the original file -- an unresolvable position must refuse, never silently pick the first match');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'do_a()\ndo_b()\n\nsection:\n    do_a()\n    do_b()\n', 'file left untouched');
-  } finally { clean(proj); }
-});
-
-test('RUNG1 F2 control: the SAME nested pair with NO coincidental top-level twin in the original file already refuses -- unaffected by the fix, proves F2 needs the ambiguity to exploit', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'section:\n    do_a()\n    do_b()\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '    do_a()\n    do_b()', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'do_a()\ndo_b()\n' },
-    ]));
-    assert.strictEqual(r.ok, false, r.error);
-  } finally { clean(proj); }
-});
-
-test('RUNG1 F3 [CRITICAL, content-loss]: indentRelativeSurvives accepted the first chain-preserving window in the NEW content without ruling out a later escaped occurrence sharing the same anchor shape', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    // a single, unambiguous original occurrence -- isolates F3 from F2's
-    // own ambiguity mechanism (origChain here is a clean, non-empty,
-    // unique chain: ["Section A:"]).
-    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      // window A (still under "Section A:", earlier in document order)
-      // preserves origChain and is a chain-preserving DECOY for the old
-      // loop's own "return true at the first ok+preserved window"
-      // semantics; window B (later, at document top-level) is a SECOND
-      // occurrence of the same text+rank shape that has genuinely escaped
-      // any enclosing structure -- the old loop never reached it.
-      { type: 'rewrite', path: f, content: 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\nkeep_line_one: alpha\nkeep_line_two: beta\n' },
-    ]));
-    assert.strictEqual(r.ok, false, 'a later occurrence of the same anchor shape escaped its enclosing structure -- an earlier chain-preserving window must not mask it');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n', 'file left untouched');
-  } finally { clean(proj); }
-});
-
-test('RUNG1 F3 control: the SAME content with the trailing escaped duplicate removed already survives cleanly -- proves F3 needs the second, later occurrence to exploit', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: '  keep_line_one: alpha\n  keep_line_two: beta', anchorFile: f });
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'Section A:\n  keep_line_one: alpha\n  keep_line_two: beta\nafter\n' },
-    ]));
+      { type: 'rewrite', path: cutFile, content: 'kept' },
+      { type: 'rewrite', path: noop, content: 'unchanged' },
+    ], { origin: 'wizard-cut' }), { home, now: 777 });
     assert.strictEqual(r.ok, true, r.error);
-  } finally { clean(proj); }
+    const st = loadState(proj, home);
+    assert.deepStrictEqual(st.fullCleanFiles, [cutFile],
+      'a rewrite that removed nothing judged nothing this function can see — the same predicate H1 landed, one level down');
+  } finally { clean(proj, home); }
 });
 
-// WAVE-6 HIGH (INSPECT on 36e4bfa, cw-class-b-reviewer): round 11's
-// flattenSurvives gained a uniformity requirement -- correct for the
-// KEEPS-GATE (F3), silently inherited by the merge-pair check (:1197,
-// reached via the SAME shared textSurvives() when the absorbed text is
-// flush-left/multi-line). The two consumers ask DIFFERENT questions: the
-// keeps-gate asks "does this exact protected span's MEANING survive"
-// (reparenting changes meaning -> refuse is correct); the merge-pair check
-// asks "was this deleted file's content absorbed at all, so nothing was
-// silently destroyed" (reparenting one line during absorption loses
-// NOTHING -- refusing here means the check wrongly concludes "not absorbed"
-// and lets BOTH halves proceed independently: source survives untouched
-// AND destination gets the (still-present, just reindented) content too --
-// the exact two-copies bug grad6 §1b exists to prevent, reopened).
-test('RED-FIRST/WAVE-6-HIGH: a merge that reparents ONE interior line of the absorbed text is still caught -- flattenSurvives\'s uniformity check must not leak into the merge-pair consumer', () => {
+// CWK-081 residue (a), A4 FORGERY — PINNED OPEN, deliberately. `plan.origin` is
+// untrusted plan data (this file's own trust-anchor comment), and MEASURED
+// enumeration of every input applyPlan receives found none that is both outside
+// a forger's control AND able to distinguish a genuine wizard pass. This cell
+// exists so the residue cannot be quietly 'closed' by a future change that only
+// makes it LOOK closed — the round-1 dup-cut arm read a false green for exactly
+// that reason. If this test ever goes RED, something real changed: re-derive it,
+// do not delete it.
+test('CWK-081 (a) RESIDUE PINNED: a FORGED wizard-cut origin removing a UNIQUE line still stamps — open by design, not by oversight', () => {
   const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   try {
-    const A = path.join(store, 'a.md');
-    const B = path.join(store, 'b.md');
-    const srcText = '---\ncritical: true\nnever closes\nSee [[keep-me]] and 42 issues.';
-    write(A, srcText);
-    write(B, 'Base B.');
-    assert.strictEqual(isPinned(A), true, 'setup sanity: an unclosed fence fails CLOSED (incapacity)');
-    // ONE interior line ("critical: true") nested under its neighbour; the
-    // rest of the flush-left block is untouched. Text order/content is
-    // identical -- only that one line's OWN indent changed.
-    const reparented = '---\n  critical: true\nnever closes\nSee [[keep-me]] and 42 issues.';
-    const r = apply(planFor(proj, store, [
-      { type: 'delete', path: A },
-      { type: 'rewrite', path: B, content: 'Base B, merged.\n' + reparented },
-    ]));
-    assert.strictEqual(r.ok, false, JSON.stringify(r));
-    assert.strictEqual(fs.existsSync(A), true, 'the source must SURVIVE untouched (incapacity refusal)');
-    assert.strictEqual(fs.readFileSync(B, 'utf8'), 'Base B.', 'the destination must NOT be rewritten -- two copies would exist otherwise (A\'s original content, plus its reparented text inside B)');
-    assert.ok((r.flagged || []).some((f) => f.path === B && /merge-pair/.test(f.reason)), `the reparented paired rewrite must still be flagged as excluded: ${JSON.stringify(r.flagged)}`);
-  } finally { clean(proj); }
-});
-
-test('WAVE-6 HIGH control: a keeps-gate anchor with the SAME one-interior-line reparent is still correctly REFUSED -- the fix must not weaken the keeps-gate to fix the merge-pair consumer', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'a: 1\nb: 2\nc: 3\nd: 4\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: 'a: 1\nb: 2\nc: 3', anchorFile: f });
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'a: 1\n  b: 2\nc: 3\nd: 4\n' },
-    ]));
-    assert.strictEqual(r.ok, false, 'the keeps-gate must stay STRICT -- this is the F3 fixture round 11 exists to close');
-    assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)), JSON.stringify(r.flagged));
-  } finally { clean(proj); }
-});
-
-// WAVE-6 MED-1 (cw-class-b-reviewer): pins the residual's own re-judged
-// table -- an F3 reparent with NO sibling carrying the text is correctly
-// refused (round 11's headline fix); the SAME reparent with a sibling in
-// the same plan coincidentally carrying the text is NOT refused, because
-// the strict check's own failure routes it into the pre-existing,
-// unchanged F6 fallback sweep. Declared as a NAMED RESIDUAL at the KEEPS-
-// GATE call site's own comment, not silently fixed here -- see that
-// comment for why (rail #2's migration case forbids extending the
-// structural check into the fallback).
-test('WAVE-6 MED-1 (documented residual, NOT a regression): F3 reparent with no sibling carrying the text is refused', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    write(f, 'a: 1\nb: 2\nc: 3\nd: 4\n');
-    recordKeep(proj, { target: 'MEMORY.md', anchor: 'a: 1\nb: 2\nc: 3', anchorFile: f });
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'a: 1\n  b: 2\nc: 3\nd: 4\n' },
-    ]));
-    assert.strictEqual(r.ok, false, 'no sibling carries the text -- the strict check + fallback both correctly refuse');
-  } finally { clean(proj); }
-});
-
-test('WAVE-6 MED-1 (documented residual, NOT a regression): the SAME F3 reparent with a sibling coincidentally carrying the text is rescued by the F6 fallback', () => {
-  const { proj, store } = sandbox();
-  try {
-    const f = path.join(store, 'MEMORY.md');
-    const sibling = path.join(store, 'other.md');
-    write(f, 'a: 1\nb: 2\nc: 3\nd: 4\n');
-    write(sibling, 'unrelated content'); // will be rewritten to coincidentally carry the anchor text
-    recordKeep(proj, { target: 'MEMORY.md', anchor: 'a: 1\nb: 2\nc: 3', anchorFile: f });
-    // WAVE-7 (cw-class-b-reviewer): this test asserts the reparent LANDS --
-    // exactly what would ALSO happen if the keep were never enforced at all
-    // (an anchor silently dropped by F5's floor). Proven by mutation
-    // (MIN_MEANINGFUL_ANCHOR_LEN -> 9999): the OTHER MED-1 test (no sibling)
-    // correctly reddens, but this one stayed green -- it cannot distinguish
-    // "rescued by the F6 fallback" from "never enforced", and pinning that
-    // rescue is this test's entire job. Non-vacuity MUST be asserted BEFORE
-    // apply() -- a precondition added after would still pass vacuously.
-    assertAnchorStored(proj, 'MEMORY.md');
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'a: 1\n  b: 2\nc: 3\nd: 4\n' }, // the reparent -- structurally refused on its own
-      { type: 'rewrite', path: sibling, content: 'a: 1\nb: 2\nc: 3\nunrelated but coincidentally carries the exact anchor text' },
-    ]));
-    // NAMED RESIDUAL, not a bug: the strict own-file check on f.md correctly
-    // fails (same as the test above), so this keep falls into the fallback
-    // sweep -- which finds the anchor verbatim in `sibling`'s new content
-    // and treats it as satisfied. f.md's own reparent therefore proceeds.
+    const f = path.join(store, 'forged.md');
+    write(f, 'kept line\nunique line only here');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'kept line' }], { origin: 'wizard-cut' }), { home, now: 777 });
     assert.strictEqual(r.ok, true, r.error);
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'a: 1\n  b: 2\nc: 3\nd: 4\n', 'the residual: the reparent on f.md is NOT refused when a sibling coincidentally carries the text');
-  } finally { clean(proj); }
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777,
+      'STILL STAMPS. The blast is bounded to WHICH ADVISORY TEXT one FULL crossing renders — never a delete, never a spend.');
+  } finally { clean(proj, home); }
+});
+
+// The CONTROL that keeps the two (b) cells above from passing on a predicate
+// broken into always-false — this room's own warning from the round that
+// introduced the stamp.
+test('CWK-081 (b) control (non-vacuity): a pass that removes from EVERY file records EVERY file', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const a = path.join(store, 'a.md'); const b = path.join(store, 'b.md');
+    write(a, 'kept\ndrop a'); write(b, 'kept\ndrop b');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: a, content: 'kept' },
+      { type: 'rewrite', path: b, content: 'kept' },
+    ], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    const st = loadState(proj, home);
+    assert.strictEqual(st.fullCleanAt, 777);
+    assert.deepStrictEqual([...st.fullCleanFiles].sort(), [a, b].sort(),
+      'a genuinely-covering pass still stamps AND names both files — the predicate was scoped, not disabled');
+  } finally { clean(proj, home); }
+});
+test('CWK-081: a wizard plan that FAILS the fidelity gate records NO Full clean (the claim rides the gate, not the intent)', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'lossy.md');
+    write(f, 'see https://example.com/spec for the contract');
+    // an unapproved structured-token drop -> applyPlan refuses the whole run
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'see the contract' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, false, 'the gate refused this run');
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'a refused run is not a clean, however wizard-shaped its origin tag');
+  } finally { clean(proj, home); }
+});
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 H1 — `ok:true` is NOT evidence of adjudication. Three ordinary plan
+// shapes an honest wizard emits reach the single ok:true return having judged
+// nothing; each stamped the Full-clean record before this predicate changed.
+// ---------------------------------------------------------------------------
+
+test('CWK-081 H1: a wizard-cut plan that REMOVES NOTHING does not record a Full clean — pure-create, no-op rewrite, append-only', () => {
+  const cases = [
+    ['A1 pure create (no rewrite at all — the fidelity loop skips every non-rewrite)',
+      (store) => [{ type: 'create', path: path.join(store, 'made.md'), content: 'brand new destination file' }]],
+    ['A2 no-op rewrite (drops nothing BECAUSE it changes nothing — passes the gate vacuously)',
+      (store) => { const f = path.join(store, 'same.md'); write(f, 'unchanged body'); return [{ type: 'rewrite', path: f, content: 'unchanged body' }]; }],
+    ['A3 append-only rewrite (a gate that only checks DROPS has nothing to check)',
+      (store) => { const f = path.join(store, 'grown.md'); write(f, 'kept line'); return [{ type: 'rewrite', path: f, content: 'kept line\nadded line' }]; }],
+  ];
+  for (const [label, build] of cases) {
+    const { proj, store } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+    try {
+      const r = apply(planFor(proj, store, build(store), { origin: 'wizard-cut' }), { home, now: 777 });
+      assert.strictEqual(r.ok, true, label + ': the transaction itself is legitimate and must still commit');
+      assert.strictEqual(loadState(proj, home).fullCleanAt, undefined,
+        label + ': committed, but nothing was adjudicated — the advisory must not be told a semantic pass judged this store');
+    } finally { clean(proj, home); }
+  }
+});
+
+test('CWK-081 H1 control (non-vacuity): the SAME predicate still records a clean when the wizard actually REMOVED something', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'shrunk.md');
+    write(f, 'fact stays\nverbose wording the outsider judged and dropped');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'fact stays' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777, 'a real cut IS the evidence the record exists to carry');
+  } finally { clean(proj, home); }
+});
+
+test('CWK-081 H1 residue, PINNED so it is not later mistaken for a bug: an all-KEEP Full pass records nothing', () => {
+  // A pass that judged every file and decided to keep all of it removes nothing,
+  // so from in here it is indistinguishable from a pass that never ran. The code
+  // declines to assert the stronger of the two, and the next FULL(capacity)
+  // crossing renders the ASK rather than the advisory. INTENDED, safe direction.
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'all-kept.md');
+    write(f, 'every line here was judged and kept');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'every line here was judged and kept' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined,
+      'indistinguishable from "never judged" in here — so it asks instead of asserting');
+  } finally { clean(proj, home); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-081 A4 / INSPECT F-C1 — THE CENSUS GETS A MACHINE.
+//
+// applyPlan's A4 residue note enumerates every input the function receives and
+// says the list is complete AS OF THAT SIGNATURE. Until now nothing fired when
+// a new one arrived. This fires: it re-derives the census from the function's
+// own body on every run and pins it.
+//
+// GOING RED IS NOT A DEFECT — it means an input was added. Re-run A4's two-part
+// test on the new field (outside the forger's control? able to distinguish a
+// genuine wizard pass?), update the note, THEN update this pin. Never the pin
+// alone.
+// ---------------------------------------------------------------------------
+
+// Extract the census from ONE function body. Three properties, each one a trap
+// this instrument fell into before it was trusted: BOTH spellings (a
+// destructured field never appears as `obj.field`), COMMENTS STRIPPED (the note
+// being checked names plan fields in prose, and counting those reports the code
+// reading what only a comment mentions), and THIS BODY ONLY (a whole-file grep
+// sweeps sibling functions' opts).
+//
+// Named bound: an end-of-line comment on a CODE line is NOT stripped — cutting
+// at a `//` that may sit inside a string or a regex is how a stripper corrupts
+// the thing it measures. Whole-line and block comments are.
+function inputCensus(source, fnName) {
+  const lines = source.split(/\r?\n/);
+  const start = lines.findIndex((l) => new RegExp('^export function ' + fnName + '\\s*\\(').test(l));
+  assert.ok(start >= 0, `${fnName} signature not found — the extractor is aimed at nothing`);
+  let end = -1;
+  for (let i = start + 1; i < lines.length; i++) if (/^\}/.test(lines[i])) { end = i; break; }
+  assert.ok(end > start, `${fnName} closing brace not found`);
+  const body = lines.slice(start, end + 1).join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  const dotted = (o) => [...new Set([...body.matchAll(new RegExp('\\b' + o + '\\.([A-Za-z_$][\\w$]*)', 'g'))].map((m) => m[1]))];
+  const destructured = (o) => {
+    const out = new Set();
+    for (const m of body.matchAll(new RegExp('\\{([^{}]*)\\}\\s*=\\s*' + o + '\\b', 'g'))) {
+      for (const part of m[1].split(',')) {
+        const key = part.trim().split(/[:=]/)[0].trim();
+        if (/^[A-Za-z_$][\w$]*$/.test(key)) out.add(key);
+      }
+    }
+    return [...out];
+  };
+  const merge = (o) => [...new Set([...dotted(o), ...destructured(o)])].sort();
+  return {
+    plan: merge('plan'),
+    opts: merge('opts'),
+    ambient: [...new Set([...body.matchAll(/\b(?:Date\.now|os\.homedir|process\.cwd)\(\)/g)].map((m) => m[0]))].sort(),
+  };
+}
+
+test('CWK-081 A4: the census EXTRACTOR reads both spellings and ignores COMMENTS — either miss makes it report a census of prose', () => {
+  const fixture = [
+    'export function applyPlan(plan, opts = {}) {',
+    '  // a comment that names plan.projectRoot and opts.ghost in prose',
+    '  const { roots, actions } = plan;',
+    '  const home = opts.home || os.homedir();',
+    '  if (plan.origin === CUT) return process.cwd();',
+    '  return actions.length + roots.length + Date.now();',
+    '}',
+  ].join('\n');
+  const c = inputCensus(fixture, 'applyPlan');
+  assert.deepStrictEqual(c.plan, ['actions', 'origin', 'roots'],
+    'DESTRUCTURED fields seen (a dotted-only reader returns [origin]) and the COMMENT\'s projectRoot NOT counted');
+  assert.deepStrictEqual(c.opts, ['home'], "the dotted spelling still is, and the comment's opts.ghost is not");
+  assert.deepStrictEqual(c.ambient, ['Date.now()', 'os.homedir()', 'process.cwd()'], 'the ambient channel is a channel');
+});
+
+test('CWK-081 A4 FOURTH TENSE: applyPlan\'s CODE-READ input census is PINNED — a new input cannot enter a function whose note claims exhaustiveness without reddening here', () => {
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'apply.mjs'), 'utf8');
+  const c = inputCensus(src, 'applyPlan');
+  assert.deepStrictEqual(c.plan,
+    ['actions', 'approvedDrops', 'origin', 'roots', 'sessionId'],
+    'plan.* moved — re-adjudicate the new field against A4 before touching this pin');
+  assert.deepStrictEqual(c.opts,
+    ['cwd', 'home', 'isPlaceholder', 'keepSnapshots', 'now', 'projectRoot', 'txDir'],
+    'opts.* moved — this is the exact case the A4 note used to say nothing fires on');
+  assert.deepStrictEqual(c.ambient, ['Date.now()', 'os.homedir()', 'process.cwd()'], 'the ambient channel moved');
+  assert.strictEqual(c.plan.length + c.opts.length, 12, '12 CODE-READ named inputs — the figure the A4 note publishes');
+});
+
+// THE TRUST ANCHOR, pinned from the other side: `plan.projectRoot` is RECEIVED
+// and deliberately NEVER READ. The anchor comment says so in prose; this makes a
+// future read of it reddening rather than silent, which matters because reading
+// it is precisely the containment bypass the anchor exists to prevent.
+test('CWK-081 A4 / trust anchor: applyPlan never READS plan.projectRoot — a forged plan root must stay unreachable', () => {
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'apply.mjs'), 'utf8');
+  const c = inputCensus(src, 'applyPlan');
+  assert.ok(!c.plan.includes('projectRoot'),
+    'the root is derived from opts.projectRoot || findProjectRoot(...) — if plan.projectRoot is being read, the trust anchor is gone');
 });

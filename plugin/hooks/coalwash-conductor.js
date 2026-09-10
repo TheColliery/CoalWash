@@ -1,5 +1,13 @@
 #!/usr/bin/env node
 'use strict';
+// ponytail: 806 lines at declaration — FOUR hook events share ONE file
+// by construction: hooks.json wires a single command and the branch on
+// hook_event_name is the first thing the body does. Splitting means either four
+// entry files, each re-paying the whole Phoenix-13 preamble (fail-silent wrap,
+// stdin read, config cascade, state paths) and re-reading the same state, or a
+// shared lib this CJS hook can only reach through await import() — a second
+// module-resolution failure mode on the one surface that must never crash the
+// host. The cohesion unit here is the hook CONTRACT, not the line count.
 // CoalWash conductor (Phoenix-13 hook: fail-silent, zero-dep, no network, no
 // spawn, never process.exit — hooks-safety.md). FOUR events share this one
 // file (hooks.json), branching on hook_event_name (+ tool_name) from stdin:
@@ -29,9 +37,16 @@
 //                   site, 0f), the UNCONDITIONAL FULL force directive (0m —
 //                   economic AND absolute-cap, no proof gate, no off
 //                   switch), the OBESE auto-Quick directive (0d — standing
-//                   config, never an ask), or the FULL(externalize)
+//                   config, never an ask), or ONE OF THE TWO capacity
+//                   outcomes (CWK-081): after a Full-tier pass REMOVED
+//                   something this episode, the FULL(externalize)
 //                   pure-information advisory — never an ask, since washing
-//                   cannot help ~all-muscle over capacity. Mirrors
+//                   cannot help ~all-muscle over capacity, and the advisory
+//                   reports only what that pass did, never a verdict over the
+//                   rest of the store (round-2 F1); BEFORE one, the Full-tier
+//                   consent instead, because "muscle" is then a claim nothing
+//                   has measured. Either way, at most ONCE per session.
+//                   Mirrors
 //                   rot-canary-stop.js's exact output mechanism — a
 //                   structured `{decision:'block', reason}` JSON write, not
 //                   plain console.log — because THAT is what makes Stop a
@@ -50,8 +65,11 @@
 // which is now CONTINUOUS: whatever actually cuts the fat — a hand edit,
 // the wizard, never Quick itself, which has no cutter — drops the next
 // gauge's re-measured fat under the disarm mark); the
-// WALL is the REAL capacity line only (capacityTokens + the CC index caps):
-// wash-first when armed, externalize when ~all-muscle. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
+// WALL is the REAL capacity line only (capacityTokens -- DISCOVERED per machine
+// where the platform exposes a window, else the derived conservative default,
+// CWK-081 -- plus the CC index caps): wash-first when armed; when ~all-muscle,
+// the externalize advice only AFTER a Full-tier pass removed something this
+// episode, otherwise the Full-tier consent first. FORCE AT FULL IS NON-OPTIONAL (0m "FORCE IS
 // A DICTATOR"): every FULL crossing force-runs the FREE Quick pass under
 // the same standing consent as OBESE's auto-Quick — no economic proof
 // needed for the free tier (the break-even proof governs the PAID wizard;
@@ -71,7 +89,12 @@
 //
 // CHEAP caliper only on the SessionStart path: file sizes + stamps; content is
 // read only for the small always-loaded set; gzip only when informational
-// work is already in budget (~100ms total wall budget). The Stop path stays
+// work is already in budget. (This clause used to end "(~100ms total wall
+// budget)" — the RETIRED cap board #24 says never to restore; the sibling
+// citation at the Stop re-gauge was removed by CWK-082 F5 and this one was
+// left standing in the same batch, which is the class-vs-instance failure this
+// room bans by name. The author-controllable gate is Phoenix #3's <=5ms of
+// ADDED work; a total wall-clock figure is an ENVIRONMENT property.) The Stop path stays
 // cheaper still on the COMMON case (Phoenix #3) — one state read, no
 // discovery, no measureEntries, no gzip. beta.13 item 3 (WARP-HOLE) adds ONE
 // more cheap step when nothing is pending: a stat-only re-check of the
@@ -91,7 +114,46 @@ const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 
 const READ_BUDGET_BYTES = 262144; // max always-loaded content read on the hook path
-const STDIN_BUDGET_MS = 30; // never let an absent/stalled stdin block the hook past this
+// The stdin budget is an IDLE gap, armed on the FIRST BYTE and re-armed on every
+// chunk after it -- NOT a total deadline, and NOT armed at t=0. The retired total
+// deadline (STDIN_BUDGET_MS = 30, measured from process start) failed as a function
+// of how LATE the FIRST byte arrived, which is a property of host contention rather
+// than of anything this hook does: under concurrent spawners the parent's write to
+// our pipe slips past 30 ms and a well-formed payload was dropped, so the hook exited
+// 0 having done nothing (CWK-072). Measured here at K=40 spawners, 4000 invocations:
+// the first byte lands after 30 ms on 25% of invocations (p50 19.5 ms, max 141.9 ms).
+// "Idle" therefore means silence since the last PROGRESS -- before the first byte
+// there is no progress to measure, and arming this timer at t=0 reproduces the total
+// deadline exactly (measured: 31/4000 dropped, against the deadline's own 34/4000).
+const STDIN_IDLE_MS = 30;
+// ANTI-HANG BACKSTOP -- NOT a delivery-latency threshold, and never to be read as the
+// retired 30 ms deadline in a larger costume. It bounds two pathologies only: a writer
+// that trickles one byte per idle window forever, and a pipe that is opened, never
+// written and never closed. A fail-silent hook that hangs blocks the user's session,
+// so the bound must exist.
+// WHY THIS NUMBER -- argued from what two independent instruments AGREE on, never from
+// a safety factor they do not. Both timed end-of-payload at K=40 with a timer-free
+// child, and their worst cases are ~6x apart: the BUILDER's probe (clock started at
+// the top of the child script, N=4000) read max 180.8 ms; the REVIEWER's independent
+// rebuild (its own origin and its own self-load, N=2000) read max 1189 ms, p99 760 ms.
+// Both were AL-1 scratch instruments and are named by ROLE, not by path -- they lived
+// under an untracked scratchpad and are in no clean checkout, so the numbers here are
+// the durable half. Neither is the other's error -- a latency
+// measured from a different origin under a different load is a different quantity --
+// so NO multiple derived from either instrument survives the other, and none is
+// claimed here. What both DO agree on is the only property this number needs:
+// nothing crossed 1500 ms in any cell either of them ran (0/4000 and 0/2000 in the
+// timing cells; 0 losses across 4000 post-fix real-hook invocations). The ceiling has
+// never cut a real payload -- and THAT, not a headroom factor, is why it must never be
+// tuned downward to "tighten" the read: tightening it is the retired deadline rebuilt,
+// and on one of the two instruments the measured worst case already sits close enough
+// to 1500 ms that a smaller number would begin cutting real payloads.
+// WHAT THIS COSTS, stated rather than buried: an absent stdin still resolves at once
+// (the pipe is closed, so "end" fires) and a TTY stdin resolves at once (see below),
+// but a pipe held open in silence now costs this ceiling where it once cost 30 ms.
+// That case has never been observed from Claude Code; the 30 ms version of it was
+// dropping real payloads roughly 1% of the time under contention.
+const STDIN_HANG_CEILING_MS = 1500;
 const DAY_MS = 86400000;
 
 function lib(name) {
@@ -101,30 +163,46 @@ function lib(name) {
 // Read this invocation's hook JSON from stdin ({session_id, hook_event_name,
 // ...} per the CC hook contract) — this is how main() tells the SessionStart
 // and Stop branches apart. Fail-safe: an absent/short/malformed/
-// never-closing stdin resolves to {} within STDIN_BUDGET_MS rather than ever
-// blocking the hook (Phoenix #3/#4) — an unrecognized/missing event name is
+// never-closing stdin resolves to {} within STDIN_IDLE_MS of the last byte (and
+// within STDIN_HANG_CEILING_MS overall) rather than ever blocking the hook
+// (Phoenix #3/#4) — an unrecognized/missing event name is
 // then silently skipped by main() (Phoenix #12/#13: a read failure must
 // never be guessed as the loudest branch; see main()'s closing comment).
 function readStdinJson() {
   return new Promise((resolve) => {
     let data = '';
     let done = false;
+    let idle = null;
+    let ceiling = null;
     const finish = () => {
       if (done) return;
       done = true;
+      if (idle) clearTimeout(idle);
+      if (ceiling) clearTimeout(ceiling);
       try { resolve(JSON.parse(data)); } catch { resolve({}); }
       // Release stdin so a still-open pipe can't keep the event loop alive past
       // the budget (the promise resolved, but a flowing stdin would otherwise
       // hold the process to EOF — observed 3.05s vs 0.125s; Phoenix #3/#4).
       try { if (process.stdin.unref) process.stdin.unref(); process.stdin.destroy(); } catch { /* fail-silent */ }
     };
+    // Armed by the data handler only — never here, never at t=0 (see STDIN_IDLE_MS).
+    const armIdle = () => {
+      if (done) return;
+      if (idle) clearTimeout(idle);
+      idle = setTimeout(finish, STDIN_IDLE_MS);
+      if (idle.unref) idle.unref();
+    };
     try {
       process.stdin.setEncoding('utf8');
-      process.stdin.on('data', (c) => { data += c; });
+      // A TTY stdin carries no hook payload and never ends, so waiting out the
+      // anti-hang ceiling would buy nothing — that is a hand-run of this file, never
+      // an invocation by the agent, which always pipes.
+      if (process.stdin.isTTY) { finish(); return; }
+      process.stdin.on('data', (c) => { data += c; armIdle(); });
       process.stdin.on('end', finish);
       process.stdin.on('error', finish);
-      const t = setTimeout(finish, STDIN_BUDGET_MS);
-      if (t.unref) t.unref();
+      ceiling = setTimeout(finish, STDIN_HANG_CEILING_MS);
+      if (ceiling.unref) ceiling.unref();
     } catch { finish(); }
   });
 }
@@ -199,9 +277,25 @@ async function handleSessionStart(input) {
   // scheduler below still runs (its own off-switch is updateMode — standard
   // system #3 is orthogonal to the gauge).
   const managedPaths = clampedRead(cfg, 'managedPaths');
+  // CWK-057: read ONCE here, in handleSessionStart's own scope. BOTH consumers
+  // sit in different blocks -- recordVerdict inside the gauge block below, the
+  // disclosure after it -- and a declaration inside the gauge block would be a
+  // ReferenceError for the second one on an empty store, which on a fail-silent
+  // hook kills the whole gauge in silence. Hoisting is about SCOPE only: it
+  // never decides whether the disclosure fires (see its own gate below).
+  const scanEverything = clampedRead(cfg, 'scanEverything') === true;
   const disc = mode === 'auto' ? classB.discoverClassB({ projectRoot, home, managedPaths }) : { entries: [] };
   if (disc.entries.length) {
-    const m = caliper.measureEntries(disc.entries, { readBudgetBytes: READ_BUDGET_BYTES, withGzip: false });
+    // CWK-057: ON lifts the read budget on the gauge path too. Phoenix #3 is
+    // NOT breached and is not being quietly stretched: the LETTER of #3 binds
+    // PostToolUse to <=5ms of ADDED work (hooks-safety §6 row 3), and this is
+    // the SessionStart gauge, which already
+    // does a full discoverClassB + a 256KB read by design. ON deliberately
+    // costs more than that, which is why it is a user-set opt-in that discloses
+    // itself below, never a default. Withholding it from the hook would make
+    // the key silently partial on its own primary consumer -- the "guard that
+    // looks covered" failure hooks-safety §9 exists to stop.
+    const m = caliper.measureEntries(disc.entries, { readBudgetBytes: caliper.readBudgetFor(scanEverything, READ_BUDGET_BYTES), withGzip: false });
     const proj = caliper.recordStamp(home, projectRoot, m.alwaysLoaded.tokensEst) || {};
     // Read BEFORE recordVerdict below overwrites it — the band + hysteresis
     // ("overCeiling") this project was in as of the LAST recorded verdict. No
@@ -230,13 +324,23 @@ async function handleSessionStart(input) {
     // economics run BEFORE the band, because the band IS the break-even) —
     // see caliper.mjs for why this is factored out rather than re-derived by
     // hand at a second call site.
-    const gv = caliper.gaugeVerdict({ measure: m, wasOver, wasEconLatched, stamps: proj.stamps, envelope });
+    // CWK-081: the capacity ADAPTER runs HERE and only here on this path —
+    // SessionStart already pays for a full discovery+measure, so one small
+    // in-sandbox JSON read rides along free; the Stop hot path never calls it
+    // (Phoenix #3), it renders the cached number instead.
+    const gv = caliper.gaugeVerdict({ measure: m, wasOver, wasEconLatched, stamps: proj.stamps, envelope, capacity: caliper.discoverCapacity({ home }) });
     const { verdict, fatTokens, economical, perDay, breakEvenDays } = gv;
 
     // WARP-HOLE (beta.13 item 3): the always-loaded path list + byte total —
     // the Stop hook's cheap re-stat baseline for catching a within-session
     // spike without paying for a full re-gauge on every turn.
     const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
+    // CWK-082 L2: computed HERE, where the entries and their sizes already exist,
+    // so the Stop path can NAME the residue off the cache instead of re-walking
+    // the store (Phoenix #3). One implementation, and it lives in the lib. The
+    // gated re-gauge below threads it too — a fix at one of two caching sites
+    // would let the OTHER one blank the list it is about to render.
+    const externalizable = caliper.externalizableResidue(disc.entries);
 
     // Cache everything the Stop hook needs to act WITHOUT re-measuring
     // (Phoenix #3): the verdict itself, the ceiling's hysteresis bit
@@ -252,10 +356,10 @@ async function handleSessionStart(input) {
       // lastVerdict is a per-gauge cache overwritten fresh at every gauge).
       muscleTokens: gv.muscleTokens, demotableTokens: gv.demotableTokens,
       reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
-      hardCeilingTokens: verdict.hardCeilingTokens,
-      alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
+      hardCeilingTokens: verdict.hardCeilingTokens, capacitySource: gv.capacitySource,
+      alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes, externalizable,
       storeTotalBytes: m.totalBytes, // the WHOLE measured store — the bin-retention budget base (P5/P8)
-    }, now);
+    }, now, { scanEverything }); // CWK-057: ON lifts the 200-path cap on the Stop re-stat baseline
     // Uniform once-per-crossing arming on the band itself — no more
     // reason-based carve for externalize (beta.10's old F1 rule): Stop now
     // dispatches on the CACHED reason within the FULL band (see handleStop),
@@ -267,6 +371,27 @@ async function handleSessionStart(input) {
     // grown since — see recordCrossing. OBESE never arms this any more (0d:
     // auto-Quick-silent only).
     caliper.recordCrossing(home, projectRoot, verdict.band, prevBand, now, { quickTried, fatTokens, session: input && input.session_id });
+  }
+
+  // CWK-057 rot-canary MEDIUM (self-found, shipped in 2c6cad0, fixed here):
+  // `disc.entries.length` is REQUIRED, not decoration. Gated on the flag alone
+  // this line fired on two paths where NO SCAN RAN AT ALL -- coalwashMode
+  // 'manual' (the gauge is deliberately silent, so disc is {entries: []}) and
+  // auto with an empty class-B store -- and said "were bypassed this run" about
+  // an event that did not occur. CoalMine's own LOW here (ee15ade) over-stated a
+  // SCOPE; this over-stated an EVENT, on the one surface whose whole job is
+  // telling a user what this tool just did to their memory. The gauge block
+  // above is the only thing that bypasses anything, so the disclosure states
+  // what it did, never what the config would have allowed.
+  if (scanEverything && disc.entries.length) {
+    // Bounded on BOTH sides: what was lifted, and what stays out of reach.
+    // Second over-claim caught in the same pass: this used to say "every
+    // always-loaded entry is actually read", which is false whenever a read
+    // THROWS -- measureEntries catches it and that entry contributes 0 certain
+    // fat, the same fail-toward-silence path the budget takes. What the bypass
+    // actually guarantees is that nothing is skipped FOR BUDGET, so that is
+    // what it now claims.
+    out.push('[CoalWash] Scan scope: scanEverything is ON — both SCAN-scope cuts were bypassed for the gauge that just ran: (1) the always-loaded READ BUDGET (262144 B) is lifted, so no always-loaded entry is skipped for budget and its certain fat is measured instead of counting as muscle by default (an entry whose read FAILS still contributes nothing — that path is unchanged); (2) the 200-path cap on the Stop hook\'s cheap re-stat baseline is not applied. It widens only what is SEEN: keeps.json, the KEEPS-GATE, every other delete gate, localOnly and every consent gate are untouched — nothing is deleted, merged or mutated that would not have been. Still narrower than "everything": recall-tier entries are sized from stat bytes and never read, and a file the platform never surfaced as class-B is not here. Costs more than a normal gauge by design. Set scanEverything to false to restore the normal scan scope.');
   }
 
   if (updateDue(cfg, clampedRead, caliper)) {
@@ -334,16 +459,33 @@ async function handleStop(input) {
     // WARP-HOLE (beta.13 item 3, MEMORY.md "WARP-HOLE + WARM COST"): a
     // within-session spike (e.g. a MEMORY.md crystallize write) sits
     // uncaught under the pure-cache read above until the NEXT SessionStart.
+    // CWK-082 findings-back F5 — this paragraph and the SessionStart one above
+    // used to read hooks-safety Phoenix #3 two OPPOSITE ways in one file: there
+    // as PostToolUse-only, here as binding this Stop path. Settled, and the
+    // reading is the conservative one rather than a licence: the LETTER of #3
+    // is PostToolUse (§6 row 3). Stop is not PostToolUse, so #3 does not bind
+    // it — this path holds the SAME <=5ms discipline BY CHOICE, because Stop
+    // fires every turn and is the same hot class §2 says to grade by what a
+    // hook ADDS. Never cite #3 as if it compelled this budget.
     // MEASURED ad-hoc before shipping (not a flaky in-suite ms-assertion — the
     // WARP-HOLE BEHAVIOR itself is pinned in conductor.test.mjs): an
-    // UNCONDITIONAL full re-gauge
-    // (discoverClassB+measureEntries) costs ~7-18ms on real repos — BLOWS
-    // the Phoenix #3 <=5ms happy-path budget if paid on EVERY Stop call
-    // (Stop fires every turn). The cheap half: an ALWAYS-ON stat-only gate
-    // (re-stat the paths already discovered at the last gauge — no
-    // directory walk, no content read; measured ~0.15-0.3ms on the SAME
-    // repos) decides whether the expensive full re-gauge (rare, and well
-    // under the <=100ms including-a-scan cap) is worth paying for THIS turn.
+    // UNCONDITIONAL full re-gauge (discoverClassB+measureEntries) costs
+    // ~7-18ms on real repos, which is why it is not paid on EVERY Stop call.
+    // ⚠ THAT FIGURE IS RETIRED AS A LIVE CLAIM (CWK-082 F4): re-measured on
+    // the real call at this box, discoverClassB alone runs far slower than
+    // 7-18ms on a real store — the numbers and their n live in the findings-
+    // back record, never pinned here where they rot. The DESIGN is unchanged
+    // and the re-measurement only strengthens it: the full re-gauge is even
+    // more worth gating than the old figure suggested. The cheap half: an
+    // ALWAYS-ON stat-only gate (re-stat the paths already discovered at the
+    // last gauge — no directory walk, no content read; measured ~0.15-0.3ms on
+    // the SAME repos) decides whether the expensive full re-gauge is worth
+    // paying for THIS turn.
+    // The old text closed by calling the re-gauge "well under the <=100ms
+    // including-a-scan cap". That cap is RETIRED (board #24: a total wall-clock
+    // figure is an ENVIRONMENT property, not one the author controls — never
+    // restore one), so citing it as live was a second defect in the same
+    // paragraph. Removed rather than re-worded.
     const cachedPaths = Array.isArray(lastVerdict.alwaysLoadedPaths) ? lastVerdict.alwaysLoadedPaths : null;
     const cachedBytes = Number(lastVerdict.alwaysLoadedBytes);
     if (cachedPaths && cachedPaths.length && Number.isFinite(cachedBytes)) {
@@ -351,24 +493,26 @@ async function handleStop(input) {
       const deltaTokens = caliper.tokensEstFromBytes(Math.abs(freshBytes - cachedBytes));
       if (deltaTokens > caliper.REGAUGE_DELTA_TOKENS) {
         const disc = classB.discoverClassB({ projectRoot, home, managedPaths });
-        const m = caliper.measureEntries(disc.entries, { readBudgetBytes: READ_BUDGET_BYTES, withGzip: false });
+        const scanEverything = clampedRead(cfg, 'scanEverything') === true; // CWK-057, same clamped cascade
+        const m = caliper.measureEntries(disc.entries, { readBudgetBytes: caliper.readBudgetFor(scanEverything, READ_BUDGET_BYTES), withGzip: false });
         // task #4: same measured-not-stamped gauge as SessionStart — fat and
         // muscle come from THIS measure's certain-fat scan; the 0j
         // provisional-floor door this block used to share is retired with
         // the floor-driven band. The reorg envelope resolves via
         // config-schema's envelope resolver (see the SessionStart site's
         // comment for why it does NOT live in the RE-TIER module).
-        const gv = caliper.gaugeVerdict({ measure: m, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps, envelope: envelopeForConfig(cfg) });
+        const gv = caliper.gaugeVerdict({ measure: m, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps, envelope: envelopeForConfig(cfg), capacity: caliper.discoverCapacity({ home }) }); // CWK-081: the gated re-gauge is the OTHER full-measure site, so the adapter rides it too
         const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
+        const externalizable = caliper.externalizableResidue(disc.entries); // CWK-082 L2, same as the SessionStart gauge
         caliper.recordVerdict(home, projectRoot, {
           band: gv.verdict.band, reason: gv.verdict.reason, economical: gv.economical, fatTokens: gv.fatTokens,
           overCeiling: gv.verdict.over, econLatched: gv.verdict.econLatched,
           perDay: gv.perDay, breakEvenDays: gv.breakEvenDays,
           muscleTokens: gv.muscleTokens, demotableTokens: gv.demotableTokens,
           reorgPerDay: gv.reorgPerDay, reorgBreakEvenDays: gv.reorgBreakEvenDays,
-          hardCeilingTokens: gv.verdict.hardCeilingTokens, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes,
+          hardCeilingTokens: gv.verdict.hardCeilingTokens, capacitySource: gv.capacitySource, alwaysLoadedPaths, alwaysLoadedBytes: m.alwaysLoaded.bytes, externalizable,
           storeTotalBytes: m.totalBytes, // same base as SessionStart (P5/P8)
-        }, now);
+        }, now, { scanEverything }); // CWK-057, same clamped flag as the gauge above
         caliper.recordCrossing(home, projectRoot, gv.verdict.band, lastVerdict.band || 'LEAN', now, { quickTried: !!proj.quickTried, fatTokens: gv.fatTokens, session: input && input.session_id });
         proj = caliper.loadState(projectRoot, home); // re-read what we just (maybe) armed
         lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
@@ -398,15 +542,41 @@ async function handleStop(input) {
 
   let reason;
   if (crossing.band === 'FULL' && lastVerdict.reason === 'externalize') {
-    // Pure information — never an ask, never force: washing cannot help
-    // ~all-muscle over capacity (the growable-full invariant's forbidden
-    // "wash harder on muscle" move). Re-emitted once per NEW session while
-    // still over (the session-id re-arm reaches externalize too, and it has
-    // no lastEscalationFat to growth-gate) — a recurring "externalize your
-    // store" reminder, the Windows low-disk-warning model; safe by
-    // construction (reason==='externalize' is checked FIRST, so it can only
-    // ever route here — never a force, never a wizard ask, muscle untouched).
-    reason = ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens });
+    // CWK-081 (1) — ELIGIBILITY, checked before the advisory can speak. The
+    // capacity branch used to assert "muscle, not bloat" off a MECHANICAL
+    // lower-bound reading and steer the user into relocating content that
+    // nothing had judged. The semantic pass is the instrument that turns
+    // unknown text into known muscle, so: no Full-tier pass removed anything
+    // this episode -> this is the Full-tier CONSENT, not an advisory. (owner
+    // ruling 2026-09-06 — decide delete/shrink/stand BEFORE moving things.)
+    // The flag is per-TRANSACTION, not per-store (round-2 F1), so it gates only
+    // WHICH text speaks; the advisory itself disclaims what the pass did not
+    // touch rather than this branch pretending to know the coverage.
+    const fullCleaned = Number.isFinite(Number(proj.fullCleanAt));
+    // CWK-081 (3) — and either way this surface speaks at most ONCE per
+    // session. Measured: 4 consecutive Stops during one live wizard run,
+    // because a consumed FULL crossing can be re-armed inside the same session
+    // and this branch is checked first, so consume-at-emission does not bound
+    // it. Suppressed => consume the crossing and stay silent (Phoenix #13):
+    // the crossing must not dangle, and repeating pure information is the
+    // defect being closed.
+    if (!caliper.armExternalize(home, projectRoot, input && input.session_id, now).surface) {
+      caliper.consumeCrossing(home, projectRoot, now);
+      return;
+    }
+    reason = fullCleaned
+      ? ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens, capacitySource: lastVerdict.capacitySource, residue: lastVerdict.externalizable, judgedFiles: proj.fullCleanFiles })
+      : ask.wizardEscalation({
+        cause: 'capacity-unmeasured',
+        fatTokens, breakEven, reorg, spawns,
+        hardCeilingTokens: lastVerdict.hardCeilingTokens,
+        capacitySource: lastVerdict.capacitySource,
+      });
+    // Neither outcome is a force and neither touches muscle: the ELIGIBLE side
+    // is pure information (a wash cannot shrink muscle — the growable-full
+    // invariant's forbidden "wash harder on muscle" move), the INELIGIBLE side
+    // is a two-button consent. reason==='externalize' is still checked FIRST,
+    // so this branch remains the only route either can take.
   } else if (crossing.band === 'FULL' && crossing.escalation) {
     // case (c) — 0f "AUTHORITATIVE 3-FLOW": a force-run already tried Quick
     // this episode and the store is STILL over FULL — only the wizard's
@@ -510,6 +680,47 @@ const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit']);
 
 // The touched file path from an Edit/Write/MultiEdit tool_input (the stable CC
 // arg key, confirmed vs rot-canary/CoalHearth's shipped hooks).
+//
+// RESIDUE, BY DESIGN, NAMED SO IT IS NOT RE-DERIVED (CWK-082 L3): this is the
+// exact reason the airbag cannot cover a SHELL-mediated write.
+//
+// WHAT DECIDES IT IS COST, AND THE NUMBER IS HERE (INSPECT F-B2 — this note
+// used to LEAD with the parser argument below, which a reader can answer, so
+// the note invited exactly the re-derivation it exists to prevent). A
+// PreToolUse(Bash) matcher puts ONE conductor PROCESS SPAWN on EVERY shell
+// call. Measured through this real hook file, spawned the way the platform
+// spawns it, n=25, arms ALTERNATED, hermetic sandboxed HOME/TEMP:
+//
+//   Bash payload            min  79.547  median  88.730  max 110.528  ms
+//   Edit payload (CONTROL)  min  95.346  median 107.245  max 124.604  ms
+//
+// The control is what makes the figure mean SPAWN rather than payload: same
+// order, and it is not a no-op — the Edit arm really fired the airbag and wrote
+// 3 snapshot files. Instrument: scratchpad/r31/probe-fb2-spawn.mjs. INSPECT
+// measured the same arm on its own separate instrument (78.804 / 82.106 /
+// 103.652, n=25) and agrees; two harnesses, same order of magnitude, cited as
+// two rather than merged into one — and the figure is quoted as the SPAN the
+// two produced, 82-89 ms at the median, never a midpoint neither of them
+// measured. Roughly eighty-odd milliseconds on EVERY shell call, to cover a
+// narrow case, is the trade this refuses — Phoenix #3, the hottest path in a
+// session. The exact per-arm distributions are the tables above; do not
+// re-round them into one number.
+//
+// THE PARSER ARGUMENT IS TRUE AND IS *NOT* WHAT DECIDES IT. A Bash payload
+// carries a command STRING, not a file_path, so this function has nothing to
+// read and no correct answer to give, and a parser that half-works would
+// produce an airbag that fires SOMETIMES — worse than one that admits it is
+// absent (a user told "protected" who is protected part of the time stops
+// taking their own precautions). BUT an airbag on Bash NEED NOT PARSE ANYTHING:
+// the guarded set is small and already enumerable, so it could snapshot THE
+// WHOLE SET unconditionally on the first Bash call and early-return, and
+// writeguard.mjs's own first-write-only check already makes that O(1)
+// afterwards. That shape defeats the parser objection cleanly and still pays
+// the spawn above on every shell call — which is why the answer does not move.
+// So the LIMIT is disclosed in the externalize template instead (ask.mjs),
+// which steers the move toward the channel the airbag genuinely covers. Do not
+// "fix" this by adding a shell parser here, and do not re-open the question on
+// the parser argument alone — it was already answered above.
 function touchedPath(input) {
   const inp = input && input.tool_input;
   return inp && typeof inp.file_path === 'string' ? inp.file_path : '';

@@ -63,6 +63,12 @@ export function oneLineResult(opts) {
 //   gatePass: bool, gateDrops?: number,
 //   breakEvenSessions?: number,
 //   dryRun?: bool,
+//   pendingUserKeeps?: number,                  — board #129: count of keeps.mjs's
+//     pendingUserKeeps(loadKeeps(...)) — a keep whose own reason names the
+//     user as decision-holder and has not yet had that decision returned to
+//     them. Fill it every run this store carries any (not only wizard runs)
+//     — it is the mechanism that stops "settled" from meaning "an agent
+//     decided and never asked."
 // }
 export function buildReceipt(r) {
   const lines = [];
@@ -87,5 +93,11 @@ export function buildReceipt(r) {
   // wikilink-orphan advisory (apply.mjs deadLinkLine — one line, never a
   // block): present only when a deleted topic is still referenced.
   if (r.deadLinkLine) lines.push(r.deadLinkLine);
+  // board #129: a keep the agent is NOT authorized to have settled alone —
+  // absent/0 renders nothing (a store with none stays silent, matching every
+  // other optional line here); present only to say the count, never the
+  // targets (that list lives in keeps.json for the human to open, not in a
+  // receipt this room's own doctrine keeps metrics-only, §9b).
+  if (r.pendingUserKeeps > 0) lines.push(`${r.pendingUserKeeps} keep(s) await YOUR decision — the reason named you, not the agent (see .claude/coalwash/keeps.json)`);
   return lines.join('\n');
 }

@@ -29,6 +29,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { txDirFor, ensureSelfIgnore } from './apply.mjs';
 import { claudeBaseDir } from './config-load.mjs';
 
@@ -86,7 +87,15 @@ const loadKeepsFrom = loadKeepsAt;
 // prior anchor happened to survive in its place. A caller that never
 // intended to set an anchor this call (the pre-beta.12 advisory shape)
 // gets `anchorDropped:false` — nothing was requested, so nothing was lost.
-function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anchorFile } = {}) {
+// Optional `pendingUser` (board #129): same preserve-unless-explicit rule as
+// anchor/anchorFile, ONE DIRECTION DIFFERENT ON PURPOSE. `undefined` (not
+// passed) preserves the prior value — an ordinary re-affirm that knows
+// nothing about this mechanism must not silently clear a standing return-to-
+// user. `true` sets it (+ `pendingSince`, defaulting like `date` does).
+// `false` — passed EXPLICITLY, never inferred — is the ONLY way to clear it:
+// the deliberate signal that the user's decision was actually recorded, not
+// merely that this call happened to omit the field.
+function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anchorFile, pendingUser, pendingSince } = {}) {
   if (typeof target !== 'string' || !target) return { ok: false, anchorDropped: false, anchorStored: false };
   try {
     const raw = rawKeepsOrNull(file);
@@ -246,6 +255,14 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
     // non-empty string was asking for an anchor; whether it cleared the
     // floor is exactly the outcome being reported, not a precondition for
     // reporting it.
+    const mergedPendingUser = pendingUser === false
+      ? undefined
+      : pendingUser === true
+        ? true
+        : (prior && prior.pendingUser === true ? true : undefined);
+    const mergedPendingSince = mergedPendingUser
+      ? (typeof pendingSince === 'string' && pendingSince ? pendingSince : (prior && typeof prior.pendingSince === 'string' ? prior.pendingSince : new Date().toISOString().slice(0, 10)))
+      : undefined;
     const anchorRequested = typeof anchor === 'string' && anchor.length > 0;
     const anchorDropped = anchorRequested && mergedAnchor !== anchor;
     keeps.push({
@@ -254,9 +271,10 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
       date: date || new Date().toISOString().slice(0, 10),
       ...(mergedAnchor ? { anchor: mergedAnchor } : {}),
       ...(mergedAnchorFile ? { anchorFile: mergedAnchorFile } : {}),
+      ...(mergedPendingUser ? { pendingUser: true, pendingSince: mergedPendingSince } : {}),
     });
-    const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), 'utf8');
+    const tmp = `${file}.${crypto.randomBytes(12).toString('hex')}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmp, file);
     return { ok: true, anchorDropped, anchorStored: !!mergedAnchor };
   } catch {
@@ -274,6 +292,13 @@ export function recordKeep(projectRoot, opts = {}) {
 
 // Global-scope variants — identical shape/schema/upsert-by-target semantics,
 // filed beside the global state file rather than a single project's tx dir.
+// board #129: the keeps still awaiting an actual user decision — never a
+// wash-time filter (a pending keep protects its target exactly like any
+// other), only a REPORTING view for the receipt/wizard to surface.
+export function pendingUserKeeps(keeps) {
+  return Array.isArray(keeps) ? keeps.filter((k) => k && k.pendingUser === true) : [];
+}
+
 export function loadGlobalKeeps(home = os.homedir()) {
   return loadKeepsFrom(globalKeepsPath(home));
 }

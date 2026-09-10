@@ -28,6 +28,14 @@ on:
 permissions:
   contents: read
 
+# CWK-058 concurrency. cancel-in-progress: TRUE — the discriminator is ATOMICITY, never
+# read-vs-write: ci.yml reads, tests and compares, publishes nothing and touches no external
+# state, so a superseded run has nothing half-done to leave behind. Grouped per REF so two
+# branches never serialise behind each other.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gate:
     name: gate (${{ matrix.os }} · node ${{ matrix.node }})

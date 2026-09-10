@@ -133,8 +133,18 @@ export function obeseAutoQuick(opts) {
 // numbers and the reorganize half's demotable-muscle numbers. `reorg` =
 // { demotableTokens, perDay, breakEvenDays }, the envelope-overflow proof
 // cached beside the fat proof by recordVerdict.
+// CWK-081 (1) — THE SECOND CAUSE. A FULL crossing whose fat sits UNDER the arm
+// mark used to route straight to the capacity advisory, which told the user to
+// go relocate content on the strength of a measurement that never looked at it.
+// It now routes HERE instead, until a Full-tier pass has actually REMOVED
+// something this episode. Same ask, same two options, same tier — a DIFFERENT headline,
+// because the reason is different and the old one would be false here: no
+// mechanical fat remains to name, no force preceded this ask, and the honest
+// statement is that the muscle is UNMEASURED, not that it is muscle.
+// `cause: 'capacity-unmeasured'` selects it; absent/anything else keeps the
+// pre-CWK-081 text byte-for-byte, so every existing caller and pin is unmoved.
 export function wizardEscalation(opts) {
-  const { fatTokens, breakEven, reorg, spawns } = opts || {};
+  const { fatTokens, breakEven, reorg, spawns, cause, hardCeilingTokens, capacitySource } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
   const payback = paybackLine(breakEven, 'wizard');
   const spawnBill = spawnBillLine(spawns); // 0o: absent when zero spawns
@@ -143,6 +153,13 @@ export function wizardEscalation(opts) {
   const reorgLine = demotable > 0
     ? ` The reorganize half pays too: ~${demotable} tok of always-loaded index is demotable to the recall tier (the retier envelope's own overflow), paying back in ${reorgBe}.`
     : '';
+  if (cause === 'capacity-unmeasured') {
+    const cap = Number.isFinite(hardCeilingTokens) ? hardCeilingTokens : '?';
+    const capProv = capacitySource === 'conservative-default'
+      ? ', a CONSERVATIVE DEFAULT — this platform exposes no context-window figure, so the ceiling is the smallest supported window minus the auto-compact reserve'
+      : (typeof capacitySource === 'string' && capacitySource ? `, discovered from ${capacitySource}` : '');
+    return `[CoalWash] memory gauge: FULL (capacity — muscle not yet measured) — this store exceeds the machine's working-capacity ceiling (~${cap} tok${capProv}). WHAT WAS ACTUALLY MEASURED: the mechanical tier proves exact duplicates and excess spacing only, and found ~${fat} tok of them — a LOWER BOUND, never a clean bill. NO semantic pass has run this episode, so nothing has yet measured whether the rest is muscle or bloat, and CoalWash will not tell you to go relocate content on a measurement that never read it.${payback}${reorgLine}${spawnBill} Offer the user via your question tool, exactly two options: ทำ (open the /coalwash wizard now, "Fat + reorganize muscle" tier — the zero-context outsider judges what the mechanical tier structurally cannot) / later (dismiss; carries forward — this ask returns at most once per session, never on a timer). If the user picks ทำ: run the wizard per the coalwash skill. Once a Full pass lands and actually removes something, THEN the capacity advisory (externalize) becomes eligible — and even then it reports only what that pass did, never a verdict that the rest of the store is muscle. This crossing is marked consumed the moment this ask fires. ${ANSWER_FIRST_REMINDER}`;
+  }
   return `[CoalWash] certain fat (~${fat} tok, measured — exact duplicates and spacing the mechanical tier can prove) remains this episode: a free mechanical Quick pass was forced this episode (the FULL-band force that precedes every ask here), but the mechanical tier has no cutter for this class of fat — it can only PROVE the measurement, not remove it. Clearing it needs a human or the wizard's semantic tier, not another automatic pass.${payback}${reorgLine}${spawnBill} Offer the user via your question tool, exactly two options: ทำ (open the /coalwash wizard now, "Fat + reorganize muscle" tier — the zero-context outsider reviews what no automatic pass can touch) / later (dismiss; carries forward — this same ask returns only once the measured fat GROWS further, never on a timer). If the user picks ทำ: run the wizard per the coalwash skill. This crossing is marked consumed the moment this ask fires. ${ANSWER_FIRST_REMINDER}`;
 }
 
@@ -170,17 +187,128 @@ export function seatbeltAdvisory(opts) {
 
 // The FULL(externalize) advisory — pure information, never an ask (a wash
 // cannot help ~all-muscle over capacity; the growable-full invariant forbids
-// steering the user into washing legitimate muscle). Fixed-template for the
+// steering the user into washing legitimate muscle). REACHABILITY, CWK-081:
+// the conductor routes here only after a Full-tier pass REMOVED something this
+// episode; before one, the same crossing goes to wizardEscalation's
+// 'capacity-unmeasured' cause instead.
+//
+// WHAT THAT ENTITLES THIS TEMPLATE TO SAY — INSPECT round-2 F1, and the first
+// version of this paragraph claimed more than the fact carries. It read: "This
+// template may therefore SAY a Full pass adjudicated the content — at every site
+// that can reach it, one did." The eligibility fact is per-TRANSACTION, not
+// per-STORE: applyPlan is handed a PLAN, so a wizard-cut plan that rewrites ONE
+// file of three and removes one line stamps the record while the other two are
+// judged by nothing (cell C1, measured on both engines). So the template says a
+// pass RAN and REMOVED under the gate, and disclaims the rest outright.
+// NARROWING THE SENTENCE IS THE FIX, not widening the predicate: coverage is a
+// property of the PASS, applyPlan has no input that carries it, and inventing an
+// adjudication receipt to carry it is a bigger unit with a wider blast. The
+// direction settles it — under-claiming costs a user one re-run they did not
+// need; over-claiming on a surface that steers real content costs the content.
+// Fixed-template for the
 // same program-side-text reason as the asks above. #21 EXTERNALIZE-TEMPLATE:
 // externalize is pure INFORMATION (a wash cannot shrink muscle), so CoalWash
 // never auto-moves it — the template names the hand-move steps (cluster ->
-// destination -> pointer), the USER/agent relocates by hand, and the write-path
-// AIRBAG (0p) snapshots that hand-move. Precedent = the CoalPortal record
-// (memory -> a durable file, a pointer left behind).
+// destination -> pointer) and the USER/agent relocates by hand. Precedent = the
+// CoalPortal record (memory -> a durable file, a pointer left behind).
+//
+// THE AIRBAG CLAIM IS CONDITIONED, AND THIS PARAGRAPH USED TO CARRY IT
+// UNCONDITIONALLY (CWK-082 L3). It read: "the write-path AIRBAG (0p) snapshots
+// that hand-move" — true for Edit/Write/MultiEdit, FALSE for a shell-mediated
+// one. Two independent gates exclude Bash (hooks.json's PreToolUse matcher and
+// the conductor's own WRITE_TOOLS belt), and INSPECT §3b measured the
+// consequence through the real hook: Write/Edit/MultiEdit produce 3 snapshot
+// files each, Bash produces 0 and the writeguard/ dir is never created.
+// So the template now STATES the condition and STEERS — an honest limit is
+// worth more when it is actionable, and the covered channel is one the agent
+// can simply choose. NOT closed by extending the airbag to Bash, and the reason
+// is COST rather than parsing (INSPECT F-B2: this paragraph led with the parser
+// argument, which is answerable — an airbag on Bash could snapshot the whole
+// guarded set unconditionally and parse nothing, and would still pay the cost).
+// A PreToolUse(Bash) matcher puts one conductor PROCESS SPAWN on EVERY shell
+// call: a median of 82-89 ms across two independent instruments (n=25 each),
+// with an Edit-payload control proving the floor is the spawn. The SPAN is
+// quoted deliberately — a single rounded figure here would be a number neither
+// instrument produced, attached to an n that makes it read as a measurement.
+// Phoenix #3, the hottest path in a session, for a narrow case.
+// SAID ONCE: the figures, the control and the instrument live where the
+// mechanism lives — the conductor's touchedPath note — and are deliberately not
+// restated here, so one of the two cannot go stale against the other.
+// writeguard.mjs's own header carries the channel limit for a reader who
+// arrives at the net rather than at the template.
+// CWK-082 findings-back F3 — a residue rendered by BASENAME cannot tell two
+// files apart, and the collision is not exotic: this room's own CLAUDE.md
+// @imports MEMORY.md while the CC store carries its own memory/MEMORY.md, so
+// CoalWash dogfooding itself printed "MEMORY.md ~41373 tok · MEMORY.md ~20798
+// tok" and named NEITHER — on the one surface whose whole job is telling a
+// hand which file to move.
+//
+// Render the SHORTEST path suffix that is unique WITHIN THE SET BEING SHOWN:
+// one segment wherever nothing collides (the common case, unchanged output),
+// more only where a hand needs it. The set is the shown slice, never the whole
+// store — the reader disambiguates against what is printed in front of them.
+//
+// RESIDUE, named not closed: two entries with the IDENTICAL full path fall
+// through to the full path for both, and a genuinely deep unique suffix
+// renders long. No truncation is added — an elided label re-introduces exactly
+// the ambiguity this fixes, which is worse than a long one.
+function shortestUniqueLabels(paths) {
+  const parts = paths.map((p) => String(p).split(/[\\/]/).filter(Boolean));
+  return parts.map((seg, i) => {
+    for (let take = 1; take <= seg.length; take++) {
+      const label = seg.slice(seg.length - take).join('/');
+      if (!parts.some((o, j) => j !== i && o.slice(Math.max(0, o.length - take)).join('/') === label)) return label;
+    }
+    return seg.join('/');
+  });
+}
 export function externalizeAdvisory(opts) {
-  const { hardCeilingTokens } = opts || {};
+  const { hardCeilingTokens, capacitySource, residue, judgedFiles } = opts || {};
   const cap = Number.isFinite(hardCeilingTokens) ? hardCeilingTokens : '?';
-  return `[CoalWash] memory gauge: FULL (externalize) — this store has ~no reclaimable fat (muscle, not bloat) but exceeds the machine's working-capacity ceiling (~${cap} tok, a rough placeholder). SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. A wash cannot shrink muscle — the only move is to EXTERNALIZE (relocate muscle OUT of the always-loaded set). CoalWash NEVER auto-moves it (externalize is pure information; the write-path airbag snapshots your hand-move). The template: (1) CLUSTER the muscle by topic (largest cohesive block first); (2) pick a DESTINATION per cluster — a project doc / blueprint / design file that loads on demand, not every session; (3) MOVE it there by hand, leaving a one-line POINTER behind in the always-loaded file (title + where it went) so recall still reaches it. Precedent: the CoalPortal record moved from memory to a durable file with a pointer left behind. (task #4: the old "raise fatMultiple" escape is gone with the floor-multiple wall itself — the capacity line is real, and the only honest lever against it is moving muscle out.)`;
+  // CWK-082 L2 — the ACCOUNTING half. Prohibition #31 stands and is untouched:
+  // this template still never moves anything, and still names no destination
+  // that would dodge the gauge. What it adds is what nothing said before — WHERE
+  // the weight actually is, and the bound this gauge cannot see past. Rendered
+  // ONLY when a residue was cached: an absent list omits the section rather than
+  // fabricating one.
+  const weight = Array.isArray(residue)
+    ? residue.filter((e) => e && typeof e.path === 'string' && Number.isFinite(Number(e.tokensEst)))
+    : [];
+  // CWK-081 (b): the advisory used to say only what it CANNOT vouch for. It now
+  // also names what it CAN — the files the pass actually removed content from —
+  // so an un-covered file is visibly outside the claim rather than silently
+  // inside it. Rendered ONLY when a scope was recorded; an absent list omits the
+  // section rather than implying the pass covered everything.
+  const judged = Array.isArray(judgedFiles)
+    ? judgedFiles.filter((f) => typeof f === 'string' && f)
+    : [];
+  // Hoisted out of the template literal on purpose: an interpolation carrying
+  // a call (let alone a nested literal) is what broke the config-key gate's own
+  // locator once already.
+  const judgedRendered = shortestUniqueLabels(judged.slice(0, 5)).join(' · ');
+  const judgedLine = judged.length
+    ? ` THAT PASS TOUCHED, exactly: ${judgedRendered}${judged.length > 5 ? ` (and ${judged.length - 5} more)` : ''} — anything not in that list it did not read.`
+    : '';
+  const weightLabels = shortestUniqueLabels(weight.map((e) => e.path));
+  const weightRendered = weight.map((e, i) => `${weightLabels[i]} ~${Math.round(Number(e.tokensEst))} tok`).join(' · ');
+  const weightLine = weight.length
+    ? ` WHERE THE WEIGHT IS (the always-loaded entries a hand-move would have to come out of, largest first): ${weightRendered}.`
+    : '';
+  // CWK-081 (2): the old headline asserted "~no reclaimable fat (muscle, not
+  // bloat)". The instrument behind that sentence is the MECHANICAL estimator,
+  // which proves exact duplicates and excess spacing and nothing else — a lower
+  // bound. "Muscle" was a claim it never measured. It now says what WAS
+  // measured on BOTH halves: the mechanical bound, and — per the eligibility
+  // check above — that a Full-tier pass ran and removed something this episode.
+  // It stops there. It does not say that pass judged the rest, because nothing
+  // this line can read knows how much of the store it covered (round-2 F1).
+  // CWK-081 (1)/adapter: the ceiling's PROVENANCE rides the line too — a
+  // conservative default and a discovered window are different claims, and a
+  // reader deciding whether to move real content deserves to know which.
+  const capProv = capacitySource === 'conservative-default'
+    ? ', a CONSERVATIVE DEFAULT — this platform exposes no context-window figure, so the ceiling is the smallest supported window minus the auto-compact reserve, not a discovered one'
+    : (typeof capacitySource === 'string' && capacitySource ? `, discovered from ${capacitySource}` : ', a rough placeholder');
+  return `[CoalWash] memory gauge: FULL (externalize) — this store exceeds the machine's working-capacity ceiling (~${cap} tok${capProv}). WHAT THIS EPISODE ESTABLISHED, and nothing beyond it: a Full-tier (semantic) pass ran and REMOVED content under the fidelity gate, which refuses any drop the plan did not name. The mechanical tier proves exact duplicates and excess spacing only — a LOWER BOUND on fat, never a verdict that the rest is muscle — and this record cannot see how much of the store that pass covered, so it establishes NOTHING about files the pass never touched.${judgedLine} SURFACE this line to the user verbatim, mentioned only AFTER you've answered their actual message, never before it. A wash cannot shrink muscle — the only move is to EXTERNALIZE (relocate muscle OUT of the always-loaded set). CoalWash NEVER auto-moves it (externalize is pure information). MAKE THE MOVE WITH THE FILE-EDIT TOOLS (Edit/Write/MultiEdit): the write-path airbag snapshots a hand-move made through those, and only those. A move made through the SHELL instead (mv, sed, a heredoc, a script) is NOT covered — no snapshot is taken and there is no undo net if the rewrite loses content. The template: (1) CLUSTER the muscle by topic (largest cohesive block first); (2) pick a DESTINATION per cluster — a project doc / blueprint / design file that loads on demand, not every session; (3) MOVE it there by hand, leaving a one-line POINTER behind in the always-loaded file (title + where it went) so recall still reaches it. Precedent: the CoalPortal record moved from memory to a durable file with a pointer left behind.${weightLine} ACCOUNTING, so the number stays honest either way: a file moved WITHIN the store still counts here — it left the always-loaded set, not the store — while a file moved OUT of the store leaves this gauge's sight entirely and no line anywhere will report it; CoalWash cannot see past that boundary and does not claim to. (task #4: the old "raise fatMultiple" escape is gone with the floor-multiple wall itself — the capacity line is real, and the only honest lever against it is moving muscle out.)`;
 }
 
 // The dig-gauge ULTRA offer (ULTRA trigger #2, dig-gauge.mjs) — fired on a

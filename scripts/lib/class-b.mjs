@@ -1,3 +1,14 @@
+// ponytail: 834 lines at declaration — ONE discovery LAYER, and the
+// cohesion unit is the CLASS-B DEFINITION rather than any one walk. Every step
+// here (global governance, the CLAUDE.md up-tree walk, the memory store, role
+// stores) feeds ONE entry list under ONE set of containment roots, ONE dedupe
+// key and ONE flag sink, and the refusal helpers at the top are shared by all of
+// them — refusalCode/refusalFlag/relLabel are called from eight discovery sites,
+// and the whole point of the r31/r32 rounds was that a refusal must read the same
+// way at every one. Splitting the walks into separate files would hand each half
+// its own copy of that vocabulary, which is the exact drift those rounds closed.
+// The number is HISTORY, not a live claim: 781 through 6a5fb07, crossed by the
+// r32 read-channel and F-T3 fixes.
 // class-b.mjs — per-platform class-B discovery (READ-ONLY).
 //
 // Class B = every FILE the platform auto-loads into context each session
@@ -48,6 +59,132 @@ export const UNKNOWN_PLATFORM_FLAG = 'unknown platform: conservative — no auto
 // path helpers
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// CWK-082 F2-R2 — WHY physicalOrNull REFUSED, so a silent skip can say which
+// case it took.
+//
+// The F2 fix put `noteUnreadable` at the readdirSync sites. On the failure mode
+// those flags exist to report, the refusal arrives ONE CALL EARLIER: on a
+// read-denied path `fs.statSync` SUCCEEDS while `fs.realpathSync.native` throws
+// EPERM, so `physicalOrNull` returns null and every guarded read below it is
+// unreachable. Measured on the shipped engine, each with a restore control: a
+// read-denied role store went 1 store -> 0; a read-denied CLAUDE.md took its
+// whole @import closure with it, 3 entries / 1,516 tok -> 0 / 0. `flags: []` on
+// both. The reviewer measured the same class on its own fixture at 97.5%.
+//
+// THE ROOT IS THAT null IS OVERLOADED. It means the legitimate, deliberately-
+// silent "unresolvable candidate, fail-closed" case AND "this exists and I was
+// refused", and the call site cannot tell them apart. This splits them.
+//
+// IT CHANGES NO BEHAVIOUR AND CANNOT FAIL OPEN. Every skip stays a skip and
+// stays fail-closed; only the SILENCE changes. This function never produces a
+// physical path, so nothing downstream can be admitted by it.
+//
+// THE SILENT CASE IS DECIDED BY THE lstat ERROR CODE, NOT BY A BOOLEAN — R3-F1,
+// and this line used to ask `pathExists` instead. `lstat` needs TRAVERSE
+// permission on the candidate's PARENT: deny the parent and it throws,
+// `pathExists` returns false, and the old first line took the branch reserved
+// for "genuinely absent" on a candidate that is not absent at all — it exists
+// and is unreachable, which is exactly the condition this helper was built to
+// separate. Measured on the shipped engine with a restore control: a project
+// whose CLAUDE.md carries `@sub/NOTES.md` with `sub` denied went 4 entries -> 3
+// with `flags: []`, and back to 4 when the deny came off; on that child, `lstat`
+// reported EPERM while `pathExists` reported false.
+//
+// ENOENT and ENOTDIR are the ONLY silent codes — the same pair `noteUnreadable`
+// already carves out at a walk root, for the same reason: nothing exists behind
+// the path, so nothing was lost. Every other code means we were REFUSED before
+// we could look, which is not absence.
+//
+// THIS DOES NOT RE-IMPLEMENT `pathExists`, which stays the right primitive for
+// its own callers (physicalForCreate still uses it): that answers a yes/no about
+// EXISTENCE for a trust decision, this reads an ERROR CODE for a report. Same
+// syscall, different question — and a boolean provably cannot answer this one.
+//
+// The CODE for the resolve step is read by re-provoking the throw — a second
+// syscall on a COLD path by construction, since the whole function runs only
+// where `physicalOrNull` already returned null. That is a READ of the error,
+// never a second decision.
+//
+// TOCTOU, BOUNDED (R3-F2 — the reasoning above was here and the bound was not).
+// These are two syscalls on one path and they CAN disagree; that disagreement is
+// the very mechanism this helper is built on (lstat succeeds where realpath
+// throws), so a path that changes BETWEEN them is the same shape, not a new one.
+// THE BOUND: a divergence can only mis-name a CODE or drop one gauge's flag. It
+// cannot admit anything — the function returns no path. It cannot change a skip
+// — that was already decided by the caller before this ran. And nothing
+// downstream consumes the value: it reaches a flag string and stops, and the
+// next gauge re-derives from scratch. That is why the two calls need no lock and
+// no re-check. If a later change ever makes this return feed a DECISION, this
+// bound is void and the pair needs one.
+//
+// UNCOMPARABLE is a real, separate case, not a fallback: `canonicalOrNull` also
+// returns null WITHOUT throwing — a `\\?\` device or UNC spelling on win32, and
+// a mapped network drive that native RESOLVES to a UNC form. Content is dropped
+// there too, so it flags, under its own word rather than borrowed from an error.
+function refusalCode(candidate) {
+  try { fs.lstatSync(candidate); } catch (err) {
+    const code = (err && err.code) || 'UNKNOWN';
+    return (code === 'ENOENT' || code === 'ENOTDIR') ? null : code; // absent = silent; refused = named
+  }
+  // F-T3: THE SAME CARVE-OUT, THE SAME RULE, BOTH CALLS. This line used to pass
+  // the second call's code through untouched, so `refusalFlag` — which calls
+  // anything that is not UNCOMPARABLE `refused` — labelled an ABSENCE as a
+  // PERMISSION problem five lines below the branch that carves absence out.
+  // REACHED, not argued: a directory junction whose target is deleted lstats OK
+  // and fails realpath with ENOENT, producing
+  // `refused path (governance): DANGLING.md [ENOENT]`; a user then hunts an ACL
+  // problem that does not exist. Nothing is behind a dangling link, so nothing
+  // was lost, so the honest output is the same SILENCE the first call already
+  // gives that pair.
+  //
+  // WHY (a) AND NOT (b), THE CODE-TO-NOUN MAP THE REVIEWER ALSO OFFERED —
+  // measured before choosing (scratchpad/r32/probe-ft3-codes.mjs, win32):
+  // ENOENT is the ONLY code observed reaching this second call at all. A junction
+  // LOOP throws ELOOP from realpath but `lstat` fails first with ENOENT, so it
+  // never arrives here; an overlong name likewise. Building a noun map for codes
+  // nothing could be shown to reach would be inventing a classifier against a
+  // measurement I do not have. With this carve-out every code that still reaches
+  // `refusalFlag` is either UNCOMPARABLE or a genuine refusal, which is what
+  // makes "the noun follows the code" true rather than nearly true.
+  //
+  // NAMED RESIDUAL: that argument rests on a win32 measurement. A POSIX box could
+  // in principle deliver ELOOP here (its lstat may not fail first), and the word
+  // would then read `refused` for a resolution failure. Unmeasured — no seat in
+  // this room has a Linux box.
+  try { fs.realpathSync.native(candidate); return 'UNCOMPARABLE'; } catch (err) {
+    const code = (err && err.code) || 'UNKNOWN';
+    return (code === 'ENOENT' || code === 'ENOTDIR') ? null : code;
+  }
+}
+
+// R3-F3 — THE NOUN FOLLOWS THE CODE. This unit's whole contribution is
+// separating UNRESOLVABLE (nothing to resolve; deliberately silent, fail-closed)
+// from REFUSED (it exists, access denied), and a user-facing line reading
+// "unresolvable path … [EPERM]" re-blurs the two at the one surface a user
+// actually reads — the noun saying the path could not be resolved while the code
+// says permission was denied. The neighbouring `unreadable directory (…)` family
+// already gets this right, so the two had started disagreeing with each other.
+// Only the genuine non-throwing case keeps the word `unresolvable`.
+function refusalFlag(what, label, code) {
+  const word = code === 'UNCOMPARABLE' ? 'unresolvable' : 'refused';
+  return `${word} path (${what}): ${label} [${code}] — its contents are NOT counted`;
+}
+
+// A label for a flag: RELATIVE to a known root wherever possible, never an
+// absolute path. Two reasons — a hand can act on it, and it stays
+// sandbox-invariant, so a flag can never carry a tmpdir or a drive letter into
+// a surface an equivalence test compares across two roots. Purely lexical, so
+// it works on the unresolved path that just refused to canonicalize.
+function relLabel(candidate, roots) {
+  for (const r of roots) {
+    if (!r) continue;
+    const rel = path.relative(r, candidate);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
+  }
+  return path.basename(candidate) || String(candidate);
+}
 // Physical form of a path; null when it cannot be resolved (absent/looping) —
 // callers treat null as fail-closed (skip the candidate).
 // Delegates to THE canonicalization primitive (config-load canonicalOrNull) so
@@ -223,6 +360,17 @@ function statBytes(p) {
 // configured `managedPaths` prefix) — MEASURED like anything else (BMI must
 // never undercount the parcel) but never a wash candidate (same class as
 // skills/commands/hooks; see SKILL.md's four washability tests).
+// ponytail: 319 lines at declaration, nesting depth 6 — ONE discovery pass over
+// ONE habitat, and the length is the habitat, not the function. Every step shares
+// three pieces of state that make it correct: `add` (which owns dedupe, the
+// realpath-and-contain gate, the inherited-vs-room tier decision and now the
+// F2-R2 refusal flags), `seen`, and `flags`. Splitting the steps into siblings
+// would either pass that closure around as parameters — the same coupling with
+// more surface — or duplicate it, which is this room's twin-drift lesson by
+// name. The depth is the walks: a stack loop, its readdir loop, and the per-entry
+// branch, none of which can flatten without losing the cap/flag accounting the
+// F1 fix depends on. Declared at the CWK-082 F2-R2 round, which added ~10 lines
+// to a function already well past the signal; the N is HISTORY, not a live claim.
 export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(), platform, managedPaths = [] } = {}) {
   const plat = platform || detectPlatform(home);
   const flags = [];
@@ -242,6 +390,13 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // walks below are skipped when projPhys is null (nothing to contain against).
   const homePhys = physicalOrNull(home);
   const projPhys = physicalOrNull(projectRoot);
+  // F2-R2: a refused ROOT is the widest instance of the class — every walk
+  // anchored on it is skipped, so the gauge reports a near-empty store. Loud.
+  for (const [label, raw, phys] of [['home', home, homePhys], ['projectRoot', projectRoot, projPhys]]) {
+    if (phys) continue;
+    const code = refusalCode(raw);
+    if (code) flags.push(refusalFlag(label, '.', code));
+  }
   const roots = [homePhys, projPhys].filter(Boolean);
   const seen = new Set();
   const entries = [];
@@ -288,14 +443,35 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // different questions; only the ancestor walk asks the second one.
   const add = (candidate, { scope, kind, alwaysLoaded, upTree = false }) => {
     const phys = physicalOrNull(candidate);
-    if (!phys) return null; // fail-closed: unresolvable candidate is skipped
+    if (!phys) {
+      // F2-R2: the skip is unchanged and still fail-closed. What is new is that
+      // it SAYS SO when the candidate exists — a refused governance file takes
+      // its entire @import closure out of the measure with it.
+      const code = refusalCode(candidate);
+      if (code) flags.push(refusalFlag('governance', relLabel(candidate, [projPhys, homePhys]), code));
+      return null;
+    }
     if (!containedIn(phys, roots)) {
+      // THE ABSOLUTE PATH HERE IS DELIBERATE, and this note exists because two of
+      // my own returns NAMED it as the one flag in this file that is not
+      // sandbox-invariant, without checking whether it CAN be relativized. It
+      // cannot. This flag fires precisely BECAUSE the candidate escaped every
+      // root, so `relLabel` finds no root to relativize against and falls through
+      // to a bare basename — which, on a path the reader has to go and FIND
+      // outside their own trees, is strictly worse than the absolute form (the
+      // same disambiguation lesson as the residue/coverage lines, pointing the
+      // other way here). RULED, not a residue: do not "fix" this into a basename.
       flags.push(`skipped (outside home/project trees): ${candidate}`);
       return null;
     }
     if (seen.has(dedupeKey(phys))) return phys;
     const bytes = statBytes(phys);
-    if (bytes == null) return null;
+    if (bytes == null) {
+      // Same class, one call later: `phys` canonicalized, so the file EXISTED a
+      // moment ago. A stat that fails now is a real mid-walk loss, not absence.
+      flags.push(`unstattable file: ${relLabel(phys, [projPhys, homePhys])} — its bytes are NOT counted`);
+      return null;
+    }
     seen.add(dedupeKey(phys));
     const isInherited = upTree && projPhys && !containedIn(phys, [projPhys]);
     (isInherited ? inherited : entries).push({ path: phys, bytes, scope, kind, alwaysLoaded, managed: false });
@@ -310,7 +486,45 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true, upTree });
       if (!phys || depth >= IMPORT_DEPTH_MAX) continue;
       let text;
-      try { text = fs.readFileSync(phys, 'utf8'); } catch { continue; }
+      try { text = fs.readFileSync(phys, 'utf8'); } catch (err) {
+        // r32, THE (a) FORK. This `continue` dropped the whole @import closure
+        // of a governance file whose CONTENT could not be read, with flags: [].
+        // Pre-existing since cec4a4d (beta.1); measured in r31 at 4 entries -> 2.
+        //
+        // WHY refusalCode() IS THE WRONG INSTRUMENT HERE, stated because the
+        // obvious reading is to reuse it: refusalCode RE-PROBES with lstat and
+        // realpathSync.native, and on exactly the fixture that produces this loss
+        // BOTH succeed — the path resolves, only the READ is denied.
+        //
+        // ⚠️ THE REASON THIS COMMENT FIRST GAVE WAS FALSE, and is corrected here
+        // rather than quietly reworded (F-R32-1): it said refusalCode "returns
+        // null and no flag would ever fire". It does not. lstat OK then realpath
+        // OK falls into the SUCCESS branch, which returns 'UNCOMPARABLE', and
+        // refusalFlag maps that word to `unresolvable`. So reusing it here would
+        // have printed `unresolvable path (governance): CLAUDE.md [UNCOMPARABLE]`
+        // about a path that resolves perfectly.
+        //
+        // WHICH MAKES THE REAL REASON STRONGER THAN THE ONE IT REPLACES: the
+        // failure mode is A WRONG FLAG, not a missing one. Reusing refusalCode
+        // would have shipped a fresh instance of F-T3 — the
+        // wrong-noun-for-the-code defect the very next commit in this dispatch
+        // closes. The error's own code is the only witness to a failure that
+        // happens at the read itself.
+        //
+        // NO ENOENT/ENOTDIR CARVE-OUT, and that is deliberate rather than an
+        // omission: the silence carve-out exists for a candidate that never
+        // existed. `phys` canonicalized one call ago, so the file DID exist a
+        // moment ago and an ENOENT now is a real mid-walk loss — identical
+        // reasoning to the `unstattable file` sibling directly above, which
+        // likewise carves nothing out.
+        //
+        // THE MESSAGE IS NOT WIDER THAN THE TRUTH: add() already succeeded, so
+        // the file's OWN bytes ARE counted. What vanishes is everything it
+        // imports.
+        const code = (err && err.code) || 'UNKNOWN';
+        flags.push(`unreadable governance file: ${relLabel(phys, [projPhys, homePhys])} [${code}] — its own bytes ARE counted, its @import closure is NOT`);
+        continue;
+      }
       for (const imp of parseImports(text, path.dirname(phys), home)) {
         queue.push({ file: imp, depth: depth + 1 });
       }
@@ -350,6 +564,29 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   //    symlinked-outside entry here is silently SKIPPED by construction,
   //    never traversed. Anything that DOES reach add() below is still
   //    realpath-and-contained regardless (defense in depth, not the only gate).
+  // ---------------------------------------------------------------------
+  // CWK-082 findings-back F2 — an unreadable directory used to `continue` in
+  // SILENCE at every walk site below, so a subtree the gauge could not read
+  // simply weighed nothing and `flags` stayed EMPTY. Measured: a locked
+  // memory subdir took the store from 7,586 to 2,613 tok with flags []. This
+  // unit exists to stop the gauge under-counting in silence and had opened a
+  // new way to do exactly that, one layer in.
+  //
+  // The ONE case that stays silent is the case the swallow was written for: a
+  // store that was never CREATED. That is decided by the error CODE on the
+  // walk ROOT (node/runtime.md §7 — key on err.code, never err.message); a
+  // subtree that vanished or refused MID-walk existed a moment ago and its
+  // loss is real, so it says so.
+  //
+  // The flag carries the path RELATIVE to the walk root: enough for a hand to
+  // act on, and sandbox-invariant, so it can never carry an absolute home
+  // path into a surface an equivalence test compares across two roots.
+  const noteUnreadable = (err, dir, root, what) => {
+    const code = (err && err.code) || 'UNKNOWN';
+    if (dir === root && (code === 'ENOENT' || code === 'ENOTDIR')) return; // never created — not a failed read
+    const rel = dir === root ? '.' : path.relative(root, dir).split(path.sep).join('/');
+    flags.push(`unreadable directory (${what}): ${rel} [${code}] — its contents are NOT counted`);
+  };
   const walkRulesTree = (rulesRoot, scope) => {
     const stack = [rulesRoot];
     let count = 0, dirs = 0;
@@ -360,7 +597,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       const dir = stack.pop();
       dirs++;
       let names;
-      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch (err) { noteUnreadable(err, dir, rulesRoot, `rules tree, scope ${scope}`); continue; }
       for (const d of names) {
         const p = path.join(dir, d.name);
         if (d.isDirectory()) stack.push(p);
@@ -374,26 +611,78 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
         }
       }
     }
-    if (count >= RULES_FILE_CAP || dirs >= RULES_FILE_CAP) flags.push(`rules tree capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP}, scope ${scope})`);
+    // CWK-082 findings-back F1 — the flag fires on what ACTUALLY HAPPENED, not
+    // on the counter reaching the cap. 526 files in ONE flat directory takes
+    // `count` past the cap and narrows NOTHING (the inner loop finishes the
+    // directory it starts), and a flag that announces a complete read trains
+    // the reader to ignore it — the cry-wolf failure this whole flag exists to
+    // prevent. A non-empty stack at loop exit is the exact, cheap predicate:
+    // directories were queued and never visited, so their contents are missing.
+    if (stack.length) flags.push(`rules tree capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP}, scope ${scope}) — ${stack.length} director${stack.length === 1 ? 'y' : 'ies'} left UNVISITED, their contents are NOT counted`);
   };
   if (projPhys) walkRulesTree(path.join(projPhys, '.claude', 'rules'), 'project');
   if (homePhys) walkRulesTree(path.join(claudeBaseDir(home), 'rules'), 'global');
 
   // 4. Memory store: ~/.claude/projects/<slug>/memory/ — MEMORY.md is the
-  //    always-loaded index; sibling *.md files load on recall.
+  //    always-loaded index; every OTHER *.md in the tree loads on recall.
+  //
+  //    RECURSIVE since CWK-082 L1, and the flat readdir it replaces was a free
+  //    exit from the gauge — not a theory. MEASURED (INSPECT §3a, four arms,
+  //    identical bytes on disk, through the SHIPPED discover->measure pair):
+  //    the same 49,515 bytes read 12,384 tok as memory/big-notes.md and 631 tok
+  //    as memory/notes/big-notes.md. 11,753 tok invisible, and flags EMPTY on
+  //    BOTH arms, so nothing anywhere said content had left. Step 3
+  //    (walkRulesTree) recurses but is anchored at .claude/rules; steps 1-2
+  //    reach a file only through an @import closure; so a *.md one directory
+  //    down was reachable by NO step. A band computed on that is not
+  //    "undercounting in the safe direction" — it reports LEAN on a store that
+  //    never shrank, which is a different failure. 0l capture-all is the law
+  //    being restored: MEASURE everything, THEN filter jurisdiction.
+  //
+  //    IT CANNOT INFLATE THE MAIN'S BMI, and that is this change's own bound:
+  //    only the TOP-LEVEL MEMORY.md is the index (depth === 0), so every entry
+  //    the widening adds carries alwaysLoaded:false and lands in m.total ONLY,
+  //    never m.alwaysLoaded — the same split the room already ruled for role
+  //    memories. Pinned by its own invariant test rather than argued here
+  //    (class-b.test.mjs, "the widening lands in m.total ONLY").
+  //
+  //    Capped on files AND dirs with a FLAG when it trips — deliberately the
+  //    SAME shape and the SAME constant as walkRulesTree above rather than a
+  //    second number to keep in step: a capped walk that says nothing is a
+  //    silently partial gauge. Symlink safety rides the same Dirent property
+  //    step 3 documents (a junction reports isSymbolicLink(), never
+  //    isDirectory()/isFile(), so it is skipped by construction) — which is
+  //    also why this now reads with { withFileTypes: true }.
+  //
+  //    RESIDUE, NAMED not closed — this closes the SUBDIR shape and nothing
+  //    wider. Recursion reaches only INSIDE memDir, so a class-B-shaped .md
+  //    placed ADJACENT to the store (INSPECT's OUTSIDE arm,
+  //    <project>/notes/big-notes.md) is still reachable by no step, and content
+  //    moved fully OUT of the store is beyond this gauge BY DESIGN. Do not read
+  //    this walk as covering either.
   {
     const memDir = ccMemoryDir(projectRoot, home);
-    let names = [];
-    try { names = fs.readdirSync(memDir); } catch { /* no memory dir yet — fine */ }
-    for (const name of names) {
-      if (!name.endsWith('.md')) continue;
-      const isIndex = name === 'MEMORY.md';
-      add(path.join(memDir, name), {
-        scope: 'project',
-        kind: isIndex ? 'memory-index' : 'memory',
-        alwaysLoaded: isIndex,
-      });
+    const stack = [{ dir: memDir, depth: 0 }];
+    let count = 0, dirs = 0;
+    while (stack.length && count < RULES_FILE_CAP && dirs < RULES_FILE_CAP) {
+      const { dir, depth } = stack.pop();
+      dirs++;
+      let names;
+      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch (err) { noteUnreadable(err, dir, memDir, 'memory store'); continue; }
+      for (const d of names) {
+        const p = path.join(dir, d.name);
+        if (d.isDirectory()) { stack.push({ dir: p, depth: depth + 1 }); continue; }
+        if (!d.isFile() || !d.name.endsWith('.md')) continue;
+        const isIndex = depth === 0 && d.name === 'MEMORY.md';
+        add(p, {
+          scope: 'project',
+          kind: isIndex ? 'memory-index' : 'memory',
+          alwaysLoaded: isIndex,
+        });
+        count++;
+      }
     }
+    if (stack.length) flags.push(`memory store capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP}) — ${stack.length} director${stack.length === 1 ? 'y' : 'ies'} left UNVISITED, their contents are NOT counted`);
   }
 
   // ---------------------------------------------------------------------
@@ -446,7 +735,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     }
   }
 
-  return { platform: plat, entries, inherited, flags, roleMemories: discoverRoleMemories({ projectRoot, home }) };
+  return { platform: plat, entries, inherited, flags, roleMemories: discoverRoleMemories({ projectRoot, home, flags }) };
 }
 
 // #22 ROLE-MEMORY DISCOVERY (promoted from retier.mjs's collectStores into the
@@ -472,28 +761,92 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
 // (fail-closed), symlink dirs never followed (Dirent own-type). CC-only (an
 // unknown platform gets [] — the agent-memory layout is a native-subagent
 // feature, conservative elsewhere, mirroring discoverClassB's own gate).
-export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.homedir() } = {}) {
+// CWK-082 findings-back F2 — `flags` is an OPTIONAL SINK, and it is the one
+// channel this function has: it returns a plain array, so a role store it
+// cannot read has nowhere else to announce itself. discoverClassB passes its
+// own flags array (the single shipped caller). RESIDUE, named not closed: a
+// future standalone caller that passes no sink still loses the notice — the
+// flag is raised at the failing read either way, but nobody is listening.
+// ponytail: 84 lines at declaration — MY edit took this past the 50 signal, and
+// the growth is entirely the F2-R2 flag arms: five silent skips became five
+// named ones, each an if-block with its own reason. Splitting them out would put
+// the reason further from the skip it explains, which is the opposite of what
+// the finding was about. Nesting stays AT 4, not over. The N is HISTORY.
+export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.homedir(), flags = [] } = {}) {
+  // F2-R2, the same class at every door of this function. Each skip is
+  // UNCHANGED and still fail-closed; each now says which case it took.
+  const note = (what, label, code) => flags.push(refusalFlag(what, label, code));
   const projPhys = physicalOrNull(projectRoot);
-  if (!projPhys) return [];
-  const roots = [physicalOrNull(home), projPhys].filter(Boolean);
+  if (!projPhys) {
+    const code = refusalCode(projectRoot);
+    if (code) note('role stores: projectRoot', '.', code);
+    return [];
+  }
+  const homePhys = physicalOrNull(home);
+  if (!homePhys) {
+    const code = refusalCode(home);
+    // A refused home does not stop the walk — projPhys still anchors it — but it
+    // NARROWS the containment roots, so a legitimately-home-rooted store can be
+    // skipped below as out-of-roots. Say it here, where the cause is known.
+    if (code) note('role stores: home', '.', code);
+  }
+  const roots = [homePhys, projPhys].filter(Boolean);
   const agentBase = path.join(projPhys, '.claude', 'agent-memory');
   let roles = [];
-  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { return []; } // no agent-memory dir = no role stores
+  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch (err) {
+    const code = (err && err.code) || 'UNKNOWN';
+    // An absent agent-memory dir is the ordinary case (no role stores). Any
+    // OTHER code means the dir is there and refused — a real, silent loss.
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') flags.push(`unreadable directory (role stores): . [${code}] — its contents are NOT counted`);
+    return [];
+  }
   const out = [];
   for (const role of roles) {
     const dirPhys = physicalOrNull(path.join(agentBase, role));
-    if (!dirPhys || !containedIn(dirPhys, roots)) continue; // fail-closed (a role dir symlinked outside is skipped)
+    if (!dirPhys) {
+      const code = refusalCode(path.join(agentBase, role));
+      if (code) note(`role store ${role}`, role, code);
+      continue; // fail-closed, unchanged
+    }
+    if (!containedIn(dirPhys, roots)) {
+      // THE containedIn HALF, ruled rather than left silent: `add()` already
+      // flags its own out-of-roots skip (`skipped (outside home/project trees)`)
+      // and this twin did not. A role dir symlinked outside the trees is still
+      // REFUSED — the fail-closed behaviour is untouched — but a whole store
+      // leaving the measure is not something to learn about by subtraction.
+      flags.push(`skipped (outside home/project trees): role store ${role}`);
+      continue;
+    }
     let names = [];
-    try { names = fs.readdirSync(dirPhys, { withFileTypes: true }); } catch { continue; }
+    try { names = fs.readdirSync(dirPhys, { withFileTypes: true }); } catch (err) {
+      // This dir came back from a Dirent that said isDirectory(), so it EXISTS:
+      // any failure here is a real read failure, never the never-created case.
+      flags.push(`unreadable directory (role store ${role}): ${role} [${(err && err.code) || 'UNKNOWN'}] — its contents are NOT counted`);
+      continue;
+    }
     let index = null;
     const memories = [];
     let bytes = 0;
     for (const d of names) {
       if (!d.isFile() || !d.name.endsWith('.md')) continue; // a symlink Dirent reports its own type — never followed
       const phys = physicalOrNull(path.join(dirPhys, d.name));
-      if (!phys || !containedIn(phys, roots)) continue;
+      if (!phys) {
+        // ONE LOOP DEEPER than the finding names, swept in the same batch: a
+        // single refused file inside a readable store drops out of the store
+        // total. Measured on the shipped engine: 2 files / 1,500 B -> 1 / 300.
+        const code = refusalCode(path.join(dirPhys, d.name));
+        if (code) note(`role store ${role}`, `${role}/${d.name}`, code);
+        continue;
+      }
+      if (!containedIn(phys, roots)) {
+        flags.push(`skipped (outside home/project trees): ${role}/${d.name}`);
+        continue;
+      }
       const b = statBytes(phys);
-      if (b == null) continue;
+      if (b == null) {
+        flags.push(`unstattable file: ${role}/${d.name} — its bytes are NOT counted`);
+        continue;
+      }
       bytes += b;
       if (d.name === 'MEMORY.md') index = { path: phys, bytes: b };
       else memories.push({ path: phys, bytes: b });

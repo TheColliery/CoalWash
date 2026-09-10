@@ -22,7 +22,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -153,6 +153,7 @@ test('LEAN (small store, no floor yet): silent — Phoenix #13 healthy path; 0j 
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.stamps.length, 1, 'the gauge still stamps the session');
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
     assert.strictEqual(st.leanFloorTokens, undefined, '0j: a tiny store (footprint < FLOOR_MIN) gets no provisional floor — ratio would be noise');
@@ -190,6 +191,7 @@ test('SessionStart: OBESE crossing is measured+cached SILENTLY (no ask text any 
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'SessionStart never prints a band ask/directive any more');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'OBESE');
     assert.strictEqual(st.lastVerdict.overCeiling, true);
     // P5/P8 wiring pin: the gauge caches the WHOLE measured store (recall
@@ -211,6 +213,7 @@ test('SessionStart: FULL via the absolute index cap fires on day one — cached,
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     // task #4: with ZERO measured certain fat, an index-cap hit reads
     // 'externalize' (washing cannot shrink what the estimator proves is
@@ -235,6 +238,7 @@ test('SessionStart: FULL with BOTH break-evens in favor caches economical:true +
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.reason, 'economic');
     assert.strictEqual(st.lastVerdict.economical, true);
@@ -260,6 +264,7 @@ test('SessionStart: certain fat armed but only ONE break-even in favor stays OBE
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'OBESE');
     assert.strictEqual(st.lastVerdict.economical, false, 'one proof is not two — the force/ask stays disarmed downstream');
   } finally { clean(home, proj); }
@@ -269,17 +274,17 @@ test('SessionStart: FULL(externalize) is cached (reason + hardCeilingTokens) and
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    // 0r: post-floor the wall is fatMultiple x leanFloor clamped at the TRUE
-    // capacity ceiling (caliper.mjs CAPACITY_TOKENS = 600000 tok) — so
-    // un-armed capHit now needs a floor near capacity itself. footprint
-    // 600200 tok; floor 600000 -> bmi ~1.0003 (well under 1.5, NOT armed) but
-    // the footprint clears the capacity clamp -> externalize.
+    // task #4: the wall is the RAW capacity line (caliper.mjs CAPACITY_TOKENS,
+    // DERIVED since CWK-081 — the 600000 stand-in this comment used to quote is
+    // retired). footprint ~600200 tok clears it with room to spare and carries
+    // zero certain fat -> un-armed capHit -> externalize.
     seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 });
     seedState(home, proj, { leanFloorTokens: 600000 });
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'externalize is information, delivered by Stop, never printed at SessionStart');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.reason, 'externalize');
     assert.strictEqual(st.lastVerdict.economical, false, 'externalize never computes/arms economical');
@@ -301,6 +306,7 @@ test('growable-full: a large HEALTHY floor (TheColliery-shaped, ~29k) stays LEAN
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'a healthy large floor must never false-fire');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
     assert.strictEqual(st.lastCrossing, undefined);
   } finally { clean(home, proj); }
@@ -324,7 +330,9 @@ test('hysteresis: a store that armed OBESE and settles into the dead zone stays 
     seedBigRecall(mem);
     const r1 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r1);
-    assert.strictEqual(readProjState(home, proj).lastVerdict.overCeiling, true);
+    const st1 = readProjState(home, proj);
+    assert.ok(st1.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st1)})`);
+    assert.strictEqual(st1.lastVerdict.overCeiling, true);
 
     // Second boot: fat drops into the dead zone (FAT_REARM 200 < ~340 tok <
     // FAT_ARM 500). Un-armed-from-scratch this would be LEAN; armed, it must
@@ -333,8 +341,11 @@ test('hysteresis: a store that armed OBESE and settles into the dead zone stays 
     const r2 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r2);
     const st2 = readProjState(home, proj);
+    assert.ok(st2.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st2)})`);
     assert.strictEqual(st2.lastVerdict.band, 'OBESE', 'the dead zone holds the PRIOR armed state');
-    assert.strictEqual(st2.lastCrossing.at, readProjState(home, proj).lastCrossing.at, 'no new crossing (same band, no re-arm)');
+    const st2b = readProjState(home, proj);
+    assert.ok(st2b.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st2b)})`);
+    assert.strictEqual(st2.lastCrossing.at, st2b.lastCrossing.at, 'no new crossing (same band, no re-arm)');
   } finally { clean(home, proj); }
 });
 
@@ -548,6 +559,7 @@ test('round trip: a FULL force-run followed by a FULL plateau (still over cap, q
     const rs2 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(rs2);
     const st2 = readProjState(home, proj);
+    assert.ok(st2.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st2)})`);
     assert.strictEqual(st2.lastCrossing.band, 'FULL');
     assert.strictEqual(st2.lastCrossing.escalation, true, 'the plateau after a tried Quick arms the wizard-escalation crossing');
 
@@ -579,6 +591,7 @@ test('0g round trip: an armed store past the break-even (well under the wall) ve
     assertGraceful(rs);
     assert.strictEqual(rs.stdout, '');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.reason, 'economic');
     assert.strictEqual(st.lastVerdict.economical, true);
@@ -602,6 +615,7 @@ test('0g Q2 round trip: the latch holds FULL across real SessionStarts through a
     seedState(home, proj, seedUsageStamps({}));
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st1 = readProjState(home, proj);
+    assert.ok(st1.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st1)})`);
     assert.strictEqual(st1.lastVerdict.reason, 'economic');
     assert.strictEqual(st1.lastVerdict.econLatched, true);
     const crossingAt = st1.lastCrossing.at;
@@ -614,6 +628,7 @@ test('0g Q2 round trip: the latch holds FULL across real SessionStarts through a
     seedBigRecall(mem);
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st2 = readProjState(home, proj);
+    assert.ok(st2.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st2)})`);
     assert.strictEqual(st2.lastVerdict.band, 'FULL', 'Q2: the latch holds the band through the dip');
     assert.strictEqual(st2.lastVerdict.reason, 'economic');
     assert.strictEqual(st2.lastVerdict.econLatched, true);
@@ -627,6 +642,7 @@ test('0g Q2 round trip: the latch holds FULL across real SessionStarts through a
     fs.writeFileSync(path.join(proj, 'CLAUDE.md'), muscleText(100), 'utf8');
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st3 = readProjState(home, proj);
+    assert.ok(st3.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st3)})`);
     assert.strictEqual(st3.lastVerdict.band, 'LEAN');
     assert.strictEqual(st3.lastVerdict.econLatched, false, 'the LEAN reset clears the latch');
     assert.strictEqual(st3.lastCrossing, undefined, 'LEAN clears the pending crossing outright');
@@ -649,6 +665,7 @@ test('task #4 round trip: day one is a MEASURED gauge — no floor stamp of any 
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.leanFloorTokens, undefined, 'task #4: the conductor stamps NO floor — provisional or otherwise; fat and muscle are measured fresh every gauge');
     assert.notStrictEqual(st.leanFloorProvisional, true);
     assert.strictEqual(st.lastVerdict.band, 'LEAN', 'distinct content = measured muscle = silence, from the first gauge');
@@ -681,6 +698,7 @@ test('task #4 ACCEPTANCE round trip (the dispatch fixture, through the REAL hook
       assertGraceful(r);
       assert.strictEqual(r.stdout, '');
       const st = readProjState(home, proj);
+      assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
       assert.strictEqual(st.lastVerdict.band, 'LEAN', 'muscle growth at ~' + linesCount + ' lines must stay silent');
       assert.strictEqual(st.lastCrossing, undefined, 'no crossing ever arms on muscle growth');
       const rp = run(proj, home, { hook_event_name: 'Stop' });
@@ -699,6 +717,7 @@ test('task #4 control (non-vacuity for the acceptance): the SAME growth WITH rea
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'OBESE', 'the silence above is the definition working, not a dead band');
     assert.strictEqual(st.lastCrossing.band, 'OBESE');
   } finally { clean(home, proj); }
@@ -717,6 +736,7 @@ test('0r superseded by task #4: a day-one store over every RETIRED wall reads LE
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.leanFloorTokens, undefined, 'no stamp exists to absorb anything — the measurement itself is the absorber');
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
     assert.strictEqual(st.lastCrossing, undefined, 'LEAN arms no crossing -> no force, no ask, no receipt');
@@ -738,6 +758,7 @@ test('task #4: a day-one store AT THE TRUE CAPACITY CLAMP with no measured fat r
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.reason, 'externalize', 'task #4: "all muscle" is MEASURED now (mechFat 0), not inferred from a day-one stamp — the externalize advice is honest immediately');
     assert.strictEqual(st.leanFloorTokens, undefined, 'no provisional stamp accompanies the verdict');
@@ -763,6 +784,7 @@ test('rc.2 cross-version un-strand: an OLD-state store carrying a CONSUMED pre-0
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.stateSchema, 1, 'the schema is stamped current at the relocated per-project file');
     assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'the legacy single-file store is drained + removed after the relocation');
     assert.strictEqual(st.leanFloorTokens, 9000, 'legacy floor bytes survive the migration untouched (harmless history — task #4 just stopped READING them)');
@@ -792,6 +814,7 @@ test('0m round trip (the user\'s live scenario, at true capacity): over the TRUE
     fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), 'a'.repeat(2400800), 'utf8');
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st1 = readProjState(home, proj);
+    assert.ok(st1.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st1)})`);
     assert.strictEqual(st1.leanFloorTokens, undefined, 'task #4: no floor stamp, day one or ever');
     assert.strictEqual(st1.lastVerdict.reason, 'absolute-cap');
     assert.ok(st1.lastVerdict.fatTokens >= 500, 'the fat that arms the cap route is MEASURED, not inferred');
@@ -816,6 +839,7 @@ test('0m round trip (the user\'s live scenario, at true capacity): over the TRUE
     // wall) -> still over + quickTried -> the ONE wizard ask arms (0f leg).
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st2 = readProjState(home, proj);
+    assert.ok(st2.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st2)})`);
     assert.strictEqual(st2.lastCrossing.band, 'FULL');
     assert.strictEqual(st2.lastCrossing.escalation, true, 'still over + quickTried -> the ONE wizard ask arms');
 
@@ -831,6 +855,7 @@ test('0m round trip (the user\'s live scenario, at true capacity): over the TRUE
     fs.writeFileSync(path.join(proj, 'CLAUDE.md'), muscleText(40), 'utf8');
     run(proj, home, { hook_event_name: 'SessionStart' });
     const st3 = readProjState(home, proj);
+    assert.ok(st3.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st3)})`);
     assert.strictEqual(st3.lastVerdict.band, 'LEAN');
     assert.strictEqual(st3.lastCrossing, undefined, 'LEAN clears the episode');
     const rp3 = run(proj, home, { hook_event_name: 'Stop' });
@@ -877,6 +902,7 @@ test('WARP-HOLE: a within-session spike (a file grown well past REGAUGE_DELTA_TO
     assert.ok(reason.includes('standing config authorizes'), reason);
 
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'OBESE', 'the cached verdict was refreshed by the gated re-gauge');
     assert.ok(st.lastVerdict.alwaysLoadedBytes > 160, 'the WARP-HOLE baseline was updated to the fresh measurement');
     assert.strictEqual(st.lastCrossing.consumed, true, 'delivered and consumed in the SAME Stop call');
@@ -900,6 +926,7 @@ test('WARP-HOLE: a small/incidental change (well under REGAUGE_DELTA_TOKENS) nev
     assertGraceful(r);
     assert.strictEqual(r.stdout, '', 'the cheap gate did not trip -> no full re-gauge, no crossing, silent');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.alwaysLoadedBytes, 160, 'the cached baseline is UNTOUCHED — no re-gauge ran at all');
   } finally { clean(home, proj); }
 });
@@ -966,6 +993,7 @@ test('rc.2 LONG SESSION (grown): fat grows PAST lastEscalationFat within ONE ses
     assert.ok(reason.includes('question tool'), 'the wizard ask fired mid-session on fat growth: ' + reason);
     assert.ok(reason.includes('no cutter for this class of fat'), reason);
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.ok(st.lastEscalationFat > 28200, 'the escalation re-armed at the NEW higher fat (branch 3 fired in the Stop path), not the seeded level');
     assert.strictEqual(st.lastCrossing.escalation, true, 'a wizard-escalation crossing (0f), armed + consumed the same turn');
   } finally { clean(home, proj); }
@@ -1128,6 +1156,7 @@ test('0m: a LEGACY config carrying forceMode:"off" is likewise IGNORED — there
     assert.ok(reason.includes('non-optional at FULL'), 'the OS-maintenance model: no veto — the only full stop is coalwashMode:off');
     assert.ok(!reason.includes('question tool'), 'force never asks');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastCrossing.consumed, true, 'consumed at emission, same as every other surfaced crossing');
     const r2 = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r2);
@@ -1138,8 +1167,13 @@ test('0m: a LEGACY config carrying forceMode:"off" is likewise IGNORED — there
 test('Stop: a FULL(externalize) crossing delivers the pure-information advisory — never an ask, never force', () => {
   const { home, proj } = sandbox();
   try {
+    // CWK-081 (1): the advisory is now ELIGIBLE only after a Full-tier pass
+    // removed something this episode — `fullCleanAt` is that fact. Seeded here so
+    // this case keeps testing what it was written for (the advisory's own
+    // shape); the INELIGIBLE route has its own case below.
     seedState(home, proj, {
       lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      fullCleanAt: Date.now(),
       lastVerdict: { band: 'FULL', reason: 'externalize', economical: false, fatTokens: 200, hardCeilingTokens: 36000, at: Date.now() },
     });
     const r = run(proj, home, { hook_event_name: 'Stop' });
@@ -1147,7 +1181,8 @@ test('Stop: a FULL(externalize) crossing delivers the pure-information advisory 
     const reason = parseBlock(r.stdout);
     assert.ok(reason.includes('FULL (externalize)'), reason);
     assert.ok(reason.includes('~36000 tok'), reason);
-    assert.ok(reason.includes('no reclaimable fat'), 'names WHY washing cannot help');
+    assert.ok(!/muscle, not bloat/.test(reason), 'CWK-081 (2): the unmeasured "muscle, not bloat" claim is retired');
+    assert.ok(reason.includes('LOWER BOUND'), 'says what the mechanical tier actually proves');
     assert.ok(!reason.includes('question tool'), 'externalize is information, never an ask');
     assert.ok(!reason.includes('standing config authorizes'), 'externalize never force-runs');
   } finally { clean(home, proj); }
@@ -1244,6 +1279,7 @@ test('round trip: a FULL-economical SessionStart records a crossing the followin
     assert.strictEqual(rs.stdout, '');
 
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.economical, true);
     assert.strictEqual(st.lastCrossing.band, 'FULL', 'the bootstrap rise (no prior verdict -> LEAN default) armed a crossing');
@@ -1267,6 +1303,7 @@ test('round trip: a LEAN SessionStart records economical:false and no crossing, 
     assert.strictEqual(rs.stdout, '');
 
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'LEAN');
     assert.strictEqual(st.lastVerdict.economical, false);
     assert.strictEqual(st.lastCrossing, undefined, 'LEAN never arms a crossing');
@@ -1288,11 +1325,15 @@ test('round trip: two SessionStarts at the SAME band record only ONE crossing (n
     seedBigRecall(mem);
     const r1 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r1);
-    const at1 = readProjState(home, proj).lastCrossing.at;
+    const stA = readProjState(home, proj);
+    assert.ok(stA.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(stA)})`);
+    const at1 = stA.lastCrossing.at;
 
     const r2 = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r2);
-    const crossing2 = readProjState(home, proj).lastCrossing;
+    const stB = readProjState(home, proj);
+    assert.ok(stB.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(stB)})`);
+    const crossing2 = stB.lastCrossing;
     assert.strictEqual(crossing2.at, at1, 'the second SessionStart at the identical band must not re-arm/overwrite the crossing');
     assert.strictEqual(crossing2.consumed, false);
 
@@ -1325,12 +1366,13 @@ test('round trip: an externalize-FULL SessionStart arms a crossing the following
     // 0r: un-armed capHit now only fires at the TRUE capacity clamp (see the
     // SessionStart externalize test above) — a floor near CAPACITY_TOKENS pins it.
     seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 });
-    seedState(home, proj, { leanFloorTokens: 600000 });
+    seedState(home, proj, { leanFloorTokens: 600000, fullCleanAt: Date.now() }); // CWK-081 (1): a Full clean landed this episode -> the advisory is eligible
     const rs = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(rs);
     assert.strictEqual(rs.stdout, '');
 
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.reason, 'externalize');
     assert.strictEqual(st.lastCrossing.band, 'FULL');
 
@@ -1686,6 +1728,7 @@ test('a poisoned/implausible stored leanFloor is IGNORED — task #4 reads no fl
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
     const st = readProjState(home, proj);
+    assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
     assert.strictEqual(st.lastVerdict.band, 'FULL');
     assert.strictEqual(st.lastVerdict.reason, 'externalize', 'capHit with NO measured fat routes externalize — same as a floor-free store');
     assert.strictEqual(st.leanFloorTokens, 999999999, 'the stored bytes are untouched — ignored, not clobbered');
@@ -1707,7 +1750,9 @@ test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no sta
       const r = run(proj, home, { hook_event_name: 'SessionStart' });
       assertGraceful(r);
       assert.strictEqual(r.stdout, '');
-      return readProjState(home, proj).lastVerdict;
+      const stG2 = readProjState(home, proj);
+      assert.ok(stG2.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(stG2)})`);
+      return stG2.lastVerdict;
     } finally { clean(home, proj); }
   };
   const baseline = runWithStateContent(undefined); // no state file at all
@@ -1717,11 +1762,21 @@ test('G2: a corrupt, empty, or truncated state file gauges IDENTICALLY to no sta
   // (beta.13 item 3 — each runWithStateContent() call is its OWN sandbox with
   // a unique tmpdir, so the cached absolute path LIST is necessarily
   // sandbox-specific even though the byte counts it feeds match).
-  const { at: _base, alwaysLoadedPaths: _pbase, ...baselineRest } = baseline;
+  // CWK-082 L2 added `externalizable`, the SECOND path-bearing field on this
+  // cache, so it takes the same exclusion — but on its PATHS ONLY. Its token
+  // estimates are sandbox-invariant, so they are compared below rather than
+  // dropped: an exclusion that swallowed the whole field would turn this
+  // equivalence test into a hole the next path-bearing field falls through.
+  const shape = (v) => (Array.isArray(v.externalizable) ? v.externalizable.map((e) => e.tokensEst) : null);
+  const { at: _base, alwaysLoadedPaths: _pbase, externalizable: _xbase, ...baselineRest } = baseline;
   for (const content of ['', '{ definitely not json', '{"projects": {"C:\\\\foo": {"leanFloorTok', '[1,2,3]', 'null']) {
-    const { at: _c, alwaysLoadedPaths: _pc, ...rest } = runWithStateContent(content);
+    const v = runWithStateContent(content);
+    const { at: _c, alwaysLoadedPaths: _pc, externalizable: _xc, ...rest } = v;
     assert.deepStrictEqual(rest, baselineRest, `state content ${JSON.stringify(content)} must gauge identically to no state file`);
+    assert.deepStrictEqual(shape(v), shape(baseline), `state content ${JSON.stringify(content)}: the externalizable residue must weigh the same too (paths are sandbox-specific, the token estimates are not)`);
   }
+  assert.ok(Array.isArray(shape(baseline)) && shape(baseline).length > 0,
+    'non-vacuity: the residue comparison above is only meaningful because this fixture HAS an always-loaded residue');
 });
 
 test('no class-B at all (empty project, no memory dir): silent, exit 0', () => {
@@ -1731,5 +1786,164 @@ test('no class-B at all (empty project, no memory dir): silent, exit 0', () => {
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');
+  } finally { clean(home, proj); }
+});
+
+// CWK-057 rot-canary MEDIUM (self-found, shipped in 2c6cad0, fixed the next
+// turn): the scanEverything disclosure was gated on the FLAG alone, so it
+// announced "both SCAN-scope cuts were bypassed this run" on two paths where no
+// scan ran at all. A disclosure that reports an event which did not occur is
+// worse than no disclosure -- this is the surface whose entire job is telling a
+// user what the tool just did to their memory. The gauge block is the only
+// thing that bypasses anything, so the line must ride disc.entries.length.
+test('CWK-057 disclosure: fires when the gauge ACTUALLY RAN', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: true });
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# p\n' + 'a duplicated substance line that is provable fat\n'.repeat(40), 'utf8');
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'cwk57-a' });
+    assert.strictEqual(r.status, 0, 'exit 0 (Phoenix #4)');
+    assert.match(r.stdout, /scanEverything is ON/, 'a real gauge discloses');
+    assert.match(r.stdout, /bypassed for the gauge that just ran/, 'and it says WHAT it did, not what the config allows');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-057 disclosure: SILENT in coalwashMode manual — the gauge is deliberately quiet, so nothing was bypassed and the line must not claim it was', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: true, coalwashMode: 'manual' });
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# p\n' + 'a duplicated substance line that is provable fat\n'.repeat(40), 'utf8');
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'cwk57-b' });
+    assert.strictEqual(r.status, 0, 'exit 0 (Phoenix #4)');
+    assert.doesNotMatch(r.stdout, /scanEverything is ON/, 'no scan ran, so no scan is claimed');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-057 disclosure: SILENT on an EMPTY class-B store — auto mode, but the gauge block never executes, so nothing was bypassed', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: true });
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'cwk57-c' });
+    assert.strictEqual(r.status, 0, 'exit 0 (Phoenix #4)');
+    assert.doesNotMatch(r.stdout, /scanEverything is ON/, 'nothing to measure, nothing to disclose');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-057 disclosure: OFF is silent even with a real store — the control that keeps the three above from passing for the wrong reason', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: false });
+    fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# p\n' + 'a duplicated substance line that is provable fat\n'.repeat(40), 'utf8');
+    const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'cwk57-d' });
+    assert.strictEqual(r.status, 0, 'exit 0 (Phoenix #4)');
+    assert.doesNotMatch(r.stdout, /scanEverything is ON/, 'off means silent');
+  } finally { clean(home, proj); }
+});
+
+
+// ---------------------------------------------------------------------------
+// AL-1 / CWK-072 — the stdin budget is an IDLE gap, never a total deadline.
+//
+// The retired budget was a TOTAL deadline armed at process start: 30 ms later it
+// resolved {} whatever had or had not arrived, so a well-formed payload whose
+// first byte landed late was DROPPED — main() then matched no branch and the hook
+// exited 0 having done nothing (no gauge, no state, no directive). Measured on
+// this box at 40 concurrent spawners: the first byte lands after 30 ms on 25% of
+// invocations, and 34 of 4000 payloads were lost.
+//
+// The delay below is the ATTACK, not a tolerance — it is the condition the fix
+// exists to survive, made deterministic so no contention is needed to observe it.
+// It is bounded by STDIN_HANG_CEILING_MS, which this case must never approach.
+function runDelayed(cwd, home, input, delayMs) {
+  return new Promise((resolve) => {
+    const c = spawn(process.execPath, [HOOK], {
+      cwd,
+      env: { ...process.env, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, CLAUDE_CONFIG_DIR: '' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    c.stdout.setEncoding('utf8');
+    c.stderr.setEncoding('utf8');
+    c.stdout.on('data', (d) => { stdout += d; });
+    c.stderr.on('data', (d) => { stderr += d; });
+    // A hook that gives up early destroys its stdin; the still-pending write then
+    // gets EPIPE. That is the DEFECT surfacing in the harness, not a harness bug.
+    c.stdin.on('error', () => {});
+    const t = setTimeout(() => { if (c.stdin.writable) c.stdin.end(JSON.stringify(input)); }, delayMs);
+    c.on('close', (status, signal) => { clearTimeout(t); resolve({ status, signal, stdout, stderr }); });
+  });
+}
+
+test('AL-1: a payload whose first byte lands 200 ms after spawn is READ, not dropped (the budget is an IDLE gap, not a total deadline)', async () => {
+  const { home, proj } = sandbox();
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
+    const r = await runDelayed(proj, home, { hook_event_name: 'SessionStart' }, 200);
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+    const st = readProjState(home, proj);
+    // The positive STATE EFFECT is the liveness proof — exit 0 proves nothing here,
+    // Phoenix #4 guarantees it on the dropped-payload path too (hooks-safety.md §7).
+    assert.ok(st.lastVerdict, `late payload dropped: the hook exited 0 having done nothing (raw: ${JSON.stringify(st)})`);
+    assert.strictEqual(st.lastVerdict.band, 'LEAN');
+    assert.strictEqual(st.stamps.length, 1, 'the gauge ran for this session');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-081 — the FULL(capacity) surface: eligibility (1) and once-per-session (3)
+// ---------------------------------------------------------------------------
+
+test('CWK-081 (1): a FULL(externalize) crossing with NO Full-tier pass this episode routes to the Full-tier CONSENT, never the advisory', () => {
+  const { home, proj } = sandbox();
+  try {
+    // the measured incident's own shape: FULL, certain fat ~3 tok (under the
+    // arm mark), and no Full pass has ever run on this store.
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'FULL', reason: 'externalize', economical: false, fatTokens: 3, hardCeilingTokens: 167000, capacitySource: 'conservative-default', at: Date.now() },
+    });
+    const r = run(proj, home, { hook_event_name: 'Stop', session_id: 'sess-1' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('FULL (capacity — muscle not yet measured)'), reason);
+    assert.ok(reason.includes('question tool'), 'the un-measured case is an ASK, not an advisory');
+    assert.ok(/NO semantic pass has run this episode/.test(reason));
+    assert.ok(!reason.includes('CLUSTER'), 'and never hands out the relocate-by-hand template before anything judged the content');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 (3): the FULL(capacity) surface speaks at most ONCE per session — a second Stop in the same session is SILENT', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedState(home, proj, {
+      lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+      fullCleanAt: Date.now(),
+      lastVerdict: { band: 'FULL', reason: 'externalize', economical: false, fatTokens: 3, hardCeilingTokens: 167000, at: Date.now() },
+    });
+    // RE-ARM IN PLACE — the live re-arm branches PATCH the crossing on the
+    // existing state; a wholesale re-seed would also wipe the dedup field this
+    // test exists to measure, and the test would pass for the wrong reason.
+    const rearm = () => {
+      const st = readProjState(home, proj);
+      st.lastCrossing = { band: 'FULL', at: Date.now(), consumed: false };
+      fs.writeFileSync(projStatePath(home, proj), JSON.stringify(st), 'utf8');
+    };
+    const first = run(proj, home, { hook_event_name: 'Stop', session_id: 'sess-A' });
+    assertGraceful(first);
+    assert.ok(parseBlock(first.stdout).includes('FULL (externalize)'), 'the first fire of a session speaks');
+    rearm();
+    const second = run(proj, home, { hook_event_name: 'Stop', session_id: 'sess-A' });
+    assertGraceful(second);
+    assert.strictEqual(second.stdout, '', 'the measured 4-consecutive-Stop repeat is closed: same session = silent');
+    // and the crossing is consumed rather than left dangling
+    assert.strictEqual(readProjState(home, proj).lastCrossing.consumed, true);
+    // a NEW session may say it once more (the low-disk-warning model survives)
+    rearm();
+    const third = run(proj, home, { hook_event_name: 'Stop', session_id: 'sess-B' });
+    assertGraceful(third);
+    assert.ok(parseBlock(third.stdout).includes('FULL (externalize)'), 'a new session re-arms the reminder');
   } finally { clean(home, proj); }
 });

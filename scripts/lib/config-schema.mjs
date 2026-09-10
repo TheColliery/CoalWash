@@ -47,6 +47,12 @@ export const CONFIG_SCHEMA = [
   { key: 'targetPercent', type: 'number', min: 0.5, max: 49, def: 3, help: 'Clean-to depth target as % of capacity — agent guidance for the wash (references/method.md §3); no band-math reads this key today (default: 3)' },
   { key: 'fileMaxSizeKb', type: 'int', min: 1, max: 1024, def: 25, help: 'Per-file size cap in KB before a class-B file is flagged oversize (default: 25 — the CC memory-index cap class)' },
   { key: 'quickVsFull', type: 'enum', values: ['quick', 'full'], def: 'quick', help: 'Default run tier: quick = free mechanical pass; full = paid semantic pass (always a separate consent; default: quick)' },
+  // CWK-057 (owner law, flock-canonical key; live in CoalMine ee15ade + CoalLedger 12b4e12).
+  // POSITIVE polarity: true = see MORE. It widens what is SEEN, CONSIDERED and
+  // REPORTED and NEVER what is deleted, merged or mutated -- in a room that
+  // destroys, that distinction is the whole feature, so it is stated in the help
+  // text a user actually reads, not only in a comment.
+  { key: 'scanEverything', type: 'bool', def: false, help: 'Bypass every SCAN-scope cut for the run: the always-loaded read budget (262144 B) is lifted so EVERY always-loaded entry is read and its certain fat measured instead of counting as muscle, and the 200-path cap on the Stop hook re-stat baseline is not applied (default: off). Positive polarity: true = more is seen. Widens SEEING only -- keeps.json, the KEEPS-GATE and every other delete gate, localOnly, and every consent gate are untouched. Costs more than a normal gauge by design; safer-value-wins on merge (a project config can never turn it ON past a global that is off)' },
   { key: 'localOnly', type: 'bool', def: false, help: "Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config (default: false)" },
   { key: 'updateMode', type: 'enum', values: ['ask', 'auto', 'remind', 'off'], def: 'ask', help: 'Self-update behavior at session start (ask, auto, remind, off; default: ask)' },
   { key: 'updateCheckDays', type: 'int', min: 1, max: 365, def: 14, help: 'Days between self-update checks/reminders (default: 14)' },

@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# CWK-058 concurrency. cancel-in-progress: TRUE — reads markdown, publishes nothing, no
+# external state to leave partial.
+concurrency:
+  group: markdownlint-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest

@@ -72,8 +72,8 @@ import { pathToFileURL } from 'node:url';
 import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
 import {
-  measureEntries, gaugeVerdict,
-  loadState, armDigGauge,
+  measureEntries, readBudgetFor, gaugeVerdict,
+  loadState, armDigGauge, discoverCapacity,
 } from './caliper.mjs';
 import { envelopeFor } from './retier.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
@@ -111,7 +111,10 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
   const disc = discoverClassB({ projectRoot, home, managedPaths });
-  const m = measureEntries(disc.entries, { withGzip: true });
+  // CWK-057: read through the SAME clamped cascade as every other key -- never a
+  // second read path (hooks-safety §9's SCOPE test).
+  const readBudgetBytes = readBudgetFor(clampedRead(cfg, 'scanEverything'));
+  const m = measureEntries(disc.entries, { withGzip: true, readBudgetBytes });
   const proj = loadState(projectRoot, home);
   // Read-only hysteresis + latch state — the gauge CONSUMES these and never
   // stamps or records them (the conductor's SessionStart/Stop are the stamping
@@ -127,12 +130,18 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   // fatMultiple wall is computed (both retired). The reorg envelope resolves
   // from the same merged config, via retier's own resolver — same composition
   // as the conductor's two gauge sites.
+  // CWK-081: the capacity ADAPTER — same composition as the conductor's two
+  // gauge sites, so the CLI gauge and the hook can never disagree about the
+  // ceiling they judged against (the "a second call site re-derived it by hand"
+  // bug this file's own header names).
+  const capacity = discoverCapacity({ home });
   const gv = gaugeVerdict({
     measure: m,
     wasOver,
     wasEconLatched,
     stamps: proj.stamps,
     envelope: envelopeFor(cfg.retier),
+    capacity,
   });
   const verdict = gv.verdict;
   const econ = {
@@ -145,8 +154,8 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   // calls this "context-cost-not-room-fat": it is real per-session cost the reader
   // should see, and it is not this room's to wash or externalize. Same
   // measureEntries, so the number is comparable to the room's own.
-  const inherited = measureEntries(disc.inherited, { withGzip: false });
-  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, inherited, verdict, breakEven: econ, roleMemories: disc.roleMemories };
+  const inherited = measureEntries(disc.inherited, { withGzip: false, readBudgetBytes });
+  return { projectRoot, platform: disc.platform, flags: disc.flags, measure: m, inherited, verdict, breakEven: econ, roleMemories: disc.roleMemories, capacity: { capacityTokens: gv.capacityTokens, source: gv.capacitySource, discovered: !!capacity.discovered } };
 }
 
 // The full gauge = measureOnly + the recovery preflight. Importable (tests and
@@ -193,11 +202,27 @@ export function gauge(opts = {}) {
 
 // The terse one-line gauge (method.md §0's reporting shape).
 export function gaugeLine(g) {
-  // task #4: BMI = footprint / MEASURED muscle now (1.00 = provably-pure
-  // muscle), informational only — the certain-fat figure beside it is what
-  // the band actually acts on.
-  const fatBit = g.breakEven && Number.isFinite(g.breakEven.fatTokens) ? ` · certain fat ~${Math.round(g.breakEven.fatTokens)} tok` : '';
-  const bmi = (g.verdict.bmi ? `BMI ${g.verdict.bmi.toFixed(2)}` : 'BMI n/a') + fatBit;
+  // THE FAT FIGURE IS A LOWER BOUND, AND THIS LINE USED TO READ AS A CLEAN
+  // BILL OF HEALTH. `certain fat ~0 tok` was rendered as a finding when it is
+  // only the floor of what `mechFatFromText` can PROVE (exact-duplicate
+  // substance lines + excess blank runs); unread and unprovable content counts
+  // as muscle by design, so a store with real semantic bloat reads ~0 and looks
+  // clean. Wording lifted from commands/stats.md:9, this room's own already-
+  // approved phrasing for the identical fact — not newly authored here.
+  //
+  // AND BMI IS A TAUTOLOGY WHENEVER FAT IS 0. muscle = footprint - fat and
+  // bmi = footprint / muscle, so fat=0 forces exactly 1.00 by arithmetic — it
+  // carries zero independent information while sitting beside the fat figure
+  // looking like a second, corroborating measurement. Two numbers that are the
+  // same number, printed as agreement. So it is SUPPRESSED at fat=0 and shown
+  // only where it can actually vary.
+  const fatTok = g.breakEven && Number.isFinite(g.breakEven.fatTokens) ? Math.round(g.breakEven.fatTokens) : null;
+  const bmiBit = g.verdict.bmi ? `BMI ${g.verdict.bmi.toFixed(2)}` : 'BMI n/a';
+  const bmi = fatTok === null
+    ? bmiBit
+    : fatTok === 0
+      ? 'no provable fat (lower bound — unread/unprovable counts as muscle)'
+      : `${bmiBit} · certain fat ~${fatTok} tok (lower bound)`;
   // A REFUSAL IS AN EVENT, AND SILENCE MADE IT INDISTINGUISHABLE FROM NOTHING.
   // Every refusal returns recovered:'none' + an error, so the old `!== 'none'`
   // test dropped ALL of them: a user with a poisoned journal sitting in a fresh
@@ -227,7 +252,19 @@ export function gaugeLine(g) {
     : (rec.recovered && rec.recovered !== 'none'
         ? ` · recovered dangling run: ${rec.recovered}`
         : (rec.error ? ' · dangling run REFUSED, left for inspection (--json for the reason)' : ''));
-  return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${recovered}`;
+  // CWK-081 — THE ADAPTER'S FLAG, on the one line a reader actually sees. The
+  // blueprint's capacity contract ends in "unknown -> conservative estimate +
+  // FLAG", and a flag that never reaches a surface is not a flag. Shown only
+  // where the ceiling is load-bearing (a FULL band judged against it) or where
+  // the ceiling was genuinely DISCOVERED — a LEAN store does not need to hear
+  // about a ceiling it is nowhere near.
+  const cap = g.capacity || {};
+  const capBit = !Number.isFinite(cap.capacityTokens)
+    ? ''
+    : cap.discovered
+      ? ` · capacity ~${cap.capacityTokens} tok (discovered: ${cap.source})`
+      : (g.verdict.band === 'FULL' ? ` · capacity ~${cap.capacityTokens} tok (CONSERVATIVE DEFAULT — no platform figure discovered)` : '');
+  return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${capBit}${recovered}`;
 }
 
 // The 0-token human recovery lookup (importable, pure read): searches BOTH

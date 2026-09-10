@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { keepsPath, loadKeeps, recordKeep, globalKeepsPath, loadGlobalKeeps, recordGlobalKeep } from './keeps.mjs';
+import { keepsPath, loadKeeps, recordKeep, globalKeepsPath, loadGlobalKeeps, recordGlobalKeep, pendingUserKeeps } from './keeps.mjs';
 import { txDirFor } from './apply.mjs';
 
 function sandbox() {
@@ -487,5 +487,119 @@ test('grad11 F5 return-contract: recordKeepAt returns an object, never a bare bo
     assert.strictEqual(typeof r.ok, 'boolean');
     assert.strictEqual(typeof r.anchorDropped, 'boolean');
     assert.strictEqual(typeof r.anchorStored, 'boolean');
+  } finally { clean(proj); }
+});
+// ---------------------------------------------------------------------------
+// PENDING-USER (board #129, THE USER-OWNED CLASS): a keep whose own reason
+// names the user as decision-holder must not settle silently. Opposite
+// clearing rule from anchor/anchorFile on purpose (see keeps.mjs's own
+// comment) -- undefined preserves, explicit false clears, explicit true sets.
+// ---------------------------------------------------------------------------
+
+test('recordKeep: pendingUser:true persists with a pendingSince date; plain keeps carry neither field', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'user-owned-thing', reason: 'this is the user own tradeoff', pendingUser: true, pendingSince: '2026-08-23' });
+    recordKeep(proj, { target: 'plain', reason: 'ordinary agent-decided keep' });
+    const keeps = loadKeeps(proj);
+    const pending = keeps.find((k) => k.target === 'user-owned-thing');
+    assert.strictEqual(pending.pendingUser, true);
+    assert.strictEqual(pending.pendingSince, '2026-08-23');
+    const plain = keeps.find((k) => k.target === 'plain');
+    assert.ok(!('pendingUser' in plain) && !('pendingSince' in plain), 'no field pollution on an ordinary keep');
+  } finally { clean(proj); }
+});
+
+test('recordKeep: re-affirming WITHOUT mentioning pendingUser PRESERVES it (the standing violation must not silently re-settle)', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'x', reason: 'user own tradeoff', pendingUser: true, pendingSince: '2026-08-23' });
+    // an ordinary re-affirm from a caller that has never heard of this mechanism
+    const reAffirmed = recordKeep(proj, { target: 'x', reason: 'user own tradeoff, re-reviewed', date: '2026-09-01' });
+    // r33 ascent: the lane's grad11 F5 return contract ascends, so the bare
+    // boolean this compared against is now `{ ok, anchorDropped, anchorStored }`.
+    // Same claim, one field deeper — and it additionally pins the shape.
+    assert.strictEqual(reAffirmed.ok, true);
+    const entry = loadKeeps(proj).find((k) => k.target === 'x');
+    assert.strictEqual(entry.reason, 'user own tradeoff, re-reviewed', 'the new reason must still land');
+    assert.strictEqual(entry.pendingUser, true, 'pendingUser must survive an omit -- this is the whole point of the mechanism');
+    assert.strictEqual(entry.pendingSince, '2026-08-23', 'the ORIGINAL pendingSince survives too, never reset by an unrelated re-affirm');
+  } finally { clean(proj); }
+});
+
+test('recordKeep: pendingUser:false EXPLICITLY clears it (the only way -- the user actually answered)', () => {
+  const proj = sandbox();
+  try {
+    recordKeep(proj, { target: 'x', reason: 'user own tradeoff', pendingUser: true, pendingSince: '2026-08-23' });
+    recordKeep(proj, { target: 'x', reason: 'user confirmed keep, 2026-09-01', pendingUser: false });
+    const entry = loadKeeps(proj).find((k) => k.target === 'x');
+    assert.ok(!('pendingUser' in entry) && !('pendingSince' in entry), 'an explicit false clears both fields');
+  } finally { clean(proj); }
+});
+
+test('pendingUserKeeps: filters to exactly the pending entries, [] on none/malformed input', () => {
+  assert.deepStrictEqual(pendingUserKeeps([]), []);
+  assert.deepStrictEqual(pendingUserKeeps(null), []);
+  assert.deepStrictEqual(pendingUserKeeps(undefined), []);
+  const list = [
+    { target: 'a', pendingUser: true },
+    { target: 'b' },
+    { target: 'c', pendingUser: false },
+    { target: 'd', pendingUser: 'true' }, // truthy string is NOT the boolean -- must not match
+  ];
+  assert.deepStrictEqual(pendingUserKeeps(list).map((k) => k.target), ['a']);
+});
+
+// U7 (CB board 2026-08-31) -- the same alias-at-the-temp class apply.mjs's
+// writeDurable carries, at the SECONDARY sites the board's sweep clause points
+// at. keeps.json lives in the PROJECT tree (txDirFor), the same trust zone as a
+// class-B memory file: anything with project write access can pre-place an
+// alias. The old temp was `<file>.tmp`, fully derivable, written with a plain
+// writeFileSync -- which follows it. Cure = CSPRNG suffix + flag 'wx'.
+//
+// A hardlink is the unprivileged stand-in for the EPERM-blocked file symlink on
+// this box; it aliases an inode the same way for a write.
+function hardlinkCapable() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-hlprobe-'));
+  try {
+    const a = path.join(d, 'a');
+    fs.writeFileSync(a, 'x');
+    fs.linkSync(a, path.join(d, 'b'));
+    return true;
+  } catch {
+    return false;
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+}
+
+test('U7: recordKeep never writes THROUGH an alias planted at its temp -- the file outside the project is untouched and the record fails closed', (t) => {
+  // ONE skippable leg, capability-PROBED: without hardlink creation the plant
+  // cannot be built, so the test would pass vacuously rather than prove anything.
+  if (!hardlinkCapable()) { t.skip('this volume refuses hardlink creation -- the unprivileged stand-in for the EPERM-blocked file symlink cannot be planted here'); return; }
+  const proj = sandbox();
+  const victim = path.join(proj, 'VICTIM-outside-the-store.txt');
+  fs.writeFileSync(victim, 'VICTIM ORIGINAL', 'utf8');
+  const realWrite = fs.writeFileSync;
+  let planted = null;
+  fs.writeFileSync = (p, ...rest) => {
+    if (planted === null && typeof p === 'string' && p.includes('.tmp')) {
+      planted = p;
+      try { fs.linkSync(victim, p); } catch { /* a pre-existing entry is itself the fail-closed case */ }
+    }
+    return realWrite(p, ...rest);
+  };
+  let ok;
+  try {
+    ok = recordKeep(proj, { target: 'MEMORY.md', reason: 'u7' });
+  } finally { fs.writeFileSync = realWrite; }
+  try {
+    assert.ok(planted, 'the plant fired (a temp path was written) -- otherwise this test proves nothing');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM ORIGINAL', 'the file outside the project is UNTOUCHED (pre-fix the plain write follows the planted alias and truncates it)');
+    // r33 ascent: `.ok`, for the same reason as the pendingUser test above.
+    // NOTE the direction — `{ ok: false }` is TRUTHY, so a test written as a
+    // truthiness check would have started passing VACUOUSLY here. Swept: this
+    // file and apply.test.mjs contain no such check (every other assertion on
+    // this return already reads `.ok`).
+    assert.strictEqual(ok.ok, false, 'the record fails closed on EEXIST at the O_EXCL temp, never silently through the alias');
+    assert.deepStrictEqual(loadKeeps(proj), [], 'and nothing was recorded');
   } finally { clean(proj); }
 });

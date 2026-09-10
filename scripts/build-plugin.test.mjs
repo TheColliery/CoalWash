@@ -62,42 +62,42 @@ test('checkDist fails loud in both directions: stale file and orphan', () => {
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
+// board #56 (both fixtures below): a blind `.replace(/\n/g, '\r\n')` assumes the
+// input is currently LF. On a CRLF working copy every existing `\r\n` becomes
+// `\r\r\n`, which contentEquals's own single-pass `\r\n -> \n` normalization
+// does not fully collapse — the pass matches the SECOND pair and consumes it,
+// leaving a stray `\r` immediately ahead of the surviving `\n`, not a bare `\r`
+// standing alone. That is a real, permanent divergence from the true source,
+// independent of the working tree's own line-ending state. Fix: always
+// normalize to a clean LF baseline FIRST, then re-encode in whichever style the
+// REAL source is NOT currently using — so the fixture never starts from an
+// ambiguous "is this already CRLF?" state and never glues `\r\r\n`.
+function realHooksJson() {
+  return fs.readFileSync(path.join(repoRoot, 'hooks', 'hooks.json'), 'utf8');
+}
+function encodeOppositeOfSource(lfText) {
+  return realHooksJson().includes('\r\n') ? lfText : lfText.replace(/\n/g, '\r\n');
+}
+
 test('board #56: a CRLF-vs-LF-only difference is NOT stale — content parity, not byte parity', () => {
   const dist = scratchDist();
   try {
     buildDist(dist);
     const p = path.join(dist, 'hooks', 'hooks.json');
-    // Normalize to LF first, then flip to WHICHEVER style the real source
-    // is NOT currently using -- the checked-out source this scratch copy
-    // was built from may already be CRLF on this working tree (this file's
-    // own committed line endings vary by checkout: a blind unconditional
-    // /\n/->\r\n replace on already-CRLF text doubles every \r into \r\r\n,
-    // which contentEquals' single-pass \r\n->\n normalization does not
-    // fully collapse, AND an already-CRLF source makes the "bytes really do
-    // differ" sanity check below vacuously fail -- both a genuine fixture
-    // bug, found merging class-b 2026-08-09, not a defect in the fix under
-    // test). Toggling to the OPPOSITE style guarantees genuine byte
-    // divergence with content parity regardless of the source's own
-    // current on-disk line-ending state.
     const lf = fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
-    const sourceIsCrlf = /\r\n/.test(fs.readFileSync(path.join(repoRoot, 'hooks', 'hooks.json'), 'utf8'));
-    fs.writeFileSync(p, sourceIsCrlf ? lf : lf.replace(/\n/g, '\r\n'));
+    fs.writeFileSync(p, encodeOppositeOfSource(lf));
     assert.notStrictEqual(fs.readFileSync(path.join(repoRoot, 'hooks', 'hooks.json')).compare(fs.readFileSync(p)), 0, 'sanity: the bytes really do differ');
     assert.deepStrictEqual(checkDist(dist), [], 'a pure line-ending difference must not read as stale');
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
-test('board #56: a REAL content difference under CRLF line endings still fails loud — the normalization must not mask an actual edit', () => {
+test('board #56: a REAL content difference across differing line-ending styles still fails loud — the normalization must not mask an actual edit', () => {
   const dist = scratchDist();
   try {
     buildDist(dist);
     const p = path.join(dist, 'hooks', 'hooks.json');
-    // Same LF-first normalization as the sibling test above, for the same
-    // reason -- not load-bearing for THIS test's own assertion (the
-    // appended tamper content makes it stale either way), kept consistent
-    // so neither test constructs a malformed double-CRLF fixture.
-    const tampered = fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n').replace(/\n/g, '\r\n') + '\r\n// tampered';
-    fs.writeFileSync(p, tampered);
+    const lf = fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n') + '\n// tampered';
+    fs.writeFileSync(p, encodeOppositeOfSource(lf));
     const drift = checkDist(dist);
     assert.ok(drift.some((d) => d.includes('stale in plugin/') && d.includes('hooks.json')), drift.join('; '));
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }

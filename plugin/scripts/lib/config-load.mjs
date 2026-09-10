@@ -519,12 +519,19 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
 //      shape) — read normally, no breakage for an existing user.
 // WRITE target = where the config was found; absent everywhere, the running
 // agent's own dir. Hooks never perform this move on a READ (Phoenix #5, no
-// side effects) — and CoalWash has NO project-config WRITER anywhere in this
-// codebase to begin with (no configure.mjs, no consent-persistence call):
-// both `.coalwash.json` files, global and project, are hand-edited by the
-// user or another tool, never written by CoalWash itself. So "move on
-// write" has no code path to hook here — this function is the READ side
-// only, which is this room's entire scope for the campaign.
+// side effects).
+//
+// ⚠️ CORRECTED 2026-09-10 (CWK-023). This block used to end "CoalWash has NO
+// project-config WRITER anywhere in this codebase (no configure.mjs ...) — so
+// 'move on write' has no code path to hook here". `scripts/configure.mjs` IS
+// that writer now, so the premise is gone. What is still true, and is now the
+// accurate statement: THIS FUNCTION is the READ side only. The writer imports
+// it (never forks the walk) and writes back to the path it returns when one
+// exists; on a first-ever write it walks `projectConfigCandidates` itself and
+// picks the first agent dir the project ALREADY has, because candidate[0] is a
+// bare `.claude` even in an `.agents`-only project. The LEGACY-location
+// migrate-and-delete that CoalLedger/CoalMine perform is deliberately NOT
+// implemented here — see configure.mjs's own header for that divergence.
 const AGENT_DIR_ORDER = ['.claude', '.agents', '.gemini'];
 export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
   const root = findProjectRoot(cwd, home);
@@ -709,6 +716,13 @@ const SAFER_ENUM = {
   writeGuard: ['on', 'snapshot-only', 'off'],
 };
 const SAFER_TRUE = ['localOnly']; // a bool whose SAFE value is true (privacy opt-in)
+// CWK-057 -- the MIRROR of SAFER_TRUE, and the polarity is the whole point.
+// SAFER_TRUE's rule is "a global true wins"; scanEverything needs the opposite,
+// because here `true` is the ESCALATED value: a project file setting it makes us
+// read MORE of the user's memory than their global stance allowed. hooks-safety
+// §9's blast test reads the DIRECTION OF ESCALATION, not the key's name, so a
+// bool whose safe value is false belongs in its own list, never in SAFER_TRUE.
+const SAFER_FALSE = ['scanEverything']; // a bool whose SAFE value is false (escalation opt-in)
 
 // WAVE-2 R2 (2026-07-27): a missing global is NOT "no constraint" -- it is the
 // schema's declared default, which IS the user's stance until they say
@@ -867,6 +881,27 @@ export function mergeSafety(global, project, { globalUnreadable = false, project
     // global (W2-3) assumes the safe value (true) unconditionally, same
     // rule as the enum loop above.
     if (globalUnreadable || global[key] === true) out[key] = true;
+  }
+  for (const key of SAFER_FALSE) {
+    // A project cannot turn ON a global escalation opt-in. Four properties,
+    // each one a hole this file has actually shipped before:
+    //   W2-3  an unreadable GLOBAL FILE assumes the safe value unconditionally
+    //         -- not the schema default, which can be weaker than what the user
+    //         really had set before the file broke.
+    //   R2    an ABSENT global reads as the schema DEFAULT (false), never a
+    //         `continue` -- the factory-default hole was exactly this, and the
+    //         common case is a user who never wrote a global config at all.
+    //   --    a project's SILENCE never clamps a global `true` away.
+    //   K1    junk on EITHER side gets no say, and the stored value is a real
+    //         boolean -- "check one spelling, act on that same spelling".
+    if (globalUnreadable) { out[key] = false; continue; }
+    // Neither side mentioned it -> write NOTHING. clampedRead already answers
+    // false from the schema, and a merged config for two absent files must stay
+    // {} (a shipped invariant with its own test: a genuinely MISSING config is
+    // {}). Writing a key nobody asked for would have quietly broken it.
+    if (global[key] === undefined && project[key] === undefined) continue;
+    const gv = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
+    out[key] = (gv === true && out[key] === true);
   }
   return out;
 }

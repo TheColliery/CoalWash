@@ -246,3 +246,62 @@ test('manualTierCounts: no stores at all -> zeros, never throws', () => {
     assert.deepStrictEqual(manualTierCounts({ projectRoot: proj, home }), { files: 0, totalBytes: 0, tokensEst: 0 });
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// CWK-057 F1 (INSPECT, LOW) — neutralScan's `scanEverything` opt is a TEST
+// SEAM, never a second read path. It used to be used RAW, so an explicit value
+// reached the decision by a route mergeSafety never saw: the exact hooks-safety
+// §9 shape, a PROJECT-side value defeating a GLOBAL stance one layer above
+// where the clamp can look. Unreached at the time (method.md:232 passes
+// projectRoot alone, no test used the opt) — the same "unreached until it was
+// the mechanism in a HIGH" story `_trustedResume` already wrote in this room.
+//
+// The measurable consequence is the READ BUDGET: ON reads every always-loaded
+// entry and MEASURES its certain fat; OFF stops at 262144 B, so an entry past
+// the budget is never read and its fat counts as muscle. So mechFat is the
+// observable that says which way the flag actually resolved.
+// ---------------------------------------------------------------------------
+function seedOverBudgetStore(home, proj) {
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true }); // claude-code platform marker
+  // ONE always-loaded file LARGER than the default read budget, so the budget
+  // check (readSoFar + e.bytes <= readBudgetBytes) fails on it outright: OFF
+  // never reads it and its duplicate-line fat counts as MUSCLE, ON reads it
+  // and MEASURES that fat. One file, so no @import ordering to assume.
+  const dup = 'a duplicated substance line that is long enough to count as provable fat';
+  fs.writeFileSync(path.join(proj, 'CLAUDE.md'), new Array(6000).fill(dup).join(String.fromCharCode(10)), 'utf8');
+}
+function writeGlobalCfg(home, cfg) {
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify(cfg), 'utf8');
+}
+
+test('CWK-057 F1: an explicit { scanEverything: true } opt CANNOT widen past a global false — the seam goes through the same clamp, it does not bypass it', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: false });
+    seedOverBudgetStore(home, proj);
+    const s = neutralScan({ projectRoot: proj, home, scanEverything: true });
+    assert.strictEqual(s.measure.mechFat.tokensEst, 0, 'the budget still applies: a project-side true must not defeat a global false (pre-fix the raw opt lifted it)');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-057 F1: the same explicit opt against an ABSENT global is likewise refused — the schema default (false) is the user stance until they say otherwise (the factory-default hole, W2-3/R2)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedOverBudgetStore(home, proj); // no global config written at all
+    const s = neutralScan({ projectRoot: proj, home, scanEverything: true });
+    assert.strictEqual(s.measure.mechFat.tokensEst, 0, 'no global config is the COMMON case, and it must not be a free escalation');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-057 F1 (seam still works, both directions): a global true + the opt omitted reads ON; the opt may still QUIETEN it to OFF', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeGlobalCfg(home, { scanEverything: true });
+    seedOverBudgetStore(home, proj);
+    const on = neutralScan({ projectRoot: proj, home });
+    assert.ok(on.measure.mechFat.tokensEst > 0, 'a legitimate global ON does lift the budget — otherwise these tests prove nothing');
+    const quietened = neutralScan({ projectRoot: proj, home, scanEverything: false });
+    assert.strictEqual(quietened.measure.mechFat.tokensEst, 0, 'quietening through the seam is always allowed');
+  } finally { clean(home, proj); }
+});

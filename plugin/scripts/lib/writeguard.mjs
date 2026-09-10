@@ -4,7 +4,8 @@
 // subs, other tools) — a gate on CW's knife alone is HALF a constraint. Two
 // advisory-grade nets for those OTHER hands:
 //
-//   AIRBAG (PreToolUse, snapshot-on-first-write) — MEMORY.md/CLAUDE.md are
+//   AIRBAG (PreToolUse, snapshot-on-first-write) — CHANNEL-BOUND, see the limit
+//   at the end of this block. MEMORY.md/CLAUDE.md are
 //   gitignored = zero undo net when any agent misedits them. On the FIRST
 //   write to a guarded file this session, ms-copy it once into
 //   .claude/coalwash/writeguard/<session>/ (the existing sandbox root,
@@ -34,6 +35,19 @@
 // NAMED divergence (one-flock: name it where it lives): this module re-inlines
 // txDir + the self-ignore drop rather than importing them from apply.mjs, to
 // stay OFF apply.mjs's heavy WAL/bins/keeps import graph on the PreToolUse
+// CHANNEL LIMIT (CWK-082 L3), stated here because this module is where a reader
+// comes to learn what the net covers: the airbag rides PreToolUse on the
+// FILE-EDIT tools only (Edit/Write/MultiEdit — hooks.json's matcher plus the
+// conductor's in-code WRITE_TOOLS belt, two independent gates). A write made
+// through the SHELL (mv, sed, a heredoc, a script) takes NO snapshot and fires
+// NO seatbelt advisory — measured, not assumed (INSPECT §3b: Write/Edit/
+// MultiEdit produce 3 snapshot files each, Bash produces 0 and the writeguard/
+// dir is never created). This is DELIBERATE, not a gap awaiting a patch — the
+// reason and the rejected alternative live at the conductor's touchedPath.
+// The externalize template discloses it to the user and steers toward the
+// covered channel; nothing else in the room states it, so do not delete it here
+// without moving it somewhere a reader of this module will still find.
+//
 // hot path (the airbag fires on every governance write). physicalOrNull/
 // containedIn come from class-b.mjs (pure, light); gateFiles from
 // fidelity-gate.mjs (zero-dep).

@@ -15,6 +15,10 @@ import {
   FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
   FAT_ARM_TOKENS, FAT_REARM_TOKENS, mechFatFromText,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
+  readBudgetFor, READ_BUDGET_DEFAULT,
+  discoverCapacity, markFullClean, armExternalize, externalizableResidue,
+  CAPACITY_STANDARD_WINDOW_TOKENS, CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, CAPACITY_DISCOVERY_MIN_TOKENS,
+  __testHooks,
 } from './caliper.mjs';
 import { discoverClassB } from './class-b.mjs';
 
@@ -130,6 +134,86 @@ test('measureEntries respects the read budget (over-budget always-loaded falls b
   } finally { clean(home, proj); }
 });
 
+// board #117-adjacent (BMI trace, item 1): the memory-index entry is LAST in
+// discovery order, so it is the FIRST thing pushed past the read budget as the
+// corpus ahead of it grows — and the over-budget branch used to set only
+// `index.bytes`. `index.lines` stayed 0, so capHit's
+// `indexLines >= CC_INDEX_CAP_LINES` leg silently died exactly as the corpus
+// grew toward the wall it guards. Both halves are asserted: the measurement,
+// and the capHit verdict that consumes it.
+test('capacity wall: the index LINES leg survives the index entry falling past the read budget (it used to silently read 0)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(home, 'CLAUDE.md');
+    const idx = path.join(home, 'MEMORY.md');
+    // A governance file big enough to eat the whole budget ahead of the index.
+    fs.writeFileSync(gov, 'g'.repeat(5000), 'utf8');
+    // 250 short lines: OVER CC_INDEX_CAP_LINES (200), UNDER CC_INDEX_CAP_BYTES
+    // (25 KB) — so the LINES leg is the only one that can fire, which is what
+    // makes this fixture discriminate rather than pass via the bytes leg.
+    fs.writeFileSync(idx, Array.from({ length: 250 }, (_, i) => `row ${i}`).join('\n'), 'utf8');
+    const idxBytes = fs.statSync(idx).size;
+    assert.ok(idxBytes < CC_INDEX_CAP_BYTES, 'fixture must sit UNDER the bytes cap or it proves the wrong leg');
+    const entries = [
+      { path: gov, bytes: fs.statSync(gov).size, scope: 'project', kind: 'governance', alwaysLoaded: true },
+      { path: idx, bytes: idxBytes, scope: 'project', kind: 'memory-index', alwaysLoaded: true },
+    ];
+    // Budget admits the governance file and pushes the index entry out.
+    const m = measureEntries(entries, { readBudgetBytes: 5000 });
+    assert.strictEqual(m.index.bytes, idxBytes, 'bytes was always set here — unchanged');
+    assert.ok(m.index.lines >= CC_INDEX_CAP_LINES, `the over-budget index must still yield its line count (got ${m.index.lines})`);
+    // The leg it feeds must actually fire — measurement alone is not the claim.
+    // `capHit` is INTERNAL to bandVerdict, so the observable is the verdict it
+    // produces: fat=0 is un-armed, and an un-armed capHit is FULL/externalize.
+    const v = bandVerdict({
+      footprintTokens: 1000, mechFatTokens: 0, capacityTokens: CAPACITY_TOKENS,
+      indexBytes: m.index.bytes, indexLines: m.index.lines,
+    });
+    assert.strictEqual(v.band, 'FULL', 'the wall must fire on the lines leg alone');
+    assert.strictEqual(v.reason, 'externalize', 'un-armed capHit routes to externalize');
+  } finally { clean(home, proj); }
+});
+
+// The bounded-read contract: an index entry OVER the bytes cap is not read at
+// all (the bytes leg already fires unconditionally), so no arbitrarily large
+// file can be pulled in by the fix above.
+test('capacity wall: an over-budget index ABOVE the bytes cap is not read for lines — the bytes leg already fires', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(home, 'CLAUDE.md');
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(gov, 'g'.repeat(5000), 'utf8');
+    fs.writeFileSync(idx, 'x'.repeat(CC_INDEX_CAP_BYTES + 1), 'utf8'); // one byte over the cap, ZERO newlines
+    const entries = [
+      { path: gov, bytes: fs.statSync(gov).size, scope: 'project', kind: 'governance', alwaysLoaded: true },
+      { path: idx, bytes: fs.statSync(idx).size, scope: 'project', kind: 'memory-index', alwaysLoaded: true },
+    ];
+    const m = measureEntries(entries, { readBudgetBytes: 5000 });
+    assert.ok(m.index.bytes > CC_INDEX_CAP_BYTES, 'the bytes leg carries this case');
+    assert.strictEqual(m.index.lines, 0, 'no read was attempted above the cap');
+    const v = bandVerdict({
+      footprintTokens: 1000, mechFatTokens: 0, capacityTokens: CAPACITY_TOKENS,
+      indexBytes: m.index.bytes, indexLines: m.index.lines,
+    });
+    assert.strictEqual(v.band, 'FULL', 'the wall still fires — via bytes, not lines');
+  } finally { clean(home, proj); }
+});
+
+// A read ERROR must degrade safely AND keep the stat-knowable leg alive.
+test('capacity wall: an UNREADABLE index still yields its stat-known bytes (only lines, which needs the read, stays 0)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(idx, 'row\n'.repeat(10), 'utf8');
+    const realBytes = fs.statSync(idx).size;
+    fs.rmSync(idx); // the entry's stat is already captured; the READ will now fail
+    const entries = [{ path: idx, bytes: realBytes, scope: 'project', kind: 'memory-index', alwaysLoaded: true }];
+    const m = measureEntries(entries); // in-budget: takes the read branch, which throws
+    assert.strictEqual(m.index.bytes, realBytes, 'bytes is a stat fact — it must survive a read error');
+    assert.strictEqual(m.index.lines, 0, 'lines genuinely needs the read; 0 is the safe direction');
+  } finally { clean(home, proj); }
+});
+
 // ---------------------------------------------------------------------------
 // bandVerdict — beta.12 BAND COLLAPSE: ONE ceiling (CEILING_BMI/CEILING_REARM_BMI,
 // hysteresis-gated) replaces the old PLUMP/OBESE ladder + FAT_BUDGET_TOKENS
@@ -233,11 +317,22 @@ test('ACCEPTANCE (task #4): an all-muscle store replaying the live false-positiv
     wasOver = v.over;
     wasEconLatched = v.econLatched;
   }
-  // and far beyond the sequence: 10x growth of pure muscle, still silent
-  // (only the REAL capacity line may ever speak, and that says externalize,
-  // never a wizard ask)
-  const big = bandVerdict({ footprintTokens: 500000, mechFatTokens: 0 });
+  // and far beyond the sequence: pure muscle growth, still silent — the
+  // fixture is CAPACITY-RELATIVE (CWK-081) rather than the old hardcoded
+  // 500000, which only read LEAN because the capacity stand-in was 600000.
+  // The PROPERTY under test is unchanged and is not about a number: pure
+  // muscle must never ARM the fat band. Anchoring it to the constant keeps it
+  // true at any capacity the adapter discovers.
+  const big = bandVerdict({ footprintTokens: CAPACITY_TOKENS - 1, mechFatTokens: 0 });
   assert.strictEqual(big.band, 'LEAN');
+  // and the test's own parenthetical, now ASSERTED instead of only asserted-
+  // about: past the REAL capacity line the band DOES speak, and what it says
+  // is externalize — never a wizard ask, never an armed fat band.
+  const wall = bandVerdict({ footprintTokens: CAPACITY_TOKENS, mechFatTokens: 0 });
+  assert.strictEqual(wall.band, 'FULL');
+  assert.strictEqual(wall.reason, 'externalize');
+  assert.strictEqual(wall.over, false, 'pure muscle never arms the fat band, even over the wall');
+  assert.strictEqual(wall.econLatched, false, 'and never latches the economic FULL that carries the wizard ask');
 });
 
 test('ACCEPTANCE control (non-vacuity): the SAME sequence with real measured fat arms and escalates — the silence above is the definition, not a dead band', () => {
@@ -1593,11 +1688,16 @@ test('rc.2 SCHEMA (f): a FRESH install (no state file) → loadState is {} and w
 });
 
 test('rc.2 SCHEMA (e): the reset-list constant matches the fields actually cleared (the mechanism a future ruling extends)', () => {
-  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict']);
+  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt']);
   // STATE_SCHEMA stays 1 even though the OBESE re-loop (2026-07-25) added
-  // `lastObeseFat` to the list: adding a NEW field is not a semantics change to
+  // `lastObeseFat` to the list, and CWK-081 (2026-09-10) added the four
+  // episode fields after it — plus `fullCleanFiles`, the Full clean
+  // SCOPE, in CWK-081 round 3 (it is episode-family state for the same reason
+  // the stamp it scopes is, and it dies in the same LEAN clear): adding a NEW field is not a semantics change to
   // any EXISTING one, which is this file's own stated bump rule. A pre-existing
-  // rc-era state simply has no watermark and starts its loop from zero.
+  // rc-era state simply has no watermark and starts its loop from zero — and,
+  // for the CWK-081 four, has no recorded Full clean, so the capacity surface
+  // routes to the ASK rather than asserting muscle. Safe direction either way.
   assert.strictEqual(STATE_SCHEMA, 1);
   // every write stamps the schema (round-trip through the public write API)
   const { home, proj } = sandbox();
@@ -1783,7 +1883,7 @@ test('TP-5: exactly ONE live home — the coal/ copy is reaped when the write mo
   } finally { clean(home, proj); }
 });
 
-test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is a one-time migration for a condition the never-create guard makes unrepeatable, and O(dirs in projects/) on every write blew the <=100ms hook budget', () => {
+test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is a one-time migration for a condition the never-create guard makes unrepeatable, and O(dirs in projects/) on every write blew the hook budget of the day (stated then as <=100ms total wall clock — a cap board #24 has since RETIRED; the live gate is the <=5ms of ADDED work Phoenix #3 names, which it blew just as hard)', () => {
   const { home, proj } = sandbox();
   try {
     const projectsDir = path.join(home, '.claude', 'projects');
@@ -1792,10 +1892,27 @@ test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is
     // caught the cost because every other fixture starts with an EMPTY projects/.
     for (let i = 0; i < 21; i++) fs.mkdirSync(path.join(projectsDir, `C--other-project-${i}`), { recursive: true });
 
+    __testHooks.reset();
     setLeanFloor(home, proj, 10);                                    // write #1 sweeps
     assert.strictEqual(loadState(proj, home).strayPruneDone, true, 'the sweep is marked done in state');
+    assert.strictEqual(__testHooks.strayPruneCalls, 1, 'write #1 calls the sweep exactly once');
 
-    // Prove write #2 does NOT sweep: plant a stray that write #1 would have removed.
+    // Prove write #2 does NOT sweep. NOTE (CWK-012 INSPECT F1, board-verified
+    // by mutation): a planted stray at <proj>/sub is NOT a usable oracle for
+    // this — pruneStrayStateDirs' own guard 4 skips it regardless of whether
+    // the sweep runs at all (`findProjectRoot('<proj>/sub', home)` never
+    // resolves back to `<proj>`, since this fixture's sandbox() writes no
+    // ROOT_MARKER anywhere, so the stray is never a delete candidate). An
+    // existsSync(strayFile) assertion here is VACUOUS — it cannot fail either
+    // way, which is exactly what made the deleted wall-clock proxy LOOK
+    // replaceable by it. It is not. The call-count counter is the actual
+    // pin (fidelity-gate.mjs's __testHooks precedent — a wall-clock bound
+    // replaced by a load-independent count, board #24); the two asserts
+    // that carry it are `write #1 calls the sweep exactly once` above and
+    // `write #2 must NOT call the sweep again` below — proven by mutation
+    // (both directions: alreadySwept forced false reddens write #2's
+    // assert at actual:2 expected:1; the sweep call itself gated off
+    // reddens write #1's at actual:0 expected:1).
     const strayCwd = path.join(proj, 'sub');
     fs.mkdirSync(strayCwd, { recursive: true });
     const strayDir = ccSlugDir(home, strayCwd);
@@ -1803,10 +1920,296 @@ test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is
     const strayFile = path.join(strayDir, 'coalwash', 'state.json');
     fs.writeFileSync(strayFile, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: strayCwd }), 'utf8');
 
-    const t0 = process.hrtime.bigint();
     setLeanFloor(home, proj, 20);                                    // write #2 must skip the sweep
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    assert.ok(fs.existsSync(strayFile), 'write #2 did not walk projects/ (one-shot held)');
-    assert.ok(ms < 50, `a post-migration write stays far under the hook budget (was ${ms.toFixed(1)}ms with 22 dirs)`);
+    assert.strictEqual(__testHooks.strayPruneCalls, 1, 'write #2 must NOT call the sweep again — the one-shot held');
+  } finally { clean(home, proj); }
+});
+
+// CWK-057 -- the SEEING half, proven at the two cuts themselves. RED-FIRST: on
+// the pre-fix engine measureEntries had no way to be told "no budget" and
+// recordVerdict always sliced at 200, so both assertions below fail.
+test('CWK-057 bypass 1/2: the read budget is a real SCAN cut — past it, an entry is never read, so its certain fat counts as MUSCLE; ON reads every always-loaded entry and MEASURES that fat', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-budget-'));
+  try {
+    // Two always-loaded entries. The first alone exhausts a small budget, so the
+    // SECOND is never read at the default -- and the second is the one carrying
+    // provable duplicate-line fat.
+    const filler = path.join(dir, 'a.md');
+    const fatty = path.join(dir, 'b.md');
+    // The filler must EXHAUST THE REAL DEFAULT BUDGET, not a small number
+    // passed in by this test. Sabotage s1 (readBudgetFor always returns the
+    // default) left the first version of this test GREEN: its 4KB fixture fit
+    // inside 262144 either way, so the fatty file was read even with the bypass
+    // dead -- it passed for a reason unrelated to what it names.
+    fs.writeFileSync(filler, 'x'.repeat(READ_BUDGET_DEFAULT), 'utf8');
+    const dupLine = 'this exact substance line repeats and is therefore provable fat';
+    fs.writeFileSync(fatty, new Array(40).fill(dupLine).join('\n'), 'utf8');
+    const entries = [filler, fatty].map((p) => ({ path: p, bytes: fs.statSync(p).size, alwaysLoaded: true, kind: 'memory' }));
+
+    const budgeted = measureEntries(entries, { readBudgetBytes: READ_BUDGET_DEFAULT });
+    assert.strictEqual(budgeted.mechFat.tokensEst, 0, 'PRECONDITION: at the budget the fatty file is never read, so its fat is invisible and counts as muscle');
+
+    const everything = measureEntries(entries, { readBudgetBytes: readBudgetFor(true) });
+    assert.ok(everything.mechFat.tokensEst > 0, 'ON: the same fat is now MEASURED — this is the cut being genuinely bypassed, not a renamed default');
+    assert.ok(everything.mechFat.dupTokens > 0, 'and it is the duplicate-line fat specifically');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CWK-057 bypass 1/2 (control): readBudgetFor is strict — only a real boolean true lifts the budget, so truthy junk can never widen the scan', () => {
+  assert.strictEqual(readBudgetFor(true), Infinity);
+  for (const junk of [false, undefined, null, 1, 'true', {}]) {
+    assert.strictEqual(readBudgetFor(junk), READ_BUDGET_DEFAULT, `${JSON.stringify(junk)} must not lift the budget`);
+  }
+  assert.strictEqual(readBudgetFor(false, 999), 999, 'an explicit fallback (the hook\'s own constant) is honored when OFF');
+});
+
+test('CWK-057 bypass 2/2: the 200-path cap truncates the Stop hook re-stat baseline; ON keeps the whole list', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-cap-home-'));
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-cap-proj-'));
+  try {
+    const paths = Array.from({ length: ALWAYS_LOADED_PATHS_CAP + 25 }, (_, i) => path.join(proj, `f${i}.md`));
+    const verdict = { band: 'LEAN', reason: 'fat', alwaysLoadedPaths: paths, alwaysLoadedBytes: 1 };
+
+    recordVerdict(home, proj, verdict);
+    const capped = loadState(proj, home).lastVerdict.alwaysLoadedPaths;
+    assert.strictEqual(capped.length, ALWAYS_LOADED_PATHS_CAP, 'PRECONDITION: the cut is real — 25 paths are invisible to the cheap re-stat gate');
+
+    recordVerdict(home, proj, verdict, Date.now(), { scanEverything: true });
+    const full = loadState(proj, home).lastVerdict.alwaysLoadedPaths;
+    assert.strictEqual(full.length, paths.length, 'ON: the whole baseline is kept, so a size change past #200 is visible to the cheap gate too');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(proj, { recursive: true, force: true }); }
+});
+
+test('CWK-057: ON widens SEEING only — recordVerdict still writes the same verdict SHAPE, no new field and no changed meaning (so no stateSchema bump is owed)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-shape-home-'));
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw57-shape-proj-'));
+  try {
+    const verdict = { band: 'LEAN', reason: 'fat', alwaysLoadedPaths: [path.join(proj, 'a.md')], alwaysLoadedBytes: 1 };
+    recordVerdict(home, proj, verdict);
+    const off = Object.keys(loadState(proj, home).lastVerdict).sort();
+    recordVerdict(home, proj, verdict, Date.now(), { scanEverything: true });
+    const on = Object.keys(loadState(proj, home).lastVerdict).sort();
+    assert.deepStrictEqual(on, off, 'identical field set — the mode changes how much is SEEN, never what is recorded about it');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(proj, { recursive: true, force: true }); }
+});
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 — THE CAPACITY ADAPTER (blueprint:115's own contract: discover ->
+// concrete ceiling; unknown -> conservative AND FLAGGED, never a silent guess)
+// ---------------------------------------------------------------------------
+
+test('CWK-081 adapter: the conservative default is DERIVED from its two terms, never a standing magic number', () => {
+  // The whole point of the row: 600000 was inherited, unexamined. The default
+  // is now an arithmetic identity a reader can check in one line.
+  assert.strictEqual(CAPACITY_TOKENS, CAPACITY_STANDARD_WINDOW_TOKENS - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS);
+  // and it is the AUTO-COMPACT window, not the raw one — the reserve is
+  // subtracted, so the constant is strictly smaller than the raw window.
+  assert.ok(CAPACITY_TOKENS < CAPACITY_STANDARD_WINDOW_TOKENS);
+  assert.ok(CAPACITY_AUTOCOMPACT_RESERVE_TOKENS > 0);
+});
+
+test('CWK-081 adapter: no discoverable figure -> the conservative default, FLAGGED discovered:false (the blueprint branch this box actually lands on)', () => {
+  const { home, proj } = sandbox();
+  try {
+    // a sandbox home with no stats-cache at all — the "platform exposes
+    // nothing" case, which is ALSO the measured live case on this box (the
+    // real cache carries the key with value 0 for every model).
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
+    assert.strictEqual(c.source, 'conservative-default');
+    assert.strictEqual(c.discovered, false, 'unknown must be FLAGGED, never silently indistinguishable from a discovery');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 adapter: a stats-cache whose contextWindow is 0 for every model is NOT a discovery (the live shape on this box)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({
+      modelUsage: { 'claude-opus-5': { contextWindow: 0, maxOutputTokens: 0 }, 'claude-sonnet-5': { contextWindow: 0 } },
+    }), 'utf8');
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.discovered, false, 'present-but-unpopulated is an ABSENT figure, not a zero-token window');
+    assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 adapter: a POPULATED contextWindow is discovered, takes the MIN across models, and the auto-compact reserve comes off it', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({
+      modelUsage: {
+        'claude-opus-5': { contextWindow: 1000000 },
+        'claude-haiku-4-5': { contextWindow: 200000 }, // the smallest = the conservative reading
+        'claude-fable-5-1': { contextWindow: 0 },      // unpopulated, ignored
+      },
+    }), 'utf8');
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.discovered, true);
+    assert.strictEqual(c.source, 'stats-cache');
+    assert.strictEqual(c.rawWindowTokens, 200000, 'MIN across models — a hook has no model identity to key on');
+    assert.strictEqual(c.capacityTokens, 200000 - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, 'the denominator is the USABLE window');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 adapter: an out-of-range or corrupt figure falls back to the conservative default (fail-closed, never a throw)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const write = (o) => fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), typeof o === 'string' ? o : JSON.stringify(o), 'utf8');
+    write({ modelUsage: { m: { contextWindow: 12 } } });                 // absurdly small
+    assert.strictEqual(discoverCapacity({ home }).discovered, false);
+    write({ modelUsage: { m: { contextWindow: 99000000 } } });           // absurdly large
+    assert.strictEqual(discoverCapacity({ home }).discovered, false);
+    write({ modelUsage: { m: { contextWindow: CAPACITY_DISCOVERY_MIN_TOKENS + 10 } } }); // in range RAW, under range once the reserve comes off
+    assert.strictEqual(discoverCapacity({ home }).discovered, false);
+    write('{ not json at all');                                          // corrupt
+    assert.doesNotThrow(() => discoverCapacity({ home }));
+    assert.strictEqual(discoverCapacity({ home }).capacityTokens, CAPACITY_TOKENS);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 adapter: gaugeVerdict JUDGES against the supplied capacity and REPORTS which one it used', () => {
+  const measure = { alwaysLoaded: { tokensEst: 300000, bytes: 1200000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 300000, totalBytes: 1200000, mechFat: { tokensEst: 0 } };
+  // default (the conservative derivation): 300k is OVER the wall
+  const lo = gaugeVerdict({ measure });
+  assert.strictEqual(lo.verdict.band, 'FULL');
+  assert.strictEqual(lo.capacityTokens, CAPACITY_TOKENS);
+  assert.strictEqual(lo.capacitySource, 'conservative-default');
+  // a DISCOVERED 1M window: the same store is nowhere near the wall
+  const hi = gaugeVerdict({ measure, capacity: { capacityTokens: 967000, source: 'stats-cache', discovered: true } });
+  assert.strictEqual(hi.verdict.band, 'LEAN');
+  assert.strictEqual(hi.capacityTokens, 967000);
+  assert.strictEqual(hi.capacitySource, 'stats-cache');
+});
+
+// ---------------------------------------------------------------------------
+// CWK-082 L2 — the ACCOUNTING half. A hand-move is doctrine (prohibition #31:
+// externalize is pure information, CW owns nothing in the estate), so the cure
+// is never a guard on the move — it is that nothing NAMED the residue or the
+// bound afterwards.
+// ---------------------------------------------------------------------------
+
+// CWK-082 F6 — the WRITE-side shape filter on the persisted residue had no test
+// at all: dropping it changed the suite by exactly 0 failures. It is redundant
+// defence (ask.mjs filters identically on read), but an untested guard reads as
+// coverage, so it earns its own cell rather than being deleted or left bare.
+test('CWK-082 F6: recordVerdict SHAPE-FILTERS the residue on the way IN — a malformed entry never reaches persisted state', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordVerdict(home, proj, {
+      band: 'FULL', reason: 'externalize',
+      externalizable: [
+        { path: '/ok.md', tokensEst: 100 },
+        { path: 42, tokensEst: 5 },
+        { path: '/bad.md', tokensEst: 'not-a-number' },
+        null,
+        { path: '/ok2.md', tokensEst: 7 },
+      ],
+    }, 111);
+    assert.deepStrictEqual(loadState(proj, home).lastVerdict.externalizable,
+      [{ path: '/ok.md', tokensEst: 100 }, { path: '/ok2.md', tokensEst: 7 }],
+      'junk dropped at the boundary, never carried into state a template will read');
+  } finally { clean(home, proj); }
+});
+test('CWK-082 L2: externalizableResidue ranks the ALWAYS-LOADED entries by weight and ignores the recall tier', () => {
+  const entries = [
+    { path: '/p/small.md', bytes: 400, alwaysLoaded: true },
+    { path: '/p/huge.md', bytes: 40000, alwaysLoaded: true },
+    { path: '/p/mid.md', bytes: 8000, alwaysLoaded: true },
+    { path: '/p/recall.md', bytes: 99999, alwaysLoaded: false },
+  ];
+  const r = externalizableResidue(entries);
+  assert.deepStrictEqual(r.map((e) => e.path), ['/p/huge.md', '/p/mid.md', '/p/small.md'],
+    'largest first, and the 99,999-byte RECALL file is absent — it costs no session, so moving it saves nothing');
+  assert.ok(r[0].tokensEst > r[1].tokensEst && r[1].tokensEst > r[2].tokensEst, 'each carries its own estimate');
+});
+
+test('CWK-082 L2: externalizableResidue caps its list and survives junk without throwing', () => {
+  const many = [];
+  for (let i = 0; i < 40; i++) many.push({ path: '/p/f' + i + '.md', bytes: 1000 + i, alwaysLoaded: true });
+  assert.strictEqual(externalizableResidue(many).length, 3, 'a default cap — this rides a persisted cache');
+  assert.strictEqual(externalizableResidue(many, { top: 1 }).length, 1);
+  assert.deepStrictEqual(externalizableResidue(null), [], 'no entries -> no claim');
+  assert.deepStrictEqual(externalizableResidue([{ path: '/p/x.md', bytes: 'nonsense', alwaysLoaded: true }]), [],
+    'an unreadable size is dropped rather than rendered as 0 tok');
+});
+
+// ---------------------------------------------------------------------------
+// CWK-081 (1)+(3) — the episode's Full-tier pass, and the
+// once-per-session dedup on the capacity surface
+// ---------------------------------------------------------------------------
+
+test('CWK-081 (b): markFullClean records the judged-file list, and a LEAN crossing clears it with the rest of the episode', () => {
+  const { home, proj } = sandbox();
+  try {
+    markFullClean(home, proj, 555, 'sess-1', ['/store/a.md', '/store/b.md']);
+    const st = loadState(proj, home);
+    assert.strictEqual(st.fullCleanAt, 555);
+    assert.deepStrictEqual(st.fullCleanFiles, ['/store/a.md', '/store/b.md']);
+    recordCrossing(home, proj, 'LEAN', 'FULL', 666);
+    const after = loadState(proj, home);
+    assert.strictEqual(after.fullCleanAt, undefined, 'the episode fact goes');
+    assert.strictEqual(after.fullCleanFiles, undefined, 'and its scope goes WITH it — a file list outliving its own stamp would be a claim with no fact behind it');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 (b): the judged-file list is shape-filtered and capped on the way IN — persisted state never reaches a template malformed', () => {
+  const { home, proj } = sandbox();
+  try {
+    markFullClean(home, proj, 555, 'sess-1', ['/ok.md', 42, null, { path: '/nope' }, '/ok2.md']);
+    assert.deepStrictEqual(loadState(proj, home).fullCleanFiles, ['/ok.md', '/ok2.md'], 'junk entries dropped, never rendered');
+    markFullClean(home, proj, 556, 'sess-1', Array.from({ length: 40 }, (_, i) => '/f' + i + '.md'));
+    assert.strictEqual(loadState(proj, home).fullCleanFiles.length, 12, 'capped — this is persisted state, not a report');
+    markFullClean(home, proj, 557, 'sess-1');
+    assert.deepStrictEqual(loadState(proj, home).fullCleanFiles, [], 'an omitted list is an EMPTY scope, never an absent field a reader could mistake for unbounded');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 (b): fullCleanFiles is in the schema reset list — episode-family state, same class as fullCleanAt', () => {
+  assert.ok(SCHEMA_RESET_FIELDS.includes('fullCleanFiles'),
+    'a scope written under different eligibility semantics is no more trustworthy than the stamp it scopes');
+});
+test('CWK-081 (1): markFullClean records the episode fact; a LEAN crossing CLEARS it (episode-scoped, not permanent)', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'nothing claims a clean before one happens');
+    markFullClean(home, proj, 4242, 'sess-a');
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 4242);
+    assert.strictEqual(loadState(proj, home).fullCleanSession, 'sess-a');
+    // the LEAN reset is the episode boundary — the same one that clears
+    // quickTried; a store that drifts back to FULL has not been cleaned in the
+    // episode it is now in.
+    recordCrossing(home, proj, 'LEAN', 'FULL', 5000);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'LEAN ends the episode, so the Full-clean fact ends with it');
+    assert.strictEqual(loadState(proj, home).fullCleanSession, undefined);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 (3): armExternalize surfaces ONCE per session id, and a NEW session re-arms it', () => {
+  const { home, proj } = sandbox();
+  try {
+    assert.strictEqual(armExternalize(home, proj, 's1', 1).surface, true, 'first fire of a session speaks');
+    assert.strictEqual(armExternalize(home, proj, 's1', 2).surface, false, 'a second Stop in the SAME session is silent');
+    assert.strictEqual(armExternalize(home, proj, 's1', 3).surface, false);
+    assert.strictEqual(armExternalize(home, proj, 's2', 4).surface, true, 'a NEW session may say it once');
+    // no session id -> nothing to dedup on -> always surface, and no write
+    const before = JSON.stringify(loadState(proj, home));
+    assert.strictEqual(armExternalize(home, proj, null, 5).surface, true);
+    assert.strictEqual(JSON.stringify(loadState(proj, home)), before, 'the no-id path writes nothing at all');
+  } finally { clean(home, proj); }
+});
+
+
+test('CWK-081 L1: a modelUsage ARRAY is refused by the shape guard (typeof [] === "object" is the trap)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: [{ contextWindow: 300000 }] }), 'utf8');
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.discovered, false, 'an array is doubt, and this function fails closed on doubt');
+    assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
   } finally { clean(home, proj); }
 });

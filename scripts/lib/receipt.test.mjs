@@ -42,6 +42,17 @@ test('wikilink-orphan advisory rides the receipt as ONE optional line — absent
   assert.ok(r.includes(line), 'the applyPlan-built line lands verbatim');
 });
 
+// board #129: a keeps.json entry whose OWN reason names the user must not
+// settle silently — the receipt is where that stays visible past the one
+// wash session that recorded it.
+test('pendingUserKeeps: absent/zero renders nothing; a positive count names itself and the recovery file, never the targets', () => {
+  assert.ok(!buildReceipt(BASE).includes('await YOUR decision'), 'field absent -> no line');
+  assert.ok(!buildReceipt({ ...BASE, pendingUserKeeps: 0 }).includes('await YOUR decision'), 'zero -> no line');
+  const r = buildReceipt({ ...BASE, pendingUserKeeps: 3 });
+  assert.ok(r.includes('3 keep(s) await YOUR decision'), 'the count renders');
+  assert.ok(r.includes('keeps.json'), 'points at the file the human opens, per receipts being metrics-only (no target list inline)');
+});
+
 test('dry-run is labelled and zero-saving/edge inputs stay well-formed', () => {
   const r = buildReceipt({
     when: '2026-07-09', dryRun: true,
