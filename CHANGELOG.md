@@ -2,7 +2,9 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.6.1] - 2026-09-10
+
+**Supersedes [1.1.0]'s "CoalWash has no project-config WRITER anywhere in this codebase (no `configure.mjs`…)" note — true when written, no longer true.** A config CLI now exists at `scripts/configure.mjs`. **It does not reach the plugin you install**: `plugin/scripts` carries `lib/` only, so this release delivers no new capability to an installed user, which is why it is a PATCH. The CLI is documented in the README for people working from a repo checkout; it earns no `### Added` line here, because this file covers what a user *receives*.
 
 ### Fixed
 
