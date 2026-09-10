@@ -273,6 +273,17 @@ function statBytes(p) {
 // configured `managedPaths` prefix) — MEASURED like anything else (BMI must
 // never undercount the parcel) but never a wash candidate (same class as
 // skills/commands/hooks; see SKILL.md's four washability tests).
+// ponytail: 319 lines at declaration, nesting depth 6 — ONE discovery pass over
+// ONE habitat, and the length is the habitat, not the function. Every step shares
+// three pieces of state that make it correct: `add` (which owns dedupe, the
+// realpath-and-contain gate, the inherited-vs-room tier decision and now the
+// F2-R2 refusal flags), `seen`, and `flags`. Splitting the steps into siblings
+// would either pass that closure around as parameters — the same coupling with
+// more surface — or duplicate it, which is this room's twin-drift lesson by
+// name. The depth is the walks: a stack loop, its readdir loop, and the per-entry
+// branch, none of which can flatten without losing the cap/flag accounting the
+// F1 fix depends on. Declared at the CWK-082 F2-R2 round, which added ~10 lines
+// to a function already well past the signal; the N is HISTORY, not a live claim.
 export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(), platform, managedPaths = [] } = {}) {
   const plat = platform || detectPlatform(home);
   const flags = [];
@@ -622,6 +633,11 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
 // own flags array (the single shipped caller). RESIDUE, named not closed: a
 // future standalone caller that passes no sink still loses the notice — the
 // flag is raised at the failing read either way, but nobody is listening.
+// ponytail: 84 lines at declaration — MY edit took this past the 50 signal, and
+// the growth is entirely the F2-R2 flag arms: five silent skips became five
+// named ones, each an if-block with its own reason. Splitting them out would put
+// the reason further from the skip it explains, which is the opposite of what
+// the finding was about. Nesting stays AT 4, not over. The N is HISTORY.
 export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.homedir(), flags = [] } = {}) {
   // F2-R2, the same class at every door of this function. Each skip is
   // UNCHANGED and still fail-closed; each now says which case it took.
