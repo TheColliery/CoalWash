@@ -494,9 +494,22 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
         // WHY refusalCode() IS THE WRONG INSTRUMENT HERE, stated because the
         // obvious reading is to reuse it: refusalCode RE-PROBES with lstat and
         // realpathSync.native, and on exactly the fixture that produces this loss
-        // BOTH succeed — the path resolves, only the READ is denied — so it
-        // returns null and no flag would ever fire. The error's own code is the
-        // only witness to a failure that happens at the read itself.
+        // BOTH succeed — the path resolves, only the READ is denied.
+        //
+        // ⚠️ THE REASON THIS COMMENT FIRST GAVE WAS FALSE, and is corrected here
+        // rather than quietly reworded (F-R32-1): it said refusalCode "returns
+        // null and no flag would ever fire". It does not. lstat OK then realpath
+        // OK falls into the SUCCESS branch, which returns 'UNCOMPARABLE', and
+        // refusalFlag maps that word to `unresolvable`. So reusing it here would
+        // have printed `unresolvable path (governance): CLAUDE.md [UNCOMPARABLE]`
+        // about a path that resolves perfectly.
+        //
+        // WHICH MAKES THE REAL REASON STRONGER THAN THE ONE IT REPLACES: the
+        // failure mode is A WRONG FLAG, not a missing one. Reusing refusalCode
+        // would have shipped a fresh instance of F-T3 — the
+        // wrong-noun-for-the-code defect the very next commit in this dispatch
+        // closes. The error's own code is the only witness to a failure that
+        // happens at the read itself.
         //
         // NO ENOENT/ENOTDIR CARVE-OUT, and that is deliberate rather than an
         // omission: the silence carve-out exists for a candidate that never
