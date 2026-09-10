@@ -519,12 +519,19 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
 //      shape) — read normally, no breakage for an existing user.
 // WRITE target = where the config was found; absent everywhere, the running
 // agent's own dir. Hooks never perform this move on a READ (Phoenix #5, no
-// side effects) — and CoalWash has NO project-config WRITER anywhere in this
-// codebase to begin with (no configure.mjs, no consent-persistence call):
-// both `.coalwash.json` files, global and project, are hand-edited by the
-// user or another tool, never written by CoalWash itself. So "move on
-// write" has no code path to hook here — this function is the READ side
-// only, which is this room's entire scope for the campaign.
+// side effects).
+//
+// ⚠️ CORRECTED 2026-09-10 (CWK-023). This block used to end "CoalWash has NO
+// project-config WRITER anywhere in this codebase (no configure.mjs ...) — so
+// 'move on write' has no code path to hook here". `scripts/configure.mjs` IS
+// that writer now, so the premise is gone. What is still true, and is now the
+// accurate statement: THIS FUNCTION is the READ side only. The writer imports
+// it (never forks the walk) and writes back to the path it returns when one
+// exists; on a first-ever write it walks `projectConfigCandidates` itself and
+// picks the first agent dir the project ALREADY has, because candidate[0] is a
+// bare `.claude` even in an `.agents`-only project. The LEGACY-location
+// migrate-and-delete that CoalLedger/CoalMine perform is deliberately NOT
+// implemented here — see configure.mjs's own header for that divergence.
 const AGENT_DIR_ORDER = ['.claude', '.agents', '.gemini'];
 export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
   const root = findProjectRoot(cwd, home);

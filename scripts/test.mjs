@@ -46,6 +46,7 @@ const TESTS = [
   'scripts/build-plugin.test.mjs',
   'scripts/verify.test.mjs',
   'scripts/config-keys.test.mjs',
+  'scripts/configure.test.mjs',
   'scripts/pointer-check.test.mjs',
 ];
 
