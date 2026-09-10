@@ -489,8 +489,8 @@ function main() {
   // ALL (F-RG-2), which matters because the first reason is a claim about
   // TODAY's `readJsonc`: a future edit could give it a throwing path and
   // nothing would send anyone back to re-read this comment. The only call to
-  // `loadMergedConfig` below this point sits at :497 inside its OWN try at
-  // :496, whose catch already degrades to a NAMED unknown ("the file was
+  // `loadMergedConfig` below this point sits inside its OWN try, whose catch
+  // already degrades to a NAMED unknown ("the file was
   // written, but the merged config could not be re-read to check which values
   // will actually be honoured"). So even if that loader learns to throw
   // tomorrow, it cannot reach this outer catch — and that inner guard was
