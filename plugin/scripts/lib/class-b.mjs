@@ -1,3 +1,14 @@
+// ponytail: 834 lines at declaration — ONE discovery LAYER, and the
+// cohesion unit is the CLASS-B DEFINITION rather than any one walk. Every step
+// here (global governance, the CLAUDE.md up-tree walk, the memory store, role
+// stores) feeds ONE entry list under ONE set of containment roots, ONE dedupe
+// key and ONE flag sink, and the refusal helpers at the top are shared by all of
+// them — refusalCode/refusalFlag/relLabel are called from eight discovery sites,
+// and the whole point of the r31/r32 rounds was that a refusal must read the same
+// way at every one. Splitting the walks into separate files would hand each half
+// its own copy of that vocabulary, which is the exact drift those rounds closed.
+// The number is HISTORY, not a live claim: 781 through 6a5fb07, crossed by the
+// r32 read-channel and F-T3 fixes.
 // class-b.mjs — per-platform class-B discovery (READ-ONLY).
 //
 // Class B = every FILE the platform auto-loads into context each session

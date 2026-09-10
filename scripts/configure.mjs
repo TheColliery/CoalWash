@@ -125,7 +125,7 @@ const LEAVES = ROWS.filter((r) => r.kind === 'leaf');
 // The widest flag today is --estate.runBudget.maxSessionsPerRun (35 chars).
 const PAD = 2 + Math.max(...LEAVES.map((r) => r.flagKey.length + 2), 10);
 
-export function printHelp(log = console.log) {
+function printHelp() {
   const lines = [
     'CoalWash Configurator Utility',
     'Usage: node scripts/configure.mjs [options]',
@@ -157,7 +157,7 @@ export function printHelp(log = console.log) {
   lines.push('  node scripts/configure.mjs --coalwashMode manual --language th');
   lines.push('  node scripts/configure.mjs --estate.digCrush.pileTok 60000');
   lines.push('  node scripts/configure.mjs --global --updateMode auto');
-  log(lines.join('\n'));
+  console.log(lines.join('\n'));
 }
 
 /**
@@ -225,7 +225,7 @@ export function parseValue(flagKey, spec, raw, current) {
 }
 
 /** Read the value currently at a dotted path (undefined when any hop is absent). */
-export function valueAtPath(obj, segs) {
+function valueAtPath(obj, segs) {
   let cur = obj;
   for (const s of segs) {
     if (!cur || typeof cur !== 'object') return undefined;
