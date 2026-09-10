@@ -5,11 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
-import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine } from './apply.mjs';
+import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, writeDurable } from './apply.mjs';
 import { recordKeep, recordGlobalKeep } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
-import { recordVerdict } from './caliper.mjs';
+import { recordVerdict, loadState } from './caliper.mjs';
 import { ccMemoryDir } from './class-b.mjs';
 
 function sandbox() {
@@ -1587,14 +1587,17 @@ test('SHRINK is an ordinary rewrite: a shrink that accidentally drops a fact (an
 // rename-atomicity and O_EXCL-exclusivity are LOCAL-filesystem semantics.
 // ---------------------------------------------------------------------------
 
-test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mid-apply FAILS CLOSED — whole-run rollback, target unchanged, no stranded .coalwash-tmp', () => {
+test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mid-apply FAILS CLOSED -- whole-run rollback, target unchanged, no stranded temp', () => {
   const { proj, store } = sandbox();
   const f1 = path.join(store, 'f1.md');
   write(f1, 'original bytes');
   const origRename = fs.renameSync;
-  // Monkey-patch the shared fs object: the ONLY renameSync in the txn path is
-  // atomicWrite's tmp->target hop (journal/snapshot writes never rename).
-  fs.renameSync = () => {
+  // Monkey-patch the shared fs object, SCOPED to this step's own target: since
+  // U7 every durable write renames (the journal included), so a blanket throw
+  // would kill the journal write before a step ever ran and this test would stop
+  // exercising the mid-apply failure it is named for.
+  fs.renameSync = (from, to) => {
+    if (to !== f1) return origRename(from, to);
     const e = new Error('EXDEV: cross-device link not permitted');
     e.code = 'EXDEV';
     throw e;
@@ -1608,7 +1611,7 @@ test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mi
     assert.strictEqual(r.rolledBack, true, 'the step failure takes the rollback path');
     assert.match(r.error, /EXDEV/, 'the error surfaces, never silent');
     assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'original bytes', 'target unchanged');
-    assert.strictEqual(fs.readdirSync(store).some((n) => n.includes('.coalwash-tmp')), false, 'no stranded tmp (rollback sweeps the sibling)');
+    assert.strictEqual(fs.readdirSync(store).some((n) => n.includes('.coalwash-tmp')), false, 'no stranded temp -- since U7 writeDurable reaps its own temp in its own catch, at the site that made it (a name-derived sweep at a distance cannot find an unpredictable name)');
   } finally { clean(proj); }
 });
 
@@ -2988,4 +2991,459 @@ test('DEMAND-10/keeps-gate POSITIVE: a keep recorded with a spelling that does N
       `the keep must still BIND despite its recorded spelling not resolving on this volume — a keep whose exact case falls out of sync with the real file must not silently stop protecting it (got: ${r.error})`);
     assert.strictEqual(fs.readFileSync(real, 'utf8'), 'The pinned clause: never trust a raw floor value.', 'file left untouched');
   } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// U7 HIGH (CB board 2026-08-31, adversary H1, judge-confirmed at source on
+// `017d998`): the class-B TWIN of the class-A blob-symlink arbitrary-write
+// already closed at `5ba5254`. `writeDurable` opened its DESTINATION with 'w'
+// (which FOLLOWS a symlink there) and `atomicWrite` handed it a fully
+// PREDICTABLE temp (`<target>.coalwash-tmp`), so anyone able to write the
+// directory holding a class-B memory file could pre-place an alias at that
+// temp path and have the wash push the file's bytes through it, outside every
+// approved root, reported ok:true. A live violation of this room's own
+// node/runtime.md section 5.
+//
+// THE UNPRIVILEGED STAND-IN, and its honest ceiling: file-symlink creation is
+// EPERM on Windows without Developer Mode (measured on this box: file symlink
+// BLOCKED/EPERM, dir junction ok, hardlink ok) -- the same ceiling the class-A
+// fix's own comments name, and the reason the board could not live-repro. A
+// HARDLINK planted at the temp path is the same class of pre-placed alias and
+// needs no privilege: openSync(p, w) on it truncates and writes the victim's
+// inode exactly as a symlink would. It proves the mechanism and the cure; it
+// does NOT prove the win32 dangling-symlink-defeats-O_EXCL claim explode.mjs
+// records as unconfirmed-not-refuted, which stays unproven here either way.
+// ---------------------------------------------------------------------------
+function hardlinkCapable() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-hlprobe-'));
+  try {
+    const a = path.join(d, 'a');
+    fs.writeFileSync(a, 'x');
+    fs.linkSync(a, path.join(d, 'b'));
+    return true;
+  } catch {
+    return false;
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+}
+
+test('U7 HIGH: an alias pre-placed at the write temp NEVER receives the content -- the file outside every approved root is untouched and the run fails closed', (t) => {
+  // ONE skippable leg, capability-PROBED (never platform-named): without
+  // hardlink creation the plant itself cannot be built, so the test would pass
+  // vacuously instead of proving anything.
+  if (!hardlinkCapable()) { t.skip('this volume refuses hardlink creation -- the unprivileged stand-in for the EPERM-blocked file symlink cannot be planted here'); return; }
+  const { proj, store } = sandbox();
+  const victim = path.join(proj, 'VICTIM-outside-every-root.txt');
+  write(victim, 'VICTIM ORIGINAL');
+  const target = path.join(store, 'MEMORY.md');
+  write(target, 'target original');
+  const realOpen = fs.openSync;
+  let planted = null;
+  // The attacker wins the race: an alias appears at the exact temp path the
+  // implementation chose, immediately before it is opened.
+  fs.openSync = (p, ...rest) => {
+    if (planted === null && typeof p === 'string' && p.includes('.coalwash-tmp')) {
+      planted = p;
+      try { fs.linkSync(victim, p); } catch { /* a pre-existing entry is itself the fail-closed case */ }
+    }
+    return realOpen(p, ...rest);
+  };
+  let r;
+  try {
+    r = apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'ATTACKER-VISIBLE MEMORY CONTENT' }]));
+  } finally { fs.openSync = realOpen; }
+  try {
+    assert.ok(planted, 'the plant fired (a temp path was opened) -- otherwise this test proves nothing');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM ORIGINAL', 'ARBITRARY WRITE: the file outside every approved root must be untouched (pre-fix the destination open follows the planted alias and truncates it)');
+    assert.strictEqual(r.ok, false, 'the run fails closed on EEXIST at the O_EXCL temp, never silently writes through the alias');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'target original', 'target unchanged');
+  } finally { clean(proj); }
+});
+
+test('U7: NOTHING is ever opened with a plain w -- every durable write lands on an O_EXCL temp and is renamed into place (rename REPLACES a directory entry; it does not write through an alias at the destination)', () => {
+  const { proj, store } = sandbox();
+  const target = path.join(store, 'MEMORY.md');
+  write(target, 'target original');
+  const realOpen = fs.openSync;
+  const opens = [];
+  fs.openSync = (p, flags, ...rest) => {
+    if (typeof p === 'string' && typeof flags === 'string') opens.push({ p, flags });
+    return realOpen(p, flags, ...rest);
+  };
+  try {
+    apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'new bytes' }]));
+  } finally { fs.openSync = realOpen; }
+  try {
+    // NON-VACUITY: the run really did open files. Asserting only "no plain w"
+    // would pass on a run that opened nothing at all.
+    assert.ok(opens.length > 0, 'the run opened files -- otherwise this proves nothing');
+    const written = opens.filter((o) => o.flags.startsWith('w') || o.flags.startsWith('a'));
+    assert.ok(written.length > 0, 'the run WROTE -- otherwise this proves nothing');
+    // A plain 'w' FOLLOWS an alias at the destination. O_EXCL ('wx') refuses a
+    // pre-existing entry instead, which is the whole cure -- so the property is
+    // not "the destination is never opened w", it is that a plain w never
+    // happens AT ALL, anywhere in the transaction.
+    const plainW = written.filter((o) => o.flags === 'w');
+    assert.deepStrictEqual(plainW, [], `a plain-w open follows whatever alias sits at that path: ${plainW.map((o) => o.p).join(', ')}`);
+    const journal = path.join(txDirFor(proj), 'journal.json');
+    for (const live of [target, journal]) {
+      assert.strictEqual(written.some((o) => o.p === live), false, `${path.basename(live)} is never opened for write -- content reaches it only through a rename`);
+    }
+  } finally { clean(proj); }
+});
+
+test('U7: the write temp is UNPREDICTABLE -- two writes to one target pick two different names, and neither is the old derivable sibling (random naming removes the PRECONDITION; O_EXCL stays the second, cross-nature belt)', () => {
+  const { proj, store } = sandbox();
+  const target = path.join(store, 'MEMORY.md');
+  write(target, 'v0');
+  const realOpen = fs.openSync;
+  const temps = [];
+  fs.openSync = (p, ...rest) => {
+    if (typeof p === 'string' && p.includes('.coalwash-tmp')) temps.push(p);
+    return realOpen(p, ...rest);
+  };
+  try {
+    apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'v1' }]));
+    apply(planFor(proj, store, [{ type: 'rewrite', path: target, content: 'v2' }]));
+  } finally { fs.openSync = realOpen; }
+  try {
+    assert.ok(temps.length >= 2, `both writes used a temp (saw ${temps.length})`);
+    assert.strictEqual(new Set(temps).size, temps.length, `every temp name is distinct: ${temps.join(', ')}`);
+    assert.strictEqual(temps.some((p) => p === target + '.coalwash-tmp'), false, 'the old fully-derivable name is gone');
+    // The collector also sees the JOURNAL's temp, in its own directory and
+    // correctly so: every temp is a sibling of ITS OWN destination, which is the
+    // #57 no-EXDEV invariant now holding for every durable write, not just this one.
+    for (const p of temps) assert.match(path.basename(p), /\.[0-9a-f]{24}\.coalwash-tmp$/, `a CSPRNG segment sits between the destination name and the marker: ${p}`);
+    const mine = temps.filter((p) => path.dirname(p) === path.dirname(target));
+    assert.ok(mine.length >= 2, `the target's own two writes each used a temp (saw ${mine.length})`);
+  } finally { clean(proj); }
+});
+
+test('U7 CONTROL (passes on BOTH engines by design -- it proves the fix did not BREAK the overwrite contract): writeDurable still replaces an existing destination, because O_EXCL sits on the TEMP and rename does the overwrite', () => {
+  const { proj, store } = sandbox();
+  const p = path.join(store, 'already-there.json');
+  try {
+    write(p, 'OLD CONTENT');
+    writeDurable(p, 'NEW CONTENT');
+    assert.strictEqual(fs.readFileSync(p, 'utf8'), 'NEW CONTENT', 'an existing destination is replaced -- the journal caller rewrites the same path every step');
+    writeDurable(p, 'NEWER');
+    assert.strictEqual(fs.readFileSync(p, 'utf8'), 'NEWER', 'and again');
+    assert.strictEqual(fs.readdirSync(store).filter((n) => n.includes('.coalwash-tmp')).length, 0, 'no temp litter left behind on the success path');
+  } finally { clean(proj); }
+});
+
+test('U7 CLASS GUARD (the propagate-check the board asked for): no engine module builds a write temp DERIVABLY from its destination -- the seventh site cannot reintroduce the class silently', () => {
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  // A temp is SAFE when an unpredictable segment sits between the destination
+  // and the marker. Flagged shapes, all fully derivable by anyone who can see
+  // the destination path (and, for a pid, the process list):
+  //   x + '.tmp'   |   `${x}.tmp`   |   `${x}.${process.pid}.tmp`
+  const CONCAT = /\+\s*['"]\.(coalwash-)?tmp['"]/;
+  const TEMPLATE = /`[^`]*\$\{[^}]+\}\.(coalwash-)?tmp`/;
+  const offenders = [];
+  for (const name of fs.readdirSync(libDir).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs'))) {
+    const src = fs.readFileSync(path.join(libDir, name), 'utf8');
+    src.split(/\r?\n/).forEach((line, i) => {
+      const t = line.trim();
+      if (t.startsWith('//') || t.startsWith('*')) return;
+      const template = TEMPLATE.exec(line);
+      const interpolations = template ? (template[0].match(/\$\{/g) || []).length : 0;
+      const derivable = CONCAT.test(line)
+        || (template && interpolations < 2)
+        || (template && /process\.pid/.test(template[0]));
+      if (derivable) offenders.push(`${name}:${i + 1}: ${t}`);
+    });
+  }
+  // detonate.mjs is class-A and UNWIRED (build-plugin.mjs's UNWIRED_ENGINE keeps
+  // both class-A engines out of the shipped dist). Its one hit is a STALE probe
+  // reference, not a write site: it checks `${outPath}.${process.pid}.tmp` for a
+  // source collision, while the writer it mirrors (explode.mjs) moved to a CSPRNG
+  // suffix at F2 and detonate never followed -- the same propagate-gap one lane
+  // over, reported to the head rather than fixed here (different lane, and
+  // nothing it guards ever reaches a user). Derived from the build's OWN list, so
+  // the day class-A is wired this guard starts covering it automatically.
+  const buildSrc = fs.readFileSync(path.join(libDir, '..', 'build-plugin.mjs'), 'utf8');
+  const unwired = [...buildSrc.matchAll(/'(\w+\.mjs)'/g)]
+    .map((m) => m[1])
+    .filter((n) => buildSrc.slice(buildSrc.indexOf('UNWIRED_ENGINE'), buildSrc.indexOf('isUnwiredEngine')).includes(n));
+  assert.ok(unwired.length >= 2, `the UNWIRED_ENGINE list was read, not assumed (saw ${unwired.join(', ')})`);
+  const shipped = offenders.filter((o) => !unwired.some((u) => o.startsWith(`${u}:`)));
+  assert.deepStrictEqual(shipped, [], `a derivable write temp is the U7 precondition -- put an unpredictable segment before the marker and open it O_EXCL:\n${shipped.join('\n')}`);
+});
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 (1) — THE EPISODE'S FULL-TIER PASS, recorded here because this is the
+// only place the REMOVAL is a fact: applyPlan refuses any unapproved
+// structured-token drop before it commits, so a wizard-cut transaction that
+// actually cut something cut it under the gate. NOT "ok:true is a gate-passed
+// clean" — that equivalence was refuted (H1), and what survives it is narrower
+// still: the fact is per-TRANSACTION, so it never says the pass covered the
+// store (round-2 F1, and the advisory's own sentence now says so).
+// ---------------------------------------------------------------------------
+
+test("CWK-081: a committed origin:'wizard-cut' plan that REMOVED something records the episode's Full-tier pass; a program cut does NOT", () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'wizard.md');
+    write(f, 'fact stays\nverbose wording the outsider dropped');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'fact stays' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777, 'the Full tier landed and removed something — that transaction fact is on the record');
+    assert.strictEqual(loadState(proj, home).fullCleanSession, 't-session');
+  } finally { clean(proj, home); }
+});
+
+test('CWK-081 control (non-vacuity): a DEFAULT (program-cut) plan records no Full clean — the mechanical tier never adjudicated anything', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'program.md');
+    write(f, 'dup line\ndup line');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'dup line' }]), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'Quick/Force is the MECHANICAL tier — it proves duplicates, it judges nothing');
+  } finally { clean(proj, home); }
+});
+
+// CWK-081 residue (b), COVERAGE — the stamp said a Full pass ran and said
+// nothing about WHAT it covered, so a plan touching one file of three minted
+// the same eligibility as one that judged the whole store (INSPECT cell C1,
+// 777 on both engines). applyPlan is handed a PLAN and can never see whether a
+// PASS covered the store — but it CAN see, exactly, which files it removed
+// content from. Recording that turns an unbounded claim into a bounded one.
+test('CWK-081 (b): a Full clean records WHICH files it removed content from, not merely that it happened', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const a = path.join(store, 'one.md'); const b = path.join(store, 'two.md'); const c = path.join(store, 'three.md');
+    write(a, 'kept\ndropped unique line'); write(b, 'untouched two'); write(c, 'untouched three');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: a, content: 'kept' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    const st = loadState(proj, home);
+    assert.strictEqual(st.fullCleanAt, 777, 'the pass still stamps — eligibility is SCOPED, never broken into always-false');
+    assert.deepStrictEqual(st.fullCleanFiles, [a], 'and the record now NAMES the one file it actually cut, so the other two are visibly outside it');
+  } finally { clean(proj, home); }
+});
+
+test('CWK-081 (b): the list is what was CUT, never what the plan merely touched — a no-op action in the same plan is absent', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const cutFile = path.join(store, 'cut.md'); const noop = path.join(store, 'noop.md');
+    write(cutFile, 'kept\ngone unique'); write(noop, 'unchanged');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: cutFile, content: 'kept' },
+      { type: 'rewrite', path: noop, content: 'unchanged' },
+    ], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    const st = loadState(proj, home);
+    assert.deepStrictEqual(st.fullCleanFiles, [cutFile],
+      'a rewrite that removed nothing judged nothing this function can see — the same predicate H1 landed, one level down');
+  } finally { clean(proj, home); }
+});
+
+// CWK-081 residue (a), A4 FORGERY — PINNED OPEN, deliberately. `plan.origin` is
+// untrusted plan data (this file's own trust-anchor comment), and MEASURED
+// enumeration of every input applyPlan receives found none that is both outside
+// a forger's control AND able to distinguish a genuine wizard pass. This cell
+// exists so the residue cannot be quietly 'closed' by a future change that only
+// makes it LOOK closed — the round-1 dup-cut arm read a false green for exactly
+// that reason. If this test ever goes RED, something real changed: re-derive it,
+// do not delete it.
+test('CWK-081 (a) RESIDUE PINNED: a FORGED wizard-cut origin removing a UNIQUE line still stamps — open by design, not by oversight', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'forged.md');
+    write(f, 'kept line\nunique line only here');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'kept line' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777,
+      'STILL STAMPS. The blast is bounded to WHICH ADVISORY TEXT one FULL crossing renders — never a delete, never a spend.');
+  } finally { clean(proj, home); }
+});
+
+// The CONTROL that keeps the two (b) cells above from passing on a predicate
+// broken into always-false — this room's own warning from the round that
+// introduced the stamp.
+test('CWK-081 (b) control (non-vacuity): a pass that removes from EVERY file records EVERY file', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const a = path.join(store, 'a.md'); const b = path.join(store, 'b.md');
+    write(a, 'kept\ndrop a'); write(b, 'kept\ndrop b');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: a, content: 'kept' },
+      { type: 'rewrite', path: b, content: 'kept' },
+    ], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    const st = loadState(proj, home);
+    assert.strictEqual(st.fullCleanAt, 777);
+    assert.deepStrictEqual([...st.fullCleanFiles].sort(), [a, b].sort(),
+      'a genuinely-covering pass still stamps AND names both files — the predicate was scoped, not disabled');
+  } finally { clean(proj, home); }
+});
+test('CWK-081: a wizard plan that FAILS the fidelity gate records NO Full clean (the claim rides the gate, not the intent)', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'lossy.md');
+    write(f, 'see https://example.com/spec for the contract');
+    // an unapproved structured-token drop -> applyPlan refuses the whole run
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'see the contract' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, false, 'the gate refused this run');
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined, 'a refused run is not a clean, however wizard-shaped its origin tag');
+  } finally { clean(proj, home); }
+});
+
+
+// ---------------------------------------------------------------------------
+// CWK-081 H1 — `ok:true` is NOT evidence of adjudication. Three ordinary plan
+// shapes an honest wizard emits reach the single ok:true return having judged
+// nothing; each stamped the Full-clean record before this predicate changed.
+// ---------------------------------------------------------------------------
+
+test('CWK-081 H1: a wizard-cut plan that REMOVES NOTHING does not record a Full clean — pure-create, no-op rewrite, append-only', () => {
+  const cases = [
+    ['A1 pure create (no rewrite at all — the fidelity loop skips every non-rewrite)',
+      (store) => [{ type: 'create', path: path.join(store, 'made.md'), content: 'brand new destination file' }]],
+    ['A2 no-op rewrite (drops nothing BECAUSE it changes nothing — passes the gate vacuously)',
+      (store) => { const f = path.join(store, 'same.md'); write(f, 'unchanged body'); return [{ type: 'rewrite', path: f, content: 'unchanged body' }]; }],
+    ['A3 append-only rewrite (a gate that only checks DROPS has nothing to check)',
+      (store) => { const f = path.join(store, 'grown.md'); write(f, 'kept line'); return [{ type: 'rewrite', path: f, content: 'kept line\nadded line' }]; }],
+  ];
+  for (const [label, build] of cases) {
+    const { proj, store } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+    try {
+      const r = apply(planFor(proj, store, build(store), { origin: 'wizard-cut' }), { home, now: 777 });
+      assert.strictEqual(r.ok, true, label + ': the transaction itself is legitimate and must still commit');
+      assert.strictEqual(loadState(proj, home).fullCleanAt, undefined,
+        label + ': committed, but nothing was adjudicated — the advisory must not be told a semantic pass judged this store');
+    } finally { clean(proj, home); }
+  }
+});
+
+test('CWK-081 H1 control (non-vacuity): the SAME predicate still records a clean when the wizard actually REMOVED something', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'shrunk.md');
+    write(f, 'fact stays\nverbose wording the outsider judged and dropped');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'fact stays' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777, 'a real cut IS the evidence the record exists to carry');
+  } finally { clean(proj, home); }
+});
+
+test('CWK-081 H1 residue, PINNED so it is not later mistaken for a bug: an all-KEEP Full pass records nothing', () => {
+  // A pass that judged every file and decided to keep all of it removes nothing,
+  // so from in here it is indistinguishable from a pass that never ran. The code
+  // declines to assert the stronger of the two, and the next FULL(capacity)
+  // crossing renders the ASK rather than the advisory. INTENDED, safe direction.
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'all-kept.md');
+    write(f, 'every line here was judged and kept');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'every line here was judged and kept' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, undefined,
+      'indistinguishable from "never judged" in here — so it asks instead of asserting');
+  } finally { clean(proj, home); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-081 A4 / INSPECT F-C1 — THE CENSUS GETS A MACHINE.
+//
+// applyPlan's A4 residue note enumerates every input the function receives and
+// says the list is complete AS OF THAT SIGNATURE. Until now nothing fired when
+// a new one arrived. This fires: it re-derives the census from the function's
+// own body on every run and pins it.
+//
+// GOING RED IS NOT A DEFECT — it means an input was added. Re-run A4's two-part
+// test on the new field (outside the forger's control? able to distinguish a
+// genuine wizard pass?), update the note, THEN update this pin. Never the pin
+// alone.
+// ---------------------------------------------------------------------------
+
+// Extract the census from ONE function body. Three properties, each one a trap
+// this instrument fell into before it was trusted: BOTH spellings (a
+// destructured field never appears as `obj.field`), COMMENTS STRIPPED (the note
+// being checked names plan fields in prose, and counting those reports the code
+// reading what only a comment mentions), and THIS BODY ONLY (a whole-file grep
+// sweeps sibling functions' opts).
+//
+// Named bound: an end-of-line comment on a CODE line is NOT stripped — cutting
+// at a `//` that may sit inside a string or a regex is how a stripper corrupts
+// the thing it measures. Whole-line and block comments are.
+function inputCensus(source, fnName) {
+  const lines = source.split(/\r?\n/);
+  const start = lines.findIndex((l) => new RegExp('^export function ' + fnName + '\\s*\\(').test(l));
+  assert.ok(start >= 0, `${fnName} signature not found — the extractor is aimed at nothing`);
+  let end = -1;
+  for (let i = start + 1; i < lines.length; i++) if (/^\}/.test(lines[i])) { end = i; break; }
+  assert.ok(end > start, `${fnName} closing brace not found`);
+  const body = lines.slice(start, end + 1).join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  const dotted = (o) => [...new Set([...body.matchAll(new RegExp('\\b' + o + '\\.([A-Za-z_$][\\w$]*)', 'g'))].map((m) => m[1]))];
+  const destructured = (o) => {
+    const out = new Set();
+    for (const m of body.matchAll(new RegExp('\\{([^{}]*)\\}\\s*=\\s*' + o + '\\b', 'g'))) {
+      for (const part of m[1].split(',')) {
+        const key = part.trim().split(/[:=]/)[0].trim();
+        if (/^[A-Za-z_$][\w$]*$/.test(key)) out.add(key);
+      }
+    }
+    return [...out];
+  };
+  const merge = (o) => [...new Set([...dotted(o), ...destructured(o)])].sort();
+  return {
+    plan: merge('plan'),
+    opts: merge('opts'),
+    ambient: [...new Set([...body.matchAll(/\b(?:Date\.now|os\.homedir|process\.cwd)\(\)/g)].map((m) => m[0]))].sort(),
+  };
+}
+
+test('CWK-081 A4: the census EXTRACTOR reads both spellings and ignores COMMENTS — either miss makes it report a census of prose', () => {
+  const fixture = [
+    'export function applyPlan(plan, opts = {}) {',
+    '  // a comment that names plan.projectRoot and opts.ghost in prose',
+    '  const { roots, actions } = plan;',
+    '  const home = opts.home || os.homedir();',
+    '  if (plan.origin === CUT) return process.cwd();',
+    '  return actions.length + roots.length + Date.now();',
+    '}',
+  ].join('\n');
+  const c = inputCensus(fixture, 'applyPlan');
+  assert.deepStrictEqual(c.plan, ['actions', 'origin', 'roots'],
+    'DESTRUCTURED fields seen (a dotted-only reader returns [origin]) and the COMMENT\'s projectRoot NOT counted');
+  assert.deepStrictEqual(c.opts, ['home'], "the dotted spelling still is, and the comment's opts.ghost is not");
+  assert.deepStrictEqual(c.ambient, ['Date.now()', 'os.homedir()', 'process.cwd()'], 'the ambient channel is a channel');
+});
+
+test('CWK-081 A4 FOURTH TENSE: applyPlan\'s CODE-READ input census is PINNED — a new input cannot enter a function whose note claims exhaustiveness without reddening here', () => {
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'apply.mjs'), 'utf8');
+  const c = inputCensus(src, 'applyPlan');
+  assert.deepStrictEqual(c.plan,
+    ['actions', 'approvedDrops', 'origin', 'roots', 'sessionId'],
+    'plan.* moved — re-adjudicate the new field against A4 before touching this pin');
+  assert.deepStrictEqual(c.opts,
+    ['cwd', 'home', 'isPlaceholder', 'keepSnapshots', 'now', 'projectRoot', 'txDir'],
+    'opts.* moved — this is the exact case the A4 note used to say nothing fires on');
+  assert.deepStrictEqual(c.ambient, ['Date.now()', 'os.homedir()', 'process.cwd()'], 'the ambient channel moved');
+  assert.strictEqual(c.plan.length + c.opts.length, 12, '12 CODE-READ named inputs — the figure the A4 note publishes');
+});
+
+// THE TRUST ANCHOR, pinned from the other side: `plan.projectRoot` is RECEIVED
+// and deliberately NEVER READ. The anchor comment says so in prose; this makes a
+// future read of it reddening rather than silent, which matters because reading
+// it is precisely the containment bypass the anchor exists to prevent.
+test('CWK-081 A4 / trust anchor: applyPlan never READS plan.projectRoot — a forged plan root must stay unreachable', () => {
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'apply.mjs'), 'utf8');
+  const c = inputCensus(src, 'applyPlan');
+  assert.ok(!c.plan.includes('projectRoot'),
+    'the root is derived from opts.projectRoot || findProjectRoot(...) — if plan.projectRoot is being read, the trust anchor is gone');
 });

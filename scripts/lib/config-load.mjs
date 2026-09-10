@@ -709,6 +709,13 @@ const SAFER_ENUM = {
   writeGuard: ['on', 'snapshot-only', 'off'],
 };
 const SAFER_TRUE = ['localOnly']; // a bool whose SAFE value is true (privacy opt-in)
+// CWK-057 -- the MIRROR of SAFER_TRUE, and the polarity is the whole point.
+// SAFER_TRUE's rule is "a global true wins"; scanEverything needs the opposite,
+// because here `true` is the ESCALATED value: a project file setting it makes us
+// read MORE of the user's memory than their global stance allowed. hooks-safety
+// §9's blast test reads the DIRECTION OF ESCALATION, not the key's name, so a
+// bool whose safe value is false belongs in its own list, never in SAFER_TRUE.
+const SAFER_FALSE = ['scanEverything']; // a bool whose SAFE value is false (escalation opt-in)
 
 // WAVE-2 R2 (2026-07-27): a missing global is NOT "no constraint" -- it is the
 // schema's declared default, which IS the user's stance until they say
@@ -852,6 +859,27 @@ export function mergeSafety(global, project, { globalUnreadable = false } = {}) 
     // global (W2-3) assumes the safe value (true) unconditionally, same
     // rule as the enum loop above.
     if (globalUnreadable || global[key] === true) out[key] = true;
+  }
+  for (const key of SAFER_FALSE) {
+    // A project cannot turn ON a global escalation opt-in. Four properties,
+    // each one a hole this file has actually shipped before:
+    //   W2-3  an unreadable GLOBAL FILE assumes the safe value unconditionally
+    //         -- not the schema default, which can be weaker than what the user
+    //         really had set before the file broke.
+    //   R2    an ABSENT global reads as the schema DEFAULT (false), never a
+    //         `continue` -- the factory-default hole was exactly this, and the
+    //         common case is a user who never wrote a global config at all.
+    //   --    a project's SILENCE never clamps a global `true` away.
+    //   K1    junk on EITHER side gets no say, and the stored value is a real
+    //         boolean -- "check one spelling, act on that same spelling".
+    if (globalUnreadable) { out[key] = false; continue; }
+    // Neither side mentioned it -> write NOTHING. clampedRead already answers
+    // false from the schema, and a merged config for two absent files must stay
+    // {} (a shipped invariant with its own test: a genuinely MISSING config is
+    // {}). Writing a key nobody asked for would have quietly broken it.
+    if (global[key] === undefined && project[key] === undefined) continue;
+    const gv = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
+    out[key] = (gv === true && out[key] === true);
   }
   return out;
 }

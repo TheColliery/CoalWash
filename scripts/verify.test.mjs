@@ -66,16 +66,52 @@ test('verify.mjs REPORTS missing scripts/lib files instead of dying on them', ()
 // desccap-cw-return.md for the manual transcript.
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+// CWK-066 F1: this fixture copies the WHOLE tree, including scripts/lib/ --
+// which is also where tests write short-lived transients (.cw-reexport-hop-*
+// from config-load.test.mjs, the mutation-proof mutants from
+// input-contract.test.mjs). node --test runs files as concurrent processes, so
+// an unfiltered cpSync can enumerate a transient and then lstat it after it is
+// gone: ENOENT, reddening THIS test for something another file did. A bare
+// cpSync races even a DOT-PREFIXED transient -- measured -- because the
+// convention only protects readers that actually honour it. This is that
+// honouring; it is NARROWER than build-plugin.mjs's hasStrayDotDir at :83, for
+// the reason stated immediately below.
+// SCOPED TO WHERE SCRATCH ACTUALLY LIVES, not to dot-names in general. A
+// blanket dot-exclusion is WRONG for this fixture and was caught reddening it
+// on the first attempt: platform-configs/.coalwash.json is a dot FILE that must
+// copy, and plugin/.claude-plugin/ is a dot DIR that must copy. build-plugin.mjs
+// can use a blanket rule because it copies .claude-plugin as its OWN DIST_ITEM,
+// so the dot is the item root; this fixture copies plugin/ wholesale, where the
+// same directory is a CHILD. The transients are all dot-prefixed files directly
+// under scripts/lib -- .cw-reexport-hop-* (config-load.test.mjs) and .mutant-*
+// (input-contract.test.mjs) -- so that, and only that, is what is skipped.
+// SEGMENT COMPARISON, NOT A REGEX, and that is deliberate. The first version of
+// this was /^scripts[\\/]lib[\\/]\./ written through a shell heredoc, which ate
+// the backslash and shipped /^scripts[\/]lib[\/]\./ -- a class containing only
+// the forward slash. path.relative returns BACKSLASHES on Windows, so the
+// predicate matched nothing and the fix was inert on the platform it was
+// measured on. Caught by the session-end canary. Splitting on path.sep has no
+// escape to lose.
+const notScratch = (s) => {
+  const seg = path.relative(REPO, s).split(path.sep);
+  return !(seg[0] === 'scripts' && seg[1] === 'lib' && (seg[2] || '').startsWith('.'));
+};
+
 test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the gate', () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-')));
   try {
     for (const rel of [
       '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
       'platform-configs', 'plugin', 'scripts', 'skills',
+      // The config-key drift gate NAMES its ship-text surfaces rather than
+      // existsSync-filtering them, so an absent one is REPORTED as unreadable
+      // instead of silently shrinking the scan. That is the property worth
+      // having, so the fixture grows to match rather than the gate softening.
+      'README.md', 'SECURITY.md', 'PRIVACY.md', 'CONTRIBUTING.md', 'INPUT-CONTRACT.md',
     ]) {
       const src = path.join(REPO, rel);
       if (!fs.existsSync(src)) continue;
-      fs.cpSync(src, path.join(root, rel), { recursive: true });
+      fs.cpSync(src, path.join(root, rel), { recursive: true, filter: notScratch });
     }
     const dest = path.join(root, 'scripts', 'verify.mjs');
     const run = () => spawnSync(process.execPath, [dest], { encoding: 'utf8' });
@@ -103,10 +139,15 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
     for (const rel of [
       '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
       'platform-configs', 'plugin', 'scripts', 'skills',
+      // The config-key drift gate NAMES its ship-text surfaces rather than
+      // existsSync-filtering them, so an absent one is REPORTED as unreadable
+      // instead of silently shrinking the scan. That is the property worth
+      // having, so the fixture grows to match rather than the gate softening.
+      'README.md', 'SECURITY.md', 'PRIVACY.md', 'CONTRIBUTING.md', 'INPUT-CONTRACT.md',
     ]) {
       const src = path.join(REPO, rel);
       if (!fs.existsSync(src)) continue;
-      fs.cpSync(src, path.join(root, rel), { recursive: true });
+      fs.cpSync(src, path.join(root, rel), { recursive: true, filter: notScratch });
     }
     const pjPath = path.join(root, '.claude-plugin', 'plugin.json');
     const pj = JSON.parse(fs.readFileSync(pjPath, 'utf8'));

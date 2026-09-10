@@ -39,6 +39,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { txDirFor, ensureSelfIgnore } from './apply.mjs';
 import { claudeBaseDir } from './config-load.mjs';
 
@@ -132,8 +133,16 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
       ...(mergedAnchorFile ? { anchorFile: mergedAnchorFile } : {}),
       ...(mergedPendingUser ? { pendingUser: true, pendingSince: mergedPendingSince } : {}),
     });
-    const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), 'utf8');
+    // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
+    // carries (read its comment for the full reasoning; this module cannot import
+    // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
+    // derivable `<dest>.tmp` can be pre-placed by anyone able to write that
+    // directory, and a plain writeFileSync FOLLOWS an alias sitting there. Random
+    // naming removes the precondition; 'wx' is the cross-nature second belt. No
+    // fsync is added here on purpose: this closes a security hole, it does not
+    // change this path's durability posture.
+    const tmp = `${file}.${crypto.randomBytes(12).toString('hex')}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmp, file);
     return true;
   } catch {

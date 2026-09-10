@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ccProjectSlug, ccMemoryDir, parseImports, discoverClassB, discoverRoleMemories, detectPlatform, containedIn, physicalOrNull, physicalForCreate, isCloudPlaceholder } from './class-b.mjs';
 import { measureEntries } from './caliper.mjs';
+import { spawnSync } from 'node:child_process';
 
 // Hermetic: the real machine's CLAUDE_CONFIG_DIR must never leak into
 // sandbox-home resolution (node --test runs each file in its own process).
@@ -23,6 +24,102 @@ function write(p, content = 'x') {
   fs.writeFileSync(p, content, 'utf8');
 }
 
+// ---------------------------------------------------------------------------
+// CWK-082 findings-back — F1 (the cap flag made a FALSE statement) and F2 (an
+// unreadable SUBDIRECTORY dropped content in silence: this unit's own headline
+// defect, reachable again through the door the unit opened).
+// ---------------------------------------------------------------------------
+
+// Make `dir` unreadable, portably, or return null when this box/volume cannot.
+// Capability PROBE, never a process.platform test (the room's own rule: 8.3
+// names, case-folding and ACL enforcement are VOLUME properties). The probe
+// asserts readdirSync actually throws, so an admin shell that bypasses the ACL
+// is detected rather than silently producing a vacuous green.
+function makeUnreadable(dir) {
+  const attempts = [
+    () => { fs.chmodSync(dir, 0o000); return () => { try { fs.chmodSync(dir, 0o700); } catch { /* best effort */ } }; },
+    () => {
+      const who = process.env.USERNAME || process.env.USER || '';
+      if (!who) return null;
+      spawnSync('icacls', [dir, '/deny', `${who}:(OI)(CI)(RX)`], { stdio: 'ignore' });
+      return () => { try { spawnSync('icacls', [dir, '/remove:d', who], { stdio: 'ignore' }); } catch { /* best effort */ } };
+    },
+  ];
+  for (const attempt of attempts) {
+    let restore = null;
+    try { restore = attempt(); } catch { restore = null; }
+    if (!restore) continue;
+    let threw = false;
+    try { fs.readdirSync(dir); } catch { threw = true; }
+    if (threw) return restore;
+    restore();
+  }
+  return null;
+}
+
+test('CWK-082 F2: an UNREADABLE memory subdirectory FLAGS — a partial read must never look like a complete one', (t) => {
+  const { home, proj } = sandbox();
+  let restore = null;
+  try {
+    // Capability probe FIRST, on a throwaway directory outside the store: the
+    // skip decision must precede every assertion, or a skipped run reports a
+    // leg as skipped that actually executed (ONE SKIPPABLE LEG PER TEST).
+    const probeDir = path.join(proj, 'probe-can-lock');
+    write(path.join(probeDir, 'x.md'), 'x');
+    const probeRestore = makeUnreadable(probeDir);
+    if (probeRestore) probeRestore();
+    else { t.skip('this volume/account cannot make a directory unreadable — the arm would be vacuous'); return; }
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# index');
+    write(path.join(mem, 'readable.md'), 'visible');
+    const locked = path.join(mem, 'locked');
+    write(path.join(locked, 'hidden.md'), 'x'.repeat(20000));
+    const before = discoverClassB({ projectRoot: proj, home });
+    assert.ok(before.entries.some((e) => e.path.includes('hidden.md')), 'PRECONDITION: readable, the nested file IS discovered');
+    restore = makeUnreadable(locked);
+    assert.ok(restore, 'the probe said this volume CAN lock a directory, so this must not fail');
+    const after = discoverClassB({ projectRoot: proj, home });
+    assert.ok(!after.entries.some((e) => e.path.includes('hidden.md')), 'PRECONDITION: the content really did become invisible');
+    assert.ok(after.flags.some((f) => /unreadable/i.test(f)),
+      `the loss must be ANNOUNCED, not swallowed: ${JSON.stringify(after.flags)}`);
+  } finally { if (restore) restore(); clean(home, proj); }
+});
+
+test('CWK-082 F2: an ABSENT memory store stays SILENT — the benign case the swallow was written for is not collateral', () => {
+  const { home, proj } = sandbox();
+  try {
+    const d = discoverClassB({ projectRoot: proj, home }); // no memory dir at all
+    assert.deepStrictEqual(d.flags.filter((f) => /unreadable/i.test(f)), [],
+      'a store that was never created is not a store that failed to read — the control that keeps the F2 flag from crying wolf');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-082 F1: 526 files in ONE flat directory are read COMPLETELY and the cap stays SILENT — a flag that fires on a complete read trains the reader to ignore it', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# index');
+    for (let i = 0; i < 526; i++) write(path.join(mem, `f${i}.md`), 'x');
+    const d = discoverClassB({ projectRoot: proj, home });
+    const memEntries = d.entries.filter((e) => e.path.startsWith(mem));
+    assert.strictEqual(memEntries.length, 527, 'the inner loop finishes a directory it starts, so NOTHING was narrowed');
+    assert.deepStrictEqual(d.flags.filter((f) => /memory store capped/.test(f)), [],
+      'and therefore the cap must NOT announce itself — it narrowed nothing');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-082 F1: a walk that GENUINELY narrows still flags, and names what it did not reach', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# index');
+    for (let i = 0; i < 526; i++) write(path.join(mem, 'd' + i, 'f.md'), 'x'); // 526 dirs x 1 file -> the dir cap bites
+    const d = discoverClassB({ projectRoot: proj, home });
+    const flag = d.flags.find((f) => /memory store capped/.test(f));
+    assert.ok(flag, `a walk that stopped early MUST announce it: ${JSON.stringify(d.flags)}`);
+    assert.match(flag, /unvisited|remain/i, `and say what it never reached: ${flag}`);
+  } finally { clean(home, proj); }
+});
 test('ccProjectSlug: every non-alphanumeric char becomes a dash, deterministically', () => {
   const abs = path.resolve(os.tmpdir(), 'A b', 'c.d');
   const slug = ccProjectSlug(abs);
@@ -32,6 +129,90 @@ test('ccProjectSlug: every non-alphanumeric char becomes a dash, deterministical
   if (process.platform === 'win32') {
     assert.strictEqual(ccProjectSlug('C:\\a b\\c'), 'C--a-b-c');
   }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-082 L1 — the memory store's discovery walk. Step 4 was a FLAT readdir, so
+// a *.md one directory down was reachable by NO step (step 3 is recursive but
+// anchored at .claude/rules; steps 1-2 reach a file only through an @import
+// closure). MEASURED by INSPECT §3a: the same 49,515 bytes read 12,384 tok as a
+// SIBLING and 631 tok in a SUBDIR — 11,753 tok invisible, flags EMPTY on both.
+// ---------------------------------------------------------------------------
+
+test('CWK-082 L1: a *.md in a memory SUBDIRECTORY is discovered — the same file one dir down is not a free exit from the gauge', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# index');
+    write(path.join(mem, 'sibling.md'), 'flat recall file');
+    write(path.join(mem, 'notes', 'deep.md'), 'moved one directory down');
+    write(path.join(mem, 'notes', 'deeper', 'deepest.md'), 'moved two directories down');
+    const d = discoverClassB({ projectRoot: proj, home });
+    const paths = d.entries.map((e) => e.path);
+    assert.ok(paths.includes(path.join(mem, 'notes', 'deep.md')), 'a nested recall file is discovered');
+    assert.ok(paths.includes(path.join(mem, 'notes', 'deeper', 'deepest.md')), 'and so is one two levels down');
+    assert.ok(paths.includes(path.join(mem, 'sibling.md')), 'the flat sibling still works (control: the widening did not replace step 4)');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-082 L1 INVARIANT: the widening lands in m.total ONLY — m.alwaysLoaded is byte-identical with and without a nested file', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# index\n' + 'index muscle line\n'.repeat(40));
+    const before = measureEntries(discoverClassB({ projectRoot: proj, home }).entries);
+    // 40 KB of DISTINCT content one directory down — big enough that any leak
+    // into the always-loaded slice would be unmissable.
+    let big = '';
+    for (let i = 0; i < 1200; i++) big += `nested distinct muscle line ${i}\n`;
+    write(path.join(mem, 'notes', 'big.md'), big);
+    const after = measureEntries(discoverClassB({ projectRoot: proj, home }).entries);
+    assert.strictEqual(after.alwaysLoaded.bytes, before.alwaysLoaded.bytes,
+      'the nested file must NOT inflate the main BMI: alwaysLoaded bytes unchanged');
+    assert.strictEqual(after.alwaysLoaded.tokensEst, before.alwaysLoaded.tokensEst,
+      'nor its token estimate');
+    assert.strictEqual(after.alwaysLoaded.files, before.alwaysLoaded.files, 'nor its file count');
+    assert.ok(after.totalBytes > before.totalBytes + 30000,
+      'and the bytes DO land in m.total — the non-vacuity control, without which the three equalities above would pass on a walk that found nothing');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-082 L1: a nested MEMORY.md is a RECALL file, never a second always-loaded index', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# the real index');
+    write(path.join(mem, 'archive', 'MEMORY.md'), '# a moved-aside copy, NOT loaded by the platform');
+    const d = discoverClassB({ projectRoot: proj, home });
+    const nested = d.entries.find((e) => e.path === path.join(mem, 'archive', 'MEMORY.md'));
+    assert.ok(nested, 'it is discovered');
+    assert.strictEqual(nested.alwaysLoaded, false, 'but only the TOP-LEVEL MEMORY.md is the index');
+    assert.strictEqual(nested.kind, 'memory');
+    const top = d.entries.find((e) => e.path === path.join(mem, 'MEMORY.md'));
+    assert.strictEqual(top.alwaysLoaded, true, 'control: the real index is still the index');
+    assert.strictEqual(top.kind, 'memory-index');
+  } finally { clean(home, proj); }
+});
+
+// RETARGETED by the CWK-082 findings-back (F1). The original fixture put 520
+// files in ONE subdirectory — a walk that FINISHES, since the inner loop always
+// completes a directory it starts — so it took `count` past the cap while
+// narrowing NOTHING, and the flag it asserted was a false statement. It now
+// trips the FILE cap with a directory still QUEUED, and proves the loss it
+// announces rather than trusting the counter. The SILENT twin (the same shape
+// minus the queued directory) sits beside the other F1 cells above.
+test('CWK-082 L1: a runaway memory tree is CAPPED and the cap FLAGS — a capped walk is never silently partial', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mem = ccMemoryDir(proj, home);
+    write(path.join(mem, 'MEMORY.md'), '# index');
+    for (let i = 0; i < 520; i++) write(path.join(mem, `f${i}.md`), 'x');
+    write(path.join(mem, 'never-reached', 'deep.md'), 'x'); // queued, never visited
+    const d = discoverClassB({ projectRoot: proj, home });
+    assert.ok(d.flags.some((f) => /memory store capped/.test(f)), `the cap announces itself: ${JSON.stringify(d.flags)}`);
+    assert.ok(!d.entries.some((e) => e.path.includes('deep.md')),
+      'and the flag is TRUE — the queued directory really was left unread');
+  } finally { clean(home, proj); }
 });
 
 test('ccMemoryDir derives <base>/projects/<slug>/memory under the given home', () => {
@@ -562,4 +743,214 @@ test('NESTED-HABITAT: ancestor governance lands in `inherited`, room governance 
     assert.ok(!own.some((p) => p.startsWith(umb + path.sep) && !p.startsWith(room + path.sep)),
       'no ancestor file may remain in entries — everything downstream of entries is a verdict the room is told to ACT on');
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-082 F2-R2 — the flag could not fire where the failure ARRIVES.
+//
+// F2 put the flags at the readdirSync sites. On a read-denied path fs.statSync
+// SUCCEEDS while fs.realpathSync.native throws EPERM, so physicalOrNull returns
+// null ONE CALL EARLIER and the guarded read is unreachable. Measured on the
+// shipped engine before the fix, each with a restore control: a role store went
+// 1 -> 0, a governance file took its whole @import closure with it (3 entries /
+// 1,516 tok -> 0 / 0), a single role file went 2 files -> 1. flags: [] on all
+// three. Probe: scratchpad/r31/probe-f2r2.mjs.
+// ---------------------------------------------------------------------------
+
+// Make `target` (file OR directory) refuse to CANONICALIZE, portably, or return
+// null when this box/volume cannot. Verified by CONSEQUENCE — physicalOrNull
+// must actually go null — so an admin shell that ignores the ACL is detected
+// rather than producing a vacuous green. Capability PROBE, never a
+// process.platform test (ACL enforcement is a VOLUME property).
+function makeUnresolvable(target) {
+  const attempts = [
+    () => { const m = fs.statSync(target).mode; fs.chmodSync(target, 0o000); return () => { try { fs.chmodSync(target, m); } catch { /* best effort */ } }; },
+    () => {
+      const who = process.env.USERNAME || process.env.USER || '';
+      if (!who) return null;
+      const isDir = fs.statSync(target).isDirectory();
+      spawnSync('icacls', [target, '/deny', isDir ? `${who}:(OI)(CI)(RX)` : `${who}:(RX)`], { stdio: 'ignore' });
+      return () => { try { spawnSync('icacls', [target, '/remove:d', who], { stdio: 'ignore' }); } catch { /* best effort */ } };
+    },
+  ];
+  for (const attempt of attempts) {
+    let undo = null;
+    try { undo = attempt(); } catch { undo = null; }
+    if (!undo) continue;
+    if (physicalOrNull(target) === null) return undo;
+    undo();
+  }
+  return null;
+}
+
+// The capability probe runs on a THROWAWAY target before anything is asserted,
+// so a box that cannot deny reads skips before any leg executes (ONE SKIPPABLE
+// LEG PER TEST — a skip decided after a real assertion reports as skipped a leg
+// that in fact ran).
+function canDenyRead(proj, name) {
+  const probe = path.join(proj, name);
+  write(path.join(probe, 'x.md'), 'x');
+  const undo = makeUnresolvable(probe);
+  if (undo) { undo(); return true; }
+  return false;
+}
+
+test('CWK-082 F2-R2: a role STORE that refuses to canonicalize FLAGS — the refusal arrives one call ABOVE the guarded read', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    const roleDir = path.join(proj, '.claude', 'agent-memory', 'coder');
+    write(path.join(roleDir, 'MEMORY.md'), 'index');
+    write(path.join(roleDir, 'craft.md'), 'craft');
+    const before = discoverRoleMemories({ projectRoot: proj, home });
+    assert.strictEqual(before.length, 1, 'PRECONDITION: readable, the store IS discovered');
+    undo = makeUnresolvable(roleDir);
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const sink = [];
+    const denied = discoverRoleMemories({ projectRoot: proj, home, flags: sink });
+    assert.strictEqual(denied.length, 0, 'PRECONDITION: the store really did leave the measure');
+    assert.ok(sink.some((f) => /refused path \(role store coder\)/.test(f)),
+      `a whole role store leaving the measure must be ANNOUNCED: ${JSON.stringify(sink)}`);
+    assert.ok(sink.every((f) => !/[A-Za-z]:[\\/]/.test(f)), `and the flag stays sandbox-invariant: ${JSON.stringify(sink)}`);
+  } finally { if (undo) undo(); clean(home, proj); }
+});
+
+test('CWK-082 F2-R2: a governance FILE that refuses to canonicalize FLAGS — it takes its whole @import closure with it', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true }); // platform must DETECT or the arm is vacuous
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@AGENTS.md\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    write(path.join(proj, 'AGENTS.md'), 'agents');
+    const before = discoverClassB({ projectRoot: proj, home });
+    assert.ok(before.entries.length >= 3, `PRECONDITION: the @import closure formed: ${before.entries.length}`);
+    undo = makeUnresolvable(path.join(proj, 'CLAUDE.md'));
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const denied = discoverClassB({ projectRoot: proj, home });
+    assert.ok(denied.entries.length < before.entries.length,
+      'PRECONDITION: content really did leave the measure');
+    assert.ok(denied.flags.some((f) => /refused path \(governance\): CLAUDE\.md/.test(f)),
+      `the loss must be ANNOUNCED, and NAME the file: ${JSON.stringify(denied.flags)}`);
+  } finally { if (undo) undo(); clean(home, proj); }
+});
+
+test('CWK-082 F2-R2: a single role FILE that refuses to canonicalize FLAGS — one loop deeper than the finding named', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    const roleDir = path.join(proj, '.claude', 'agent-memory', 'coder');
+    write(path.join(roleDir, 'MEMORY.md'), 'index');
+    write(path.join(roleDir, 'craft.md'), 'x'.repeat(1200));
+    const before = discoverRoleMemories({ projectRoot: proj, home });
+    assert.strictEqual(before[0].files, 2, 'PRECONDITION: both files counted');
+    undo = makeUnresolvable(path.join(roleDir, 'craft.md'));
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const sink = [];
+    const denied = discoverRoleMemories({ projectRoot: proj, home, flags: sink });
+    assert.strictEqual(denied[0].files, 1, 'PRECONDITION: the file really did leave the store total');
+    assert.ok(sink.some((f) => /refused path \(role store coder\): coder\/craft\.md/.test(f)),
+      `a file leaving a store total must be ANNOUNCED by name: ${JSON.stringify(sink)}`);
+  } finally { if (undo) undo(); clean(home, proj); }
+});
+
+// THE CONTROL, and it is the whole reason the fix keys on pathExists rather than
+// on "physicalOrNull returned null": an ABSENT candidate is the legitimate,
+// deliberately-silent fail-closed case, and the new flag must not start crying
+// wolf on it. Without this, the cure is worse than the disease — every governance
+// file a project does not have would flag on every gauge.
+test('CWK-082 F2-R2 CONTROL: an ABSENT candidate stays SILENT — fail-closed on nothing is not a loss to announce', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@does-not-exist.md\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    const d = discoverClassB({ projectRoot: proj, home });
+    assert.deepStrictEqual(d.flags.filter((f) => /(unresolvable|refused) path/.test(f)), [],
+      `an @import target that was never created is not content that was lost: ${JSON.stringify(d.flags)}`);
+    assert.ok(d.entries.some((e) => e.path.endsWith('MEMORY.md')), 'and the rest of the closure still resolved');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// R3 findings-back on cdfd519.
+// ---------------------------------------------------------------------------
+
+test('R3-F1: a candidate whose PARENT refuses is REFUSED, not absent — lstat needs traverse permission on the parent, so the boolean probe read it as missing', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@sub/NOTES.md\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    write(path.join(proj, 'sub', 'NOTES.md'), 'notes');
+    const before = discoverClassB({ projectRoot: proj, home });
+    assert.ok(before.entries.some((e) => e.path.endsWith('NOTES.md')),
+      'PRECONDITION: the nested @import target IS discovered while its parent is readable');
+    undo = makeUnresolvable(path.join(proj, 'sub'));
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const denied = discoverClassB({ projectRoot: proj, home });
+    assert.ok(!denied.entries.some((e) => e.path.endsWith('NOTES.md')),
+      'PRECONDITION: the child really did leave the measure');
+    assert.ok(denied.flags.some((f) => /refused path \(governance\): sub\/NOTES\.md/.test(f)),
+      `a child behind a denied parent is REFUSED, not absent: ${JSON.stringify(denied.flags)}`);
+  } finally { if (undo) undo(); clean(home, proj); }
+});
+
+// R3-F3 in BOTH directions. One direction alone would pass on a flag builder
+// that had simply swapped one hardcoded noun for another; only the pair proves
+// the word FOLLOWS the code. UNCOMPARABLE is reachable end-to-end because
+// canonicalOrNull refuses a `\\?\` spelling at its INPUT shape check WITHOUT
+// throwing, so physicalOrNull goes null while lstat and realpath both succeed.
+test('R3-F3: the flag NOUN follows the CODE — a non-throwing refusal keeps `unresolvable`, and it is the only case that does', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const notes = path.join(proj, 'NOTES.md');
+    write(notes, 'notes');
+    const ns = path.toNamespacedPath(notes);
+    let lstatOk = false;
+    try { fs.lstatSync(ns); lstatOk = true; } catch { lstatOk = false; }
+    if (!(lstatOk && physicalOrNull(ns) === null)) {
+      t.skip('this platform does not produce a non-throwing canonicalization refusal — the arm would be vacuous');
+      return;
+    }
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@' + ns + '\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    const d = discoverClassB({ projectRoot: proj, home });
+    assert.ok(d.flags.some((f) => /unresolvable path .*\[UNCOMPARABLE\]/.test(f)),
+      `the genuine non-throwing case KEEPS the word: ${JSON.stringify(d.flags)}`);
+    assert.ok(!d.flags.some((f) => /refused path .*\[UNCOMPARABLE\]/.test(f)),
+      'and never calls it refused — nothing denied it, there was simply nothing comparable to resolve to');
+  } finally { clean(home, proj); }
+});
+
+// The invariant behind both, stated as its own cell so a future third code path
+// cannot pick the wrong noun quietly: the ONLY flag that may say `unresolvable`
+// is the one whose code is UNCOMPARABLE, and every error-code flag says
+// `refused`. This is a property of the whole flag set, not of one site.
+test('R3-F3 INVARIANT: no flag pairs the word `unresolvable` with an ERROR code, on any site', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    write(path.join(proj, '.claude', 'agent-memory', 'coder', 'MEMORY.md'), 'index');
+    undo = makeUnresolvable(path.join(proj, '.claude', 'agent-memory', 'coder'));
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const sink = [];
+    discoverRoleMemories({ projectRoot: proj, home, flags: sink });
+    const d = discoverClassB({ projectRoot: proj, home });
+    const all = [...sink, ...d.flags];
+    assert.ok(all.length > 0, `the fixture must PRODUCE flags or this cell measures nothing: ${JSON.stringify(all)}`);
+    const wrong = all.filter((f) => /unresolvable path/.test(f) && !/\[UNCOMPARABLE\]/.test(f));
+    assert.deepStrictEqual(wrong, [],
+      `every error-code flag must say 'refused'; 'unresolvable' belongs to the non-throwing case alone`);
+  } finally { if (undo) undo(); clean(home, proj); }
 });

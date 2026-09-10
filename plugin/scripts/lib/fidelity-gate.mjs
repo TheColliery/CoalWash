@@ -408,8 +408,11 @@ const FILE_REF_RE = /\b[\w][\w.-]*\.(?:md|mjs|cjs|js|json|jsonc|ps1|txt|yml|yaml
 // grad6 #6 (CoalBoard verdict, regression pair): FILE_REF_RE's `[\w.-]*\.(?:ext)`
 // overlaps the literal dot with the character class walking up to it, so an
 // unbroken run with NO valid trailing extension backtracks per restart point
-// -- measured ~5.6s at 256 KiB of periodic non-matching dots, ~55x over the
-// 100ms Phoenix #3 seatbelt budget. `evidenceAnchors` above never hits this
+// -- measured ~5.6s at 256 KiB of periodic non-matching dots. (That figure was
+// once stated as "~55x over the 100ms Phoenix #3 seatbelt budget"; the 100ms
+// TOTAL-wall-clock cap is RETIRED — board #24, never restore one — so the
+// comparison is to Phoenix #3's <=5ms of ADDED work, which 5.6s clears by any
+// reading. The measurement is unchanged; only the retired yardstick is gone.) `evidenceAnchors` above never hits this
 // (it only ever regexes a <=~400-char marker window); the one unbounded
 // caller is `nextEvTokens` in checkFidelity below, which must scan the WHOLE
 // `next` text (a surviving token can relocate anywhere), so it cannot borrow

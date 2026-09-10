@@ -54,6 +54,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zero-dep builtin)
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
@@ -84,7 +85,7 @@ import { TIER1_KEEP_ALL_MS } from './retention.mjs'; // the keep-all floor, for 
 // from the session gauge's cached verdict (caliper state; zero new I/O
 // beyond one small state read). caliper imports only config-load/jsonc, so
 // this adds no module cycle.
-import { loadState } from './caliper.mjs';
+import { loadState, markFullClean } from './caliper.mjs';
 // Wikilink-orphan advisory (the git filter-branch cross-reference lesson):
 // ONE reference-detection implementation, shared with RE-TIER — never
 // duplicated. NOTE the same deliberate module-cycle shape as keeps.mjs/
@@ -117,14 +118,58 @@ export function globalLockPath(home = os.homedir()) {
 // (estate-archive -> apply -> retier -> estate-archive): both are function
 // DECLARATIONS bound at CALL time, so ESM resolves it safely — identical
 // reasoning to the keeps/bins/retier cycles documented in the header.
+// U7 HIGH (CB board 2026-08-31, judge-confirmed at source on `017d998`) — the
+// class-B TWIN of the class-A blob-symlink arbitrary-write already closed at
+// `5ba5254`. This was `fs.openSync(p, 'w')` straight onto the destination, and a
+// 'w' open FOLLOWS a symlink sitting there; `atomicWrite` (now folded in below)
+// additionally handed it a fully DERIVABLE temp, `<target>.coalwash-tmp`. So
+// anyone able to write the directory holding a class-B memory file could
+// pre-place an alias at that path and have the wash push the file's bytes
+// through it, outside every approved root, with the run still reporting ok:true.
+// Reproduced live before the fix with an unprivileged hardlink stand-in
+// (apply.test.mjs's U7 HIGH test — file symlinks are EPERM on this box).
+//
+// THE CURE IS THE ONE THIS ROOM ALREADY PROVED, ported not reinvented
+// (node/runtime.md §5; explode.mjs's four write sites): open an O_EXCL fresh
+// inode at an UNPREDICTABLE temp, then `renameSync` it into place — rename
+// REPLACES a directory entry instead of writing through whatever sits there, so
+// the destination is never opened for write at all.
+//
+// WHY THE EXCL SITS ON THE TEMP AND NOT ON `p` — the trap that makes the naive
+// fix wrong: callers legitimately OVERWRITE (writeJournal rewrites the same path
+// on every step; the estate `.gz` recovery write re-lands a dest), and 'wx' on
+// the destination would fail closed on a CORRECT operation. On the temp, a
+// pre-existing entry is genuinely an error. Same split `5ba5254` argued.
+//
+// The two guards are CROSS-NATURE by design: the random name removes the
+// PRECONDITION (nothing can be pre-placed at a path an attacker cannot predict),
+// O_EXCL defeats a race that guesses right anyway. The `.coalwash-tmp` marker is
+// kept so a crash-stranded scratch file is still attributable to this tool.
+//
+// #57 FILESYSTEM-SEMANTICS-ASSUMPTION (MASTER-LOSS-TAXONOMY) moves HERE with the
+// rename it governs: rename is atomic ONLY within one directory on one
+// filesystem — cross-device it throws EXDEV (the Claude Code #32533 class). The
+// temp is a string SUFFIX on `p`, so same-directory holds BY CONSTRUCTION, not
+// by inspection. An EXDEV (or any other failure) reaps the temp HERE, at the
+// site that created it — a name-based sweep at a distance cannot find an
+// unpredictable name — and surfaces to applyPlan's step catch -> whole-run
+// rollback: fail-closed, destination untouched, no stranded temp.
 export function writeDurable(p, data) {
-  const fd = fs.openSync(p, 'w');
+  const tmp = `${p}.${crypto.randomBytes(12).toString('hex')}.coalwash-tmp`;
+  let fd = null;
   try {
+    fd = fs.openSync(tmp, 'wx');
     fs.writeSync(fd, data);
     fs.fsyncSync(fd);
-  } finally {
     fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmp, p);
+  } catch (e) {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* best-effort */ } }
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* best-effort reap */ }
+    throw e;
   }
+  fsyncDirBestEffort(path.dirname(p));
 }
 export function fsyncDirBestEffort(dir) {
   // POSIX: makes the rename itself durable. Windows: opening a dir fd throws —
@@ -134,23 +179,11 @@ export function fsyncDirBestEffort(dir) {
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   } catch { /* best-effort */ }
 }
-// Atomic replace: write sibling .tmp -> fsync -> rename over target.
-// #57 FILESYSTEM-SEMANTICS-ASSUMPTION (MASTER-LOSS-TAXONOMY): rename is atomic
-// ONLY within one directory on one filesystem — cross-device it throws EXDEV
-// (the Claude Code #32533 class). tmp derives from target, so same-dir holds
-// by construction; the assert keeps the invariant EXPLICIT against a future
-// edit pointing tmp at os.tmpdir(). An EXDEV (or any rename failure) surfaces
-// to applyPlan's step catch -> whole-run rollback, which also sweeps the
-// `.coalwash-tmp` sibling — fail-closed, target untouched, no stranded tmp.
-function atomicWrite(target, content) {
-  const tmp = target + '.coalwash-tmp';
-  if (path.dirname(tmp) !== path.dirname(target)) {
-    throw new Error(`atomicWrite invariant: tmp must be a same-directory sibling of ${target}`);
-  }
-  writeDurable(tmp, content);
-  fs.renameSync(tmp, target);
-  fsyncDirBestEffort(path.dirname(target));
-}
+// `atomicWrite` is GONE, folded into writeDurable above (U7): its whole body —
+// sibling temp, fsync, rename over the target, dir fsync — is now what every
+// durable write does, so a separate wrapper was one derivable-temp footgun with
+// a second name on it. The one caller (the rewrite step) calls writeDurable
+// directly; the #57 EXDEV invariant moved with the rename that owns it.
 
 // 0h: what a rewrite CUT — the lines present in the gated original and
 // absent from the rewritten text (blank lines skipped; set-membership, so a
@@ -1105,15 +1138,25 @@ export function applyPlan(plan, opts = {}) {
         for (const m of manifest) {
           try { fs.copyFileSync(path.join(snapDir, m.snap), m.original); } catch { failed++; /* keep restoring the rest */ }
         }
-        // A created file (or a stranded .coalwash-tmp sibling) the rollback CANNOT
-        // remove LINGERS in the store = a mixed state, exactly like a failed
-        // snapshot restore — count it (EPERM/EBUSY: AV or cloud-sync holding a
-        // no-FILE_SHARE_DELETE handle, the win32 hazard) so the status below is
-        // honestly rollback-failed, never a clean rolledBack:true over a lingering
-        // file. force:true never throws on a missing target, so a throw here means
-        // a real removal failure; the existsSync belt counts it ONLY if it lingers.
+        // A created file the rollback CANNOT remove LINGERS in the store = a mixed
+        // state, exactly like a failed snapshot restore — count it (EPERM/EBUSY: AV
+        // or cloud-sync holding a no-FILE_SHARE_DELETE handle, the win32 hazard) so
+        // the status below is honestly rollback-failed, never a clean
+        // rolledBack:true over a lingering file. force:true never throws on a
+        // missing target, so a throw here means a real removal failure; the
+        // existsSync belt counts it ONLY if it lingers.
+        //
+        // U7: the companion per-action `<phys>.coalwash-tmp` sweep is GONE, not
+        // forgotten. Two reasons, and the second is the one that matters: (1) the
+        // temp name is now unpredictable, so a name-derived sweep at a distance
+        // cannot find it — writeDurable reaps its own temp in its own catch, at the
+        // site that created it, which reaches every in-process failure the old
+        // sweep reached; (2) a stranded scratch sibling was never the class the two
+        // counters above exist for — those count a mixed STATE of the user's data
+        // (a restore that failed, a plan-created file still present). A leftover
+        // temp is cosmetic litter beside an UNTOUCHED target, and a process crash
+        // skipped the old sweep just as completely.
         for (const p of createdPaths) { try { fs.rmSync(p, { force: true }); } catch { if (fs.existsSync(p)) failed++; } }
-        for (const a of actionable) { const tmp = a.phys + '.coalwash-tmp'; try { fs.rmSync(tmp, { force: true }); } catch { if (fs.existsSync(tmp)) failed++; } }
         // A PARTIAL rollback must NOT be marked terminal-clean, or a cold-start
         // recoverDangling would clear the journal over a mixed on-disk state.
         journal.status = failed ? 'rollback-failed' : 'rolled-back';
@@ -1142,7 +1185,7 @@ export function applyPlan(plan, opts = {}) {
             throw new Error(`external writer detected: create target ${a.phys} appeared mid-transaction`);
           }
           if (a.type === 'rewrite' || a.type === 'create') {
-            atomicWrite(a.phys, a.content);
+            writeDurable(a.phys, a.content); // U7: temp is O_EXCL + unpredictable; the destination is never opened for write
             if (a.type === 'create') createdPaths.push(a.phys);
             // verify: what landed is byte-for-byte what the plan said (blueprint step 3 "verify")
             const back = fs.readFileSync(a.phys);
@@ -1185,6 +1228,13 @@ export function applyPlan(plan, opts = {}) {
       // recovery copy and NO report line, indistinguishable from a clean run.
       const binName = plan.origin === 'wizard-cut' ? STORE_OLD_NAME : FAT_BIN_NAME;
       const binOrigin = plan.origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut';
+      // CWK-081 H1 — how many actions actually REMOVED content. This loop
+      // already derives that per action for the bin (`cut`); counting it costs
+      // one integer and is the evidence the Full-clean record needs below.
+      let removedCount = 0;
+      // CWK-081 (b): the FILES those removals landed on — a Set, because one file
+      // can carry several actions and the record is about coverage, not volume.
+      const removedFrom = new Set();
       for (const a of actionable) {
         if (a.type === 'create') continue; // an addition cut nothing
         // A DELETE banks the BUFFER, never a decode of it (G3-3). `baseBuf` is
@@ -1197,6 +1247,8 @@ export function applyPlan(plan, opts = {}) {
         // type there and recordBinItem encodes it once, at the boundary.
         const cut = a.type === 'delete' ? a.baseBuf : removedLines(a.baseBuf.toString('utf8'), a.content).join('\n');
         if (!cut.length) continue;
+        removedCount++; // CWK-081 H1: this action removed something
+        removedFrom.add(a.phys); // CWK-081 (b): and THIS is the file it removed it from
         const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
         if (binId === null) {
           flagged.push({
@@ -1211,6 +1263,133 @@ export function applyPlan(plan, opts = {}) {
       // un-commits the run; the fields just stay empty.
       let deadLinks = [];
       try { deadLinks = deadLinkScan(actionable, physRoots, txDir); } catch { /* advisory only */ }
+
+      // CWK-081 (1) — record the GATE-PASSED FULL CLEAN. The conductor's
+      // FULL(capacity) branch reads it: before it exists, the store's muscle is
+      // UNMEASURED and the advisory that asserts otherwise is ineligible.
+      //
+      // ⚠️ THE PREDICATE IS "SOMETHING WAS REMOVED", NOT "ok:true" — INSPECT H1,
+      // and the first version of this block got the equivalence WRONG. It argued
+      // that an `ok:true` return on a wizard-cut plan IS a gate-passed Full-tier
+      // transaction, because the fidelity block refuses every unapproved drop.
+      // That proves the gate did not REFUSE. It never proved anything was
+      // ADJUDICATED: the fidelity loop skips every non-rewrite
+      // (`if (a.type !== 'rewrite') continue`), and a rewrite that drops nothing
+      // BECAUSE IT CHANGES NOTHING passes it vacuously. MEASURED through this
+      // very function: a PURE-CREATE plan, a NO-OP rewrite and an APPEND-ONLY
+      // rewrite all returned ok:true and all stamped the record — three ordinary
+      // shapes an honest wizard emits, none of them forgery. The advisory then
+      // TOLD the user "the semantic pass that judges the rest RAN and kept this
+      // content", which is the assertion-without-measurement that change (1)
+      // exists to remove, restored through its own eligibility fact. That
+      // sentence is gone as of round-2 F1 — see the COVERAGE residue below.
+      //
+      // So the record keys on `removedCount` — at least one action whose
+      // baseline carried content the result does not. A semantic pass that
+      // judged text and acted on it removes something by construction; a
+      // transaction that removed nothing has adjudicated nothing this function
+      // can see.
+      //
+      // RESIDUE, named rather than implied away: a Full pass that genuinely
+      // judged every file and decided to KEEP all of it removes nothing, so it
+      // does not stamp, and the next FULL(capacity) crossing renders the ASK
+      // instead of the advisory. That is the SAFE direction and the honest one —
+      // this function cannot distinguish "judged and kept everything" from
+      // "never judged", so it declines to assert the stronger of the two. A
+      // delete of an already-empty file counts as nothing removed for the same
+      // reason (`cut.length` is 0), same direction.
+      //
+      // RESIDUE, COVERAGE — INSPECT round-2 F1, and it is the one this list did
+      // NOT name until it was found. `removedCount` counts ACTIONS, never files
+      // judged: a plan that rewrites one file of three and removes one line from
+      // it stamps, while the other two were judged by nothing (INSPECT's cell C1,
+      // 777 on both engines). This function is handed a PLAN and can never see
+      // whether a PASS covered the store, so the fix landed on the CLAIM instead
+      // — the advisory now says a pass ran and removed something under the gate,
+      // and states outright that it establishes nothing about files that pass
+      // never touched. The predicate is unchanged, deliberately: widening it
+      // toward coverage needs an adjudication receipt from the wizard layer that
+      // does not exist, and a wider predicate over-claims on a consent-adjacent
+      // surface where under-claiming is the safe direction.
+      //
+      // COVERAGE, residue (b), NOW RECORDED RATHER THAN ONLY DISCLAIMED. This
+      // function cannot see whether a PASS covered the store — but it can see,
+      // exactly, which files it REMOVED CONTENT FROM, and that is a fact rather
+      // than an inference. `removedFrom` carries them to the record, the advisory
+      // names them, and a file absent from that list is visibly outside the claim
+      // instead of silently inside it. The predicate is deliberately UNCHANGED —
+      // scoping the claim is not the same as gating on coverage, and gating would
+      // need the discovered store, which is not among this function's inputs.
+      //
+      // A4 — STILL OPEN, AND NOW MEASURED RATHER THAN ASSERTED. `plan.origin` is
+      // untrusted plan data (the trust-anchor comment above), so a forged origin
+      // on a plan that DOES remove something still stamps.
+      //
+      // THE CENSUS, AND ITS BOUND (INSPECT F-C1). CWK-081 round 3 wrote that it
+      // "enumerated EVERY input this function receives" and listed EIGHT. The
+      // CONCLUSION was right; the coverage CLAIM was not. INSPECT re-derived the
+      // set from this function's own body, found the list short, adjudicated every
+      // missing channel, and each failed the same two-part test — so the verdict
+      // below rests on the whole set, never on the eight. Re-derived again here,
+      // independently, and it corrects INSPECT's figure by one (below).
+      //
+      //   RECEIVED FROM THE PLAN (method.md's documented shape + approvedDrops) — 6:
+      //     origin · sessionId · roots · actions · approvedDrops   READ by this code
+      //     projectRoot                                            RECEIVED AND NEVER READ
+      //   RECEIVED FROM THE CALLER (opts) — 7, all read:
+      //     cwd · home · isPlaceholder · keepSnapshots · now · projectRoot · txDir
+      //   AMBIENT — 3:  Date.now() · os.homedir() · process.cwd()
+      //
+      // THE ONE-FIELD CORRECTION IS LOAD-BEARING, not bookkeeping. INSPECT counted
+      // 13 CODE-READ named inputs; the code reads 12. `plan.projectRoot` appears in
+      // this function ONLY inside comments — the trust anchor above deliberately
+      // ignores it and derives the root from `opts.projectRoot || findProjectRoot(...)`.
+      // It is still an INPUT (a forger puts it in PLAN.json), so it belongs in the
+      // census; it simply cannot close A4 for a STRONGER reason than the others:
+      // not merely "the forger types it" but "nothing here ever reads it".
+      //
+      // ⚠ THE LIST IS COMPLETE AS OF THIS SIGNATURE AND NOWHERE ELSE — a measurement
+      // of ONE revision, never a standing property. That used to be all this note
+      // could say; `apply.test.mjs` now PINS the code-read census, so a new input
+      // reddens a cell instead of entering a function whose note claims
+      // exhaustiveness. Re-derive rather than trust, and mind the two traps this
+      // note's own instrument fell into, in order:
+      //   (1) READ BOTH SPELLINGS. `roots` and `actions` arrive by DESTRUCTURING
+      //       (`const { roots, actions } = plan`), so a `plan.` grep alone returns
+      //       three where the code reads five.
+      //   (2) STRIP COMMENTS FIRST. This very paragraph names plan fields in prose;
+      //       an extractor over the raw body counts them and reports the code
+      //       reading what only a comment mentions. That is how the 13 arose.
+      //   (3) THIS FUNCTION'S BODY ONLY. Grepping the file sweeps sibling
+      //       functions' `opts` and produces a census as wrong as the one it checks.
+      //
+      // THE VERDICT, unchanged, resting on all sixteen received channels: NONE is
+      // both outside the forger's control AND able to distinguish a genuine wizard
+      // pass. Every plan field is payload the forger types. Every opts field comes
+      // from the CALLER, and on the file-driven path (method.md:
+      // `applyPlan(JSON.parse(PLAN.json))`) the caller IS the agent that wrote the
+      // plan — isPlaceholder/keepSnapshots/txDir are hermetic-test seams that path
+      // never passes at all. The ambient three are the agent's own clock, home and
+      // working directory. The single caller that cannot forge is retier.mjs, which
+      // passes the literal in code and never reads it from a file.
+      //
+      // SO IT IS UNCLOSEABLE AT THIS CALL SITE, not merely unclosed: closing it
+      // needs a trusted channel that does not exist, and no threshold on "how much
+      // removal counts as a semantic pass" is derivable from anything visible here
+      // — an arbitrary number would be a fix's costume, which this room has paid
+      // for before. Blast stays bounded to WHICH ADVISORY TEXT one FULL crossing
+      // renders — never a delete, never a spend. NOTE, because it is the tempting
+      // wrong read: the file list below does NOT narrow this. A forger who can set
+      // `origin` can also fabricate the removals the list is built from, so the
+      // list strengthens the HONEST case (coverage) and not the dishonest one.
+      // Pinned by its own test so a future change cannot make it merely LOOK closed.
+      //
+      // Post-commit and fail-silent by construction (same discipline as the
+      // advisory above): a state-write failure must never un-commit a run that
+      // already succeeded — it only costs the next crossing one ask.
+      if (plan.origin === 'wizard-cut' && removedCount > 0) {
+        try { markFullClean(home, projectRoot, now, plan.sessionId, [...removedFrom]); } catch { /* never un-commits */ }
+      }
 
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };
     } finally {

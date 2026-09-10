@@ -80,6 +80,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 // findProjectRoot/physicalDir: the room's ONE root resolver — the stray-state
 // detector re-uses it rather than hand-rolling a second walk.
 import { claudeBaseDir, findProjectRoot, physicalDir } from './config-load.mjs';
@@ -129,16 +130,56 @@ export const MECH_DUP_MIN_CHARS = 24;
 // absolute difference reads as a huge BMI swing on a near-empty project.
 // ~10KB of ASCII text -> ~2500 tok (the tokensEstFromBytes heuristic, /4).
 export const FLOOR_MIN_TOKENS = 2500;
-// Rough placeholder for the session's usable per-turn window — NOT a verified
-// per-model capacity claim (Claude sessions run anywhere from a 200k standard
-// to a 1M-token beta ceiling depending on tier/org; never silently assert
-// either as given). Recalibrated 2026-07-09 off the first real dogfood run (a
-// healthy ~29k-tok floor and a ~44k-tok bootstrap footprint both needed
-// headroom the stale 200k-era guess didn't give, which would otherwise false-
-// FULL on plain muscle forever). Still a fuzzy placeholder by design
-// (blueprint §5 — capacity is inherently approximate); refine later via a
-// per-platform capacity probe, never by guessing higher again.
-export const CAPACITY_TOKENS = 600000;
+// CWK-081 — THE CONSERVATIVE CAPACITY DEFAULT, DERIVED, not inherited. This is
+// the "unknown -> conservative estimate + flag" branch of the blueprint's own
+// capacity contract (COALWASH_BLUEPRINT.md:115); the DISCOVERY branch is
+// discoverCapacity() below, and every caller that can reach it should.
+//
+// THE TWO TERMS, each sourced rather than guessed:
+//   (a) 200,000 — the SMALLEST window a supported Claude Code session runs on.
+//       This file's own prior comment already recorded the range ("a 200k
+//       standard to a 1M-token beta ceiling depending on tier/org"), so the
+//       lower bound is this room's own recorded figure, not a fresh guess.
+//       SMALLEST is the conservative direction for a CEILING: assuming the 1M
+//       beta on a 200k session leaves CoalWash silent while the session is
+//       genuinely out of room (the CWK-086 shape — a governance layer that grew
+//       past what the platform could load, with nothing warning), whereas
+//       assuming 200k on a 1M session costs one early FULL band, which routes
+//       to a free mechanical sweep and one ask, never to data loss.
+//   (b) 33,000 — the AUTO-COMPACT RESERVE, measured by this room's own record:
+//       a 1M-window model reports 967k usable in the platform's own /context
+//       readout. The denominator is the USABLE window, never the raw one, so
+//       the reserve is subtracted here once and every consumer inherits it —
+//       INCLUDING discoverCapacity()'s discovery branch, which takes the same
+//       absolute figure off whatever raw window it finds.
+//       THE TRANSFER IS THE UNTRACEABLE STEP, and INSPECT M1 is right that
+//       calling both terms "sourced" hid it. The reserve is TREATED AS ABSOLUTE
+//       — the same 33,000 subtracted from a 200,000 window as from a 1,000,000
+//       one — and the evidence for absoluteness is n=1, AT 1M. Nothing in the
+//       cited source establishes that the reserve does not scale with the
+//       window. If it were instead PROPORTIONAL (~3.3%), the usable 200k window
+//       would be ~193,400 and this default is ~26,400 tok more conservative
+//       than its own arithmetic implies. That is the SAFE direction (it
+//       over-fires FULL, which routes to a free sweep and one ask, never to
+//       data loss), so it is not a live defect — it is a step a reader must be
+//       able to trace, and now can. Re-derive it the moment a second window
+//       size can be measured; until then this term is a HYPOTHESIS exactly as
+//       the constant below already says of itself.
+//
+// WHY 600000 IS RETIRED AND THIS IS NOT "GUESSING LOWER". The 2026-07-09
+// recalibration raised the stand-in to 600k because the 200k-era number
+// "false-FULLed on plain muscle forever" — but that false-FULL came through the
+// `fullPercent x capacity` PROXY (6% of 200k = 12k, which a healthy ~29k floor
+// clears trivially), and task #4 RETIRED that proxy: the wall is now the RAW
+// capacity line (`footprintTokens >= capacityTokens`). So the reason the number
+// was raised no longer exists, and 600k was left standing as an unexamined
+// inheritance — the thing this row was opened to stop.
+//
+// STILL A HYPOTHESIS. It is a DEFAULT, not a measurement, which is exactly why
+// discoverCapacity() reports its `source` and callers surface it (gaugeLine).
+export const CAPACITY_STANDARD_WINDOW_TOKENS = 200000;
+export const CAPACITY_AUTOCOMPACT_RESERVE_TOKENS = 33000;
+export const CAPACITY_TOKENS = CAPACITY_STANDARD_WINDOW_TOKENS - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS;
 export const CC_INDEX_CAP_BYTES = 25 * 1024; // CC memory-index platform cap class (25KB)
 export const CC_INDEX_CAP_LINES = 200; // CC memory-index platform cap class (200 lines)
 export const RUN_COST_MULTIPLIER = 3; // one Full run ~ store read x2 (outsider+insider) + rewrite
@@ -159,6 +200,16 @@ export const REGAUGE_DELTA_TOKENS = 500;
 // among the excess never widens past the existing next-SessionStart catch),
 // never breaks anything.
 export const ALWAYS_LOADED_PATHS_CAP = 200;
+
+// CWK-057 -- the two SCAN-scope cuts this room actually has, and the ONE place
+// the "ON = no cut" rule lives. Kept as a pure function of a BOOLEAN (never of
+// the config object) so caliper stays free of a config-schema import, and so a
+// caller is forced to have already read the key through the clamped cascade.
+// Strict `=== true`: only a real boolean arms it, never truthy junk.
+export const READ_BUDGET_DEFAULT = 262144;
+export function readBudgetFor(scanEverything, fallback = READ_BUDGET_DEFAULT) {
+  return scanEverything === true ? Infinity : fallback;
+}
 const DAY_MS = 86400000;
 
 // ---------------------------------------------------------------------------
@@ -321,10 +372,17 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
 // (reproduce by timing statOnlyFootprintBytes vs discoverClassB+measureEntries;
 // the WARP-HOLE BEHAVIOR is pinned in conductor.test.mjs — the timing itself is
 // deliberately NOT a flaky in-suite ms-assertion): ~0.15-0.3ms on the
-// flock's heaviest room (CoalWash's own, 11 always-loaded files) vs ~7-18ms
-// for a full discoverClassB+measureEntries re-gauge on the SAME/a bigger
-// root — cheap enough to run on EVERY Stop call, unlike the full pass, which
-// blows the Phoenix #3 <=5ms happy-path budget if paid unconditionally. A
+// flock's heaviest room (CoalWash's own, 11 always-loaded files) — cheap enough
+// to run on EVERY Stop call, unlike a full discoverClassB+measureEntries
+// re-gauge, which blows the Phoenix #3 <=5ms happy-path budget if paid
+// unconditionally.
+// ⚠ THE FULL-PASS FIGURE THAT USED TO SIT HERE (~7-18ms) IS RETIRED AS A LIVE
+// CLAIM (CWK-082 F4): re-measured on the REAL call at this box, discoverClassB
+// alone runs several times that. The numbers, their n and their derivation live
+// in the findings-back record, never pinned in a comment where they rot — and
+// the re-measurement only strengthens the design, since the full pass is even
+// more worth gating than the old figure suggested. The RATIO is the point here,
+// not either number: the stat-only gate is cheap, the full pass is not. A
 // path that no longer exists contributes 0 (folds naturally into the delta —
 // a legitimate shrink signal, never a special case).
 export function statOnlyFootprintBytes(paths) {
@@ -509,7 +567,15 @@ export function sessionsPerDay(stamps, now = Date.now()) {
 // ABSENT envelope => demotable 0 => condition 2b FAILS => the wizard ask
 // cannot arm. Fail-closed toward SILENCE, the task-#4 direction: a missing
 // input must never manufacture an ask.
-export function gaugeVerdict({ measure, wasOver = false, wasEconLatched = false, stamps, envelope = null } = {}) {
+// `capacity` (CWK-081) = discoverCapacity()'s output, the CALLER's to supply —
+// the same module boundary as `envelope` above: caliper stays free of the I/O
+// decision about WHEN to probe (Phoenix #3: the probe rides the two FULL-gauge
+// sites that already pay for a measure, never the Stop hot path). ABSENT =>
+// the derived conservative default, which is what every pre-CWK-081 caller and
+// test already gets by construction.
+export function gaugeVerdict({ measure, wasOver = false, wasEconLatched = false, stamps, envelope = null, capacity = null } = {}) {
+  const capacityTokens = (capacity && Number.isFinite(capacity.capacityTokens)) ? capacity.capacityTokens : CAPACITY_TOKENS;
+  const capacitySource = (capacity && typeof capacity.source === 'string') ? capacity.source : 'conservative-default';
   const footprintTokens = measure.alwaysLoaded.tokensEst;
   const mechFatTokens = (measure.mechFat && Number.isFinite(measure.mechFat.tokensEst)) ? measure.mechFat.tokensEst : 0;
   const spd = sessionsPerDay(stamps);
@@ -543,6 +609,7 @@ export function gaugeVerdict({ measure, wasOver = false, wasEconLatched = false,
   const verdict = bandVerdict({
     footprintTokens,
     mechFatTokens,
+    capacityTokens,
     indexBytes: measure.index.bytes,
     indexLines: measure.index.lines,
     wasOver,
@@ -569,9 +636,44 @@ export function gaugeVerdict({ measure, wasOver = false, wasEconLatched = false,
   return {
     verdict, fatTokens, mechFatTokens, muscleTokens: verdict.muscleTokens, demotableTokens,
     economical, perDay, breakEvenDays, reorgPerDay, reorgBreakEvenDays,
+    // CWK-081: the capacity actually used for THIS verdict, and where it came
+    // from. Returned so the flag reaches a surface a reader can act on
+    // (gaugeLine) instead of dying inside the band arithmetic.
+    capacityTokens, capacitySource,
   };
 }
 
+// CWK-082 L2 — THE EXTERNALIZABLE RESIDUE. The FULL(externalize) advisory tells
+// a user to relocate muscle out of the always-loaded set BY HAND, and that is
+// doctrine, not a defect: prohibition #31 (SKILL.md:37/:157, method.md:30) says
+// externalize is pure INFORMATION because CoalWash owns nothing in the estate.
+// SKILL.md:157 already states the exposure in ship-text — "content moved by hand
+// leaves the always-loaded set with no report line". So the missing half was
+// never a GUARD on the move; it was that nothing COUNTED or NAMED the residue
+// afterwards. This is that accounting: which always-loaded entries actually
+// carry the weight a hand-move would have to come out of, largest first.
+//
+// Deliberately ALWAYS-LOADED ONLY. A recall-tier file already costs the session
+// nothing, so naming it would invite a move that saves zero tokens and only
+// makes the store harder to find things in.
+//
+// A DISPLAY field with no decision branching on it, so it rides lastVerdict the
+// same way capacitySource does; the cap is small because that cache is
+// persisted state, not a report.
+export function externalizableResidue(entries, { top = 3 } = {}) {
+  const src = Array.isArray(entries) ? entries : [];
+  const out = [];
+  for (const e of src) {
+    if (!e || e.alwaysLoaded !== true || typeof e.path !== 'string') continue;
+    const bytes = Number(e.bytes);
+    // An unreadable size is DROPPED, never rendered as "~0 tok" — a zero on
+    // this surface reads as "nothing to move here", which is a claim.
+    if (!Number.isFinite(bytes) || bytes <= 0) continue;
+    out.push({ path: e.path, tokensEst: tokensEstFromBytes(bytes) });
+  }
+  out.sort((a, b) => b.tokensEst - a.tokensEst);
+  return out.slice(0, Math.max(0, Number(top) || 0));
+}
 // ---------------------------------------------------------------------------
 // OS-CITIZEN STATE LAYOUT (task #13, "well-behaved OS citizen — one namespace").
 // PER-PROJECT state RIDES the CC memory dir: it lives BESIDE the platform's own
@@ -654,6 +756,73 @@ export function oldStatePath(home = os.homedir()) {
   return path.join(claudeBaseDir(home), '.coalwash-state.json');
 }
 
+// ---------------------------------------------------------------------------
+// CWK-081 — THE CAPACITY ADAPTER. The blueprint's own contract, verbatim
+// (COALWASH_BLUEPRINT.md:115): "The skill DISCOVERS the platform's context
+// capacity (adapter) -> converts % to a concrete KB ceiling for that machine;
+// unknown -> conservative estimate + flag." Both branches are here, and the
+// UNKNOWN branch is FLAGGED rather than silent — a silent guess is the defect
+// this replaces, not a fallback it is allowed to keep.
+//
+// THE PROBE ORDER IS WRITTEN DOWN so a platform that starts exposing a window
+// is picked up BY CONSTRUCTION rather than by someone remembering to look:
+//   P1  <claudeBase>/stats-cache.json -> modelUsage[<model>].contextWindow.
+//       Real, structured, in-sandbox (Phoenix #10: ~/.claude/), zero-dep, no
+//       network, one small JSON. MEASURED ON THIS BOX 2026-09-10: the field
+//       EXISTS for all 9 models the cache knows and every value is 0 — the
+//       platform aggregates the key but never populates it here. So the probe
+//       is correct and finds nothing, which is a RESULT, not a failure.
+//   ..  (no P2 today.) Deliberately NOT probed, each for a stated reason:
+//       ~/.claude.json is UNTOUCHABLE (AR-40 — a human-consent surface, read
+//       or write); the session transcripts carry no modelUsage record at all
+//       (swept: every `contextWindow` hit in them is prose from the injected
+//       governance text); a `claude -p --output-format json` receipt DOES
+//       carry a real contextWindow, but it is a PARENT-SIDE artefact a hook
+//       can never see; and a network/model-registry lookup is barred outright
+//       (Phoenix #7).
+//   ->  fall through to CAPACITY_TOKENS, the DERIVED conservative default,
+//       with `discovered:false` so a reader can act on the distinction.
+//
+// MIN, not the current model's: a hook has no model identity to key on, and the
+// smallest window any model on this box runs at is the conservative reading
+// (see CAPACITY_TOKENS' own note on why smallest is the safe direction here).
+// SANITY-BOUND both ends — a discovered figure outside [100k, 5M] is a poisoned
+// or unit-confused cache, not a window; any doubt falls back (fail-closed, the
+// sanitizeLeanFloor discipline). Phoenix #4: every failure path is silent.
+export const CAPACITY_DISCOVERY_MIN_TOKENS = 100000;
+export const CAPACITY_DISCOVERY_MAX_TOKENS = 5000000;
+export function discoverCapacity({ home = os.homedir() } = {}) {
+  const fallback = { capacityTokens: CAPACITY_TOKENS, source: 'conservative-default', discovered: false };
+  try {
+    const raw = fs.readFileSync(path.join(claudeBaseDir(home), 'stats-cache.json'), 'utf8');
+    const j = parseJsonc(raw);
+    const usage = j && typeof j === 'object' && !Array.isArray(j) ? j.modelUsage : null;
+    // INSPECT L1: `typeof [] === 'object'`, so an ARRAY used to pass this guard
+    // and Object.values() would happily yield its elements. No measured
+    // exposure — the platform emits an object and every value stays bounded by
+    // the range check below — but this function's own comment promises "any
+    // doubt falls back (fail-closed)", and an array is doubt. Fixed rather than
+    // bounded, because the fix is four tokens.
+    if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return fallback;
+    let smallest = null;
+    for (const v of Object.values(usage)) {
+      const w = Number(v && v.contextWindow);
+      if (!Number.isFinite(w) || w <= 0) continue; // 0 = present-but-unpopulated, the live case here
+      if (w < CAPACITY_DISCOVERY_MIN_TOKENS || w > CAPACITY_DISCOVERY_MAX_TOKENS) continue;
+      if (smallest === null || w < smallest) smallest = w;
+    }
+    if (smallest === null) return fallback;
+    // The RAW window is what the platform reports; the denominator every band
+    // decision uses is the AUTO-COMPACT window, so the reserve comes off here,
+    // once, exactly as CAPACITY_TOKENS' own derivation does.
+    const usable = smallest - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS;
+    if (usable < CAPACITY_DISCOVERY_MIN_TOKENS) return fallback;
+    return { capacityTokens: usable, source: 'stats-cache', discovered: true, rawWindowTokens: smallest };
+  } catch {
+    return fallback; // unreadable/absent/corrupt -> conservative, never a throw (Phoenix #4)
+  }
+}
+
 function projKey(projectRoot) {
   return path.resolve(projectRoot);
 }
@@ -714,7 +883,21 @@ export const STATE_SCHEMA = 1;
 // trustworthy. Resetting it is the SAFE direction (worst case: one extra FREE
 // mechanical sweep). Its ADDITION is not itself a schema bump — no existing
 // field's meaning changed, per this file's own rule above.
-export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict']);
+// CWK-081 (b): the judged-file SCOPE rides a small cap for the same reason
+// ALWAYS_LOADED_PATHS_CAP exists — this is persisted state, not a report, and
+// the advisory renders only the first few anyway. Truncation narrows what the
+// advisory can NAME; it never widens what the stamp CLAIMS, so the cut is in
+// the safe direction.
+export const FULL_CLEAN_FILES_CAP = 12;
+// CWK-081 adds `fullCleanAt`/`fullCleanSession` (the episode's Full-tier pass) and `externalizeSession`/`externalizeAt` (the once-per-session dedup)
+// for the SAME reason `lastObeseFat` is here: they are episode/crossing-family
+// state, and a value written by a version with different eligibility semantics
+// is not trustworthy. Resetting is the SAFE direction — a spurious reset makes
+// the capacity surface route to the Full-tier ASK instead of asserting muscle,
+// i.e. it asks rather than claims. Their ADDITION is not a STATE_SCHEMA bump:
+// no EXISTING field's meaning changed, per this file's own rule above and the
+// `lastObeseFat` precedent.
+export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt']);
 // VERSION-STABLE — PRESERVED across a schema bump AND across the location move:
 // the project's real footprint BASELINE + history. Must survive a reinstall/
 // upgrade, or every version bump false-FULLs the store until the next clean. NOT
@@ -784,8 +967,16 @@ function dropOldRootEntry(projectRoot, home) {
     if (Object.keys(all.projects).length === 0) {
       fs.rmSync(p, { force: true }); // last entry gone → drop the legacy file
     } else {
-      const tmp = p + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(all), 'utf8');
+      // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
+      // carries (read its comment for the full reasoning; this module cannot import
+      // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
+      // derivable `<dest>.tmp` can be pre-placed by anyone able to write that
+      // directory, and a plain writeFileSync FOLLOWS an alias sitting there. Random
+      // naming removes the precondition; 'wx' is the cross-nature second belt. No
+      // fsync is added here on purpose: this closes a security hole, it does not
+      // change this path's durability posture.
+      const tmp = `${p}.${crypto.randomBytes(12).toString('hex')}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(all), { encoding: 'utf8', flag: 'wx' });
       fs.renameSync(tmp, p);
     }
   } catch { /* fail-silent — migration is best-effort, never blocks a write */ }
@@ -813,6 +1004,23 @@ export function loadState(projectRoot, home = os.homedir()) {
 function rmdirIfEmpty(dir) {
   try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* not empty / gone */ }
 }
+
+// Test-only perf-regression counter (press 2: wall-clock -> count conversion,
+// the fidelity-gate.mjs __testHooks precedent — parseNumTokenCalls et al.).
+// R2/TP-6 (Phoenix #3): the O(dirs in projects/) sweep below must run AT MOST
+// ONCE per project across its whole write history, not once per write. A
+// wall-clock bound on ONE call is the wrong instrument (an environment
+// property, not a code one, board #24) and a state-effect assert on the
+// SWEEP'S OWN fixture proves nothing when that fixture is never a delete
+// candidate in the first place (CWK-012 INSPECT F1, verified by mutation —
+// the planted stray's `projectRoot` resolves to itself under
+// `findProjectRoot`, so guard 4 in pruneStrayStateDirs skips it whether or
+// not the sweep runs at all). Counting INVOCATIONS of the function is the
+// one thing that is both load-independent and cannot pass vacuously.
+export const __testHooks = {
+  strayPruneCalls: 0,
+  reset() { this.strayPruneCalls = 0; },
+};
 
 // Self-clean CW's OWN pre-fix scatter (no-old-version-leftover, rc.3 precedent):
 // slug dirs minted for a NON-root cwd before the layer-1/layer-2 fix.
@@ -843,6 +1051,7 @@ function rmdirIfEmpty(dir) {
 // Touches ONLY `coalwash/state.json` + the dirs it leaves empty — never a foreign
 // file, never a non-empty dir (the recovery-paths lesson). Fail-silent.
 function pruneStrayStateDirs(projectRoot, home) {
+  __testHooks.strayPruneCalls++;
   try {
     const base = claudeBaseDir(home);
     const projectsDir = path.join(base, 'projects');
@@ -887,8 +1096,16 @@ function saveState(proj, projectRoot, home) {
     // change, so no STATE_SCHEMA bump (this file's own rule).
     const alreadySwept = base.strayPruneDone === true;
     const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true };
-    const tmp = p + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(toWrite), 'utf8');
+    // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
+    // carries (read its comment for the full reasoning; this module cannot import
+    // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
+    // derivable `<dest>.tmp` can be pre-placed by anyone able to write that
+    // directory, and a plain writeFileSync FOLLOWS an alias sitting there. Random
+    // naming removes the precondition; 'wx' is the cross-nature second belt. No
+    // fsync is added here on purpose: this closes a security hole, it does not
+    // change this path's durability posture.
+    const tmp = `${p}.${crypto.randomBytes(12).toString('hex')}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(toWrite), { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmp, p);
     dropOldRootEntry(projectRoot, home); // no-old-version-leftover (the rc.2-era legacy file)
     // EXACTLY ONE LIVE HOME. loadState reads the slug-dir path then the coal/
@@ -1077,7 +1294,7 @@ export function sanitizeLeanFloor(rawLeanFloorTokens, footprintTokens) {
 // false, so the LEAN reset clears it with no special code);
 // `perDay`/`breakEvenDays` (breakEven()'s output,
 // optional) back the Stop hook's payback line on ANY ask, not just FULL's.
-export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
+export function recordVerdict(home, projectRoot, verdict, now = Date.now(), { scanEverything = false } = {}) {
   const proj = loadState(projectRoot, home);
   const perDay = Number(verdict && verdict.perDay);
   const breakEvenDays = Number(verdict && verdict.breakEvenDays);
@@ -1103,13 +1320,26 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
     reorgPerDay: Number.isFinite(verdict && verdict.reorgPerDay) ? Math.round(verdict.reorgPerDay) : 0,
     reorgBreakEvenDays: Number.isFinite(verdict && verdict.reorgBreakEvenDays) ? verdict.reorgBreakEvenDays : null,
     hardCeilingTokens: Number.isFinite(hardCeilingTokens) ? Math.round(hardCeilingTokens) : 0,
+    // CWK-081: WHERE that ceiling came from — a discovered window and a
+    // conservative default are different claims, and the Stop hook renders the
+    // number without re-probing, so the provenance has to ride the cache with
+    // it. Same class as hardCeilingTokens itself: a per-gauge DISPLAY field, no
+    // decision branches on it, absence degrades to the conservative label.
+    capacitySource: String((verdict && verdict.capacitySource) || 'conservative-default'),
     // WARP-HOLE (beta.13 item 3): the always-loaded path list + its byte total
     // AT this gauge — the Stop hook's cheap re-stat baseline
     // (statOnlyFootprintBytes above). Capped defensively (state-size hygiene);
     // a truncated list only narrows the delta gate's visibility, never breaks
     // anything (fail-safe: undercounting just delays a re-gauge to the next
     // SessionStart, the EXISTING behavior this feature is additive to).
-    alwaysLoadedPaths: rawPaths.filter((p) => typeof p === 'string').slice(0, ALWAYS_LOADED_PATHS_CAP),
+    // CWK-057: ON lifts the truncation. Note precisely WHAT this cut hides, so
+    // nobody re-reads it as a report cut: this list is the Stop hook's cheap
+    // re-stat baseline (statOnlyFootprintBytes), so a path past #200 is never
+    // re-stat'd and a size change there is invisible to the CHEAP gate -- the
+    // next SessionStart's full gauge still catches it. Lifting it grows the
+    // persisted array; that is the declared cost of the mode, and the field's
+    // MEANING is unchanged, so no stateSchema bump (this file's own rule).
+    alwaysLoadedPaths: rawPaths.filter((p) => typeof p === 'string').slice(0, scanEverything === true ? Infinity : ALWAYS_LOADED_PATHS_CAP),
     alwaysLoadedBytes: Number.isFinite(alwaysLoadedBytes) ? Math.round(alwaysLoadedBytes) : 0,
     // The WHOLE measured class-B store (measureEntries m.totalBytes: always-
     // loaded + recall tiers) — the bin-retention budget base (P5/P8 fix: the
@@ -1120,6 +1350,16 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now()) {
     // existing field changed meaning, and the absence self-heals in one
     // SessionStart).
     storeTotalBytes: Number.isFinite(storeTotalBytes) ? Math.round(storeTotalBytes) : 0,
+    // CWK-082 L2: the externalizable residue AT this gauge, so the Stop hook can
+    // NAME where the weight is without re-measuring (Phoenix #3 — the same class
+    // as hardCeilingTokens/capacitySource: a per-gauge DISPLAY field, no branch
+    // reads it, and absence degrades to an advisory that omits the section rather
+    // than inventing one). Shape-filtered on the way IN: this is persisted state,
+    // and a malformed cache must never reach a user-facing template.
+    externalizable: (Array.isArray(verdict && verdict.externalizable) ? verdict.externalizable : [])
+      .filter((e) => e && typeof e.path === 'string' && Number.isFinite(Number(e.tokensEst)))
+      .slice(0, 3)
+      .map((e) => ({ path: e.path, tokensEst: Math.round(Number(e.tokensEst)) })),
     at: now,
   };
   return saveState(proj, projectRoot, home);
@@ -1161,6 +1401,90 @@ export function armDigGauge(home, projectRoot, session, now = Date.now()) {
   if (proj.digGaugeSession === session) return { surface: false }; // already surfaced this session
   proj.digGaugeSession = session;
   proj.digGaugeAt = now;
+  saveState(proj, projectRoot, home);
+  return { surface: true };
+}
+
+// CWK-081 (1) — THE EPISODE'S FULL-TIER PASS, recorded. The externalize advisory
+// steers a user into relocating real content, and the ONLY instrument in this
+// system that judges text semantically is the Full tier's pass; the mechanical
+// estimator proves a LOWER BOUND and nothing else. So the advisory becomes
+// eligible only after a Full pass has actually landed this episode, and this is
+// the fact that records one.
+//
+// WHAT THIS FACT DOES NOT CARRY, and the header used to imply it did (round-2
+// F1): it is per-TRANSACTION, never per-STORE. It says a pass ran and removed
+// something. It says nothing about how much of the store that pass covered, and
+// applyPlan — the one writer — is handed a PLAN, so it has no input that could.
+// The advisory's own sentence was NARROWED to match rather than this record
+// widened toward a coverage figure nothing here can compute.
+//
+// WHAT COUNTS AS ONE — and the FIRST version of this paragraph got it WRONG, so
+// the correction is written where the wrong argument stood rather than quietly
+// swapped out. It used to read: "applyPlan runs checkFidelity over every rewrite
+// and ABORTS on any unapproved drop, so an `ok:true` return from a wizard-cut
+// plan IS a Full-tier transaction that passed the gate, exactly and not
+// approximately." That proves the gate did not REFUSE. It never proved anything
+// was ADJUDICATED — the fidelity loop skips every non-rewrite, and a rewrite that
+// drops nothing BECAUSE IT CHANGES NOTHING passes it vacuously. MEASURED through
+// the real applyPlan (INSPECT H1): a pure-create plan, a no-op rewrite and an
+// append-only rewrite all returned ok:true and all stamped this record, none of
+// them forgery, all of them shapes an honest wizard emits.
+//
+// So the WRITER (apply.mjs) now calls this only when the transaction actually
+// REMOVED something — at least one action whose baseline carried content the
+// result does not. A semantic pass that judged text and acted on it removes
+// something by construction. This function does not re-check that: the predicate
+// lives at the one call site that can see it, and this note exists so a reader
+// here is not told the retired story.
+//
+// EPISODE-SCOPED, not permanent: recordCrossing's LEAN branch clears it with the
+// rest of the episode state. A store that was cleaned, drifted back up and is
+// FULL again has not been cleaned THIS episode, and the advisory is ineligible
+// again — which is the ruling's own "in the same episode" clause, mechanized.
+//
+// STILL KNOWN AND NAMED, and NARROWED rather than closed: `plan.origin` is
+// untrusted plan data (apply.mjs already
+// routes the recovery bin on it), so a forged plan can set this flag. Blast is
+// bounded to WHICH ADVISORY TEXT one FULL crossing renders — never a delete,
+// never a spend; the alternative (a second trusted channel for a cosmetic
+// routing bit) costs more than the thing it protects.
+// CWK-081 (b) — `files` is the SCOPE of the stamp: the paths applyPlan actually
+// removed content from. It is a FACT that function observed, not an inference
+// about store coverage, and recording it is what lets the advisory name what
+// the pass touched instead of only disclaiming what it cannot vouch for.
+//
+// ALWAYS SET, never left absent when omitted: an absent field reads as "no
+// scope recorded", which a future consumer could take for "unbounded" — the
+// exact over-read this residue is about. An omitted list is an EMPTY scope.
+// Shape-filtered and capped on the way IN because this is persisted state that
+// reaches a user-facing template; a malformed cache must never get there.
+export function markFullClean(home, projectRoot, now = Date.now(), session, files) {
+  const proj = loadState(projectRoot, home);
+  proj.fullCleanAt = now;
+  if (session !== undefined) proj.fullCleanSession = session;
+  proj.fullCleanFiles = (Array.isArray(files) ? files : [])
+    .filter((f) => typeof f === 'string' && f)
+    .slice(0, FULL_CLEAN_FILES_CAP);
+  return saveState(proj, projectRoot, home);
+}
+
+// CWK-081 (3) — ONCE PER SESSION for the FULL(capacity) surface. MEASURED: the
+// advisory fired on 4 consecutive Stops during one live wizard run, because the
+// crossing re-arm branches can re-arm a consumed FULL crossing inside the SAME
+// session (`quickTried` satisfies the same-session leg) and the capacity branch
+// is checked FIRST, so every re-arm re-renders it. Consume-at-emission alone
+// therefore does NOT bound this surface to once, and this dedup does.
+//
+// Shape lifted verbatim from armDigGauge above rather than re-invented: no
+// session id -> always surface (nothing to dedup on, and a repeated advisory is
+// a smaller harm than a missed one), and the ONLY field it touches is its own.
+export function armExternalize(home, projectRoot, session, now = Date.now()) {
+  if (session == null) return { surface: true };
+  const proj = loadState(projectRoot, home);
+  if (proj.externalizeSession === session) return { surface: false };
+  proj.externalizeSession = session;
+  proj.externalizeAt = now;
   saveState(proj, projectRoot, home);
   return { surface: true };
 }
@@ -1224,6 +1548,18 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     delete proj.quickTriedAt;
     delete proj.lastEscalationFat;
     delete proj.lastObeseFat;
+    // CWK-081: the Full-clean fact is EPISODE-scoped for the same reason
+    // quickTried is — "a Full clean ran this episode" is exactly the claim the
+    // externalize advisory rests on, and a store that has since drifted back up
+    // to FULL has not been cleaned in the episode it is now in. The
+    // once-per-session dedup goes too: a new episode is entitled to say it once.
+    delete proj.fullCleanAt;
+    delete proj.fullCleanSession;
+    // CWK-081 (b): the SCOPE dies with the stamp it scopes. A file list
+    // outliving its own fact would be a claim with nothing behind it.
+    delete proj.fullCleanFiles;
+    delete proj.externalizeSession;
+    delete proj.externalizeAt;
   } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     // OBESE RE-LOOP watermark (see the branch at the end): stamp the fat level

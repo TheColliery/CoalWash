@@ -14,6 +14,29 @@ on: pull_request
 permissions:
   contents: read
 
+# CWK-058 concurrency. Grouped PER PULL REQUEST, never per-ref or per-workflow: two different
+# Dependabot PRs must not serialise behind each other, so the KEY is wrong before the flag is
+# even considered. WITHIN one PR's own group, cancel-in-progress: TRUE — enabling auto-merge
+# is IDEMPOTENT (the same atomicity discriminator applied here), so a cancelled run corrupts
+# nothing and the next push to that same PR re-enables it.
+#
+# WHY TRUE AND NOT FALSE, since the opposite has been argued in this flock before: the
+# `false` case rests on the SHARED-GROUP shape, which cannot apply once the key is scoped
+# per-PR. The canon retires that reasoning BY NAME (.github/SKILL-REPO-PATTERN.md, the
+# concurrency: bullet). This room follows the canon.
+#
+# A STATE CLAIM ABOUT ANOTHER ROOM USED TO SIT HERE, AND IT ROTTED IN 36 MINUTES. It read
+# "CoalMine ships FALSE here" — true when it was written (040c24e, ~06:35 on 2026-09-10),
+# false by CoalMine's own 5abc737 (07:11:55 the same morning), which conformed that file to
+# this same canon. Nothing in either room fires when the other moves, so a cross-room state
+# claim in shipped source has no owner and no way to notice it has gone stale. REMOVED,
+# not re-dated: the reasoning above is permanent and is ours; the other room's current
+# state never was. Compare rooms by reading the other room's file, never by trusting a
+# sentence in this one.
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   auto-merge:
     if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
