@@ -48,6 +48,56 @@ export const UNKNOWN_PLATFORM_FLAG = 'unknown platform: conservative — no auto
 // path helpers
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// CWK-082 F2-R2 — WHY physicalOrNull REFUSED, so a silent skip can say which
+// case it took.
+//
+// The F2 fix put `noteUnreadable` at the readdirSync sites. On the failure mode
+// those flags exist to report, the refusal arrives ONE CALL EARLIER: on a
+// read-denied path `fs.statSync` SUCCEEDS while `fs.realpathSync.native` throws
+// EPERM, so `physicalOrNull` returns null and every guarded read below it is
+// unreachable. Measured on the shipped engine, each with a restore control: a
+// read-denied role store went 1 store -> 0; a read-denied CLAUDE.md took its
+// whole @import closure with it, 3 entries / 1,516 tok -> 0 / 0. `flags: []` on
+// both. The reviewer measured the same class on its own fixture at 97.5%.
+//
+// THE ROOT IS THAT null IS OVERLOADED. It means the legitimate, deliberately-
+// silent "unresolvable candidate, fail-closed" case AND "this exists and I was
+// refused", and the call site cannot tell them apart. This splits them.
+//
+// IT CHANGES NO BEHAVIOUR AND CANNOT FAIL OPEN. Every skip stays a skip and
+// stays fail-closed; only the SILENCE changes. This function never produces a
+// physical path, so nothing downstream can be admitted by it.
+//
+// `pathExists` is config-load's own "absent vs present-but-unresolvable"
+// primitive (already imported) and decides the silent case. The CODE is read by
+// re-provoking the throw — a second syscall on a COLD path by construction,
+// since it only runs where the first call already returned null. That is a READ
+// of the error, never a second decision.
+//
+// UNCOMPARABLE is a real, separate case, not a fallback: `canonicalOrNull` also
+// returns null WITHOUT throwing — a `\\?\` device or UNC spelling on win32, and
+// a mapped network drive that native RESOLVES to a UNC form. Content is dropped
+// there too, so it flags, under its own word rather than borrowed from an error.
+function refusalCode(candidate) {
+  if (!pathExists(candidate)) return null; // genuinely absent — the legitimate silent case
+  try { fs.realpathSync.native(candidate); return 'UNCOMPARABLE'; } catch (err) { return (err && err.code) || 'UNKNOWN'; }
+}
+
+// A label for a flag: RELATIVE to a known root wherever possible, never an
+// absolute path. Two reasons — a hand can act on it, and it stays
+// sandbox-invariant, so a flag can never carry a tmpdir or a drive letter into
+// a surface an equivalence test compares across two roots. Purely lexical, so
+// it works on the unresolved path that just refused to canonicalize.
+function relLabel(candidate, roots) {
+  for (const r of roots) {
+    if (!r) continue;
+    const rel = path.relative(r, candidate);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
+  }
+  return path.basename(candidate) || String(candidate);
+}
 // Physical form of a path; null when it cannot be resolved (absent/looping) —
 // callers treat null as fail-closed (skip the candidate).
 // Delegates to THE canonicalization primitive (config-load canonicalOrNull) so
@@ -242,6 +292,13 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // walks below are skipped when projPhys is null (nothing to contain against).
   const homePhys = physicalOrNull(home);
   const projPhys = physicalOrNull(projectRoot);
+  // F2-R2: a refused ROOT is the widest instance of the class — every walk
+  // anchored on it is skipped, so the gauge reports a near-empty store. Loud.
+  for (const [label, raw, phys] of [['home', home, homePhys], ['projectRoot', projectRoot, projPhys]]) {
+    if (phys) continue;
+    const code = refusalCode(raw);
+    if (code) flags.push(`unresolvable path (${label}): . [${code}] — its contents are NOT counted`);
+  }
   const roots = [homePhys, projPhys].filter(Boolean);
   const seen = new Set();
   const entries = [];
@@ -288,14 +345,26 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // different questions; only the ancestor walk asks the second one.
   const add = (candidate, { scope, kind, alwaysLoaded, upTree = false }) => {
     const phys = physicalOrNull(candidate);
-    if (!phys) return null; // fail-closed: unresolvable candidate is skipped
+    if (!phys) {
+      // F2-R2: the skip is unchanged and still fail-closed. What is new is that
+      // it SAYS SO when the candidate exists — a refused governance file takes
+      // its entire @import closure out of the measure with it.
+      const code = refusalCode(candidate);
+      if (code) flags.push(`unresolvable path (governance): ${relLabel(candidate, [projPhys, homePhys])} [${code}] — its contents are NOT counted`);
+      return null;
+    }
     if (!containedIn(phys, roots)) {
       flags.push(`skipped (outside home/project trees): ${candidate}`);
       return null;
     }
     if (seen.has(dedupeKey(phys))) return phys;
     const bytes = statBytes(phys);
-    if (bytes == null) return null;
+    if (bytes == null) {
+      // Same class, one call later: `phys` canonicalized, so the file EXISTED a
+      // moment ago. A stat that fails now is a real mid-walk loss, not absence.
+      flags.push(`unstattable file: ${relLabel(phys, [projPhys, homePhys])} — its bytes are NOT counted`);
+      return null;
+    }
     seen.add(dedupeKey(phys));
     const isInherited = upTree && projPhys && !containedIn(phys, [projPhys]);
     (isInherited ? inherited : entries).push({ path: phys, bytes, scope, kind, alwaysLoaded, managed: false });
@@ -554,9 +623,24 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
 // future standalone caller that passes no sink still loses the notice — the
 // flag is raised at the failing read either way, but nobody is listening.
 export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.homedir(), flags = [] } = {}) {
+  // F2-R2, the same class at every door of this function. Each skip is
+  // UNCHANGED and still fail-closed; each now says which case it took.
+  const note = (what, label, code) => flags.push(`unresolvable path (${what}): ${label} [${code}] — its contents are NOT counted`);
   const projPhys = physicalOrNull(projectRoot);
-  if (!projPhys) return [];
-  const roots = [physicalOrNull(home), projPhys].filter(Boolean);
+  if (!projPhys) {
+    const code = refusalCode(projectRoot);
+    if (code) note('role stores: projectRoot', '.', code);
+    return [];
+  }
+  const homePhys = physicalOrNull(home);
+  if (!homePhys) {
+    const code = refusalCode(home);
+    // A refused home does not stop the walk — projPhys still anchors it — but it
+    // NARROWS the containment roots, so a legitimately-home-rooted store can be
+    // skipped below as out-of-roots. Say it here, where the cause is known.
+    if (code) note('role stores: home', '.', code);
+  }
+  const roots = [homePhys, projPhys].filter(Boolean);
   const agentBase = path.join(projPhys, '.claude', 'agent-memory');
   let roles = [];
   try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch (err) {
@@ -569,7 +653,20 @@ export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.ho
   const out = [];
   for (const role of roles) {
     const dirPhys = physicalOrNull(path.join(agentBase, role));
-    if (!dirPhys || !containedIn(dirPhys, roots)) continue; // fail-closed (a role dir symlinked outside is skipped)
+    if (!dirPhys) {
+      const code = refusalCode(path.join(agentBase, role));
+      if (code) note(`role store ${role}`, role, code);
+      continue; // fail-closed, unchanged
+    }
+    if (!containedIn(dirPhys, roots)) {
+      // THE containedIn HALF, ruled rather than left silent: `add()` already
+      // flags its own out-of-roots skip (`skipped (outside home/project trees)`)
+      // and this twin did not. A role dir symlinked outside the trees is still
+      // REFUSED — the fail-closed behaviour is untouched — but a whole store
+      // leaving the measure is not something to learn about by subtraction.
+      flags.push(`skipped (outside home/project trees): role store ${role}`);
+      continue;
+    }
     let names = [];
     try { names = fs.readdirSync(dirPhys, { withFileTypes: true }); } catch (err) {
       // This dir came back from a Dirent that said isDirectory(), so it EXISTS:
@@ -583,9 +680,23 @@ export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.ho
     for (const d of names) {
       if (!d.isFile() || !d.name.endsWith('.md')) continue; // a symlink Dirent reports its own type — never followed
       const phys = physicalOrNull(path.join(dirPhys, d.name));
-      if (!phys || !containedIn(phys, roots)) continue;
+      if (!phys) {
+        // ONE LOOP DEEPER than the finding names, swept in the same batch: a
+        // single refused file inside a readable store drops out of the store
+        // total. Measured on the shipped engine: 2 files / 1,500 B -> 1 / 300.
+        const code = refusalCode(path.join(dirPhys, d.name));
+        if (code) note(`role store ${role}`, `${role}/${d.name}`, code);
+        continue;
+      }
+      if (!containedIn(phys, roots)) {
+        flags.push(`skipped (outside home/project trees): ${role}/${d.name}`);
+        continue;
+      }
       const b = statBytes(phys);
-      if (b == null) continue;
+      if (b == null) {
+        flags.push(`unstattable file: ${role}/${d.name} — its bytes are NOT counted`);
+        continue;
+      }
       bytes += b;
       if (d.name === 'MEMORY.md') index = { path: phys, bytes: b };
       else memories.push({ path: phys, bytes: b });

@@ -744,3 +744,133 @@ test('NESTED-HABITAT: ancestor governance lands in `inherited`, room governance 
       'no ancestor file may remain in entries — everything downstream of entries is a verdict the room is told to ACT on');
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+// ---------------------------------------------------------------------------
+// CWK-082 F2-R2 — the flag could not fire where the failure ARRIVES.
+//
+// F2 put the flags at the readdirSync sites. On a read-denied path fs.statSync
+// SUCCEEDS while fs.realpathSync.native throws EPERM, so physicalOrNull returns
+// null ONE CALL EARLIER and the guarded read is unreachable. Measured on the
+// shipped engine before the fix, each with a restore control: a role store went
+// 1 -> 0, a governance file took its whole @import closure with it (3 entries /
+// 1,516 tok -> 0 / 0), a single role file went 2 files -> 1. flags: [] on all
+// three. Probe: scratchpad/r31/probe-f2r2.mjs.
+// ---------------------------------------------------------------------------
+
+// Make `target` (file OR directory) refuse to CANONICALIZE, portably, or return
+// null when this box/volume cannot. Verified by CONSEQUENCE — physicalOrNull
+// must actually go null — so an admin shell that ignores the ACL is detected
+// rather than producing a vacuous green. Capability PROBE, never a
+// process.platform test (ACL enforcement is a VOLUME property).
+function makeUnresolvable(target) {
+  const attempts = [
+    () => { const m = fs.statSync(target).mode; fs.chmodSync(target, 0o000); return () => { try { fs.chmodSync(target, m); } catch { /* best effort */ } }; },
+    () => {
+      const who = process.env.USERNAME || process.env.USER || '';
+      if (!who) return null;
+      const isDir = fs.statSync(target).isDirectory();
+      spawnSync('icacls', [target, '/deny', isDir ? `${who}:(OI)(CI)(RX)` : `${who}:(RX)`], { stdio: 'ignore' });
+      return () => { try { spawnSync('icacls', [target, '/remove:d', who], { stdio: 'ignore' }); } catch { /* best effort */ } };
+    },
+  ];
+  for (const attempt of attempts) {
+    let undo = null;
+    try { undo = attempt(); } catch { undo = null; }
+    if (!undo) continue;
+    if (physicalOrNull(target) === null) return undo;
+    undo();
+  }
+  return null;
+}
+
+// The capability probe runs on a THROWAWAY target before anything is asserted,
+// so a box that cannot deny reads skips before any leg executes (ONE SKIPPABLE
+// LEG PER TEST — a skip decided after a real assertion reports as skipped a leg
+// that in fact ran).
+function canDenyRead(proj, name) {
+  const probe = path.join(proj, name);
+  write(path.join(probe, 'x.md'), 'x');
+  const undo = makeUnresolvable(probe);
+  if (undo) { undo(); return true; }
+  return false;
+}
+
+test('CWK-082 F2-R2: a role STORE that refuses to canonicalize FLAGS — the refusal arrives one call ABOVE the guarded read', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    const roleDir = path.join(proj, '.claude', 'agent-memory', 'coder');
+    write(path.join(roleDir, 'MEMORY.md'), 'index');
+    write(path.join(roleDir, 'craft.md'), 'craft');
+    const before = discoverRoleMemories({ projectRoot: proj, home });
+    assert.strictEqual(before.length, 1, 'PRECONDITION: readable, the store IS discovered');
+    undo = makeUnresolvable(roleDir);
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const sink = [];
+    const denied = discoverRoleMemories({ projectRoot: proj, home, flags: sink });
+    assert.strictEqual(denied.length, 0, 'PRECONDITION: the store really did leave the measure');
+    assert.ok(sink.some((f) => /unresolvable path \(role store coder\)/.test(f)),
+      `a whole role store leaving the measure must be ANNOUNCED: ${JSON.stringify(sink)}`);
+    assert.ok(sink.every((f) => !/[A-Za-z]:[\\/]/.test(f)), `and the flag stays sandbox-invariant: ${JSON.stringify(sink)}`);
+  } finally { if (undo) undo(); clean(home, proj); }
+});
+
+test('CWK-082 F2-R2: a governance FILE that refuses to canonicalize FLAGS — it takes its whole @import closure with it', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true }); // platform must DETECT or the arm is vacuous
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@AGENTS.md\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    write(path.join(proj, 'AGENTS.md'), 'agents');
+    const before = discoverClassB({ projectRoot: proj, home });
+    assert.ok(before.entries.length >= 3, `PRECONDITION: the @import closure formed: ${before.entries.length}`);
+    undo = makeUnresolvable(path.join(proj, 'CLAUDE.md'));
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const denied = discoverClassB({ projectRoot: proj, home });
+    assert.ok(denied.entries.length < before.entries.length,
+      'PRECONDITION: content really did leave the measure');
+    assert.ok(denied.flags.some((f) => /unresolvable path \(governance\): CLAUDE\.md/.test(f)),
+      `the loss must be ANNOUNCED, and NAME the file: ${JSON.stringify(denied.flags)}`);
+  } finally { if (undo) undo(); clean(home, proj); }
+});
+
+test('CWK-082 F2-R2: a single role FILE that refuses to canonicalize FLAGS — one loop deeper than the finding named', (t) => {
+  const { home, proj } = sandbox();
+  let undo = null;
+  try {
+    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    const roleDir = path.join(proj, '.claude', 'agent-memory', 'coder');
+    write(path.join(roleDir, 'MEMORY.md'), 'index');
+    write(path.join(roleDir, 'craft.md'), 'x'.repeat(1200));
+    const before = discoverRoleMemories({ projectRoot: proj, home });
+    assert.strictEqual(before[0].files, 2, 'PRECONDITION: both files counted');
+    undo = makeUnresolvable(path.join(roleDir, 'craft.md'));
+    assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
+    const sink = [];
+    const denied = discoverRoleMemories({ projectRoot: proj, home, flags: sink });
+    assert.strictEqual(denied[0].files, 1, 'PRECONDITION: the file really did leave the store total');
+    assert.ok(sink.some((f) => /unresolvable path \(role store coder\): coder\/craft\.md/.test(f)),
+      `a file leaving a store total must be ANNOUNCED by name: ${JSON.stringify(sink)}`);
+  } finally { if (undo) undo(); clean(home, proj); }
+});
+
+// THE CONTROL, and it is the whole reason the fix keys on pathExists rather than
+// on "physicalOrNull returned null": an ABSENT candidate is the legitimate,
+// deliberately-silent fail-closed case, and the new flag must not start crying
+// wolf on it. Without this, the cure is worse than the disease — every governance
+// file a project does not have would flag on every gauge.
+test('CWK-082 F2-R2 CONTROL: an ABSENT candidate stays SILENT — fail-closed on nothing is not a loss to announce', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@does-not-exist.md\ngovernance');
+    write(path.join(proj, 'MEMORY.md'), 'memory');
+    const d = discoverClassB({ projectRoot: proj, home });
+    assert.deepStrictEqual(d.flags.filter((f) => /unresolvable path/.test(f)), [],
+      `an @import target that was never created is not content that was lost: ${JSON.stringify(d.flags)}`);
+    assert.ok(d.entries.some((e) => e.path.endsWith('MEMORY.md')), 'and the rest of the closure still resolved');
+  } finally { clean(home, proj); }
+});
