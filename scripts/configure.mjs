@@ -417,13 +417,43 @@ function main() {
   }
 
   // THE WRITE HAS ITS OWN try AND NOTHING ELSE IS INSIDE IT. Everything below
-  // the write is REPORTING about a file that already exists on disk, and a
-  // throw there must never be reported as a write failure — the rot-canary
-  // finding that produced this split: loadMergedConfig lives one line down, an
-  // unreadable global config is enough to make it throw, and the catch here
-  // says "Failed to write to config file" and exits 1 over a write that
-  // succeeded. Saying something false about what just happened is the exact
-  // class F-R32-3 closed; it must not come back through its own fix.
+  // the write is REPORTING about a file that already exists on disk, and a throw
+  // there must never be reported as a write failure. Saying something false
+  // about what just happened is the exact class F-R32-3 closed; it must not come
+  // back through its own fix.
+  //
+  // ⚠️ THE TRIGGER THIS COMMENT FIRST NAMED DOES NOT REPRODUCE, and it is
+  // retracted here rather than reworded away (F-RR-1). It said "loadMergedConfig
+  // lives one line down, an unreadable global config is enough to make it
+  // throw". It is not, and nothing else I could build is either.
+  // `loadMergedConfig` calls `readJsonc` twice, and `readJsonc` wraps its ENTIRE
+  // body — read, BOM strip, parse, shape check — in one try/catch that returns
+  // `{ data: {}, unreadable }`; it has no throwing path.
+  //
+  // MEASURED, ten shapes, all returning normally
+  // (scratchpad/r32/probe-rr1-trigger.mjs): a malformed global · a malformed
+  // project · a global that is an ARRAY · a DIRECTORY at either config path · a
+  // UTF-16 global · an 8 MiB global of junk · a read-DENIED global · a
+  // traversal-DENIED project parent · and a valid-config control. The one
+  // remaining idea — `process.cwd()` throwing on a deleted cwd, which is the
+  // CALLER's expression rather than the loader — is unreachable on this box:
+  // Windows refuses to remove a directory that is a live process's cwd (EPERM).
+  //
+  // SO THE HONEST STATE IS: NO REPRODUCING TRIGGER IS KNOWN, and I am not
+  // inventing a second one to replace the first. THE SPLIT STAYS ANYWAY, on the
+  // structural reason above rather than on a reachable bug: the guard costs one
+  // branch, and the alternative it prevents is a report that LIES about what
+  // just happened — telling a user their write failed over a file already on
+  // disk. What is NOT claimed: that this catch is provably dead. Ten shapes
+  // returned normally; that is not a proof of never.
+  //
+  // AND WHY THE RETRACTION IS VISIBLE RATHER THAN A QUIET EDIT: the next reader
+  // who trusts a named trigger writes its fixture, watches it pass at both
+  // commits, finds no defect, and concludes the split was unnecessary — a wrong
+  // WHY that sends the next reader to DELETE a correct fix. Third instance of
+  // the wrong-WHY class in this one dispatch (F-R32-1, this, and the return's
+  // own wording), and the sharpest: the earlier one mis-described a mechanism
+  // that fires, this one named one that cannot.
   try {
     fs.mkdirSync(path.dirname(writePath), { recursive: true });
     fs.writeFileSync(writePath, JSON.stringify(next, null, 2) + '\n', 'utf8');
