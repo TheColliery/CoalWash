@@ -1232,6 +1232,9 @@ export function applyPlan(plan, opts = {}) {
       // already derives that per action for the bin (`cut`); counting it costs
       // one integer and is the evidence the Full-clean record needs below.
       let removedCount = 0;
+      // CWK-081 (b): the FILES those removals landed on — a Set, because one file
+      // can carry several actions and the record is about coverage, not volume.
+      const removedFrom = new Set();
       for (const a of actionable) {
         if (a.type === 'create') continue; // an addition cut nothing
         // A DELETE banks the BUFFER, never a decode of it (G3-3). `baseBuf` is
@@ -1245,6 +1248,7 @@ export function applyPlan(plan, opts = {}) {
         const cut = a.type === 'delete' ? a.baseBuf : removedLines(a.baseBuf.toString('utf8'), a.content).join('\n');
         if (!cut.length) continue;
         removedCount++; // CWK-081 H1: this action removed something
+        removedFrom.add(a.phys); // CWK-081 (b): and THIS is the file it removed it from
         const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
         if (binId === null) {
           flagged.push({
@@ -1308,17 +1312,43 @@ export function applyPlan(plan, opts = {}) {
       // does not exist, and a wider predicate over-claims on a consent-adjacent
       // surface where under-claiming is the safe direction.
       //
-      // STILL NOT CLOSED, and unchanged: `plan.origin` is untrusted plan data,
-      // so a forged origin on a plan that DOES remove something still stamps
-      // (INSPECT's A4). Blast is bounded to WHICH ADVISORY TEXT one FULL
-      // crossing renders — never a delete, never a spend — and a second trusted
-      // channel for a cosmetic routing bit costs more than it protects.
+      // COVERAGE, residue (b), NOW RECORDED RATHER THAN ONLY DISCLAIMED. This
+      // function cannot see whether a PASS covered the store — but it can see,
+      // exactly, which files it REMOVED CONTENT FROM, and that is a fact rather
+      // than an inference. `removedFrom` carries them to the record, the advisory
+      // names them, and a file absent from that list is visibly outside the claim
+      // instead of silently inside it. The predicate is deliberately UNCHANGED —
+      // scoping the claim is not the same as gating on coverage, and gating would
+      // need the discovered store, which is not among this function's inputs.
+      //
+      // A4 — STILL OPEN, AND NOW MEASURED RATHER THAN ASSERTED. `plan.origin` is
+      // untrusted plan data (the trust-anchor comment above), so a forged origin
+      // on a plan that DOES remove something still stamps. CWK-081 round 3
+      // enumerated EVERY input this function receives and tested each: plan.origin,
+      // plan.sessionId, plan.projectRoot, plan.approvedDrops are all PLAN DATA the
+      // forger types; opts.projectRoot/home/now/cwd come from the CALLER, and on
+      // the file-driven path (method.md: `applyPlan(JSON.parse(PLAN.json))`) the
+      // caller IS the agent that wrote the plan. NONE is both outside the forger's
+      // control and able to distinguish a genuine wizard pass. The single caller
+      // that cannot forge is retier.mjs, which passes the literal in code and
+      // never reads it from a file.
+      //
+      // SO IT IS UNCLOSEABLE AT THIS CALL SITE, not merely unclosed: closing it
+      // needs a trusted channel that does not exist, and no threshold on "how much
+      // removal counts as a semantic pass" is derivable from anything visible here
+      // — an arbitrary number would be a fix's costume, which this room has paid
+      // for before. Blast stays bounded to WHICH ADVISORY TEXT one FULL crossing
+      // renders — never a delete, never a spend. NOTE, because it is the tempting
+      // wrong read: the file list below does NOT narrow this. A forger who can set
+      // `origin` can also fabricate the removals the list is built from, so the
+      // list strengthens the HONEST case (coverage) and not the dishonest one.
+      // Pinned by its own test so a future change cannot make it merely LOOK closed.
       //
       // Post-commit and fail-silent by construction (same discipline as the
       // advisory above): a state-write failure must never un-commit a run that
       // already succeeded — it only costs the next crossing one ask.
       if (plan.origin === 'wizard-cut' && removedCount > 0) {
-        try { markFullClean(home, projectRoot, now, plan.sessionId); } catch { /* never un-commits */ }
+        try { markFullClean(home, projectRoot, now, plan.sessionId, [...removedFrom]); } catch { /* never un-commits */ }
       }
 
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };

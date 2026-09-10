@@ -145,6 +145,23 @@ test('CWK-082 L2: with no residue cached the advisory says nothing about weight 
   assert.match(r, /moved OUT of the store leaves this gauge/, 'the BOUND is unconditional — it is true whether or not a list exists');
 });
 
+// CWK-081 residue (b) — the advisory stops saying only what it CANNOT vouch for
+// and names what it CAN: the files the pass actually removed content from.
+test('CWK-081 (b): the advisory NAMES the files the pass actually cut, so an un-covered file is visibly outside the claim', () => {
+  const r = externalizeAdvisory({
+    hardCeilingTokens: 167000,
+    judgedFiles: ['/home/.claude/projects/x/memory/MEMORY.md', '/home/.claude/projects/x/memory/notes.md'],
+  });
+  assert.match(r, /MEMORY\.md/, 'the first judged file is named');
+  assert.match(r, /notes\.md/, 'and the second');
+  assert.match(r, /THAT PASS TOUCHED|removed content from/i, 'framed as what the pass touched, never as store coverage');
+});
+
+test('CWK-081 (b): with no judged-file list the advisory names none — an absent scope is never rendered as a full one', () => {
+  const r = externalizeAdvisory({ hardCeilingTokens: 167000 });
+  assert.ok(!/THAT PASS TOUCHED/i.test(r), 'no list -> no section, never a fabricated one');
+  assert.match(r, /NOTHING about files the pass never touched/, 'the unconditional bound still stands on its own');
+});
 test('externalizeAdvisory: a missing hardCeilingTokens degrades to a "?" placeholder, never throws', () => {
   assert.doesNotThrow(() => externalizeAdvisory({}));
   assert.ok(externalizeAdvisory({}).includes('~? tok'));

@@ -534,7 +534,7 @@ async function handleStop(input) {
       return;
     }
     reason = fullCleaned
-      ? ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens, capacitySource: lastVerdict.capacitySource, residue: lastVerdict.externalizable })
+      ? ask.externalizeAdvisory({ hardCeilingTokens: lastVerdict.hardCeilingTokens, capacitySource: lastVerdict.capacitySource, residue: lastVerdict.externalizable, judgedFiles: proj.fullCleanFiles })
       : ask.wizardEscalation({
         cause: 'capacity-unmeasured',
         fatTokens, breakEven, reorg, spawns,

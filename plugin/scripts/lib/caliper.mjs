@@ -876,6 +876,12 @@ export const STATE_SCHEMA = 1;
 // trustworthy. Resetting it is the SAFE direction (worst case: one extra FREE
 // mechanical sweep). Its ADDITION is not itself a schema bump — no existing
 // field's meaning changed, per this file's own rule above.
+// CWK-081 (b): the judged-file SCOPE rides a small cap for the same reason
+// ALWAYS_LOADED_PATHS_CAP exists — this is persisted state, not a report, and
+// the advisory renders only the first few anyway. Truncation narrows what the
+// advisory can NAME; it never widens what the stamp CLAIMS, so the cut is in
+// the safe direction.
+export const FULL_CLEAN_FILES_CAP = 12;
 // CWK-081 adds `fullCleanAt`/`fullCleanSession` (the episode's Full-tier pass) and `externalizeSession`/`externalizeAt` (the once-per-session dedup)
 // for the SAME reason `lastObeseFat` is here: they are episode/crossing-family
 // state, and a value written by a version with different eligibility semantics
@@ -884,7 +890,7 @@ export const STATE_SCHEMA = 1;
 // i.e. it asks rather than claims. Their ADDITION is not a STATE_SCHEMA bump:
 // no EXISTING field's meaning changed, per this file's own rule above and the
 // `lastObeseFat` precedent.
-export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'externalizeSession', 'externalizeAt']);
+export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt']);
 // VERSION-STABLE — PRESERVED across a schema bump AND across the location move:
 // the project's real footprint BASELINE + history. Must survive a reinstall/
 // upgrade, or every version bump false-FULLs the store until the next clean. NOT
@@ -1436,10 +1442,23 @@ export function armDigGauge(home, projectRoot, session, now = Date.now()) {
 // bounded to WHICH ADVISORY TEXT one FULL crossing renders — never a delete,
 // never a spend; the alternative (a second trusted channel for a cosmetic
 // routing bit) costs more than the thing it protects.
-export function markFullClean(home, projectRoot, now = Date.now(), session) {
+// CWK-081 (b) — `files` is the SCOPE of the stamp: the paths applyPlan actually
+// removed content from. It is a FACT that function observed, not an inference
+// about store coverage, and recording it is what lets the advisory name what
+// the pass touched instead of only disclaiming what it cannot vouch for.
+//
+// ALWAYS SET, never left absent when omitted: an absent field reads as "no
+// scope recorded", which a future consumer could take for "unbounded" — the
+// exact over-read this residue is about. An omitted list is an EMPTY scope.
+// Shape-filtered and capped on the way IN because this is persisted state that
+// reaches a user-facing template; a malformed cache must never get there.
+export function markFullClean(home, projectRoot, now = Date.now(), session, files) {
   const proj = loadState(projectRoot, home);
   proj.fullCleanAt = now;
   if (session !== undefined) proj.fullCleanSession = session;
+  proj.fullCleanFiles = (Array.isArray(files) ? files : [])
+    .filter((f) => typeof f === 'string' && f)
+    .slice(0, FULL_CLEAN_FILES_CAP);
   return saveState(proj, projectRoot, home);
 }
 
@@ -1529,6 +1548,9 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     // once-per-session dedup goes too: a new episode is entitled to say it once.
     delete proj.fullCleanAt;
     delete proj.fullCleanSession;
+    // CWK-081 (b): the SCOPE dies with the stamp it scopes. A file list
+    // outliving its own fact would be a claim with nothing behind it.
+    delete proj.fullCleanFiles;
     delete proj.externalizeSession;
     delete proj.externalizeAt;
   } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {

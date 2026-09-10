@@ -3206,6 +3206,84 @@ test('CWK-081 control (non-vacuity): a DEFAULT (program-cut) plan records no Ful
   } finally { clean(proj, home); }
 });
 
+// CWK-081 residue (b), COVERAGE — the stamp said a Full pass ran and said
+// nothing about WHAT it covered, so a plan touching one file of three minted
+// the same eligibility as one that judged the whole store (INSPECT cell C1,
+// 777 on both engines). applyPlan is handed a PLAN and can never see whether a
+// PASS covered the store — but it CAN see, exactly, which files it removed
+// content from. Recording that turns an unbounded claim into a bounded one.
+test('CWK-081 (b): a Full clean records WHICH files it removed content from, not merely that it happened', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const a = path.join(store, 'one.md'); const b = path.join(store, 'two.md'); const c = path.join(store, 'three.md');
+    write(a, 'kept\ndropped unique line'); write(b, 'untouched two'); write(c, 'untouched three');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: a, content: 'kept' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    const st = loadState(proj, home);
+    assert.strictEqual(st.fullCleanAt, 777, 'the pass still stamps — eligibility is SCOPED, never broken into always-false');
+    assert.deepStrictEqual(st.fullCleanFiles, [a], 'and the record now NAMES the one file it actually cut, so the other two are visibly outside it');
+  } finally { clean(proj, home); }
+});
+
+test('CWK-081 (b): the list is what was CUT, never what the plan merely touched — a no-op action in the same plan is absent', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const cutFile = path.join(store, 'cut.md'); const noop = path.join(store, 'noop.md');
+    write(cutFile, 'kept\ngone unique'); write(noop, 'unchanged');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: cutFile, content: 'kept' },
+      { type: 'rewrite', path: noop, content: 'unchanged' },
+    ], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    const st = loadState(proj, home);
+    assert.deepStrictEqual(st.fullCleanFiles, [cutFile],
+      'a rewrite that removed nothing judged nothing this function can see — the same predicate H1 landed, one level down');
+  } finally { clean(proj, home); }
+});
+
+// CWK-081 residue (a), A4 FORGERY — PINNED OPEN, deliberately. `plan.origin` is
+// untrusted plan data (this file's own trust-anchor comment), and MEASURED
+// enumeration of every input applyPlan receives found none that is both outside
+// a forger's control AND able to distinguish a genuine wizard pass. This cell
+// exists so the residue cannot be quietly 'closed' by a future change that only
+// makes it LOOK closed — the round-1 dup-cut arm read a false green for exactly
+// that reason. If this test ever goes RED, something real changed: re-derive it,
+// do not delete it.
+test('CWK-081 (a) RESIDUE PINNED: a FORGED wizard-cut origin removing a UNIQUE line still stamps — open by design, not by oversight', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'forged.md');
+    write(f, 'kept line\nunique line only here');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f, content: 'kept line' }], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(loadState(proj, home).fullCleanAt, 777,
+      'STILL STAMPS. The blast is bounded to WHICH ADVISORY TEXT one FULL crossing renders — never a delete, never a spend.');
+  } finally { clean(proj, home); }
+});
+
+// The CONTROL that keeps the two (b) cells above from passing on a predicate
+// broken into always-false — this room's own warning from the round that
+// introduced the stamp.
+test('CWK-081 (b) control (non-vacuity): a pass that removes from EVERY file records EVERY file', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const a = path.join(store, 'a.md'); const b = path.join(store, 'b.md');
+    write(a, 'kept\ndrop a'); write(b, 'kept\ndrop b');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: a, content: 'kept' },
+      { type: 'rewrite', path: b, content: 'kept' },
+    ], { origin: 'wizard-cut' }), { home, now: 777 });
+    assert.strictEqual(r.ok, true, r.error);
+    const st = loadState(proj, home);
+    assert.strictEqual(st.fullCleanAt, 777);
+    assert.deepStrictEqual([...st.fullCleanFiles].sort(), [a, b].sort(),
+      'a genuinely-covering pass still stamps AND names both files — the predicate was scoped, not disabled');
+  } finally { clean(proj, home); }
+});
 test('CWK-081: a wizard plan that FAILS the fidelity gate records NO Full clean (the claim rides the gate, not the intent)', () => {
   const { proj, store } = sandbox();
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));

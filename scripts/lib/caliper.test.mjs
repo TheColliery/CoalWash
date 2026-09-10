@@ -1688,10 +1688,12 @@ test('rc.2 SCHEMA (f): a FRESH install (no state file) → loadState is {} and w
 });
 
 test('rc.2 SCHEMA (e): the reset-list constant matches the fields actually cleared (the mechanism a future ruling extends)', () => {
-  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'externalizeSession', 'externalizeAt']);
+  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt']);
   // STATE_SCHEMA stays 1 even though the OBESE re-loop (2026-07-25) added
   // `lastObeseFat` to the list, and CWK-081 (2026-09-10) added the four
-  // episode fields after it: adding a NEW field is not a semantics change to
+  // episode fields after it — plus `fullCleanFiles`, the Full clean
+  // SCOPE, in CWK-081 round 3 (it is episode-family state for the same reason
+  // the stamp it scopes is, and it dies in the same LEAN clear): adding a NEW field is not a semantics change to
   // any EXISTING one, which is this file's own stated bump rule. A pre-existing
   // rc-era state simply has no watermark and starts its loop from zero — and,
   // for the CWK-081 four, has no recorded Full clean, so the capacity surface
@@ -2118,6 +2120,36 @@ test('CWK-082 L2: externalizableResidue caps its list and survives junk without 
 // once-per-session dedup on the capacity surface
 // ---------------------------------------------------------------------------
 
+test('CWK-081 (b): markFullClean records the judged-file list, and a LEAN crossing clears it with the rest of the episode', () => {
+  const { home, proj } = sandbox();
+  try {
+    markFullClean(home, proj, 555, 'sess-1', ['/store/a.md', '/store/b.md']);
+    const st = loadState(proj, home);
+    assert.strictEqual(st.fullCleanAt, 555);
+    assert.deepStrictEqual(st.fullCleanFiles, ['/store/a.md', '/store/b.md']);
+    recordCrossing(home, proj, 'LEAN', 'FULL', 666);
+    const after = loadState(proj, home);
+    assert.strictEqual(after.fullCleanAt, undefined, 'the episode fact goes');
+    assert.strictEqual(after.fullCleanFiles, undefined, 'and its scope goes WITH it — a file list outliving its own stamp would be a claim with no fact behind it');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 (b): the judged-file list is shape-filtered and capped on the way IN — persisted state never reaches a template malformed', () => {
+  const { home, proj } = sandbox();
+  try {
+    markFullClean(home, proj, 555, 'sess-1', ['/ok.md', 42, null, { path: '/nope' }, '/ok2.md']);
+    assert.deepStrictEqual(loadState(proj, home).fullCleanFiles, ['/ok.md', '/ok2.md'], 'junk entries dropped, never rendered');
+    markFullClean(home, proj, 556, 'sess-1', Array.from({ length: 40 }, (_, i) => '/f' + i + '.md'));
+    assert.strictEqual(loadState(proj, home).fullCleanFiles.length, 12, 'capped — this is persisted state, not a report');
+    markFullClean(home, proj, 557, 'sess-1');
+    assert.deepStrictEqual(loadState(proj, home).fullCleanFiles, [], 'an omitted list is an EMPTY scope, never an absent field a reader could mistake for unbounded');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-081 (b): fullCleanFiles is in the schema reset list — episode-family state, same class as fullCleanAt', () => {
+  assert.ok(SCHEMA_RESET_FIELDS.includes('fullCleanFiles'),
+    'a scope written under different eligibility semantics is no more trustworthy than the stamp it scopes');
+});
 test('CWK-081 (1): markFullClean records the episode fact; a LEAN crossing CLEARS it (episode-scoped, not permanent)', () => {
   const { home, proj } = sandbox();
   try {
