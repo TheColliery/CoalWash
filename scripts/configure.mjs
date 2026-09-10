@@ -275,6 +275,13 @@ export function firstWriteTarget(cwd, home) {
   return candidates[0];
 }
 
+// ponytail: 183 lines at declaration — ONE user-visible transaction, and every
+// early return in it is a REFUSAL that must leave the file untouched. Resolve
+// the target, read, parse, apply, validate, write, report: splitting it hands
+// half the refusals to a helper that cannot return from main, so each one
+// becomes a sentinel the caller must re-check — which is precisely how a
+// refusal turns into a fall-through, the F-R32-2 defect this file has already
+// paid for once. The number is HISTORY, not a live claim.
 function main() {
   const args = process.argv.slice(2);
   if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
@@ -409,9 +416,24 @@ function main() {
     return;
   }
 
+  // THE WRITE HAS ITS OWN try AND NOTHING ELSE IS INSIDE IT. Everything below
+  // the write is REPORTING about a file that already exists on disk, and a
+  // throw there must never be reported as a write failure — the rot-canary
+  // finding that produced this split: loadMergedConfig lives one line down, an
+  // unreadable global config is enough to make it throw, and the catch here
+  // says "Failed to write to config file" and exits 1 over a write that
+  // succeeded. Saying something false about what just happened is the exact
+  // class F-R32-3 closed; it must not come back through its own fix.
   try {
     fs.mkdirSync(path.dirname(writePath), { recursive: true });
     fs.writeFileSync(writePath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+  } catch (e) {
+    console.error(`Error: Failed to write to config file: ${e.message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  {
     if (hadComments) {
       console.warn('Note: inline comments were stripped (this tool writes plain JSON). Every key stays documented in platform-configs/.coalwash.json.');
     }
@@ -433,10 +455,18 @@ function main() {
     // The comparison is against the LOADER's own merged read, never a
     // re-derivation of the clamp here — one implementation, and it answers the
     // only question that matters: what will a reader get?
-    const effective = loadMergedConfig({ cwd: process.cwd() });
-    const clamped = edits
-      .map((e) => ({ key: e.segs.join('.'), wrote: e.value, reads: valueAtPath(effective, e.segs) }))
-      .filter((x) => JSON.stringify(x.wrote) !== JSON.stringify(x.reads));
+    let clamped = [];
+    try {
+      const effective = loadMergedConfig({ cwd: process.cwd() });
+      clamped = edits
+        .map((e) => ({ key: e.segs.join('.'), wrote: e.value, reads: valueAtPath(effective, e.segs) }))
+        .filter((x) => JSON.stringify(x.wrote) !== JSON.stringify(x.reads));
+    } catch (e) {
+      // Degrade to a NAMED unknown, never to silence and never to a false
+      // success: the write happened, and we simply cannot say which values a
+      // reader will honour.
+      console.warn(`Note: the file was written, but the merged config could not be re-read to check which values will actually be honoured (${e.message}).`);
+    }
 
     if (clamped.length) {
       console.log(`Wrote ${writePath} — but see the warning below.`);
@@ -453,9 +483,6 @@ function main() {
       console.warn(`  To make this take effect, set it on the GLOBAL layer instead:`);
       console.warn(`      node scripts/configure.mjs --global --${c.key} ${typeof c.wrote === 'string' ? c.wrote : JSON.stringify(c.wrote)}`);
     }
-  } catch (e) {
-    console.error(`Error: Failed to write to config file: ${e.message}`);
-    process.exitCode = 1;
   }
 }
 
