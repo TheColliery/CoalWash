@@ -237,3 +237,97 @@ test('CWK-023: a MALFORMED existing config is reported, never silently overwritt
   assert.notStrictEqual(r.status, 0);
   assert.strictEqual(sha(projCfg(sb)), before, 'refusing beats rebuilding: the user’s bytes are still there to fix');
 });
+
+// ---------------------------------------------------------------------------
+// r32 FINDINGS-BACK — F-R32-2 [HIGH] and F-R32-4 [LOW].
+// ---------------------------------------------------------------------------
+
+// Deny a FILE's CONTENT while its PATH still resolves. Same capability the
+// (a)-fork cell needs in class-b.test.mjs, and deliberately NOT imported from
+// there: a test helper crossing test files is a shared fixture with two owners,
+// and this one has to live where the CLI's own cells are. The acceptance test is
+// both halves — the read must throw AND the path must still exist — because a
+// helper that also broke the path would be testing a different finding.
+//
+// (RD) alone, never (RX): (RX) removes Read AND Execute and takes resolution
+// down with it, which is the state this finding is NOT about.
+function makeUnreadableFile(target) {
+  const attempts = [
+    () => { const m = fs.statSync(target).mode; fs.chmodSync(target, 0o000); return () => { try { fs.chmodSync(target, m); } catch { /* best effort */ } }; },
+    () => {
+      const who = process.env.USERNAME || process.env.USER || '';
+      if (!who) return null;
+      spawnSync('icacls', [target, '/deny', who + ':(RD)'], { stdio: 'ignore' });
+      return () => { try { spawnSync('icacls', [target, '/remove:d', who], { stdio: 'ignore' }); } catch { /* best effort */ } };
+    },
+  ];
+  for (const attempt of attempts) {
+    let restore = null;
+    try { restore = attempt(); } catch { restore = null; }
+    if (!restore) continue;
+    let threw = false;
+    try { fs.readFileSync(target, 'utf8'); } catch { threw = true; }
+    if (threw && fs.existsSync(target)) return restore;
+    restore();
+  }
+  return null;
+}
+
+test('F-R32-2: an UNREADABLE existing config is REFUSED, never rebuilt from nothing over the top of it', (t) => {
+  const sb = sandbox(t);
+  let restore = null;
+  try {
+    // Probe FIRST, on a throwaway, before any assertion (ONE SKIPPABLE LEG).
+    const probe = path.join(sb.proj, 'probe-deny.json');
+    fs.writeFileSync(probe, '{}');
+    const probeUndo = makeUnreadableFile(probe);
+    if (!probeUndo) {
+      t.skip('this volume/account cannot deny a FILE READ while leaving the file present — the arm would be vacuous');
+      return;
+    }
+    probeUndo();
+
+    const cfgFile = projCfg(sb);
+    fs.mkdirSync(path.dirname(cfgFile), { recursive: true });
+    const original = JSON.stringify({ fileMaxSizeKb: 40, language: 'th', quickVsFull: 'full' }, null, 2) + '\n';
+
+    // CONTROL — the identical command on a READABLE config keeps every key.
+    fs.writeFileSync(cfgFile, original);
+    const okRun = run(sb, ['--updateCheckDays', '30']);
+    assert.strictEqual(okRun.status, 0, okRun.stderr);
+    const kept = Object.keys(JSON.parse(fs.readFileSync(cfgFile, 'utf8'))).sort();
+    assert.deepStrictEqual(kept, ['fileMaxSizeKb', 'language', 'quickVsFull', 'updateCheckDays'],
+      'CONTROL: a readable config keeps its other keys — without this the arm below proves nothing');
+
+    // ARM — same command, read denied. The file must come back byte-identical.
+    fs.writeFileSync(cfgFile, original);
+    const before = sha(cfgFile);
+    restore = makeUnreadableFile(cfgFile);
+    assert.ok(restore, 'the probe said this box CAN deny a file read, so this must not fail');
+    const denied = run(sb, ['--updateCheckDays', '30']);
+    restore();
+    restore = null;
+
+    assert.notStrictEqual(denied.status, 0,
+      'an existing config that cannot be READ must not be treated as ABSENT: ' + denied.stdout);
+    assert.doesNotMatch(denied.stdout, /Successfully updated/,
+      'it must not report success over a file it could not read');
+    assert.strictEqual(sha(cfgFile), before,
+      'the user KEYS must survive byte-for-byte — the whole contract of this tool is that a failed run changes nothing');
+  } finally {
+    if (restore) restore();
+  }
+});
+
+test('F-R32-4: an unrecognized flag does not swallow the NEXT FLAG as its value', (t) => {
+  const sb = sandbox(t);
+  const r = run(sb, ['--nosuchkey', '--language', 'en']);
+  assert.notStrictEqual(r.status, 0);
+  const unrecognized = r.stderr.split(/\r?\n/).filter((l) => /Unrecognized option/.test(l));
+  assert.strictEqual(unrecognized.length, 1,
+    'exactly ONE unrecognized flag was typed; a second error names a token the user never typed as a flag: ' + JSON.stringify(unrecognized));
+  assert.match(unrecognized[0], /--nosuchkey/);
+  assert.doesNotMatch(r.stderr, /Unrecognized option 'en'/,
+    "'en' is the VALUE of --language and must never be reported as a flag");
+  assert.ok(!fs.existsSync(projCfg(sb)), 'a rejected run still writes nothing');
+});

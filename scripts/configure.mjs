@@ -300,11 +300,40 @@ function main() {
   // stripped via charCodeAt, this room's own established shape (never a typed
   // U+FEFF literal: a raw BOM pasted into source gets converted by the tool
   // layer, a hazard this room has paid for more than once).
+  let readErr = null;
   try {
     let content = fs.readFileSync(cfgPath, 'utf8');
     if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
     raw = content;
-  } catch {}
+  } catch (err) { readErr = err; }
+  // F-R32-2: AN EMPTY CATCH HERE MADE AN UNREADABLE FILE INDISTINGUISHABLE FROM
+  // AN ABSENT ONE, and the difference is the user's whole config. On an
+  // EPERM/EACCES read of a file that IS there, `raw` stayed null, `cfg` stayed
+  // {}, the edits landed on {}, and the write target was STILL that same file
+  // (existence and readability are different questions) — so the tool rebuilt a
+  // config from nothing over one that was really there, exit 0, "Successfully
+  // updated". Measured with a control: three keys in, one key out.
+  //
+  // IT IS THE SAME CLASS AS ee7975a, this dispatch's own headline commit — a read
+  // failure read as absence. There it cost a measurement; here it costs the file.
+  // And the file already knew better five lines down: the MALFORMED branch below
+  // refuses for exactly this reason, in its own words.
+  //
+  // KEYED ON err.code, NEVER existsSync (node/runtime.md §7: message text is
+  // unstable, the code is Node's own committed identity). ENOENT/ENOTDIR are the
+  // only ABSENCE codes — the same pair class-b.mjs carves out at both refusal
+  // calls, this room's one absence vocabulary. Anything else means the file is
+  // there and we could not read it.
+  //
+  // THIS IS ALSO THE ANSWER TO THE WRITE-TARGET HALF: rather than reconciling
+  // "content came from a failed read" with "target came from existsSync", the
+  // state where those two can disagree is REMOVED — a failed read never reaches
+  // the write at all.
+  if (readErr && readErr.code !== 'ENOENT' && readErr.code !== 'ENOTDIR') {
+    console.error(`Error: ${cfgPath} exists but could not be read (${readErr.code || 'UNKNOWN'}). Nothing was written — an unreadable config is not an absent one, and rebuilding it from defaults would destroy every key it holds.`);
+    process.exitCode = 1;
+    return;
+  }
   if (raw !== null) {
     hadComments = raw.includes('//');
     try {
@@ -344,7 +373,12 @@ function main() {
       } else {
         errors.push(`Unrecognized option '${flag}' (run --help for every flag)`);
       }
-      i++; // skip whatever followed it; it was never a value we understood
+      // F-R32-4: consume the next token ONLY when it cannot be a flag of its own.
+      // The old unconditional `i++` assumed whatever follows an unknown flag is
+      // its VALUE; given `--nosuchkey --language en` it swallowed `--language`
+      // and then reported `en` — a token the user typed as a VALUE — as a second
+      // unrecognized FLAG, sending the reader at the wrong word.
+      if (args[i + 1] !== undefined && !args[i + 1].startsWith('--')) i++;
       continue;
     }
     const parsed = parseValue(row.flagKey, row.spec, args[++i], valueAtPath(cfg, row.segs));
