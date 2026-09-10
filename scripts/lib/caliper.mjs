@@ -372,10 +372,17 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
 // (reproduce by timing statOnlyFootprintBytes vs discoverClassB+measureEntries;
 // the WARP-HOLE BEHAVIOR is pinned in conductor.test.mjs — the timing itself is
 // deliberately NOT a flaky in-suite ms-assertion): ~0.15-0.3ms on the
-// flock's heaviest room (CoalWash's own, 11 always-loaded files) vs ~7-18ms
-// for a full discoverClassB+measureEntries re-gauge on the SAME/a bigger
-// root — cheap enough to run on EVERY Stop call, unlike the full pass, which
-// blows the Phoenix #3 <=5ms happy-path budget if paid unconditionally. A
+// flock's heaviest room (CoalWash's own, 11 always-loaded files) — cheap enough
+// to run on EVERY Stop call, unlike a full discoverClassB+measureEntries
+// re-gauge, which blows the Phoenix #3 <=5ms happy-path budget if paid
+// unconditionally.
+// ⚠ THE FULL-PASS FIGURE THAT USED TO SIT HERE (~7-18ms) IS RETIRED AS A LIVE
+// CLAIM (CWK-082 F4): re-measured on the REAL call at this box, discoverClassB
+// alone runs several times that. The numbers, their n and their derivation live
+// in the findings-back record, never pinned in a comment where they rot — and
+// the re-measurement only strengthens the design, since the full pass is even
+// more worth gating than the old figure suggested. The RATIO is the point here,
+// not either number: the stat-only gate is cheap, the full pass is not. A
 // path that no longer exists contributes 0 (folds naturally into the delta —
 // a legitimate shrink signal, never a special case).
 export function statOnlyFootprintBytes(paths) {

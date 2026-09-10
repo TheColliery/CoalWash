@@ -1883,7 +1883,7 @@ test('TP-5: exactly ONE live home — the coal/ copy is reaped when the write mo
   } finally { clean(home, proj); }
 });
 
-test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is a one-time migration for a condition the never-create guard makes unrepeatable, and O(dirs in projects/) on every write blew the <=100ms hook budget', () => {
+test('R2/TP-6 (Phoenix #3): the stray sweep is ONE-SHOT, not per-write — it is a one-time migration for a condition the never-create guard makes unrepeatable, and O(dirs in projects/) on every write blew the hook budget of the day (stated then as <=100ms total wall clock — a cap board #24 has since RETIRED; the live gate is the <=5ms of ADDED work Phoenix #3 names, which it blew just as hard)', () => {
   const { home, proj } = sandbox();
   try {
     const projectsDir = path.join(home, '.claude', 'projects');

@@ -81,7 +81,12 @@
 //
 // CHEAP caliper only on the SessionStart path: file sizes + stamps; content is
 // read only for the small always-loaded set; gzip only when informational
-// work is already in budget (~100ms total wall budget). The Stop path stays
+// work is already in budget. (This clause used to end "(~100ms total wall
+// budget)" — the RETIRED cap board #24 says never to restore; the sibling
+// citation at the Stop re-gauge was removed by CWK-082 F5 and this one was
+// left standing in the same batch, which is the class-vs-instance failure this
+// room bans by name. The author-controllable gate is Phoenix #3's <=5ms of
+// ADDED work; a total wall-clock figure is an ENVIRONMENT property.) The Stop path stays
 // cheaper still on the COMMON case (Phoenix #3) — one state read, no
 // discovery, no measureEntries, no gzip. beta.13 item 3 (WARP-HOLE) adds ONE
 // more cheap step when nothing is pending: a stat-only re-check of the
