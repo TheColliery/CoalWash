@@ -166,12 +166,43 @@ function printHelp() {
  * may name one band without having to retype the other).
  */
 // ponytail: 58 lines at declaration — ONE switch over the schema's own type
-// space, and the cohesion unit is THAT SPACE, not the line count. Every arm is
-// the same three steps (turn one CLI string into a JS value, hand it to
-// validateValue, return {value} or {error}); splitting them into per-type
-// helpers would scatter the one property that matters — that the CLI parser and
-// the JSON validator cannot drift — across five files, and a new schema type
-// would then need a new file rather than a new arm. The number is HISTORY.
+// space, and the cohesion unit is THAT SPACE, not the line count. Splitting the
+// arms into a helper per type would scatter the one property that matters — that
+// the CLI parser and the JSON validator cannot drift — across a file per type,
+// and a new schema type would then need a new file rather than a new arm. The
+// number is HISTORY.
+//
+// ⚠️ THE SHAPE CLAIM THIS COMMENT FIRST MADE WAS A FALSE UNIVERSAL, and it is
+// retracted here rather than reworded away (F-RG-1). It said "Every arm is the
+// same three steps (turn one CLI string into a JS value, hand it to
+// validateValue, return {value} or {error})". Two of the seven arms are not.
+//
+// MEASURED over the switch body itself, never read by eye
+// (scratchpad/r32/probe-rg1-arms.mjs — it strips comments before matching, so a
+// MENTION of validateValue is never counted as a CALL, which is this dispatch's
+// own defect class one layer down): 7 arms · 5 CALL validateValue (int|number,
+// enum, string, stringList, bandmap) · 1 returns a value WITHOUT it (bool) · 1
+// returns only an error (default).
+//
+// SO THE PROPERTY, STATED OVER THE ARMS THAT ACTUALLY CARRY IT: those five each
+// turn one CLI string into a JS value, hand it to validateValue, and return
+// {value} or {error} — that is where CLI-vs-JSON drift is possible and where the
+// shared call is what closes it. `bool` is the NAMED EXCEPTION and needs no
+// call: its own guard rejects everything but the exact strings 'true' and
+// 'false', so `raw === 'true'` is a boolean by construction, while
+// validateValue's bool branch is `typeof v === 'boolean'` — strictly weaker,
+// with nothing left to reject. `default` reaches no value at all. THE CODE IS
+// CORRECT AND THE CLAIM WAS NOT: do not "fix" the bool arm by adding a call that
+// can only ever pass.
+//
+// THE COHESION ARGUMENT IS UNCHANGED BY THIS, and bool's exemption is itself an
+// argument for it — whether an arm needs the validator is decided by reading it
+// beside its six siblings, which a helper-per-type split makes impossible.
+//
+// FOURTH instance of the wrong-WHY class in this one dispatch, and it sat inside
+// the commit written to close the third: a comment whose stated reason the code
+// does not support survives every gate this room owns, because nothing
+// downstream ever fails when only the reason is wrong.
 export function parseValue(flagKey, spec, raw, current) {
   if (raw === undefined) return { error: `${flagKey} needs a value` };
   switch (spec.type) {
@@ -453,6 +484,20 @@ function main() {
   // just happened — telling a user their write failed over a file already on
   // disk. What is NOT claimed: that this catch is provably dead. Ten shapes
   // returned normally; that is not a proof of never.
+  //
+  // AND THERE IS A SECOND REASON THAT DOES NOT DEPEND ON THAT MEASUREMENT AT
+  // ALL (F-RG-2), which matters because the first reason is a claim about
+  // TODAY's `readJsonc`: a future edit could give it a throwing path and
+  // nothing would send anyone back to re-read this comment. The only call to
+  // `loadMergedConfig` below this point sits at :497 inside its OWN try at
+  // :496, whose catch already degrades to a NAMED unknown ("the file was
+  // written, but the merged config could not be re-read to check which values
+  // will actually be honoured"). So even if that loader learns to throw
+  // tomorrow, it cannot reach this outer catch — and that inner guard was
+  // ALREADY IN THE TREE AT 7fd06dd ITSELF, the commit whose own message named
+  // the loader as the trigger. The named trigger was false twice over when it
+  // was written: the mechanism does not fire, and it was already caught one
+  // frame in if it ever did.
   //
   // AND WHY THE RETRACTION IS VISIBLE RATHER THAN A QUIET EDIT: the next reader
   // who trusts a named trigger writes its fixture, watches it pass at both
