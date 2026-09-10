@@ -674,18 +674,42 @@ const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit']);
 // arg key, confirmed vs rot-canary/CoalHearth's shipped hooks).
 //
 // RESIDUE, BY DESIGN, NAMED SO IT IS NOT RE-DERIVED (CWK-082 L3): this is the
-// exact reason the airbag cannot cover a SHELL-mediated write. A Bash payload
+// exact reason the airbag cannot cover a SHELL-mediated write.
+//
+// WHAT DECIDES IT IS COST, AND THE NUMBER IS HERE (INSPECT F-B2 — this note
+// used to LEAD with the parser argument below, which a reader can answer, so
+// the note invited exactly the re-derivation it exists to prevent). A
+// PreToolUse(Bash) matcher puts ONE conductor PROCESS SPAWN on EVERY shell
+// call. Measured through this real hook file, spawned the way the platform
+// spawns it, n=25, arms ALTERNATED, hermetic sandboxed HOME/TEMP:
+//
+//   Bash payload            min  79.547  median  88.730  max 110.528  ms
+//   Edit payload (CONTROL)  min  95.346  median 107.245  max 124.604  ms
+//
+// The control is what makes the figure mean SPAWN rather than payload: same
+// order, and it is not a no-op — the Edit arm really fired the airbag and wrote
+// 3 snapshot files. Instrument: scratchpad/r31/probe-fb2-spawn.mjs. INSPECT
+// measured the same arm on its own separate instrument (78.804 / 82.106 /
+// 103.652, n=25) and agrees; two harnesses, same order of magnitude, cited as
+// two rather than merged into one. ~85 ms on EVERY shell call, to cover a
+// narrow case, is the trade this refuses — Phoenix #3, the hottest path in a
+// session.
+//
+// THE PARSER ARGUMENT IS TRUE AND IS *NOT* WHAT DECIDES IT. A Bash payload
 // carries a command STRING, not a file_path, so this function has nothing to
-// read and no correct answer to give — locating a write target inside an
-// arbitrary shell string is not something it can do, and a parser that
-// half-works would produce an airbag that fires SOMETIMES, which is worse than
-// one that admits it is absent (a user told "protected" who is protected part
-// of the time stops taking their own precautions). Widening WRITE_TOOLS or the
-// hooks.json matcher to Bash would also put a hook on the hottest path in a
-// session for a narrow case — Phoenix #3. So the LIMIT is disclosed in the
-// externalize template instead (ask.mjs), which steers the move toward the
-// channel the airbag genuinely covers. Do not "fix" this by adding a shell
-// parser here.
+// read and no correct answer to give, and a parser that half-works would
+// produce an airbag that fires SOMETIMES — worse than one that admits it is
+// absent (a user told "protected" who is protected part of the time stops
+// taking their own precautions). BUT an airbag on Bash NEED NOT PARSE ANYTHING:
+// the guarded set is small and already enumerable, so it could snapshot THE
+// WHOLE SET unconditionally on the first Bash call and early-return, and
+// writeguard.mjs's own first-write-only check already makes that O(1)
+// afterwards. That shape defeats the parser objection cleanly and still pays
+// the spawn above on every shell call — which is why the answer does not move.
+// So the LIMIT is disclosed in the externalize template instead (ask.mjs),
+// which steers the move toward the channel the airbag genuinely covers. Do not
+// "fix" this by adding a shell parser here, and do not re-open the question on
+// the parser argument alone — it was already answered above.
 function touchedPath(input) {
   const inp = input && input.tool_input;
   return inp && typeof inp.file_path === 'string' ? inp.file_path : '';

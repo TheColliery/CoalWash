@@ -1323,15 +1323,55 @@ export function applyPlan(plan, opts = {}) {
       //
       // A4 — STILL OPEN, AND NOW MEASURED RATHER THAN ASSERTED. `plan.origin` is
       // untrusted plan data (the trust-anchor comment above), so a forged origin
-      // on a plan that DOES remove something still stamps. CWK-081 round 3
-      // enumerated EVERY input this function receives and tested each: plan.origin,
-      // plan.sessionId, plan.projectRoot, plan.approvedDrops are all PLAN DATA the
-      // forger types; opts.projectRoot/home/now/cwd come from the CALLER, and on
-      // the file-driven path (method.md: `applyPlan(JSON.parse(PLAN.json))`) the
-      // caller IS the agent that wrote the plan. NONE is both outside the forger's
-      // control and able to distinguish a genuine wizard pass. The single caller
-      // that cannot forge is retier.mjs, which passes the literal in code and
-      // never reads it from a file.
+      // on a plan that DOES remove something still stamps.
+      //
+      // THE CENSUS, AND ITS BOUND (INSPECT F-C1). CWK-081 round 3 wrote that it
+      // "enumerated EVERY input this function receives" and listed EIGHT. The
+      // CONCLUSION was right; the coverage CLAIM was not. INSPECT re-derived the
+      // set from this function's own body, found the list short, adjudicated every
+      // missing channel, and each failed the same two-part test — so the verdict
+      // below rests on the whole set, never on the eight. Re-derived again here,
+      // independently, and it corrects INSPECT's figure by one (below).
+      //
+      //   RECEIVED FROM THE PLAN (method.md's documented shape + approvedDrops) — 6:
+      //     origin · sessionId · roots · actions · approvedDrops   READ by this code
+      //     projectRoot                                            RECEIVED AND NEVER READ
+      //   RECEIVED FROM THE CALLER (opts) — 7, all read:
+      //     cwd · home · isPlaceholder · keepSnapshots · now · projectRoot · txDir
+      //   AMBIENT — 3:  Date.now() · os.homedir() · process.cwd()
+      //
+      // THE ONE-FIELD CORRECTION IS LOAD-BEARING, not bookkeeping. INSPECT counted
+      // 13 CODE-READ named inputs; the code reads 12. `plan.projectRoot` appears in
+      // this function ONLY inside comments — the trust anchor above deliberately
+      // ignores it and derives the root from `opts.projectRoot || findProjectRoot(...)`.
+      // It is still an INPUT (a forger puts it in PLAN.json), so it belongs in the
+      // census; it simply cannot close A4 for a STRONGER reason than the others:
+      // not merely "the forger types it" but "nothing here ever reads it".
+      //
+      // ⚠ THE LIST IS COMPLETE AS OF THIS SIGNATURE AND NOWHERE ELSE — a measurement
+      // of ONE revision, never a standing property. That used to be all this note
+      // could say; `apply.test.mjs` now PINS the code-read census, so a new input
+      // reddens a cell instead of entering a function whose note claims
+      // exhaustiveness. Re-derive rather than trust, and mind the two traps this
+      // note's own instrument fell into, in order:
+      //   (1) READ BOTH SPELLINGS. `roots` and `actions` arrive by DESTRUCTURING
+      //       (`const { roots, actions } = plan`), so a `plan.` grep alone returns
+      //       three where the code reads five.
+      //   (2) STRIP COMMENTS FIRST. This very paragraph names plan fields in prose;
+      //       an extractor over the raw body counts them and reports the code
+      //       reading what only a comment mentions. That is how the 13 arose.
+      //   (3) THIS FUNCTION'S BODY ONLY. Grepping the file sweeps sibling
+      //       functions' `opts` and produces a census as wrong as the one it checks.
+      //
+      // THE VERDICT, unchanged, resting on all sixteen received channels: NONE is
+      // both outside the forger's control AND able to distinguish a genuine wizard
+      // pass. Every plan field is payload the forger types. Every opts field comes
+      // from the CALLER, and on the file-driven path (method.md:
+      // `applyPlan(JSON.parse(PLAN.json))`) the caller IS the agent that wrote the
+      // plan — isPlaceholder/keepSnapshots/txDir are hermetic-test seams that path
+      // never passes at all. The ambient three are the agent's own clock, home and
+      // working directory. The single caller that cannot forge is retier.mjs, which
+      // passes the literal in code and never reads it from a file.
       //
       // SO IT IS UNCLOSEABLE AT THIS CALL SITE, not merely unclosed: closing it
       // needs a trusted channel that does not exist, and no threshold on "how much

@@ -221,13 +221,18 @@ export function seatbeltAdvisory(opts) {
 // files each, Bash produces 0 and the writeguard/ dir is never created.
 // So the template now STATES the condition and STEERS — an honest limit is
 // worth more when it is actionable, and the covered channel is one the agent
-// can simply choose. NOT closed by extending the airbag to Bash: that hook
-// would fire on every shell call (Phoenix #3, the hottest path in a session)
-// and would have to parse a command string to find a target, so it would fire
-// SOMETIMES — and a user told "protected" who is protected part of the time is
-// misled MORE than one told "unprotected", because they stop taking their own
-// precautions. The residue is stated where the mechanism lives (the conductor's
-// touchedPath) and in writeguard.mjs's own header.
+// can simply choose. NOT closed by extending the airbag to Bash, and the reason
+// is COST rather than parsing (INSPECT F-B2: this paragraph led with the parser
+// argument, which is answerable — an airbag on Bash could snapshot the whole
+// guarded set unconditionally and parse nothing, and would still pay the cost).
+// A PreToolUse(Bash) matcher puts one conductor PROCESS SPAWN on EVERY shell
+// call: ~85 ms median, n=25, with an Edit-payload control proving the floor is
+// the spawn. Phoenix #3, the hottest path in a session, for a narrow case.
+// SAID ONCE: the figures, the control and the instrument live where the
+// mechanism lives — the conductor's touchedPath note — and are deliberately not
+// restated here, so one of the two cannot go stale against the other.
+// writeguard.mjs's own header carries the channel limit for a reader who
+// arrives at the net rather than at the template.
 // CWK-082 findings-back F3 — a residue rendered by BASENAME cannot tell two
 // files apart, and the collision is not exotic: this room's own CLAUDE.md
 // @imports MEMORY.md while the CC store carries its own memory/MEMORY.md, so

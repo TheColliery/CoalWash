@@ -3353,3 +3353,97 @@ test('CWK-081 H1 residue, PINNED so it is not later mistaken for a bug: an all-K
       'indistinguishable from "never judged" in here — so it asks instead of asserting');
   } finally { clean(proj, home); }
 });
+
+// ---------------------------------------------------------------------------
+// CWK-081 A4 / INSPECT F-C1 — THE CENSUS GETS A MACHINE.
+//
+// applyPlan's A4 residue note enumerates every input the function receives and
+// says the list is complete AS OF THAT SIGNATURE. Until now nothing fired when
+// a new one arrived. This fires: it re-derives the census from the function's
+// own body on every run and pins it.
+//
+// GOING RED IS NOT A DEFECT — it means an input was added. Re-run A4's two-part
+// test on the new field (outside the forger's control? able to distinguish a
+// genuine wizard pass?), update the note, THEN update this pin. Never the pin
+// alone.
+// ---------------------------------------------------------------------------
+
+// Extract the census from ONE function body. Three properties, each one a trap
+// this instrument fell into before it was trusted: BOTH spellings (a
+// destructured field never appears as `obj.field`), COMMENTS STRIPPED (the note
+// being checked names plan fields in prose, and counting those reports the code
+// reading what only a comment mentions), and THIS BODY ONLY (a whole-file grep
+// sweeps sibling functions' opts).
+//
+// Named bound: an end-of-line comment on a CODE line is NOT stripped — cutting
+// at a `//` that may sit inside a string or a regex is how a stripper corrupts
+// the thing it measures. Whole-line and block comments are.
+function inputCensus(source, fnName) {
+  const lines = source.split(/\r?\n/);
+  const start = lines.findIndex((l) => new RegExp('^export function ' + fnName + '\\s*\\(').test(l));
+  assert.ok(start >= 0, `${fnName} signature not found — the extractor is aimed at nothing`);
+  let end = -1;
+  for (let i = start + 1; i < lines.length; i++) if (/^\}/.test(lines[i])) { end = i; break; }
+  assert.ok(end > start, `${fnName} closing brace not found`);
+  const body = lines.slice(start, end + 1).join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  const dotted = (o) => [...new Set([...body.matchAll(new RegExp('\\b' + o + '\\.([A-Za-z_$][\\w$]*)', 'g'))].map((m) => m[1]))];
+  const destructured = (o) => {
+    const out = new Set();
+    for (const m of body.matchAll(new RegExp('\\{([^{}]*)\\}\\s*=\\s*' + o + '\\b', 'g'))) {
+      for (const part of m[1].split(',')) {
+        const key = part.trim().split(/[:=]/)[0].trim();
+        if (/^[A-Za-z_$][\w$]*$/.test(key)) out.add(key);
+      }
+    }
+    return [...out];
+  };
+  const merge = (o) => [...new Set([...dotted(o), ...destructured(o)])].sort();
+  return {
+    plan: merge('plan'),
+    opts: merge('opts'),
+    ambient: [...new Set([...body.matchAll(/\b(?:Date\.now|os\.homedir|process\.cwd)\(\)/g)].map((m) => m[0]))].sort(),
+  };
+}
+
+test('CWK-081 A4: the census EXTRACTOR reads both spellings and ignores COMMENTS — either miss makes it report a census of prose', () => {
+  const fixture = [
+    'export function applyPlan(plan, opts = {}) {',
+    '  // a comment that names plan.projectRoot and opts.ghost in prose',
+    '  const { roots, actions } = plan;',
+    '  const home = opts.home || os.homedir();',
+    '  if (plan.origin === CUT) return process.cwd();',
+    '  return actions.length + roots.length + Date.now();',
+    '}',
+  ].join('\n');
+  const c = inputCensus(fixture, 'applyPlan');
+  assert.deepStrictEqual(c.plan, ['actions', 'origin', 'roots'],
+    'DESTRUCTURED fields seen (a dotted-only reader returns [origin]) and the COMMENT\'s projectRoot NOT counted');
+  assert.deepStrictEqual(c.opts, ['home'], "the dotted spelling still is, and the comment's opts.ghost is not");
+  assert.deepStrictEqual(c.ambient, ['Date.now()', 'os.homedir()', 'process.cwd()'], 'the ambient channel is a channel');
+});
+
+test('CWK-081 A4 FOURTH TENSE: applyPlan\'s CODE-READ input census is PINNED — a new input cannot enter a function whose note claims exhaustiveness without reddening here', () => {
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'apply.mjs'), 'utf8');
+  const c = inputCensus(src, 'applyPlan');
+  assert.deepStrictEqual(c.plan,
+    ['actions', 'approvedDrops', 'origin', 'roots', 'sessionId'],
+    'plan.* moved — re-adjudicate the new field against A4 before touching this pin');
+  assert.deepStrictEqual(c.opts,
+    ['cwd', 'home', 'isPlaceholder', 'keepSnapshots', 'now', 'projectRoot', 'txDir'],
+    'opts.* moved — this is the exact case the A4 note used to say nothing fires on');
+  assert.deepStrictEqual(c.ambient, ['Date.now()', 'os.homedir()', 'process.cwd()'], 'the ambient channel moved');
+  assert.strictEqual(c.plan.length + c.opts.length, 12, '12 CODE-READ named inputs — the figure the A4 note publishes');
+});
+
+// THE TRUST ANCHOR, pinned from the other side: `plan.projectRoot` is RECEIVED
+// and deliberately NEVER READ. The anchor comment says so in prose; this makes a
+// future read of it reddening rather than silent, which matters because reading
+// it is precisely the containment bypass the anchor exists to prevent.
+test('CWK-081 A4 / trust anchor: applyPlan never READS plan.projectRoot — a forged plan root must stay unreachable', () => {
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'apply.mjs'), 'utf8');
+  const c = inputCensus(src, 'applyPlan');
+  assert.ok(!c.plan.includes('projectRoot'),
+    'the root is derived from opts.projectRoot || findProjectRoot(...) — if plan.projectRoot is being read, the trust anchor is gone');
+});
