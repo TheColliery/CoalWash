@@ -274,8 +274,9 @@ async function handleSessionStart(input) {
   const disc = mode === 'auto' ? classB.discoverClassB({ projectRoot, home, managedPaths }) : { entries: [] };
   if (disc.entries.length) {
     // CWK-057: ON lifts the read budget on the gauge path too. Phoenix #3 is
-    // NOT breached and is not being quietly stretched: #3 binds PostToolUse to
-    // <=5ms of ADDED work, and this is the SessionStart gauge, which already
+    // NOT breached and is not being quietly stretched: the LETTER of #3 binds
+    // PostToolUse to <=5ms of ADDED work (hooks-safety §6 row 3), and this is
+    // the SessionStart gauge, which already
     // does a full discoverClassB + a 256KB read by design. ON deliberately
     // costs more than that, which is why it is a user-set opt-in that discloses
     // itself below, never a default. Withholding it from the hook would make
@@ -445,16 +446,33 @@ async function handleStop(input) {
     // WARP-HOLE (beta.13 item 3, MEMORY.md "WARP-HOLE + WARM COST"): a
     // within-session spike (e.g. a MEMORY.md crystallize write) sits
     // uncaught under the pure-cache read above until the NEXT SessionStart.
+    // CWK-082 findings-back F5 — this paragraph and the SessionStart one above
+    // used to read hooks-safety Phoenix #3 two OPPOSITE ways in one file: there
+    // as PostToolUse-only, here as binding this Stop path. Settled, and the
+    // reading is the conservative one rather than a licence: the LETTER of #3
+    // is PostToolUse (§6 row 3). Stop is not PostToolUse, so #3 does not bind
+    // it — this path holds the SAME <=5ms discipline BY CHOICE, because Stop
+    // fires every turn and is the same hot class §2 says to grade by what a
+    // hook ADDS. Never cite #3 as if it compelled this budget.
     // MEASURED ad-hoc before shipping (not a flaky in-suite ms-assertion — the
     // WARP-HOLE BEHAVIOR itself is pinned in conductor.test.mjs): an
-    // UNCONDITIONAL full re-gauge
-    // (discoverClassB+measureEntries) costs ~7-18ms on real repos — BLOWS
-    // the Phoenix #3 <=5ms happy-path budget if paid on EVERY Stop call
-    // (Stop fires every turn). The cheap half: an ALWAYS-ON stat-only gate
-    // (re-stat the paths already discovered at the last gauge — no
-    // directory walk, no content read; measured ~0.15-0.3ms on the SAME
-    // repos) decides whether the expensive full re-gauge (rare, and well
-    // under the <=100ms including-a-scan cap) is worth paying for THIS turn.
+    // UNCONDITIONAL full re-gauge (discoverClassB+measureEntries) costs
+    // ~7-18ms on real repos, which is why it is not paid on EVERY Stop call.
+    // ⚠ THAT FIGURE IS RETIRED AS A LIVE CLAIM (CWK-082 F4): re-measured on
+    // the real call at this box, discoverClassB alone runs far slower than
+    // 7-18ms on a real store — the numbers and their n live in the findings-
+    // back record, never pinned here where they rot. The DESIGN is unchanged
+    // and the re-measurement only strengthens it: the full re-gauge is even
+    // more worth gating than the old figure suggested. The cheap half: an
+    // ALWAYS-ON stat-only gate (re-stat the paths already discovered at the
+    // last gauge — no directory walk, no content read; measured ~0.15-0.3ms on
+    // the SAME repos) decides whether the expensive full re-gauge is worth
+    // paying for THIS turn.
+    // The old text closed by calling the re-gauge "well under the <=100ms
+    // including-a-scan cap". That cap is RETIRED (board #24: a total wall-clock
+    // figure is an ENVIRONMENT property, not one the author controls — never
+    // restore one), so citing it as live was a second defect in the same
+    // paragraph. Removed rather than re-worded.
     const cachedPaths = Array.isArray(lastVerdict.alwaysLoadedPaths) ? lastVerdict.alwaysLoadedPaths : null;
     const cachedBytes = Number(lastVerdict.alwaysLoadedBytes);
     if (cachedPaths && cachedPaths.length && Number.isFinite(cachedBytes)) {

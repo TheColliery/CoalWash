@@ -228,6 +228,32 @@ export function seatbeltAdvisory(opts) {
 // misled MORE than one told "unprotected", because they stop taking their own
 // precautions. The residue is stated where the mechanism lives (the conductor's
 // touchedPath) and in writeguard.mjs's own header.
+// CWK-082 findings-back F3 — a residue rendered by BASENAME cannot tell two
+// files apart, and the collision is not exotic: this room's own CLAUDE.md
+// @imports MEMORY.md while the CC store carries its own memory/MEMORY.md, so
+// CoalWash dogfooding itself printed "MEMORY.md ~41373 tok · MEMORY.md ~20798
+// tok" and named NEITHER — on the one surface whose whole job is telling a
+// hand which file to move.
+//
+// Render the SHORTEST path suffix that is unique WITHIN THE SET BEING SHOWN:
+// one segment wherever nothing collides (the common case, unchanged output),
+// more only where a hand needs it. The set is the shown slice, never the whole
+// store — the reader disambiguates against what is printed in front of them.
+//
+// RESIDUE, named not closed: two entries with the IDENTICAL full path fall
+// through to the full path for both, and a genuinely deep unique suffix
+// renders long. No truncation is added — an elided label re-introduces exactly
+// the ambiguity this fixes, which is worse than a long one.
+function shortestUniqueLabels(paths) {
+  const parts = paths.map((p) => String(p).split(/[\\/]/).filter(Boolean));
+  return parts.map((seg, i) => {
+    for (let take = 1; take <= seg.length; take++) {
+      const label = seg.slice(seg.length - take).join('/');
+      if (!parts.some((o, j) => j !== i && o.slice(Math.max(0, o.length - take)).join('/') === label)) return label;
+    }
+    return seg.join('/');
+  });
+}
 export function externalizeAdvisory(opts) {
   const { hardCeilingTokens, capacitySource, residue, judgedFiles } = opts || {};
   const cap = Number.isFinite(hardCeilingTokens) ? hardCeilingTokens : '?';
@@ -248,11 +274,17 @@ export function externalizeAdvisory(opts) {
   const judged = Array.isArray(judgedFiles)
     ? judgedFiles.filter((f) => typeof f === 'string' && f)
     : [];
+  // Hoisted out of the template literal on purpose: an interpolation carrying
+  // a call (let alone a nested literal) is what broke the config-key gate's own
+  // locator once already.
+  const judgedRendered = shortestUniqueLabels(judged.slice(0, 5)).join(' · ');
   const judgedLine = judged.length
-    ? ` THAT PASS TOUCHED, exactly: ${judged.slice(0, 5).map((f) => String(f).split(/[\\/]/).pop()).join(' · ')}${judged.length > 5 ? ` (and ${judged.length - 5} more)` : ''} — anything not in that list it did not read.`
+    ? ` THAT PASS TOUCHED, exactly: ${judgedRendered}${judged.length > 5 ? ` (and ${judged.length - 5} more)` : ''} — anything not in that list it did not read.`
     : '';
+  const weightLabels = shortestUniqueLabels(weight.map((e) => e.path));
+  const weightRendered = weight.map((e, i) => `${weightLabels[i]} ~${Math.round(Number(e.tokensEst))} tok`).join(' · ');
   const weightLine = weight.length
-    ? ` WHERE THE WEIGHT IS (the always-loaded entries a hand-move would have to come out of, largest first): ${weight.map((e) => `${String(e.path).split(/[\\/]/).pop()} ~${Math.round(Number(e.tokensEst))} tok`).join(' · ')}.`
+    ? ` WHERE THE WEIGHT IS (the always-loaded entries a hand-move would have to come out of, largest first): ${weightRendered}.`
     : '';
   // CWK-081 (2): the old headline asserted "~no reclaimable fat (muscle, not
   // bloat)". The instrument behind that sentence is the MECHANICAL estimator,

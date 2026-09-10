@@ -350,6 +350,29 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   //    symlinked-outside entry here is silently SKIPPED by construction,
   //    never traversed. Anything that DOES reach add() below is still
   //    realpath-and-contained regardless (defense in depth, not the only gate).
+  // ---------------------------------------------------------------------
+  // CWK-082 findings-back F2 — an unreadable directory used to `continue` in
+  // SILENCE at every walk site below, so a subtree the gauge could not read
+  // simply weighed nothing and `flags` stayed EMPTY. Measured: a locked
+  // memory subdir took the store from 7,586 to 2,613 tok with flags []. This
+  // unit exists to stop the gauge under-counting in silence and had opened a
+  // new way to do exactly that, one layer in.
+  //
+  // The ONE case that stays silent is the case the swallow was written for: a
+  // store that was never CREATED. That is decided by the error CODE on the
+  // walk ROOT (node/runtime.md §7 — key on err.code, never err.message); a
+  // subtree that vanished or refused MID-walk existed a moment ago and its
+  // loss is real, so it says so.
+  //
+  // The flag carries the path RELATIVE to the walk root: enough for a hand to
+  // act on, and sandbox-invariant, so it can never carry an absolute home
+  // path into a surface an equivalence test compares across two roots.
+  const noteUnreadable = (err, dir, root, what) => {
+    const code = (err && err.code) || 'UNKNOWN';
+    if (dir === root && (code === 'ENOENT' || code === 'ENOTDIR')) return; // never created — not a failed read
+    const rel = dir === root ? '.' : path.relative(root, dir).split(path.sep).join('/');
+    flags.push(`unreadable directory (${what}): ${rel} [${code}] — its contents are NOT counted`);
+  };
   const walkRulesTree = (rulesRoot, scope) => {
     const stack = [rulesRoot];
     let count = 0, dirs = 0;
@@ -360,7 +383,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       const dir = stack.pop();
       dirs++;
       let names;
-      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch (err) { noteUnreadable(err, dir, rulesRoot, `rules tree, scope ${scope}`); continue; }
       for (const d of names) {
         const p = path.join(dir, d.name);
         if (d.isDirectory()) stack.push(p);
@@ -374,7 +397,14 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
         }
       }
     }
-    if (count >= RULES_FILE_CAP || dirs >= RULES_FILE_CAP) flags.push(`rules tree capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP}, scope ${scope})`);
+    // CWK-082 findings-back F1 — the flag fires on what ACTUALLY HAPPENED, not
+    // on the counter reaching the cap. 526 files in ONE flat directory takes
+    // `count` past the cap and narrows NOTHING (the inner loop finishes the
+    // directory it starts), and a flag that announces a complete read trains
+    // the reader to ignore it — the cry-wolf failure this whole flag exists to
+    // prevent. A non-empty stack at loop exit is the exact, cheap predicate:
+    // directories were queued and never visited, so their contents are missing.
+    if (stack.length) flags.push(`rules tree capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP}, scope ${scope}) — ${stack.length} director${stack.length === 1 ? 'y' : 'ies'} left UNVISITED, their contents are NOT counted`);
   };
   if (projPhys) walkRulesTree(path.join(projPhys, '.claude', 'rules'), 'project');
   if (homePhys) walkRulesTree(path.join(claudeBaseDir(home), 'rules'), 'global');
@@ -424,7 +454,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       const { dir, depth } = stack.pop();
       dirs++;
       let names;
-      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; /* no memory dir yet — fine */ }
+      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch (err) { noteUnreadable(err, dir, memDir, 'memory store'); continue; }
       for (const d of names) {
         const p = path.join(dir, d.name);
         if (d.isDirectory()) { stack.push({ dir: p, depth: depth + 1 }); continue; }
@@ -438,7 +468,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
         count++;
       }
     }
-    if (count >= RULES_FILE_CAP || dirs >= RULES_FILE_CAP) flags.push(`memory store capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP})`);
+    if (stack.length) flags.push(`memory store capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP}) — ${stack.length} director${stack.length === 1 ? 'y' : 'ies'} left UNVISITED, their contents are NOT counted`);
   }
 
   // ---------------------------------------------------------------------
@@ -491,7 +521,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     }
   }
 
-  return { platform: plat, entries, inherited, flags, roleMemories: discoverRoleMemories({ projectRoot, home }) };
+  return { platform: plat, entries, inherited, flags, roleMemories: discoverRoleMemories({ projectRoot, home, flags }) };
 }
 
 // #22 ROLE-MEMORY DISCOVERY (promoted from retier.mjs's collectStores into the
@@ -517,19 +547,36 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
 // (fail-closed), symlink dirs never followed (Dirent own-type). CC-only (an
 // unknown platform gets [] — the agent-memory layout is a native-subagent
 // feature, conservative elsewhere, mirroring discoverClassB's own gate).
-export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.homedir() } = {}) {
+// CWK-082 findings-back F2 — `flags` is an OPTIONAL SINK, and it is the one
+// channel this function has: it returns a plain array, so a role store it
+// cannot read has nowhere else to announce itself. discoverClassB passes its
+// own flags array (the single shipped caller). RESIDUE, named not closed: a
+// future standalone caller that passes no sink still loses the notice — the
+// flag is raised at the failing read either way, but nobody is listening.
+export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.homedir(), flags = [] } = {}) {
   const projPhys = physicalOrNull(projectRoot);
   if (!projPhys) return [];
   const roots = [physicalOrNull(home), projPhys].filter(Boolean);
   const agentBase = path.join(projPhys, '.claude', 'agent-memory');
   let roles = [];
-  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { return []; } // no agent-memory dir = no role stores
+  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch (err) {
+    const code = (err && err.code) || 'UNKNOWN';
+    // An absent agent-memory dir is the ordinary case (no role stores). Any
+    // OTHER code means the dir is there and refused — a real, silent loss.
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') flags.push(`unreadable directory (role stores): . [${code}] — its contents are NOT counted`);
+    return [];
+  }
   const out = [];
   for (const role of roles) {
     const dirPhys = physicalOrNull(path.join(agentBase, role));
     if (!dirPhys || !containedIn(dirPhys, roots)) continue; // fail-closed (a role dir symlinked outside is skipped)
     let names = [];
-    try { names = fs.readdirSync(dirPhys, { withFileTypes: true }); } catch { continue; }
+    try { names = fs.readdirSync(dirPhys, { withFileTypes: true }); } catch (err) {
+      // This dir came back from a Dirent that said isDirectory(), so it EXISTS:
+      // any failure here is a real read failure, never the never-created case.
+      flags.push(`unreadable directory (role store ${role}): ${role} [${(err && err.code) || 'UNKNOWN'}] — its contents are NOT counted`);
+      continue;
+    }
     let index = null;
     const memories = [];
     let bytes = 0;

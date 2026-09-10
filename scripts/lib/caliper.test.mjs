@@ -2092,6 +2092,28 @@ test('CWK-081 adapter: gaugeVerdict JUDGES against the supplied capacity and REP
 // bound afterwards.
 // ---------------------------------------------------------------------------
 
+// CWK-082 F6 — the WRITE-side shape filter on the persisted residue had no test
+// at all: dropping it changed the suite by exactly 0 failures. It is redundant
+// defence (ask.mjs filters identically on read), but an untested guard reads as
+// coverage, so it earns its own cell rather than being deleted or left bare.
+test('CWK-082 F6: recordVerdict SHAPE-FILTERS the residue on the way IN — a malformed entry never reaches persisted state', () => {
+  const { home, proj } = sandbox();
+  try {
+    recordVerdict(home, proj, {
+      band: 'FULL', reason: 'externalize',
+      externalizable: [
+        { path: '/ok.md', tokensEst: 100 },
+        { path: 42, tokensEst: 5 },
+        { path: '/bad.md', tokensEst: 'not-a-number' },
+        null,
+        { path: '/ok2.md', tokensEst: 7 },
+      ],
+    }, 111);
+    assert.deepStrictEqual(loadState(proj, home).lastVerdict.externalizable,
+      [{ path: '/ok.md', tokensEst: 100 }, { path: '/ok2.md', tokensEst: 7 }],
+      'junk dropped at the boundary, never carried into state a template will read');
+  } finally { clean(home, proj); }
+});
 test('CWK-082 L2: externalizableResidue ranks the ALWAYS-LOADED entries by weight and ignores the recall tier', () => {
   const entries = [
     { path: '/p/small.md', bytes: 400, alwaysLoaded: true },

@@ -162,6 +162,38 @@ test('CWK-081 (b): with no judged-file list the advisory names none — an absen
   assert.ok(!/THAT PASS TOUCHED/i.test(r), 'no list -> no section, never a fabricated one');
   assert.match(r, /NOTHING about files the pass never touched/, 'the unconditional bound still stands on its own');
 });
+// CWK-082 F3 — the residue rendered BASENAMES, so the project's own MEMORY.md
+// and the CC store's memory/MEMORY.md printed as two identical rows with a 2x
+// weight difference and no way to tell them apart. This room's OWN CLAUDE.md
+// @imports MEMORY.md while the store carries its own index of that name, so
+// CoalWash dogfooding itself hits it.
+test('CWK-082 F3: two always-loaded files sharing a basename render DISTINGUISHABLY — the advisory names the file a hand should move', () => {
+  const r = externalizeAdvisory({
+    hardCeilingTokens: 167000,
+    residue: [
+      { path: '/home/.claude/projects/slug/memory/MEMORY.md', tokensEst: 41373 },
+      { path: '/proj/MEMORY.md', tokensEst: 20798 },
+    ],
+  });
+  // Assert on the LABEL ALONE, never label+number: the two entries carry
+  // DIFFERENT token counts, so a whole-row compare passes on identical labels
+  // and measures the fixture instead of the fix (this room’s own vacuity
+  // class, caught on this cell’s first run).
+  const labels = [...r.matchAll(/([^ ·:]+) ~\d+ tok/g)].map((m) => m[1]);
+  assert.strictEqual(labels.length, 2, `both rows render: ${JSON.stringify(labels)}`);
+  assert.notStrictEqual(labels[0], labels[1], `the two LABELS must tell the files apart: ${JSON.stringify(labels)}`);
+});
+
+test('CWK-082 F3: a residue with no collision stays SHORT — disambiguation is paid only where it is needed', () => {
+  const r = externalizeAdvisory({
+    hardCeilingTokens: 167000,
+    residue: [
+      { path: '/home/.claude/projects/slug/memory/MEMORY.md', tokensEst: 41373 },
+      { path: '/proj/CLAUDE.md', tokensEst: 5 },
+    ],
+  });
+  assert.match(r, /(^|[ ·])MEMORY\.md ~41373 tok/, 'a unique basename is still rendered bare — the control that keeps the fix from padding every row');
+});
 test('externalizeAdvisory: a missing hardCeilingTokens degrades to a "?" placeholder, never throws', () => {
   assert.doesNotThrow(() => externalizeAdvisory({}));
   assert.ok(externalizeAdvisory({}).includes('~? tok'));
