@@ -165,6 +165,13 @@ function printHelp() {
  * `current` is the value already in the config (used only by bandmap, so a user
  * may name one band without having to retype the other).
  */
+// ponytail: 58 lines at declaration — ONE switch over the schema's own type
+// space, and the cohesion unit is THAT SPACE, not the line count. Every arm is
+// the same three steps (turn one CLI string into a JS value, hand it to
+// validateValue, return {value} or {error}); splitting them into per-type
+// helpers would scatter the one property that matters — that the CLI parser and
+// the JSON validator cannot drift — across five files, and a new schema type
+// would then need a new file rather than a new arm. The number is HISTORY.
 export function parseValue(flagKey, spec, raw, current) {
   if (raw === undefined) return { error: `${flagKey} needs a value` };
   switch (spec.type) {
