@@ -80,7 +80,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig } from './lib/config-schema.mjs';
 import { parseJsonc } from './lib/jsonc.mjs';
-import { projectConfigPath, projectConfigCandidates, globalConfigPath } from './lib/config-load.mjs';
+import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig } from './lib/config-load.mjs';
 
 // Prototype-pollution guard. `parseJsonc` already drops these at PARSE (so a
 // poisoned file on disk cannot reach us), and the flag map is built from the
@@ -415,8 +415,44 @@ function main() {
     if (hadComments) {
       console.warn('Note: inline comments were stripped (this tool writes plain JSON). Every key stays documented in platform-configs/.coalwash.json.');
     }
-    console.log(`Successfully updated configuration in: ${writePath}`);
+    // F-R32-3: SAY WHAT WILL ACTUALLY BE READ. hooks-safety.md §9 clamps every
+    // consent-bearing key SAFER-VALUE-WINS on merge, so a PROJECT config may make
+    // one quieter but never weaker — and this tool used to write `writeGuard:
+    // "off"`, echo it back, and print "Successfully updated" while every reader
+    // kept getting `"on"`. The user turned their airbag off, was told it worked,
+    // and the airbag stayed on.
+    //
+    // WARN, NOT REFUSE — the head's ruling, and the reasons are worth keeping
+    // beside the code: the clamp is a READ-side security property rather than a
+    // write-side prohibition, so refusing would turn a rail that protects the
+    // user into one that blocks them; a project value is legitimately meaningful
+    // the moment their global stance changes; and §9's own recorded residual is
+    // that an honest write and a hostile one are BYTE-IDENTICAL, so refusing
+    // would punish the honest one for no security gain.
+    //
+    // The comparison is against the LOADER's own merged read, never a
+    // re-derivation of the clamp here — one implementation, and it answers the
+    // only question that matters: what will a reader get?
+    const effective = loadMergedConfig({ cwd: process.cwd() });
+    const clamped = edits
+      .map((e) => ({ key: e.segs.join('.'), wrote: e.value, reads: valueAtPath(effective, e.segs) }))
+      .filter((x) => JSON.stringify(x.wrote) !== JSON.stringify(x.reads));
+
+    if (clamped.length) {
+      console.log(`Wrote ${writePath} — but see the warning below.`);
+    } else {
+      console.log(`Successfully updated configuration in: ${writePath}`);
+    }
     console.log(JSON.stringify(next, null, 2));
+    for (const c of clamped) {
+      console.warn(`\nWarning: ${c.key} will NOT be read at the value you set.`);
+      console.warn(`  written: ${JSON.stringify(c.wrote)}    every read returns: ${JSON.stringify(c.reads)}`);
+      console.warn('  A consent-bearing key merges SAFER-VALUE-WINS (hooks-safety.md §9): a project');
+      console.warn('  config may make it quieter, never weaker, because a cloned repo ships a project');
+      console.warn('  config and its bytes are indistinguishable from yours.');
+      console.warn(`  To make this take effect, set it on the GLOBAL layer instead:`);
+      console.warn(`      node scripts/configure.mjs --global --${c.key} ${typeof c.wrote === 'string' ? c.wrote : JSON.stringify(c.wrote)}`);
+    }
   } catch (e) {
     console.error(`Error: Failed to write to config file: ${e.message}`);
     process.exitCode = 1;

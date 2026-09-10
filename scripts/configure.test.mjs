@@ -331,3 +331,51 @@ test('F-R32-4: an unrecognized flag does not swallow the NEXT FLAG as its value'
     "'en' is the VALUE of --language and must never be reported as a flag");
   assert.ok(!fs.existsSync(projCfg(sb)), 'a rejected run still writes nothing');
 });
+
+// ---------------------------------------------------------------------------
+// r32 FINDINGS-BACK — F-R32-3 [MED]. The head ruled WARN, not REFUSE: the clamp
+// is a READ-side security property, not a write-side prohibition, and a project
+// value is legitimately meaningful the moment the user's global stance changes.
+// So the write proceeds and the CLI must say what will actually be READ.
+// ---------------------------------------------------------------------------
+
+test('F-R32-3: a project write no read will honour is NAMED, with the effective value and --global', (t) => {
+  const sb = sandbox(t);
+  const r = run(sb, ['--writeGuard', 'off']);
+
+  // The write itself still happens — the ruling is WARN, not REFUSE.
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(JSON.parse(fs.readFileSync(projCfg(sb), 'utf8')).writeGuard, 'off',
+    'the ruling is WARN: the value the user asked for is still written to their file');
+
+  const out = r.stdout + r.stderr;
+  assert.match(out, /writeGuard/, 'the warning must name the KEY');
+  assert.match(out, /"on"/, 'the warning must name the EFFECTIVE value every read returns');
+  assert.match(out, /--global/, 'the warning must point at the path that DOES take effect');
+  assert.doesNotMatch(r.stdout, /Successfully updated configuration/,
+    'the success line must stop overstating when a key it just wrote will not be read at that value');
+});
+
+test('F-R32-3 CONTROL: an UNCLAMPED key is written, honoured, and NOT warned about', (t) => {
+  const sb = sandbox(t);
+  // Without this control the cell above would pass just as well against a CLI
+  // that warned on every key — which would be a different defect, not a fix.
+  const r = run(sb, ['--language', 'th']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(JSON.parse(fs.readFileSync(projCfg(sb), 'utf8')).language, 'th');
+  assert.match(r.stdout, /Successfully updated configuration/,
+    'an honoured write keeps the plain success line');
+  assert.doesNotMatch(r.stdout + r.stderr, /will NOT be read/,
+    'a key nothing clamps must draw no warning at all');
+});
+
+test('F-R32-3: --global IS honoured, so the warning fires on the PROJECT path only', (t) => {
+  const sb = sandbox(t);
+  const r = run(sb, ['--global', '--writeGuard', 'off']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const g = path.join(sb.home, '.claude', '.coalwash.json');
+  assert.strictEqual(JSON.parse(fs.readFileSync(g, 'utf8')).writeGuard, 'off');
+  assert.doesNotMatch(r.stdout + r.stderr, /will NOT be read/,
+    'the global layer is where a consent-bearing key DOES take effect — warning here would be false');
+  assert.match(r.stdout, /Successfully updated configuration/);
+});
