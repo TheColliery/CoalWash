@@ -1,5 +1,13 @@
 #!/usr/bin/env node
 'use strict';
+// ponytail: 806 lines at declaration — FOUR hook events share ONE file
+// by construction: hooks.json wires a single command and the branch on
+// hook_event_name is the first thing the body does. Splitting means either four
+// entry files, each re-paying the whole Phoenix-13 preamble (fail-silent wrap,
+// stdin read, config cascade, state paths) and re-reading the same state, or a
+// shared lib this CJS hook can only reach through await import() — a second
+// module-resolution failure mode on the one surface that must never crash the
+// host. The cohesion unit here is the hook CONTRACT, not the line count.
 // CoalWash conductor (Phoenix-13 hook: fail-silent, zero-dep, no network, no
 // spawn, never process.exit — hooks-safety.md). FOUR events share this one
 // file (hooks.json), branching on hook_event_name (+ tool_name) from stdin:
