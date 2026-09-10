@@ -117,7 +117,35 @@ function refusalCode(candidate) {
     const code = (err && err.code) || 'UNKNOWN';
     return (code === 'ENOENT' || code === 'ENOTDIR') ? null : code; // absent = silent; refused = named
   }
-  try { fs.realpathSync.native(candidate); return 'UNCOMPARABLE'; } catch (err) { return (err && err.code) || 'UNKNOWN'; }
+  // F-T3: THE SAME CARVE-OUT, THE SAME RULE, BOTH CALLS. This line used to pass
+  // the second call's code through untouched, so `refusalFlag` — which calls
+  // anything that is not UNCOMPARABLE `refused` — labelled an ABSENCE as a
+  // PERMISSION problem five lines below the branch that carves absence out.
+  // REACHED, not argued: a directory junction whose target is deleted lstats OK
+  // and fails realpath with ENOENT, producing
+  // `refused path (governance): DANGLING.md [ENOENT]`; a user then hunts an ACL
+  // problem that does not exist. Nothing is behind a dangling link, so nothing
+  // was lost, so the honest output is the same SILENCE the first call already
+  // gives that pair.
+  //
+  // WHY (a) AND NOT (b), THE CODE-TO-NOUN MAP THE REVIEWER ALSO OFFERED —
+  // measured before choosing (scratchpad/r32/probe-ft3-codes.mjs, win32):
+  // ENOENT is the ONLY code observed reaching this second call at all. A junction
+  // LOOP throws ELOOP from realpath but `lstat` fails first with ENOENT, so it
+  // never arrives here; an overlong name likewise. Building a noun map for codes
+  // nothing could be shown to reach would be inventing a classifier against a
+  // measurement I do not have. With this carve-out every code that still reaches
+  // `refusalFlag` is either UNCOMPARABLE or a genuine refusal, which is what
+  // makes "the noun follows the code" true rather than nearly true.
+  //
+  // NAMED RESIDUAL: that argument rests on a win32 measurement. A POSIX box could
+  // in principle deliver ELOOP here (its lstat may not fail first), and the word
+  // would then read `refused` for a resolution failure. Unmeasured — no seat in
+  // this room has a Linux box.
+  try { fs.realpathSync.native(candidate); return 'UNCOMPARABLE'; } catch (err) {
+    const code = (err && err.code) || 'UNKNOWN';
+    return (code === 'ENOENT' || code === 'ENOTDIR') ? null : code;
+  }
 }
 
 // R3-F3 — THE NOUN FOLLOWS THE CODE. This unit's whole contribution is

@@ -784,10 +784,36 @@ function makeUnresolvable(target) {
 }
 
 // The capability probe runs on a THROWAWAY target before anything is asserted,
-// so a box that cannot deny reads skips before any leg executes (ONE SKIPPABLE
+// so a box that cannot produce the state skips before any leg executes (ONE SKIPPABLE
 // LEG PER TEST — a skip decided after a real assertion reports as skipped a leg
 // that in fact ran).
-function canDenyRead(proj, name) {
+// ⚠️ WHAT THIS PROBE ESTABLISHES, AND THE PLATFORM SCOPE THAT FOLLOWS FROM IT
+// (F-T4, r31 INSPECT §7 — the words used to say something else).
+//
+// It returns true only when `makeUnresolvable` succeeded, and `makeUnresolvable`
+// accepts an attempt ONLY when `physicalOrNull(target) === null` — i.e. only when
+// the denial broke CANONICALIZATION. That is NOT the same property as "this box
+// can deny a read", and the old name and skip message said the second one.
+// Measured on POSIX the two come apart cleanly: `chmod 0o000` DOES deny the read
+// and does NOT break `realpath` (resolution needs SEARCH on the parent chain, not
+// READ on the target), so this probe returns false on a box that denies reads
+// perfectly well. The r32 (a)-fork cell below carries its own separate probe,
+// `makeUnreadableFile`, precisely because it needs the OPPOSITE state.
+//
+// THE SCOPE CLAIM, written here because this is where a reader meets the skip:
+// `.github/workflows/ci.yml` runs os: [ubuntu-latest, windows-latest,
+// macos-latest]. By the derivation above, every cell gated on THIS probe — the
+// three CWK-082 F2-R2 cells, R3-F1, and R3-F3 INVARIANT — is expected to SKIP on
+// the two POSIX legs, leaving windows-latest as the only platform on which the
+// permission-refusal family is exercised at all.
+//
+// ⚠️ REASONED, NOT EXECUTED: no seat in this room has a Linux or macOS box, so
+// the POSIX half of that derivation has never been run — it follows from what
+// `realpath` requires, not from a measurement taken here. What would settle it:
+// reading the SKIP COUNT off the ubuntu/macos CI legs of any run that includes
+// this file, or another room's box. Until then this is a stated expectation, and
+// a reader must not upgrade it to a measurement.
+function canMakeUnresolvable(proj, name) {
   const probe = path.join(proj, name);
   write(path.join(probe, 'x.md'), 'x');
   const undo = makeUnresolvable(probe);
@@ -799,7 +825,7 @@ test('CWK-082 F2-R2: a role STORE that refuses to canonicalize FLAGS — the ref
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     const roleDir = path.join(proj, '.claude', 'agent-memory', 'coder');
     write(path.join(roleDir, 'MEMORY.md'), 'index');
     write(path.join(roleDir, 'craft.md'), 'craft');
@@ -820,7 +846,7 @@ test('CWK-082 F2-R2: a governance FILE that refuses to canonicalize FLAGS — it
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true }); // platform must DETECT or the arm is vacuous
     write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@AGENTS.md\ngovernance');
     write(path.join(proj, 'MEMORY.md'), 'memory');
@@ -841,7 +867,7 @@ test('CWK-082 F2-R2: a single role FILE that refuses to canonicalize FLAGS — o
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     const roleDir = path.join(proj, '.claude', 'agent-memory', 'coder');
     write(path.join(roleDir, 'MEMORY.md'), 'index');
     write(path.join(roleDir, 'craft.md'), 'x'.repeat(1200));
@@ -883,7 +909,7 @@ test('R3-F1: a candidate whose PARENT refuses is REFUSED, not absent — lstat n
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
     write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@sub/NOTES.md\ngovernance');
     write(path.join(proj, 'MEMORY.md'), 'memory');
@@ -937,10 +963,22 @@ test('R3-F3 INVARIANT: no flag pairs the word `unresolvable` with an ERROR code,
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
-    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\ngovernance');
+    // F-T3: the fixture carries BOTH refusal classes, so one flag set holds a
+    // real permission refusal (EPERM, from the denied role dir below) AND an
+    // absence reaching the second call (ENOENT, from the dangling link). Without
+    // the link the new direction below can never fire on this cell's own data.
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@DANGLING.md\ngovernance');
     write(path.join(proj, 'MEMORY.md'), 'memory');
+    const danglingTarget = path.join(proj, 'dangling-target');
+    fs.mkdirSync(danglingTarget, { recursive: true });
+    let dangled = false;
+    try {
+      fs.symlinkSync(danglingTarget, path.join(proj, 'DANGLING.md'), 'junction');
+      fs.rmSync(danglingTarget, { recursive: true, force: true });
+      dangled = true;
+    } catch { dangled = false; }
     write(path.join(proj, '.claude', 'agent-memory', 'coder', 'MEMORY.md'), 'index');
     undo = makeUnresolvable(path.join(proj, '.claude', 'agent-memory', 'coder'));
     assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
@@ -952,6 +990,15 @@ test('R3-F3 INVARIANT: no flag pairs the word `unresolvable` with an ERROR code,
     const wrong = all.filter((f) => /unresolvable path/.test(f) && !/\[UNCOMPARABLE\]/.test(f));
     assert.deepStrictEqual(wrong, [],
       `every error-code flag must say 'refused'; 'unresolvable' belongs to the non-throwing case alone`);
+    // F-T3: THE OTHER DIRECTION. The assertion above is half of the property this
+    // cell's own name claims — it never asserted that `refused` is paired only
+    // with a REFUSAL code, and it PASSED on the very fixture that produced
+    // `refused path (governance): DANGLING.md [ENOENT]`. ENOENT/ENOTDIR mean
+    // nothing is behind the path: absent, never denied.
+    assert.ok(dangled, 'the dangling link is what makes the second direction non-vacuous on this fixture');
+    const absentButNamed = all.filter((f) => /refused path/.test(f) && /\[(ENOENT|ENOTDIR)\]/.test(f));
+    assert.deepStrictEqual(absentButNamed, [],
+      `'refused' is a permission word; an absence code must never carry it`);
   } finally { if (undo) undo(); clean(home, proj); }
 });
 
@@ -1039,4 +1086,62 @@ test('r32 (a): a governance file whose CONTENT is denied FLAGS — its own bytes
     if (restore) restore();
     clean(home, proj);
   }
+});
+
+// ---------------------------------------------------------------------------
+// r32, F-T3 — the noun was ONE-SIDED. refusalCode carved ENOENT/ENOTDIR on the
+// FIRST call (lstat) and passed the SECOND call's (realpath) code through
+// untouched, after which refusalFlag called anything that is not UNCOMPARABLE
+// "refused". So one code meant "absent, stay silent" from lstat and "REFUSED"
+// from realpath, five lines apart.
+//
+// MEASURED BEFORE CHOOSING THE FIX (scratchpad/r32/probe-ft3-codes.mjs, win32):
+//   dangling junction   lstat=OK       realpath=ENOENT   <- reaches the 2nd call
+//   junction loop       lstat=ENOENT   realpath=ELOOP    <- stopped by the 1st
+//   overlong name       lstat=ENOENT   realpath=ENOENT   <- stopped by the 1st
+//   denied parent       lstat=EPERM    realpath=EPERM    <- named, correctly
+// ENOENT is the ONLY code measured reaching the second call here, which is why
+// the fix carves the same pair there rather than building a code-to-noun map for
+// codes nothing could reach.
+// ---------------------------------------------------------------------------
+
+test('F-T3: a DANGLING link is SILENT, never called refused — an absence code is not a permission word', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    // Probe FIRST, on a throwaway: this box must be able to produce the state
+    // (lstat OK, realpath ENOENT) or the arm measures nothing.
+    const gone = path.join(proj, 'probe-target');
+    const link = path.join(proj, 'probe-link.md');
+    fs.mkdirSync(gone, { recursive: true });
+    let made = false;
+    try { fs.symlinkSync(gone, link, 'junction'); made = true; } catch { made = false; }
+    if (made) fs.rmSync(gone, { recursive: true, force: true });
+    let lstatOk = false;
+    let realpathCode = null;
+    if (made) {
+      try { fs.lstatSync(link); lstatOk = true; } catch { lstatOk = false; }
+      try { fs.realpathSync.native(link); } catch (e) { realpathCode = e.code || 'UNKNOWN'; }
+    }
+    if (!made || !lstatOk || realpathCode !== 'ENOENT') {
+      t.skip('this box cannot produce a link that lstats OK and fails realpath with ENOENT — the arm would be vacuous');
+      return;
+    }
+    try { fs.rmSync(link, { recursive: true, force: true }); } catch { /* best effort */ }
+
+    write(path.join(home, '.claude', 'CLAUDE.md'), 'global');
+    const dangling = path.join(proj, 'DANGLING.md');
+    const target = path.join(proj, 'target-dir');
+    fs.mkdirSync(target, { recursive: true });
+    write(path.join(proj, 'CLAUDE.md'), '@DANGLING.md' + String.fromCharCode(10));
+    fs.symlinkSync(target, dangling, 'junction');
+    fs.rmSync(target, { recursive: true, force: true });
+
+    const d = discoverClassB({ projectRoot: proj, home });
+    assert.ok(d.entries.some((e) => path.basename(e.path) === 'CLAUDE.md'),
+      'PRECONDITION: the walk still runs and still counts the importing file');
+    const named = d.flags.filter((f) => /refused path/.test(f) && /\[ENOENT\]/.test(f));
+    assert.deepStrictEqual(named, [],
+      'a dangling link lost NOTHING — there is nothing behind it to count — so it must produce no flag at all, '
+      + 'never a permission word: ' + JSON.stringify(d.flags));
+  } finally { clean(home, proj); }
 });
