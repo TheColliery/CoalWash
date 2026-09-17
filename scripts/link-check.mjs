@@ -8,12 +8,14 @@
 // config-keys.mjs), none of which ship.
 //
 // ============================================================================
-// THE SLUG RULE IS MEASURED, NOT GUESSED (CWK-098). Conformed to CoalHearth's slug-oracle
-// record, sha256 ae1ff6aefddc05e758f9cf0d6f5384e59e0cb0697b83fb2ebbc4ac2e9b0b099a,
-// 998 of 998 anchors reproduced against GitHub's own POST /markdown render. If that record
-// is revised, this hash is how the drift shows. Its status when conformed to (2026-09-17):
-// the CoalHearth code-reviewer's return to its own head, not yet ruled by that head nor
-// copied to CoalWorks/warehouse/.
+// THE SLUG RULE IS MEASURED, NOT GUESSED (CWK-098). Record:
+// CoalWorks/warehouse/slug-oracle-2026-09.md, sha256
+// 2a8acee03f15e28ff02c2ee37bc0f833954f4cf11fc9bdc14f9d5bd10450bf78 — 998 of 998 anchors
+// reproduced against GitHub's own POST /markdown render. This engine was conformed to that
+// record's scratch original (CoalHearth's slug-oracle.md, sha256
+// ae1ff6aefddc05e758f9cf0d6f5384e59e0cb0697b83fb2ebbc4ac2e9b0b099a); the warehouse copy is that
+// file byte-identical under a provenance comment line and a blank line. If the record is
+// revised, its hash is how the drift shows.
 //
 // The rule, per clause — every one of these was WRONG in at least one sibling room:
 //   step 0  resolve inline markup to rendered text (code span content kept, link/image text

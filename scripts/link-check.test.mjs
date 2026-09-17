@@ -1,11 +1,15 @@
 // CW-017 — scripts/link-check.mjs. Two things are pinned here: the SLUG RULE, against data
 // measured from GitHub's own render, and the GATE, against planted defects it must name.
 //
-// THE VECTORS ARE COPIED IN, never read from where they were measured: that file lives in
-// another room's gitignored scratchpad, absent from any clone. Source:
-//   CoalWorks/CoalHearth/scratchpad/r34/out/test-vectors.json
+// THE VECTORS ARE COPIED IN, never read from where they were measured: that file lives
+// outside this repo, absent from any clone. Source:
+//   CoalWorks/warehouse/slug-oracle-2026-09.test-vectors.json
 //   sha256 85106848652e965675fbe5a9195601f8ff675575968f6e6531a6c9b70940c82d
-// (companion record slug-oracle.md, sha256 ae1ff6aefddc05e758f9cf0d6f5384e59e0cb0697b83fb2ebbc4ac2e9b0b099a).
+// (byte-identical to CoalHearth's scratchpad/r34/out/test-vectors.json, which these rows were
+// deep-compared to; companion record CoalWorks/warehouse/slug-oracle-2026-09.md, sha256
+// 2a8acee03f15e28ff02c2ee37bc0f833954f4cf11fc9bdc14f9d5bd10450bf78 — the conformed-to scratch
+// record, sha256 ae1ff6aefddc05e758f9cf0d6f5384e59e0cb0697b83fb2ebbc4ac2e9b0b099a, under a
+// provenance comment line and a blank line).
 // Every code point outside printable ASCII is written \u{…}, so an invisible one (VS16, ZWJ, ZWNJ, NBSP,
 // TAB) cannot be lost by an editor; the literal was evaluated and deep-compared to the JSON
 // before it was pasted. Rows 10 and 39 need their
