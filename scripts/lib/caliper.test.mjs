@@ -2144,7 +2144,39 @@ test('CWK-099 adapter P2: a file the adapter does not recognise is IGNORED — t
   }
 });
 
-test('CWK-099 adapter P2: a POPULATED stats-cache still wins — the file is read only when P1 finds nothing', () => {
+// F-R34-2 (C21): PowerShell 5.1's `Set-Content -Encoding utf8` / `Out-File` write a
+// UTF-8 BOM. A correct writer's file must not be dead because of it.
+test('CWK-099 adapter P2: a BOM-prefixed valid capacity file is READ, the way every other state file here is', () => {
+  const { home, proj } = cwk099Home(String.fromCharCode(0xFEFF) + JSON.stringify({ capacityTokens: 967000, rawWindowTokens: 1000000, stateSchema: CAPACITY_FILE_SCHEMA }));
+  try {
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.source, 'capacity-file', `a leading U+FEFF must not make a valid file doubt, got ${JSON.stringify(c)}`);
+    assert.strictEqual(c.capacityTokens, 967000);
+  } finally { clean(home, proj); }
+});
+
+// F-R34-1 (C25): P1 FOUND a window — a non-zero contextWindow — and cannot use it.
+// That is positive evidence of the box's window, so the default answers and the
+// file is NOT consulted: a larger file must never override it. Every shape of
+// "found but unusable" is pinned, so the rule is not only the one reported row.
+test('CWK-099 adapter P2: a stats-cache that FOUND a window it cannot use answers with the DEFAULT — a larger capacity file never overrides it', () => {
+  for (const [label, window] of [
+    ['a real small window (usable below the discovery floor)', 120000],
+    ['a window below the discovery range', 64000],
+    ['a window above the discovery range', 6000000],
+  ]) {
+    const { home, proj } = cwk099Home({ capacityTokens: 967000, rawWindowTokens: 1000000, stateSchema: CAPACITY_FILE_SCHEMA });
+    try {
+      fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: { m: { contextWindow: window } } }), 'utf8');
+      const c = discoverCapacity({ home });
+      assert.strictEqual(c.source, 'conservative-default', `${label}: the file must not be consulted, got ${JSON.stringify(c)}`);
+      assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS, label);
+      assert.strictEqual(c.discovered, false, label);
+    } finally { clean(home, proj); }
+  }
+});
+
+test('CWK-099 adapter P2: a POPULATED usable stats-cache still wins over the file — the file answers only when every contextWindow is 0 or absent', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });

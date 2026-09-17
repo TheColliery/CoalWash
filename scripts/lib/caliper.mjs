@@ -783,19 +783,36 @@ export function oldStatePath(home = os.homedir()) {
 //       window size does not age). Any doubt — a missing or non-numeric field,
 //       a non-positive or out-of-range number, a stale OR newer stateSchema, a
 //       capacityTokens that disagrees with the re-derivation below — ignores the
-//       file and falls through. Never guessed from.
+//       file and falls through. Never guessed from. A leading U+FEFF is not
+//       doubt (stripped, as every state file here is).
+//       WRITER CONTRACT — MIN: the file holds the SMALLEST raw window of any
+//       model this box runs, never the last receipt's. It is ONE number standing
+//       for every session on the box, and a hook cannot tell which model its
+//       session runs, so only the smallest is safe for all of them. THE RESIDUAL,
+//       stated: this adapter CANNOT verify that the writer honoured MIN — the
+//       file is trusted to BE the MIN, and a writer that records a larger window
+//       (a 1M receipt on a box that also runs a 200k model) makes every smaller
+//       session gauge against a wall it does not have, the unsafe direction
+//       TRUST-OR-RE-DERIVE below names.
+//       P2 is consulted ONLY when P1 found no populated window at all: a window
+//       P1 found but cannot use is answered by the default, never by this file.
 //   ..  Deliberately NOT probed, each for a stated reason: ~/.claude.json is
 //       UNTOUCHABLE (AR-40 — a human-consent surface, read or write); the
 //       session transcripts carry no modelUsage record at all (swept: every
 //       `contextWindow` hit in them is prose from the injected governance
 //       text); and a network/model-registry lookup is barred outright
 //       (Phoenix #7).
-//   ->  fall through to CAPACITY_TOKENS, the DERIVED conservative default,
-//       with `discovered:false` so a reader can act on the distinction.
+//   ->  CAPACITY_TOKENS, the DERIVED conservative default, when P1 found a
+//       window it cannot use OR neither probe found anything — with
+//       `discovered:false` so a reader can act on the distinction.
 //
 // MIN, not the current model's: a hook has no model identity to key on, and the
 // smallest window any model on this box runs at is the conservative reading
 // (see CAPACITY_TOKENS' own note on why smallest is the safe direction here).
+// WHERE THAT HOLDS, scoped: P1 takes the MIN itself, over every model the cache
+// knows. P2 holds one number and cannot take a MIN — it inherits the obligation
+// through its writer contract above, unverifiable here. And positive evidence of
+// a small window (any populated P1 window) never yields to a larger P2 file.
 // SANITY-BOUND both ends — a discovered figure outside [100k, 5M] is a poisoned
 // or unit-confused cache, not a window; any doubt falls back (fail-closed, the
 // sanitizeLeanFloor discipline). Phoenix #4: every failure path is silent.
@@ -829,14 +846,21 @@ function probeStatsCache(home) {
     // bounded, because the fix is four tokens.
     if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null;
     let smallest = null;
+    let found = false;
     for (const v of Object.values(usage)) {
       const w = Number(v && v.contextWindow);
       if (!Number.isFinite(w) || w <= 0) continue; // 0 = present-but-unpopulated, the live case here
+      found = true;
       if (w < CAPACITY_DISCOVERY_MIN_TOKENS || w > CAPACITY_DISCOVERY_MAX_TOKENS) continue;
       if (smallest === null || w < smallest) smallest = w;
     }
     const usable = smallest === null ? null : usableFromRawWindow(smallest);
-    return usable === null ? null : { capacityTokens: usable, source: 'stats-cache', discovered: true, rawWindowTokens: smallest };
+    if (usable !== null) return { capacityTokens: usable, source: 'stats-cache', discovered: true, rawWindowTokens: smallest };
+    // F-R34-1: a window P1 FOUND but cannot use (usable below the floor, or out of
+    // range) is ANSWERED here, by the default, exactly as before P2 existed. Only a
+    // cache with no populated window at all falls through to P2 — so a larger file
+    // can never override a smaller window the platform itself reported.
+    return found ? conservativeCapacity() : null;
   } catch {
     return null; // unreadable/absent/corrupt -> the next probe, never a throw (Phoenix #4)
   }
@@ -851,8 +875,11 @@ function probeStatsCache(home) {
 // direction: an early FULL, never a store judged against a window it lacks.
 function probeCapacityFile(home) {
   try {
-    const j = parseJsonc(fs.readFileSync(capacityFilePath(home), 'utf8'));
-    if (!j || typeof j !== 'object' || Array.isArray(j)) return null;
+    // readStateFile: the one reader here that strips a leading U+FEFF (a PowerShell
+    // 5.1 writer adds one — F-R34-2) and refuses a non-object; absent/unreadable/
+    // corrupt/a directory all come back null.
+    const j = readStateFile(capacityFilePath(home));
+    if (!j) return null;
     if (j.stateSchema !== CAPACITY_FILE_SCHEMA) return null; // stale or newer: never guess what it means
     if (typeof j.rawWindowTokens !== 'number' || typeof j.capacityTokens !== 'number') return null;
     const usable = usableFromRawWindow(j.rawWindowTokens);
@@ -862,9 +889,11 @@ function probeCapacityFile(home) {
     return null; // absent (the common case) / unreadable / corrupt -> fall through, silently (Phoenix #4)
   }
 }
+function conservativeCapacity() {
+  return { capacityTokens: CAPACITY_TOKENS, source: 'conservative-default', discovered: false };
+}
 export function discoverCapacity({ home = os.homedir() } = {}) {
-  return probeStatsCache(home) || probeCapacityFile(home)
-    || { capacityTokens: CAPACITY_TOKENS, source: 'conservative-default', discovered: false };
+  return probeStatsCache(home) || probeCapacityFile(home) || conservativeCapacity();
 }
 
 function projKey(projectRoot) {
@@ -872,7 +901,8 @@ function projKey(projectRoot) {
 }
 
 // Parse a state JSON file → a plain object, or null on any doubt (missing,
-// corrupt, wrong-shape, unreadable). Shared by the new-path + old-root reads.
+// corrupt, wrong-shape, unreadable). Shared by the new-path + old-root reads and
+// the capacity adapter's P2 file.
 function readStateFile(p) {
   try {
     let raw = fs.readFileSync(p, 'utf8');
