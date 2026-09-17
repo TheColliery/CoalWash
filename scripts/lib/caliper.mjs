@@ -772,13 +772,23 @@ export function oldStatePath(home = os.homedir()) {
 //       EXISTS for all 9 models the cache knows and every value is 0 — the
 //       platform aggregates the key but never populates it here. So the probe
 //       is correct and finds nothing, which is a RESULT, not a failure.
-//   ..  (no P2 today.) Deliberately NOT probed, each for a stated reason:
-//       ~/.claude.json is UNTOUCHABLE (AR-40 — a human-consent surface, read
-//       or write); the session transcripts carry no modelUsage record at all
-//       (swept: every `contextWindow` hit in them is prose from the injected
-//       governance text); a `claude -p --output-format json` receipt DOES
-//       carry a real contextWindow, but it is a PARENT-SIDE artefact a hook
-//       can never see; and a network/model-registry lookup is barred outright
+//   P2  <claudeBase>/coal/coalwash/capacity.json (CWK-099, the gauge-file
+//       pattern). A `claude -p --output-format json` receipt DOES carry a real
+//       contextWindow, but it is a PARENT-SIDE artefact a hook can never see —
+//       so whoever DOES see a receipt (main's runner, a room head after its own
+//       dispatch) writes it down here, and this probe reads it. The adapter is
+//       a READER only: it never writes this file. Shape, all required:
+//       { stateSchema: CAPACITY_FILE_SCHEMA, rawWindowTokens, capacityTokens }
+//       (`source`/`at` are the writer's own labels and are not consulted — a
+//       window size does not age). Any doubt — a missing or non-numeric field,
+//       a non-positive or out-of-range number, a stale OR newer stateSchema, a
+//       capacityTokens that disagrees with the re-derivation below — ignores the
+//       file and falls through. Never guessed from.
+//   ..  Deliberately NOT probed, each for a stated reason: ~/.claude.json is
+//       UNTOUCHABLE (AR-40 — a human-consent surface, read or write); the
+//       session transcripts carry no modelUsage record at all (swept: every
+//       `contextWindow` hit in them is prose from the injected governance
+//       text); and a network/model-registry lookup is barred outright
 //       (Phoenix #7).
 //   ->  fall through to CAPACITY_TOKENS, the DERIVED conservative default,
 //       with `discovered:false` so a reader can act on the distinction.
@@ -791,11 +801,25 @@ export function oldStatePath(home = os.homedir()) {
 // sanitizeLeanFloor discipline). Phoenix #4: every failure path is silent.
 export const CAPACITY_DISCOVERY_MIN_TOKENS = 100000;
 export const CAPACITY_DISCOVERY_MAX_TOKENS = 5000000;
-export function discoverCapacity({ home = os.homedir() } = {}) {
-  const fallback = { capacityTokens: CAPACITY_TOKENS, source: 'conservative-default', discovered: false };
+export const CAPACITY_FILE_SCHEMA = 1;
+export function capacityFilePath(home = os.homedir()) {
+  return path.join(claudeBaseDir(home), 'coal', 'coalwash', 'capacity.json');
+}
+// THE ONE usable-from-raw DERIVATION, shared by both probes. The RAW window is
+// what a platform reports; the denominator every band decision uses is the
+// AUTO-COMPACT window, so the reserve comes off here, once, exactly as
+// CAPACITY_TOKENS' own derivation does (1,000,000 - 33,000 = 967,000 — the
+// reserve is the measured /context readout recorded at CAPACITY_TOKENS above,
+// TheColliery AGENTS.md ORG STRUCTURE's fuel-gauge denominator correction).
+// null = not a usable window.
+function usableFromRawWindow(raw) {
+  if (!Number.isFinite(raw) || raw < CAPACITY_DISCOVERY_MIN_TOKENS || raw > CAPACITY_DISCOVERY_MAX_TOKENS) return null;
+  const usable = raw - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS;
+  return usable < CAPACITY_DISCOVERY_MIN_TOKENS ? null : usable;
+}
+function probeStatsCache(home) {
   try {
-    const raw = fs.readFileSync(path.join(claudeBaseDir(home), 'stats-cache.json'), 'utf8');
-    const j = parseJsonc(raw);
+    const j = parseJsonc(fs.readFileSync(path.join(claudeBaseDir(home), 'stats-cache.json'), 'utf8'));
     const usage = j && typeof j === 'object' && !Array.isArray(j) ? j.modelUsage : null;
     // INSPECT L1: `typeof [] === 'object'`, so an ARRAY used to pass this guard
     // and Object.values() would happily yield its elements. No measured
@@ -803,7 +827,7 @@ export function discoverCapacity({ home = os.homedir() } = {}) {
     // the range check below — but this function's own comment promises "any
     // doubt falls back (fail-closed)", and an array is doubt. Fixed rather than
     // bounded, because the fix is four tokens.
-    if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return fallback;
+    if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null;
     let smallest = null;
     for (const v of Object.values(usage)) {
       const w = Number(v && v.contextWindow);
@@ -811,16 +835,36 @@ export function discoverCapacity({ home = os.homedir() } = {}) {
       if (w < CAPACITY_DISCOVERY_MIN_TOKENS || w > CAPACITY_DISCOVERY_MAX_TOKENS) continue;
       if (smallest === null || w < smallest) smallest = w;
     }
-    if (smallest === null) return fallback;
-    // The RAW window is what the platform reports; the denominator every band
-    // decision uses is the AUTO-COMPACT window, so the reserve comes off here,
-    // once, exactly as CAPACITY_TOKENS' own derivation does.
-    const usable = smallest - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS;
-    if (usable < CAPACITY_DISCOVERY_MIN_TOKENS) return fallback;
-    return { capacityTokens: usable, source: 'stats-cache', discovered: true, rawWindowTokens: smallest };
+    const usable = smallest === null ? null : usableFromRawWindow(smallest);
+    return usable === null ? null : { capacityTokens: usable, source: 'stats-cache', discovered: true, rawWindowTokens: smallest };
   } catch {
-    return fallback; // unreadable/absent/corrupt -> conservative, never a throw (Phoenix #4)
+    return null; // unreadable/absent/corrupt -> the next probe, never a throw (Phoenix #4)
   }
+}
+// TRUST OR RE-DERIVE, answered: RE-DERIVE from rawWindowTokens, and hold the
+// file's own capacityTokens to it as a CHECK. The reserve has one home — this
+// module — and it is still a HYPOTHESIS (see CAPACITY_TOKENS). Trusting the
+// file's number would install a second derivation, written outside this
+// codebase, that nothing here can see drift. A disagreement means writer and
+// reader hold different reserves, which is doubt, so the file is ignored and
+// the conservative default answers, with its provenance line. That is the safe
+// direction: an early FULL, never a store judged against a window it lacks.
+function probeCapacityFile(home) {
+  try {
+    const j = parseJsonc(fs.readFileSync(capacityFilePath(home), 'utf8'));
+    if (!j || typeof j !== 'object' || Array.isArray(j)) return null;
+    if (j.stateSchema !== CAPACITY_FILE_SCHEMA) return null; // stale or newer: never guess what it means
+    if (typeof j.rawWindowTokens !== 'number' || typeof j.capacityTokens !== 'number') return null;
+    const usable = usableFromRawWindow(j.rawWindowTokens);
+    if (usable === null || j.capacityTokens !== usable) return null;
+    return { capacityTokens: usable, source: 'capacity-file', discovered: true, rawWindowTokens: j.rawWindowTokens };
+  } catch {
+    return null; // absent (the common case) / unreadable / corrupt -> fall through, silently (Phoenix #4)
+  }
+}
+export function discoverCapacity({ home = os.homedir() } = {}) {
+  return probeStatsCache(home) || probeCapacityFile(home)
+    || { capacityTokens: CAPACITY_TOKENS, source: 'conservative-default', discovered: false };
 }
 
 function projKey(projectRoot) {

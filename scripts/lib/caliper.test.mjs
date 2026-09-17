@@ -18,6 +18,7 @@ import {
   readBudgetFor, READ_BUDGET_DEFAULT,
   discoverCapacity, markFullClean, armExternalize, externalizableResidue,
   CAPACITY_STANDARD_WINDOW_TOKENS, CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, CAPACITY_DISCOVERY_MIN_TOKENS,
+  CAPACITY_FILE_SCHEMA, capacityFilePath,
   __testHooks,
 } from './caliper.mjs';
 import { discoverClassB } from './class-b.mjs';
@@ -2068,6 +2069,87 @@ test('CWK-081 adapter: an out-of-range or corrupt figure falls back to the conse
     write('{ not json at all');                                          // corrupt
     assert.doesNotThrow(() => discoverCapacity({ home }));
     assert.strictEqual(discoverCapacity({ home }).capacityTokens, CAPACITY_TOKENS);
+  } finally { clean(home, proj); }
+});
+
+// CWK-099 — P2, the gauge file. The live shape it exists for: a stats-cache whose
+// every contextWindow is 0 (P1 finds nothing) on a box whose real window is 1M.
+const CWK099_MEASURE = { alwaysLoaded: { tokensEst: 300000, bytes: 1200000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 300000, totalBytes: 1200000, mechFat: { tokensEst: 0 } };
+function cwk099Home(capacityFile) {
+  const { home, proj } = sandbox();
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: { 'claude-opus-5': { contextWindow: 0 } } }), 'utf8');
+  if (capacityFile !== undefined) {
+    fs.mkdirSync(path.dirname(capacityFilePath(home)), { recursive: true });
+    fs.writeFileSync(capacityFilePath(home), typeof capacityFile === 'string' ? capacityFile : JSON.stringify(capacityFile), 'utf8');
+  }
+  return { home, proj };
+}
+
+test('CWK-099 adapter P2: a valid capacity file is DISCOVERED after an empty stats-cache, and the store gauges against 967,000', () => {
+  const { home, proj } = cwk099Home({ capacityTokens: 967000, rawWindowTokens: 1000000, source: 'claude -p receipt', at: '2026-09-17T00:00:00Z', stateSchema: CAPACITY_FILE_SCHEMA });
+  try {
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.source, 'capacity-file');
+    assert.strictEqual(c.discovered, true);
+    assert.strictEqual(c.rawWindowTokens, 1000000);
+    assert.strictEqual(c.capacityTokens, 1000000 - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, 'the usable window is re-derived from the raw one — the same derivation P1 uses');
+    const gv = gaugeVerdict({ measure: CWK099_MEASURE, capacity: c });
+    assert.strictEqual(gv.capacityTokens, 967000);
+    assert.strictEqual(gv.capacitySource, 'capacity-file');
+    assert.strictEqual(gv.verdict.band, 'LEAN', 'a 300k store is nowhere near a 967k wall');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-099 adapter P2: WITHOUT the file, the same box still reads the conservative default with the default\'s provenance', () => {
+  const { home, proj } = cwk099Home(undefined);
+  try {
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.source, 'conservative-default');
+    assert.strictEqual(c.discovered, false);
+    assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
+    const gv = gaugeVerdict({ measure: CWK099_MEASURE, capacity: c });
+    assert.strictEqual(gv.capacitySource, 'conservative-default');
+    assert.strictEqual(gv.verdict.band, 'FULL', 'the same 300k store is over the conservative wall');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-099 adapter P2: a file the adapter does not recognise is IGNORED — the default answers, never a guess', () => {
+  const good = { capacityTokens: 967000, rawWindowTokens: 1000000, source: 'x', at: 0, stateSchema: CAPACITY_FILE_SCHEMA };
+  for (const [label, file] of [
+    ['a stale stateSchema', { ...good, stateSchema: CAPACITY_FILE_SCHEMA - 1 }],
+    ['a newer stateSchema', { ...good, stateSchema: CAPACITY_FILE_SCHEMA + 1 }],
+    ['no stateSchema', { capacityTokens: 967000, rawWindowTokens: 1000000 }],
+    ['a string stateSchema', { ...good, stateSchema: String(CAPACITY_FILE_SCHEMA) }],
+    ['no capacityTokens', { rawWindowTokens: 1000000, stateSchema: CAPACITY_FILE_SCHEMA }],
+    ['no rawWindowTokens', { capacityTokens: 967000, stateSchema: CAPACITY_FILE_SCHEMA }],
+    ['a non-numeric rawWindowTokens', { ...good, rawWindowTokens: '1000000' }],
+    ['a non-positive rawWindowTokens', { ...good, rawWindowTokens: -1000000, capacityTokens: -1033000 }],
+    ['a non-positive capacityTokens', { ...good, capacityTokens: 0 }],
+    ['an out-of-range rawWindowTokens', { ...good, rawWindowTokens: 99000000, capacityTokens: 98967000 }],
+    ['a capacityTokens that skipped the reserve', { ...good, capacityTokens: 1000000 }],
+    ['an array', [good]],
+    ['corrupt JSON', '{ "capacityTokens": 967000,'],
+  ]) {
+    const { home, proj } = cwk099Home(file);
+    try {
+      const c = discoverCapacity({ home });
+      assert.strictEqual(c.source, 'conservative-default', `${label}: must fall through to the default, got ${JSON.stringify(c)}`);
+      assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS, label);
+    } finally { clean(home, proj); }
+  }
+});
+
+test('CWK-099 adapter P2: a POPULATED stats-cache still wins — the file is read only when P1 finds nothing', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: { m: { contextWindow: 200000 } } }), 'utf8');
+    fs.mkdirSync(path.dirname(capacityFilePath(home)), { recursive: true });
+    fs.writeFileSync(capacityFilePath(home), JSON.stringify({ capacityTokens: 967000, rawWindowTokens: 1000000, stateSchema: CAPACITY_FILE_SCHEMA }), 'utf8');
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.source, 'stats-cache');
+    assert.strictEqual(c.rawWindowTokens, 200000);
   } finally { clean(home, proj); }
 });
 

@@ -4,6 +4,10 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- **CoalWash can now learn your real context ceiling from a file another tool writes, when the platform's own stats leave it blank.** Today's Claude Code reports every model's context window as `0` in `~/.claude/stats-cache.json`, so every install fell back to the conservative 167,000-token ceiling — and a store sized for a 1,000,000-token session read FULL on every gauge. The capacity adapter now checks a second place after the stats cache: `~/.claude/coal/coalwash/capacity.json`, `{ stateSchema: 1, rawWindowTokens, capacityTokens }`, written by whatever can actually see a session's window (a `claude -p --output-format json` receipt carries it; a hook never can). The gauge line names it: `(discovered: capacity-file)`. **CoalWash only reads this file — it never writes it.** The usable ceiling is re-derived from `rawWindowTokens` (raw minus the 33,000-token auto-compact reserve: 1,000,000 → 967,000), and the file's own `capacityTokens` must agree with that, so a writer using a different reserve cannot quietly install its own arithmetic. A missing or non-numeric field, a number out of range, or a `stateSchema` that is older or newer than 1 makes CoalWash ignore the file and use the conservative default, labelled as such. — test: `scripts/lib/caliper.test.mjs` (`CWK-099`)
+
 ### Changed
 
 - **A keep's `anchor` is now measured for real content before it is stored, and the store tells you when one was dropped.** A re-affirm passing a whitespace-only, single-character, or invisible-character anchor no longer silently overwrites a real adjudicated one, and `recordKeep`/`recordGlobalKeep` return `{ ok, anchorDropped, anchorStored }` instead of a bare boolean — so "the write succeeded" and "the anchor you asked for did not survive the floor" stop being the same answer. **This is a return-shape change for any caller reading that value: `{ ok: false }` is TRUTHY, so a truthiness check that used to detect failure now cannot.** Nothing in the shipped engine calls these functions, so no shipped behaviour depends on it today.
