@@ -1126,9 +1126,9 @@ test('KEY-LINE COST: a 60 KiB pathological line parses in bounded time (was ~5.4
 // the no-drop path linear. Every second of gate time sits inside applyPlan's
 // window between the staging read and the external-writer compare, so gate
 // time is exposure, not just latency. The candidates are now parsed ONCE per
-// checkFidelity call; the bound below is ~10x the fixed cost and ~2x under
-// the measured quadratic at this size, so it only trips if the quadratic
-// returns. Semantics are pinned by the survivor-order control underneath and
+// checkFidelity call, and the test asserts that as a parseNumToken CALL COUNT
+// against a linear bound — the wall-clock bound that used to stand here is
+// retired (F-RR-2, r34). Semantics are pinned by the survivor-order control underneath and
 // by the old-vs-new corpus differential recorded in the CHANGELOG.
 // ---------------------------------------------------------------------------
 function dropHeavyPair(targetBytes) {
