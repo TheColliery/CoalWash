@@ -67,8 +67,9 @@
 //
 // CLI discipline (scripts-quality.md): fail LOUD — a bad subcommand, a
 // missing id, or a pipeline error prints to stderr and exits non-zero.
+import fs from 'node:fs';
 import os from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
 import {
@@ -525,4 +526,18 @@ function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+// Run only as the entry point (cli.test.mjs imports this file). Node resolves import.meta.url to
+// the entry file's REALPATH, but argv[1] keeps the path it was invoked by: through a symlink or a
+// junction a plain compare never matched, main() never ran, and every command exited 0 with no
+// output. node/runtime.md §4: both sides through realpathSync.native. An argv[1] that cannot be
+// resolved cannot be the file Node just loaded, so it is not this module. A local copy of the
+// repo scripts' identical guard: this file ships, and scripts/ outside lib/ does not.
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync.native(process.argv[1]) === fs.realpathSync.native(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (isEntryPoint()) main();

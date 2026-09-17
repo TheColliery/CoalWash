@@ -481,3 +481,26 @@ test('CWK-081: a gauge object with NO capacity block renders exactly as before (
   const line = gaugeLine({ verdict: { band: 'FULL', bmi: 1 }, measure: { alwaysLoaded: { tokensEst: 1000 } } });
   assert.ok(!/capacity ~/.test(line), line);
 });
+
+// r34c: the entry-point guard compared import.meta.url (Node resolves the entry file to its
+// REALPATH) with argv[1] (the path it was invoked by). Through a symlink or a junction the two
+// differed, main() never ran, and every command exited 0 with no output. A directory junction
+// needs no admin rights on Windows; a host that cannot make one skips.
+test('r34c: invoked through a directory junction, the CLI still runs (no subcommand: usage, exit 1)', (t) => {
+  const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-junction-'));
+  t.after(() => fs.rmSync(holder, { recursive: true, force: true })); // rmSync does not follow a junction (probed)
+  const link = path.join(holder, 'lib-link');
+  try {
+    fs.symlinkSync(here, link, 'junction');
+  } catch (e) {
+    return t.skip(`cannot create a junction or directory symlink on this host (${e.code || e.message})`);
+  }
+  const r = spawnSync(process.execPath, [path.join(link, 'cli.mjs')], {
+    cwd: holder,
+    env: { ...process.env, HOME: holder, USERPROFILE: holder, CLAUDE_CONFIG_DIR: '' },
+    encoding: 'utf8',
+    timeout: 20000,
+  });
+  assert.strictEqual(r.status, 1, `through the junction: exit ${r.status}, output ${JSON.stringify(r.stdout + r.stderr)}`);
+  assert.match(r.stderr, /^usage: node scripts\/lib\/cli\.mjs/);
+});
