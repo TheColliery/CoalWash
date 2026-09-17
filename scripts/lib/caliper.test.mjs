@@ -2077,12 +2077,16 @@ test('CWK-081 adapter: an out-of-range or corrupt figure falls back to the conse
 const CWK099_MEASURE = { alwaysLoaded: { tokensEst: 300000, bytes: 1200000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 300000, totalBytes: 1200000, mechFat: { tokensEst: 0 } };
 function cwk099Home(capacityFile) {
   const { home, proj } = sandbox();
-  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
-  fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: { 'claude-opus-5': { contextWindow: 0 } } }), 'utf8');
-  if (capacityFile !== undefined) {
-    fs.mkdirSync(path.dirname(capacityFilePath(home)), { recursive: true });
-    fs.writeFileSync(capacityFilePath(home), typeof capacityFile === 'string' ? capacityFile : JSON.stringify(capacityFile), 'utf8');
-  }
+  // The caller's try/finally only exists once this returns, so a throw while
+  // seeding must clean the two dirs HERE or they leak (scripts-quality.md §2).
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: { 'claude-opus-5': { contextWindow: 0 } } }), 'utf8');
+    if (capacityFile !== undefined) {
+      fs.mkdirSync(path.dirname(capacityFilePath(home)), { recursive: true });
+      fs.writeFileSync(capacityFilePath(home), typeof capacityFile === 'string' ? capacityFile : JSON.stringify(capacityFile), 'utf8');
+    }
+  } catch (e) { clean(home, proj); throw e; }
   return { home, proj };
 }
 
