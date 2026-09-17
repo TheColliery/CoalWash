@@ -83,6 +83,13 @@ const BIN_LOCK_NAME = '.bin.lock'; // per-bin (not per-tx) exclusive lock — se
 // the happy-path hold time on the target filesystem, and treat an
 // unquantified network/cloud mount as the open question, not a solved one.
 const BIN_LOCK_STALE_MS = 5000;
+// Perf-regression counter for tests only (the apply.mjs / fidelity-gate.mjs
+// `__testHooks` precedent, GATE COST ruling 2026-08-04: a count, not a clock).
+// `binLockAttempts` counts every acquireLock call recordBinItem makes, so a
+// test can assert an orphan was reclaimed on the FIRST attempt instead of
+// timing the call against the retry budget. One increment per attempt; read
+// by nothing outside a test.
+export const __testHooks = { binLockAttempts: 0 };
 
 function binDir(projectRoot, name) {
   return path.join(txDirFor(projectRoot), name);
@@ -228,6 +235,7 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
       if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
       lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now, staleMs: BIN_LOCK_STALE_MS });
+      __testHooks.binLockAttempts++;
     }
     if (!lock.acquired) return null;
     // U7 (7th site — found by apply.test.mjs's own FINAL-path guard, not by the

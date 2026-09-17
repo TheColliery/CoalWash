@@ -1800,13 +1800,14 @@ test('WAVE-9 L4 (cumulative re-read cap): a FRONT-LOADED file (first maxLines re
     const size = fs.statSync(src).size;
     assert.ok(size > (1 << 20), `fixture spans multiple chunks (${size} bytes)`);
     const out = path.join(dir, 'front.out');
-    const t0 = Date.now();
     const r = reduceToCompletion(src, { cutTypes: ['mode'], outPath: out, snapshotDir: path.join(dir, 's'), maxLines: 64 });
-    const elapsed = Date.now() - t0;
     assert.strictEqual(r.ok, false, 'the front-loaded re-read explosion is REFUSED (pre-fix: ok:true after grinding thousands of waves)');
     assert.match(r.reason, /re-read|explosion|amplif/i, 'the reason names the re-read explosion');
+    // F-RR-2 (r34): an `elapsed < 10000` wall-clock leg stood beside this and is
+    // DELETED. The WAVE COUNT is the machine-independent statement of "no
+    // multi-second grind" — a grind IS many waves — so the clock added only a
+    // way to go red on a slow runner.
     assert.ok(r.waves < 200, `aborted early — ${r.waves} waves, not the thousands the wave-1 projection let through`);
-    assert.ok(elapsed < 10000, `fast refusal (${elapsed}ms) — no multi-second grind`);
     assert.strictEqual(fs.existsSync(out), false, 'no partial output left on the refusal');
   } finally { rm(dir); }
 });

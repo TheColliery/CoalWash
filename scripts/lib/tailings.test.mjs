@@ -8,6 +8,7 @@ import {
   FAT_BIN_NAME, STORE_OLD_NAME,
   recordBinItem, listBin, restoreFromBin,
   sweepFatBin, sweepStoreOld, readDeathLog, breadcrumb,
+  __testHooks,
 } from './tailings.mjs';
 import { txDirFor } from './apply.mjs';
 import { TIER1_KEEP_ALL_MS, HORIZON_MS } from './retention.mjs';
@@ -118,11 +119,16 @@ test('grad6 F1: an orphaned lock OLDER than the bin\'s own (short) staleness win
     fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'dead', pid: 999999, at: Date.now(), token: 'dead:999999:0' }));
     const oldMtime = new Date(Date.now() - 6000); // 6s old — older than the bin's 5s staleness window
     fs.utimesSync(lockPath, oldMtime, oldMtime);
-    const t0 = Date.now();
+    // F-RR-2 (r34): this used to assert `ms < 500` against a ~600 ms retry
+    // budget — a 100 ms margin on a shared machine, the most false-red-prone
+    // clock in the suite. The clock was the SIGNAL here, not a redundant
+    // secondary, so it is REPLACED rather than deleted: "reclaimed immediately"
+    // means reclaimed on the first acquire attempt, and that is a count.
+    __testHooks.binLockAttempts = 0;
     const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'a cut that must be banked', original: '/f.md' });
-    const ms = Date.now() - t0;
+    assert.strictEqual(__testHooks.binLockAttempts, 1,
+      `reclaiming a stale orphan took ${__testHooks.binLockAttempts} acquire attempts — expected the steal on attempt 1, not a walk through the retry budget`);
     assert.ok(id, 'a lock older than the bin\'s own staleness window must be reclaimed, not return null');
-    assert.ok(ms < 500, `reclaiming a stale orphan took ${ms}ms — expected a near-immediate steal, not the ~600ms full retry budget`);
     assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 1);
   } finally { clean(proj); }
 });

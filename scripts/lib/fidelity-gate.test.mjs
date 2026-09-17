@@ -1086,6 +1086,21 @@ test('LINE BASIS: a block containing a bare CR refuses — the split basis canno
 // to assert instead of time; the call count is 1 on both the fixed and the
 // broken engine. Elapsed ms is the only available proxy for "is
 // KEY_SEP_STRICT still non-backtracking" here.
+//
+// THAT CLAIM WAS TESTED, NOT CARRIED (F-RR-2, r34), and it holds — for a reason
+// the siblings below do not share. Each sibling's counter instruments a loop or
+// a slice in OUR code (parseNumTokenCalls, evidenceIncludesCalls,
+// fileRefMaxSliceLen). This cost lives inside V8's regex engine, which exposes
+// no backtrack or step count. The only way to get a count is to move the scan
+// out of the regex engine into a JS loop — a rewrite of the parser that decides
+// whether a file is `pinned`, on a door that deletes files, bought for a test
+// instrument. And that counter would watch ONE pattern, while this clock covers
+// every regex frontmatterBlockParse runs on the line (the indent, SEQ_ITEM, the
+// printable-ASCII and indicator-character checks). So the clock STAYS, declared.
+// THE MARGIN, measured on this box (r34): green 0.1-0.5 ms per 60 KiB line;
+// the retired KEY_STRICT regex reintroduced reddened it at 4486 ms. The 1500 ms
+// bound therefore needs a runner ~3000x slower than this one to false-red, and
+// still sits ~3x under the regression it exists to catch.
 // ---------------------------------------------------------------------------
 test('KEY-LINE COST: a 60 KiB pathological line parses in bounded time (was ~5.4 s quadratic)', () => {
   const shapes = [
@@ -1159,8 +1174,10 @@ test('GATE COST: a drop-heavy 512 KB pair gates in bounded time (was ~4.8 s quad
   const bound = numberDrops + nextNumberCount; // one parseNumToken per dropped orig token + one per next candidate
   assert.ok(calls <= bound,
     `parseNumToken called ${calls} times for ${numberDrops} drops x ${nextNumberCount} candidates (linear bound ${bound}) — the per-drop candidate re-parse is back`);
-  // ms kept as a secondary sanity check, not the regression signal.
-  assert.ok(ms < 2000, `gating ${orig.length} chars with ${r.drops.length} drops took ${ms.toFixed(0)}ms — unexpectedly slow even with the call count in bounds`);
+  // F-RR-2 (r34): the `ms < 2000` leg that stood here is DELETED, not loosened.
+  // The count above is the regression signal; the clock could only add a false
+  // red (2132 ms under parallel load on correct code, r32). The printed ms stays
+  // as a diagnostic a human reads — it never fails a build.
 });
 
 // The SECOND quadratic term in the same function (found while closing #36,
@@ -1204,8 +1221,8 @@ test('GATE COST: a marker-heavy LOW-DROP 1 MB pair gates in bounded time (the ty
   const survivingLines = lines.length - Math.floor(lines.length / 16);
   assert.ok(includesCalls <= anchorDrops + 10,
     `next.includes(tok) evaluated ${includesCalls} times for ${anchorDrops} anchor drops out of ${survivingLines} surviving lines — the nextEvTokens short-circuit is back`);
-  // ms kept as a secondary sanity check, not the regression signal.
-  assert.ok(ms < 2000, `gating 1 MB marker-heavy with ${r.drops.length} drops took ${ms.toFixed(0)}ms — unexpectedly slow even with the call count in bounds`);
+  // F-RR-2 (r34): the `ms < 2000` leg that stood here is DELETED, not loosened —
+  // same reason as the drop-heavy test above. The count is the signal.
 });
 
 test('GATE COST control: the FIRST coarser survivor in inventory order is still the one named — the tie-break is pinned', () => {
@@ -1250,8 +1267,8 @@ test('GATE COST: an unbroken [\\w.-] run with NO valid file extension gates in b
   // no timing involved.
   assert.ok(__testHooks.fileRefMaxSliceLen <= FILE_REF_RUN_CAP,
     `a ${__testHooks.fileRefMaxSliceLen}-char slice reached FILE_REF_RE (cap is ${FILE_REF_RUN_CAP}) — the run-length cap is not being enforced`);
-  // ms kept as a secondary sanity check, not the regression signal.
-  assert.ok(ms < 1000, `gating a ${next.length}-char extension-less run took ${ms.toFixed(0)}ms — unexpectedly slow even with the cap enforced`);
+  // F-RR-2 (r34): the `ms < 1000` leg that stood here is DELETED, not loosened —
+  // the slice-length cap above is the signal, "no timing involved".
 });
 
 // Same fix, correctness control: an ordinary short filename reference must
