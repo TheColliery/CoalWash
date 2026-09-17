@@ -4,13 +4,13 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      # CodeQL analyzes js/ts only — NO markdown needs a security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
+      # CodeQL analyzes js/ts AND the workflow files (the actions language) — markdown still needs no security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
       - '**.md'
       - 'LICENSE'
   pull_request:
     branches: [main]
     paths-ignore:
-      # CodeQL analyzes js/ts only — NO markdown needs a security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
+      # CodeQL analyzes js/ts AND the workflow files (the actions language) — markdown still needs no security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
       - '**.md'
       - 'LICENSE'
   schedule:
@@ -37,6 +37,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         with:
-          languages: javascript-typescript
+          languages: javascript-typescript, actions
           queries: security-and-quality
       - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
