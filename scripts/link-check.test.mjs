@@ -6,7 +6,7 @@
 //   CoalWorks/CoalHearth/scratchpad/r34/out/test-vectors.json
 //   sha256 85106848652e965675fbe5a9195601f8ff675575968f6e6531a6c9b70940c82d
 // (companion record slug-oracle.md, sha256 ae1ff6aefddc05e758f9cf0d6f5384e59e0cb0697b83fb2ebbc4ac2e9b0b099a).
-// Every non-ASCII code point is written \u{…}, so an invisible one (VS16, ZWJ, ZWNJ, NBSP,
+// Every code point outside printable ASCII is written \u{…}, so an invisible one (VS16, ZWJ, ZWNJ, NBSP,
 // TAB) cannot be lost by an editor; the literal was evaluated and deep-compared to the JSON
 // before it was pasted. Rows 10 and 39 need their
 // document's earlier duplicates, and are replayed.
