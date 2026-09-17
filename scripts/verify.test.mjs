@@ -160,3 +160,95 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
       `must name the actual type, not silently report 0 chars\n${r.stdout}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// CW-015 (b), r34: EVERY verify.mjs spawn above runs OUTSIDE a git repository, so
+// verify.mjs's `pointers (ship-text vs the tree):` block took its named "git
+// unavailable" skip in all of them. Its wiring could be deleted with the suite fully
+// green — a gate the suite could not observe. This runs the REAL gate inside a REAL
+// repository and plants one citation of each kind the block exists to refuse.
+//
+// THE FIXTURE RAIL, and each clause is a measured incident, not caution:
+// - the tree lives under os.tmpdir(), never under this repo;
+// - git is invoked with `-C <fixture>` on EVERY call, and with every GIT_* variable
+//   scrubbed. A suite run from `.githooks/pre-commit` inherits GIT_DIR, and from a
+//   linked worktree it is ABSOLUTE — scripts/pointer-check.test.mjs's CWK-079 header
+//   records `git init` in a fixture re-initialising the REAL repository that way. The
+//   scrub is a PREFIX, not that file's list: wider by construction, and no roster to
+//   keep in step with it;
+// - the fixture's own `.git` is ASSERTED to exist before anything else touches it: a
+//   git command with no `.git` beside it walks UP to the nearest repository (on
+//   2026-09-10 a fixture's `git config core.bare true` did exactly that and broke the
+//   umbrella);
+// - and this test runs NO `git config` at all. `git add` fills the index, which is
+//   what `ls-files` answers from, so no commit, no identity and no signing config.
+//
+// WHY NOT `core.bare true`, which CoalHearth's 0413924 sets: there it builds a
+// FAIL-LOUD test for a check-ignore that cannot run. A bare repository refuses
+// `check-ignore` outright, which would switch off exactly the gitignored-root branch
+// this test needs to see. That other test is a different question, reported
+// separately rather than folded in here.
+//
+// THE TREE IS THE TRACKED FILE LIST, copied from disk: it is what a clone has, which
+// is the question the pointer gate asks.
+const hermeticGit = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+
+test('verify.mjs inside a REAL git repo: the pointer-drift block RUNS, and a missing, an untracked and a gitignored citation each FAIL', (t) => {
+  const listed = spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: hermeticGit() });
+  if (listed.error || listed.status !== 0) return t.skip('git unavailable');
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-git-')));
+  try {
+    const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: hermeticGit() });
+    const init = git('init', '-q', '-b', 'main');
+    assert.strictEqual(init.status, 0, `git init in the fixture failed\n${init.stderr}`);
+    assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(),
+      'FIXTURE RAIL: the fixture must own its .git before any other git call, or git walks UP to a real repository');
+
+    for (const rel of listed.stdout.split('\0').filter(Boolean)) {
+      const src = path.join(REPO, rel);
+      if (!fs.existsSync(src)) continue; // deleted in the working tree, not yet committed
+      const dest = path.join(root, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+    }
+    const added = git('add', '-A');
+    assert.strictEqual(added.status, 0, `git add in the fixture failed\n${added.stderr}`);
+    const tracked = git('ls-files');
+    assert.ok(tracked.stdout.includes('scripts/verify.mjs'), `the fixture index must hold the tree\n${tracked.stderr}`);
+
+    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hermeticGit() });
+
+    // CLEAN: the block runs and reports both of its own coverage lines.
+    const clean = run();
+    assert.strictEqual(clean.status, 0, `the tracked tree must PASS inside a repo\n${clean.stdout}${clean.stderr}`);
+    assert.doesNotMatch(clean.stdout, /pointer check: git unavailable/,
+      `inside a real repo the pointer block must RUN, never take its no-git skip\n${clean.stdout}`);
+    assert.match(clean.stdout, /ok\s+gitignored-root citations: \d+ distinct first segment\(s\) cited and shape-qualified/,
+      `the ignore-derivation line must print\n${clean.stdout}`);
+    assert.match(clean.stdout, /ok\s+every path this repo points at from \d+ ship-text surface\(s\) \(\d+ in-scope citations\) resolves to a TRACKED file/,
+      `the resolution line must print\n${clean.stdout}`);
+
+    // PLANTED: one citation per refusal the block exists to make. `scratchpad/` is a
+    // gitignored root in this repo's .gitignore; asserted here so the leg cannot pass
+    // on a .gitignore that stopped saying so.
+    const ignored = git('check-ignore', 'scratchpad/');
+    assert.strictEqual(ignored.status, 0, `the gitignored leg needs scratchpad/ ignored in the fixture\n${ignored.stdout}${ignored.stderr}`);
+    // The untracked plant sits in a NEW top-level dir on purpose: a file under
+    // scripts/lib/ also trips the LIBS roster and the dist-mirror gates (measured), and
+    // then exit 1 would say nothing about the pointer block.
+    fs.mkdirSync(path.join(root, 'r34-probe'));
+    fs.writeFileSync(path.join(root, 'r34-probe', 'untracked-probe.txt'), 'on disk, never added\n');
+    fs.appendFileSync(path.join(root, 'README.md'),
+      '\nPlanted by verify.test.mjs: `scripts/lib/r34-no-such-engine.mjs`, `r34-probe/untracked-probe.txt`, `scratchpad/r34-probe-notes.md`.\n');
+
+    const planted = run();
+    assert.strictEqual(planted.status, 1, `three bad citations must FAIL the gate\n${planted.stdout}${planted.stderr}`);
+    assert.match(planted.stdout, /\nVERIFY: FAIL \(3\)/,
+      `exactly the three planted citations fail — any other count means the exit code is not this block's\n${planted.stdout}`);
+    assert.match(planted.stdout, /FAIL\s+README\.md cites `scripts\/lib\/r34-no-such-engine\.mjs`, which does not resolve in this repo/,
+      `the MISSING citation must be named\n${planted.stdout}`);
+    assert.match(planted.stdout, /FAIL\s+README\.md cites `r34-probe\/untracked-probe\.txt`, which exists here but is UNTRACKED/,
+      `the UNTRACKED citation must be named\n${planted.stdout}`);
+    assert.match(planted.stdout, /FAIL\s+README\.md cites `scratchpad\/r34-probe-notes\.md`, which lives under the gitignored `scratchpad`/,
+      `the GITIGNORED citation must be named\n${planted.stdout}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
