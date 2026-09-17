@@ -48,6 +48,7 @@ const TESTS = [
   'scripts/config-keys.test.mjs',
   'scripts/configure.test.mjs',
   'scripts/pointer-check.test.mjs',
+  'scripts/link-check.test.mjs',
 ];
 
 // CWK-071 (node/runtime.md §7): process.exitCode + a natural exit at all three
