@@ -125,18 +125,26 @@ test('RED-FIRST/root-C: a foreign occupant at the derived snapshot slot (the sta
     // to simulate "before any snapshot exists" — production computes the path,
     // the test only ever reads it back, never precomputes the hash itself.
     const realSnap = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
-    assert.ok(realSnap && fs.existsSync(realSnap));
+    assert.ok(realSnap, 'setup: production derived a slot');
+    assert.strictEqual(fs.readFileSync(realSnap, 'utf8'), trueOrig, 'setup: production wrote the real baseline into that slot');
     fs.rmSync(realSnap, { force: true });
     fs.rmSync(`${realSnap}.origpath`, { force: true });
-    assert.strictEqual(fs.existsSync(realSnap), false, 'setup: slot genuinely empty now');
 
     // Plant a FOREIGN occupant at that exact slot — content that belongs to a
     // DIFFERENT file, with a sidecar naming that different file's own path
     // (the collision shape: this slot's name matches `gov`'s derived name,
     // but the content and recorded identity are someone else's).
+    //
+    // CodeQL #41 (js/file-system-race): this used to assert
+    // `fs.existsSync(realSnap) === false` and THEN write — a check-then-use
+    // pair on one path. The exclusive create below states the same setup
+    // precondition ("the slot is genuinely empty before we plant") ATOMICALLY:
+    // `flag: 'wx'` refuses with EEXIST if anything occupies the slot, so the
+    // test fails AT THE PLANT instead of passing on a wrong premise. The same
+    // flag goes on the sidecar, whose slot the rmSync above also emptied.
     const victimPath = path.join(proj, 'AGENTS.md');
-    fs.writeFileSync(realSnap, 'FOREIGN CONTENT — belongs to a different file entirely', 'utf8');
-    fs.writeFileSync(`${realSnap}.origpath`, victimPath, 'utf8');
+    fs.writeFileSync(realSnap, 'FOREIGN CONTENT — belongs to a different file entirely', { encoding: 'utf8', flag: 'wx' });
+    fs.writeFileSync(`${realSnap}.origpath`, victimPath, { encoding: 'utf8', flag: 'wx' });
 
     // The real write we care about: gov's snapshot is requested again in the
     // SAME session. Pre-fix code would see `fs.existsSync(snap)` true and
