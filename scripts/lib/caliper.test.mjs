@@ -2176,7 +2176,7 @@ test('CWK-099 adapter P2: a stats-cache that FOUND a window it cannot use answer
   }
 });
 
-test('CWK-099 adapter P2: a POPULATED usable stats-cache still wins over the file — the file answers only when every contextWindow is 0 or absent', () => {
+test('CWK-099 adapter P2: a POPULATED usable stats-cache still wins over the file — the file answers only when P1 reads no populated window (every contextWindow 0, negative, non-numeric or absent)', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });

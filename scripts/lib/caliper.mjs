@@ -809,10 +809,13 @@ export function oldStatePath(home = os.homedir()) {
 // MIN, not the current model's: a hook has no model identity to key on, and the
 // smallest window any model on this box runs at is the conservative reading
 // (see CAPACITY_TOKENS' own note on why smallest is the safe direction here).
-// WHERE THAT HOLDS, scoped: P1 takes the MIN itself, over every model the cache
-// knows. P2 holds one number and cannot take a MIN — it inherits the obligation
-// through its writer contract above, unverifiable here. And positive evidence of
-// a small window (any populated P1 window) never yields to a larger P2 file.
+// WHERE THAT HOLDS, scoped: P1 takes the MIN itself, over the in-range windows of
+// every model the cache knows. P2 holds one number and cannot take a MIN — it
+// inherits the obligation through its writer contract above, unverifiable here.
+// And positive evidence of a small window (any populated P1 window) never yields
+// to a larger P2 file, in a cache this adapter can read: an absent, corrupt,
+// BOM-prefixed or array-shaped stats-cache reads as nothing found, and then the
+// file answers.
 // SANITY-BOUND both ends — a discovered figure outside [100k, 5M] is a poisoned
 // or unit-confused cache, not a window; any doubt falls back (fail-closed, the
 // sanitizeLeanFloor discipline). Phoenix #4: every failure path is silent.
@@ -859,7 +862,9 @@ function probeStatsCache(home) {
     // F-R34-1: a window P1 FOUND but cannot use (usable below the floor, or out of
     // range) is ANSWERED here, by the default, exactly as before P2 existed. Only a
     // cache with no populated window at all falls through to P2 — so a larger file
-    // can never override a smaller window the platform itself reported.
+    // can never override a smaller window the platform itself reported in a cache
+    // this adapter can read (an absent, corrupt, BOM-prefixed or array-shaped cache reads
+    // as nothing found, and then the file answers).
     return found ? conservativeCapacity() : null;
   } catch {
     return null; // unreadable/absent/corrupt -> the next probe, never a throw (Phoenix #4)
