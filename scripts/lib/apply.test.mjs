@@ -39,8 +39,9 @@ function planFor(proj, store, actions, extra = {}) {
 // A SANDBOX HOME, by default, for every call through this shim (r34 F2). applyPlan
 // resolves `opts.home || os.homedir()`, and without it a committed wizard-cut plan
 // that removed something wrote its Full-clean record into the REAL
-// ~/.claude/coal/coalwash/ — one `state-…-Temp-cwa-proj-*.json` per suite run,
-// 189 of them before this line existed (measured by a before/after name diff).
+// ~/.claude/coal/coalwash/ — one `state-…-Temp-cwa-proj-*.json` per suite run (a
+// before/after name diff of that directory proves the one); 190 had accumulated by
+// the time this line existed, and were swept.
 // The same default also READ the real global keeps store into these tests. So the
 // fix sits at the shim, not the one test that tripped it: every present and
 // future call is hermetic unless it names its own home, which still wins.

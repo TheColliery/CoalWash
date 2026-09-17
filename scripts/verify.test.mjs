@@ -179,14 +179,16 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
 //   git command with no `.git` beside it walks UP to the nearest repository (on
 //   2026-09-10 a fixture's `git config core.bare true` did exactly that and broke the
 //   umbrella);
-// - and this test runs NO `git config` at all. `git add` fills the index, which is
-//   what `ls-files` answers from, so no commit, no identity and no signing config.
+// - and the fixture builder runs NO `git config` at all. `git add` fills the index,
+//   which is what `ls-files` answers from, so no commit, no identity and no signing
+//   config. The ONE `git config` in this file is the BARE-repo test's, and it
+//   re-asserts the fixture's own `.git` at that call.
 //
-// WHY NOT `core.bare true`, which CoalHearth's 0413924 sets: there it builds a
-// FAIL-LOUD test for a check-ignore that cannot run. A bare repository refuses
-// `check-ignore` outright, which would switch off exactly the gitignored-root branch
-// this test needs to see. That other test is a different question, reported
-// separately rather than folded in here.
+// WHY the real-repo test does NOT set `core.bare true`, which CoalHearth's 0413924
+// sets: a bare repository refuses `check-ignore` outright, which would switch off
+// exactly the gitignored-root branch that test needs to see. The bare case is a
+// different question — does an unanswerable check-ignore FAIL the gate — and it has
+// its own test below (r34 F1).
 //
 // THE TREE IS THE TRACKED FILE LIST, copied from disk: it is what a clone has, which
 // is the question the pointer gate asks.
