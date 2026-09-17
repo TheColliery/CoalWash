@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -35,7 +35,21 @@ function planFor(proj, store, actions, extra = {}) {
 // sandbox proj as that trusted root. The forged test deliberately does NOT use
 // this shim — it passes a DIFFERENT opts.projectRoot to prove the mismatch is
 // refused (so a regression that re-trusts plan.projectRoot flips that test red).
-const apply = (plan, opts = {}) => applyPlan(plan, { projectRoot: plan && plan.projectRoot, ...opts });
+//
+// A SANDBOX HOME, by default, for every call through this shim (r34 F2). applyPlan
+// resolves `opts.home || os.homedir()`, and without it a committed wizard-cut plan
+// that removed something wrote its Full-clean record into the REAL
+// ~/.claude/coal/coalwash/ — one `state-…-Temp-cwa-proj-*.json` per suite run,
+// 189 of them before this line existed (measured by a before/after name diff).
+// The same default also READ the real global keeps store into these tests. So the
+// fix sits at the shim, not the one test that tripped it: every present and
+// future call is hermetic unless it names its own home, which still wins.
+// ONE dir for the whole file, removed by the file-level `after` — node:test runs
+// a file's tests serially, and every state record inside it is keyed by that
+// test's own unique project dir.
+const SANDBOX_HOME = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-shared-')));
+after(() => fs.rmSync(SANDBOX_HOME, { recursive: true, force: true }));
+const apply = (plan, opts = {}) => applyPlan(plan, { projectRoot: plan && plan.projectRoot, home: SANDBOX_HOME, ...opts });
 
 test('happy path: rewrite + create + approved delete, all-or-nothing artifacts correct', () => {
   const { proj, store } = sandbox();
