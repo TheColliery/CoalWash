@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { buildDist, checkDist, DIST_ITEMS } from './build-plugin.mjs';
 
@@ -192,4 +193,22 @@ test('R4/TP-4: a planted *.test.* inside a DIST_ITEM fails loud — isTest was t
     fs.writeFileSync(path.join(dist, 'scripts', 'lib', 'x.test.mjs', 'deep', 'anything.js'), '// hidden subtree');
     assert.ok(checkDist(dist).some((d) => d.includes('test artifact present in plugin/')), 'a *.test.* DIRECTORY is caught too');
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
+// r34c C: the main-module guard compared import.meta.url (Node resolves the entry file to its
+// REALPATH) with argv[1] (the path it was invoked by). Through a symlink or a junction the two
+// differ and neither the build nor --check ran: exit 0, no output. --check is read-only; its
+// verdict line is asserted to APPEAR, not to be "in sync" (a concurrent test can plant into
+// scripts/lib). A host that cannot make a directory junction skips.
+test('r34c C: invoked through a directory junction, build-plugin.mjs --check still runs and prints its verdict', (t) => {
+  const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-build-junction-'));
+  t.after(() => fs.rmSync(holder, { recursive: true, force: true })); // rmSync does not follow a junction (probed)
+  const link = path.join(holder, 'scripts-link');
+  try {
+    fs.symlinkSync(path.dirname(fileURLToPath(import.meta.url)), link, 'junction');
+  } catch (e) {
+    return t.skip(`cannot create a junction or directory symlink on this host (${e.code || e.message})`);
+  }
+  const r = spawnSync(process.execPath, [path.join(link, 'build-plugin.mjs'), '--check'], { cwd: holder, encoding: 'utf8' });
+  assert.match(r.stdout + r.stderr, /plugin\/ dist (in sync with source|OUT OF SYNC)/, `through the junction: exit ${r.status}, output ${JSON.stringify(r.stdout + r.stderr)}`);
 });

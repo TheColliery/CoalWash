@@ -77,7 +77,7 @@
 //     a clean run.
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig } from './lib/config-schema.mjs';
 import { parseJsonc } from './lib/jsonc.mjs';
 import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig } from './lib/config-load.mjs';
@@ -572,5 +572,17 @@ function main() {
 // setPath/firstWriteTarget to exercise them directly; without this guard that
 // import would execute main() against the TEST RUNNER's argv. Every sibling's
 // configure.mjs calls main() unconditionally because nothing imports one — ours
-// is imported, so it needs the guard.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+// is imported, so it needs the guard. Node resolves import.meta.url to the entry file's
+// REALPATH, but argv[1] keeps the path it was invoked by: through a symlink or a junction a plain
+// compare never matched, and main() silently never ran (exit 0, no output, nothing written).
+// node/runtime.md §4: both sides through realpathSync.native. An argv[1] that cannot be resolved
+// cannot be the file Node just loaded, so it is not this module.
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync.native(process.argv[1]) === fs.realpathSync.native(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (isEntryPoint()) main();

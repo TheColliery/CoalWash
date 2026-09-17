@@ -73,7 +73,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const BT = String.fromCharCode(96);
 const ESC_BASE = 0xF0000;   // an escaped ASCII punctuation char, held as a private-use code point
@@ -402,4 +402,17 @@ function main(argv) {
   if (r.findings.length) process.exitCode = 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main(process.argv.slice(2));
+// Run only as the entry point (the test imports this file). Node resolves import.meta.url to the
+// entry file's REALPATH, but argv[1] keeps the path it was invoked by: through a symlink or a
+// junction a plain compare never matched, and main() silently never ran (exit 0, no output).
+// node/runtime.md §4: both sides through realpathSync.native. An argv[1] that cannot be resolved
+// cannot be the file Node just loaded, so it is not this module.
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync.native(process.argv[1]) === fs.realpathSync.native(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (isEntryPoint()) main(process.argv.slice(2));

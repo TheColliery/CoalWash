@@ -15,7 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dist = path.join(repo, 'plugin');
@@ -203,7 +203,20 @@ export function checkDist(distRoot = dist) {
   return out;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run only as the entry point (verify.mjs and the tests import this file). Node resolves
+// import.meta.url to the entry file's REALPATH, but argv[1] keeps the path it was invoked by:
+// through a symlink or a junction a plain compare never matched, and neither the build nor
+// --check ran (exit 0, no output). node/runtime.md §4: both sides through realpathSync.native.
+// An argv[1] that cannot be resolved cannot be the file Node just loaded, so it is not this module.
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync.native(process.argv[1]) === fs.realpathSync.native(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (isEntryPoint()) {
   if (process.argv.includes('--check')) {
     const f = checkDist();
     // CWK-071 (node/runtime.md §7): exitCode + natural exit. The ELSE is

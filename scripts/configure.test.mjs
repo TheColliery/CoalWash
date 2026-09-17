@@ -379,3 +379,22 @@ test('F-R32-3: --global IS honoured, so the warning fires on the PROJECT path on
     'the global layer is where a consent-bearing key DOES take effect — warning here would be false');
   assert.match(r.stdout, /Successfully updated configuration/);
 });
+
+// r34c C: the main-module guard compared import.meta.url (Node resolves the entry file to its
+// REALPATH) with argv[1] (the path it was invoked by). Through a symlink or a junction the two
+// differ and main() never ran: exit 0, no output, and no config written. A host that cannot
+// make a directory junction skips.
+test('r34c C: invoked through a directory junction, configure.mjs still runs (--help prints the help)', (t) => {
+  const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-configure-junction-'));
+  t.after(() => fs.rmSync(holder, { recursive: true, force: true })); // rmSync does not follow a junction (probed)
+  const link = path.join(holder, 'scripts-link');
+  try {
+    fs.symlinkSync(path.dirname(fileURLToPath(import.meta.url)), link, 'junction');
+  } catch (e) {
+    return t.skip(`cannot create a junction or directory symlink on this host (${e.code || e.message})`);
+  }
+  const r = spawnSync(process.execPath, [path.join(link, 'configure.mjs'), '--help'],
+    { cwd: holder, encoding: 'utf8', env: { ...process.env, HOME: holder, USERPROFILE: holder } });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.stdout, /CoalWash Configurator Utility/, `through the junction: output ${JSON.stringify(r.stdout + r.stderr)}`);
+});

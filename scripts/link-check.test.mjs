@@ -253,3 +253,21 @@ test('CLI: planted broken link and anchor exit 1 and are named; the fixed tree e
   assert.strictEqual(none.status, 1);
   assert.match(none.stdout, /no files given/);
 });
+
+// r34c C: the main-module guard compared import.meta.url (Node resolves the entry file to its
+// REALPATH) with argv[1] (the path it was invoked by). Through a symlink or a junction the two
+// differ and main() never ran: exit 0, no output, a silent pass on the gate's only mechanism.
+// A directory junction needs no admin rights on Windows; a host that cannot make one skips.
+test('CLI: invoked through a directory junction, the engine still runs (no files: refuses, exit 1)', (t) => {
+  const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-junction-'));
+  t.after(() => fs.rmSync(holder, { recursive: true, force: true })); // rmSync does not follow a junction (probed)
+  const link = path.join(holder, 'scripts-link');
+  try {
+    fs.symlinkSync(path.dirname(ENGINE), link, 'junction');
+  } catch (e) {
+    return t.skip(`cannot create a junction or directory symlink on this host (${e.code || e.message})`);
+  }
+  const r = spawnSync(process.execPath, [path.join(link, 'link-check.mjs')], { cwd: holder, encoding: 'utf8' });
+  assert.strictEqual(r.status, 1, `through the junction: exit ${r.status}, output ${JSON.stringify(r.stdout + r.stderr)}`);
+  assert.match(r.stdout, /no files given/);
+});
