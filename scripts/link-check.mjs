@@ -183,6 +183,11 @@ function renderInline(raw) {
   const { masked, spans } = maskInline(raw);
   let t = masked.replace(INLINE_LINK, (m, bang, text) => text);
   t = t.replace(/<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*)>/g, '$1');     // autolink (unmeasured): its URL is its text
+  // ONE pass, on purpose (CodeQL #42, js/incomplete-multi-character-sanitization): GitHub strips a
+  // raw tag once and keeps its inner text, so a loop would break oracle fidelity. `<<a>b>` can leave
+  // a re-formed tag here, and that is safe: this text is never HTML. slugifyHeading's SLUG_DROP
+  // deletes every `<` and `>`, and a slug is only ever a Map/Set key (HeadingAnchors, fragmentMatches).
+  // Pinned by the test "CodeQL #42: no slug and no heading anchor ever contains < or >".
   t = t.replace(/<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?\/?>/g, '');       // raw HTML tag: removed, inner text stays
   t = stripUnderscoreEmphasis(t);
   t = decodeEntities(t);                                                   // after emphasis: a decoded `_` is literal

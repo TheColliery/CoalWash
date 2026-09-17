@@ -97,6 +97,31 @@ test('CWK-098 replayed rows: the earlier duplicates themselves read as GitHub nu
   );
 });
 
+// CodeQL #42 (js/incomplete-multi-character-sanitization) flags renderInline's single-pass
+// raw-HTML-tag strip. It stays single-pass on purpose: GitHub strips a raw tag once and keeps
+// the inner text, so a loop to a fixed point would break oracle fidelity. What makes the one
+// pass safe is pinned here: whatever the strip leaves, SLUG_DROP deletes every `<` and `>`,
+// and no anchor this engine builds can carry either character.
+test('CodeQL #42: no slug and no heading anchor ever contains < or >, whatever tag shape the heading holds', () => {
+  const SHAPES = [
+    '<scr<script>ipt>',
+    '<<a>b>',
+    '<<<x>>>',
+    '<script',
+    'unterminated <script src=x',
+    '&lt;script&gt;alert(1)&lt;/script&gt;',
+    '&#60;img&#62;',
+    '`<script>` in a code span',
+  ];
+  for (const heading of SHAPES) {
+    const slug = slugifyHeading(heading);
+    assert.ok(!/[<>]/.test(slug), `slug ${JSON.stringify(slug)} from ${JSON.stringify(heading)} contains < or >`);
+    for (const anchor of headingAnchors(`# ${heading}\n`)) {
+      assert.ok(!/[<>]/.test(anchor), `anchor ${JSON.stringify(anchor)} from ${JSON.stringify(heading)} contains < or >`);
+    }
+  }
+});
+
 test('an empty slug is registered but never linkable; the next empty one is "-1", which is', () => {
   const doc = '## \u{1F525}\n\ntext\n\n## \u{1F680}\n\n## real\n';
   assert.deepStrictEqual([...headingAnchors(doc)].sort(), ['-1', 'real']);
