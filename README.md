@@ -23,7 +23,7 @@
 
 [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Releases](https://github.com/TheColliery/CoalWash/releases)
 
-**Part of [TheColliery](https://github.com/TheColliery)** — siblings: **[CoalMine](https://github.com/HetCreep/CoalMine)** (quality canaries) · **[CoalTipple](https://github.com/TheColliery/CoalTipple)** (model/effort routing) · **[CoalBoard](https://github.com/TheColliery/CoalBoard)** (consensus board) · **[CoalHearth](https://github.com/TheColliery/CoalHearth)** (warm-resume) · **[CoalFace](https://github.com/TheColliery/CoalFace)** (fan-out discipline) · **[CoalLedger](https://github.com/TheColliery/CoalLedger)** (docs health).
+**Part of [TheColliery](https://github.com/TheColliery)** — siblings: **[CoalMine](https://github.com/TheColliery/CoalMine)** (quality canaries) · **[CoalTipple](https://github.com/TheColliery/CoalTipple)** (model/effort routing) · **[CoalBoard](https://github.com/TheColliery/CoalBoard)** (consensus board) · **[CoalHearth](https://github.com/TheColliery/CoalHearth)** (warm-resume) · **[CoalFace](https://github.com/TheColliery/CoalFace)** (fan-out discipline) · **[CoalLedger](https://github.com/TheColliery/CoalLedger)** (docs health).
 
 </div>
 
@@ -165,7 +165,7 @@ CoalWash's claims are measured, not asserted, by fixture-based benchmarks with a
 
 CoalWash is the **memory-maintenance** member of the mining series:
 
-- [CoalMine](https://github.com/HetCreep/CoalMine) — quality canaries
+- [CoalMine](https://github.com/TheColliery/CoalMine) — quality canaries
 - [CoalTipple](https://github.com/TheColliery/CoalTipple) — model/effort routing
 - [CoalBoard](https://github.com/TheColliery/CoalBoard) — consensus & debate
 - [CoalHearth](https://github.com/TheColliery/CoalHearth) — session warm-resume
