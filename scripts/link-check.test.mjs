@@ -102,10 +102,12 @@ test('CWK-098 replayed rows: the earlier duplicates themselves read as GitHub nu
 });
 
 // CodeQL #42 (js/incomplete-multi-character-sanitization) flags renderInline's single-pass
-// raw-HTML-tag strip. It stays single-pass on purpose: GitHub strips a raw tag once and keeps
-// the inner text, so a loop to a fixed point would break oracle fidelity. What makes the one
-// pass safe is pinned here: whatever the strip leaves, SLUG_DROP deletes every `<` and `>`,
-// and no anchor this engine builds can carry either character.
+// raw-HTML-tag strip. It stays single-pass because GitHub keeps an ALLOWED tag's inner text,
+// which one pass reproduces and a loop to a fixed point would not. (GitHub ESCAPES a DISALLOWED
+// tag such as `<script>` to literal text instead, which neither reproduces: a declared bound in
+// the engine header, measured on GitHub's own render by the r34c room INSPECT.) The strip is not
+// a security boundary, and this test pins why: after lowercasing, SLUG_DROP deletes every `<`
+// and `>`, and no anchor this engine builds can carry either character.
 test('CodeQL #42: no slug and no heading anchor ever contains < or >, whatever tag shape the heading holds', () => {
   const SHAPES = [
     '<scr<script>ipt>',

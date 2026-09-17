@@ -19,7 +19,8 @@
 //
 // The rule, per clause — every one of these was WRONG in at least one sibling room:
 //   step 0  resolve inline markup to rendered text (code span content kept, link/image text
-//           kept, raw HTML tags removed, escapes and entities resolved, `_` emphasis removed)
+//           kept, raw HTML tags removed (see the raw-HTML bound below), escapes and entities
+//           resolved, `_` emphasis removed)
 //   step 1  lowercase EACH CODE POINT on its own ('Σ' -> 'σ' even word-final; 'İ' -> 'i'+U+0307)
 //   step 2  delete every code point NOT in \p{Alphabetic} \p{M} \p{Nd} \p{Pc} \p{Join_Control},
 //           U+0020 or U+002D. NOT \p{L} ('Ⓐ' is So yet Alphabetic, and stays); NOT \p{N}
@@ -34,6 +35,16 @@
 // heading, link text with brackets nested deeper than one level, multi-backtick code spans
 // that hold backticks, emphasis edge cases beyond a single matched `_` pair, and named
 // entities other than amp/lt/gt/quot/apos/nbsp (numeric entities are all decoded).
+//
+// DECLARED BOUND of step 0, raw HTML — MEASURED, and not reproduced. Raw HTML in a heading is
+// stripped as a tag WHATEVER the tag. GitHub does that only for an ALLOWED tag: it escapes a
+// DISALLOWED tag (`<script>`, `<style>`, `<iframe>`, measured on GitHub's own render by the r34c
+// room INSPECT) to literal text, so the tag's name stays in GitHub's anchor
+// (`Why <script> is refused` -> GitHub why-script-is-refused, this engine why--is-refused). For
+// such a heading, a link to GitHub's anchor FAILs here (loud), and a link to this engine's anchor
+// passes here while it is broken on GitHub (silent). No tracked heading holds a disallowed tag
+// today, and the 39 vectors cannot see this: row 34 is their only raw-tag vector, and `<code>` is
+// an allowed tag.
 //
 // ============================================================================
 // WHAT IS SCANNED, AND WHAT IS NOT (bounds, each measured on this room's 11 in-scope docs
@@ -185,10 +196,14 @@ function renderInline(raw) {
   const { masked, spans } = maskInline(raw);
   let t = masked.replace(INLINE_LINK, (m, bang, text) => text);
   t = t.replace(/<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*)>/g, '$1');     // autolink (unmeasured): its URL is its text
-  // ONE pass, on purpose (CodeQL #42, js/incomplete-multi-character-sanitization): GitHub strips a
-  // raw tag once and keeps its inner text, so a loop would break oracle fidelity. `<<a>b>` can leave
-  // a re-formed tag here, and that is safe: this text is never HTML. slugifyHeading's SLUG_DROP
-  // deletes every `<` and `>`, and a slug is only ever a Map/Set key (HeadingAnchors, fragmentMatches).
+  // ONE pass, not a loop to a fixed point (CodeQL #42, js/incomplete-multi-character-sanitization).
+  // Measured against GitHub's own POST /markdown render (two renders, the r34c room INSPECT):
+  // GitHub keeps an ALLOWED tag's inner text (`a <<b>c>d e` -> a-cd-e, which this one pass
+  // reproduces and a loop would not), and ESCAPES a DISALLOWED tag (`<script>`, `<style>`,
+  // `<iframe>`) to literal text, which neither a single pass nor a loop reproduces (the raw-HTML
+  // bound in the header). `<<a>b>` can leave a re-formed tag here, and that is safe: this strip is
+  // not a security boundary. After lowercasing, slugifyHeading's SLUG_DROP deletes every `<` and
+  // `>`, and a slug is only ever a Map/Set key (HeadingAnchors, fragmentMatches).
   // Pinned by the test "CodeQL #42: no slug and no heading anchor ever contains < or >".
   t = t.replace(/<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?\/?>/g, '');       // raw HTML tag: removed, inner text stays
   t = stripUnderscoreEmphasis(t);
