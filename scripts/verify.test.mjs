@@ -192,9 +192,12 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
 // is the question the pointer gate asks.
 const hermeticGit = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
 
-test('verify.mjs inside a REAL git repo: the pointer-drift block RUNS, and a missing, an untracked and a gitignored citation each FAIL', (t) => {
+// The tracked tree in a real repo, fenced per the rail above. Returns null when git is
+// unavailable (the caller skips visibly). The dir is cleaned HERE if building it throws,
+// and by the caller's finally once this returns.
+function trackedTreeRepo() {
   const listed = spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: hermeticGit() });
-  if (listed.error || listed.status !== 0) return t.skip('git unavailable');
+  if (listed.error || listed.status !== 0) return null;
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-git-')));
   try {
     const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: hermeticGit() });
@@ -214,8 +217,16 @@ test('verify.mjs inside a REAL git repo: the pointer-drift block RUNS, and a mis
     assert.strictEqual(added.status, 0, `git add in the fixture failed\n${added.stderr}`);
     const tracked = git('ls-files');
     assert.ok(tracked.stdout.includes('scripts/verify.mjs'), `the fixture index must hold the tree\n${tracked.stderr}`);
-
     const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hermeticGit() });
+    return { root, git, run };
+  } catch (e) { fs.rmSync(root, { recursive: true, force: true }); throw e; }
+}
+
+test('verify.mjs inside a REAL git repo: the pointer-drift block RUNS, and a missing, an untracked and a gitignored citation each FAIL', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root, git, run } = fx;
+  try {
 
     // CLEAN: the block runs and reports both of its own coverage lines.
     const clean = run();
@@ -250,5 +261,39 @@ test('verify.mjs inside a REAL git repo: the pointer-drift block RUNS, and a mis
       `the UNTRACKED citation must be named\n${planted.stdout}`);
     assert.match(planted.stdout, /FAIL\s+README\.md cites `scratchpad\/r34-probe-notes\.md`, which lives under the gitignored `scratchpad`/,
       `the GITIGNORED citation must be named\n${planted.stdout}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// r34 F1: `git check-ignore` exits 0 (something fed is ignored), 1 (nothing is), or
+// anything else when it CANNOT ANSWER. A bare repository is the portable way to reach
+// the third case with the real git binary: `ls-files` still answers from the index, so
+// the block does not take its no-git skip, while check-ignore exits 128 ("this operation
+// must be run in a work tree"). Measured before the fix: the gate read "0 gitignored",
+// let a citation under a gitignored root fall out of scope, and printed VERIFY: PASS.
+test('verify.mjs in a BARE repo: a check-ignore that cannot answer FAILs the gate — never a "0 gitignored" read as clean', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root, git, run } = fx;
+  try {
+    fs.appendFileSync(path.join(root, 'README.md'), '\nPlanted by verify.test.mjs: `scratchpad/r34-probe-notes.md`.\n');
+    // FIXTURE RAIL, re-asserted at the ONE `git config` call site: without its own .git
+    // beside it, this is the call that walks up and reconfigures a real repository.
+    assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(), 'FIXTURE RAIL: own .git before `git config`');
+    const bare = git('config', 'core.bare', 'true');
+    assert.strictEqual(bare.status, 0, `git config in the fixture failed\n${bare.stderr}`);
+    const probe = git('check-ignore', 'scratchpad/');
+    assert.ok(probe.status !== 0 && probe.status !== 1,
+      `precondition: in a bare repo check-ignore must be UNANSWERABLE, got exit ${probe.status}\n${probe.stderr}`);
+
+    const r = run();
+    assert.strictEqual(r.status, 1, `an unanswered check-ignore must FAIL the gate\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /FAIL\s+git check-ignore --stdin exited \d+/,
+      `the FAIL must name the probe and its exit status\n${r.stdout}`);
+    assert.doesNotMatch(r.stdout, /ok\s+gitignored-root citations:/,
+      `no ok line may count ignored roots from a probe that never answered\n${r.stdout}`);
+    assert.doesNotMatch(r.stdout, /ok\s+every path this repo points at/,
+      `the resolution ok line rests on the ignore set, so it must not print either\n${r.stdout}`);
+    assert.match(r.stdout, /\nVERIFY: FAIL \(1\)/,
+      `exactly one failure, this one — any other count means the exit code is not this probe's\n${r.stdout}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

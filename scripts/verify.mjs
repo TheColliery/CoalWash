@@ -340,15 +340,30 @@ try {
     // any existence- or ourRoots-based test would re-open the exact vacuity this ticket
     // removes — and the miss is LOUD by design: a wrong FAIL names the file and the
     // token, unlike a dead citation falling silently out of scope.
+    // CHECK-IGNORE'S OWN EXIT CONTRACT (r34 F1): 0 = something fed is ignored, 1 = nothing
+    // is, ANYTHING ELSE = git could not answer. The runner used to read only `ci.error`, so
+    // an unanswered probe returned '' — "0 gitignored" — and a citation under a gitignored
+    // root fell out of scope and PASSED. Measured on a bare repository: `ls-files` still
+    // answers from the index (so the no-git skip above never fires) while check-ignore exits
+    // 128, "this operation must be run in a work tree".
+    // A FAIL, not a named skip, and the difference from that no-git skip is the reason: with
+    // no git the block asks nothing, so nothing false can pass; here git answered half the
+    // question, and a skip would still end VERIFY: PASS with every gitignored citation
+    // unjudged — the defect itself, printed politely. (CoalHearth 0413924 chose FAIL too.)
+    let checkIgnoreFailure = null;
     const ign = deriveIgnoredRoots({
       surfaces,
       agentHomes,
       runCheckIgnore: (names) => {
         const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
           { cwd: repo, encoding: 'utf8', input: names.map((n) => n + '/').join('\n') + '\n' });
-        // Exit 1 means nothing fed was ignored — not an error. git was already proven
-        // reachable by the ls-files probe this whole block is gated on.
-        return ci.error ? '' : ci.stdout;
+        if (ci.error) { checkIgnoreFailure = `failed to spawn: ${ci.error.message}`; return ''; }
+        if (ci.status !== 0 && ci.status !== 1) {
+          const why = String(ci.stderr || '').split('\n')[0].trim();
+          checkIgnoreFailure = `exited ${ci.status}${why ? ` — ${why}` : ''}`;
+          return '';
+        }
+        return ci.stdout;
       },
     });
     const ignoredRoots = ign.ignored;
@@ -376,9 +391,12 @@ try {
     // caller's directory listing. The artefact count is printed whenever it is non-zero
     // rather than hidden: a checkout whose `.gitignore` is CRLF is not an error, but a
     // reader is owed the fact that rows were dropped.
-    ok(`gitignored-root citations: ${ign.cited.size} distinct first segment(s) cited and shape-qualified, ${ign.probed.length} probed through one git check-ignore call (${ign.homesPresent} of ${agentHomes.size} agent home(s) held out: ${[...agentHomes].sort().join(' ')}) — ${ignoredRoots.size} gitignored${ign.artefacts.length ? `, ${ign.artefacts.length} empty-pattern row(s) dropped (CRLF .gitignore)` : ''}`);
+    // An unanswered probe gets a FAIL and NO ok line: its "0 gitignored" would be a count of
+    // nothing, and the resolution ok line below rests on the same set, so it is withheld too.
+    if (checkIgnoreFailure) fail(`git check-ignore --stdin ${checkIgnoreFailure} — cannot tell which cited roots are gitignored, so no citation under one can be judged`);
+    else ok(`gitignored-root citations: ${ign.cited.size} distinct first segment(s) cited and shape-qualified, ${ign.probed.length} probed through one git check-ignore call (${ign.homesPresent} of ${agentHomes.size} agent home(s) held out: ${[...agentHomes].sort().join(' ')}) — ${ignoredRoots.size} gitignored${ign.artefacts.length ? `, ${ign.artefacts.length} empty-pattern row(s) dropped (CRLF .gitignore)` : ''}`);
     const hard = findings.filter((f) => f.level !== 'SKIP');
-    if (!hard.length) {
+    if (!hard.length && !checkIgnoreFailure) {
       ok(`every path this repo points at from ${surfaces.length} ship-text surface(s) (${findings.checked} in-scope citations) resolves to a TRACKED file — sections and symbols are NOT checked, see scripts/pointer-check.mjs`);
     }
     for (const f of findings) {
