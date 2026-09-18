@@ -1,0 +1,453 @@
+// writeguard.mjs — the WRITE-PATH SEATBELT + AIRBAG (ruling 0p). The gate
+// follows the KNIFE: the fidelity gate blocks a STRUCTURED-token drop only on
+// CoalWash's OWN wash, but the governance store is edited by every hand (main,
+// subs, other tools) — a gate on CW's knife alone is HALF a constraint. Two
+// advisory-grade nets for those OTHER hands:
+//
+//   AIRBAG (PreToolUse, snapshot-on-first-write) — CHANNEL-BOUND, see the limit
+//   at the end of this block. MEMORY.md/CLAUDE.md are
+//   gitignored = zero undo net when any agent misedits them. On the FIRST
+//   write to a guarded file this session, ms-copy it once into
+//   .claude/coalwash/writeguard/<session>/ (the existing sandbox root,
+//   self-ignored) = the orig baseline. Subsequent writes to the same file
+//   skip (already snapshotted). Write-only, no output.
+//
+//   SEATBELT (PostToolUse, advisory drop-detector) — after a guarded write,
+//   diff {airbag-snapshot orig, current disk} through the wash's own
+//   fidelity gate (gateFiles); on a structured-token drop, emit ONE advisory
+//   line. ADVISORY ONLY — never blocks, never {decision:'block'} (a deliberate
+//   delete/crystallize is legitimate; an ambient gate has no approvedDrops
+//   channel, so blocking = sabotage). FP DECISION (0p prereq, option ii):
+//   the advisory ALWAYS fires on any structured drop, FYI-framed + a snapshot
+//   pointer — NO deliberate-vs-careless heuristic (which would misclassify);
+//   an FP costs ONE ignorable line, never a blocked edit, and every fire is a
+//   usable undo hint. Reaches subs natively (tool hooks fire in subs — proven
+//   by the 0o spawn meter). Clean edits = silent (no per-edit output).
+//
+// PHOENIX: the cheap path-shape prefilter (isGuardedTarget) runs first, so
+// near-all Edit/Write calls (source code, configs) skip FREE — no discovery
+// walk EVER on the write path (unlike SessionStart's gauge), just one realpath
+// + string checks. Fail-silent throughout (a guard failure must never block a
+// write). 0h-GUARD untouched: writeguard is NOT a bin — no retention.mjs, no
+// bin sweep; stale session dirs are cleaned run-gated at SessionStart (event,
+// never a clock), keeping only the current session's.
+//
+// NAMED divergence (one-flock: name it where it lives): this module re-inlines
+// txDir + the self-ignore drop rather than importing them from apply.mjs, to
+// stay OFF apply.mjs's heavy WAL/bins/keeps import graph on the PreToolUse
+// CHANNEL LIMIT (CWK-082 L3), stated here because this module is where a reader
+// comes to learn what the net covers: the airbag rides PreToolUse on the
+// FILE-EDIT tools only (Edit/Write/MultiEdit — hooks.json's matcher plus the
+// conductor's in-code WRITE_TOOLS belt, two independent gates). A write made
+// through the SHELL (mv, sed, a heredoc, a script) takes NO snapshot and fires
+// NO seatbelt advisory — measured, not assumed (INSPECT §3b: Write/Edit/
+// MultiEdit produce 3 snapshot files each, Bash produces 0 and the writeguard/
+// dir is never created). This is DELIBERATE, not a gap awaiting a patch — the
+// reason and the rejected alternative live at the conductor's touchedPath.
+// The externalize template discloses it to the user and steers toward the
+// covered channel; nothing else in the room states it, so do not delete it here
+// without moving it somewhere a reader of this module will still find.
+//
+// hot path (the airbag fires on every governance write). physicalOrNull/
+// containedIn come from class-b.mjs (pure, light); gateFiles from
+// fidelity-gate.mjs (zero-dep).
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { physicalOrNull, containedIn } from './class-b.mjs';
+import { claudeBaseDir } from './config-load.mjs';
+import { gateFiles } from './fidelity-gate.mjs';
+
+// The root governance basenames, guarded anywhere in the trees. Memory-store
+// and rules markdown are caught by the ".md under a .claude tree" clause below.
+const GOV_BASENAMES = new Set(['CLAUDE.md', 'AGENTS.md', 'MEMORY.md']);
+
+// Birth certificate (0p perf prereq + the no-undeclared-default rule): the
+// SEATBELT diff (gateFiles' inventory scans) scales with file size; over this
+// cap the airbag still snapshots but the diff is SKIPPED (degrade to a
+// "snapshot taken, diff skipped, oversize" note, never an inline scan of a
+// pathological file). 256KB = the READ_BUDGET_BYTES scale already used on the
+// gauge hot path; a governance file over it is pathological (CW's own whale
+// measured 157KB in the estate-wash finding). Not measured-in-CI (the
+// warp-gate lesson: a perf DECISION is recorded data, never a wall-clock
+// assertion) — the STRUCTURAL claim (non-guarded path does zero work; oversize
+// skips the diff) is what the hermetic tests pin.
+export const SEATBELT_MAX_BYTES = 262144;
+
+function txDir(projectRoot) { return path.join(projectRoot, '.claude', 'coalwash'); }
+function writeguardRoot(projectRoot) { return path.join(txDir(projectRoot), 'writeguard'); }
+function sanitizeSession(sessionId) {
+  // Traversal-safe (the CoalMine session-id lesson): a hostile session_id like
+  // '../../x' can never escape the writeguard root.
+  return String(sessionId || '').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 120) || 'nosession';
+}
+function sessionDir(projectRoot, sessionId) {
+  return path.join(writeguardRoot(projectRoot), sanitizeSession(sessionId));
+}
+// grad7 ruling Root C (F3, worse than named): the OLD djb2 hash below was a
+// 32-bit, path-only, deliberately-invertible checksum. A round-8 worker
+// constructed a REAL collision between two distinct governed files (two
+// role directories both ending `MEMORY.md`) in 4.4M brute-force tries — a
+// plain for-loop, no cryptographic effort. sha256 of the full physical path
+// closes that SPECIFIC attack (brute-forcing a 256-bit collision is not a
+// for-loop), but per the ruling's own model (explode.mjs's snapshotSource:
+// "content-addressed dedup MUST VERIFY the existing blob really belongs to
+// it before trusting it") a stronger hash alone is still trust-by-name. The
+// sidecar below (`recordOrigPath`/`verifyOrigPath`) is the verification: it
+// answers "does the snapshot AT this name actually belong to THIS phys",
+// which no hash strength alone can — two independently-CORRECT hashes could
+// still theoretically collide, and a future weakening of the hash function
+// must not silently reopen this.
+function hash(s) {
+  return crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+}
+function snapName(phys) {
+  const base = path.basename(phys).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 80);
+  return `${base}--${hash(phys)}`;
+}
+// Self-ignore (re-inlined, see the named divergence above): keep the snapshots
+// out of VCS even when the project tracks .claude/. Best-effort, fail-silent.
+function selfIgnore(dir) {
+  try { fs.writeFileSync(path.join(dir, '.gitignore'), '*\n', { flag: 'wx' }); }
+  catch (e) { if (e && e.code !== 'EEXIST') { /* read-only fs etc — ignore */ } }
+}
+
+// The cheap class-B shape prefilter + realpath-and-contain, fail-closed.
+// Returns the guarded file's PHYSICAL path, or null (skip free). Honest
+// ceiling (0l undercount-is-safe): covers the governance/memory-markdown
+// shapes (the 4 live header-clobber incidents were all MEMORY/CLAUDE .md); a
+// user's exotic custom @import living OUTSIDE a .claude tree with a
+// non-governance basename is NOT caught by this cheap prefilter — the
+// full-discovery version would be, at a per-edit budget we deliberately refuse
+// to pay (unseen = unguarded = safe; the airbag/seatbelt are a best-effort
+// net, not a correctness guarantee).
+export function isGuardedTarget(touchedPath, { projectRoot, home } = {}) {
+  if (typeof touchedPath !== 'string' || !touchedPath || !projectRoot) return null;
+  const phys = physicalOrNull(touchedPath);
+  if (!phys) return null; // unresolvable / missing -> fail-closed
+  const base = claudeBaseDir(home);
+  const roots = [physicalOrNull(home), physicalOrNull(projectRoot), physicalOrNull(base)].filter(Boolean);
+  if (!roots.length || !containedIn(phys, roots)) return null; // realpath-and-contain, both sides physical
+  // NEVER guard CW's OWN sandbox (snapshots / bins / writeguard / state) —
+  // 0h-GUARD: the write guard must never operate on a bin, and snapshotting
+  // our own snapshots would recurse. discoverClassB already excludes
+  // .claude/coalwash/ from class-B; mirror that here.
+  const tx = physicalOrNull(txDir(projectRoot)) || txDir(projectRoot);
+  if (containedIn(phys, [tx])) return null;
+  // Admit: a root governance basename anywhere, OR any markdown under a
+  // .claude tree (global governance/rules + the per-project memory store).
+  if (GOV_BASENAMES.has(path.basename(phys))) return phys;
+  if (/\.md$/i.test(phys)) {
+    const trees = [physicalOrNull(base), physicalOrNull(path.join(projectRoot, '.claude'))].filter(Boolean);
+    if (containedIn(phys, trees)) return phys;
+  }
+  return null;
+}
+
+// IDENTITY SIDECAR — grad9 F1: round 8 named the defect "no content-verify-
+// before-trust". The sha256 upgrade above closed the NAME-collision route
+// (infeasible to forge a colliding snapName), but the sidecar this comment
+// used to describe as "the content-verify-before-trust the ruling names"
+// compared a PATH STRING only — it never read, hashed, or otherwise looked
+// at the blob's own bytes. Coordinator's fixture proved the gap live: take a
+// legit snapshot, overwrite the BLOB in place (no hash work, no collision
+// search — just a write to a file the engine's own listWriteguard already
+// enumerates), call snapshotOnFirstWrite again -> the slot was reused with
+// the tampered bytes trusted as "already snapshotted this session". The
+// label and the mechanism disagreed inside one comment block; the mechanism
+// is now upgraded to MATCH the label. The sidecar carries the recorded orig
+// PATH on its first line (still needed — a genuine collision is a different
+// phys entirely, and content-hashing alone can't distinguish "same file,
+// tampered" from "different file, same bytes") and the sha256 of the blob's
+// content, AS WRITTEN, on its second line. Reusing a slot now requires BOTH:
+// the recorded path matches AND the blob's CURRENT on-disk bytes still hash
+// to what was recorded at creation.
+//
+// grad10 F2 [CRITICAL against this repair's OWN stated purpose, NOT CLOSED
+// AT THIS LAYER — stated plainly rather than papered over]: the sidecar is
+// a PLAIN FILE in the SAME unprotected directory as the blob it attests,
+// and its two-line format is documented in this shipped source. An actor
+// who overwrites the blob can recompute sha256 of THEIR OWN bytes and
+// rewrite the sidecar to match — `verifyOrigPath`/`verifyBlobIntegrity`
+// both return `true`, and the forgery becomes the trusted baseline. A
+// self-attesting hash stored beside the content it attests, writable by
+// the same actor, proves SELF-consistency (these two files were meant to
+// go together), never PROVENANCE (the pair was ever honest). What this
+// repair bought, honestly stated: two consistent writes instead of one
+// inconsistent one (F1's slot-reuse and restore-door bypasses, both real,
+// both closed). What it did not buy, and cannot buy at this layer: a trust
+// model.
+//
+// THREE CANDIDATE FIXES CONSIDERED AND KILLED, so "not closable here" is a
+// checked claim, not an assumption:
+//   (1) HMAC with a secret key stored elsewhere. Fails because there is no
+//       PRIVILEGE boundary in this tool's actual deployment between "the
+//       legitimate writeguard writer" and "the actor this finding is
+//       about" — per this file's own header, that actor is explicitly
+//       "main, subs, other tools" running with the SAME OS-user privilege
+//       as the code that would need to read the key to verify. Anywhere
+//       this process can read a key, so can whatever wrote the rogue blob.
+//   (2) OS file permissions / ACLs restricting write to the writeguard
+//       dir. Fails for the same reason (same UID can chmod its own files
+//       back), is not zero-dependency-portable (Phoenix #2), and POSIX
+//       permissions and Windows ACLs are not the same primitive — this
+//       file already treats cross-platform parity as binding elsewhere.
+//   (3) Move the trust record OUTSIDE the project tree (e.g. under
+//       ~/.claude/), reasoning a project-tree-scoped attacker (a cloned
+//       malicious repo's own content) could not reach it. Fails because
+//       nothing in this deployment scopes an agent/tool's WRITE access to
+//       project-tree-only — a Write/Edit call reaches wherever the OS user
+//       can, home included; there is no evidence of a narrower-scoped
+//       actor in this tool's actual threat surface to make the boundary
+//       real, only a hypothetical one.
+// All three fail on the identical root cause: closing F2 needs a trust
+// boundary this store does not have (a genuinely separate privilege level,
+// or a credential store the writer cannot also read) — not a cleverer
+// check inside the same unprotected directory. Building one would be
+// building a weaker check that LOOKS like a fix, which is precisely what
+// this finding is about. Routed up, same standing as class-A's own F2 on
+// the snapshot manifest (`explode.mjs`) — a board there enumerated and
+// killed seven candidates before reaching the same disposition.
+function origPathSidecar(snap) { return `${snap}.origpath`; }
+function contentDigest(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+function recordOrigPath(snap, phys, blobBuf) {
+  fs.writeFileSync(origPathSidecar(snap), `${phys}\n${contentDigest(blobBuf)}`, 'utf8');
+}
+// Returns true (verified: path matches AND the blob's bytes, hashed right
+// now, still match what was recorded at write time), false (either a
+// DIFFERENT phys owns this name — the collision case — or the SAME phys's
+// blob was altered after the fact; either way, never trust it), or null
+// (unverifiable — no sidecar at all, a pre-content-hash legacy sidecar
+// carrying only a path with no second line, or the blob itself is
+// unreadable; the caller treats null the same as false: never assume
+// identity that was never recorded). Consequence, right direction but worth
+// stating: a session in flight across the FIRST upgrade (the path-only
+// sidecar) loses its seatbelt BASELINE for a file it already snapshotted
+// pre-fix (the advisory goes silent, never a false one — fail-silent, not
+// fail-wrong).
+// CORRECTED grad10 F1: the sentence that used to close this comment claimed
+// "the human RESTORE path is untouched, since readWriteguardSnapshot
+// resolves by NAME... not through this identity check" — true of the CODE
+// at the time, and the wrong design. `readWriteguardSnapshot` searched
+// EVERY session dir by NAME ONLY and returned the newest by mtime; `snapName`
+// is a pure public function of the physical path, so a rogue blob planted
+// under the same name in ANY session dir (no access to the live session's
+// slot, no access to the governed file) with a newer mtime won over the
+// real snapshot. See `verifyBlobIntegrity` below, now wired into
+// `readWriteguardSnapshot` — the restore door the round-10 dispatch names
+// as "the one a human actually presses" is gated too.
+function verifyOrigPath(snap, phys) {
+  try {
+    const raw = fs.readFileSync(origPathSidecar(snap), 'utf8');
+    const nl = raw.indexOf('\n');
+    if (nl === -1) return null; // legacy path-only sidecar, or malformed — unverifiable
+    if (raw.slice(0, nl) !== phys) return false;
+    const recordedHash = raw.slice(nl + 1).trim();
+    let blobBuf;
+    try { blobBuf = fs.readFileSync(snap); } catch { return null; } // blob unreadable — can't verify content
+    return contentDigest(blobBuf) === recordedHash;
+  } catch { return null; }
+}
+// Walk the disambiguation chain for `phys` inside `dir`: the FIRST candidate
+// that is either (a) verified as already belonging to phys, or (b) does not
+// exist at all yet, is the correct slot. A genuine collision (or a legacy
+// snapshot with no sidecar) is never reused — it is skipped to the next
+// candidate, so two distinct files sharing snapName's hash each still get
+// their own real, independently-verifiable snapshot.
+function resolveSnapPath(dir, phys) {
+  const base = snapName(phys);
+  for (let n = 0; ; n++) {
+    const candidate = path.join(dir, n === 0 ? base : `${base}-${n}`);
+    if (!fs.existsSync(candidate)) return { path: candidate, existing: false };
+    if (verifyOrigPath(candidate, phys) === true) return { path: candidate, existing: true };
+    // occupied by something else (collision or legacy, unverifiable) — try the next slot
+  }
+}
+
+// AIRBAG — snapshot-on-FIRST-write per file per session. Returns the snapshot
+// path (or the existing one), or null (not guarded / new file with no orig /
+// guard failure). Fail-silent: the airbag's own failure never blocks the write.
+export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home } = {}) {
+  try {
+    const phys = isGuardedTarget(touchedPath, { projectRoot, home });
+    if (!phys) return null;
+    if (!fs.existsSync(phys)) return null; // a Write CREATING a new file: no orig to snapshot
+    const dir = sessionDir(projectRoot, sessionId);
+    const { path: snap, existing } = resolveSnapPath(dir, phys);
+    if (existing) return snap; // FIRST-write only, VERIFIED as this file's own baseline — already snapshotted this session
+    fs.mkdirSync(dir, { recursive: true });
+    selfIgnore(txDir(projectRoot));
+    selfIgnore(writeguardRoot(projectRoot));
+    selfIgnore(dir);
+    fs.copyFileSync(phys, snap); // the ms-copy
+    // hash what's ACTUALLY on disk at `snap` now (not `phys` before the
+    // copy) — this guards the copy step itself, not just a promise about
+    // the source.
+    recordOrigPath(snap, phys, fs.readFileSync(snap));
+    return snap;
+  } catch { return null; }
+}
+
+// Read the airbag baseline for the seatbelt's diff. Returns { phys,
+// snapshotPath, orig } or null (no baseline — not guarded, new file, or the
+// airbag was off/failed → the seatbelt stays silent).
+// ANALYSIS PATH, DECLARED — the rule G3-3 set (recovery moves BYTES, analysis
+// may decode to TEXT and must say so at the call). `orig` is decoded on purpose:
+// it exists only to be compared with the current disk through the fidelity gate,
+// and BOTH sides take the same transform, so a lossy decode cannot manufacture a
+// drop. It is never written anywhere and never handed to a human as "the
+// original" — RECOVERY reads the same snapshot through readWriteguardSnapshot
+// below, which returns a Buffer.
+export function readSnapshot(projectRoot, sessionId, touchedPath, { home } = {}) {
+  try {
+    const phys = isGuardedTarget(touchedPath, { projectRoot, home });
+    if (!phys) return null;
+    const { path: snap, existing } = resolveSnapPath(sessionDir(projectRoot, sessionId), phys);
+    if (!existing) return null;
+    return { phys, snapshotPath: snap, orig: fs.readFileSync(snap, 'utf8') };
+  } catch { return null; }
+}
+
+// SEATBELT — diff the airbag baseline against the current (post-edit) disk
+// through the wash's fidelity gate. Returns:
+//   null                                    — silent (not guarded / no baseline / clean edit)
+//   { file, snapshotPath, oversize:true }   — snapshot stands, diff skipped (file over the cap)
+//   { file, snapshotPath, classes:[...] }   — structured-token drop(s) detected (advise)
+// A clean edit returns { classes: [] } which the caller treats as silent.
+// READ-ONLY: reads the snapshot + the current disk, writes NOTHING.
+export function seatbeltCheck(projectRoot, sessionId, touchedPath, { home } = {}) {
+  const b = readSnapshot(projectRoot, sessionId, touchedPath, { home });
+  if (!b) return null;
+  let cur;
+  try { cur = fs.readFileSync(b.phys, 'utf8'); } catch { return null; } // gone/unreadable -> silent
+  if (Buffer.byteLength(b.orig, 'utf8') > SEATBELT_MAX_BYTES || Buffer.byteLength(cur, 'utf8') > SEATBELT_MAX_BYTES) {
+    return { file: b.phys, snapshotPath: b.snapshotPath, oversize: true, classes: [] };
+  }
+  const { drops } = gateFiles([{ path: b.phys, orig: b.orig, next: cur }]);
+  const classes = [...new Set(drops.map((d) => d.type))].sort();
+  return { file: b.phys, snapshotPath: b.snapshotPath, oversize: false, classes };
+}
+
+// Bare-id allowlist (the F1 restore-door lesson: allowlist the shape, never
+// segment-scan) — a snapshot name is a flat token; anything else is a plain
+// not-found before a path is ever built.
+function isBareId(id) {
+  return typeof id === 'string' && !!id && id !== '.' && id !== '..' && path.basename(id) === id;
+}
+
+// PULL-ONLY listing — METADATA ONLY, never content (the 0p recovery-by-
+// reference law): the agent POINTS at a snapshot by this metadata (name /
+// session / bytes / mtime / original path), it never reproduces the bytes.
+// Every writeguard snapshot currently on disk. Fail-silent -> [].
+export function listWriteguard(projectRoot, { home: _home } = {}) {
+  const out = [];
+  try {
+    const root = writeguardRoot(projectRoot);
+    if (!fs.existsSync(root)) return out;
+    for (const session of fs.readdirSync(root)) {
+      const sdir = path.join(root, session);
+      let st; try { st = fs.statSync(sdir); } catch { continue; }
+      if (!st.isDirectory()) continue;
+      for (const name of fs.readdirSync(sdir)) {
+        if (name === '.gitignore' || name.endsWith('.origpath')) continue; // sidecars are identity metadata, never a listable/restorable snapshot
+        try {
+          const p = path.join(sdir, name);
+          const fst = fs.statSync(p);
+          if (fst.isFile()) out.push({ session, name, snapshotPath: p, bytes: fst.size, mtimeMs: fst.mtimeMs });
+        } catch { /* skip unreadable */ }
+      }
+    }
+  } catch { /* fail-silent */ }
+  return out;
+}
+
+// grad10 F1 [CRITICAL]: round 9's digest closed slot-REUSE at the WRITE path
+// (resolveSnapPath/verifyOrigPath) but the RESTORE door — the one a human
+// actually presses — went through no identity check of any kind (see the
+// correction above `verifyOrigPath`). Coordinator's own reproduction, built
+// from the repair's stated claim, confirmed it live: a rogue blob planted
+// under the SAME canonical name in a DIFFERENT (unswept) session dir, with a
+// newer mtime, was served over the real snapshot — no access to the live
+// session's own slot needed, none to the governed file itself. The rogue in
+// that reproduction even COPIED the legit sidecar verbatim (the lazy
+// attack — reusing the true content's hash without re-signing for its own
+// bytes), which is exactly what this check catches: the blob's CURRENT
+// bytes must still hash to what its OWN sidecar recorded.
+//
+// Deliberately NARROWER than `verifyOrigPath` at the write path: restore has
+// no independently-trusted `phys` to compare the sidecar's recorded path
+// against (the caller supplies only a bare snapName, by design — that is
+// the whole point of "point at a snapshot, never reproduce bytes"), so this
+// checks SELF-consistency (has this blob been altered since this sidecar
+// was last written), not PROVENANCE (was the sidecar itself ever honest).
+// It closes the reproduced attack. It does NOT close an attacker who
+// recomputes a matching hash for their OWN forged bytes and writes a fresh,
+// internally-consistent sidecar to match — that is co-tampering, F2's
+// finding, and applies here exactly as it applies at the write path.
+//
+// A legacy (pre-F1) sidecar carries no hash line and is UNVERIFIABLE, not
+// merely absent — treated the SAME as a failed verification (skip, never
+// silently serve unverified content), the identical fail-closed polarity
+// `resolveSnapPath` already applies at write time. The cost: a session in
+// flight across THIS upgrade loses restorability for a snapshot it already
+// took pre-fix, via this door specifically (the write-path's own legacy-
+// sidecar cost, documented above, was scoped to a NEW baseline never being
+// taken; this is the restore-side twin of that same trade).
+function verifyBlobIntegrity(snapPath) {
+  try {
+    const raw = fs.readFileSync(origPathSidecar(snapPath), 'utf8');
+    const nl = raw.indexOf('\n');
+    if (nl === -1) return false; // legacy path-only sidecar — unverifiable, never trusted
+    const recordedHash = raw.slice(nl + 1).trim();
+    const blobBuf = fs.readFileSync(snapPath);
+    return contentDigest(blobBuf) === recordedHash;
+  } catch { return false; }
+}
+
+// Read ONE snapshot's ORIGINAL bytes by its bare snapName. THE RECOVERY DOOR
+// (0p law, USER-reaffirmed "ต้องทำให้ ai ลงไปเก็บกู้ ห้ามเสกของใหม่เข้า"):
+// CODE moves the bytes — they never pass through an agent's context; the AI
+// only names WHICH snapshot, code copies the REAL bytes. An AI re-authoring a
+// "recovery" from memory is the ADD-01 hallucination-twin (a fake that looks
+// original); undo is trustworthy ONLY because the bytes are the real bytes,
+// model-untouched. isBareId-contained (F1); searches every session dir,
+// VERIFIES each candidate's blob-vs-sidecar integrity (grad10 F1), and
+// returns the newest VERIFIED match — never the newest match outright
+// (post-sweep only the current session survives, so a cross-session name
+// collision, verified or not, is the exception the sweep exists to close;
+// this check is the net for the window before that sweep runs). null on a
+// non-bare id, a miss, or every candidate failing verification (fail
+// closed — a human pressing restore gets a refusal, never unverified bytes).
+export function readWriteguardSnapshot(projectRoot, snapName, { home } = {}) {
+  if (!isBareId(snapName)) return null;
+  const rows = listWriteguard(projectRoot, { home }).filter((r) => r.name === snapName);
+  if (!rows.length) return null;
+  rows.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const pick = rows.find((r) => verifyBlobIntegrity(r.snapshotPath));
+  if (!pick) return null;
+  // BYTES (G3-3's twin, same commit — the bins and this door are one concept
+  // with two implementations, and when one learns the other changes or the
+  // "same law" comment is a lie). The snapshot on disk is byte-exact (a
+  // copyFileSync), but reading it back through 'utf8' re-encoded every
+  // non-UTF-8 byte as U+FFFD — so the CLI's own words, "byte-exact original on
+  // stdout", were FALSE for exactly the files this net exists to save. `bytes`
+  // already comes from a stat, so it was right while the content was wrong.
+  try { return { ...pick, content: fs.readFileSync(pick.snapshotPath) }; }
+  catch { return null; }
+}
+
+// Run-gated cleanup (SessionStart, event-driven — NEVER a clock; 0h-GUARD
+// spirit): drop every writeguard session dir except the current one. NOT a bin
+// sweep, NOT retention.mjs — a plain keep-current-drop-prior fs cleanup, the
+// same discipline as the spawn-meter's per-session counter reset. Fail-silent.
+export function sweepWriteguard(projectRoot, currentSessionId, { home: _home } = {}) {
+  try {
+    const root = writeguardRoot(projectRoot);
+    if (!fs.existsSync(root)) return;
+    const keep = sanitizeSession(currentSessionId);
+    for (const name of fs.readdirSync(root)) {
+      if (name === keep || name === '.gitignore') continue;
+      try { fs.rmSync(path.join(root, name), { recursive: true, force: true }); } catch { /* leftover waits for the next pass */ }
+    }
+  } catch { /* fail-silent */ }
+}
