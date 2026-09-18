@@ -1,0 +1,592 @@
+import { test } from 'node:test';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  FAT_BIN_NAME, STORE_OLD_NAME,
+  recordBinItem, listBin, restoreFromBin,
+  sweepFatBin, sweepStoreOld, readDeathLog, breadcrumb,
+  __testHooks,
+} from './tailings.mjs';
+import { txDirFor } from './apply.mjs';
+import { TIER1_KEEP_ALL_MS, HORIZON_MS } from './retention.mjs';
+
+function sandbox() {
+  return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-proj-')));
+}
+// restoreFromBin hands back BYTES (G3-3). These are POLICY tests — they assert
+// WHICH items survive a sweep, not how they are encoded — so they decode here,
+// explicitly. The byte contract itself is asserted in apply.test.mjs.
+const binText = (p, n, id) => { const b = restoreFromBin(p, n, id); return b === null ? null : b.toString('utf8'); };
+function clean(...dirs) {
+  for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+}
+
+test('recordBinItem: writes the content verbatim, records it in the index, self-ignores the tx dir', () => {
+  const proj = sandbox();
+  try {
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'cut prose', original: '/some/file.md' });
+    assert.ok(id, 'an id is returned');
+    const list = listBin(proj, FAT_BIN_NAME);
+    assert.strictEqual(list.length, 1);
+    assert.strictEqual(list[0].id, id);
+    assert.strictEqual(list[0].original, '/some/file.md');
+    assert.strictEqual(list[0].origin, 'program-cut', 'the default origin');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'cut prose');
+    const gitignore = path.join(txDirFor(proj), FAT_BIN_NAME, '.gitignore');
+    assert.ok(fs.existsSync(gitignore), 'the bin dir is self-ignored (never version-controlled, same as the tx dir)');
+  } finally { clean(proj); }
+});
+
+// grad6 (relayed W1-F4, confirmed here with real OS processes before the fix
+// landed — 4 workers x 10 items measured 16 catalogued vs 31 actual blobs
+// against an expected 40 of each): the in-process test above cannot reach the
+// real read-modify-write race between the shared index.json and the fixed
+// tmp filename — that needs genuinely concurrent OS processes, the same
+// reason explode.test.mjs's own "#1 CROSS-PROCESS" test spawns real workers
+// rather than simulating concurrency in one event loop.
+test('recordBinItem: CROSS-PROCESS — concurrent workers writing the SAME bin never lose or undercount an item', async () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-xproc-')));
+  try {
+    const proj = path.join(dir, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const engineUrl = new URL('./tailings.mjs', import.meta.url).href;
+    const workerPath = path.join(dir, 'worker.mjs');
+    fs.writeFileSync(workerPath,
+      `import { recordBinItem } from ${JSON.stringify(engineUrl)};\n` +
+      `const [,, projectRoot, countStr] = process.argv;\n` +
+      `for (let i = 0; i < Number(countStr); i++) recordBinItem(projectRoot, 'fat-bin', { content: 'item-' + process.pid + '-' + i, original: '/f' + i + '.md' });\n`);
+    const WORKERS = 4;
+    const PER_WORKER = 10;
+    // rot-canary (self-found, session end): mirror explode.test.mjs's own
+    // "#1 CROSS-PROCESS" precedent exactly — capture the exit code + stderr so
+    // a worker CRASH surfaces as its own assertion, not a confusing item-count
+    // mismatch with no diagnostic behind it.
+    const runKid = () => new Promise((resolve) => {
+      const c = spawn(process.execPath, [workerPath, proj, String(PER_WORKER)]);
+      let e = '';
+      c.stderr.on('data', (d) => (e += d));
+      c.on('close', (code) => resolve({ code, e: e.trim() }));
+    });
+    const results = await Promise.all(Array.from({ length: WORKERS }, runKid));
+    for (const r of results) {
+      assert.strictEqual(r.code, 0, `a worker crashed (exit ${r.code}), stderr: ${r.e.slice(0, 200)}`);
+    }
+    const index = listBin(proj, FAT_BIN_NAME);
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    const onDisk = fs.readdirSync(binPath).filter((f) => f !== 'index.json' && f !== 'index.json.tmp' && f !== '.gitignore' && f !== '.bin.lock');
+    // grad6 F2's RULING, RETRO-APPLIED (demand 5 of the #36 twin-pair brief).
+    // This line used to be `strictEqual(onDisk.length, WORKERS * PER_WORKER)` — the
+    // LOSSLESS count, which is a property of the MACHINE, not of the code: 40/40 on a
+    // developer box, 37 measured on a 2-core CI runner, and it is exactly what turned
+    // ubuntu-22 red on `af17017`. The same day it was written, F2's own new test hit
+    // this and pinned the INVARIANT instead; the ruling was never carried back here.
+    //
+    // The invariant is the line below and it always held, including at 37: whatever
+    // number of items survive contention, the CATALOGUE and the BLOBS agree. A
+    // refusal under contention is ALLOWED (bounded retry, by design); silent LOSS —
+    // a blob with no index row, or a row with no blob — is not.
+    //
+    // Two bounds keep this from passing vacuously now that the exact count is gone:
+    // never MORE than were attempted (that would mean duplication), and never zero
+    // (that would mean the workers did nothing and every assertion below is empty).
+    assert.ok(onDisk.length > 0 && onDisk.length <= WORKERS * PER_WORKER,
+      `expected 1..${WORKERS * PER_WORKER} blobs on disk, got ${onDisk.length} — zero means the workers never ran, more than attempted means duplication`);
+    assert.strictEqual(index.length, onDisk.length, 'the catalogue must never undercount the actual blobs written');
+    // NAMED RESIDUAL, not built here: the workers discard `recordBinItem`'s return, so
+    // this test cannot assert the STRONGEST form (catalogued === blobs === SUCCESSFUL
+    // attempts) the way F2's own test does — it would need each worker to report its
+    // success count back over stdout or an exit code. What is pinned here is the
+    // consistency invariant; the accounting invariant lives in F2's test.
+  } finally { clean(dir); }
+});
+
+// grad6 F1 (inspect findings-back on 7d57d4c): a lock ORPHANED by a crashed
+// holder used to inherit acquireLock's 30-minute default staleness window
+// (sized for the tx-dir lock, a big rare transaction) even though this lock's
+// own critical section is sub-millisecond — every recordBinItem call for up
+// to 30 minutes burned its whole retry budget and returned null. The bin
+// lock now uses its own short staleness window; a lock older than it must be
+// reclaimed almost immediately, not after exhausting the retry budget.
+test('grad6 F1: an orphaned lock OLDER than the bin\'s own (short) staleness window is reclaimed quickly, not after burning the whole retry budget', () => {
+  const proj = sandbox();
+  try {
+    const dir = path.join(txDirFor(proj), FAT_BIN_NAME);
+    fs.mkdirSync(dir, { recursive: true });
+    const lockPath = path.join(dir, '.bin.lock');
+    fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'dead', pid: 999999, at: Date.now(), token: 'dead:999999:0' }));
+    const oldMtime = new Date(Date.now() - 6000); // 6s old — older than the bin's 5s staleness window
+    fs.utimesSync(lockPath, oldMtime, oldMtime);
+    // F-RR-2 (r34): this used to assert `ms < 500` against a ~600 ms retry
+    // budget — a 100 ms margin on a shared machine, the most false-red-prone
+    // clock in the suite. The clock was the SIGNAL here, not a redundant
+    // secondary, so it is REPLACED rather than deleted: "reclaimed immediately"
+    // means reclaimed on the first acquire attempt, and that is a count.
+    __testHooks.binLockAttempts = 0;
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'a cut that must be banked', original: '/f.md' });
+    assert.strictEqual(__testHooks.binLockAttempts, 1,
+      `reclaiming a stale orphan took ${__testHooks.binLockAttempts} acquire attempts — expected the steal on attempt 1, not a walk through the retry budget`);
+    assert.ok(id, 'a lock older than the bin\'s own staleness window must be reclaimed, not return null');
+    assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 1);
+  } finally { clean(proj); }
+});
+
+// grad6 F2 (inspect findings-back), NAME corrected per WAVE-16 finding 6: the
+// prior name asserted "some attempts cleanly REFUSE" over a body that only
+// ever checked `successfulAttempts > 0 && <= 160` — a 160/160 fully-lossless
+// run would have PASSED that body while contradicting its own name (this
+// room's #1 recurring test-naming class: read every test name as a claim,
+// then check the body actually enforces it). The body was always right; only
+// the name overreached. This pins the INVARIANT at heavier load — never
+// lossless-ness itself, which is a machine-dependent property (WAVE-16
+// measured 8x10 already losing one refusal on a different box) — every
+// successful attempt (non-null id) has exactly one blob and one catalogue
+// entry; a refusal (null) leaves nothing behind either. A refusal is
+// PERMITTED at this load, never REQUIRED by this test.
+test('grad6 F2: at heavier load (16x10=160) the catalogue/blobs never diverge from whatever actually succeeded (a clean refusal is allowed, never required)', async () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-f2-')));
+  try {
+    const proj = path.join(dir, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const engineUrl = new URL('./tailings.mjs', import.meta.url).href;
+    const workerPath = path.join(dir, 'worker-f2.mjs');
+    fs.writeFileSync(workerPath,
+      `import { recordBinItem } from ${JSON.stringify(engineUrl)};\n` +
+      `const [,, projectRoot, countStr] = process.argv;\n` +
+      `let ok = 0;\n` +
+      `for (let i = 0; i < Number(countStr); i++) { const id = recordBinItem(projectRoot, 'fat-bin', { content: 'item-' + process.pid + '-' + i, original: '/f' + i + '.md' }); if (id !== null) ok++; }\n` +
+      `process.stdout.write(String(ok));\n`);
+    const WORKERS = 16;
+    const PER_WORKER = 10;
+    const runKid = () => new Promise((resolve) => {
+      const c = spawn(process.execPath, [workerPath, proj, String(PER_WORKER)]);
+      let o = '', e = '';
+      c.stdout.on('data', (d) => (o += d));
+      c.stderr.on('data', (d) => (e += d));
+      c.on('close', (code) => resolve({ code, o: o.trim(), e: e.trim() }));
+    });
+    const results = await Promise.all(Array.from({ length: WORKERS }, runKid));
+    let successfulAttempts = 0;
+    for (const r of results) {
+      assert.strictEqual(r.code, 0, `a worker crashed (exit ${r.code}), stderr: ${r.e.slice(0, 200)}`);
+      successfulAttempts += Number(r.o) || 0;
+    }
+    const index = listBin(proj, FAT_BIN_NAME);
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    const onDisk = fs.readdirSync(binPath).filter((f) => f !== 'index.json' && f !== 'index.json.tmp' && f !== '.gitignore' && f !== '.bin.lock');
+    assert.ok(successfulAttempts > 0 && successfulAttempts <= WORKERS * PER_WORKER, `sanity: ${successfulAttempts} successes out of ${WORKERS * PER_WORKER} attempted`);
+    assert.strictEqual(onDisk.length, successfulAttempts, 'every successful attempt must have exactly one blob — a refusal must leave nothing behind');
+    assert.strictEqual(index.length, onDisk.length, 'the catalogue must never diverge from the blobs, even when some attempts refuse');
+  } finally { clean(dir); }
+});
+
+// grad6 WAVE-16 finding 4: sleepMs's no-SharedArrayBuffer fallback used
+// Date.now() (wall-clock) although the comment claimed a "monotonic clock" —
+// process.hrtime.bigint() is the actual monotonic primitive (apply.mjs's own
+// ownerToken already uses and documents it as such). FREEZING Date.now()
+// discriminates the two cleanly: the OLD `while (Date.now() < until)` loop
+// never advances past a frozen clock and spins FOREVER; the fixed
+// hrtime-based loop is entirely unaffected by Date.now and completes
+// normally. Forced via the same SharedArrayBuffer-delete technique F3's own
+// reproduction used, then a genuinely contended call so at least one
+// fallback wait actually runs.
+test('grad6 WAVE-16 finding 4: sleepMs\'s fallback uses the MONOTONIC clock — freezing Date.now() must not hang it', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-f4-')));
+  try {
+    const proj = path.join(dir, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const engineUrl = new URL('./tailings.mjs', import.meta.url).href;
+    const workerPath = path.join(dir, 'worker-f4.mjs');
+    fs.writeFileSync(workerPath,
+      `delete globalThis.SharedArrayBuffer;\n` + // force the no-SAB fallback branch, before the engine loads
+      `Date.now = () => 1700000000000;\n` + // FROZEN wall-clock — never advances
+      `const { recordBinItem } = await import(${JSON.stringify(engineUrl)});\n` +
+      `const id = recordBinItem(process.argv[2], 'fat-bin', { content: 'x', original: '/f.md' });\n` +
+      `process.stdout.write(JSON.stringify({ id }));\n`);
+    // a fresh (real-mtime) fake lock so the retry loop genuinely contends —
+    // the frozen `now` (1700000000000, far in the past of the real mtime)
+    // reads as "not stale" every attempt, forcing the full retry+sleep ladder.
+    const binDir = path.join(txDirFor(proj), FAT_BIN_NAME);
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other', pid: 1, at: Date.now(), token: 'other:1:0' }));
+    const r = spawnSync(process.execPath, [workerPath, proj], { encoding: 'utf8', timeout: 5000 });
+    assert.strictEqual(r.signal, null, `a frozen Date.now() must not hang the fallback wait (killed by ${r.signal} after the 5s timeout)`);
+    assert.strictEqual(r.status, 0, `worker crashed: ${r.stderr}`);
+    assert.deepStrictEqual(JSON.parse(r.stdout), { id: null }, 'the contended, never-staling lock must exhaust the retry budget and return null (not hang, not falsely succeed)');
+  } finally { clean(dir); }
+});
+
+test('recordBinItem: origin defaults to program-cut; wizard-cut is honored when passed; any other value falls back to program-cut', () => {
+  const proj = sandbox();
+  try {
+    recordBinItem(proj, STORE_OLD_NAME, { content: 'pre-surgery image', origin: 'wizard-cut' });
+    recordBinItem(proj, STORE_OLD_NAME, { content: 'x', origin: 'bogus' });
+    const list = listBin(proj, STORE_OLD_NAME);
+    assert.strictEqual(list[0].origin, 'wizard-cut');
+    assert.strictEqual(list[1].origin, 'program-cut', 'an unrecognized origin value never persists garbage');
+  } finally { clean(proj); }
+});
+
+test('recordBinItem: non-string content degrades to an empty stash, never throws', () => {
+  const proj = sandbox();
+  try {
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: undefined });
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), '');
+  } finally { clean(proj); }
+});
+
+test('listBin: an empty/never-used bin is []; restoreFromBin on a missing id is null, not empty string', () => {
+  const proj = sandbox();
+  try {
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), []);
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, 'never-existed'), null);
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, ''), null);
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, null), null);
+  } finally { clean(proj); }
+});
+
+test('F1: restoreFromBin rejects every traversal-shaped id as a plain not-found — bare program-generated names only', () => {
+  const proj = sandbox();
+  try {
+    // Plant a real item AND a reachable outside-the-bin victim file.
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'legit' });
+    const victim = path.join(txDirFor(proj), 'victim.txt'); // one level above the bin dir
+    fs.writeFileSync(victim, 'secret outside the bin', 'utf8');
+    for (const evil of ['../victim.txt', '..\\victim.txt', victim, '/etc/passwd', 'C:\\Windows\\win.ini', '.', '..', 'a/b', 'a\\b']) {
+      assert.strictEqual(binText(proj, FAT_BIN_NAME, evil), null, `traversal id ${JSON.stringify(evil)} must be a not-found, never a read`);
+    }
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'legit', 'a legitimate flat id still round-trips');
+  } finally { clean(proj); }
+});
+
+test('F1: a POISONED index.json (traversal-shaped ids) is filtered at load — the sweep never rm\'s outside the bin, listBin never surfaces it', () => {
+  const proj = sandbox();
+  try {
+    const dir = path.join(txDirFor(proj), FAT_BIN_NAME);
+    fs.mkdirSync(dir, { recursive: true });
+    const victim = path.join(txDirFor(proj), 'victim.txt');
+    fs.writeFileSync(victim, 'must survive', 'utf8');
+    const now = Date.now();
+    // Poisoned entries aimed outside the bin, old enough that retention would
+    // destroy them if they were ever trusted — the recoverDangling-class
+    // recovery-path shape (a poisoned artifact shipped inside a cloned repo).
+    fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify([
+      { id: '../victim.txt', at: now - (HORIZON_MS.fat + 86400000), bytes: 10 },
+      { id: '..', at: now - (HORIZON_MS.fat + 86400000), bytes: 10 },
+    ]), 'utf8');
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [], 'poisoned ids never surface');
+    const r = sweepFatBin(proj, { now });
+    assert.deepStrictEqual(r, { destroyed: 0, kept: 0 }, 'nothing trusted, nothing swept');
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'must survive', 'the out-of-bin file was never touched');
+  } finally { clean(proj); }
+});
+
+test('listBin: PULL-ONLY — never called by anything automatically; a corrupt index degrades to [], never throws', () => {
+  const proj = sandbox();
+  try {
+    const dir = path.join(txDirFor(proj), FAT_BIN_NAME);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'index.json'), '{ not json', 'utf8');
+    assert.doesNotThrow(() => listBin(proj, FAT_BIN_NAME));
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), []);
+
+    fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify(['garbage', 42, { noId: true }, { id: 'ok', at: 1 }]), 'utf8');
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [{ id: 'ok', at: 1 }], 'malformed entries are filtered, never crash the read');
+  } finally { clean(proj); }
+});
+
+test('sweepFatBin/sweepStoreOld: nothing to sweep is a harmless no-op', () => {
+  const proj = sandbox();
+  try {
+    assert.deepStrictEqual(sweepFatBin(proj), { destroyed: 0, kept: 0 });
+    assert.deepStrictEqual(sweepStoreOld(proj), { destroyed: 0, kept: 0 });
+  } finally { clean(proj); }
+});
+
+test('sweepFatBin: an item inside the 48h keep-all tier survives untouched', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'recent cut', now: now - 3600000 }); // 1h old
+    const r = sweepFatBin(proj, { now });
+    assert.deepStrictEqual(r, { destroyed: 0, kept: 1 });
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'recent cut', 'still readable after the sweep');
+  } finally { clean(proj); }
+});
+
+test('sweepFatBin: an item past the 30-day fat horizon is destroyed — verified gone, dropped from the index, death-certified', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', original: 'notes/old.md', now: now - (HORIZON_MS.fat + 86400000) }); // 31 days old
+    const r = sweepFatBin(proj, { now });
+    assert.deepStrictEqual(r, { destroyed: 1, kept: 0 });
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), null, 'gone');
+    assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 0, 'dropped from the index');
+    const log = readDeathLog(proj, FAT_BIN_NAME);
+    assert.ok(log.includes(id), 'the death certificate names the destroyed id');
+    // name/age/rule — the full certificate this module's own header always
+    // promised; the AXIS that fired and the SOURCE FILENAME both survive the
+    // index entry's deletion (the lab P8 audit-trail finding).
+    assert.ok(/age 31d, rule horizon\) original notes\/old\.md/.test(log), log);
+    // A legacy item with no recorded original still certifies (placeholder '-').
+    const id2 = recordBinItem(proj, FAT_BIN_NAME, { content: 'anon', now: now - (HORIZON_MS.fat + 86400000) });
+    sweepFatBin(proj, { now });
+    assert.ok(new RegExp(`destroyed ${id2} \\(age 31d, rule horizon\\) original -`).test(readDeathLog(proj, FAT_BIN_NAME)), 'no recorded source degrades to "-", never a crash');
+  } finally { clean(proj); }
+});
+
+test('sweepStoreOld: uses the 60-day horizon, independent of the fat bin\'s 30-day one (the SAME item age survives store.old but dies in fat)', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const age45d = now - 45 * 86400000;
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'x', now: age45d });
+    recordBinItem(proj, STORE_OLD_NAME, { content: 'x', now: age45d });
+    assert.deepStrictEqual(sweepFatBin(proj, { now }), { destroyed: 1, kept: 0 }, '45d > the 30d fat horizon');
+    assert.deepStrictEqual(sweepStoreOld(proj, { now }), { destroyed: 0, kept: 1 }, '45d is still within the 60d store.old horizon');
+  } finally { clean(proj); }
+});
+
+test('sweep: density thinning still applies within a bin — multiple same-day items collapse to the newest survivor once past the 48h tier', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const dayOld = now - (TIER1_KEEP_ALL_MS + 3600000); // just past the keep-all tier, inside the daily-thinning band
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'older-write', now: dayOld });
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'newer-write', now: dayOld + 1000 });
+    const r = sweepFatBin(proj, { now });
+    assert.strictEqual(r.kept, 1, 'same day-slot thins to one survivor');
+    const survivors = listBin(proj, FAT_BIN_NAME);
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, survivors[0].id), 'newer-write', 'the newer write in the slot survives');
+  } finally { clean(proj); }
+});
+
+// N2 (graduation-lab round 2) END-TO-END: the real banking shape — applyPlan
+// hands ONE `now` to every recordBinItem of a transaction — collapsed a whole
+// wash into one density slot, so an ordinary sweep at 49h destroyed 3 of 4
+// banked files (restoreFromBin -> null) with no crash, no attacker, cap off.
+test('N2: one wash banking 4 files stays 4/4 recoverable at 49h (the event survives together)', () => {
+  const proj = sandbox();
+  try {
+    const washAt = Date.now() - (TIER1_KEEP_ALL_MS + 3600000); // banked 49h ago
+    const ids = ['alpha', 'beta', 'gamma', 'delta'].map((name) =>
+      recordBinItem(proj, FAT_BIN_NAME, { content: `content-${name}`, original: `${name}.md`, now: washAt }));
+    const r = sweepFatBin(proj, { now: Date.now() });
+    assert.strictEqual(r.destroyed, 0, 'nothing of a lone event is thinned');
+    assert.strictEqual(r.kept, 4);
+    ids.forEach((id, i) => assert.ok(binText(proj, FAT_BIN_NAME, id) !== null, `file ${i} must still restore`));
+  } finally { clean(proj); }
+});
+
+test('N2 MUST-BREAK end-to-end: two washes in one day slot — the older wash dies whole, the newer restores whole', () => {
+  const proj = sandbox();
+  try {
+    // Explicit day-boundary placement so both events share a slot for any wall
+    // clock (the epoch craft rule): a full day, 3+ days back (past the floor).
+    const day = Math.floor(Date.now() / 86400000) - 4;
+    const wash1 = ['w1a', 'w1b'].map((n) => recordBinItem(proj, FAT_BIN_NAME, { content: n, now: day * 86400000 + 2 * 3600000 }));
+    const wash2 = ['w2a', 'w2b'].map((n) => recordBinItem(proj, FAT_BIN_NAME, { content: n, now: day * 86400000 + 20 * 3600000 }));
+    const r = sweepFatBin(proj, { now: Date.now() });
+    assert.strictEqual(r.destroyed, 2, 'the older EVENT dies whole');
+    assert.strictEqual(r.kept, 2);
+    for (const id of wash1) assert.strictEqual(binText(proj, FAT_BIN_NAME, id), null, 'older wash gone (thinned)');
+    for (const id of wash2) assert.ok(binText(proj, FAT_BIN_NAME, id) !== null, 'newer wash restores whole');
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// 0i SIZE-CAP ∧ TIME-HORIZON, floor-ordered (3ded5ec) — the sweep's second
+// limit: budget = BIN_BUDGET_STORE_MULTIPLE x opts.storeBytes (the measured
+// store, never the disk). Byte pressure evicts only past the 48h keep-all
+// floor; an under-floor bin over cap rides over it and reports (capConflict
+// + a cap-conflict death-log line). No storeBytes = the cap inert
+// (horizon-only, the exact pre-0i behavior every sweep test above already pins).
+// ---------------------------------------------------------------------------
+
+test('0i: recordBinItem records the item\'s byte weight at birth', () => {
+  const proj = sandbox();
+  try {
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'abcd' }); // 4 ASCII bytes
+    assert.strictEqual(listBin(proj, FAT_BIN_NAME)[0].bytes, 4);
+  } finally { clean(proj); }
+});
+
+test('0i + snapper floor: a bin whose UNDER-FLOOR items alone exceed the cap keeps ALL of them, grows past the cap, and reports the conflict (loud, in-return AND in the log)', () => {
+  const proj = sandbox();
+  try {
+    // Pinned mid-week (~87h past the weekly epoch): wall-clock here flakes for
+    // ~4h after every weekly boundary — weekOf() regroups items across it.
+    const now = 1750000000000;
+    // Four young items (all inside the 48h keep-all floor), 100 bytes each.
+    const ids = [4, 3, 2, 1].map((h) => recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(100), now: now - h * 3600000 }));
+    // storeBytes 100 -> budget 200 (2x): 400 bytes over a 200 budget, but the
+    // 48h keep-all floor is untouchable by byte pressure (the lab P5 kill,
+    // inverted) -> nothing dies; the unsatisfiable cap is REPORTED.
+    const r = sweepFatBin(proj, { now, storeBytes: 100 });
+    assert.deepStrictEqual(r, { destroyed: 0, kept: 4, capConflict: { budgetBytes: 200, keptBytes: 400 } });
+    const remaining = listBin(proj, FAT_BIN_NAME).map((i) => i.id);
+    for (const id of ids) assert.ok(remaining.includes(id), `${id} survives under the floor`);
+    const log = readDeathLog(proj, FAT_BIN_NAME);
+    assert.ok(/cap-conflict/.test(log), 'the conflict lands in the audit log too');
+    assert.ok(log.includes('400') && log.includes('200'), 'the audit line names kept vs budget bytes');
+    assert.ok(!/destroyed \S+ \(age/.test(log), 'no death certificate — nothing died');
+  } finally { clean(proj); }
+});
+
+test('P5/P8 end-to-end (own fixture, the lab shape): a 25h-old pre-surgery whole-store image SURVIVES a size-bound sweep; only floor-cleared items die, each certified with rule + original filename', () => {
+  const proj = sandbox();
+  try {
+    const now = 1750000000000; // pinned mid-week (epoch-flake lesson)
+    const DAY = 86400000;
+    // store.old: the wizard bin. One 25h-old whole-store image (the P8
+    // victim's age) + three older per-cut records on distinct days.
+    const image = recordBinItem(proj, STORE_OLD_NAME, { content: 'W'.repeat(300), original: 'STORE-IMAGE.md', origin: 'wizard-cut', now: now - 25 * 3600000 });
+    const old7d = recordBinItem(proj, STORE_OLD_NAME, { content: 'a'.repeat(200), original: 'seven.md', origin: 'wizard-cut', now: now - 7 * DAY });
+    const old5d = recordBinItem(proj, STORE_OLD_NAME, { content: 'b'.repeat(200), original: 'five.md', origin: 'wizard-cut', now: now - 5 * DAY });
+    const old3d = recordBinItem(proj, STORE_OLD_NAME, { content: 'c'.repeat(200), original: 'three.md', origin: 'wizard-cut', now: now - 3 * DAY });
+    // storeBytes 250 -> budget 500; bin holds 900. Size pressure evicts the
+    // floor-cleared OLDEST first (7d -> 700, then 5d -> 500 = under budget,
+    // stop); 3d survives because pressure stopped; the 25h image is under the
+    // floor -> untouchable (the exact kill the lab measured, now impossible).
+    const r = sweepStoreOld(proj, { now, storeBytes: 250 });
+    assert.deepStrictEqual(r, { destroyed: 2, kept: 2 }, 'cap satisfied without touching the floor -> no capConflict field at all');
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, image), 'W'.repeat(300), 'the 25h pre-surgery image survives AND round-trips byte-exact');
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, old3d), 'c'.repeat(200), 'the newest cut survives (retrievability anchor)');
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, old7d), null);
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, old5d), null);
+    const log = readDeathLog(proj, STORE_OLD_NAME);
+    // The death certificate carries the AXIS and the SOURCE FILENAME — the
+    // id->file mapping survives destruction inside the certificate itself
+    // (the lab's P8 audit-trail finding: "no filename, no rule").
+    assert.ok(new RegExp(`destroyed ${old7d} \\(age 7d, rule size-cap\\) original seven\\.md`).test(log), log);
+    assert.ok(new RegExp(`destroyed ${old5d} \\(age 5d, rule size-cap\\) original five\\.md`).test(log), log);
+    assert.ok(!log.includes(image), 'the image was never destroyed — no certificate for it');
+  } finally { clean(proj); }
+});
+
+test('0i: the SAME over-budget bin swept WITHOUT storeBytes (store never measured) is horizon-only — the cap layer stays inert, keep-on-doubt', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    for (const h of [4, 3, 2, 1]) recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(100), now: now - h * 3600000 });
+    assert.deepStrictEqual(sweepFatBin(proj, { now }), { destroyed: 0, kept: 4 }, 'no measured store -> no budget -> nothing size-evicted');
+    assert.deepStrictEqual(sweepFatBin(proj, { now, storeBytes: 0 }), { destroyed: 0, kept: 4 }, 'zero/malformed storeBytes degrades the same way');
+  } finally { clean(proj); }
+});
+
+test('0i: a legacy (pre-0i) index entry without bytes is stat-weighed at sweep time, so it participates in the cap instead of escaping it forever', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const DAY = 86400000;
+    // Both PAST the 48h floor (size pressure only reaches floor-cleared
+    // items now) and exactly a day apart -> always distinct day slots.
+    const oldId = recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(300), now: now - 4 * DAY });
+    const newId = recordBinItem(proj, FAT_BIN_NAME, { content: 'y'.repeat(100), now: now - 3 * DAY });
+    // Strip the bytes fields — the pre-0i index shape.
+    const dir = path.join(txDirFor(proj), FAT_BIN_NAME);
+    const idx = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).map(({ bytes, ...rest }) => rest);
+    fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify(idx), 'utf8');
+    // storeBytes 100 -> budget 200: 400 on disk -> the older 300-byte item
+    // must die even though the index never recorded its weight.
+    const r = sweepFatBin(proj, { now, storeBytes: 100 });
+    assert.deepStrictEqual(r, { destroyed: 1, kept: 1 });
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, oldId), null, 'the stat-weighed legacy item was evicted');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, newId), 'y'.repeat(100));
+  } finally { clean(proj); }
+});
+
+test('sweep: a doubt case (a future `at`) is KEPT, never destroyed — the broom asymmetry', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    // NaN cannot be tested via a written index.json: JSON has no NaN
+    // representation (JSON.stringify(NaN) -> null, which reads back as 0 —
+    // a valid, very-old epoch timestamp, not a doubt case at all). A future
+    // timestamp round-trips through JSON fine and IS one of
+    // retentionPlan's own doubt cases (see retention-policy.test.mjs).
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'x', now: now + 86400000 });
+    const r = sweepFatBin(proj, { now });
+    assert.deepStrictEqual(r, { destroyed: 0, kept: 1 });
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'x');
+  } finally { clean(proj); }
+});
+
+test('sweep: the two bins are independent — sweeping one never touches the other', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const oldId = recordBinItem(proj, STORE_OLD_NAME, { content: 'still young for store.old', now: now - 45 * 86400000 });
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'irrelevant', now });
+    sweepFatBin(proj, { now });
+    assert.strictEqual(binText(proj, STORE_OLD_NAME, oldId), 'still young for store.old', 'sweeping the fat bin never touches store.old');
+  } finally { clean(proj); }
+});
+
+test('readDeathLog: empty/missing log reads as "", never throws', () => {
+  const proj = sandbox();
+  try {
+    assert.strictEqual(readDeathLog(proj, FAT_BIN_NAME), '');
+  } finally { clean(proj); }
+});
+
+test('breadcrumb: a fixed, program-side template — names the bin path and the never-invent rule; never agent-composed prose', () => {
+  const line = breadcrumb({ date: '2026-07-11', binPath: '.claude/coalwash/fat-bin/abc123' });
+  assert.strictEqual(line, '<!-- washed 2026-07-11 · removed content recoverable at .claude/coalwash/fat-bin/abc123 — check the bin/journal before re-deriving; never invent a missing memory -->');
+});
+
+test('breadcrumb: missing date/binPath degrade to safe defaults, never throw', () => {
+  assert.doesNotThrow(() => breadcrumb());
+  const line = breadcrumb();
+  assert.match(line, /^<!-- washed \d{4}-\d{2}-\d{2} · removed content recoverable at \.claude\/coalwash\/fat-bin — check the bin\/journal before re-deriving; never invent a missing memory -->$/);
+});
+
+// ---------------------------------------------------------------------------
+// 0h-GUARD MIRROR (station-3 finding). The bin functions are run-gated: they run
+// inside a REAL run, never off a hook/timer. `retier.test.mjs` and
+// `estate-archive.test.mjs` each pin their own engine that way; the BIN layer
+// never got the same pin, and it just became load-bearing — recoverDangling now
+// WRITES a bin entry before undoing a create, and recoverDangling sits at
+// `cli.mjs gauge` Step 0. The invariant holds today (the conductor imports only
+// config-load/config-schema/class-b/caliper/writeguard), but "holds today" with
+// no test is exactly how the next import lands silently.
+//
+// The check is TRANSITIVE on purpose: a hook that imported apply.mjs or cli.mjs
+// would inherit the bin writers without ever naming them, so grepping the hook
+// text for 'recordbinitem' alone would pass while the door stood open.
+// ---------------------------------------------------------------------------
+test('0h-GUARD: no hook reaches a bin WRITER, directly or through apply/cli (grep hooks/ = 0)', () => {
+  // URL-relative so this needs no repo-root helper and no extra import.
+  const hooksUrl = new URL('../../hooks/', import.meta.url);
+  // MATCH SYNTAX, NEVER A RAW SUBSTRING — this guard's first cut used
+  // `content.includes(...)` and immediately flagged the conductor for the COMMENT
+  // that documents its compliance ("NOT a bin sweep / no retention.mjs"). A guard
+  // that fires on the sentence asserting the invariant is worse than none: the
+  // next person deletes the comment to get green. Third instance of this exact
+  // substring-FP family in this repo (root-provenance's `jroots` ⊃ `roots` was
+  // the second), so it is matched as a CALL and as an import SPECIFIER.
+  const BANNED_CALLS = /\b(recordBinItem|sweepFatBin|sweepStoreOld|recoverDangling)\s*\(/;
+  // Modules that CARRY a bin writer. retention.mjs is deliberately NOT here: it
+  // exports the retention POLICY (horizons, budget math) and destroys nothing —
+  // banning it would ban the wrong thing and teach the next reader the wrong rule.
+  const BANNED_MODULES = ['apply.mjs', 'cli.mjs', 'tailings.mjs'];
+  let checked = 0;
+  for (const d of fs.readdirSync(hooksUrl, { withFileTypes: true })) {
+    if (!d.isFile() || !/\.(js|mjs|cjs)$/.test(d.name)) continue;
+    checked++;
+    const content = fs.readFileSync(new URL(d.name, hooksUrl), 'utf8');
+    const call = BANNED_CALLS.exec(content);
+    assert.ok(!call, `hooks/${d.name} CALLS ${call && call[1]} — destruction and bin population are RUN-GATED, never hook-driven (0h)`);
+    // Only real import/require syntax has a quoted specifier, so prose can never
+    // match here.
+    const specs = [...content.matchAll(/(?:from\s*|require\s*\(\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);
+    for (const mod of BANNED_MODULES) {
+      assert.ok(!specs.some((s) => s.endsWith(mod)),
+        `hooks/${d.name} imports ${mod}, which carries the bin writers transitively — the run-gate is a REACHABILITY property, not a spelling one (recoverDangling now WRITES a bin entry and sits at gauge Step 0)`);
+    }
+  }
+  assert.ok(checked > 0, 'no hook files were scanned — a guard that scans nothing passes vacuously');
+});

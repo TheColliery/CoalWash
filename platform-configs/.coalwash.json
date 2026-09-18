@@ -1,0 +1,150 @@
+{
+  // Master switch. auto = the session-start gauge measures class-B footprint
+  // and arms the Stop-hook ask/directive by ceiling (LEAN silent / OBESE ask /
+  // FULL economic force — every cut snapshot-backed and revertible); manual =
+  // gauge silent, you run /coalwash yourself; off = fully silent.
+  "coalwashMode": "auto",
+
+  // Language for prompts and nudges. auto = follow the conversation's language;
+  // a locked value pins user-facing prose (technical terms stay verbatim).
+  "language": "auto",
+
+  // RETIRED as a band input by task #4 (2026-08-03, v1.0.0) — read-tolerated
+  // and ignored. Used to be the pre-floor absolute-cap heuristic; there is no
+  // floor-driven wall left for it to feed (fat/muscle are measured from
+  // content at every gauge instead). Kept here only so an existing value
+  // still validates rather than failing.
+  "fullPercent": 6,
+
+  // RETIRED as a band input by task #4 (2026-08-03, v1.0.0) — read-tolerated
+  // and ignored. Used to scale a floor-relative absolute-cap wall
+  // (fatMultiple x leanFloor); the wall is now the real capacityTokens plus
+  // the CC index caps only, with no floor to scale. Kept here only so an
+  // existing value still validates rather than failing.
+  "fatMultiple": 2.0,
+
+  // Clean-to depth target as % of capacity. Agent guidance for the wash's
+  // clean-to depth (references/method.md §3) — NOT the anti-flap hysteresis
+  // (that job is caliper.mjs's fat Schmitt trigger, task #4/v1.0.0: arm at
+  // FAT_ARM_TOKENS, disarm at FAT_REARM_TOKENS); no band-math reads this key
+  // today. An out-of-range value degrades to the default on read.
+  "targetPercent": 3,
+
+  // Per-file size cap in KB before a class-B file is flagged oversize
+  // (25 = the Claude Code memory-index cap class).
+  "fileMaxSizeKb": 25,
+
+  // Default run tier. quick = the free mechanical pass (flags exact-duplicate
+  // fat, empty tables/headings, possible dead links — no model ever reads
+  // the content; clearing what it finds is a hand edit or the wizard, not an
+  // auto-cut); full = the paid semantic pass (always asked as a separate
+  // consent, never auto).
+  "quickVsFull": "quick",
+
+  // Trade-secret mode: true = the SKILL contract runs Quick-only and skips
+  // the semantic tier (deep defrag disabled) — agent-honored, not a
+  // code-enforced transmission block; the flag itself can't be weakened by
+  // a project config once set globally.
+  "localOnly": false,
+
+  // Self-update (series standard). The session-start hook only SCHEDULES a check
+  // via a throttled local stamp (no network); the AGENT verifies the latest tag
+  // and offers the update, consent-gated. ask = on the first due session, ask
+  // once how to handle updates; auto = standing consent to check + offer;
+  // remind = a free reminder, you run it; off = silent.
+  "updateMode": "ask",
+
+  // Days between self-update checks/reminders (1-365; out-of-range clamps to 14 on read).
+  "updateCheckDays": 14,
+
+  // Per-ceiling exercise the Stop-hook ask offers when a band ceiling is
+  // crossed (quick = free mechanical pass; full = the paid semantic pass,
+  // always a separate consent). obese/full key by the DESTINATION band
+  // reached (beta.12 band-collapse retired the separate plump rung). The
+  // fat-only scoping refinement is a later release — 'full' here is today's
+  // shipped Full pass.
+  "exercisePerBand": { "obese": "quick", "full": "full" },
+
+  // NOTE (0m): there is deliberately NO forceMode key — force at FULL is
+  // non-optional by design (the Windows critical-space-maintenance model;
+  // safety lives in UNDO — snapshot + rollback + bins — and the receipt is
+  // the surfacing). A legacy config still carrying forceMode is tolerated
+  // and ignored. The skill's whole power switch is coalwashMode: "off".
+
+  // Extra path PREFIXES (relative to their own project/global root, forward
+  // slashes) auto-declared MANAGED — a sync-owned pack (e.g. a shared rules
+  // directory kept in lockstep across projects) is never proposed for a
+  // local wash, the same class as skills/commands/hooks. The default []
+  // relies on the byte-identical-across-roots heuristic alone (a project
+  // file that mirrors a global file at the same relative path); add entries
+  // here only for a managed tree that heuristic cannot see (e.g. no global
+  // counterpart exists to compare against).
+  "managedPaths": [],
+
+  // ULTRA estate tier (class-A at-rest transcripts; runs ONLY inside the
+  // wizard's third choice, never a hook/band — estate is disk, not context).
+  // compressAfterDays: sessions with no file younger than this are WARM ->
+  //   gzip-archived under archiveDir with copy-verify-then-delete (byte-exact,
+  //   restorable via `cli.mjs estate-restore <sessionId>`).
+  // purgeAfterDays: older than this = COLD (0 = never). Cold is REPORT-ONLY —
+  //   the first-party `claude project purge` is the delete lever — unless
+  //   deleteCold is explicitly true (archive-then-delete, death-certified).
+  // archiveDir: absolute path (another drive is fine); "" = the default under
+  //   ~/.claude/coal/coalwash/estate-archive.
+  // indexEnabled: append a dig-index row per archived session (searchable via
+  //   `cli.mjs estate-search <query>`; local file, never pushed anywhere).
+  // digCrush: ULTRA trigger #2 — the dig-gauge PRE-READ tollgate. An agent runs
+  //   `cli.mjs dig-gauge <candidates>` BEFORE a raw transcript dig (report-only,
+  //   never blocks). KNEE-GROUNDED priors (not %-of-window): the byte/4 ~est
+  //   under-counts a real Read ~1.7x (CC #20223), and long-context degradation
+  //   has an ABSOLUTE knee ~32-100k tok (NoLiMa/Chroma). CRUSHING if ANY holds:
+  //   one candidate >= singleFileTok (~35k bytes/4 = ~60k real tok, into the
+  //   knee; clamp 20000-200000) · pile sum >= pileTok (58000; 40000-200000) ·
+  //   candidate count >= fileCount (6; 3-50). Still priors — a/b-calibrate later.
+  // runBudget: the per-run ULTRA work-limit on the unbounded session loop —
+  //   maxSessionsPerRun (25; 1-100000) · maxBytesPerRun (500 MB; 1MiB-1TiB). The
+  //   loop stops at a completed session-unit boundary once either is reached
+  //   (zero partial), reports N/M; run again for the rest.
+  "estate": { "compressAfterDays": 14, "purgeAfterDays": 180, "deleteCold": false, "archiveDir": "", "indexEnabled": true, "digCrush": { "singleFileTok": 35000, "pileTok": 58000, "fileCount": 6 }, "runBudget": { "maxSessionsPerRun": 25, "maxBytesPerRun": 524288000 } },
+
+  // RE-TIER envelope (the wizard's FOURTH choice; wizard-only, never a
+  // hook/band/BMI trigger). A +/- BAND around targetTokens, never a locked
+  // value (the SSD watermark-pair law):
+  // targetTokens: the per-store hot memory-index target (500-6250; 4125 = the
+  //   cross-AI Tier-1 index-cap median — CC 6250 hard / Letta 10000 / Zep 625 /
+  //   LangChain-legacy 2000 — and ~2% of the 200k binding context envelope).
+  // armPct: RE-TIER may act only ABOVE target*(1+armPct/100) (~4950).
+  // disarmPct: disarmed BELOW target*(1-disarmPct/100) (~3712); between the
+  //   two = the dead zone — no action, no re-trigger flap.
+  // headroomPct: a run refills the index only to target*(1-headroomPct/100)
+  //   (never TO target — the over-provisioning analog).
+  // Overflow DEMOTES down the ladder losslessly (index line -> topic file ->
+  // estate archive); RE-TIER never summarizes or deletes content.
+  "retier": { "targetTokens": 4125, "armPct": 20, "disarmPct": 10, "headroomPct": 10 },
+
+  // 0p WRITE-PATH SEATBELT + AIRBAG — the gate follows every hand, not just
+  // CoalWash's own knife. on = snapshot-on-first-write to a class-B
+  // governance/memory file (the undo net for the gitignored MEMORY.md/
+  // CLAUDE.md) + a one-line FYI advisory when an edit drops a structured token
+  // (link/number/quote/frontmatter/...). It NEVER blocks an edit — a deliberate
+  // delete is legitimate; the advisory just flags it and points at the
+  // byte-exact snapshot to restore from. snapshot-only = keep the airbag undo
+  // net, silence the advisory. off = disabled. coalwashMode:"off" kills it too.
+  "writeGuard": "on",
+
+  // CWK-057 SCAN-SCOPE OVERRIDE — one key lifts every cut on what is SEEN.
+  // true = the 262144 B always-loaded read budget is lifted, so no
+  // always-loaded entry is skipped for budget and its certain fat is measured
+  // instead of counting as muscle by default (an entry whose read FAILS still
+  // contributes nothing — that path is unchanged), and the full always-loaded
+  // path list is kept in state (the 200-path cap on the Stop hook's cheap
+  // re-stat baseline is not applied).
+  //
+  // IT WIDENS SEEING, NEVER DESTROYING. keeps.json, the KEEPS-GATE, every other
+  // delete gate, localOnly and every consent gate are untouched: nothing is
+  // deleted, merged or mutated that would not have been at false. Costs more
+  // than a normal gauge by design, and says so on SessionStart while it is on.
+  // Safer-value-wins on merge: a project config can never turn this ON past a
+  // global that is off (or unreadable) — it can only turn it off.
+  "scanEverything": false
+}

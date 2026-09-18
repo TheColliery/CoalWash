@@ -1,0 +1,42 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      # CodeQL analyzes js/ts AND the workflow files (the actions language) — markdown still needs no security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
+      - '**.md'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      # CodeQL analyzes js/ts AND the workflow files (the actions language) — markdown still needs no security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
+      - '**.md'
+      - 'LICENSE'
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+# CWK-058 concurrency. cancel-in-progress: TRUE, and this is the case that shows the test is
+# ATOMICITY rather than publishes-vs-not: codeql.yml DOES publish (a SARIF upload), and still
+# cancels — a killed run simply never uploads, leaving the PRIOR analysis standing intact.
+# Stale, never corrupt. Contrast scorecard.yml, which cancels NOT for exactly this reason.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (javascript)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
+        with:
+          languages: javascript-typescript, actions
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4

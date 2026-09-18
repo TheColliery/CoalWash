@@ -1,0 +1,297 @@
+// Single source of truth for every .coalwash.json key (SKILL-REPO-PATTERN Layer 3).
+// Flat key list like CoalMine/CoalTipple. verify.mjs validates the factory template
+// against it; every runtime read goes through clampedRead so an out-of-range or
+// wrong-typed value silently degrades to the factory default, never misbehaves.
+//
+// Spec fields:
+//   key     canonical .coalwash.json key
+//   type    'bool' | 'int' | 'number' | 'enum'
+//   min/max bounds for 'int'/'number' (inclusive)
+//   values  allowed values for 'enum' (compared case-insensitively)
+//   def     factory default — the clamp target for any invalid value
+//   help    one-line description
+//
+// Standard-system keys (language / updateMode / updateCheckDays) keep CoalMine's
+// schema shapes byte-for-byte (values + bounds + help) — one flock, one color.
+// Band thresholds (PLUMP/OBESE/FULL BMI) are deliberately NOT config keys yet:
+// they are placeholder code constants in caliper.mjs, to be calibrated at the
+// fidelity benchmark before they earn a user-facing knob (no consumer-less keys).
+
+export const CONFIG_SCHEMA = [
+  { key: 'coalwashMode', type: 'enum', values: ['auto', 'manual', 'off'], def: 'auto', help: 'Master switch: auto = session-start gauge + band nudges; manual = /coalwash only (gauge silent); off = fully silent' },
+  { key: 'language', type: 'enum', values: ['auto', 'th', 'en', 'ja', 'zh', 'es'], def: 'auto', help: 'Language override for prompts and nudges (auto, th, en, ja, zh, es)' },
+  { key: 'fullPercent', type: 'number', min: 1, max: 50, def: 6, help: 'RETIRED as a band input by task #4 (2026-08-03) — read-tolerated and ignored; the wall it once fed no longer depends on a floor. Kept in the schema only so an existing config value degrades quietly rather than failing validation (default: 6)' },
+  // TASK #4 (2026-08-03): fullPercent and fatMultiple are RETIRED as band
+  // inputs. The wall they fed (0r: fatMultiple x leanFloor, floor-relative)
+  // depended on a stamped lean floor that no gauge computes any more — fat
+  // and muscle are measured from content at every gauge instead. Both keys
+  // are read-tolerated and ignored (the earlier forceMode precedent) rather
+  // than removed from the schema, so an existing project config with either
+  // key set still validates and simply has no effect — kept, not removed,
+  // because removing a shipped config key would be a breaking change. See
+  // caliper.mjs's own header for the current wall (real capacityTokens + the
+  // CC index caps).
+  // fatMultiple's own min/max are unchanged HISTORY: `min` was once required
+  // strictly above `CEILING_BMI` (the ordering-clamp that kept this wall from
+  // firing before OBESE could even arm) — caliper.mjs's own `CEILING_BMI`/
+  // `CEILING_REARM_BMI` now carry that file's `LEGACY (task #4)` marker, so
+  // the clamp no longer constrains anything live either.
+  { key: 'fatMultiple', type: 'number', min: 1.6, max: 10, def: 2.0, help: 'RETIRED as a band input by task #4 (2026-08-03) — read-tolerated and ignored; the wall is now the real capacity ceiling plus the CC index caps, with no floor to scale. Kept in the schema only so an existing config value degrades quietly rather than failing validation (default: 2.0)' },
+  // targetPercent has NO band-math consumer post-band-collapse. Anti-flap now
+  // lives in caliper.mjs's FAT Schmitt trigger (FAT_ARM_TOKENS/
+  // FAT_REARM_TOKENS) — an unrelated axis this key never fed, and NOT
+  // caliper.mjs's `CEILING_BMI`/`CEILING_REARM_BMI`, which now carry that
+  // file's own `LEGACY (task #4)` marker. It survives as AGENT guidance for
+  // the wash clean-to depth (references/method.md §3); kept, not removed
+  // (removing a shipped config key would be a breaking change).
+  { key: 'targetPercent', type: 'number', min: 0.5, max: 49, def: 3, help: 'Clean-to depth target as % of capacity — agent guidance for the wash (references/method.md §3); no band-math reads this key today (default: 3)' },
+  { key: 'fileMaxSizeKb', type: 'int', min: 1, max: 1024, def: 25, help: 'Per-file size cap in KB before a class-B file is flagged oversize (default: 25 — the CC memory-index cap class)' },
+  { key: 'quickVsFull', type: 'enum', values: ['quick', 'full'], def: 'quick', help: 'Default run tier: quick = free mechanical pass; full = paid semantic pass (always a separate consent; default: quick)' },
+  // CWK-057 (owner law, flock-canonical key; live in CoalMine ee15ade + CoalLedger 12b4e12).
+  // POSITIVE polarity: true = see MORE. It widens what is SEEN, CONSIDERED and
+  // REPORTED and NEVER what is deleted, merged or mutated -- in a room that
+  // destroys, that distinction is the whole feature, so it is stated in the help
+  // text a user actually reads, not only in a comment.
+  { key: 'scanEverything', type: 'bool', def: false, help: 'Bypass every SCAN-scope cut for the run: the always-loaded read budget (262144 B) is lifted so EVERY always-loaded entry is read and its certain fat measured instead of counting as muscle, and the 200-path cap on the Stop hook re-stat baseline is not applied (default: off). Positive polarity: true = more is seen. Widens SEEING only -- keeps.json, the KEEPS-GATE and every other delete gate, localOnly, and every consent gate are untouched. Costs more than a normal gauge by design; safer-value-wins on merge (a project config can never turn it ON past a global that is off)' },
+  { key: 'localOnly', type: 'bool', def: false, help: "Trade-secret mode: the SKILL contract runs Quick-only and skips the semantic tier — agent-honored, not a code-enforced transmission block; the flag itself can't be weakened by a project config (default: false)" },
+  { key: 'updateMode', type: 'enum', values: ['ask', 'auto', 'remind', 'off'], def: 'ask', help: 'Self-update behavior at session start (ask, auto, remind, off; default: ask)' },
+  { key: 'updateCheckDays', type: 'int', min: 1, max: 365, def: 14, help: 'Days between self-update checks/reminders (default: 14)' },
+  // exercisePerBand values are PER-BAND (F3, main-adjudicated per the 0f
+  // ruling "OBESE never asks, no matter what"): obese admits ONLY 'quick' —
+  // the old 'full' option routed an OBESE crossing to an ask, contradicting
+  // the ruling; the key survives (documents the standing behavior, future-
+  // proof) and a legacy obese:'full' config reads as 'quick' silently
+  // (clampedRead's per-band safer-value-wins clamp, the CM v3.9.3 pattern).
+  { key: 'exercisePerBand', type: 'bandmap', values: { obese: ['quick'], full: ['quick', 'full'] }, def: { obese: 'quick', full: 'full' }, help: 'Per-ceiling exercise (obese: quick only — OBESE is auto-Quick-silent by ruling, never an ask; full: quick|full); the fat-only scoping refinement is a later release (default: {obese:quick, full:full})' },
+  { key: 'managedPaths', type: 'stringList', def: [], help: 'Extra path PREFIXES (relative to their own project/global root, forward-slash form) to auto-declare MANAGED — sync-owned packs never proposed for a local wash, same class as skills (default: [], the byte-identical-across-roots heuristic already covers the common case)' },
+  // RE-TIER envelope (the wizard's FOURTH choice, consumed by retier.mjs ONLY
+  // inside a wizard-consented run — never a hook/band/BMI). A +/- BAND, never
+  // a locked value (the SSD watermark-pair law): targetTokens 4125 = the
+  // cross-AI Tier-1 memory-index cap median (CC 6250 hard · Letta 10000 hard ·
+  // Zep 625 default · LangChain-legacy 2000 default; WHATSNEW-LEDGER row 27,
+  // 2026-07-16) and independently ~2% of the 200k binding envelope. Max 6250 =
+  // the CC hard cap. The envelope decides TIER PLACEMENT ONLY — it may never
+  // choose or escalate a treatment (retier.mjs's core rail).
+  { key: 'retier', type: 'object', fields: {
+    targetTokens: { type: 'int', min: 500, max: 6250, def: 4125 },
+    armPct: { type: 'int', min: 5, max: 50, def: 20 },
+    disarmPct: { type: 'int', min: 5, max: 50, def: 10 },
+    headroomPct: { type: 'int', min: 5, max: 50, def: 10 },
+  }, def: { targetTokens: 4125, armPct: 20, disarmPct: 10, headroomPct: 10 }, help: 'RE-TIER envelope (wizard-only): targetTokens = the per-store hot-index target (500-6250, def 4125 = the cross-AI Tier-1 median); armPct/disarmPct/headroomPct (5-50) derive arm ~ target*(1+arm%), disarm ~ target*(1-disarm%), fill ceiling ~ target*(1-headroom%) — a band, never a locked value; overflow demotes losslessly, nothing deleted (default: {4125, 20, 10, 10})' },
+  // 0p WRITE-PATH SEATBELT + AIRBAG: on = both nets (PreToolUse snapshot-on-
+  // first-write to a class-B governance/memory file + the PostToolUse advisory
+  // when a structured token drops); snapshot-only = keep the airbag undo net
+  // but SILENCE the advisory (for a user who finds the FYI line noisy); off =
+  // both off. Advisory-only always (never blocks an edit). coalwashMode:off is
+  // the master kill for this too.
+  { key: 'writeGuard', type: 'enum', values: ['on', 'snapshot-only', 'off'], def: 'on', help: 'Write-path guard for class-B governance/memory files: on = snapshot-on-first-write + drop advisory; snapshot-only = airbag undo net, no advisory; off = disabled (advisory never blocks; default: on)' },
+  // ULTRA estate tier (class-A at-rest transcripts — blueprint §19 P2 partial,
+  // consumed by estate-archive.mjs ONLY inside a wizard-consented ULTRA run,
+  // never a hook/band). Sub-keys clamp independently (object type below); the
+  // compress<->purge ordering guard lives at the consumer (resolveEstateCfg).
+  // digCrush = ULTRA trigger #2 (dig-gauge.mjs) — the PRE-READ tollgate's
+  // thresholds, NESTED in estate (same estate/ULTRA family; clampedRead's
+  // object path recurses so each sub-key clamps INDEPENDENTLY + a partial
+  // config fills the absent sub-keys — the trust-boundary fill). KNEE-GROUNDED
+  // priors (NOT %-of-window): the byte/4 ~est UNDER-counts a real Read ~1.7x
+  // (CC #20223 line-number overhead), and long-context degradation has an
+  // ABSOLUTE knee ~32-100k tok (NoLiMa/Chroma) a 1M-window model does NOT move
+  // — and CT can delegate a dig to a 200k worker, so gate for the SMALLEST
+  // fleet window: singleFileTok 35000 (~60k real tok after the 1.7x = into the
+  // knee, unreadable in one clean pass) · pileTok 58000 (a dig pile at/over the
+  // knee band) · fileCount 6 (dispersion). Still priors → a/b-calibrate from
+  // real dig telemetry later (note it, don't block on it).
+  // runBudget = the per-run work-limit on the ULTRA session loop (the UNBOUNDED
+  // axis — CC accretes hundreds of old sessions). The loop stops at a COMPLETED
+  // session-unit boundary once EITHER limit is reached (never mid-unit — units
+  // are independent copy-verify-delete tx, so a stop leaves zero partial) and
+  // reports N/M; a second run continues the rest. SQLite incremental_vacuum /
+  // SSD bounded-burst GC. (RE-TIER is ONE atomic tx, no incremental loop — it
+  // needs no runBudget; the named divergence lives in retier.mjs's runRetier.)
+  { key: 'estate', type: 'object', fields: {
+    compressAfterDays: { type: 'int', min: 1, max: 3650, def: 14 },
+    purgeAfterDays: { type: 'int', min: 0, max: 36500, def: 180 },
+    deleteCold: { type: 'bool', def: false },
+    archiveDir: { type: 'string', def: '' },
+    indexEnabled: { type: 'bool', def: true },
+    digCrush: { type: 'object', fields: {
+      singleFileTok: { type: 'int', min: 20000, max: 200000, def: 35000 },
+      pileTok: { type: 'int', min: 40000, max: 200000, def: 58000 },
+      fileCount: { type: 'int', min: 3, max: 50, def: 6 },
+    }, def: { singleFileTok: 35000, pileTok: 58000, fileCount: 6 } },
+    runBudget: { type: 'object', fields: {
+      maxSessionsPerRun: { type: 'int', min: 1, max: 100000, def: 25 },
+      maxBytesPerRun: { type: 'int', min: 1048576, max: 1099511627776, def: 524288000 },
+    }, def: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } },
+  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, digCrush: { singleFileTok: 35000, pileTok: 58000, fileCount: 6 }, runBudget: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/; indexEnabled = write dig-index rows; digCrush = the dig-gauge PRE-READ crush thresholds (singleFileTok 20000-200000 / pileTok 40000-200000 / fileCount 3-50 — CRUSHING if any one holds); runBudget = the per-run ULTRA work-limit (maxSessionsPerRun 1-100000 / maxBytesPerRun 1MiB-1TiB — the session loop stops at a unit boundary once either is reached, run again for the rest) (default: {14, 180, false, "", true, {35000, 58000, 6}, {25, 524288000}})' },
+];
+
+// 0m tombstone — "FORCE IS A DICTATOR, NO OFF SWITCH" (USER 2026-07-11:
+// "วินโดว์ไม่เคยมีให้ปิด force ได้นะ และ force นี้ต้องเผด็จการเท่ากัน"): the
+// `forceMode` knob (auto/ask/off) is REMOVED — force at FULL is non-optional
+// by design (the Windows critical-space-maintenance model; the knife lives in
+// UNDO, not pre-approval; the receipt is the surfacing, so no-silent-branch
+// holds). The only full stop is `coalwashMode: off` — the skill's own power
+// switch, a whole-skill choice, never a force veto. A LEGACY config still
+// carrying a retired key is read-TOLERATED and ignored: never a validation
+// error, never warning noise (clampedRead has no spec for it, so no consumer
+// can ever read it). Do NOT re-add an off switch.
+export const RETIRED_KEYS = Object.freeze(['forceMode']);
+
+// Validate an already-parsed JSON value against a spec.
+// Returns an error message fragment ("must be ...") or null when valid.
+export function validateValue(spec, v) {
+  switch (spec.type) {
+    case 'bool':
+      return typeof v === 'boolean' ? null : 'must be a boolean';
+    case 'int':
+      if (typeof v !== 'number' || !Number.isFinite(v)) return 'must be a finite number';
+      if (!Number.isInteger(v)) return 'must be an integer';
+      if (spec.min != null && v < spec.min) return `must be >= ${spec.min}`;
+      if (spec.max != null && v > spec.max) return `must be <= ${spec.max}`;
+      return null;
+    case 'number':
+      if (typeof v !== 'number' || !Number.isFinite(v)) return 'must be a finite number';
+      if (spec.min != null && v < spec.min) return `must be >= ${spec.min}`;
+      if (spec.max != null && v > spec.max) return `must be <= ${spec.max}`;
+      return null;
+    case 'enum':
+      return typeof v === 'string' && spec.values.includes(v.toLowerCase())
+        ? null
+        : `must be one of: ${spec.values.join(', ')}`;
+    case 'string':
+      return typeof v === 'string' ? null : 'must be a string';
+    case 'stringList':
+      return Array.isArray(v) && v.every((s) => typeof s === 'string') ? null : 'must be an array of strings';
+    case 'object': {
+      // fields = per-sub-key primitive specs; a PARTIAL object is valid (the
+      // clamp fills absent sub-keys with their own defaults), an unknown
+      // sub-key is an error (schema is the allowlist).
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return 'must be an object';
+      for (const [k, sub] of Object.entries(v)) {
+        const fieldSpec = spec.fields[k];
+        if (!fieldSpec) return `has an unknown sub-key '${k}'`;
+        const err = validateValue(fieldSpec, sub);
+        if (err) return `'${k}' ${err}`;
+      }
+      return null;
+    }
+    case 'bandmap': {
+      // values = a per-sub-key allowlist map (F3: each band declares its own
+      // options — obese admits only 'quick').
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return 'must be an object';
+      for (const k of Object.keys(spec.def)) {
+        if (!(k in v)) return `must include '${k}'`;
+        const allowed = spec.values[k] || [];
+        if (typeof v[k] !== 'string' || !allowed.includes(v[k].toLowerCase())) return `'${k}' must be one of: ${allowed.join(', ')}`;
+      }
+      return null;
+    }
+    default:
+      return `has an unknown spec type '${spec.type}'`;
+  }
+}
+
+// Validate a full parsed config object (unknown keys are reported, never
+// thrown; a RETIRED key is tolerated silently — legacy configs keep working).
+export function validateConfig(cfg) {
+  const errors = [];
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return ['config must be a JSON object'];
+  const byKey = new Map(CONFIG_SCHEMA.map((s) => [s.key, s]));
+  for (const [key, v] of Object.entries(cfg)) {
+    if (RETIRED_KEYS.includes(key)) continue; // read-tolerated, ignored (0m tombstone)
+    const spec = byKey.get(key);
+    if (!spec) { errors.push(`'${key}' not in schema`); continue; }
+    const err = validateValue(spec, v);
+    if (err) errors.push(`'${key}' ${err}`);
+  }
+  return errors;
+}
+
+// Per-SUB-KEY clamp of an 'object' spec, rebuilt from the spec's OWN fields
+// (never the raw value's key set — an extra/unknown sub-key can't leak, every
+// declared sub-key is guaranteed present at its own default): each sub-key
+// reads its value when valid, else ITS OWN factory default — a malformed
+// sub-key degrades alone, never the block. An object-typed sub-field RECURSES
+// (so a nested block like estate.digCrush also clamps per-sub-key + fills a
+// partial config's absent sub-keys — the trust-boundary fill); everything else
+// takes the primitive path. Byte-identical to the old inline object clamp for a
+// primitive-only block (estate's existing fields, retier) — the recursion only
+// activates for the object-typed field.
+function clampObject(spec, v) {
+  const raw = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  const out = {};
+  for (const [k, fieldSpec] of Object.entries(spec.fields)) {
+    out[k] = fieldSpec.type === 'object'
+      ? clampObject(fieldSpec, raw[k])
+      : (raw[k] !== undefined && validateValue(fieldSpec, raw[k]) === null) ? raw[k] : fieldSpec.def;
+  }
+  return out;
+}
+
+// Clamped read: return the config value for `key` if valid, else the factory
+// default (enums normalized to lowercase). An unknown key returns undefined —
+// that is a programming error, surfaced loud in tests, silent at runtime.
+export function clampedRead(cfg, key) {
+  const spec = CONFIG_SCHEMA.find((s) => s.key === key);
+  if (!spec) return undefined;
+  const v = cfg ? cfg[key] : undefined;
+  if (spec.type === 'object') return clampObject(spec, v);
+  if (spec.type === 'bandmap') {
+    // Per-SUB-KEY safer-value-wins clamp (F3, the CM v3.9.3 pattern),
+    // rebuilt from the spec's OWN sub-keys (never the raw value's key set —
+    // a malformed/extra sub-key can't leak through, every expected sub-key
+    // is guaranteed present): each band reads its own value when allowed,
+    // else ITS OWN factory default — so a legacy obese:'full' silently
+    // reads 'quick' (no breakage) WITHOUT clobbering a still-valid
+    // customization on the other band.
+    const raw = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    const out = {};
+    for (const k of Object.keys(spec.def)) {
+      const val = typeof raw[k] === 'string' ? raw[k].toLowerCase() : null;
+      out[k] = (spec.values[k] || []).includes(val) ? val : spec.def[k];
+    }
+    return out;
+  }
+  if (v === undefined || validateValue(spec, v) !== null) return spec.def;
+  if (spec.type === 'enum') return v.toLowerCase();
+  return v;
+}
+
+// ---------------------------------------------------------------------------
+// The RE-TIER envelope — pure config interpretation (task #4: moved here from
+// retier.mjs, which re-exports both, so the conductor's gauge can read the
+// envelope NUMBERS for the reorganize break-even without a hook ever holding
+// a reference to retier.mjs — the "RE-TIER is wizard-only" grep-rail stays
+// strict and the demotion machinery stays structurally unreachable from
+// hooks. One definition; retier's own passes import it from here.
+// ---------------------------------------------------------------------------
+
+// `retier` arrives via clampedRead (per-sub-key degrade-to-default); this is
+// defense in depth for direct callers, same pattern as resolveEstateCfg.
+export function resolveRetierCfg(retier) {
+  const r = retier && typeof retier === 'object' ? retier : {};
+  const num = (v, def, min, max) => (Number.isFinite(v) && v >= min && v <= max ? v : def);
+  return {
+    targetTokens: num(r.targetTokens, 4125, 500, 6250), // 6250 = the CC hard cap (25 KB index / 4)
+    armPct: num(r.armPct, 20, 5, 50),
+    disarmPct: num(r.disarmPct, 10, 5, 50),
+    headroomPct: num(r.headroomPct, 10, 5, 50),
+  };
+}
+
+export function envelopeFor(retier) {
+  const c = resolveRetierCfg(retier);
+  return {
+    targetTokens: c.targetTokens,
+    armAt: Math.round(c.targetTokens * (1 + c.armPct / 100)),
+    disarmAt: Math.round(c.targetTokens * (1 - c.disarmPct / 100)),
+    fillCeiling: Math.round(c.targetTokens * (1 - c.headroomPct / 100)),
+  };
+}
+// Hook-facing variant: reads the config BLOCK itself, so a hook never has to
+// reference the block's key by name (the "RE-TIER is wizard-only" rail greps
+// hooks/ for that name and must stay byte-strict — see envelopeFor above).
+export function envelopeForConfig(cfg) {
+  return envelopeFor(cfg && typeof cfg === 'object' ? cfg.retier : undefined);
+}
