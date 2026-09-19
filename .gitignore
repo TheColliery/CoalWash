@@ -56,3 +56,8 @@ skills-lock.json
 # place, not moving it, is the cheap structural cure.
 scripts/lib/.cw-reexport-hop-*.mjs
 scripts/lib/*.mutant-*.mjs
+
+# UMB-124 generated coverage output (the workflow writes coverage/lcov.info + cobertura.xml on
+# every run; CI makes it fresh each time). Room practice already ignores generated reports
+# (skillspector-*) and transient gate fixtures — same class, same cure: never stageable.
+coverage/
