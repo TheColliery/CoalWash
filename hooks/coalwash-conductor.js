@@ -261,8 +261,12 @@ async function handleSessionStart(input) {
   // for it is a nag on the ordinary case, not a rare stray file. Hole (1) has
   // no such collision -- planting a bare dotfile under .agents/.gemini is
   // genuinely rare, so it stays on this sanctioned channel.
+  // The resolved root goes IN rather than being derived a third time: this hook
+  // already holds `projectRoot` from the line above, and the probe would
+  // otherwise walk the marker chain twice more per SessionStart (UMB-133
+  // INSPECT F2 -- measured 30 existsSync before, 0 after).
   try {
-    for (const p of discoverIgnoredConfigs(process.cwd(), home)) {
+    for (const p of discoverIgnoredConfigs(process.cwd(), home, projectRoot)) {
       out.push(`[CoalWash] IGNORED: ${p} is not a config path; canonical = .claude/coal/coalwash.json`);
     }
   } catch { /* fail-silent, per hooks-safety.md Phoenix #4 */ }

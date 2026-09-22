@@ -1269,6 +1269,64 @@ test('discoverIgnoredConfigs: no stray files anywhere -> empty array', () => {
   } finally { clean(home, proj); }
 });
 
+// UMB-133 INSPECT F2: the probe's cost note used to claim a bound it did not
+// have, because the function derived the project root TWICE (itself, then again
+// inside projectConfigCandidates) while its caller had already derived it once.
+// The cure is an optional resolved root, and these two tests are what make the
+// note true BY CONSTRUCTION rather than by a figure someone has to re-check --
+// the first pins that the passed root is what is USED, the second pins that
+// passing it leaves no marker walk behind at all.
+test('discoverIgnoredConfigs: a PASSED root is what the probe reports under -- not one it re-derives from cwd', () => {
+  const { home, proj } = sandbox();
+  const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-otherroot-')));
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    fs.mkdirSync(path.join(other, '.git'));
+    // the stray sits under OTHER, never under the root `cwd` would resolve to
+    writeJson(path.join(other, '.agents', '.coalwash.json'), { coalwashMode: 'auto' });
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home), [], 'control: cwd resolves to proj, which has no stray');
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home, other), [path.join(other, '.agents', '.coalwash.json')],
+      'the third argument must be the root the probe actually uses; ignoring it silently re-derives a different one');
+  } finally { clean(home, proj, other); }
+});
+
+test('discoverIgnoredConfigs: passing the resolved root costs ZERO marker-walk calls -- the probe adds only its own existence probes', () => {
+  const { home, proj } = sandbox();
+  try {
+    // a marker several levels up, so a marker walk is expensive enough to be
+    // unmistakable in the counts if one still runs
+    fs.mkdirSync(path.join(proj, '.git'));
+    const deep = path.join(proj, 'a', 'b', 'c');
+    fs.mkdirSync(deep, { recursive: true });
+    const root = findProjectRoot(deep, home);
+    assert.strictEqual(root, proj, 'fixture sanity: the walk must have real work to do');
+
+    const KEYS = ['existsSync', 'lstatSync', 'readFileSync'];
+    const counts = {};
+    const orig = {};
+    const origRealpath = fs.realpathSync;
+    const origNative = fs.realpathSync.native;
+    counts.realpathSync = 0;
+    for (const k of KEYS) { orig[k] = fs[k]; counts[k] = 0; }
+    try {
+      for (const k of KEYS) fs[k] = (...a) => { counts[k]++; return orig[k](...a); };
+      const rp = (...a) => { counts.realpathSync++; return origRealpath(...a); };
+      rp.native = (...a) => { counts.realpathSync++; return origNative(...a); };
+      fs.realpathSync = rp;
+      discoverIgnoredConfigs(deep, home, root);
+    } finally {
+      for (const k of KEYS) fs[k] = orig[k];
+      origRealpath.native = origNative;
+      fs.realpathSync = origRealpath;
+    }
+
+    assert.strictEqual(counts.existsSync, 0, `a marker walk still ran (${counts.existsSync} existsSync); the passed root must short-circuit it entirely`);
+    assert.strictEqual(counts.realpathSync, 0, `a marker walk still ran (${counts.realpathSync} realpathSync); the passed root must short-circuit it entirely`);
+    assert.strictEqual(counts.readFileSync, 0, 'the probe reads no file: it reports paths, it never opens one');
+    assert.ok(counts.lstatSync <= 3, `the probe's own loop is bounded by AGENT_DIR_ORDER.length; got ${counts.lstatSync}`);
+  } finally { clean(home, proj); }
+});
+
 test('projectConfigPath: nothing exists anywhere -> the own-dir (.claude) path is the read AND write target, matching a never-configured project', () => {
   const { home, proj } = sandbox();
   try {

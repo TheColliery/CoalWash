@@ -568,12 +568,19 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
 // neither legacy candidate's parent is -- verified unchanged by this addition,
 // not merely assumed, in configure.test.mjs.
 const AGENT_DIR_ORDER = ['.claude', '.agents', '.gemini'];
-export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
-  const root = findProjectRoot(cwd, home);
+// Pure path arithmetic over an ALREADY-RESOLVED root: no filesystem call of any
+// kind. Split out so a caller holding the root (the conductor does) can build
+// the candidate list without paying a second marker walk for it -- see
+// discoverIgnoredConfigs' own cost note below, which this split is what makes
+// TRUE rather than merely asserted.
+function candidatesForRoot(root) {
   const candidates = AGENT_DIR_ORDER.map((d) => path.join(root, d, 'coal', 'coalwash.json'));
   candidates.push(path.join(root, '.claude', '.coalwash.json')); // LEGACY (nested)
   candidates.push(path.join(root, '.coalwash.json')); // LEGACY (root), always last
   return candidates;
+}
+export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
+  return candidatesForRoot(findProjectRoot(cwd, home));
 }
 export function projectConfigPath(cwd = process.cwd(), home = os.homedir()) {
   const candidates = projectConfigCandidates(cwd, home);
@@ -605,11 +612,29 @@ export function projectConfigResolution(cwd = process.cwd(), home = os.homedir()
 // projectConfigCandidates already covers, so the probe set tracks the walk by
 // construction and cannot rot the day the candidate order changes (the r34/
 // #107 lesson: a hand-enumerated roster rots, a derived one does not).
-// BOUNDED: exactly AGENT_DIR_ORDER.length stat calls under root, no directory
-// walk, no recursion -- a report, not a filesystem crawl.
-export function discoverIgnoredConfigs(cwd = process.cwd(), home = os.homedir()) {
-  const root = findProjectRoot(cwd, home);
-  const candidateSet = new Set(projectConfigCandidates(cwd, home));
+//
+// COST, corrected 2026-09-22 (UMB-133 INSPECT F2 -- the prior note read
+// "exactly AGENT_DIR_ORDER.length stat calls under root", which counted this
+// function's OWN loop and silently omitted everything it wrapped). The loop is
+// at most AGENT_DIR_ORDER.length existence probes and never more -- 2 today,
+// since `.claude`'s bare dotfile IS a candidate and is skipped -- with no
+// readdir and no recursion, and that half was always true. What the old note
+// missed is the PROJECT-ROOT RESOLUTION: this function derived the root itself
+// AND called projectConfigCandidates, which derived it again, so the marker
+// walk ran TWICE per call, and a third time in the conductor that had already
+// resolved it on the line above. Measured on this box, one call, fs patched
+// over the real function, fixture = a marker at the 3rd ancestor:
+//   before: existsSync 30 · lstatSync 2 · realpathSync 6   (two marker walks)
+//   after, root omitted: existsSync 15 · lstatSync 2 · realpathSync 3  (one)
+//   after, root passed:  existsSync  0 · lstatSync 2 · realpathSync 0  (none)
+// The optional `root` is what makes this note true BY CONSTRUCTION rather than
+// by a figure someone has to re-check: pass a resolved root and the only
+// filesystem calls left are the loop's own probes. Timing distribution for the
+// root-passed path (n=300, this box, same fixture) is in the UMB-133 bounce
+// return -- a number published without its instrument is a property of one
+// harness, so it is not pinned here.
+export function discoverIgnoredConfigs(cwd = process.cwd(), home = os.homedir(), root = findProjectRoot(cwd, home)) {
+  const candidateSet = new Set(candidatesForRoot(root));
   const ignored = [];
   for (const d of AGENT_DIR_ORDER) {
     const p = path.join(root, d, '.coalwash.json');
