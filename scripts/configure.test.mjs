@@ -149,9 +149,39 @@ test('CWK-023: firstWriteTarget skips BOTH legacy shapes even when the nested on
   fs.mkdirSync(path.join(sb.proj, '.claude'), { recursive: true });
   fs.writeFileSync(path.join(sb.proj, '.claude', '.coalwash.json'), '{}\n');
   const target = firstWriteTarget(sb.proj, sb.home);
+  // MESSAGE CORRECTED (UMB-133 INSPECT F3): this pins `firstWriteTarget`'s own
+  // SHAPE check and nothing else. It does NOT say where a real run writes --
+  // with this fixture's file on disk the production path never calls this
+  // function at all (`configure.mjs`: writePath = exists(found) ? found :
+  // firstWriteTarget(...)), so the composed behaviour is the NEXT test's, not
+  // this one's. The old message claimed the composed property and this
+  // assertion could not carry it.
   assert.ok(target.includes(`.claude${path.sep}coal${path.sep}coalwash.json`),
-    `a first write must land at the canonical .claude/coal/coalwash.json, never at the nested legacy itself; got ${target}`);
+    `firstWriteTarget must return the canonical .claude/coal/coalwash.json for a project with no config anywhere, never either legacy address; got ${target}`);
   assert.notStrictEqual(target, path.join(sb.proj, '.claude', '.coalwash.json'));
+});
+
+// UMB-133 INSPECT F3, the COMPOSED half -- the claim the unit above cannot
+// reach. `README.md`'s promise is that a config sitting at either LEGACY path
+// is written back THERE, never moved, and this unit is what newly extended
+// that promise to the nested shape, so it is precisely the claim that owes a
+// test. This spawns the REAL writer rather than calling a helper: the
+// discriminator lives in configure.mjs's own `exists(found) ? found :
+// firstWriteTarget(...)` line, which no test of `firstWriteTarget` can see.
+test('CWK-023: a real write with a NESTED legacy present lands IN that legacy and creates no canonical file -- the config is never silently relocated', (t) => {
+  const sb = sandbox(t);
+  const nested = path.join(sb.proj, '.claude', '.coalwash.json');
+  fs.mkdirSync(path.join(sb.proj, '.claude'), { recursive: true });
+  fs.writeFileSync(nested, `${JSON.stringify({ language: 'en' }, null, 2)}\n`);
+
+  const r = run(sb, ['--fileMaxSizeKb', '31']);
+  assert.strictEqual(r.status, 0, r.stderr);
+
+  const after = JSON.parse(fs.readFileSync(nested, 'utf8'));
+  assert.strictEqual(after.fileMaxSizeKb, 31, 'the key must land in the legacy file the loader actually reads');
+  assert.strictEqual(after.language, 'en', 'the pre-existing content must survive the write');
+  assert.ok(!fs.existsSync(projCfg(sb)),
+    'no canonical file may appear: a silent relocation would leave the user with two configs, one of which the loader stops reading');
 });
 
 // ----------------------------------------------------------------- the CLI
