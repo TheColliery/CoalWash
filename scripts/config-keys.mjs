@@ -94,10 +94,16 @@ export const NOT_CONFIG = Object.freeze({
     "receipt.mjs's exported one-line receipt builder. ask.mjs's forceAuto names it inside the "
     + 'directive text so the agent knows which function produces the line it must push, which is '
     + 'why L5 reaches it: it is a function name deliberately printed in user-facing prose.',
-  projectConfigPath:
-    'a function in config-load.mjs that RESOLVES the per-project config path. It is named in '
-    + "references/platform-cc.md's config-location prose, which is precisely why L3's "
-    + 'config-context locator reaches it: the sentence is about where the config lives.',
+  projectConfigCandidates:
+    'a function in config-load.mjs that BUILDS the full per-project candidate list (canonical + '
+    + "both legacy shapes). Named in references/platform-cc.md's config-location prose (UMB-133), "
+    + 'which is precisely why L3\'s config-context locator reaches it.',
+  projectConfigResolution:
+    'a function in config-load.mjs that reports WHICH candidate the walk actually read from, and '
+    + 'whether it was a legacy one. Named in the same config-location prose for the same reason.',
+  discoverIgnoredConfigs:
+    'a function in config-load.mjs that reports a .coalwash.json planted somewhere the walk will '
+    + 'never read. Named in the same config-location prose for the same reason.',
 });
 
 /**
