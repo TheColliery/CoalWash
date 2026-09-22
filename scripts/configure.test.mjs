@@ -135,6 +135,25 @@ test('CWK-023: a first write lands in an agent dir the project ALREADY has, neve
   assert.ok(firstWriteTarget(bare, sb.home).includes(`.claude${path.sep}coal`));
 });
 
+// UMB-133 hole (2): the candidate list grew a second legacy entry
+// (`.claude/.coalwash.json`). `firstWriteTarget`'s existing `basename !==
+// 'coal'` check already excludes ANY non-canonical candidate by SHAPE, not by
+// a hand-enumerated list of legacy paths -- so it should skip the new one for
+// the same reason it already skips the root legacy, with no code change owed
+// here. Proven, not merely read: an EXISTING nested-legacy file at
+// `.claude/.coalwash.json` (the file the writer would plant a SECOND config
+// into if this check ever narrowed) still routes a first write to the
+// candidate the project ALREADY has, never to the legacy address itself.
+test('CWK-023: firstWriteTarget skips BOTH legacy shapes even when the nested one already exists -- never plants a second config beside it', (t) => {
+  const sb = sandbox(t);
+  fs.mkdirSync(path.join(sb.proj, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(sb.proj, '.claude', '.coalwash.json'), '{}\n');
+  const target = firstWriteTarget(sb.proj, sb.home);
+  assert.ok(target.includes(`.claude${path.sep}coal${path.sep}coalwash.json`),
+    `a first write must land at the canonical .claude/coal/coalwash.json, never at the nested legacy itself; got ${target}`);
+  assert.notStrictEqual(target, path.join(sb.proj, '.claude', '.coalwash.json'));
+});
+
 // ----------------------------------------------------------------- the CLI
 
 test('CWK-023: --help exits 0, is generated from the schema, and names --global', (t) => {

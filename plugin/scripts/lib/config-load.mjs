@@ -447,6 +447,32 @@ export function physicalDir(p) {
 // match NOTHING and fall through to the raw `startDir` fallback, the exact
 // per-subdir scatter class this file's own history already names above. Same
 // additive-only invariant: each new entry can only make the walk stop LOWER.
+//
+// UMB-133: `.claude/.coalwash.json` (the second, nested legacy shape --
+// CoalTipple's and CoalBoard's) is DELIBERATELY NOT added here, and this is a
+// reasoned exclusion, not an oversight. Every existing entry's relative shape
+// is unique to a PROJECT marker; this one is not: `claudeBaseDir(home) +
+// '.coalwash.json'` is `globalConfigPath`'s own path, so
+// `path.join(dir, '.claude', '.coalwash.json')` is BYTE-IDENTICAL to the
+// user's GLOBAL config file whenever `dir === home`. Measured on this box:
+// this machine's real `~/.claude/.coalwash.json` (a genuine GLOBAL
+// `scanEverything` setting) made the walk match at `dir === home` -- before
+// the `dir === homeAbs` fallback check even runs, since the marker test sits
+// first in the loop body -- misidentifying the user's HOME directory as a
+// CoalWash project root, purely because a global config exists. `isBase()`
+// exists precisely to keep `~/.claude` itself out of marker contention; this
+// entry would have re-opened the identical global/project conflation one
+// level up, for every user who has ever set a global option -- a FAR more
+// common false-positive than the narrow subdir-scatter case it would close.
+// The bare root legacy (`.coalwash.json`, above) has no such collision --
+// `globalConfigPath` never resolves to `<dir>/.coalwash.json` for any `dir`
+// other than `claudeBaseDir(home)` itself, which is a DIFFERENT relative
+// shape (`.claude/.coalwash.json`, not the bare root one). The scatter class
+// this entry would have closed is real but narrow (a project configured ONLY
+// via `.claude/.coalwash.json`, no `.git`, no `CLAUDE.md`, no root legacy)
+// and stays open -- `projectConfigCandidates` still HONOURS the file once a
+// caller's `cwd` already resolves to the right root by other means; only the
+// ROOT-DISCOVERY shortcut is declined.
 const ROOT_MARKERS = [
   '.git', '.coalwash.json', 'CLAUDE.md',
   '.claude/coal/coalwash.json', '.agents/coal/coalwash.json', '.gemini/coal/coalwash.json',
@@ -532,17 +558,65 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
 // bare `.claude` even in an `.agents`-only project. The LEGACY-location
 // migrate-and-delete that CoalLedger/CoalMine perform is deliberately NOT
 // implemented here — see configure.mjs's own header for that divergence.
+//
+// UMB-133 hole (2): BOTH legacy shapes are honoured now, nested before root --
+// CoalTipple/CoalBoard's `.claude/.coalwash.json` (the shape a user coming
+// from either of those rooms is likeliest to have already written), then the
+// original bare-root `.coalwash.json`. `firstWriteTarget` (configure.mjs)
+// already skips BOTH: its `path.basename(path.dirname(c)) !== 'coal'` check
+// only accepts a candidate whose parent dir is literally named `coal`, and
+// neither legacy candidate's parent is -- verified unchanged by this addition,
+// not merely assumed, in configure.test.mjs.
 const AGENT_DIR_ORDER = ['.claude', '.agents', '.gemini'];
 export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
   const root = findProjectRoot(cwd, home);
   const candidates = AGENT_DIR_ORDER.map((d) => path.join(root, d, 'coal', 'coalwash.json'));
-  candidates.push(path.join(root, '.coalwash.json')); // LEGACY, always last
+  candidates.push(path.join(root, '.claude', '.coalwash.json')); // LEGACY (nested)
+  candidates.push(path.join(root, '.coalwash.json')); // LEGACY (root), always last
   return candidates;
 }
 export function projectConfigPath(cwd = process.cwd(), home = os.homedir()) {
   const candidates = projectConfigCandidates(cwd, home);
   for (const c of candidates) if (pathExists(c)) return c;
   return candidates[0]; // nothing found anywhere -- own-dir is both the read and write target
+}
+
+// UMB-133 hole (2), the migration-notice half: which candidate did the walk
+// actually read from, and was it a LEGACY one? Index-derived from
+// projectConfigCandidates' own known shape (AGENT_DIR_ORDER.length canonical
+// entries, then both legacy ones) -- never a second hand-written path list, so
+// this cannot drift from the walk it describes. Returns null when nothing
+// exists anywhere (nothing to notice).
+export function projectConfigResolution(cwd = process.cwd(), home = os.homedir()) {
+  const candidates = projectConfigCandidates(cwd, home);
+  const canonicalCount = AGENT_DIR_ORDER.length;
+  for (let i = 0; i < candidates.length; i++) {
+    if (pathExists(candidates[i])) return { path: candidates[i], legacy: i >= canonicalCount };
+  }
+  return null;
+}
+
+// UMB-133 hole (1): a `.coalwash.json` sitting at a path this walk will NEVER
+// read -- specifically, the bare-dotfile legacy SHAPE planted under an agent
+// dir this walk does not honour it for (only `.claude` carries a nested-legacy
+// candidate; `.agents` and `.gemini` do not, so the same habit copied to
+// either of those is silently dead here). DERIVED from AGENT_DIR_ORDER -- the
+// same constant the walk itself uses -- and excludes whatever
+// projectConfigCandidates already covers, so the probe set tracks the walk by
+// construction and cannot rot the day the candidate order changes (the r34/
+// #107 lesson: a hand-enumerated roster rots, a derived one does not).
+// BOUNDED: exactly AGENT_DIR_ORDER.length stat calls under root, no directory
+// walk, no recursion -- a report, not a filesystem crawl.
+export function discoverIgnoredConfigs(cwd = process.cwd(), home = os.homedir()) {
+  const root = findProjectRoot(cwd, home);
+  const candidateSet = new Set(projectConfigCandidates(cwd, home));
+  const ignored = [];
+  for (const d of AGENT_DIR_ORDER) {
+    const p = path.join(root, d, '.coalwash.json');
+    if (candidateSet.has(p)) continue; // .claude's own nested-legacy IS a candidate
+    if (pathExists(p)) ignored.push(p);
+  }
+  return ignored;
 }
 
 // Decode raw config bytes to text, sniffing the encoding (H6). Node's default

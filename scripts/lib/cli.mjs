@@ -81,7 +81,7 @@ import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './tailings.mjs';
 import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
-import { loadMergedConfig, findProjectRoot } from './config-load.mjs';
+import { loadMergedConfig, findProjectRoot, projectConfigResolution, discoverIgnoredConfigs } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { estateReport } from './estate.mjs';
@@ -289,7 +289,29 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   return { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>] | config-status [--json]';
+
+// UMB-133 — the READ-ONLY report for BOTH holes: was the config actually read
+// from a LEGACY path, and is there a `.coalwash.json` sitting somewhere this
+// walk will never look? Deliberately a SEPARATE, user-pulled subcommand
+// rather than SessionStart output: the migration notice (hole 2) is common —
+// this room's own hermetic conductor tests default every project to the
+// ROOT legacy shape, and plenty of real installs do too — so printing it on
+// every session would be a nag on the ordinary case, not a rare finding.
+// `/coalwash:stats` (or a direct call, for verification) is the pull channel;
+// hole (1)'s ignored-path report ALSO fires ambiently on SessionStart
+// (hooks/coalwash-conductor.js), because planting a bare dotfile under an
+// agent dir this walk does not honour for it is genuinely rare.
+function configStatusLines({ resolution, ignored }) {
+  const out = [];
+  if (resolution && resolution.legacy) {
+    out.push(`[CoalWash] Config read from a LEGACY path (${resolution.path}); canonical = .claude/coal/coalwash.json. Move it there when convenient — reading is unchanged either way.`);
+  }
+  for (const p of ignored) {
+    out.push(`[CoalWash] IGNORED: ${p} is not a config path; canonical = .claude/coal/coalwash.json`);
+  }
+  return out;
+}
 
 // estate-scan / estate-run / estate-search / estate-restore (ULTRA, blueprint
 // §19 P2 partial — estate-archive.mjs): estate-scan = the non-mutating bill
@@ -319,6 +341,22 @@ function main() {
       console.log(args.includes('--json') ? JSON.stringify(g, null, 1) : gaugeLine(g));
     } catch (e) {
       console.error(`gauge failed: ${e.message}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'config-status') {
+    try {
+      const home = os.homedir();
+      const cwd = process.cwd();
+      const resolution = projectConfigResolution(cwd, home);
+      const ignored = discoverIgnoredConfigs(cwd, home);
+      if (args.includes('--json')) {
+        console.log(JSON.stringify({ resolution, ignored }, null, 1));
+      } else {
+        const lines = configStatusLines({ resolution, ignored });
+        console.log(lines.length ? lines.join('\n') : '[CoalWash] config: canonical, nothing to report.');
+      }
+    } catch (e) {
+      console.error(`config-status failed: ${e.message}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'restore') {

@@ -174,6 +174,38 @@ test('manual mode: gauge silent (no stamp), but the self-update scheduler still 
 });
 
 // ---------------------------------------------------------------------------
+// UMB-133 hole (1): a `.coalwash.json` planted at a path this room's walk
+// never reads is REPORTED on SessionStart, not silently skipped. Hole (2)'s
+// migration notice is deliberately NOT tested here (deliberately not wired
+// to this channel at all — see cli.mjs's config-status tests instead).
+// ---------------------------------------------------------------------------
+
+test('UMB-133: a .coalwash.json planted under .agents (bare, not nested/coal) is IGNORED and REPORTED on SessionStart', () => {
+  const { home, proj } = sandbox(); // default sandbox already seeds a ROOT legacy .coalwash.json
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
+    fs.mkdirSync(path.join(proj, '.agents'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.agents', '.coalwash.json'), '{}\n', 'utf8');
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.ok(r.stdout.includes(`[CoalWash] IGNORED: ${path.join(proj, '.agents', '.coalwash.json')} is not a config path; canonical = .claude/coal/coalwash.json`),
+      `expected an IGNORED line naming the stray file; got: ${r.stdout}`);
+  } finally { clean(home, proj); }
+});
+
+test('UMB-133: the ordinary ROOT legacy shape (this file\'s own sandbox default) is NOT reported as ignored -- it is a real candidate', () => {
+  const { home, proj } = sandbox(); // sandbox() itself writes proj/.coalwash.json
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.ok(!r.stdout.includes('IGNORED:'), `the supported root legacy shape must never be reported as ignored; got: ${r.stdout}`);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
 // SessionStart — band-collapse: SILENT for every band, only the cache changes.
 // ---------------------------------------------------------------------------
 

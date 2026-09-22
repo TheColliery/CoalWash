@@ -100,6 +100,59 @@ test('0p writeguard-restore via CLI: a snapshot that IS listed but fails integri
   } finally { clean(home, proj); }
 });
 
+// ---------------------------------------------------------------------------
+// UMB-133 — config-status: the user-pulled report for both holes. hole (2)'s
+// migration notice lives HERE, deliberately never on SessionStart (see
+// hooks/coalwash-conductor.js's own comment on why); hole (1)'s ignored-path
+// report is exposed here too, alongside its own ambient conductor test.
+// ---------------------------------------------------------------------------
+
+test('config-status: this file\'s own sandbox default (a ROOT legacy .coalwash.json) IS reported as a legacy read', () => {
+  const { home, proj } = sandbox(); // sandbox() writes proj/.coalwash.json
+  try {
+    const r = run(proj, home, ['config-status']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`Config read from a LEGACY path (${path.join(proj, '.coalwash.json')})`), r.stdout);
+    assert.ok(r.stdout.includes('canonical = .claude/coal/coalwash.json'), r.stdout);
+  } finally { clean(home, proj); }
+});
+
+test('config-status: a canonical config (.claude/coal/coalwash.json) reports NOTHING -- the honest-empty-state line', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.rmSync(path.join(proj, '.coalwash.json')); // remove the sandbox's own root legacy first
+    fs.mkdirSync(path.join(proj, '.claude', 'coal'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.claude', 'coal', 'coalwash.json'), '{}\n', 'utf8');
+    const r = run(proj, home, ['config-status']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout.trim(), '[CoalWash] config: canonical, nothing to report.');
+  } finally { clean(home, proj); }
+});
+
+test('config-status: a stray .coalwash.json under .gemini (bare) is reported as IGNORED, alongside the legacy notice', () => {
+  const { home, proj } = sandbox(); // still carries the sandbox's own root legacy
+  try {
+    fs.mkdirSync(path.join(proj, '.gemini'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.gemini', '.coalwash.json'), '{}\n', 'utf8');
+    const r = run(proj, home, ['config-status']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`IGNORED: ${path.join(proj, '.gemini', '.coalwash.json')} is not a config path`), r.stdout);
+    assert.ok(r.stdout.includes('Config read from a LEGACY path'), 'both holes fire independently in one call');
+  } finally { clean(home, proj); }
+});
+
+test('config-status --json: the raw resolution + ignored shape, machine-readable', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = run(proj, home, ['config-status', '--json']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const j = JSON.parse(r.stdout);
+    assert.strictEqual(j.resolution.legacy, true);
+    assert.strictEqual(j.resolution.path, path.join(proj, '.coalwash.json'));
+    assert.deepStrictEqual(j.ignored, []);
+  } finally { clean(home, proj); }
+});
+
 test('gauge --json: one call returns recover + platform + measure + verdict + breakEven, exit 0', () => {
   const { home, proj } = sandbox();
   try {

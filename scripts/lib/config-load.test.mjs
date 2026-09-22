@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { globalConfigPath, projectConfigPath, projectConfigCandidates, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
+import { globalConfigPath, projectConfigPath, projectConfigCandidates, projectConfigResolution, discoverIgnoredConfigs, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -1122,7 +1122,7 @@ test('discoverRetentionCandidateKeys: no matches anywhere -> empty array, never 
 // the structural move-on-write proof + the clamp-unchanged regression.
 // ---------------------------------------------------------------------------
 
-test('projectConfigCandidates: the rail order is .claude -> .agents -> .gemini -> LEGACY, always relative to the resolved project root', () => {
+test('projectConfigCandidates: the rail order is .claude -> .agents -> .gemini -> LEGACY(nested) -> LEGACY(root), always relative to the resolved project root', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
@@ -1131,33 +1131,49 @@ test('projectConfigCandidates: the rail order is .claude -> .agents -> .gemini -
       path.join(proj, '.claude', 'coal', 'coalwash.json'),
       path.join(proj, '.agents', 'coal', 'coalwash.json'),
       path.join(proj, '.gemini', 'coal', 'coalwash.json'),
+      path.join(proj, '.claude', '.coalwash.json'),
       path.join(proj, '.coalwash.json'),
     ]);
   } finally { clean(home, proj); }
 });
 
-test('projectConfigPath precedence 1/3: own-dir (.claude) wins even when every other candidate, including LEGACY, also exists', () => {
+test('projectConfigPath precedence 1/4: own-dir (.claude) wins even when every other candidate, including BOTH legacies, also exists', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'own-dir' });
     writeJson(path.join(proj, '.agents', 'coal', 'coalwash.json'), { coalwashMode: 'other-dir' });
-    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy' });
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'legacy-nested' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy-root' });
     assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
   } finally { clean(home, proj); }
 });
 
-test('projectConfigPath precedence 2/3: .claude absent, .agents present -> the other-known-dir entry wins over LEGACY', () => {
+test('projectConfigPath precedence 2/4: .claude absent, .agents present -> the other-known-dir entry wins over BOTH legacies', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     writeJson(path.join(proj, '.agents', 'coal', 'coalwash.json'), { coalwashMode: 'other-dir' });
-    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy' });
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'legacy-nested' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy-root' });
     assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.agents', 'coal', 'coalwash.json'));
   } finally { clean(home, proj); }
 });
 
-test('projectConfigPath precedence 3/3: no new-shape candidate exists anywhere -> LEGACY root dotfile is read, no breakage for an existing user', () => {
+test('projectConfigPath precedence 3/4: no canonical shape exists anywhere -> the NESTED legacy (.claude/.coalwash.json) wins over the root one, and is actually READ', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    // UMB-133 hole (2): the second legacy shape (CoalTipple's/CoalBoard's) is
+    // now honoured here too, and it comes BEFORE the root legacy in the walk.
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'manual' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'auto' });
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', '.coalwash.json'));
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).coalwashMode, 'manual', 'the nested legacy is what actually gets READ, not merely resolved');
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath precedence 4/4: no new-shape candidate and no nested legacy -> the ROOT legacy dotfile is read, no breakage for an existing user', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
@@ -1171,11 +1187,113 @@ test('projectConfigPath precedence 3/3: no new-shape candidate exists anywhere -
   } finally { clean(home, proj); }
 });
 
+// UMB-133 hole (2), the migration-notice half.
+test('projectConfigResolution: a canonical hit reports legacy:false', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'auto' });
+    const r = projectConfigResolution(proj, home);
+    assert.deepStrictEqual(r, { path: path.join(proj, '.claude', 'coal', 'coalwash.json'), legacy: false });
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigResolution: a NESTED legacy hit (.claude/.coalwash.json) reports legacy:true', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'auto' });
+    const r = projectConfigResolution(proj, home);
+    assert.deepStrictEqual(r, { path: path.join(proj, '.claude', '.coalwash.json'), legacy: true });
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigResolution: a ROOT legacy hit reports legacy:true', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'auto' });
+    const r = projectConfigResolution(proj, home);
+    assert.deepStrictEqual(r, { path: path.join(proj, '.coalwash.json'), legacy: true });
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigResolution: nothing exists anywhere -> null, nothing to notice', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    assert.strictEqual(projectConfigResolution(proj, home), null);
+  } finally { clean(home, proj); }
+});
+
+// UMB-133 hole (1), the ignored-report half.
+test('discoverIgnoredConfigs: a .coalwash.json planted under .agents (a dir this walk does NOT honour a nested legacy for) is REPORTED, never silently skipped', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.agents', '.coalwash.json'), { coalwashMode: 'auto' });
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home), [path.join(proj, '.agents', '.coalwash.json')]);
+    // and it plays no part in what actually gets read
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+test('discoverIgnoredConfigs: the SAME shape under .gemini is reported too, and both fire together', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.agents', '.coalwash.json'), { coalwashMode: 'auto' });
+    writeJson(path.join(proj, '.gemini', '.coalwash.json'), { coalwashMode: 'auto' });
+    const ignored = discoverIgnoredConfigs(proj, home).sort();
+    assert.deepStrictEqual(ignored, [
+      path.join(proj, '.agents', '.coalwash.json'),
+      path.join(proj, '.gemini', '.coalwash.json'),
+    ].sort());
+  } finally { clean(home, proj); }
+});
+
+test('discoverIgnoredConfigs: the .claude/.coalwash.json shape is NOT reported -- it is a real candidate now, not an ignored path', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'auto' });
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home), []);
+  } finally { clean(home, proj); }
+});
+
+test('discoverIgnoredConfigs: no stray files anywhere -> empty array', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home), []);
+  } finally { clean(home, proj); }
+});
+
 test('projectConfigPath: nothing exists anywhere -> the own-dir (.claude) path is the read AND write target, matching a never-configured project', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+// UMB-133: the reasoned NON-addition to ROOT_MARKERS, made falsifiable rather
+// than left as a comment nobody re-checks. globalConfigPath(home) IS
+// `<home>/.claude/.coalwash.json` -- the SAME relative shape the nested legacy
+// candidate uses. Were that shape ever added to ROOT_MARKERS, a real user's
+// global config would make `home` itself match as a "project root" the moment
+// the walk reaches it, conflating global and project scope one level up from
+// where `isBase()` already guards `~/.claude` itself. This test plants the
+// global file exactly as a real user would and proves the walk still ignores
+// it as a marker -- if this ever reds, the exclusion was silently reversed.
+test('ROOT_MARKERS deliberately excludes .claude/.coalwash.json: a real GLOBAL config at that exact shape does not make an unrelated subdir of home resolve TO home', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeJson(globalConfigPath(home), { scanEverything: true });
+    const startDir = path.join(home, 'unmarked', 'deeper');
+    fs.mkdirSync(startDir, { recursive: true });
+    assert.strictEqual(findProjectRoot(startDir, home), startDir,
+      'a global config must never be read as a project-root marker -- reintroducing .claude/.coalwash.json to ROOT_MARKERS reopens the global/project conflation this guards against');
   } finally { clean(home, proj); }
 });
 

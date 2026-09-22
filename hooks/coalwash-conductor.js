@@ -228,7 +228,7 @@ function updateDue(cfg, clampedRead, caliper) {
 }
 
 async function handleSessionStart(input) {
-  const [{ loadMergedConfig, findProjectRoot }, { clampedRead, envelopeForConfig }, classB, caliper] = await Promise.all([
+  const [{ loadMergedConfig, findProjectRoot, discoverIgnoredConfigs }, { clampedRead, envelopeForConfig }, classB, caliper] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
     import(lib('class-b.mjs')),
@@ -250,6 +250,22 @@ async function handleSessionStart(input) {
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
   const out = [];
+
+  // UMB-133 hole (1) ONLY, fail-silent by construction (a pure read over the
+  // walk this hook already pays for once per SessionStart; throwing is a
+  // no-op here, same as every other advisory line below). Hole (2)'s
+  // migration notice is DELIBERATELY NOT wired here -- see cli.mjs's
+  // `config-status` subcommand for why: this room's own hermetic conductor
+  // tests default every sandbox project to the ROOT LEGACY shape, and a real
+  // install commonly does too, so an unconditional per-SessionStart notice
+  // for it is a nag on the ordinary case, not a rare stray file. Hole (1) has
+  // no such collision -- planting a bare dotfile under .agents/.gemini is
+  // genuinely rare, so it stays on this sanctioned channel.
+  try {
+    for (const p of discoverIgnoredConfigs(process.cwd(), home)) {
+      out.push(`[CoalWash] IGNORED: ${p} is not a config path; canonical = .claude/coal/coalwash.json`);
+    }
+  } catch { /* fail-silent, per hooks-safety.md Phoenix #4 */ }
 
   // rc.2 SCHEMA MIGRATION + task #13 LOCATION MIGRATION are both LAZY now (in
   // caliper.loadState/saveState): the first gauge read below returns the
