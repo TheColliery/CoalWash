@@ -353,6 +353,21 @@ function main() {
         console.log(JSON.stringify({ resolution, ignored }, null, 1));
       } else {
         const lines = configStatusLines({ resolution, ignored });
+        // DECLARED EXCEPTION to the no-zero-line rule (UMB-133 INSPECT F4),
+        // stated here rather than left for the next reader to mistake for an
+        // oversight. `commands/stats.md` says of this section "print NOTHING
+        // ... never a 'config OK' line", and states the same rule twice more on
+        // that page -- but it binds the /coalwash:stats RENDERING, which reads
+        // the `--json` form: that form emits `{"resolution":…,"legacy":false},
+        // "ignored":[]}` and no prose at all, so the agent has nothing to
+        // print and the rule holds untouched on its own channel (measured, all
+        // four states). THIS branch is the human, directly-invoked one. A user
+        // who types the command and gets silence cannot tell success from a
+        // crash, so the confirmation line is the answer to a question that was
+        // asked -- not an unprompted status line, which is what the rule bans.
+        // PRECEDENT, not a new divergence: `writeguard-list` below has printed
+        // "[CoalWash] no write-guard snapshots this session." since a81df55
+        // (2026-07-11), the same shape for the same reason.
         console.log(lines.length ? lines.join('\n') : '[CoalWash] config: canonical, nothing to report.');
       }
     } catch (e) {
