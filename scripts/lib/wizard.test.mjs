@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import {
   neutralScan, estimateBill, billLine, PARTITION_FILES, PARTITION_KB, MINUTES_PER_PARTITION, TOKEN_RATE_PER_KB,
   wizardContract, wizardHandshake, manualTierCounts, handoffVerdict, HANDOFF_KNEE_TOK, HANDOFF_FLOOR_FILES,
@@ -304,4 +305,29 @@ test('CWK-057 F1 (seam still works, both directions): a global true + the opt om
     const quietened = neutralScan({ projectRoot: proj, home, scanEverything: false });
     assert.strictEqual(quietened.measure.mechFat.tokensEst, 0, 'quietening through the seam is always allowed');
   } finally { clean(home, proj); }
+});
+
+// CWK-120 row 14 (CodeRabbit, adjudicated): wizardContract canonicalised the main-side root with the PLAIN realpathSync, which does
+// not expand a win32 8.3 short name; the clone re-derives its root through findProjectRoot (realpathSync.native), so a main-side
+// root spelled short produced a different projectRoot + slug than the clone and the handshake refused a legitimate clone.
+// fixture-canonical.test.mjs records the same variant divergence as the CI-red class. Capability-probed, never platform-named:
+// the test skips VISIBLY where the volume generates no short alias.
+function shortNameOf(p) {
+  try { return execSync(`cmd /c for %I in ("${p}") do @echo %~sI`, { encoding: 'utf8' }).trim(); } catch { return p; }
+}
+
+test('CWK-120 row 14: a main-side root spelled as an 8.3 SHORT name derives the same contract the clone does, and the handshake proceeds', (t) => {
+  if (process.platform !== 'win32') { t.skip('8.3 short names are a win32 form'); return; }
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cww-home-')));
+  const longRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-LONGDIRNAME-FOR-8DOT3-')));
+  try {
+    markedProj(longRoot);
+    const short = shortNameOf(longRoot);
+    if (short.toLowerCase() === longRoot.toLowerCase()) { t.skip('this volume generates no 8.3 alias for the fixture directory'); return; }
+    const contract = wizardContract({ projectRoot: short, home });
+    assert.strictEqual(contract.projectRoot, longRoot, 'the short spelling is EXPANDED to the canonical long form');
+    assert.strictEqual(contract.slug, ccProjectSlug(longRoot), 'and so is the slug derived from it');
+    const r = wizardHandshake({ contract, cwd: longRoot, home });
+    assert.deepStrictEqual([r.ok, r.refuse, r.mismatches], [true, false, []], 'the clone, which lands in the long form, matches');
+  } finally { clean(home, longRoot); }
 });
