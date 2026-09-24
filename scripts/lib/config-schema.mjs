@@ -271,7 +271,12 @@ export function clampedRead(cfg, key) {
 // defense in depth for direct callers, same pattern as resolveEstateCfg.
 export function resolveRetierCfg(retier) {
   const r = retier && typeof retier === 'object' ? retier : {};
-  const num = (v, def, min, max) => (Number.isFinite(v) && v >= min && v <= max ? v : def);
+  // CWK-120 row 11: INTEGERS only, as the schema declares every retier field (`validateValue`'s int rule). This resolver is the
+  // ONE definition every consumer reads (the hook via envelopeForConfig, the CLI gauge, runRetier), and it takes the raw
+  // config, so it must apply the schema's own rule itself: `Number.isFinite` alone kept an in-range decimal such as
+  // `targetTokens: 4125.5` that clampedRead(cfg, 'retier') degrades to the default. Fixing it at the one shared function,
+  // not at one call site, keeps the CLI and the hook agreeing (cli.mjs's own header names that invariant).
+  const num = (v, def, min, max) => (Number.isInteger(v) && v >= min && v <= max ? v : def);
   return {
     targetTokens: num(r.targetTokens, 4125, 500, 6250), // 6250 = the CC hard cap (25 KB index / 4)
     armPct: num(r.armPct, 20, 5, 50),
