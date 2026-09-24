@@ -1625,3 +1625,18 @@ test('UMB-174: the report names the candidate the walk SELECTED -- a malformed R
     assert.strictEqual(ConfigLoad.projectConfigPath(proj, home), legacy);
   } finally { clean(home, proj); }
 });
+
+// CWK-120 row 12 (CodeRabbit, adjudicated): the SAFER_FALSE presence check read `project[key]`, but an UNREADABLE project is absent
+// (the R8-F5 contract): with an empty global and a populated project handed in beside `projectUnreadable: true`, the key looked
+// "asked for" and `false` was written into a merged config that must stay {}. The effective boolean was false either way; the
+// merged SHAPE is what a caller (and the "two absent files merge to {}" invariant) reads.
+test('CWK-120 row 12: an UNREADABLE project asks for nothing -- a SAFER_FALSE key it names leaves the merged config EMPTY', () => {
+  assert.deepStrictEqual(mergeSafety({}, { scanEverything: true }, { projectUnreadable: true }), {}, 'unreadable = absent: nothing was asked for, so nothing is written');
+  assert.deepStrictEqual(mergeSafety({}, { scanEverything: false }, { projectUnreadable: true }), {});
+});
+
+test('CWK-120 row 12 control: a READABLE project that names the key still gets the clamp (a project cannot turn scanEverything ON over a false/absent global)', () => {
+  assert.strictEqual(mergeSafety({}, { scanEverything: true }).scanEverything, false, 'no global opt-in -> the escalation is clamped to false');
+  assert.strictEqual(mergeSafety({ scanEverything: true }, { scanEverything: true }).scanEverything, true, 'a global opt-in survives');
+  assert.deepStrictEqual(mergeSafety({}, {}), {}, 'two absent files still merge to {}');
+});

@@ -1151,7 +1151,10 @@ export function mergeSafety(global, project, { globalUnreadable = false, project
     // false from the schema, and a merged config for two absent files must stay
     // {} (a shipped invariant with its own test: a genuinely MISSING config is
     // {}). Writing a key nobody asked for would have quietly broken it.
-    if (global[key] === undefined && project[key] === undefined) continue;
+    // CWK-120 row 12: `p`, NOT `project` -- an UNREADABLE project is ABSENT (the R8-F5 contract above), so a populated
+    // `project` handed in beside `projectUnreadable: true` must not make this key look "asked for" and write `false` into a
+    // merged config that is supposed to stay {}. The effective boolean was false either way; the SHAPE was the defect.
+    if (global[key] === undefined && p[key] === undefined) continue;
     const gv = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
     out[key] = (gv === true && out[key] === true);
   }
