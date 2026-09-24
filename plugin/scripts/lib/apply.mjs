@@ -58,7 +58,7 @@ import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zer
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
@@ -304,8 +304,10 @@ function deadLinkScan(actionable, physRoots, txDir) {
   const files = [];
   for (const root of physRoots) collectMdFiles(root, txPhys, files);
   if (!files.length) return [];
+  // CWK-137: bounded + kind-gated. A surviving .md over MAX_DOC_BYTES (or one that turned out not to be a regular
+  // file) contributes nothing: the advisory then UNDER-reports, which is its safe direction, and no file is read whole.
   const surviving = files
-    .map((p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } })
+    .map((p) => readRepoFileBounded(p, null, MAX_DOC_BYTES) ?? '')
     .join('\n');
   const topics = deleted.map((a) => ({ path: a.phys, basename: path.basename(a.phys), text: '', mtimeMs: 0 }));
   const unref = new Set(unreferencedTopics({ topics }, surviving).map((t) => t.path));
@@ -901,8 +903,11 @@ export function applyPlan(plan, opts = {}) {
         flagged.push({ path: a.phys, reason: 'cloud placeholder (dehydrated — 0 blocks, size>0): a plain read returns a stub, rewriting would clobber the real content on hydration — flagged, not rewritten (#57d)' });
         continue;
       }
-      let origBuf;
-      try { origBuf = fs.readFileSync(a.phys); } catch { return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed)` }; }
+      // CWK-137: bounded + kind-gated, and the ONE read that admits a plan target (the re-reads below see a file this
+      // one admitted). Over MAX_DOC_BYTES is refused by name, exactly as discovery already refuses to measure it.
+      const staged = repoReadOutcome(a.phys, null, MAX_DOC_BYTES);
+      if (!staged.buf) return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed${staged.why ? `: ${staged.why}` : ''})` };
+      const origBuf = staged.buf;
       if (a.type === 'rewrite') {
         const why = sniffUnrewritable(origBuf);
         if (why) { flagged.push({ path: a.phys, reason: why }); continue; }
@@ -1541,9 +1546,13 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
   try {
     let protect = null;
     const jp = path.join(txDir, JOURNAL_NAME);
-    if (fs.existsSync(jp)) {
+    // CWK-137: the journal lives in the directory a cloned repo can commit, so it is read bounded + kind-gated. Absent
+    // means no journal; ANY other refusal (a link, a special file, over the bound) is "cannot know" and freezes the sweep.
+    const jo = repoReadOutcome(jp, null, MAX_DOC_BYTES);
+    if (jo.why && jo.why !== 'absent') return;
+    if (jo.buf) {
       let j = null;
-      try { j = JSON.parse(fs.readFileSync(jp, 'utf8')); } catch { /* unreadable -> freeze below */ }
+      try { j = JSON.parse(jo.buf.toString('utf8')); } catch { /* unreadable -> freeze below */ }
       if (!j || typeof j !== 'object' || Number(j.version) > 1) return; // cannot know what it references -> sweep nothing
       if (j.status !== 'committed' && j.status !== 'rolled-back') protect = path.basename(String(j.snapDir || ''));
     }

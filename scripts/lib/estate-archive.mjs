@@ -61,7 +61,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
-import { claudeBaseDir } from './config-load.mjs';
+import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
 import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort } from './apply.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
@@ -204,7 +204,13 @@ export function chJournalGuard(projectRoot) {
   const none = { inProgress: false, mtimeMs: null, sessionId: null };
   try {
     const p = path.join(projectRoot, '.claude', 'coalhearth', 'session_handoff.json');
-    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    // CWK-137: the journal lives inside the project, so a cloned repo can plant a link or a huge file at this name.
+    // Read bounded + contained in the project. ABSENT is still "no session" (no CoalHearth installed); anything else
+    // we refuse to read is UNCERTAIN -- the module's own rule for a journal it cannot judge: protect.
+    const o = repoReadOutcome(p, projectRoot, MAX_DOC_BYTES);
+    if (o.why === 'absent') return none;
+    if (!o.buf) return { inProgress: true, mtimeMs: null, sessionId: null };
+    const j = JSON.parse(o.buf.toString('utf8'));
     if (!j || j.status !== 'in_progress') return none;
     let mtimeMs = null;
     try { mtimeMs = fs.statSync(p).mtimeMs; } catch { /* unreadable stat = uncertain -> caller protects */ }
@@ -250,13 +256,12 @@ export function chJournalGuard(projectRoot) {
 // zero. `unreachable: true` tells the caller exactly that.
 export function readRosterSids(projectRoot) {
   const p = path.join(projectRoot, '.claude', 'agent-roster.md');
-  let text;
-  try {
-    text = fs.readFileSync(p, 'utf8');
-  } catch (err) {
-    if (err && err.code === 'ENOENT') return { sids: new Set(), unreachable: false };
-    return { sids: null, unreachable: true }; // present but unreadable -- protect everything
-  }
+  // CWK-137: bounded + contained in the project (a link out, a special file, or an over-bound file is "present but
+  // unreadable"). ABSENT is unchanged: no roster convention in this project, so nothing to protect.
+  const o = repoReadOutcome(p, projectRoot, MAX_DOC_BYTES);
+  if (o.why === 'absent') return { sids: new Set(), unreachable: false };
+  if (!o.buf) return { sids: null, unreachable: true }; // present but unreadable -- protect everything
+  const text = o.buf.toString('utf8');
   if (!text) return { sids: null, unreachable: true }; // present but empty -- same fail-closed treatment
   const sids = new Set();
   for (const m of text.matchAll(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi)) {

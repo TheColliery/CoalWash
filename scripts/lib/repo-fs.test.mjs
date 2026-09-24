@@ -24,7 +24,8 @@ import {
 import { ownSandboxDir, RepoWriteRefused } from './repo-fs.mjs';
 import { sweepWriteguard, snapshotOnFirstWrite } from './writeguard.mjs';
 import { recordBinItem, restoreFromBin, sweepFatBin, readDeathLog, FAT_BIN_NAME } from './tailings.mjs';
-import { acquireLock, LOCK_STALE_MS } from './apply.mjs';
+import { acquireLock, applyPlan, sweepSnapshots, LOCK_STALE_MS } from './apply.mjs';
+import { chJournalGuard, readRosterSids } from './estate-archive.mjs';
 import { HORIZON_MS } from './retention.mjs';
 import { restore } from './cli.mjs';
 import { recordKeep } from './keeps.mjs';
@@ -361,4 +362,104 @@ test('CWK-137: the edit-time airbag will not snapshot THROUGH a linked session d
   assert.deepEqual(fs.readdirSync(outside), ['keep.txt'], 'nothing landed in the link target');
   const control = snapshotOnFirstWrite(project, 'plain', path.join(project, 'MEMORY.md'), { home });
   assert.equal(typeof control, 'string', 'the same call with an ordinary session directory DOES snapshot (the refusal above was the link)');
+});
+
+// ---- item 1b (fire 6): reads of repo-derived files the census found still raw -------------------------------------
+// Each test plants the hostile shape INSIDE the project (where a clone puts it) and asserts on a boolean, a count or a
+// short list -- never on the planted content. A file over the bound is `MAX_DOC_BYTES + 1` bytes of padding.
+function overBoundFile(file, prefix) {
+  fs.writeFileSync(file, prefix + 'x'.repeat(MAX_DOC_BYTES + 1));
+}
+
+test('CWK-137: the snapshot sweep does not read an over-bound journal -- it freezes and keeps every snapshot', (t) => {
+  const { project } = sandbox(t, 'sweepj');
+  const txDir = path.join(project, '.claude', 'coalwash');
+  for (const n of ['snap-1', 'snap-2', 'snap-3']) fs.mkdirSync(path.join(txDir, n), { recursive: true });
+  const journal = path.join(txDir, 'journal.json');
+  overBoundFile(journal, '{"version":1,"status":"committed","pad":"');
+  fs.appendFileSync(journal, '"}');
+  sweepSnapshots(txDir, 1);
+  const snaps = () => fs.readdirSync(txDir).filter((n) => n.startsWith('snap-')).sort();
+  assert.deepEqual(snaps(), ['snap-1', 'snap-2', 'snap-3'], 'an unreadable journal freezes the sweep');
+  fs.writeFileSync(journal, '{"version":1,"status":"committed"}');
+  sweepSnapshots(txDir, 1);
+  assert.deepEqual(snaps(), ['snap-3'], 'control: the same sweep with a readable journal DOES sweep (the freeze above was the bound)');
+});
+
+test('CWK-137: the snapshot sweep does not follow a journal that is a link out of the project', (t) => {
+  const { project, outside } = sandbox(t, 'sweepl');
+  const txDir = path.join(project, '.claude', 'coalwash');
+  for (const n of ['snap-1', 'snap-2']) fs.mkdirSync(path.join(txDir, n), { recursive: true });
+  if (!dirLink(outside, path.join(txDir, 'journal.json'))) { t.skip('this volume cannot make a directory link'); return; }
+  sweepSnapshots(txDir, 1);
+  assert.deepEqual(fs.readdirSync(txDir).filter((n) => n.startsWith('snap-')).sort(), ['snap-1', 'snap-2'], 'a journal we cannot read freezes the sweep');
+});
+
+test('CWK-137: the dead-link scan skips an over-bound .md instead of reading it whole', (t) => {
+  const { dir, project } = sandbox(t, 'deadlink');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home);
+  const store = path.join(project, 'memory');
+  fs.mkdirSync(store);
+  fs.writeFileSync(path.join(store, 'gone-a.md'), 'topic a\n');
+  fs.writeFileSync(path.join(store, 'gone-b.md'), 'topic b\n');
+  fs.writeFileSync(path.join(store, 'ref.md'), 'see gone-a.md for details\n');
+  overBoundFile(path.join(store, 'big.md'), 'see gone-b.md ');
+  const plan = {
+    projectRoot: project, roots: [store], sessionId: 't-deadlink',
+    actions: [{ type: 'delete', path: path.join(store, 'gone-a.md') }, { type: 'delete', path: path.join(store, 'gone-b.md') }],
+  };
+  const r = applyPlan(plan, { projectRoot: project, home });
+  assert.equal(r.ok, true, `apply: ${r.error}`);
+  assert.deepEqual([...r.deadLinks].sort(), ['gone-a.md'], 'the small referrer is counted; the over-bound one is not read');
+});
+
+test('CWK-137: the CoalHearth journal guard reads a bounded, contained file -- and an unreadable one is UNCERTAIN, never "no session"', (t) => {
+  const { project } = sandbox(t, 'chj');
+  const NONE = { inProgress: false, mtimeMs: null, sessionId: null };
+  assert.deepEqual(chJournalGuard(project), NONE, 'no journal at all');
+  const file = path.join(project, '.claude', 'coalhearth', 'session_handoff.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, 'not json');
+  assert.deepEqual(chJournalGuard(project), NONE, 'garbage content is still "no session" (unchanged)');
+  fs.writeFileSync(file, '{"status":"in_progress","sessionId":"abc"}');
+  assert.equal(chJournalGuard(project).sessionId, 'abc', 'control: a readable in-progress journal is read');
+  overBoundFile(file, '{"status":"in_progress","pad":"');
+  fs.appendFileSync(file, '"}');
+  const big = chJournalGuard(project);
+  assert.equal(big.inProgress, true, 'an over-bound journal is UNCERTAIN, so it protects');
+  assert.equal(big.mtimeMs, null, 'and it was not read (no mtime is claimed)');
+});
+
+test('CWK-137: the CoalHearth journal guard treats a journal that is a link out of the project as UNCERTAIN', (t) => {
+  const { project, outside } = sandbox(t, 'chjl');
+  fs.mkdirSync(path.join(project, '.claude', 'coalhearth'), { recursive: true });
+  if (!dirLink(outside, path.join(project, '.claude', 'coalhearth', 'session_handoff.json'))) { t.skip('this volume cannot make a directory link'); return; }
+  assert.equal(chJournalGuard(project).inProgress, true);
+});
+
+test('CWK-137: the roster reader is bounded -- an over-bound roster protects everything (unreachable), an absent one protects nothing', (t) => {
+  const { project } = sandbox(t, 'roster');
+  const file = path.join(project, '.claude', 'agent-roster.md');
+  const SID = '0123abcd-0123-4abc-8def-0123456789ab';
+  assert.deepEqual({ n: readRosterSids(project).sids.size, u: readRosterSids(project).unreachable }, { n: 0, u: false }, 'absent');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `| coder | ${SID} |\n`);
+  assert.equal(readRosterSids(project).sids.has(SID), true, 'control: a readable roster yields its sids');
+  overBoundFile(file, `| coder | ${SID} |\n`);
+  assert.equal(readRosterSids(project).unreachable, true, 'over the bound: not read, so everything is protected');
+});
+
+test('CWK-137: applyPlan refuses to STAGE a rewrite target over the read bound, and leaves it untouched', (t) => {
+  const { dir, project } = sandbox(t, 'stage');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home);
+  const store = path.join(project, 'memory');
+  fs.mkdirSync(store);
+  const big = path.join(store, 'big.md');
+  fs.writeFileSync(big, 'a'.repeat(MAX_DOC_BYTES + 1));
+  const r = applyPlan({ projectRoot: project, roots: [store], sessionId: 't-stage', actions: [{ type: 'rewrite', path: big, content: 'b' }] }, { projectRoot: project, home });
+  assert.equal(r.ok, false, 'the plan is refused');
+  assert.match(String(r.error), /cannot read .* to stage it/, `error: ${String(r.error).slice(0, 160)}`);
+  assert.equal(fs.statSync(big).size, MAX_DOC_BYTES + 1, 'the target is byte-length-identical');
 });
