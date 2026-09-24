@@ -21,6 +21,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -106,16 +107,29 @@ function splitArgs(s) {
 // the class this walk must survive even if a future fixture breaks the
 // naming convention) is skipped, never a crash — a file that disappeared
 // mid-scan was never a stable product source to begin with.
-function collectCallSites() {
-  const sites = [];
-  for (const f of fs.readdirSync(LIB).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs') && !n.startsWith('.'))) {
+// CWK-120 row 3: the ONE guarded walk of the class-B lib's product sources, shared by EVERY walk in this file. It used to be
+// inlined in collectCallSites alone, so the "ONE definition" walk further down read the same live directory with neither guard
+// and could abort the whole file on the race above (a concurrent config-load.test.mjs cleanup makes `readFileSync` throw
+// ENOENT outside any handler, and every cell in the file stops counting). `dir` and `read` are parameters so the guards can be
+// pinned directly, on a fixture directory and an injected reader, without racing a real process.
+function libProductSources(dir = LIB, read = fs.readFileSync) {
+  const out = [];
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs') && !n.startsWith('.'))) {
     let src;
     try {
-      src = fs.readFileSync(path.join(LIB, f), 'utf8');
+      src = read(path.join(dir, f), 'utf8');
     } catch (e) {
       if (e && e.code === 'ENOENT') continue; // vanished between readdir and read — not a stable source, skip it
       throw e;
     }
+    out.push({ f, src });
+  }
+  return out;
+}
+
+function collectCallSites() {
+  const sites = [];
+  for (const { f, src } of libProductSources()) {
     const lines = src.split(/\r?\n/);
     lines.forEach((line, i) => {
       if (/function\s+(is)?[cC]ontainedIn\s*\(/.test(line)) return; // the definition itself
@@ -182,12 +196,34 @@ test('CONFORMANCE: both archiveDir exemptions are still exactly two, and still w
 
 test('CONFORMANCE: containedIn has ONE definition in the class-B engine (the apply.mjs duplicate stays deleted)', () => {
   const defs = [];
-  for (const f of fs.readdirSync(LIB).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs'))) {
-    const src = fs.readFileSync(path.join(LIB, f), 'utf8');
+  for (const { f, src } of libProductSources()) {
     if (/^\s*(export\s+)?function\s+containedIn\s*\(/m.test(src)) defs.push(f);
   }
   // explode.mjs's `isContainedIn` is the class-A twin — a NAMED divergence (it may
   // not import this chain) pinned BEHAVIOURALLY by twin-pin.test.mjs, so it is
   // deliberately not counted here and needs no shared primitive.
   assert.deepStrictEqual(defs, ['class-b.mjs'], `containedIn must have exactly one definition; found in: ${defs.join(', ')}`);
+});
+
+// CWK-120 row 3: the shared walk's two guards, pinned on a fixture directory and an injected reader (no real race needed).
+test('CWK-120 row 3: libProductSources skips test files and dot-prefixed per-pid fixtures, and reads only the product sources', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-rootprov-'));
+  try {
+    for (const n of ['a.mjs', 'b.mjs', 'b.test.mjs', '.cw-reexport-hop-123.mjs', 'notes.md']) fs.writeFileSync(path.join(dir, n), `// ${n}`);
+    assert.deepStrictEqual(libProductSources(dir).map((s) => s.f).sort(), ['a.mjs', 'b.mjs']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CWK-120 row 3: a source that VANISHES between readdir and read is skipped, never a crash -- any other read error still propagates', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-rootprov-'));
+  try {
+    for (const n of ['a.mjs', 'gone.mjs', 'z.mjs']) fs.writeFileSync(path.join(dir, n), `// ${n}`);
+    const vanishing = (p, enc) => {
+      if (path.basename(p) === 'gone.mjs') { const e = new Error('ENOENT: vanished'); e.code = 'ENOENT'; throw e; }
+      return fs.readFileSync(p, enc);
+    };
+    assert.deepStrictEqual(libProductSources(dir, vanishing).map((s) => s.f).sort(), ['a.mjs', 'z.mjs'], 'the vanished entry is skipped, its neighbours are still read');
+    const denied = () => { const e = new Error('EACCES: denied'); e.code = 'EACCES'; throw e; };
+    assert.throws(() => libProductSources(dir, denied), (e) => e.code === 'EACCES', 'only ENOENT is forgiven: a real read failure is a real failure');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

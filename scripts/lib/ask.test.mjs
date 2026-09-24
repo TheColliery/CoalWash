@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { ANSWER_FIRST_REMINDER, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory, seatbeltAdvisory } from './ask.mjs';
+import { ANSWER_FIRST_REMINDER, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory, seatbeltAdvisory, digGaugeOffer } from './ask.mjs';
 
 // (0m: the old `ceilingAsk` template and its tests died with the forceMode
 // knob — force at FULL is unconditional, so no suppressed/disarmed-FULL ask
@@ -10,6 +10,19 @@ test('every template embeds the answer-first reminder verbatim (queue item 0)', 
   assert.ok(forceAuto({ fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
   assert.ok(obeseAutoQuick({ fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
   assert.ok(wizardEscalation({ fatTokens: 100 }).includes(ANSWER_FIRST_REMINDER));
+  // CWK-120 row 17: digGaugeOffer (cli.mjs calls it) is a fourth live surface that embeds the reminder; the test never imported it.
+  assert.ok(digGaugeOffer({ files: 3, totalTok: 90000, largestTok: 12000, tripped: ['total'] }).includes(ANSWER_FIRST_REMINDER));
+});
+
+// CWK-120 row 17: the malformed-input pin the other builders already have (the test just below), for the one builder it left out.
+test('digGaugeOffer: a missing or malformed verdict degrades to zeros and a "crush" reason, never artifacts', () => {
+  for (const bad of [undefined, null, {}, { files: 'x', tripped: 'total' }]) {
+    const r = digGaugeOffer(bad);
+    assert.ok(r.includes('dig-gauge: CRUSHING (crush)'), `${JSON.stringify(bad)}: the reason falls back to "crush": ${r}`);
+    assert.ok(r.includes('reading these 0 candidate(s) pulls ~0 tok'), `${JSON.stringify(bad)}: the figures fall back to 0: ${r}`);
+    assert.ok(!r.includes('undefined') && !r.includes('NaN'), `${JSON.stringify(bad)}: no artifacts: ${r}`);
+  }
+  assert.ok(digGaugeOffer({ files: 2, tripped: ['total', 'single'] }).includes('(total+single)'), 'a real verdict keeps its own reasons');
 });
 
 test('forceAuto (economic): break-even headline, no question-tool wording (force never asks), non-optional named, once-per-crossing truth', () => {

@@ -370,7 +370,12 @@ test('resolveEstateHorizon rung 6: keyResolvedNow is a plain OUTPUT — the func
     const h2 = resolveEstateHorizon({ cwd: proj, home });
     assert.strictEqual(h1.keyResolvedNow, true);
     assert.deepStrictEqual(h1, h2, 'purity: no hidden state mutated by the first call changes the second');
-    assert.strictEqual(fs.existsSync(path.join(home, 'coal')), false, 'estate.mjs itself never writes -- no coal/ dir appears from this call alone');
+    // CWK-120 row 13: the marker lives under claudeBaseDir(home) = <home>/.claude, at coal/coalwash/estate-cleanup-key.json
+    // (estate-archive.mjs). This assertion used to look at <home>/coal, a path NO code creates, so it passed even with
+    // resolveEstateHorizon persisting the marker (mutation-proven: estate.mjs writing that dir read GREEN against the old
+    // line). It now names the real location, and the marker file itself.
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude', 'coal')), false, 'estate.mjs itself never writes -- no <home>/.claude/coal dir appears from this call alone');
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude', 'coal', 'coalwash', 'estate-cleanup-key.json')), false, 'and no marker file');
   } finally { clean(home, proj); }
 });
 
