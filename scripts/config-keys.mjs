@@ -162,12 +162,24 @@ export function dottedKeys(text, containers) {
   return out;
 }
 
-/** L3: a config-context line -- names .coalwash.json, or sits under a "Configure" heading. */
+/**
+ * L3: a config-context line -- names .coalwash.json, or sits under a "Configure" heading.
+ * The section ends at the next heading of ANY ATX level (CWK-120 row 10: `#{2,4}` let an H1/H5/H6
+ * leave the section open to the end of the file), but a `# comment` inside a fenced code block is
+ * not a heading, so the fence state is tracked (CommonMark: the closer is the same character, at
+ * least as long as the opener). Matching all six levels WITHOUT that would end the section at the
+ * first shell comment in a Configure snippet and silently stop checking every claim after it.
+ */
 export function configProseKeys(text) {
   const out = new Set();
   let inCfg = false;
+  let fence = null; // { ch, len } while inside a fenced block
   for (const line of text.split(/\r?\n/)) {
-    if (/^#{2,4}\s/.test(line)) inCfg = /configure/i.test(line);
+    const f = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (f) {
+      if (!fence) fence = { ch: f[1][0], len: f[1].length };
+      else if (f[1][0] === fence.ch && f[1].length >= fence.len && f[2].trim() === '') fence = null;
+    } else if (!fence && /^ {0,3}#{1,6}(\s|$)/.test(line)) inCfg = /configure/i.test(line);
     if (!inCfg && !line.includes('.coalwash.json')) continue;
     for (const m of line.matchAll(new RegExp(BACKTICKED, 'g'))) addIdent(out, m[1]);
   }
