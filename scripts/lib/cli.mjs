@@ -79,7 +79,7 @@ import {
 import { envelopeFor } from './retier.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './tailings.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, binItemOutcome } from './tailings.mjs';
 import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
 import { loadMergedConfig, findProjectRoot, projectConfigResolution, discoverIgnoredConfigs } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
@@ -279,14 +279,18 @@ export function gaugeLine(g) {
 // same reason, not a re-measured string length.
 export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   const projectRoot = findProjectRoot(cwd, home);
+  let refused = null;
   for (const bin of [FAT_BIN_NAME, STORE_OLD_NAME]) {
-    const content = restoreFromBin(projectRoot, bin, id);
-    if (content !== null) {
+    const r = binItemOutcome(projectRoot, bin, id);
+    if (r.buf) {
       const item = listBin(projectRoot, bin).find((i) => i && i.id === id) || {};
-      return { found: true, bin, id, original: item.original || null, bytes: content.length, content };
+      return { found: true, bin, id, original: item.original || null, bytes: r.buf.length, content: r.buf };
     }
+    // CWK-137: an item that is THERE but refused (over the read bound, not a regular
+    // file) is not "not found" -- say which, so the user knows to copy it by hand.
+    if (r.why && r.why !== 'absent' && !refused) refused = { bin, why: r.why };
   }
-  return { found: false, id };
+  return refused ? { found: false, id, refused } : { found: false, id };
 }
 
 const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>] | config-status [--json]';
@@ -384,7 +388,8 @@ function main() {
     try {
       const r = restore({ id });
       if (!r.found) {
-        console.error(`restore: id '${id}' not found in ${FAT_BIN_NAME} or ${STORE_OLD_NAME}`);
+        if (r.refused) console.error(`restore: '${id}' is in ${r.refused.bin} but was NOT read (${r.refused.why}${r.refused.why === 'over-bound' ? ': larger than the read bound' : ''}) -- nothing was written; copy it by hand from .claude/coalwash/${r.refused.bin}/${id}`);
+        else console.error(`restore: id '${id}' not found in ${FAT_BIN_NAME} or ${STORE_OLD_NAME}`);
         process.exitCode = 1;
         return;
       }

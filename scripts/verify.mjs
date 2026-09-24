@@ -26,7 +26,7 @@ const LIBS = [
   'class-b.mjs', 'caliper.mjs', 'fidelity-gate.mjs', 'apply.mjs', 'keeps.mjs', 'receipt.mjs',
   'retention.mjs', 'cli.mjs', 'ask.mjs', 'tailings.mjs', 'broom.mjs', 'wizard.mjs', 'parcel.mjs', 'writeguard.mjs',
   'anchor-diff.mjs', 'estate.mjs', 'estate-archive.mjs', 'retier.mjs', 'dig-gauge.mjs',
-  'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs',
+  'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs', 'repo-fs.mjs',
 ];
 
 // LIBS is hand-listed, so it silently rots: a new lib nobody adds here is never

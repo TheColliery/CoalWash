@@ -44,7 +44,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape } from './config-load.mjs';
+import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape, repoEntryKind, repoReadOutcome, readRepoBytesBounded, MAX_DOC_BYTES } from './config-load.mjs';
 
 const IMPORT_DEPTH_MAX = 5; // CC @import recursion cap (docs: max 5 hops)
 const RULES_FILE_CAP = 500; // defensive cap on a runaway rules tree
@@ -485,8 +485,17 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       const { file: f, depth } = queue.shift();
       const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true, upTree });
       if (!phys || depth >= IMPORT_DEPTH_MAX) continue;
+      // CWK-137: BOUNDED and kind-gated. `phys` is already contained (add() above), so
+      // no root here -- but an @import may name ANY file under home (`@~/big.iso`), and a
+      // plain readFileSync read it whole. Over MAX_DOC_BYTES, or not a regular file, it is
+      // refused and flagged below exactly like an unreadable one -- its own bytes are
+      // still counted from stat, its @import closure is not.
       let text;
-      try { text = fs.readFileSync(phys, 'utf8'); } catch (err) {
+      try {
+        const r = repoReadOutcome(phys, null, MAX_DOC_BYTES);
+        if (!r.buf) throw Object.assign(new Error(r.why), { code: r.code || r.why.toUpperCase() });
+        text = r.buf.toString('utf8');
+      } catch (err) {
         // r32, THE (a) FORK. This `continue` dropped the whole @import closure
         // of a governance file whose CONTENT could not be read, with flags: [].
         // Pre-existing since cec4a4d (beta.1); measured in r31 at 4 entries -> 2.
@@ -620,7 +629,16 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     // directories were queued and never visited, so their contents are missing.
     if (stack.length) flags.push(`rules tree capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP}, scope ${scope}) — ${stack.length} director${stack.length === 1 ? 'y' : 'ies'} left UNVISITED, their contents are NOT counted`);
   };
-  if (projPhys) walkRulesTree(path.join(projPhys, '.claude', 'rules'), 'project');
+  // CWK-137: the PROJECT walk root must itself be a directory inside the project. A
+  // cloned repo can commit `.claude/rules` as a link (to `/`, to home): readdirSync
+  // follows a ROOT link, so the walk -- and every add() it feeds -- would start in the
+  // link's target. The Dirent rule below only protects entries INSIDE the root.
+  // Absent stays silent (the ordinary case); present-but-refused says so.
+  if (projPhys) {
+    const rulesRoot = path.join(projPhys, '.claude', 'rules');
+    if (repoEntryKind(rulesRoot, projPhys) === 'dir') walkRulesTree(rulesRoot, 'project');
+    else if (pathExists(rulesRoot)) flags.push('refused path (rules tree, scope project): .claude/rules — not a directory inside the project (a link out of it, or not a directory) — its contents are NOT counted');
+  }
   if (homePhys) walkRulesTree(path.join(claudeBaseDir(home), 'rules'), 'global');
 
   // 4. Memory store: ~/.claude/projects/<slug>/memory/ — MEMORY.md is the
@@ -711,7 +729,12 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
         for (const g of glob) {
           if (p.entry.bytes !== g.entry.bytes) continue; // cheap pre-check
           let same = false;
-          try { same = Buffer.compare(fs.readFileSync(p.entry.path), fs.readFileSync(g.entry.path)) === 0; } catch { same = false; }
+          try {
+            // CWK-137: bounded bytes, both sides; a refusal is simply not-the-same.
+            const pb = readRepoBytesBounded(p.entry.path, null, MAX_DOC_BYTES);
+            const gb = readRepoBytesBounded(g.entry.path, null, MAX_DOC_BYTES);
+            same = !!pb && !!gb && Buffer.compare(pb, gb) === 0;
+          } catch { same = false; }
           if (same) { p.entry.managed = true; g.entry.managed = true; }
         }
       }
@@ -792,6 +815,12 @@ export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.ho
   }
   const roots = [homePhys, projPhys].filter(Boolean);
   const agentBase = path.join(projPhys, '.claude', 'agent-memory');
+  // CWK-137: the same walk-root rule as the rules tree -- a cloned repo's
+  // `.claude/agent-memory` link would make every directory in its target a "role".
+  if (pathExists(agentBase) && repoEntryKind(agentBase, projPhys) !== 'dir') {
+    flags.push('refused path (role stores): .claude/agent-memory — not a directory inside the project (a link out of it, or not a directory) — its contents are NOT counted');
+    return [];
+  }
   let roles = [];
   try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch (err) {
     const code = (err && err.code) || 'UNKNOWN';

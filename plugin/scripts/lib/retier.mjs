@@ -49,6 +49,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
 import { tokensEst } from './caliper.mjs';
+import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
@@ -160,7 +161,9 @@ export function assertTreatmentAllowed(type, treatment) {
 // ---------------------------------------------------------------------------
 
 function readOrNull(p) {
-  try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
+  // CWK-137: bounded and kind-gated -- a store under <project>/.claude/agent-memory is
+  // repo-derived. The path is contained by the caller; a refusal reads as unreadable.
+  return readRepoFileBounded(p, null, MAX_DOC_BYTES);
 }
 
 // A STORE = a directory holding a MEMORY.md index: the CC main memory dir

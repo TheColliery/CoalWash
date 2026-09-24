@@ -33,6 +33,7 @@
 // strictly READ-ONLY (reads + stats, zero writes of any kind).
 import fs from 'node:fs';
 import { physicalOrNull, containedIn } from './class-b.mjs';
+import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { tokensEstFromBytes } from './caliper.mjs';
 
 // Head-compare window: the agent quotes roughly the first ~200 chars of the
@@ -100,8 +101,9 @@ export function verifyParcelCandidates(candidates, { home, projectRoot } = {}) {
         rejected.push({ path: c.path, reason: 'not a readable file' });
         continue;
       }
-      let raw;
-      try { raw = fs.readFileSync(phys, 'utf8'); } catch {
+      // CWK-137: a PREFIX read, bounded and kind-gated -- only the head is compared.
+      let raw = readRepoFileBounded(phys, null, MAX_DOC_BYTES, true);
+      if (raw === null) {
         rejected.push({ path: c.path, reason: 'exists but unreadable' });
         continue;
       }

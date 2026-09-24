@@ -447,3 +447,26 @@ test('r34c C: invoked through a directory junction, configure.mjs still runs (--
   assert.strictEqual(r.status, 0, r.stderr);
   assert.match(r.stdout, /CoalWash Configurator Utility/, `through the junction: output ${JSON.stringify(r.stdout + r.stderr)}`);
 });
+
+// CWK-137: the project write goes through writeRepoFile, contained in the project root.
+// The project's `.claude/coal` directory is a link to a directory OUTSIDE the project;
+// the write is refused loudly and the outside directory keeps exactly its one file.
+test('CWK-137: a project config write whose directory links OUTSIDE the project is REFUSED, and the outside file is untouched', (t) => {
+  const sb = sandbox(t);
+  const outside = path.join(sb.root, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'keep.txt'), 'keep me\n');
+  fs.mkdirSync(path.join(sb.proj, '.claude'));
+  try {
+    fs.symlinkSync(outside, path.join(sb.proj, '.claude', 'coal'), process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (e) {
+    return t.skip(`cannot create a directory link on this host (${e.code || e.message})`);
+  }
+  const before = sha(path.join(outside, 'keep.txt'));
+  const r = run(sb, ['--fileMaxSizeKb', '31']);
+  assert.strictEqual(r.status, 1, `exit ${r.status}: ${r.stderr}`);
+  assert.match(r.stderr, /\[refused\]/, 'the refusal is loud');
+  assert.match(r.stderr, /nothing was written/);
+  assert.deepStrictEqual(fs.readdirSync(outside), ['keep.txt'], 'no config and no temp file lands in the outside directory');
+  assert.strictEqual(sha(path.join(outside, 'keep.txt')), before);
+});

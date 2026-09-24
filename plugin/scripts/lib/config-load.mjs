@@ -424,6 +424,118 @@ export function physicalDir(p) {
   return canonicalOrNull(p) ?? path.resolve(p);
 }
 
+// CWK-137 -- BOUNDED READS OF REPO-DERIVED PATHS. The rules are house law (main-
+// ruled), mirrored from CoalMine v3.20.2 (`scripts/lib/repo-fs.mjs`): same NAMES,
+// same CONSTANTS. They live HERE and not in a module of their own because every
+// primitive they need (canonicalOrNull, pathWithin) lives here, and this file is
+// the one every other lib module already imports -- a separate module importing
+// this one while this one imported it back would be an import cycle.
+//
+// A cloned repository is untrusted input: a path that comes out of it can be a
+// symlink, a junction, a FIFO or a device. A plain readFileSync trusts all of it --
+// a FIFO with no writer hangs the hook, `/dev/zero` or a multi-GB file an @import
+// names allocates without bound, an escaping link reads outside the project.
+//   READ -- lstat; a regular file proceeds; a symlink proceeds only when its target
+//           is a regular file and, with a `root`, its canonical path lies inside the
+//           root's canonical path (canonicalOrNull + pathWithin, the room's one
+//           containment primitive); anything else (FIFO, device, socket, directory,
+//           an escaping or dangling link) is refused BEFORE open. Then open with
+//           O_NONBLOCK where the platform has it, fstat the fd, and re-check regular +
+//           size ON THE FD. Over the bound = SKIPPED, never truncated-and-parsed.
+//   `root = null` = no containment, for the user's OWN files (the global config, a
+//   path discovery already contained against home): the kind gate and the bound
+//   still apply.
+//
+// Bounds, measured on this box 2026-09-24 (scratchpad/r8/measure.mjs over every repo
+// under source/repos plus ~/.claude, 52,104 files): the largest real config is 9,308 B
+// (the shipped, fully commented template), keeps.json 47,380 B, a governance/memory
+// markdown 338,159 B, and this room's own MEMORY.md peaked at 776,264 B before its cap
+// pass (2026-09-09). Headroom: ~112x for config, ~5x over the worst memory file this
+// room has ever produced. A bound a real file crosses silently skips that file, so
+// the doc bound errs wide.
+export const MAX_CONFIG_BYTES = 1024 * 1024;
+export const MAX_DOC_BYTES = 4 * 1024 * 1024;
+
+// O_NONBLOCK makes open() return at once on a FIFO swapped in after the lstat (the
+// path-vs-fd gap); fstat then rejects it. Windows has no O_NONBLOCK (and a repo cannot
+// plant a FIFO there), so it degrades to a plain read-only open.
+const REPO_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0);
+
+// { kind: 'file' | 'dir' } or { why, code? }, decided WITHOUT opening the path.
+// `why` names the refusal so a caller that REPORTS it can say which one it was:
+// absent · not-regular (FIFO/device/socket) · outside-root · root-unresolvable ·
+// dangling · unreadable.
+function repoEntryVerdict(p, root) {
+  let lst;
+  try { lst = fs.lstatSync(p); } catch (e) {
+    const code = e && e.code;
+    return { why: code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'unreadable', code };
+  }
+  if (!lst.isSymbolicLink() && !lst.isFile() && !lst.isDirectory()) return { why: 'not-regular' };
+  if (root != null) {
+    const rootPhys = canonicalOrNull(root);
+    const pPhys = canonicalOrNull(p);
+    if (!pPhys) return { why: lst.isSymbolicLink() ? 'dangling' : 'unreadable' };
+    if (!rootPhys) return { why: 'root-unresolvable' }; // the ROOT could not be canonicalized (UNC, a device path, a mapped drive): not the path's fault
+    if (!pathWithin(pPhys, rootPhys)) return { why: 'outside-root' };
+  }
+  let st = lst;
+  if (lst.isSymbolicLink()) {
+    try { st = fs.statSync(p); } catch (e) { return { why: 'dangling', code: e && e.code }; }
+  }
+  if (st.isFile()) return { kind: 'file' };
+  if (st.isDirectory()) return { kind: 'dir' };
+  return { why: 'not-regular' };
+}
+
+// 'file' | 'dir' | null (CoalMine's name and shape).
+export function repoEntryKind(p, root) {
+  return repoEntryVerdict(p, root).kind || null;
+}
+
+// The bounded read with its REASON: { buf } or { why, code?, size? }, where `why` adds
+// `directory` and `over-bound` to repoEntryVerdict's set. `prefixOnly` reads the first
+// maxBytes of a larger file instead of refusing it -- only for a caller that wants a
+// sample, never for one that parses the whole.
+export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
+  const v = repoEntryVerdict(file, root);
+  if (!v.kind) return v;
+  if (v.kind === 'dir') return { why: 'directory' };
+  let fd;
+  try {
+    fd = fs.openSync(file, REPO_READ_FLAGS);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { why: st.isDirectory() ? 'directory' : 'not-regular' };
+    if (st.size > maxBytes && !prefixOnly) return { why: 'over-bound', size: st.size };
+    const want = Math.min(st.size, maxBytes);
+    const buf = Buffer.alloc(want);
+    let got = 0;
+    while (got < want) {
+      const n = fs.readSync(fd, buf, got, want - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    return { buf: got === want ? buf : buf.subarray(0, got) };
+  } catch (e) {
+    const code = e && e.code;
+    return { why: code === 'EISDIR' ? 'directory' : 'unreadable', code };
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+// The same read, as raw bytes or null (CoalMine's name and shape) -- for a caller that
+// hashes or compares bytes (a utf8 round trip changes the digest of non-UTF-8 input).
+export function readRepoBytesBounded(file, root, maxBytes, prefixOnly = false) {
+  return repoReadOutcome(file, root, maxBytes, prefixOnly).buf || null;
+}
+
+// The file's text, or null (absent, refused, over the bound, unreadable).
+export function readRepoFileBounded(file, root, maxBytes, prefixOnly = false) {
+  const buf = readRepoBytesBounded(file, root, maxBytes, prefixOnly);
+  return buf === null ? null : buf.toString('utf8');
+}
+
 // Project-root markers, in the order a project actually declares itself.
 // `CLAUDE.md` = the GOVERNANCE root — the same up-tree governance walk
 // discoverClassB §2 already performs, added here because it was the missing
@@ -681,16 +793,24 @@ function decodeConfigText(buf) {
 // is true only when `pathExists` confirms the file is there and reading it
 // still failed; callers decide what "unknown" means for their own keys
 // (mergeSafety below assumes the SAFEST stance, never the schema default).
-function readJsonc(file) {
-  const existed = pathExists(file);
+// CWK-137: the read is BOUNDED (repoReadOutcome, MAX_CONFIG_BYTES) and, for a
+// repo-derived file, CONTAINED in `root` -- a config path a cloned repo planted as a
+// link to /dev/zero, a FIFO or a file outside the project is refused before open
+// instead of hanging or exhausting the hook. A refusal on an EXISTING path is
+// `unreadable`, exactly as a failed read always was, so mergeSafety's fail-safe
+// stance is unchanged; `why` names which refusal it was.
+function readJsonc(file, root = null) {
+  const r = repoReadOutcome(file, root, MAX_CONFIG_BYTES);
+  if (r.why === 'absent') return { data: {}, unreadable: false };
+  if (!r.buf) return { data: {}, unreadable: true, why: r.why, code: r.code };
   try {
-    let content = decodeConfigText(fs.readFileSync(file)); // raw bytes -> encoding-sniffed text
+    let content = decodeConfigText(r.buf); // raw bytes -> encoding-sniffed text
     if (content.charCodeAt(0) === 0xfeff) content = content.slice(1); // strip any residual BOM char
     const parsed = parseJsonc(content); // proto-pollution-guarded parse
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return { data: parsed, unreadable: false };
-    return { data: {}, unreadable: existed }; // wrong shape (array/null/scalar) on an EXISTING file
+    return { data: {}, unreadable: true }; // wrong shape (array/null/scalar) on an EXISTING file
   } catch {
-    return { data: {}, unreadable: existed };
+    return { data: {}, unreadable: true }; // it exists (a buffer came back); the parse failed
   }
 }
 
@@ -748,8 +868,9 @@ function settingsCascadeCandidates({ cwd = process.cwd(), home = os.homedir() } 
   let projectRoot = null;
   try { projectRoot = findProjectRoot(cwd, home); } catch { /* no project root -> skip local/project tiers */ }
   if (projectRoot) {
-    candidates.push({ source: 'local', file: path.join(projectRoot, '.claude', 'settings.local.json') });
-    candidates.push({ source: 'project', file: path.join(projectRoot, '.claude', 'settings.json') });
+    // CWK-137: these two are repo-derived -- read contained in the project root.
+    candidates.push({ source: 'local', file: path.join(projectRoot, '.claude', 'settings.local.json'), root: projectRoot });
+    candidates.push({ source: 'project', file: path.join(projectRoot, '.claude', 'settings.json'), root: projectRoot });
   }
   candidates.push({ source: 'user', file: path.join(claudeBaseDir(home), 'settings.json') });
   return candidates;
@@ -768,8 +889,8 @@ function saneCleanupDays(v) {
 }
 
 export function readCleanupPeriodDays({ cwd = process.cwd(), home = os.homedir() } = {}) {
-  for (const { source, file } of settingsCascadeCandidates({ cwd, home })) {
-    const { data, unreadable } = readJsonc(file);
+  for (const { source, file, root = null } of settingsCascadeCandidates({ cwd, home })) {
+    const { data, unreadable } = readJsonc(file, root);
     if (unreadable) continue; // present but broken -> try the next tier, never guess
     const v = data && data.cleanupPeriodDays;
     if (saneCleanupDays(v)) return { days: v, source, file };
@@ -786,8 +907,8 @@ export function readCleanupPeriodDays({ cwd = process.cwd(), home = os.homedir()
 export function discoverRetentionCandidateKeys({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const RETENTION_KEY_RE = /cleanup|retention|prune|expire|purge/i;
   const found = [];
-  for (const { source, file } of settingsCascadeCandidates({ cwd, home })) {
-    const { data, unreadable } = readJsonc(file);
+  for (const { source, file, root = null } of settingsCascadeCandidates({ cwd, home })) {
+    const { data, unreadable } = readJsonc(file, root);
     if (unreadable || !data || typeof data !== 'object') continue;
     for (const key of Object.keys(data)) {
       if (key === 'cleanupPeriodDays') continue; // the known key -- not a "candidate"
@@ -1006,7 +1127,8 @@ export function mergeSafety(global, project, { globalUnreadable = false, project
 }
 
 export function loadMergedConfig({ cwd = process.cwd(), home = os.homedir() } = {}) {
-  const g = readJsonc(globalConfigPath(home));
-  const p = readJsonc(projectConfigPath(cwd, home));
+  const g = readJsonc(globalConfigPath(home)); // the user's own file: bounded, never contained
+  // CWK-137: the project config is repo-derived -- contained in its project root.
+  const p = readJsonc(projectConfigPath(cwd, home), findProjectRoot(cwd, home));
   return mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable });
 }

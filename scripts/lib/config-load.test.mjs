@@ -1278,8 +1278,9 @@ test('discoverIgnoredConfigs: no stray files anywhere -> empty array', () => {
 // passing it leaves no marker walk behind at all.
 test('discoverIgnoredConfigs: a PASSED root is what the probe reports under -- not one it re-derives from cwd', () => {
   const { home, proj } = sandbox();
-  const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-otherroot-')));
+  let other; // allocated INSIDE the try: a throw here must still reach the cleanup of home/proj
   try {
+    other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-otherroot-')));
     fs.mkdirSync(path.join(proj, '.git'));
     fs.mkdirSync(path.join(other, '.git'));
     // the stray sits under OTHER, never under the root `cwd` would resolve to
@@ -1287,7 +1288,7 @@ test('discoverIgnoredConfigs: a PASSED root is what the probe reports under -- n
     assert.deepStrictEqual(discoverIgnoredConfigs(proj, home), [], 'control: cwd resolves to proj, which has no stray');
     assert.deepStrictEqual(discoverIgnoredConfigs(proj, home, other), [path.join(other, '.agents', '.coalwash.json')],
       'the third argument must be the root the probe actually uses; ignoring it silently re-derives a different one');
-  } finally { clean(home, proj, other); }
+  } finally { clean(...[home, proj, other].filter(Boolean)); }
 });
 
 test('discoverIgnoredConfigs: passing the resolved root costs ZERO marker-walk calls -- the probe adds only its own existence probes', () => {
@@ -1305,7 +1306,7 @@ test('discoverIgnoredConfigs: passing the resolved root costs ZERO marker-walk c
     const counts = {};
     const orig = {};
     const origRealpath = fs.realpathSync;
-    const origNative = fs.realpathSync.native;
+    const origNative = fs.realpathSync.native; // captured by the wrapper's `.native` below
     counts.realpathSync = 0;
     for (const k of KEYS) { orig[k] = fs[k]; counts[k] = 0; }
     try {
@@ -1316,8 +1317,8 @@ test('discoverIgnoredConfigs: passing the resolved root costs ZERO marker-walk c
       discoverIgnoredConfigs(deep, home, root);
     } finally {
       for (const k of KEYS) fs[k] = orig[k];
-      origRealpath.native = origNative;
-      fs.realpathSync = origRealpath;
+      fs.realpathSync = origRealpath; // restores .native too: the wrapper above never mutated the original's .native
+      // (the dead `origRealpath.native = origNative` that stood here was a no-op -- UMB-133 carry-over)
     }
 
     assert.strictEqual(counts.existsSync, 0, `a marker walk still ran (${counts.existsSync} existsSync); the passed root must short-circuit it entirely`);

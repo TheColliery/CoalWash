@@ -80,7 +80,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig } from './lib/config-schema.mjs';
 import { parseJsonc } from './lib/jsonc.mjs';
-import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig } from './lib/config-load.mjs';
+import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig, findProjectRoot, repoReadOutcome, MAX_CONFIG_BYTES } from './lib/config-load.mjs';
+import { writeRepoFile, RepoWriteRefused } from './lib/repo-fs.mjs';
 
 // Prototype-pollution guard. `parseJsonc` already drops these at PARSE (so a
 // poisoned file on disk cannot reach us), and the flag map is built from the
@@ -346,11 +347,21 @@ function main() {
   // U+FEFF literal: a raw BOM pasted into source gets converted by the tool
   // layer, a hazard this room has paid for more than once).
   let readErr = null;
-  try {
-    let content = fs.readFileSync(cfgPath, 'utf8');
+  // CWK-137: the project config is REPO-DERIVED -- read bounded, kind-gated and
+  // contained in the project root (a link to ~/.bashrc, a FIFO, /dev/zero or a file
+  // outside the project is refused before open). The --global file is the user's own:
+  // a dotfile manager may link it anywhere, so it is bounded and kind-gated but not
+  // contained. A refusal on a path that EXISTS lands in the unreadable branch below,
+  // exactly like a failed read; `absent` keeps the ENOENT meaning it always had.
+  const projectRoot = isGlobal ? null : findProjectRoot(process.cwd());
+  const got = repoReadOutcome(cfgPath, projectRoot, MAX_CONFIG_BYTES);
+  if (got.buf) {
+    let content = got.buf.toString('utf8');
     if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
     raw = content;
-  } catch (err) { readErr = err; }
+  } else {
+    readErr = { code: got.why === 'absent' ? 'ENOENT' : (got.code || got.why) };
+  }
   // F-R32-2: AN EMPTY CATCH HERE MADE AN UNREADABLE FILE INDISTINGUISHABLE FROM
   // AN ABSENT ONE, and the difference is the user's whole config. On an
   // EPERM/EACCES read of a file that IS there, `raw` stayed null, `cfg` stayed
@@ -507,10 +518,20 @@ function main() {
   // own wording), and the sharpest: the earlier one mis-described a mechanism
   // that fires, this one named one that cannot.
   try {
-    fs.mkdirSync(path.dirname(writePath), { recursive: true });
-    fs.writeFileSync(writePath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    if (isGlobal) {
+      // The user's own file, written as before (a dotfile manager's link is honoured).
+      fs.mkdirSync(path.dirname(writePath), { recursive: true });
+      fs.writeFileSync(writePath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    } else {
+      // CWK-137: contained in the project root, never through a link (temp + rename).
+      writeRepoFile(writePath, JSON.stringify(next, null, 2) + '\n', projectRoot);
+    }
   } catch (e) {
-    console.error(`Error: Failed to write to config file: ${e.message}`);
+    if (e instanceof RepoWriteRefused) {
+      console.error(`[refused] ${writePath}: ${e.message} -- nothing was written. Replace it with a regular file inside the project (or remove it) and re-run.`);
+    } else {
+      console.error(`Error: Failed to write to config file: ${e.message}`);
+    }
     process.exitCode = 1;
     return;
   }

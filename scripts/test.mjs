@@ -43,6 +43,7 @@ const TESTS = [
   'scripts/lib/twin-pin.test.mjs',
   'scripts/lib/fixture-canonical.test.mjs',
   'scripts/lib/root-provenance.test.mjs',
+  'scripts/lib/repo-fs.test.mjs',
   'scripts/build-plugin.test.mjs',
   'scripts/verify.test.mjs',
   'scripts/config-keys.test.mjs',
@@ -88,7 +89,11 @@ function main() {
     return;
   }
 
-  const r = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: repo, stdio: 'inherit' });
+  // COALWASH_TEST_CONCURRENCY=<n> (opt-in, unset = unchanged): run n file-children at a time instead of node's
+  // default of one per core. A seat that must leave the host breathing sets 1 (git passes the env on to the
+  // pre-commit / pre-push hooks that call this runner). Nothing tests this line; it is read, not measured.
+  const conc = /^[1-9]\d*$/.test(process.env.COALWASH_TEST_CONCURRENCY || '') ? [`--test-concurrency=${process.env.COALWASH_TEST_CONCURRENCY}`] : [];
+  const r = spawnSync(process.execPath, ['--test', ...conc, ...TESTS], { cwd: repo, stdio: 'inherit' });
   process.exitCode = r.status ?? 1;
 }
 main();

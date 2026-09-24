@@ -842,6 +842,7 @@ test('statOnlyFootprintBytes: sums current byte sizes for existing paths; a miss
 test('WARP-HOLE STRUCTURAL GATE: statOnlyFootprintBytes opens ZERO file content (stat only) while the full discoverClassB+measureEntries re-gauge DOES read content — the machine-independent reason the full pass is delta-gated', () => {
   const { home, proj } = sandbox();
   const realReadFileSync = fs.readFileSync;
+  const realReadSync = fs.readSync;
   try {
     // Hermetic fixture store — never the live repo (its class-B files are
     // gitignored and absent on CI). A project-level CLAUDE.md is an
@@ -860,6 +861,10 @@ test('WARP-HOLE STRUCTURAL GATE: statOnlyFootprintBytes opens ZERO file content 
     // own calls. The wrapper still delegates — nothing can break under it.
     let contentReads = 0;
     fs.readFileSync = (...args) => { contentReads++; return realReadFileSync(...args); };
+    // CWK-137: content is now read through the bounded open/fstat/readSync reader, so
+    // readSync is a content read too. Counting BOTH primitives widens what the gate
+    // observes; the stat-only half must still see zero of either.
+    fs.readSync = (...args) => { contentReads++; return realReadSync(...args); };
 
     // The CHEAP half: the stat-only gate must produce the correct byte total
     // WITHOUT a single content read — that absence is the structural core of
@@ -879,6 +884,7 @@ test('WARP-HOLE STRUCTURAL GATE: statOnlyFootprintBytes opens ZERO file content 
     assert.ok(contentReads > 0, `the full discoverClassB+measureEntries pass DOES read content (observed ${contentReads} reads) — structurally heavier than the stat gate on the same store`);
   } finally {
     fs.readFileSync = realReadFileSync;
+    fs.readSync = realReadSync;
     clean(home, proj);
   }
 });

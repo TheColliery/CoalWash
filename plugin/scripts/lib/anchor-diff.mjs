@@ -35,7 +35,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { inventory } from './fidelity-gate.mjs';
-import { txDirFor } from './apply.mjs';
+import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { ownSandboxDir } from './repo-fs.mjs';
 import { physicalOrNull, containedIn } from './class-b.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin, isBareId } from './tailings.mjs';
 
@@ -91,7 +92,7 @@ function oldestAnchor(txDir, physTarget) {
     const dir = path.join(txDir, d);
     if (!fs.existsSync(path.join(dir, SNAP_MARKER))) continue;
     let manifest;
-    try { manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch { continue; }
+    try { manifest = JSON.parse(readRepoFileBounded(path.join(dir, 'manifest.json'), null, MAX_DOC_BYTES)); } catch { continue; } // CWK-137: bounded
     if (!Array.isArray(manifest)) continue;
     const hit = manifest.find((m) => m && samePath(m.original, physTarget));
     if (!hit) continue;
@@ -138,13 +139,12 @@ export function anchorDiff(filePath, { projectRoot, home = os.homedir() } = {}) 
     const physRoot = physicalOrNull(projectRoot);
     const phys = physicalOrNull(filePath);
     if (!physRoot || !phys || !containedIn(phys, [physRoot])) return null; // fail-closed, out of tree
-    const anchor = oldestAnchor(txDirFor(projectRoot), phys);
+    const anchor = oldestAnchor(ownSandboxDir(projectRoot, '.claude', 'coalwash'), phys); // CWK-137: throws on a planted link -> the catch below -> null
     if (!anchor) return null; // no ground truth on disk for this file — nothing to compare
-    let anchorText, currentText;
-    try {
-      anchorText = fs.readFileSync(anchor.snapFile, 'utf8');
-      currentText = fs.readFileSync(phys, 'utf8');
-    } catch { return null; } // unreadable — fail-silent, never guess
+    // CWK-137: both reads bounded and kind-gated; a refusal is `unreadable` (null).
+    const anchorText = readRepoFileBounded(anchor.snapFile, null, MAX_DOC_BYTES);
+    const currentText = readRepoFileBounded(phys, null, MAX_DOC_BYTES);
+    if (anchorText === null || currentText === null) return null; // unreadable — fail-silent, never guess
     const approvedTexts = approvedSince(projectRoot, phys, anchor.at);
     const { candidates, counts } = computeCandidates({ anchorText, currentText, approvedTexts });
     return { file: phys, snapshotPath: anchor.snapDir, snapshotAt: anchor.at, approvedCount: approvedTexts.length, candidates, counts };

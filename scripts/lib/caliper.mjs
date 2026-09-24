@@ -83,7 +83,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 // findProjectRoot/physicalDir: the room's ONE root resolver — the stray-state
 // detector re-uses it rather than hand-rolling a second walk.
-import { claudeBaseDir, findProjectRoot, physicalDir } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, physicalDir, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { parseJsonc } from './jsonc.mjs';
 // task #13 (OS-citizen state): the per-project state path RIDES the CC memory
 // dir, so we reuse the SAME adapter discovery computes (ccMemoryDir/ccProjectSlug)
@@ -309,7 +309,12 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
       m.alwaysLoaded.bytes += e.bytes;
       if (readSoFar + e.bytes <= readBudgetBytes) {
         try {
-          const text = fs.readFileSync(e.path, 'utf8');
+          // CWK-137: bounded and kind-gated. The budget above is judged on a STAT size
+          // taken at discovery; the read itself trusted the path, so a file swapped or
+          // grown in between -- or scanEverything's lifted budget -- read without limit.
+          // A refusal takes the catch below: the stat estimate stands, 0 certain fat.
+          const text = readRepoFileBounded(e.path, null, MAX_DOC_BYTES);
+          if (text === null) throw new Error('refused or unreadable');
           readSoFar += e.bytes;
           tok = tokensEst(text);
           if (withGzip) gzParts.push(text);
@@ -352,7 +357,8 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
         m.index.bytes = e.bytes;
         if (e.bytes <= CC_INDEX_CAP_BYTES) {
           try {
-            m.index.lines = fs.readFileSync(e.path, 'utf8').split('\n').length;
+            const t = readRepoFileBounded(e.path, null, MAX_DOC_BYTES); // CWK-137: bounded
+            if (t !== null) m.index.lines = t.split('\n').length;
           } catch { /* unreadable: lines stays 0, same safe direction as the read-error path above */ }
         }
       }

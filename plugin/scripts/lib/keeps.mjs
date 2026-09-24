@@ -31,7 +31,8 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { txDirFor, ensureSelfIgnore } from './apply.mjs';
-import { claudeBaseDir } from './config-load.mjs';
+import { claudeBaseDir, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { ownSandboxDir } from './repo-fs.mjs';
 
 export const KEEPS_NAME = 'keeps.json'; // exported for apply.mjs's KEEPS-GATE (opts.txDir-aware path build)
 const KEEPS_SCHEMA_V = 1;
@@ -45,7 +46,9 @@ export function globalKeepsPath(home = os.homedir()) {
 }
 
 function rawKeepsOrNull(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  // CWK-137: bounded and kind-gated -- a project keeps.json sits in the repo-plantable
+  // .claude/coalwash/ (a link to /dev/zero there hung the reader).
+  try { return JSON.parse(readRepoFileBounded(file, null, MAX_DOC_BYTES)); } catch { return null; }
 }
 
 // Every prior keep-adjudication at `file`: [{ target, reason, date, anchor?,
@@ -286,8 +289,9 @@ export function loadKeeps(projectRoot) {
   return loadKeepsFrom(keepsPath(projectRoot));
 }
 export function recordKeep(projectRoot, opts = {}) {
-  const dir = txDirFor(projectRoot);
-  return recordKeepAt(keepsPath(projectRoot), () => { fs.mkdirSync(dir, { recursive: true }); ensureSelfIgnore(dir); }, opts);
+  // CWK-137: the directory is proven link-free (ownSandboxDir) INSIDE ensureDir, which
+  // recordKeepAt calls inside its own try -- a planted link returns { ok: false }.
+  return recordKeepAt(keepsPath(projectRoot), () => { const dir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); fs.mkdirSync(dir, { recursive: true }); ensureSelfIgnore(dir); }, opts);
 }
 
 // Global-scope variants — identical shape/schema/upsert-by-target semantics,

@@ -58,7 +58,8 @@ import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zer
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
+import { ownSandboxDir } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -592,7 +593,9 @@ function ownerToken(sessionId) {
   return `${sessionId}:${process.pid}:${process.hrtime.bigint()}`;
 }
 function readLockToken(lockPath) {
-  try { return JSON.parse(fs.readFileSync(lockPath, 'utf8')).token ?? null; } catch { return null; }
+  // CWK-137: bounded + kind-gated -- the lock lives in the project's .claude/coalwash/,
+  // which a cloned repo can pre-populate (a lock that is a link to /dev/zero hung this).
+  try { return JSON.parse(readRepoFileBounded(lockPath, null, MAX_CONFIG_BYTES)).token ?? null; } catch { return null; }
 }
 export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs = LOCK_STALE_MS, now = Date.now() } = {}) {
   const token = ownerToken(sessionId);
@@ -613,16 +616,26 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
     if (e && e.code !== 'EEXIST') return { acquired: false, reason: `lock error: ${e.message}` };
   }
   // Lock exists — stale takeover ONLY when demonstrably old; any doubt = defer.
+  // CWK-137: lstat, never stat, and only a plain single-link regular file is ever
+  // taken over. The old statSync + openSync('r+') FOLLOWED a link: a cloned repo that
+  // committed `.claude/coalwash/<lock>` as a link to an old file (~/.bashrc) had the
+  // next wash judge the TARGET's mtime stale, then truncate it and write the lock
+  // JSON into it. The same checks are made again ON THE OPEN HANDLE below.
   try {
-    const st = fs.statSync(lockPath);
+    const st = fs.lstatSync(lockPath);
+    if (st.isSymbolicLink() || !st.isFile() || st.nlink > 1) return { acquired: false, reason: `the lock ${lockPath} is not a plain file (a link or special file) — refusing to take it over; remove it by hand if it is yours` };
     if (now - st.mtimeMs > staleMs) {
       // STEAL IN PLACE (no rm -> no missing-file window a third writer could slip
       // through). Two racing stealers overwrite the same file; whoever's write
       // lands last owns it, the other's compare-after-write fails -> it defers
       // (worst case both defer on a byte-interleave = a safe retry, never a
       // double-hold). Fixed width via truncate so a shorter write leaves no tail.
-      const fd = fs.openSync(lockPath, 'r+');
-      try { fs.ftruncateSync(fd, 0); fs.writeSync(fd, body, 0); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      const fd = fs.openSync(lockPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+      try {
+        const fst = fs.fstatSync(fd);
+        if (!fst.isFile() || fst.nlink > 1) return { acquired: false, reason: 'the lock changed under the takeover — deferring' };
+        fs.ftruncateSync(fd, 0); fs.writeSync(fd, body, 0); fs.fsyncSync(fd);
+      } finally { fs.closeSync(fd); }
       if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner };
       return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
     }
@@ -991,7 +1004,11 @@ export function applyPlan(plan, opts = {}) {
     // (per-file failure, the sniffUnrewritable pattern). Keeps without the
     // handle (the pre-beta.12 {target, reason, date} shape) stay advisory —
     // zero behavior change for existing stores.
-    const txDir = opts.txDir || txDirFor(projectRoot);
+    // CWK-137: the DERIVED tx dir is `<project>/.claude/coalwash`, which a cloned repo
+    // can commit as (or under) a link; ownSandboxDir refuses any link between the
+    // project root and it, and the throw lands in this function's own catch as a
+    // loud `{ ok: false }`. A caller-supplied opts.txDir is the caller's own.
+    const txDir = opts.txDir || ownSandboxDir(projectRoot, '.claude', 'coalwash');
     {
       // #36 demand 10: this compare decides whether a pinned keep BINDS the action
       // about to delete or rewrite the file it names, and it used to fold case on
@@ -1580,11 +1597,11 @@ export function recoverDangling(projectRoot, opts = {}) {
     // fail-closed reading of both legs.
     const anchorGate = trustedRootsForAnchor(projectRoot, home);
     if (!anchorGate.ok) return { recovered: 'none', error: anchorGate.error };
-    const txDir = opts.txDir || txDirFor(projectRoot);
+    const txDir = opts.txDir || ownSandboxDir(projectRoot, '.claude', 'coalwash'); // CWK-137, as in applyPlan
     const journalPath = path.join(txDir, JOURNAL_NAME);
     if (!fs.existsSync(journalPath)) return { recovered: 'none' };
     let journal;
-    try { journal = JSON.parse(fs.readFileSync(journalPath, 'utf8')); } catch {
+    try { journal = JSON.parse(readRepoFileBounded(journalPath, null, MAX_DOC_BYTES)); } catch { // CWK-137: bounded
       // an unreadable journal with NO readable snapDir cannot be replayed —
       // fail-closed: leave it for a human (never guess at memory state).
       return { recovered: 'none', error: 'journal unreadable — left in place for inspection' };
@@ -1645,7 +1662,7 @@ export function recoverDangling(projectRoot, opts = {}) {
     // canonicalization of the raw journal string. Every read below goes through it,
     // so the manifest is loaded from the bound location, never the raw one.
     const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
-    const manifest = JSON.parse(fs.readFileSync(path.join(snapPhys, 'manifest.json'), 'utf8'));
+    const manifest = JSON.parse(readRepoFileBounded(path.join(snapPhys, 'manifest.json'), null, MAX_DOC_BYTES)); // CWK-137: bounded
     let restored = 0, failed = 0, refused = 0, refusedPinned = 0;
     for (const m of manifest) {
       const src = path.join(snapPhys, m.snap);
