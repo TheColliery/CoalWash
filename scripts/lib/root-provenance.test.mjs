@@ -71,7 +71,7 @@ const VALIDATED_BEFORE_USE = new Map([
 // REVIEWED EXEMPTIONS — data-derived outer gates that are ACCEPTED, each with the
 // reason it is a different trust class. Adding to this list is the visible diff.
 const REVIEWED_EXEMPTIONS = new Map([
-  ['[rootPhys]', 'estate-archive.mjs: estate.archiveDir from project config — documented, wizard-only, named on the consent bill before the press'],
+  ['[rootPhys]', 'estate-archive.mjs: estate.archiveDir from the user\'s GLOBAL config only (a project value is dropped at the merge, CWK-120 D3) — documented, wizard-only, named on the consent bill before the press'],
   ['[archiveRootPhys]', 'retier.mjs: the same estate.archiveDir config value, same trust class'],
 ]);
 
