@@ -393,7 +393,10 @@ function main() {
   if (raw !== null) {
     hadComments = raw.includes('//');
     try {
-      cfg = parseJsonc(raw) || {}; // proto-pollution-guarded parse (jsonc.mjs)
+      // proto-pollution-guarded parse (jsonc.mjs). NO `|| {}` fallback (CWK-120 ride-along (a), UMB-174): it turned a
+      // FALSY body (null, 0, false, "") into an EMPTY config, so a write landed on {} over a file that held a value this
+      // tool did not understand. A parsed body that is not a plain object reaches the shape check just below and is refused.
+      cfg = parseJsonc(raw);
     } catch (e) {
       // A malformed config is a FAILURE the user must see, and it is also the
       // one case where refusing is strictly better than the siblings' rebuild:

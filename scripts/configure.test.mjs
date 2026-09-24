@@ -470,3 +470,33 @@ test('CWK-137: a project config write whose directory links OUTSIDE the project 
   assert.deepStrictEqual(fs.readdirSync(outside), ['keep.txt'], 'no config and no temp file lands in the outside directory');
   assert.strictEqual(sha(path.join(outside, 'keep.txt')), before);
 });
+
+// CWK-120 ride-along (a), UMB-174: a parsed body that is not a plain object is never accepted as the config.
+// The old `parseJsonc(raw) || {}` turned a FALSY body (null, 0, false, "") into an EMPTY config, so a write landed
+// on {} over a file that held something the tool did not understand; the truthy shapes ([], "x", 42) were already
+// refused by the shape check below it. Every body must exit 1, name the reason and leave the file byte-identical.
+for (const [name, body] of [['null', 'null'], ['0', '0'], ['false', 'false'], ['an empty string', '""'], ['an array', '[]'], ['a string', '"x"'], ['a number', '42']]) {
+  test(`CWK-120 (a): a config whose body is ${name} is REFUSED as not a JSON object, and the file stays byte-identical`, (t) => {
+    const sb = sandbox(t);
+    fs.mkdirSync(path.dirname(projCfg(sb)), { recursive: true });
+    fs.writeFileSync(projCfg(sb), body + '\n');
+    const before = sha(projCfg(sb));
+    const r = run(sb, ['--language', 'en']);
+    assert.strictEqual(r.status, 1, `a ${name} body must be refused (exit ${r.status}): ${r.stderr}`);
+    assert.match(r.stderr, /does not hold a JSON object/);
+    assert.match(r.stderr, /Nothing was written/);
+    assert.strictEqual(sha(projCfg(sb)), before, 'refusing beats rebuilding: the bytes are still there to fix');
+  });
+}
+
+test('UMB-174: a UTF-8 BOM before a valid object still PARSES, and the write keeps the key it held', (t) => {
+  const sb = sandbox(t);
+  fs.mkdirSync(path.dirname(projCfg(sb)), { recursive: true });
+  fs.writeFileSync(projCfg(sb), String.fromCharCode(0xfeff) + '{ "updateCheckDays": 9 }\n');
+  const r = run(sb, ['--language', 'en']);
+  assert.strictEqual(r.status, 0, `a BOM-prefixed valid config must be edited, not refused: ${r.stderr}`);
+  const written = fs.readFileSync(projCfg(sb), 'utf8');
+  const after = JSON.parse(written.charCodeAt(0) === 0xfeff ? written.slice(1) : written);
+  assert.strictEqual(after.updateCheckDays, 9, 'the key the BOM-prefixed file held survives the write');
+  assert.strictEqual(after.language, 'en');
+});

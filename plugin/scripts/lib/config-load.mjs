@@ -694,10 +694,15 @@ function candidatesForRoot(root) {
 export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
   return candidatesForRoot(findProjectRoot(cwd, home));
 }
-export function projectConfigPath(cwd = process.cwd(), home = os.homedir()) {
-  const candidates = projectConfigCandidates(cwd, home);
+// The walk's ONE selection rule: the first candidate that exists (lstat, so a directory or a link WINS),
+// else candidate 0 -- nothing found anywhere, so the own-dir is both the read and the write target. Shared by
+// projectConfigPath and loadMergedConfigReport (UMB-174 b), so the two can never select differently.
+function pickCandidate(candidates) {
   for (const c of candidates) if (pathExists(c)) return c;
-  return candidates[0]; // nothing found anywhere -- own-dir is both the read and write target
+  return candidates[0];
+}
+export function projectConfigPath(cwd = process.cwd(), home = os.homedir()) {
+  return pickCandidate(projectConfigCandidates(cwd, home));
 }
 
 // UMB-133 hole (2), the migration-notice half: which candidate did the walk
@@ -799,19 +804,46 @@ function decodeConfigText(buf) {
 // instead of hanging or exhausting the hook. A refusal on an EXISTING path is
 // `unreadable`, exactly as a failed read always was, so mergeSafety's fail-safe
 // stance is unchanged; `why` names which refusal it was.
+//
+// UMB-174 (b): every `unreadable: true` also carries `reason`, one of the flock's four
+// (`unreadable` | `a directory` | `malformed JSON` | `not a JSON object`), so a REPORT can
+// say which. The mapping, stated because two of its cells are this room's own choice:
+//   - a directory at the path                          -> `a directory`
+//   - ANY other refusal or failed read on a path that EXISTS -> `unreadable`: the fs codes
+//     the flock names (EACCES, and EPERM, which is what a Windows ACL denial surfaces as)
+//     AND this room's own CWK-137 refusals (over the 1 MiB bound, a FIFO/device, a link
+//     that dangles or leaves the project, an unresolvable root). The flock string has no
+//     fifth reason, and the fail-safe stance above ALREADY applies to every one of them,
+//     so staying silent about a config that is being skipped is the worse answer;
+//   - the parse threw (an empty file included: it is not JSON) -> `malformed JSON`
+//   - valid JSON that is not a plain object (`[]`, `"x"`, `42`, and the FALSY bodies
+//     `null` / `0` / `false`, which a `parsed || {}` would have read as an empty config) -> `not a JSON object`
+// The walk's SELECTION is untouched: an unreadable candidate still wins and contributes {}.
 function readJsonc(file, root = null) {
   const r = repoReadOutcome(file, root, MAX_CONFIG_BYTES);
   if (r.why === 'absent') return { data: {}, unreadable: false };
-  if (!r.buf) return { data: {}, unreadable: true, why: r.why, code: r.code };
+  if (!r.buf) return { data: {}, unreadable: true, why: r.why, code: r.code, reason: r.why === 'directory' ? 'a directory' : 'unreadable' };
   try {
     let content = decodeConfigText(r.buf); // raw bytes -> encoding-sniffed text
     if (content.charCodeAt(0) === 0xfeff) content = content.slice(1); // strip any residual BOM char
     const parsed = parseJsonc(content); // proto-pollution-guarded parse
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return { data: parsed, unreadable: false };
-    return { data: {}, unreadable: true }; // wrong shape (array/null/scalar) on an EXISTING file
+    return { data: {}, unreadable: true, reason: 'not a JSON object' }; // wrong shape (array/null/scalar) on an EXISTING file
   } catch {
-    return { data: {}, unreadable: true }; // it exists (a buffer came back); the parse failed
+    return { data: {}, unreadable: true, reason: 'malformed JSON' }; // it exists (a buffer came back); the parse failed
   }
+}
+
+// UMB-174 (b) + CWK-135 (a): ONE flock string for a config that EXISTS where the walk reads but cannot be
+// used, shared by every surface that reports it (never a second hand-written copy). The PROJECT tier keeps
+// the verbatim flock wording, `canonical = .claude/coal/coalwash.json`; the GLOBAL tier names ITS OWN path
+// there, because a global config has no project location to move to and a project path would send the user
+// to the wrong place. Line breaks in the path are neutralized: a path is built from directory names a cloned
+// repo chose, and this text lands in the agent's context (security.md, log injection).
+export function unreadableNotice({ tier, path: p, reason }) {
+  const shown = String(p).replace(/[\r\n]+/g, ' ');
+  const canonical = tier === 'global' ? shown : '.claude/coal/coalwash.json';
+  return `UNREADABLE: ${shown} exists but is not a readable config (${reason}); it was skipped — canonical = ${canonical}`;
 }
 
 // board #55 (owner-ordered): the PLATFORM's own `cleanupPeriodDays` (Claude Code's session-
@@ -1126,9 +1158,23 @@ export function mergeSafety(global, project, { globalUnreadable = false, project
   return out;
 }
 
-export function loadMergedConfig({ cwd = process.cwd(), home = os.homedir() } = {}) {
-  const g = readJsonc(globalConfigPath(home)); // the user's own file: bounded, never contained
+// The merged config PLUS the notices a report-capable caller (the SessionStart conductor) emits: one entry per
+// tier whose config EXISTS where the walk reads but could not be used -- `{ tier, path, reason }`, the reason
+// one of readJsonc's four. Still ONE pass: the global path and the ONE candidate the walk selected are read once,
+// and only those two paths are ever touched (never a crawl, never a candidate the walk did not stat).
+export function loadMergedConfigReport({ cwd = process.cwd(), home = os.homedir() } = {}) {
+  const gPath = globalConfigPath(home);
+  const g = readJsonc(gPath); // the user's own file: bounded, never contained
   // CWK-137: the project config is repo-derived -- contained in its project root.
-  const p = readJsonc(projectConfigPath(cwd, home), findProjectRoot(cwd, home));
-  return mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable });
+  const root = findProjectRoot(cwd, home);
+  const pPath = pickCandidate(candidatesForRoot(root));
+  const p = readJsonc(pPath, root);
+  const unreadable = [];
+  if (g.unreadable) unreadable.push({ tier: 'global', path: gPath, reason: g.reason });
+  if (p.unreadable) unreadable.push({ tier: 'project', path: pPath, reason: p.reason });
+  return { cfg: mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable }), unreadable };
+}
+
+export function loadMergedConfig(opts = {}) {
+  return loadMergedConfigReport(opts).cfg;
 }
