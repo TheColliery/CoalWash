@@ -590,3 +590,92 @@ test('0h-GUARD: no hook reaches a bin WRITER, directly or through apply/cli (gre
   }
   assert.ok(checked > 0, 'no hook files were scanned — a guard that scans nothing passes vacuously');
 });
+
+// ---------------------------------------------------------------------------
+// CWK-120 rows 4 + 18 (CodeRabbit, adjudicated against the live tree). The sweep is the SECOND writer of a bin's
+// index.json -- a read-modify-write exactly like recordBinItem's -- so it takes the SAME bin lock; and the lock judges
+// staleness by a LIVE clock, never by the item's (backdatable) birth timestamp.
+// ---------------------------------------------------------------------------
+const PAST_HORIZON_MS = HORIZON_MS.fat + 86400000; // 31 days: past the fat bin's 30-day horizon
+const binPathOf = (proj) => path.join(txDirFor(proj), FAT_BIN_NAME);
+// A lock a LIVE holder just took: a fresh mtime, a token that is not ours.
+function plantForeignLock(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const lockPath = path.join(dir, '.bin.lock');
+  fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'other', pid: 1, at: Date.now(), token: 'other:1:0' }));
+  return lockPath;
+}
+// A lock ORPHANED by a crashed holder: older than the bin's own 5 s staleness window.
+function plantOrphanLock(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const lockPath = path.join(dir, '.bin.lock');
+  fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'dead', pid: 999999, at: Date.now(), token: 'dead:999999:0' }));
+  const old = new Date(Date.now() - 6000);
+  fs.utimesSync(lockPath, old, old);
+  return lockPath;
+}
+
+test('CWK-120 row 4: a sweep that finds the bin lock HELD destroys nothing and waits for the next run -- it never rewrites index.json unlocked', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', original: 'notes/old.md', now: now - PAST_HORIZON_MS });
+    const dir = binPathOf(proj);
+    const lockPath = plantForeignLock(dir);
+    const indexBefore = fs.readFileSync(path.join(dir, 'index.json'), 'utf8');
+    const r = sweepFatBin(proj, { now });
+    assert.deepStrictEqual(r, { destroyed: 0, kept: 1 }, 'a held lock: the item past its horizon is still there');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'old cut', 'the blob is untouched');
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'), indexBefore, 'index.json was not rewritten');
+    assert.strictEqual(readDeathLog(proj, FAT_BIN_NAME), '', 'no death certificate for a destruction that did not happen');
+    assert.strictEqual(fs.existsSync(lockPath), true, 'the OTHER holder\'s lock is not ours to remove');
+  } finally { clean(proj); }
+});
+
+test('CWK-120 row 4: a sweep RELEASES the bin lock it took -- a record made right after it succeeds on the FIRST attempt', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', now: now - PAST_HORIZON_MS });
+    assert.deepStrictEqual(sweepFatBin(proj, { now }), { destroyed: 1, kept: 0 });
+    assert.strictEqual(fs.existsSync(path.join(binPathOf(proj), '.bin.lock')), false, 'the sweep released its lock');
+    __testHooks.binLockAttempts = 0;
+    assert.ok(recordBinItem(proj, FAT_BIN_NAME, { content: 'next', now }), 'the next writer gets in');
+    assert.strictEqual(__testHooks.binLockAttempts, 1);
+  } finally { clean(proj); }
+});
+
+test('CWK-120 row 4: a sweep of an ABSENT bin takes no lock and creates nothing -- an absent bin stays absent', () => {
+  const proj = sandbox();
+  try {
+    assert.deepStrictEqual(sweepFatBin(proj), { destroyed: 0, kept: 0 });
+    assert.deepStrictEqual(sweepStoreOld(proj), { destroyed: 0, kept: 0 });
+    assert.strictEqual(fs.existsSync(binPathOf(proj)), false, 'no fat-bin directory was created by a sweep of nothing');
+    assert.strictEqual(fs.existsSync(path.join(txDirFor(proj), STORE_OLD_NAME)), false, 'no store.old directory either');
+  } finally { clean(proj); }
+});
+
+test('CWK-120 row 4: a sweep TAKES OVER an orphaned bin lock on its first attempt (the stale-steal path, on the sweep\'s own live clock)', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', now: now - PAST_HORIZON_MS });
+    plantOrphanLock(binPathOf(proj));
+    __testHooks.binLockAttempts = 0;
+    assert.deepStrictEqual(sweepFatBin(proj, { now }), { destroyed: 1, kept: 0 }, 'an orphan does not stall the sweep');
+    assert.strictEqual(__testHooks.binLockAttempts, 1);
+  } finally { clean(proj); }
+});
+
+test('CWK-120 row 18: an orphaned lock is reclaimed on the FIRST attempt even when the item is BACKDATED -- the lock judges staleness by a live clock, never the item\'s birth', () => {
+  const proj = sandbox();
+  try {
+    plantOrphanLock(binPathOf(proj));
+    __testHooks.binLockAttempts = 0;
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'a cut banked in the past', original: '/f.md', now: Date.now() - 3 * 86400000 });
+    assert.strictEqual(__testHooks.binLockAttempts, 1,
+      `a backdated item made the orphan look fresh: ${__testHooks.binLockAttempts} acquire attempts (expected the steal on attempt 1)`);
+    assert.ok(id, 'the item is recorded, not refused after the whole retry budget');
+    assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 1);
+  } finally { clean(proj); }
+});

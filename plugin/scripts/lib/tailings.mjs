@@ -87,7 +87,7 @@ const BIN_LOCK_NAME = '.bin.lock'; // per-bin (not per-tx) exclusive lock — se
 const BIN_LOCK_STALE_MS = 5000;
 // Perf-regression counter for tests only (the apply.mjs / fidelity-gate.mjs
 // `__testHooks` precedent, GATE COST ruling 2026-08-04: a count, not a clock).
-// `binLockAttempts` counts every acquireLock call recordBinItem makes, so a
+// `binLockAttempts` counts every acquireLock call recordBinItem or the sweep makes, so a
 // test can assert an orphan was reclaimed on the FIRST attempt instead of
 // timing the call against the retry budget. One increment per attempt; read
 // by nothing outside a test.
@@ -231,6 +231,20 @@ function sleepMs(ms) {
     while (process.hrtime.bigint() < untilNs) { /* bounded busy-wait — no sync sleep primitive available */ }
   }
 }
+// The ONE way either writer of a bin's index.json takes its lock (CWK-120 rows 4 + 18): the same file, the same
+// staleMs, the same bounded jittered retry for recordBinItem and for the sweep, so the two can never disagree about
+// what "held" means. `acquireLock` judges staleness as `now - lockFile.mtimeMs > staleMs`, so `now` here is ALWAYS a live
+// clock reading, never an item's birth timestamp: callers legitimately backdate `now` (the tests bank items days in the
+// past), and a backdated value made every orphaned lock look fresh forever, burning the whole retry budget (row 18).
+function acquireBinLock(dir) {
+  let lock;
+  for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
+    if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
+    lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now: Date.now(), staleMs: BIN_LOCK_STALE_MS });
+    __testHooks.binLockAttempts++;
+  }
+  return lock;
+}
 export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now() } = {}) {
   let dir;
   let lock;
@@ -238,11 +252,7 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     dir = binDir(projectRoot, name); // CWK-137: may throw on a planted link -> null, like any failure
     fs.mkdirSync(dir, { recursive: true });
     ensureSelfIgnore(dir);
-    for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
-      if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
-      lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now, staleMs: BIN_LOCK_STALE_MS });
-      __testHooks.binLockAttempts++;
-    }
+    lock = acquireBinLock(dir);
     if (!lock.acquired) return null;
     // U7 (7th site — found by apply.test.mjs's own FINAL-path guard, not by the
     // board enumeration): this id doubles as a WRITE PATH, so its unpredictability
@@ -324,8 +334,23 @@ function appendOwnLog(file, text) {
   } finally { fs.closeSync(fd); }
 }
 
+// CWK-120 row 4: the sweep is the SECOND writer of index.json, a read-modify-write (`loadIndex` ... `saveIndex(survivors)`)
+// exactly like recordBinItem's, so it takes the SAME bin lock. Without it a concurrent recordBinItem (the estate archive
+// records into the fat bin under the GLOBAL lock only, while a wash sweeps the same bin under the project lock) could
+// commit its row between the sweep's load and its save; the sweep then wrote `survivors`, which never held that row,
+// leaving its blob on disk with no index entry -- the undercount this module's header forbids. A bin with nothing in it
+// is peeked WITHOUT the lock and never touched (taking the lock creates the directory: an absent bin must stay absent).
+// A lock that stays held past the retry budget means the sweep waits for the next run (fail-silent housekeeping): nothing
+// is destroyed and the items are all still there.
 function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
-  const index = loadIndex(dir);
+  const peek = loadIndex(dir);
+  if (!peek.length) return { destroyed: 0, kept: 0 };
+  const lock = acquireBinLock(dir);
+  if (!lock.acquired) return { destroyed: 0, kept: peek.length };
+  try { return sweepBinLocked(dir, horizonMs, now, budgetBytes); } finally { lock.release(); }
+}
+function sweepBinLocked(dir, horizonMs, now, budgetBytes) {
+  const index = loadIndex(dir); // re-read INSIDE the lock: the peek above may be stale by now
   if (!index.length) return { destroyed: 0, kept: 0 };
   // Legacy index entries (pre-0i) carry no bytes — weigh them by a one-time
   // stat so they participate in the size cap instead of escaping it forever;
