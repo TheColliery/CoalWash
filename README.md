@@ -23,7 +23,7 @@
 
 [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Releases](https://github.com/TheColliery/CoalWash/releases)
 
-**Part of [TheColliery](https://github.com/TheColliery)** — siblings: **[CoalMine](https://github.com/TheColliery/CoalMine)** (quality canaries) · **[CoalTipple](https://github.com/TheColliery/CoalTipple)** (model/effort routing) · **[CoalBoard](https://github.com/TheColliery/CoalBoard)** (consensus board) · **[CoalHearth](https://github.com/TheColliery/CoalHearth)** (warm-resume) · **[CoalFace](https://github.com/TheColliery/CoalFace)** (fan-out discipline) · **[CoalLedger](https://github.com/TheColliery/CoalLedger)** (docs health).
+**Part of [TheColliery](https://github.com/TheColliery)** — siblings: **[CoalMine](https://github.com/TheColliery/CoalMine)** (quality canaries) · **[CoalTipple](https://github.com/TheColliery/CoalTipple)** (model/effort routing) · **[CoalBoard](https://github.com/TheColliery/CoalBoard)** (consensus board) · **[CoalHearth](https://github.com/TheColliery/CoalHearth)** (warm-resume) · **[CoalFace](https://github.com/TheColliery/CoalFace)** (fan-out discipline) · **[CoalLedger](https://github.com/TheColliery/CoalLedger)** (docs health) · **[CoalGob](https://github.com/TheColliery/CoalGob)** (OS-trash delete guard, PUBLIC BETA v0.1.0-beta.1).
 
 </div>
 
@@ -177,6 +177,7 @@ CoalWash is the **memory-maintenance** member of the mining series:
 - [CoalHearth](https://github.com/TheColliery/CoalHearth) — session warm-resume
 - [CoalFace](https://github.com/TheColliery/CoalFace) — fan-out discipline
 - [CoalLedger](https://github.com/TheColliery/CoalLedger) — docs health
+- [CoalGob](https://github.com/TheColliery/CoalGob) — OS-trash delete guard (PUBLIC BETA v0.1.0-beta.1)
 
 Install one, it stands alone; install all, they compose without conflict (CoalWash skips any session CoalHearth's in-progress journal names, so a live handoff is never archived; an interrupted apply recovers from its own write-ahead journal, or keeps that journal for you and says so — CoalHearth-side recognition is planned, not yet shipped).
 
