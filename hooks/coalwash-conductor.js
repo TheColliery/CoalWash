@@ -585,7 +585,9 @@ async function handleStop(input) {
     // The flag is per-TRANSACTION, not per-store (round-2 F1), so it gates only
     // WHICH text speaks; the advisory itself disclaims what the pass did not
     // touch rather than this branch pretending to know the coverage.
-    const fullCleaned = Number.isFinite(Number(proj.fullCleanAt));
+    // CWK-120 row 7: a Full clean is a POSITIVE TIMESTAMP, judged on the value itself. `Number(x)` first read `null`,
+    // `''` and `false` as 0, a finite number, so a corrupt or hand-edited state spoke the advisory instead of the consent.
+    const fullCleaned = Number.isFinite(proj.fullCleanAt) && proj.fullCleanAt > 0;
     // CWK-081 (3) — and either way this surface speaks at most ONCE per
     // session. Measured: 4 consecutive Stops during one live wizard run,
     // because a consumed FULL crossing can be re-armed inside the same session

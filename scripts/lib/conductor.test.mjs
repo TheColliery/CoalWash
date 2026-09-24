@@ -2149,3 +2149,25 @@ test('UMB-174 (b): the report rides SessionStart ONLY -- a Stop event over an un
     assert.ok(!r.stdout.includes('UNREADABLE'), `no other channel carries the line; got: ${r.stdout}`);
   } finally { clean(home, proj); }
 });
+
+// CWK-120 row 7: `Number.isFinite(Number(proj.fullCleanAt))` read null, '' and false as 0 -- a finite number -- so an episode that
+// had NO Full clean spoke the pure FULL(externalize) ADVISORY instead of offering the Full-tier CONSENT. A Full clean is a
+// positive timestamp, judged on the value itself. Same fixture as the round-trip test above, which keeps its eligible side.
+for (const [what, value] of [['null', null], ['an empty string', ''], ['false', false], ['0', 0], ['a negative number', -5], ['a string', 'x']]) {
+  test(`CWK-120 row 7: fullCleanAt ${what} is NOT a Full clean -- the FULL(externalize) crossing offers the Full-tier consent, never the advisory`, () => {
+    const { home, proj } = sandbox();
+    try {
+      muteUpdate(home);
+      seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 });
+      seedState(home, proj, { leanFloorTokens: 600000, fullCleanAt: value });
+      const rs = run(proj, home, { hook_event_name: 'SessionStart' });
+      assertGraceful(rs);
+      assert.strictEqual(readProjState(home, proj).lastVerdict.reason, 'externalize', 'the fixture is the externalize-FULL crossing');
+      const rp = run(proj, home, { hook_event_name: 'Stop' });
+      assertGraceful(rp);
+      const reason = parseBlock(rp.stdout);
+      assert.ok(!reason.includes('FULL (externalize)'), `an episode with no Full clean must not speak the advisory: ${reason}`);
+      assert.ok(reason.includes('question tool'), `it offers the Full-tier consent instead: ${reason}`);
+    } finally { clean(home, proj); }
+  });
+}
