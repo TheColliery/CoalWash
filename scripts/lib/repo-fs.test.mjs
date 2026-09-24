@@ -24,7 +24,7 @@ import {
 import { ownSandboxDir, RepoWriteRefused } from './repo-fs.mjs';
 import { sweepWriteguard, snapshotOnFirstWrite } from './writeguard.mjs';
 import { recordBinItem, restoreFromBin, sweepFatBin, readDeathLog, FAT_BIN_NAME } from './tailings.mjs';
-import { acquireLock, applyPlan, sweepSnapshots, LOCK_STALE_MS } from './apply.mjs';
+import { acquireLock, applyPlan, sweepSnapshots, verifySnapshot, LOCK_STALE_MS } from './apply.mjs';
 import { chJournalGuard, readRosterSids } from './estate-archive.mjs';
 import { HORIZON_MS } from './retention.mjs';
 import { restore } from './cli.mjs';
@@ -462,4 +462,99 @@ test('CWK-137: applyPlan refuses to STAGE a rewrite target over the read bound, 
   assert.equal(r.ok, false, 'the plan is refused');
   assert.match(String(r.error), /cannot read .* to stage it/, `error: ${String(r.error).slice(0, 160)}`);
   assert.equal(fs.statSync(big).size, MAX_DOC_BYTES + 1, 'the target is byte-length-identical');
+});
+
+// CWK-120 D3 / RESIDUAL_REREAD -- the census's four named rows (applyPlan's `cur` external-writer compare and `back` post-write
+// read-back; verifySnapshot's snapshot-copy read and source read). The staging read already admits a plan target at or under
+// MAX_DOC_BYTES, so these re-reads were only unbounded against a concurrent writer that GROWS the file in between. They now go
+// through the same bounded, kind-gated read: an over-bound file is REFUSED, never read whole.
+//
+// verifySnapshot is reachable directly and its result is observable (a faithful over-bound pair used to verify clean).
+test('CWK-137 RESIDUAL_REREAD: verifySnapshot does not read an over-bound SOURCE whole -- it reports it unverifiable', (t) => {
+  const { dir } = sandbox(t, 'vs-src');
+  const snapDir = path.join(dir, 'snap');
+  fs.mkdirSync(snapDir);
+  const src = path.join(dir, 'src.md');
+  fs.writeFileSync(src, 'a'.repeat(MAX_DOC_BYTES + 1));
+  fs.writeFileSync(path.join(snapDir, 'f0'), 'small\n'); // the COPY is in bound, so only the SOURCE read can be the over-bound one
+  const bad = verifySnapshot(snapDir, [{ snap: 'f0', original: src }]);
+  assert.equal(bad.length, 1, JSON.stringify(bad));
+  assert.match(bad[0], /unverifiable: source over-bound/, 'the SOURCE is named, not the copy');
+});
+
+test('CWK-137 RESIDUAL_REREAD: verifySnapshot does not read an over-bound snapshot COPY whole', (t) => {
+  const { dir } = sandbox(t, 'vs-copy');
+  const snapDir = path.join(dir, 'snap');
+  fs.mkdirSync(snapDir);
+  const src = path.join(dir, 'src.md');
+  fs.writeFileSync(src, 'small\n');
+  fs.writeFileSync(path.join(snapDir, 'f0'), 'a'.repeat(MAX_DOC_BYTES + 1));
+  const bad = verifySnapshot(snapDir, [{ snap: 'f0', original: src }]);
+  assert.equal(bad.length, 1, JSON.stringify(bad));
+  assert.match(bad[0], /unverifiable: copy over-bound/, 'the COPY is named as unbounded-unreadable, not merely "does not match"');
+});
+
+test('CWK-137 RESIDUAL_REREAD: verifySnapshot still passes a faithful pair and still catches a corrupted copy and a missing one', (t) => {
+  const { dir } = sandbox(t, 'vs-control');
+  const snapDir = path.join(dir, 'snap');
+  fs.mkdirSync(snapDir);
+  const a = path.join(dir, 'a.md');
+  const b = path.join(dir, 'b.md');
+  fs.writeFileSync(a, 'one\n');
+  fs.writeFileSync(b, 'two\n');
+  fs.copyFileSync(a, path.join(snapDir, 'f0'));
+  fs.copyFileSync(b, path.join(snapDir, 'f1'));
+  const manifest = [{ snap: 'f0', original: a }, { snap: 'f1', original: b }];
+  assert.deepEqual(verifySnapshot(snapDir, manifest), [], 'a faithful set verifies clean');
+  fs.writeFileSync(path.join(snapDir, 'f0'), 'CORRUPTED\n');
+  fs.rmSync(path.join(snapDir, 'f1'));
+  const bad = verifySnapshot(snapDir, manifest);
+  assert.equal(bad.length, 2);
+  assert.match(bad[0], /does not match/);
+  assert.match(bad[1], /unverifiable/);
+});
+
+// applyPlan's two re-reads sit inside the transaction, so the only OBSERVABLE difference is which API reads the target: the
+// bounded read opens and reads through a file descriptor, never `fs.readFileSync(<the target>)`. Recorded, not mocked away: the
+// call is delegated to the real one, and the run must still succeed (the bounded path did its job, the write verified).
+test('CWK-137 RESIDUAL_REREAD: applyPlan re-reads a rewrite target through the BOUNDED read -- never readFileSync on it (external-writer compare, post-write read-back)', (t) => {
+  const { dir, project } = sandbox(t, 'reread');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home);
+  const store = path.join(project, 'memory');
+  fs.mkdirSync(store);
+  const target = path.join(store, 'note.md');
+  fs.writeFileSync(target, 'old\n');
+  const orig = fs.readFileSync;
+  const seen = [];
+  fs.readFileSync = (p, ...rest) => {
+    if (path.resolve(String(p)).toLowerCase() === target.toLowerCase()) seen.push(String(p));
+    return orig.call(fs, p, ...rest);
+  };
+  let r;
+  try {
+    r = applyPlan({ projectRoot: project, roots: [store], sessionId: 't-reread', actions: [{ type: 'rewrite', path: target, content: 'new\n' }] }, { projectRoot: project, home });
+  } finally { fs.readFileSync = orig; }
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 200));
+  assert.equal(fs.readFileSync(target, 'utf8'), 'new\n', 'the rewrite landed and verified');
+  assert.deepEqual(seen, [], 'no unbounded read of the plan target: the staging read, the compare and the read-back are all bounded');
+});
+
+test('CWK-137 RESIDUAL_REREAD: the external-writer compare still ABORTS a target that no longer matches its baseline (the bounded read is not a weaker check)', (t) => {
+  // The CONTROL for the test above. The compare is what the bounded re-read feeds; it must still refuse a target whose bytes are
+  // not the ones the plan was gated against, and leave the file exactly as the foreign writer left it.
+  const { dir, project } = sandbox(t, 'baseline');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home);
+  const store = path.join(project, 'memory');
+  fs.mkdirSync(store);
+  const target = path.join(store, 'note.md');
+  fs.writeFileSync(target, 'what the writer saw\n');
+  const r = applyPlan({
+    projectRoot: project, roots: [store], sessionId: 't-baseline',
+    actions: [{ type: 'rewrite', path: target, content: 'new\n', expectedOrig: 'what the plan was gated against\n' }],
+  }, { projectRoot: project, home });
+  assert.equal(r.ok, false, 'a target that no longer matches the baseline the plan was gated on is refused');
+  assert.match(String(r.error), /external writer detected/);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'what the writer saw\n', 'and left untouched');
 });

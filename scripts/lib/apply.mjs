@@ -1291,8 +1291,12 @@ export function applyPlan(plan, opts = {}) {
           // the snapshot, so nothing of this plan is left half-applied). A
           // target that can no longer be read counts as foreign interference.
           if (a.type === 'rewrite' || a.type === 'delete') {
-            let cur = null;
-            try { cur = fs.readFileSync(a.phys); } catch { /* handled below */ }
+            // CWK-137 RESIDUAL_REREAD: bounded + kind-gated like the staging read (MAX_DOC_BYTES, the bound that read already
+            // admitted this target under); a target that grew past it, or is no longer a regular file, is foreign interference:
+            // the same verdict as an unreadable one. The bound is deliberately NOT baseline-length + 1: that would make the size
+            // check a second refusal path beside the compare, and GATE-LIVENESS 7's compare-neutralized mutant would stop
+            // neutralizing the guard for any foreign content longer than the baseline.
+            const cur = repoReadOutcome(a.phys, null, MAX_DOC_BYTES).buf || null;
             if (!cur || Buffer.compare(cur, a.baseBuf) !== 0) {
               throw new Error(`external writer detected: ${a.phys} changed after the plan was gated — aborting the transaction`);
             }
@@ -1304,8 +1308,10 @@ export function applyPlan(plan, opts = {}) {
             writeDurable(a.phys, a.content); // U7: temp is O_EXCL + unpredictable; the destination is never opened for write
             if (a.type === 'create') createdPaths.push(a.phys);
             // verify: what landed is byte-for-byte what the plan said (blueprint step 3 "verify")
-            const back = fs.readFileSync(a.phys);
-            if (Buffer.compare(back, Buffer.from(a.content, 'utf8')) !== 0) {
+            // CWK-137 RESIDUAL_REREAD: bounded by what was just written, +1 byte so growth is seen as a mismatch, not read whole.
+            const wrote = Buffer.from(a.content, 'utf8');
+            const back = repoReadOutcome(a.phys, null, wrote.length + 1).buf;
+            if (!back || Buffer.compare(back, wrote) !== 0) {
               throw new Error(`post-write verify mismatch: ${a.phys}`);
             }
           } else {
@@ -1526,9 +1532,15 @@ export function verifySnapshot(snapDir, manifest) {
   const bad = [];
   for (const m of manifest) {
     try {
-      const snapBuf = fs.readFileSync(path.join(snapDir, m.snap));
-      const srcBuf = fs.readFileSync(m.original);
-      if (Buffer.compare(snapBuf, srcBuf) !== 0) bad.push(`${m.original} (copy does not match source)`);
+      // CWK-137 RESIDUAL_REREAD: both sides through the bounded, kind-gated read. Over the bound is UNVERIFIABLE by name (the
+      // staging read never admits such a target, so this is only reachable if one grew since), never read whole.
+      const snap = repoReadOutcome(path.join(snapDir, m.snap), null, MAX_DOC_BYTES);
+      const src = repoReadOutcome(m.original, null, MAX_DOC_BYTES);
+      if (!snap.buf || !src.buf) {
+        bad.push(`${m.original} (unverifiable: ${!snap.buf ? `copy ${snap.why || 'unreadable'}` : `source ${src.why || 'unreadable'}`})`);
+        continue;
+      }
+      if (Buffer.compare(snap.buf, src.buf) !== 0) bad.push(`${m.original} (copy does not match source)`);
     } catch (e) {
       bad.push(`${m.original} (unverifiable: ${e.message})`);
     }
