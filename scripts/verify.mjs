@@ -257,8 +257,8 @@ try {
   // a linked worktree's hook would otherwise decide which repository these two calls answer for). Dynamic, inside the
   // check that uses it: a missing helper is one FAIL line here, never a link-time crash (node/runtime.md §1).
   const { gitEnv } = await import(pathToFileURL(path.join(repo, 'scripts', 'git-env.mjs')).href);
-  const gitEnvHere = gitEnv(path.dirname(repo));
-  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8', env: gitEnvHere });
+  // The env is built INLINE at each spawn (not held in a variable) so the git-spawn census below can see it is the helper's.
+  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)) });
   if (lsAll.error || lsAll.status !== 0) {
     // A VISIBLE skip, never a silent carve-out: no git means no durability answer.
     console.log('  --   pointer check: git unavailable — cannot tell a tracked path from an untracked one; skipped');
@@ -361,7 +361,7 @@ try {
       agentHomes,
       runCheckIgnore: (names) => {
         const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-          { cwd: repo, encoding: 'utf8', env: gitEnvHere, input: names.map((n) => n + '/').join('\n') + '\n' });
+          { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)), input: names.map((n) => n + '/').join('\n') + '\n' });
         if (ci.error) { checkIgnoreFailure = `failed to spawn: ${ci.error.message}`; return ''; }
         if (ci.status !== 0 && ci.status !== 1) {
           const why = String(ci.stderr || '').split('\n')[0].trim();
@@ -410,6 +410,20 @@ try {
     }
   }
 } catch (e) { fail(`pointer check: ${e.message}`); }
+
+// GIT SPAWNS (CWK-136). CWK-133 gave every fixture and gate one env helper (scripts/git-env.mjs); this is the tripwire
+// that keeps the NEXT git spawn from inheriting an ambient GIT_DIR / GIT_INDEX_FILE. It refuses a spawn with no `env:`
+// and an `env:` that names process.env, and it PRINTS its coverage: a census that matched nothing would report clean.
+// Detection lives in scripts/git-env-census.mjs (dynamic import, node/runtime.md 1); its named limits are in that
+// file's header (a local wrapper or variable is counted as unverified, never followed).
+console.log('git spawn census (every git spawn under scripts/ takes its env from gitEnv(), never the ambient process.env):');
+try {
+  const { censusGitSpawns, collectScriptsMjs } = await import(pathToFileURL(path.join(repo, 'scripts', 'git-env-census.mjs')).href);
+  const census = censusGitSpawns(collectScriptsMjs(repo));
+  for (const f of census.findings) fail(f);
+  if (!census.calls) fail('git spawn census found NO git spawn under scripts/: the locator is dead, and a census that matches nothing reports clean');
+  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly, ${census.other} a local wrapper or variable (text not verified)`);
+} catch (e) { fail(`git spawn census: ${e.message}`); }
 
 console.log('libs (import check):');
 for (const l of LIBS) {

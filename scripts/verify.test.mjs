@@ -325,3 +325,30 @@ test('verify.mjs inside a REAL git repo: an ambient absolute GIT_DIR cannot make
     fs.rmSync(decoy, { recursive: true, force: true });
   }
 });
+
+// CWK-136: the git-spawn census inside the gate. A git spawn planted in the fixture's scripts/ that inherits the ambient env
+// (env: process.env) or names none at all must FAIL verify, and the clean tree must print the census's coverage line. The
+// planted text is built from parts: this file is itself scanned by the census, and a spelled-out spawn would be a finding.
+test('verify.mjs inside a REAL git repo: a planted git spawn with env: process.env FAILS the census, and so does one with no env: (CWK-136)', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root, run } = fx;
+  try {
+    const clean = run();
+    assert.strictEqual(clean.status, 0, `the tracked tree must PASS the census\n${clean.stdout}${clean.stderr}`);
+    assert.match(clean.stdout, /ok\s+\d+ git spawn call\(s\) across \d+ script file\(s\)/, `the census must print its coverage\n${clean.stdout}`);
+
+    const planted = path.join(root, 'scripts', 'zz-planted-spawn.mjs');
+    const spawn = (opts) => `${'spawn' + 'Sync'}(${JSON.stringify('git')}, ['status']${opts})`;
+    fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn(', { env: process.env }')};`, ''].join('\n'));
+    const inherit = run();
+    assert.strictEqual(inherit.status, 1, `env: process.env must FAIL the gate\n${inherit.stdout}${inherit.stderr}`);
+    assert.match(inherit.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) passes an 'env:' that names process\.env/, `the FAIL must name the file, the line and the reason\n${inherit.stdout}`);
+    assert.match(inherit.stdout, /\nVERIFY: FAIL \(1\)/, `exactly the planted spawn fails\n${inherit.stdout}`);
+
+    fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn('')};`, ''].join('\n'));
+    const bare = run();
+    assert.strictEqual(bare.status, 1, `a spawn with no env: must FAIL the gate\n${bare.stdout}${bare.stderr}`);
+    assert.match(bare.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) carries no 'env:'/, `the FAIL must name the missing env\n${bare.stdout}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
