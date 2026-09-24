@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitEnv } from './git-env.mjs';
 
 const VERIFY = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify.mjs');
@@ -98,8 +98,11 @@ const notScratch = (s) => {
   return !(seg[0] === 'scripts' && seg[1] === 'lib' && (seg[2] || '').startsWith('.'));
 };
 
-test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the gate', () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-')));
+// The gate's own tree in a scratch dir: every top-level path verify.mjs itself reads. Three tests below need it; the copy
+// (and the reason its list is what it is) used to be inlined in each. The dir is cleaned HERE if the copy throws, and by the
+// caller's finally once this returns -- a helper that allocates must not leave the failure half of that to its caller.
+function copyGateTree(prefix) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   try {
     for (const rel of [
       '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
@@ -114,6 +117,13 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
       if (!fs.existsSync(src)) continue;
       fs.cpSync(src, path.join(root, rel), { recursive: true, filter: notScratch });
     }
+  } catch (e) { fs.rmSync(root, { recursive: true, force: true }); throw e; }
+  return root;
+}
+
+test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the gate', () => {
+  const root = copyGateTree('cw-desccap-');
+  try {
     const dest = path.join(root, 'scripts', 'verify.mjs');
     const run = () => spawnSync(process.execPath, [dest], { encoding: 'utf8' });
 
@@ -135,21 +145,8 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
 });
 
 test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never silently reads as 0 chars', () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-nonstring-')));
+  const root = copyGateTree('cw-desccap-nonstring-');
   try {
-    for (const rel of [
-      '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
-      'platform-configs', 'plugin', 'scripts', 'skills',
-      // The config-key drift gate NAMES its ship-text surfaces rather than
-      // existsSync-filtering them, so an absent one is REPORTED as unreadable
-      // instead of silently shrinking the scan. That is the property worth
-      // having, so the fixture grows to match rather than the gate softening.
-      'README.md', 'SECURITY.md', 'PRIVACY.md', 'CONTRIBUTING.md', 'INPUT-CONTRACT.md',
-    ]) {
-      const src = path.join(REPO, rel);
-      if (!fs.existsSync(src)) continue;
-      fs.cpSync(src, path.join(root, rel), { recursive: true, filter: notScratch });
-    }
     const pjPath = path.join(root, '.claude-plugin', 'plugin.json');
     const pj = JSON.parse(fs.readFileSync(pjPath, 'utf8'));
     pj.description = 123; // truthy non-string — must never read as 0 chars and pass
@@ -159,6 +156,32 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
     assert.strictEqual(r.status, 1, 'a non-string description must FAIL, not silently pass as 0 chars');
     assert.match(r.stdout, /FAIL\s+\.claude-plugin\/plugin\.json: description is not a string \(number\)/,
       `must name the actual type, not silently report 0 chars\n${r.stdout}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// CWK-120 row 16: two messages named a place the gate never checks. The SessionStart FAIL said `${CLAUDE_PLUGIN_ROOT}/bin` while the
+// check above it tests `${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js`, and the dist ok line listed `bin`, a directory the dist has
+// never shipped (DIST_ITEMS is manifest + commands + hooks + skills + scripts/lib). A maintainer reading either inspects the wrong path.
+// The ok line is now BUILT from DIST_ITEMS, so this asserts the relation (every shipped item is named, and no `bin`) rather than a copy of
+// today's list that would itself go stale the next time DIST_ITEMS moves.
+test('CWK-120 row 16: the hooks FAIL names the path the gate checks, and the dist ok line names exactly what DIST_ITEMS ships', async () => {
+  const root = copyGateTree('cw-verify-text-');
+  try {
+    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8' });
+    const clean = run();
+    assert.strictEqual(clean.status, 0, `pristine copy must PASS\n${clean.stdout}${clean.stderr}`);
+    const { DIST_ITEMS } = await import(pathToFileURL(path.join(REPO, 'scripts', 'build-plugin.mjs')).href);
+    const distLine = clean.stdout.split(/\r?\n/).find((l) => l.includes('plugin/ matches source'));
+    assert.ok(distLine, `the dist ok line must be printed\n${clean.stdout}`);
+    for (const item of DIST_ITEMS) assert.ok(distLine.includes(item.split(path.sep).join('/')), `the dist ok line must name ${item}\n${distLine}`);
+    assert.ok(!/\bbin\b/.test(distLine), `the dist ok line must not name a directory the dist does not ship\n${distLine}`);
+
+    const hj = path.join(root, 'hooks', 'hooks.json');
+    fs.writeFileSync(hj, fs.readFileSync(hj, 'utf8').split('coalwash-conductor.js').join('some-other-hook.js'));
+    const bad = run();
+    assert.strictEqual(bad.status, 1, 'a hooks.json that does not wire the conductor must FAIL the gate');
+    assert.match(bad.stdout, /FAIL\s+hooks\.json does not wire \$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/coalwash-conductor\.js/, `the FAIL must name the path the check reads\n${bad.stdout}`);
+    assert.ok(!bad.stdout.includes('CLAUDE_PLUGIN_ROOT}/bin'), `the FAIL must not name the never-checked bin path\n${bad.stdout}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

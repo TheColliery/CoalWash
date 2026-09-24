@@ -169,7 +169,7 @@ try {
   if (pj.license === 'Apache-2.0') ok('plugin.json license = Apache-2.0'); else fail(`plugin.json license = '${pj.license}' (series license is Apache-2.0)`);
   const hj = fs.readFileSync(path.join(repo, 'hooks', 'hooks.json'), 'utf8');
   if (hj.includes('${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js')) ok('hooks.json wires SessionStart via ${CLAUDE_PLUGIN_ROOT}/hooks');
-  else fail('hooks.json does not wire SessionStart under ${CLAUDE_PLUGIN_ROOT}/bin');
+  else fail('hooks.json does not wire ${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js');
 } catch (e) { fail(`plugin manifest: ${e.message}`); }
 
 console.log('marketplace.json:');
@@ -433,9 +433,10 @@ for (const l of LIBS) {
 
 console.log('plugin/ dist (the clean CC plugin vs source SSoT):');
 try {
-  const { checkDist } = await import(pathToFileURL(path.join(repo, 'scripts', 'build-plugin.mjs')).href);
+  const { checkDist, DIST_ITEMS } = await import(pathToFileURL(path.join(repo, 'scripts', 'build-plugin.mjs')).href);
   const drift = checkDist();
-  if (!drift.length) ok('plugin/ matches source (manifest + bin + commands + hooks + skills + scripts/lib); nothing else leaked');
+  // Named FROM DIST_ITEMS, never retyped: the hand-written list said "bin" for a directory the dist has never shipped (CWK-120 row 16).
+  if (!drift.length) ok(`plugin/ matches source (${DIST_ITEMS.map((i) => i.split(path.sep).join('/')).join(' + ')}); nothing else leaked`);
   else for (const d of drift) fail(d);
 } catch (e) { fail(`plugin/ dist check: ${e.message}`); }
 

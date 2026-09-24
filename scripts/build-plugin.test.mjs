@@ -13,7 +13,7 @@ function scratchDist() {
   return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-dist-')));
 }
 
-test('buildDist produces a clean, in-sync dist: manifest + bin + hooks + engine, tests filtered out', () => {
+test('buildDist produces a clean, in-sync dist: manifest + hooks + engine, tests filtered out', () => {
   const dist = scratchDist();
   try {
     buildDist(dist);
