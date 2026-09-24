@@ -177,11 +177,11 @@ The deliberate door — no BMI, no numbers at entry (openable on any store, incl
 
 **Choice 4 — THREE layers (procedure + table: §11):** **①** ULTRA engine = choice 3. **②** RE-TIER engine (`cli.mjs retier-run` on start, print verbatim; refuses below the arm line). **③** ONE agent clone (prohibition #40) reorganizes the MANUAL tier (prohibition #46) — **③a merge/regroup duplicate topics, THEN ③b condense** — every rewrite through `gateFiles`, every move through MOVE-VERIFY **by contract, not a code path that requires it** (method §11), ONE `applyPlan` tx, `origin: 'wizard-cut'`. `localOnly` blocks ③ (①② still run). Prohibition #47. All wizard-ONLY.
 
-**③-clone coordination + logbook: §9b** (disjoint partitions · collection-merge · blocked-returns-named). **CoalFace hand-off:** ③ past both size∧count gates (`handoffVerdict`, §9c) → NO more workers inside CoalWash; at fan-out grade OFFER `/coalface` ONCE (prohibition #48 — the fidelity gate stays the domain gate). ONE huge file = 1 worker — demote-first.
+**③-clone coordination + logbook: §9b** (disjoint partitions · collection-merge · blocked-returns-named). **CoalFace hand-off:** ③ past both size∧count gates (`handoffVerdict`, §9c) → NO more workers inside CoalWash; at fan-out grade, if CoalFace is installed, OFFER `/coalface` ONCE (prohibition #48 — the fidelity gate stays the domain gate). ONE huge file = 1 worker — demote-first.
 
 ## Activation ladder (capability-keyed; prohibition #51)
 
-Has lifecycle hooks → the shipped conductor runs the gauge at `SessionStart`, delivers any pending ask/force at `Stop`, counts sub spawns at `PostToolUse` (Claude Code today). No hooks → best-effort agent-driven: an always-loaded instruction watches for visible class-B bloat and OFFERS the ask-box (probabilistic; prohibition #49). Always → manual `/coalwash`. A platform adding hooks moves UP (wire the hook, retire the emulation).
+Has lifecycle hooks → the shipped conductor runs the gauge at `SessionStart`, delivers any pending ask/force at `Stop`, counts sub spawns at `PostToolUse` (Claude Code today). No hooks → best-effort agent-driven offer: DESIGNED, not shipped on a file-copy install (nothing installs the always-loaded instruction; prohibition #49). Always → manual `/coalwash`. A platform adding hooks moves UP (wire the hook, retire the emulation).
 
 **Sub-spawn true-bill (0o):** session hooks fire on the MAIN session only — never inside a sub (a named platform constraint). A PostToolUse Agent-tool meter silently adds each spawn's cached-parcel cost (write-only, no per-spawn output); the bill surfaces ONLY via `/coalwash:stats` and the FULL directive numbers, one clause, absent at zero.
 

@@ -22,6 +22,8 @@ node scripts/verify.mjs         # gate: manifests, factory config vs schema, dis
 node scripts/test.mjs           # zero-dependency test suite (node --test, explicit file list)
 ```
 
+The tracked git hooks (`.githooks/pre-commit`, `.githooks/pre-push`) run `node scripts/verify.mjs` and then `node scripts/test.mjs`, so every commit and push runs the whole suite. `scripts/test.mjs` runs `node --test` at node's default concurrency (one file-child per core) unless `COALWASH_TEST_CONCURRENCY=<n>` is set to a positive integer, which adds `--test-concurrency=<n>`. On a small machine, run a serial, memory-capped suite: set `NODE_OPTIONS=--max-old-space-size=2048` (it has to be in the environment; a flag on the command line does not reach `node --test`'s per-file children) and `COALWASH_TEST_CONCURRENCY=1`. Git hands both on to the hooks, e.g. `COALWASH_TEST_CONCURRENCY=1 NODE_OPTIONS=--max-old-space-size=2048 git commit`.
+
 ### Development Rules
 
 - **Rebuild the dist after a source change:** edit `hooks/`, `scripts/lib/`, `skills/`, `commands/`, or the manifest, then `node scripts/build-plugin.mjs` to re-sync `plugin/` (verify fails on a stale dist).
@@ -29,6 +31,7 @@ node scripts/test.mjs           # zero-dependency test suite (node --test, expli
 - **Safety gates live in code, keep them there:** delete/merge authorization is plan-sourced (no separate approval flag), `pinned: true` is refused, every path is realpath-and-contained fail-closed, the apply is snapshot + WAL + rollback — safety is UNDO, not pre-approval. Never move one of these into prompt text.
 - **Keep the hook Phoenix-pure:** zero dependencies, fail-silent (try/catch, exit 0, never `process.exit()`), no network, no child processes, silent except the sanctioned channel.
 - **Add tests:** every lib change gets a unit test; every hook-behavior change gets a **hermetic spawn test** (spawn the real hook, sandbox TEMP + HOME). Register a new test *file* in `scripts/test.mjs` (the runner fails on an unlisted orphan).
+- **A git child in a test or a gate takes its environment from `gitEnv()`** (`scripts/git-env.mjs`), which strips the whole `GIT_*` family — an ambient `GIT_DIR` from a hook or a linked worktree would otherwise aim the fixture's git at the real repository. `verify.mjs` fails a git spawn under `scripts/` that does not, and prints what it covered.
 - **Language & tone:** shipped source and docs stay in English.
 
 ---

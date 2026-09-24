@@ -1,8 +1,12 @@
 {
   // Master switch. auto = the session-start gauge measures class-B footprint
-  // and arms the Stop-hook ask/directive by ceiling (LEAN silent / OBESE ask /
-  // FULL economic force — every cut snapshot-backed and revertible); manual =
-  // gauge silent, you run /coalwash yourself; off = fully silent.
+  // and arms the Stop hook by ceiling: LEAN silent · OBESE runs the free
+  // mechanical Quick pass automatically under standing consent, no ask · FULL
+  // force-runs the same Quick pass unconditionally, and only if the store is
+  // STILL over FULL afterwards does the Stop hook ask, once, to open the Full
+  // (semantic) wizard, the one consent in the system · a capacity-wall FULL is
+  // an advisory, never a cut · every cut snapshot-backed and revertible.
+  // manual = gauge silent, you run /coalwash yourself; off = fully silent.
   "coalwashMode": "auto",
 
   // Language for prompts and nudges. auto = follow the conversation's language;
@@ -57,12 +61,12 @@
   // Days between self-update checks/reminders (1-365; out-of-range clamps to 14 on read).
   "updateCheckDays": 14,
 
-  // Per-ceiling exercise the Stop-hook ask offers when a band ceiling is
-  // crossed (quick = free mechanical pass; full = the paid semantic pass,
-  // always a separate consent). obese/full key by the DESTINATION band
-  // reached (beta.12 band-collapse retired the separate plump rung). The
-  // fat-only scoping refinement is a later release — 'full' here is today's
-  // shipped Full pass.
+  // exercisePerBand: read-tolerated, NO runtime effect. The conductor's OBESE
+  // and FULL branches are fixed (OBESE = the automatic Quick pass; FULL = the
+  // force-run Quick pass, then the once-per-crossing wizard ask) and never
+  // read this key; it stays in the schema so an existing value degrades
+  // quietly. Changing it changes nothing today. (obese/full key by the
+  // DESTINATION band; the shipped values are quick / full.)
   "exercisePerBand": { "obese": "quick", "full": "full" },
 
   // NOTE (0m): there is deliberately NO forceMode key — force at FULL is
@@ -90,7 +94,8 @@
   //   the first-party `claude project purge` is the delete lever — unless
   //   deleteCold is explicitly true (archive-then-delete, death-certified).
   // archiveDir: absolute path (another drive is fine); "" = the default under
-  //   ~/.claude/coal/coalwash/estate-archive.
+  //   ~/.claude/coal/coalwash/estate-archive. Read from the GLOBAL config only:
+  //   a value set in a project config is ignored.
   // indexEnabled: append a dig-index row per archived session (searchable via
   //   `cli.mjs estate-search <query>`; local file, never pushed anywhere).
   // digCrush: ULTRA trigger #2 — the dig-gauge PRE-READ tollgate. An agent runs
