@@ -27,6 +27,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { gitEnv } from './git-env.mjs';
 
 const VERIFY = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify.mjs');
 
@@ -192,17 +193,18 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
 //
 // THE TREE IS THE TRACKED FILE LIST, copied from disk: it is what a clone has, which
 // is the question the pointer gate asks.
-const hermeticGit = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+// CWK-133: scripts/git-env.mjs's `gitEnv` -- the whole GIT_* family out, the given directory's parent as the ceiling.
+const hermeticGit = (dir) => gitEnv(path.dirname(dir));
 
 // The tracked tree in a real repo, fenced per the rail above. Returns null when git is
 // unavailable (the caller skips visibly). The dir is cleaned HERE if building it throws,
 // and by the caller's finally once this returns.
 function trackedTreeRepo() {
-  const listed = spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: hermeticGit() });
+  const listed = spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: hermeticGit(REPO) });
   if (listed.error || listed.status !== 0) return null;
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-git-')));
   try {
-    const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: hermeticGit() });
+    const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: hermeticGit(root) });
     const init = git('init', '-q', '-b', 'main');
     assert.strictEqual(init.status, 0, `git init in the fixture failed\n${init.stderr}`);
     assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(),
@@ -219,7 +221,7 @@ function trackedTreeRepo() {
     assert.strictEqual(added.status, 0, `git add in the fixture failed\n${added.stderr}`);
     const tracked = git('ls-files');
     assert.ok(tracked.stdout.includes('scripts/verify.mjs'), `the fixture index must hold the tree\n${tracked.stderr}`);
-    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hermeticGit() });
+    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hermeticGit(root) });
     return { root, git, run };
   } catch (e) { fs.rmSync(root, { recursive: true, force: true }); throw e; }
 }
@@ -298,4 +300,28 @@ test('verify.mjs in a BARE repo: a check-ignore that cannot answer FAILs the gat
     assert.match(r.stdout, /\nVERIFY: FAIL \(1\)/,
       `exactly one failure, this one — any other count means the exit code is not this probe's\n${r.stdout}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// CWK-133: an ABSOLUTE GIT_DIR in the caller's environment (a linked worktree's hook exports one) must not decide which
+// repository this gate's two git calls answer for. A decoy repository with an empty index stands in for the caller's:
+// without the strip `git ls-files` returns the decoy's index, no cited path reads as tracked, and the pointer block FAILs.
+test('verify.mjs inside a REAL git repo: an ambient absolute GIT_DIR cannot make its git calls answer for another repository (CWK-133)', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root } = fx;
+  const decoy = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-decoy-')));
+  try {
+    const made = spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: hermeticGit(decoy) });
+    assert.strictEqual(made.status, 0, `git init in the decoy failed\n${made.stderr}`);
+    // Observable on the check-ignore call too: were it to run against the DECOY's git dir, this exclude file (which
+    // `check-ignore` reads from the git dir, not from the work tree) would mark every root the ship-text cites as ignored.
+    fs.writeFileSync(path.join(decoy, '.git', 'info', 'exclude'), ['skills/', 'commands/', 'hooks/', 'scripts/', 'plugin/', 'references/', ''].join('\n'));
+    const hostile = { ...hermeticGit(root), GIT_DIR: path.join(decoy, '.git') };
+    const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hostile });
+    assert.strictEqual(r.status, 0, `the tracked tree must still PASS with a hostile GIT_DIR in the environment\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /ok\s+every path this repo points at/, `the pointer block must have run and resolved\n${r.stdout}`);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(decoy, { recursive: true, force: true });
+  }
 });

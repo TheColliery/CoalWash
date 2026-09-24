@@ -253,7 +253,12 @@ try {
 // each with its measured reason in scripts/pointer-check.mjs.
 console.log('pointers (ship-text vs the tree):');
 try {
-  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8' });
+  // CWK-133: every git spawn in this gate gets its env from the ONE helper (an ambient GIT_DIR / GIT_INDEX_FILE from
+  // a linked worktree's hook would otherwise decide which repository these two calls answer for). Dynamic, inside the
+  // check that uses it: a missing helper is one FAIL line here, never a link-time crash (node/runtime.md §1).
+  const { gitEnv } = await import(pathToFileURL(path.join(repo, 'scripts', 'git-env.mjs')).href);
+  const gitEnvHere = gitEnv(path.dirname(repo));
+  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8', env: gitEnvHere });
   if (lsAll.error || lsAll.status !== 0) {
     // A VISIBLE skip, never a silent carve-out: no git means no durability answer.
     console.log('  --   pointer check: git unavailable — cannot tell a tracked path from an untracked one; skipped');
@@ -356,7 +361,7 @@ try {
       agentHomes,
       runCheckIgnore: (names) => {
         const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-          { cwd: repo, encoding: 'utf8', input: names.map((n) => n + '/').join('\n') + '\n' });
+          { cwd: repo, encoding: 'utf8', env: gitEnvHere, input: names.map((n) => n + '/').join('\n') + '\n' });
         if (ci.error) { checkIgnoreFailure = `failed to spawn: ${ci.error.message}`; return ''; }
         if (ci.status !== 0 && ci.status !== 1) {
           const why = String(ci.stderr || '').split('\n')[0].trim();

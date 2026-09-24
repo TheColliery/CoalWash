@@ -85,6 +85,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { gitEnv } from './git-env.mjs';
 
 const BT = String.fromCharCode(96);
 const ESC_BASE = 0xF0000;   // an escaped ASCII punctuation char, held as a private-use code point
@@ -400,7 +401,9 @@ function main(argv) {
     return;
   }
   let tracked = null;
-  const ls = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  // CWK-133: no ambient GIT_* reaches this spawn. No ceiling: `root` is wherever the contributor stands, which may
+  // be a subdirectory of the repository git has to find (scripts/git-env.mjs, the `ceilingDir` paragraph).
+  const ls = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: gitEnv() });
   if (ls.error && ls.error.code === 'ENOENT') {
     console.log('  --   git not found: targets are checked for existence only, not for being tracked');
   } else if (ls.error || ls.status !== 0) {

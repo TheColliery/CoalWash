@@ -50,6 +50,7 @@ const TESTS = [
   'scripts/configure.test.mjs',
   'scripts/pointer-check.test.mjs',
   'scripts/link-check.test.mjs',
+  'scripts/git-env.test.mjs',
 ];
 
 // CWK-071 (node/runtime.md §7): process.exitCode + a natural exit at all three
