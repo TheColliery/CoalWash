@@ -1363,3 +1363,37 @@ test('BREAK-3g Vector 2 end-to-end (index OFF): a sole-home codespan anchor `api
     assert.ok(res.kept.some((k) => k.path.endsWith('orphan.md')), 'the keep is recorded');
   } finally { clean(home, proj); }
 });
+
+// CWK-120 row 2 (CodeRabbit, adjudicated): `JSON.parse` enforces no shape, and rollbackFromSnapshot is the LAST resort of a
+// failed post-commit probe -- an exception escaping it means the rollback never completes and the caller never learns.
+test('CWK-120 row 2: a manifest that is not an ARRAY reads as unreadable (-1), never a thrown TypeError', () => {
+  const { home, proj } = sandbox();
+  try {
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir, { recursive: true });
+    for (const body of ['{}', 'null', '42', '"x"', 'true', '{"snap":"f0","original":"x"}']) {
+      fs.writeFileSync(path.join(snapDir, 'manifest.json'), body);
+      assert.strictEqual(rollbackFromSnapshot(snapDir, [], [proj]), -1, `manifest ${body}`);
+    }
+  } finally { clean(home, proj); }
+});
+
+test('CWK-120 row 2: a malformed ENTRY is one failed restore and the REST of the manifest is still restored (fail closed, keep going)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir, { recursive: true });
+    const good = path.join(proj, 'a.md');
+    write(good, 'CHANGED-AFTER-COMMIT');
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'PRISTINE-A');
+    const manifest = [
+      null, 7, {}, { snap: 'f0' }, { original: good }, { snap: 5, original: good }, { snap: 'f0', original: 5 },
+      { snap: 'f0' + String.fromCharCode(0) + 'x', original: good }, // a NUL in a path: path arithmetic that throws
+      { snap: 'f0', original: good }, // the one well-formed entry, AFTER the malformed ones
+    ];
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify(manifest));
+    const failed = rollbackFromSnapshot(snapDir, [], [proj]);
+    assert.strictEqual(failed, manifest.length - 1, 'every malformed entry is counted as a failed restore');
+    assert.strictEqual(fs.readFileSync(good, 'utf8'), 'PRISTINE-A', 'the well-formed entry after the malformed ones was still restored');
+  } finally { clean(home, proj); }
+});
