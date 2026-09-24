@@ -80,7 +80,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig } from './lib/config-schema.mjs';
 import { parseJsonc } from './lib/jsonc.mjs';
-import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig, findProjectRoot, repoReadOutcome, MAX_CONFIG_BYTES } from './lib/config-load.mjs';
+import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig, findProjectRoot, repoReadOutcome, MAX_CONFIG_BYTES, GLOBAL_ONLY_KEYS } from './lib/config-load.mjs';
 import { writeRepoFile, RepoWriteRefused } from './lib/repo-fs.mjs';
 
 // Prototype-pollution guard. `parseJsonc` already drops these at PARSE (so a
@@ -582,10 +582,16 @@ function main() {
     console.log(JSON.stringify(next, null, 2));
     for (const c of clamped) {
       console.warn(`\nWarning: ${c.key} will NOT be read at the value you set.`);
-      console.warn(`  written: ${JSON.stringify(c.wrote)}    every read returns: ${JSON.stringify(c.reads)}`);
-      console.warn('  A consent-bearing key merges SAFER-VALUE-WINS (hooks-safety.md §9): a project');
-      console.warn('  config may make it quieter, never weaker, because a cloned repo ships a project');
-      console.warn('  config and its bytes are indistinguishable from yours.');
+      console.warn(`  written: ${JSON.stringify(c.wrote)}    every read returns: ${JSON.stringify(c.reads) ?? 'unset (the default)'}`);
+      if (GLOBAL_ONLY_KEYS.includes(c.key)) {
+        // CWK-120 D3: a REACH key, not a consent key -- no "safer value" is involved, so the consent-clamp story below would be false.
+        console.warn('  This key is read from the GLOBAL config only: a cloned repo ships a project config,');
+        console.warn('  and it must not be able to choose where your own session transcripts are archived.');
+      } else {
+        console.warn('  A consent-bearing key merges SAFER-VALUE-WINS (hooks-safety.md §9): a project');
+        console.warn('  config may make it quieter, never weaker, because a cloned repo ships a project');
+        console.warn('  config and its bytes are indistinguishable from yours.');
+      }
       console.warn(`  To make this take effect, set it on the GLOBAL layer instead:`);
       console.warn(`      node scripts/configure.mjs --global --${c.key} ${typeof c.wrote === 'string' ? c.wrote : JSON.stringify(c.wrote)}`);
     }

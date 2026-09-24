@@ -11,6 +11,8 @@ import { globalConfigPath, projectConfigPath, projectConfigCandidates, projectCo
 // assertion (a TypeError at the call) instead of crashing the whole file at link time, so the red-first evidence
 // for the new API is per-test, not "the file did not load".
 import * as ConfigLoad from './config-load.mjs';
+import { resolveArchiveDir } from './estate-archive.mjs';
+import { clampedRead } from './config-schema.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -1639,4 +1641,76 @@ test('CWK-120 row 12 control: a READABLE project that names the key still gets t
   assert.strictEqual(mergeSafety({}, { scanEverything: true }).scanEverything, false, 'no global opt-in -> the escalation is clamped to false');
   assert.strictEqual(mergeSafety({ scanEverything: true }, { scanEverything: true }).scanEverything, true, 'a global opt-in survives');
   assert.deepStrictEqual(mergeSafety({}, {}), {}, 'two absent files still merge to {}');
+});
+
+// CWK-120 D3 (the head's ruling, r8-coalwash return, D3 (a)): `estate.archiveDir` is read from the GLOBAL config layer ONLY. It
+// names WHERE a user's own session transcripts are copied and later deleted from (archive-then-delete), so a value a cloned
+// repo ships in its project config must not be able to choose it. This is a REACH clamp, not a consent clamp: there is no
+// "safer value" to fall back to, the project layer simply has no say. It lives in the ONE merge site (`mergeObjectKey`) every
+// consumer reads -- the CLI, the estate report, retier, the wizard handshake -- the row-11 lesson: fix it where all callers route.
+const D3_OUTSIDE = () => path.join(os.tmpdir(), 'cw-d3-someone-elses-archive');
+
+test('CWK-120 D3: a project estate.archiveDir is IGNORED -- where the archive lands does not move (no global config at all)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ estate: { archiveDir: D3_OUTSIDE() } }));
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.estate.archiveDir, undefined, 'the merged config carries no project archiveDir');
+    const landed = resolveArchiveDir(clampedRead(cfg, 'estate'), home);
+    assert.strictEqual(landed, resolveArchiveDir({}, home), 'the archive lands at the OS-citizen DEFAULT, exactly where an absent key puts it');
+    assert.ok(!landed.startsWith(D3_OUTSIDE()), 'and never under the path the cloned config named');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-120 D3: a GLOBAL estate.archiveDir wins over a different project value (the user\'s own choice is honoured)', () => {
+  const { home, proj } = sandbox();
+  const mine = path.join(home, 'my-archive');
+  try {
+    writeCfgs(home, proj, { estate: { archiveDir: mine } }, { estate: { archiveDir: D3_OUTSIDE() } });
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.estate.archiveDir, mine, 'the global value, not the project one');
+    assert.ok(!resolveArchiveDir(clampedRead(cfg, 'estate'), home).startsWith(D3_OUTSIDE()));
+  } finally { clean(home, proj); }
+});
+
+test('CWK-120 D3: dropping archiveDir drops ONLY that sub-key -- every other project estate value still wins on its own key', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj,
+      { estate: { purgeAfterDays: 400 } },
+      { estate: { archiveDir: D3_OUTSIDE(), compressAfterDays: 30, indexEnabled: false } });
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.estate.archiveDir, undefined);
+    assert.strictEqual(cfg.estate.compressAfterDays, 30, 'the project\'s other sub-key is untouched');
+    assert.strictEqual(cfg.estate.indexEnabled, false);
+    assert.strictEqual(cfg.estate.purgeAfterDays, 400, 'and the global sub-key still survives (W2-2)');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-120 D3: an UNREADABLE global file gives the project no archiveDir either -- the user\'s stance is unknown, the default stands', () => {
+  // The whole global file could not be read, so what the user had chosen is UNKNOWN; the safe answer for a reach key is the
+  // default location, never the project's value. (mergeSafety is handed `{}` for an unreadable global, as loadMergedConfig does.)
+  const merged = mergeSafety({}, { estate: { archiveDir: D3_OUTSIDE(), compressAfterDays: 30 } }, { globalUnreadable: true });
+  assert.strictEqual(merged.estate.archiveDir, undefined);
+  assert.strictEqual(merged.estate.compressAfterDays, 30, 'the rest of the object still merges');
+});
+
+test('CWK-120 D3: a project-only estate with NOTHING but archiveDir merges to an estate with no archiveDir (never a stray key)', () => {
+  const merged = mergeSafety({}, { estate: { archiveDir: D3_OUTSIDE() } });
+  assert.ok(!('archiveDir' in merged.estate), 'the key is absent, not present-and-undefined, so a strict deep-equal against {} holds');
+});
+
+test('CWK-120 D3: the clamp is keyed by NAME on the object-typed key `estate`, so another object\'s sub-key of the same name is untouched', () => {
+  // `retier` has no archiveDir of its own; a project-wins sub-key there must keep winning. The clamp must not be a blanket
+  // "ignore any archiveDir anywhere".
+  const merged = mergeSafety({}, { retier: { archiveDir: 'elsewhere', armPct: 50 } });
+  assert.strictEqual(merged.retier.archiveDir, 'elsewhere');
+  assert.strictEqual(merged.retier.armPct, 50);
+});
+
+test('CWK-120 D3: a hand-built GLOBAL object handed in beside globalUnreadable:true is not trusted either (the same contract projectUnreadable already states)', () => {
+  // readJsonc returns `{}` for an unreadable file today, so this is DEFENSIVE, like R8-F5 for the project layer: mergeSafety is a
+  // reusable function, and "the global file could not be read" means its content is unverifiable whatever the caller passed.
+  const merged = mergeSafety({ estate: { archiveDir: path.join(os.tmpdir(), 'cw-d3-global-claim') } }, { estate: { archiveDir: D3_OUTSIDE() } }, { globalUnreadable: true });
+  assert.ok(!('archiveDir' in merged.estate), 'neither the project value nor an unverifiable global value is used');
 });
