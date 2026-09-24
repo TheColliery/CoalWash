@@ -27,7 +27,12 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      # CWK-120 #5 -- persist-credentials: false: this job only reads (`git ls-files` needs no credential) and executes repository code
+      # from the pull-request checkout, which could otherwise read the token `actions/checkout` leaves in .git/config
+      # (zizmor artipacked, CWE-522). scorecard.yml already set it; the flock precedent is CoalHearth's ci.yml.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22

@@ -7,12 +7,12 @@ on:
       # CodeQL analyzes js/ts AND the workflow files (the actions language) — markdown still needs no security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
       - '**.md'
       - 'LICENSE'
+  # NO paths-ignore here (CWK-120 finding #1): the ruleset `dependabot-auto-merge-gate` requires BOTH `all-green`
+  # (ci.yml) AND `analyze (javascript)` (this job) on every PR into main, so a filter on this trigger leaves the
+  # same Pending-forever check on this half of the gate. `push` keeps its filter: no PR merge is gated on a
+  # push-triggered analyze run. The flock precedent is CoalFace's codeql.yml (same finding, same ruleset).
   pull_request:
     branches: [main]
-    paths-ignore:
-      # CodeQL analyzes js/ts AND the workflow files (the actions language) — markdown still needs no security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
-      - '**.md'
-      - 'LICENSE'
   schedule:
     - cron: '0 6 * * 1'
 
@@ -34,7 +34,13 @@ jobs:
     permissions:
       security-events: write
     steps:
+      # CWK-120 #5 -- persist-credentials: false: the analysis only reads the checkout (its one write is the SARIF
+      # upload under `security-events: write`, never a ref), so the token `actions/checkout` leaves in .git/config
+      # buys nothing and is readable by anything run against the pull-request checkout (zizmor artipacked, CWE-522).
+      # scorecard.yml already set it; the flock precedent is CoalHearth's ci.yml.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
         with:
           languages: javascript-typescript, actions

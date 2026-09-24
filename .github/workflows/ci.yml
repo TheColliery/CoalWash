@@ -14,16 +14,17 @@ on:
       - 'PRIVACY.md'
       - 'SECURITY.md'
       - 'LICENSE'
+  # NO paths-ignore here (CWK-120 finding #1, CONFIRMED against this repo's OWN live ruleset
+  # `dependabot-auto-merge-gate`, active, targeting every PR into main, requiring the `all-green` and
+  # `analyze (javascript)` contexts): GitHub's own docs are explicit -- "If a workflow is skipped due to path
+  # filtering... checks associated with that workflow will remain in a 'Pending' state. A pull request that
+  # requires those checks to be successful will be blocked from merging." A doc-only PR would trigger no `gate`
+  # job, so `all-green` would never post and the PR would sit blocked for anyone without bypass. The gate is
+  # cheap (no build step, no install), so paying it on every PR is the right trade against a permanently stuck
+  # required check. The flock precedent is CoalFace's ci.yml (same finding, same ruleset). `push` keeps its
+  # filter above: no PR merge is gated on a push-triggered run.
   pull_request:
     branches: [main]
-    paths-ignore:
-      # skip verify/test only for NON-shipped docs — a SHIPPED markdown artifact (skills/**/SKILL.md, commands/*.md) MUST run CI (verify checks dist-sync)
-      - 'README.md'
-      - 'CHANGELOG.md'
-      - 'CONTRIBUTING.md'
-      - 'PRIVACY.md'
-      - 'SECURITY.md'
-      - 'LICENSE'
 
 permissions:
   contents: read
@@ -55,8 +56,13 @@ jobs:
         node: ${{ github.ref == 'refs/heads/main' && fromJSON('[22, 24]') || fromJSON('[22]') }}  # supported LTS only (24 Active, 22 Maintenance); 18/20 are EOL — bump as the Node LTS schedule moves
     runs-on: ${{ matrix.os }}
     steps:
+      # CWK-120 #5 -- persist-credentials: false: this job pushes nothing (`contents: read`) and executes repository code
+      # from the pull-request checkout, which could otherwise read the token `actions/checkout` leaves in .git/config
+      # (zizmor artipacked, CWE-522). scorecard.yml already set it; the flock precedent is CoalHearth's ci.yml.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
       # Zero-dependency: no install step. Run the same fail-loud gate as a local pre-push,
