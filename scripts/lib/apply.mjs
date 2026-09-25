@@ -1205,6 +1205,11 @@ export function applyPlan(plan, opts = {}) {
       for (const a of actionable) {
         if (a.type === 'create') continue; // nothing to snapshot
         const snapName = `f${n++}`;
+        // CWK-137 F-8: the one re-read of a plan target NOT routed through the bounded read, on purpose. It is a kernel-side copy
+        // (no JS buffer holds the bytes), and its result is judged by `verifySnapshot` a few lines below, which reads BOTH sides
+        // bounded at MAX_DOC_BYTES: a target that grew past the staging bound since staging is refused there
+        // ("unverifiable: ... over-bound") before any mutation. Routing the copy through a buffered read would only add a second
+        // bounded read and replace this copy's durability path. Named in the census as the one RESIDUAL_REREAD member.
         fs.copyFileSync(a.phys, path.join(snapDir, snapName));
         const fd = fs.openSync(path.join(snapDir, snapName), 'r+');
         try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
