@@ -349,7 +349,8 @@ const oneLine = (s, max = 300) => {
 function archiveDirHint({ ignored, estate, home }) {
   const hit = (ignored || []).find((i) => i.key === 'estate.archiveDir');
   if (!hit) return null;
-  return `[CoalWash] estate.archiveDir set in the project config (${oneLine(hit.path)}) is ignored: ${oneLine(hit.value)} was NOT used, because the archive directory is read from the GLOBAL config only. This run read ${oneLine(resolveArchiveDir(estate, home))}. To use that path, set estate.archiveDir to it in ${oneLine(globalConfigPath(home))}, or move the archives.`;
+  const read = oneLine(resolveArchiveDir(estate, home));
+  return `[CoalWash] estate.archiveDir set in the project config (${oneLine(hit.path)}) is ignored: ${oneLine(hit.value)} was NOT used, because the archive directory is read from the GLOBAL config only. This run read ${read}. To use ${oneLine(hit.value)}, set estate.archiveDir to it in ${oneLine(globalConfigPath(home))}, or move the archives it holds into ${read}.`;
 }
 
 function main() {

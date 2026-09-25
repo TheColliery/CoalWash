@@ -580,8 +580,10 @@ test('CWK-137 D3 hint: estate-search names an ignored PROJECT estate.archiveDir 
     const lines = d3HintLines(withValue.stderr);
     assert.strictEqual(lines.length, 1, `exactly one hint line, got: ${withValue.stderr}`);
     assert.ok(lines[0].includes(ignored), 'names the path the project config asked for');
-    assert.ok(lines[0].includes(path.join(home, '.claude', 'coal', 'coalwash', 'estate-archive')), 'names the directory this run actually read');
+    assert.ok(lines[0].includes(`This run read ${path.join(home, '.claude', 'coal', 'coalwash', 'estate-archive')}.`), 'names the directory this run actually read, in the sentence that says so');
     assert.ok(lines[0].includes(path.join(home, '.claude', '.coalwash.json')), 'names the GLOBAL config the code reads (claudeBaseDir), not a literal ~/.claude');
+    assert.ok(lines[0].includes(`To use ${ignored}, set estate.archiveDir to it in `), 'the remedy names the IGNORED path as the one to set (an ambiguous "that path" reads as the directory this run read)');
+    assert.ok(lines[0].includes(`move the archives it holds into ${path.join(home, '.claude', 'coal', 'coalwash', 'estate-archive')}.`), 'and the other remedy names where to move them');
     fs.writeFileSync(path.join(proj, '.coalwash.json'), '{}');
     const without = run(proj, home, ['estate-search', 'anything']);
     assert.strictEqual(without.status, 0, without.stderr);
@@ -616,7 +618,7 @@ test('CWK-137 D3 hint: a user\'s own GLOBAL archiveDir is the directory named as
     assert.strictEqual(other.status, 0, other.stderr);
     const lines = d3HintLines(other.stderr);
     assert.strictEqual(lines.length, 1);
-    assert.ok(lines[0].includes(mine), 'this run read the GLOBAL value');
+    assert.ok(lines[0].includes(`This run read ${mine}.`), 'this run read the GLOBAL value');
     d3ProjectArchiveDir(proj, mine);
     assert.strictEqual(d3HintLines(run(proj, home, ['estate-search', 'x']).stderr).length, 0, 'the project restated the global value: nothing was ignored');
   } finally { clean(home, proj); }
