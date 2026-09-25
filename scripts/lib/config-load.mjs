@@ -1191,7 +1191,23 @@ export function loadMergedConfigReport({ cwd = process.cwd(), home = os.homedir(
   const unreadable = [];
   if (g.unreadable) unreadable.push({ tier: 'global', path: gPath, reason: g.reason });
   if (p.unreadable) unreadable.push({ tier: 'project', path: pPath, reason: p.reason });
-  return { cfg: mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable }), unreadable };
+  // CWK-137 D3 (the sizing ruling's restore-door hint): a GLOBAL-ONLY sub-key the PROJECT layer carries and the merge
+  // therefore drops. Read from `p.data`, the ONE bounded read above -- never a second read that could disagree with the
+  // merge. A project value that only restates the user's own (readable) global value ignored nothing, so it is not
+  // reported; an unreadable project is `{}` and reports nothing; a non-string or empty value is junk with no path to name.
+  const ignored = [];
+  for (const [obj, subs] of Object.entries(GLOBAL_ONLY_OBJECT_KEYS)) {
+    const pObj = p.data[obj];
+    if (!isPlainObject(pObj)) continue;
+    const gObj = isPlainObject(g.data[obj]) ? g.data[obj] : {};
+    for (const sub of subs) {
+      const value = pObj[sub];
+      if (typeof value !== 'string' || value === '') continue;
+      if (!g.unreadable && value === gObj[sub]) continue;
+      ignored.push({ key: `${obj}.${sub}`, tier: 'project', path: pPath, value });
+    }
+  }
+  return { cfg: mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable }), unreadable, ignored };
 }
 
 export function loadMergedConfig(opts = {}) {

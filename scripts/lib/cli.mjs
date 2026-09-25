@@ -81,7 +81,7 @@ import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, binItemOutcome } from './tailings.mjs';
 import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
-import { loadMergedConfig, findProjectRoot, projectConfigResolution, discoverIgnoredConfigs } from './config-load.mjs';
+import { loadMergedConfig, loadMergedConfigReport, globalConfigPath, findProjectRoot, projectConfigResolution, discoverIgnoredConfigs } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { estateReport } from './estate.mjs';
@@ -332,8 +332,24 @@ function argAfter(args, flag) {
 function estateOpts(args) {
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
-  const estate = clampedRead(loadMergedConfig({ cwd: process.cwd(), home }), 'estate');
-  return { projectRoot, home, estate, currentSessionId: argAfter(args, '--session') };
+  const { cfg, ignored } = loadMergedConfigReport({ cwd: process.cwd(), home });
+  const estate = clampedRead(cfg, 'estate');
+  return { projectRoot, home, estate, ignored, currentSessionId: argAfter(args, '--session') };
+}
+
+// CWK-137 D3 restore-door hint (the sizing ruling): estate.archiveDir is read from the GLOBAL config only, so a project value the
+// clamp dropped would leave estate-search / estate-restore looking in a different directory than the user once archived into,
+// with nothing to say so. `ignored` comes from the SAME bounded config read the merge made (never a second read). The line is
+// built from a cloned repo's bytes and lands in the agent's context, so every field is one line and bounded (security.md, log
+// injection). Printed on EVERY run, to stderr; stdout and the exit code are untouched.
+const oneLine = (s, max = 300) => {
+  const t = String(s).replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' '); // control chars, U+2028, U+2029
+  return t.length > max ? `${t.slice(0, max)}...` : t;
+};
+function archiveDirHint({ ignored, estate, home }) {
+  const hit = (ignored || []).find((i) => i.key === 'estate.archiveDir');
+  if (!hit) return null;
+  return `[CoalWash] estate.archiveDir set in the project config (${oneLine(hit.path)}) is ignored: ${oneLine(hit.value)} was NOT used, because the archive directory is read from the GLOBAL config only. This run read ${oneLine(resolveArchiveDir(estate, home))}. To use that path, set estate.archiveDir to it in ${oneLine(globalConfigPath(home))}, or move the archives.`;
 }
 
 function main() {
@@ -485,7 +501,10 @@ function main() {
     const query = args.slice(1).filter((a) => !a.startsWith('--')).join(' ');
     if (!query) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const { projectRoot, home, estate } = estateOpts(args);
+      const opts = estateOpts(args);
+      const { projectRoot, home, estate } = opts;
+      const hint = archiveDirHint(opts);
+      if (hint) console.error(hint);
       // #58 tombstone cross-check: a matching row is ANNOTATED (later-removed?),
       // never dropped — the search still returns everything it found.
       const tombstones = collectTombstones({ projectRoot, home });
@@ -529,7 +548,10 @@ function main() {
     const sessionId = args[1];
     if (!sessionId || sessionId.startsWith('--')) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const { projectRoot, home, estate } = estateOpts(args);
+      const opts = estateOpts(args);
+      const { projectRoot, home, estate } = opts;
+      const hint = archiveDirHint(opts);
+      if (hint) console.error(hint);
       const tombstones = collectTombstones({ projectRoot, home });
       const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: argAfter(args, '--to'), tombstones });
       if (!r.ok) { console.error(`estate-restore: ${r.error}`); process.exitCode = 1; return; }

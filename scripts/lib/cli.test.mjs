@@ -557,3 +557,81 @@ test('r34c: invoked through a directory junction, the CLI still runs (no subcomm
   assert.strictEqual(r.status, 1, `through the junction: exit ${r.status}, output ${JSON.stringify(r.stdout + r.stderr)}`);
   assert.match(r.stderr, /^usage: node scripts\/lib\/cli\.mjs/);
 });
+
+// ---------------------------------------------------------------------------
+// CWK-137 D3 restore-door hint (the sizing ruling): estate.archiveDir is read from the GLOBAL config only, so a user who once set it in
+// a PROJECT config would otherwise find estate-search / estate-restore silently looking somewhere else. Both say so on STDERR, on every
+// run, when the project layer carries a value the clamp dropped: the ignored path, the directory this run actually read, the global
+// config to set it in. Stdout and the exit code are untouched, so a script reading them sees the ordinary output.
+// ---------------------------------------------------------------------------
+const D3_HINT = /^\[CoalWash\] estate\.archiveDir /;
+function d3ProjectArchiveDir(proj, value) {
+  fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ estate: { archiveDir: value } }));
+}
+const d3HintLines = (stderr) => stderr.split(/\r?\n/).filter((l) => D3_HINT.test(l));
+
+test('CWK-137 D3 hint: estate-search names an ignored PROJECT estate.archiveDir on stderr -- the ignored path, the directory it read, the global config to use -- and leaves stdout and the exit code alone', () => {
+  const { home, proj } = sandbox();
+  try {
+    const ignored = path.join(os.tmpdir(), 'cw-d3-cli-someone-elses-archive');
+    d3ProjectArchiveDir(proj, ignored);
+    const withValue = run(proj, home, ['estate-search', 'anything']);
+    assert.strictEqual(withValue.status, 0, withValue.stderr);
+    const lines = d3HintLines(withValue.stderr);
+    assert.strictEqual(lines.length, 1, `exactly one hint line, got: ${withValue.stderr}`);
+    assert.ok(lines[0].includes(ignored), 'names the path the project config asked for');
+    assert.ok(lines[0].includes(path.join(home, '.claude', 'coal', 'coalwash', 'estate-archive')), 'names the directory this run actually read');
+    assert.ok(lines[0].includes(path.join(home, '.claude', '.coalwash.json')), 'names the GLOBAL config the code reads (claudeBaseDir), not a literal ~/.claude');
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), '{}');
+    const without = run(proj, home, ['estate-search', 'anything']);
+    assert.strictEqual(without.status, 0, without.stderr);
+    assert.strictEqual(d3HintLines(without.stderr).length, 0, 'no project value, no hint');
+    assert.strictEqual(withValue.stdout, without.stdout, 'stdout is the ordinary output, byte for byte');
+    assert.strictEqual(withValue.status, without.status, 'and so is the exit code');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: estate-restore prints it on EVERY run, beside its ordinary not-found line; a hint never changes the exit code or stdout', () => {
+  const { home, proj } = sandbox();
+  try {
+    d3ProjectArchiveDir(proj, path.join(os.tmpdir(), 'cw-d3-cli-restore-dir'));
+    for (let i = 0; i < 2; i++) {
+      const r = run(proj, home, ['estate-restore', 'no-such-session']);
+      assert.strictEqual(r.status, 1, 'the ordinary not-found failure, exit 1');
+      assert.strictEqual(d3HintLines(r.stderr).length, 1, `run ${i}: the hint is there every time, not only the first, and not only when the default dir is empty`);
+      assert.match(r.stderr, /estate-restore: /, 'beside the ordinary error line, which is still printed');
+      assert.strictEqual(r.stdout, '', 'stdout stays empty');
+    }
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: a user\'s own GLOBAL archiveDir is the directory named as "read"; a project value that only restates it draws no hint', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mine = path.join(home, 'my-archive');
+    fs.mkdirSync(mine);
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ estate: { archiveDir: mine } }));
+    d3ProjectArchiveDir(proj, path.join(os.tmpdir(), 'cw-d3-cli-other'));
+    const other = run(proj, home, ['estate-search', 'x']);
+    assert.strictEqual(other.status, 0, other.stderr);
+    const lines = d3HintLines(other.stderr);
+    assert.strictEqual(lines.length, 1);
+    assert.ok(lines[0].includes(mine), 'this run read the GLOBAL value');
+    d3ProjectArchiveDir(proj, mine);
+    assert.strictEqual(d3HintLines(run(proj, home, ['estate-search', 'x']).stderr).length, 0, 'the project restated the global value: nothing was ignored');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: the value comes from a cloned repo, so the line is ONE line and bounded -- a newline in it cannot forge a second stderr line (log injection)', () => {
+  const { home, proj } = sandbox();
+  try {
+    d3ProjectArchiveDir(proj, `${path.join(os.tmpdir(), 'x')}\nFORGED-LINE ${'a'.repeat(5000)}`);
+    const r = run(proj, home, ['estate-search', 'x']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const all = r.stderr.split(/\r?\n/);
+    assert.ok(all.every((l) => !l.startsWith('FORGED-LINE')), 'the forged text did not start a line of its own');
+    const lines = d3HintLines(r.stderr);
+    assert.strictEqual(lines.length, 1);
+    assert.ok(lines[0].length < 1500, `bounded, not ${lines[0].length} characters`);
+  } finally { clean(home, proj); }
+});

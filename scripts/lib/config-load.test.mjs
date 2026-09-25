@@ -1467,7 +1467,7 @@ function plantProjectConfig(proj, body) {
 test('UMB-174: a healthy or an ABSENT config reports NOTHING (silence on the ordinary case)', () => {
   const { home, proj } = rootedProject();
   try {
-    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }), { cfg: {}, unreadable: [] }, 'no config anywhere');
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }), { cfg: {}, unreadable: [], ignored: [] }, 'no config anywhere');
     plantProjectConfig(proj, '{ "updateCheckDays": 9 }');
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
     fs.writeFileSync(globalConfigFile(home), '// a comment\n{ "language": "en" }');
@@ -1713,4 +1713,44 @@ test('CWK-120 D3: a hand-built GLOBAL object handed in beside globalUnreadable:t
   // reusable function, and "the global file could not be read" means its content is unverifiable whatever the caller passed.
   const merged = mergeSafety({ estate: { archiveDir: path.join(os.tmpdir(), 'cw-d3-global-claim') } }, { estate: { archiveDir: D3_OUTSIDE() } }, { globalUnreadable: true });
   assert.ok(!('archiveDir' in merged.estate), 'neither the project value nor an unverifiable global value is used');
+});
+
+// CWK-137 D3 restore-door hint (the sizing ruling): the report NAMES a project-layer value the global-only clamp dropped, from the
+// ONE bounded read the merge already made, so estate-search / estate-restore can say so instead of silently looking elsewhere.
+test('CWK-137 D3 hint: loadMergedConfigReport().ignored names a project estate.archiveDir the clamp dropped -- key, tier, the config path, the value', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const p = plantProjectConfig(proj, JSON.stringify({ estate: { archiveDir: D3_OUTSIDE() } }));
+    const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(rep.ignored, [{ key: 'estate.archiveDir', tier: 'project', path: p, value: D3_OUTSIDE() }]);
+    assert.ok(!('archiveDir' in (rep.cfg.estate || {})), 'and the merge did drop it: the report describes what the merge did');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: a project value that only RESTATES the readable global value ignored nothing; a different one, or an unreadable global, is reported', () => {
+  const { home, proj } = rootedProject();
+  try {
+    plantProjectConfig(proj, JSON.stringify({ estate: { archiveDir: D3_OUTSIDE() } }));
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { archiveDir: D3_OUTSIDE() } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'same value both layers: the effective archive dir is the project one, nothing was ignored');
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { archiveDir: path.join(os.tmpdir(), 'cw-d3-mine') } }));
+    assert.strictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored.length, 1, 'a different global value: the project one was ignored');
+    fs.writeFileSync(globalConfigFile(home), '{ not json');
+    assert.strictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored.length, 1, 'an unreadable global: the user\'s choice is unknown, the project value was still not used');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: nothing to report when the project carries no archiveDir, a junk one (not a string, empty), or is itself unreadable', () => {
+  const { home, proj } = rootedProject();
+  try {
+    plantProjectConfig(proj, JSON.stringify({ estate: { compressAfterDays: 30 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'a project estate without the key');
+    plantProjectConfig(proj, JSON.stringify({ estate: { archiveDir: 42 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'a number has no path to name');
+    plantProjectConfig(proj, JSON.stringify({ estate: { archiveDir: '' } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'the empty default is not a choice');
+    plantProjectConfig(proj, '{ "estate": { "archiveDir": ');
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'an unreadable project is absent, exactly as the merge treats it');
+  } finally { clean(home, proj); }
 });
