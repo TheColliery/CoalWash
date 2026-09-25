@@ -2125,28 +2125,43 @@ test('UMB-174: a UTF-8 BOM before a valid object PARSES -- the manual mode it ho
   } finally { clean(home, proj); }
 });
 
+// CWK-137 F-11: an absence proves nothing about a hook that never ran (a dead hook is as silent as a healthy one), so each
+// silence below is PAIRED with a liveness signal the same run must carry. The first case leaves the self-update check live
+// (a fresh sandbox home makes it due on the first boot) and asserts its directive, as the BOM test above does; each scenario
+// gets its own fresh home, because the first boot is the only one that is due. The second case seeds an unconsumed OBESE
+// crossing, so the Stop hook has a real block to emit, and adds a SessionStart control over the SAME broken config.
 test('UMB-174 (b): a healthy config and an absent one stay SILENT -- the report is for the exception, never a nag', () => {
-  const { home, proj } = sandbox();
-  try {
-    quietProject(home, proj); // the sandbox() project config is a healthy {}
-    const r = run(proj, home, { hook_event_name: 'SessionStart' });
-    assertGraceful(r);
-    assert.strictEqual(r.stdout, '');
-    fs.rmSync(rootLegacyConfig(proj));
-    const r2 = run(proj, home, { hook_event_name: 'SessionStart' });
-    assertGraceful(r2);
-    assert.strictEqual(r2.stdout, '');
-  } finally { clean(home, proj); }
+  for (const [what, arrange] of [['a healthy config', () => {}], ['an absent config', (proj) => fs.rmSync(rootLegacyConfig(proj))]]) {
+    const { home, proj } = sandbox(); // the sandbox() project config is a healthy {}
+    try {
+      seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 }); // NOT muted: the update directive is the liveness signal
+      arrange(proj);
+      const r = run(proj, home, { hook_event_name: 'SessionStart' });
+      assertGraceful(r);
+      assert.ok(r.stdout.includes('[self-update due]'), `${what}: liveness -- the hook ran through to its context injection; got: ${JSON.stringify(r.stdout)}`);
+      assert.ok(!r.stdout.includes('UNREADABLE'), `${what}: nothing to report, so nothing reported; got: ${r.stdout}`);
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, `${what}: the update directive is the ONLY line; got: ${r.stdout}`);
+    } finally { clean(home, proj); }
+  }
 });
 
 test('UMB-174 (b): the report rides SessionStart ONLY -- a Stop event over an unreadable project config prints nothing of it (Phoenix #13)', () => {
   const { home, proj } = sandbox();
   try {
     quietProject(home, proj);
+    seedState(home, proj, {
+      lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'OBESE', reason: 'bmi', economical: false, fatTokens: 1234, at: Date.now() },
+    });
     fs.writeFileSync(rootLegacyConfig(proj), '{ this is not json');
     const r = run(proj, home, { hook_event_name: 'Stop' });
     assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('memory crossed the OBESE ceiling'), `liveness -- the Stop hook ran through the broken config to its real block; got: ${reason}`);
     assert.ok(!r.stdout.includes('UNREADABLE'), `no other channel carries the line; got: ${r.stdout}`);
+    const s = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(s);
+    assert.ok(s.stdout.includes('UNREADABLE'), `control -- the SAME fixture IS reported on SessionStart, so the Stop silence is not a config that never read as broken; got: ${s.stdout}`);
   } finally { clean(home, proj); }
 });
 
