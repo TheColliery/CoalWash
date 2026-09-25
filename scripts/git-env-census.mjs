@@ -17,6 +17,15 @@
 //   - a `//` earlier on the same line hides a call after it (a `//` inside a string too): under-detection, the same
 //     heuristic CoalTipple's exemplar carries. A call written inside a `/* */` block IS scanned (over-detection: loud,
 //     fixed by rewording).
+//   - THREE more BYPASSES (CWK-137 F-10), named rather than widened, and pinned by a test so this list cannot rot (a
+//     widening turns that test red, and the fix is to move the item off this list):
+//       (1) `env: process['env']` (or the double-quoted form): the value text has every string literal's CONTENTS
+//           blanked, so a bracket access reads as `process['   ']` and refusal (2) never sees it. It is COUNTED as `other`.
+//       (2) a command literal that does not START with `git` then a quote or space: `'git.exe'` and any absolute path
+//           (`'C:/Program Files/Git/bin/git.exe'`, `'/usr/bin/git'`) never match the locator, so the call is not counted at all.
+//       (3) the ASYNC `exec('git ...')` of child_process: only spawnSync, execFileSync, spawn, execFile and execSync are
+//           located.
+//     A spawn written any of these ways passes this gate whatever its env holds.
 // The gate PRINTS its coverage (files, calls, per-class counts) because a locator that matches nothing reports clean.
 //
 // censusGitSpawns() is pure (a { rel, text } list in, a report out) so it is unit-tested directly, red-first;

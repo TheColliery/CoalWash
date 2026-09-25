@@ -109,3 +109,22 @@ test('the REAL tree: every git spawn under scripts/ is clean, and the locator fi
   assert.ok(files.length > 30, `the walk must reach the tree (${files.length} files)`);
   assert.ok(r.calls > 0 && r.viaHelper > 0, `the locator must find git spawns (${r.calls} calls, ${r.viaHelper} via the helper)`);
 });
+
+// CWK-137 F-10: the census header NAMES three bypasses instead of widening the locator. This pins them, so the named list
+// cannot rot: if a bypass is ever closed, this test goes red on purpose, and the fix is to delete that item from the
+// header's list (and this leg) in the same change. Every fixture is a spawn that would be a FINDING if the census saw it.
+test('the three NAMED bypasses pass unseen (a named limit, pinned so the header list cannot rot)', () => {
+  // (1) process['env'] in the env value: counted as `other`, never refused
+  const bracket = census(call('spawnSync', 'git', "['status']", "env: process['env']"));
+  assert.deepEqual([bracket.findings.length, bracket.calls, bracket.other], [0, 1, 1], "bracket access to process.env is NOT refused");
+  // (2) a command literal that does not start with `git` + quote/space: not located at all
+  for (const cmd of ['git.exe', 'C:/Program Files/Git/bin/git.exe', '/usr/bin/git']) {
+    const r = census(call('spawnSync', cmd, "['status']", 'cwd: dir'));
+    assert.deepEqual([r.findings.length, r.calls], [0, 0], `${cmd}: an unlocated spawn is neither counted nor refused (this one carries no env at all)`);
+  }
+  // (3) the async exec(): not in the located call list
+  const asyncExec = census(`${'exec'}(${Q}git status${Q}, () => {});`);
+  assert.deepEqual([asyncExec.findings.length, asyncExec.calls], [0, 0], 'async exec() is not located');
+  // control: the SAME shape through a located form IS refused, so the zeros above are the bypass and not a dead locator
+  assert.equal(census(call('spawnSync', 'git', "['status']", 'cwd: dir')).findings.length, 1);
+});
