@@ -4,8 +4,11 @@
   // mechanical Quick pass automatically under standing consent, no ask · FULL
   // force-runs the same Quick pass unconditionally, and only if the store is
   // STILL over FULL afterwards does the Stop hook ask, once, to open the Full
-  // (semantic) wizard, the one consent in the system · a capacity-wall FULL is
-  // an advisory, never a cut · every cut snapshot-backed and revertible.
+  // (semantic) wizard, the one consent in the system · a capacity-wall FULL
+  // with certain fat is force-run like any FULL; one with ~no certain fat
+  // skips the force and asks the Full-tier consent until a Full pass has
+  // removed something this episode, then speaks an advisory, never a wash ·
+  // every cut snapshot-backed and revertible.
   // manual = gauge silent, you run /coalwash yourself; off = fully silent.
   "coalwashMode": "auto",
 

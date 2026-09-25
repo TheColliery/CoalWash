@@ -70,7 +70,7 @@ Advisory nets for every OTHER hand editing a class-B governance/memory file (mai
 | 6 | Unverifiable contradiction → human, change nothing (prohibition #50) | adjudication finds an unverifiable contradiction |
 | 7 | Unknown-platform parcel candidates → human confirms | preflight finds an unmapped platform |
 | 8 | `estate.deleteCold: true` config | before ULTRA's COLD archive-then-delete |
-| 9 | CoalFace hand-off offer (ONCE) | choice-4 ③ past both size ∧ count gates |
+| 9 | CoalFace hand-off offer (ONCE) | choice-4 ③ past both size ∧ count gates, and CoalFace installed |
 | 10 | dig-gauge CRUSHING → ULTRA offer (ONCE) | before a raw transcript dig |
 
 **Standing consent — NOT a gate, no ask:** `obeseAutoQuick` (OBESE, no ask) · `forceAuto` (every FULL crossing, no off switch) · `externalizeAdvisory` (information only, never asks or forces — reachable only after a Full pass has genuinely removed something this episode; before that the crossing takes the Full-tier consent instead).

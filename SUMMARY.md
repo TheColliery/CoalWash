@@ -2,6 +2,7 @@
 
 * [CoalWash](README.md)
 * [Changelog](CHANGELOG.md)
+* [Privacy](PRIVACY.md)
 
 ## Skill
 
