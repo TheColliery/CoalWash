@@ -69,6 +69,7 @@
 // missing id, or a pipeline error prints to stderr and exits non-zero.
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
@@ -342,15 +343,22 @@ function estateOpts(args) {
 // with nothing to say so. `ignored` comes from the SAME bounded config read the merge made (never a second read). The line is
 // built from a cloned repo's bytes and lands in the agent's context, so every field is one line and bounded (security.md, log
 // injection). Printed on EVERY run, to stderr; stdout and the exit code are untouched.
+// R11d bounce 2: (N-2) the repo's value is named ONCE, as what the project config asked for, never inside an imperative, and every
+// remedy is conditional on the user having set the path themselves: the D3 clamp exists because a cloned repo must not choose where
+// the user's transcripts go, so the line must not launder the repo's choice as the user's to-do. The reason is configure.mjs's own
+// sentence. (N-3) Only an ABSOLUTE value is reported: resolveArchiveDir drops a relative one on either layer, so the clamp changed
+// nothing for it and there is nothing true to say. (N-4) Cf (a right-to-left override, zero-width characters) is flattened with the
+// rest, and the length cut is by code point so it can never leave half of a surrogate pair.
 const oneLine = (s, max = 300) => {
-  const t = String(s).replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' '); // control chars, U+2028, U+2029
-  return t.length > max ? `${t.slice(0, max)}...` : t;
+  const t = String(s).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, ' '); // control, format (bidi, zero-width), U+2028, U+2029
+  const cps = Array.from(t);
+  return cps.length > max ? `${cps.slice(0, max).join('')}...` : t;
 };
 function archiveDirHint({ ignored, estate, home }) {
   const hit = (ignored || []).find((i) => i.key === 'estate.archiveDir');
-  if (!hit) return null;
+  if (!hit || !path.isAbsolute(hit.value)) return null;
   const read = oneLine(resolveArchiveDir(estate, home));
-  return `[CoalWash] estate.archiveDir set in the project config (${oneLine(hit.path)}) is ignored: ${oneLine(hit.value)} was NOT used, because the archive directory is read from the GLOBAL config only. This run read ${read}. To use ${oneLine(hit.value)}, set estate.archiveDir to it in ${oneLine(globalConfigPath(home))}, or move the archives it holds into ${read}.`;
+  return `[CoalWash] estate.archiveDir: the project config (${oneLine(hit.path)}) asks for ${oneLine(hit.value)}, and that was ignored. A cloned repo ships a project config, and it must not be able to choose where your own session transcripts are archived, so this key is read from the GLOBAL config only. This run read ${read}. If you set that path yourself and want it used, set estate.archiveDir in ${oneLine(globalConfigPath(home))}, or move the archives that path holds into ${read}.`;
 }
 
 function main() {
