@@ -59,7 +59,7 @@ import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockPars
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
 import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir } from './repo-fs.mjs';
+import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -622,24 +622,32 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
   // taken over. The old statSync + openSync('r+') FOLLOWED a link: a cloned repo that
   // committed `.claude/coalwash/<lock>` as a link to an old file (~/.bashrc) had the
   // next wash judge the TARGET's mtime stale, then truncate it and write the lock
-  // JSON into it. The same checks are made again ON THE OPEN HANDLE below.
+  // JSON into it.
+  // CodeQL #43/#44 (js/file-system-race), fire 10: that lstat is one PATH lookup and the
+  // open is a second one, so a link (or another file) swapped in at the name between them
+  // was opened without ever being vetted, and the fstat vouched for whatever it landed on
+  // (Windows has no O_NOFOLLOW, so there the link is followed). openPlainFile opens FIRST
+  // and then proves the handle is the entry this lstat judged stale: same dev+ino, the
+  // path still a plain single-link file, the handle too (repo-fs.mjs has the mechanism).
   try {
-    const st = fs.lstatSync(lockPath);
-    if (st.isSymbolicLink() || !st.isFile() || st.nlink > 1) return { acquired: false, reason: `the lock ${lockPath} is not a plain file (a link or special file) — refusing to take it over; remove it by hand if it is yours` };
-    if (now - st.mtimeMs > staleMs) {
+    const st = fs.lstatSync(lockPath, { bigint: true }); // BigInt: a Windows file id can exceed 2**53
+    const notPlain = { acquired: false, reason: `the lock ${lockPath} is not a plain file (a link or special file) — refusing to take it over; remove it by hand if it is yours` };
+    if (st.isSymbolicLink() || !st.isFile() || st.nlink > 1n) return notPlain;
+    if (now - Number(st.mtimeMs) > staleMs) {
       // STEAL IN PLACE (no rm -> no missing-file window a third writer could slip
       // through). Two racing stealers overwrite the same file; whoever's write
       // lands last owns it, the other's compare-after-write fails -> it defers
       // (worst case both defer on a byte-interleave = a safe retry, never a
       // double-hold). Fixed width via truncate so a shorter write leaves no tail.
-      const fd = fs.openSync(lockPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
-      try {
-        const fst = fs.fstatSync(fd);
-        if (!fst.isFile() || fst.nlink > 1) return { acquired: false, reason: 'the lock changed under the takeover — deferring' };
-        fs.ftruncateSync(fd, 0); fs.writeSync(fd, body, 0); fs.fsyncSync(fd);
-      } finally { fs.closeSync(fd); }
-      if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner };
-      return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
+      const o = openPlainFile(lockPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), st);
+      if (o.why === 'not-plain') return notPlain;
+      if (o.why === 'changed') return { acquired: false, reason: 'the lock changed under the takeover — deferring' };
+      if (o.why === 'unverifiable') return { acquired: false, reason: `the lock ${lockPath} is stale, but this filesystem reports no file identity number, so CoalWash cannot prove the file it opens is the one it checked — refusing to take it over; remove the lock by hand if it is yours` };
+      if (o.fd !== undefined) {
+        try { fs.ftruncateSync(o.fd, 0); fs.writeSync(o.fd, body, 0); fs.fsyncSync(o.fd); } finally { fs.closeSync(o.fd); }
+        if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner };
+        return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
+      }
     }
   } catch { /* unreadable lock = doubt = defer */ }
   return { acquired: false, reason: 'another CoalWash run (or a live session) holds the store — deferring' };

@@ -21,7 +21,7 @@ import { spawnSync } from 'node:child_process';
 import {
   MAX_CONFIG_BYTES, MAX_DOC_BYTES, repoEntryKind, repoReadOutcome, readRepoFileBounded, readRepoBytesBounded, loadMergedConfig,
 } from './config-load.mjs';
-import { ownSandboxDir, RepoWriteRefused } from './repo-fs.mjs';
+import { ownSandboxDir, RepoWriteRefused, writeRepoFile } from './repo-fs.mjs';
 import { sweepWriteguard, snapshotOnFirstWrite } from './writeguard.mjs';
 import { recordBinItem, restoreFromBin, sweepFatBin, readDeathLog, FAT_BIN_NAME } from './tailings.mjs';
 import { acquireLock, applyPlan, sweepSnapshots, verifySnapshot, LOCK_STALE_MS } from './apply.mjs';
@@ -557,4 +557,162 @@ test('CWK-137 RESIDUAL_REREAD: the external-writer compare still ABORTS a target
   assert.equal(r.ok, false, 'a target that no longer matches the baseline the plan was gated on is refused');
   assert.match(String(r.error), /external writer detected/);
   assert.equal(fs.readFileSync(target, 'utf8'), 'what the writer saw\n', 'and left untouched');
+});
+
+// ---- fire 10 (CodeQL #43/#44, js/file-system-race): a name swapped between the path check and the open --------------------
+// The takeover, the death-log append and writeRepoFile's in-place fallback all vetted a PATH (lstat) and then opened the PATH.
+// A concurrent writer that puts something else at the name in between made the open land on a file nobody vetted, and the
+// fstat that followed vouched for it (a plain single-link file passes). O_NOFOLLOW stops a swapped-in link on POSIX; Windows has
+// none. These tests act between the two calls: `raceOpen` runs `before()` just before a matched open, and a returned path is what
+// the open lands on -- exactly what the OS does when the name has become a link to that path -- so the witness is the same on
+// every platform, with no privilege needed. The real file-symlink leg is capability-probed and skips visibly where the volume
+// refuses one (this box: EPERM without developer mode).
+function raceOpen(t, match, before) {
+  const realOpen = fs.openSync;
+  fs.openSync = (p, flags, ...rest) => {
+    let target = p;
+    if (match(String(p), flags)) { const r = before(String(p), flags); if (typeof r === 'string') target = r; }
+    return realOpen(target, flags, ...rest);
+  };
+  const restore = () => { fs.openSync = realOpen; };
+  t.after(restore);
+  return restore;
+}
+const opensRdwr = (file) => (p, flags) => p === file && typeof flags === 'number' && (flags & 3) === fs.constants.O_RDWR;
+
+test('CodeQL #43/#44: a stale lock whose name becomes a link to another file between the path check and the open is NOT taken over', (t) => {
+  const { project, keep } = sandbox(t, 'lockswap');
+  const lockPath = path.join(project, '.coalwash.lock');
+  fs.writeFileSync(lockPath, 'OLD LOCK BODY');
+  const restore = raceOpen(t, opensRdwr(lockPath), () => keep);
+  const r = acquireLock(lockPath, { sessionId: 'x', now: Date.now() + OLD_ENOUGH });
+  restore();
+  assert.equal(r.acquired, false);
+  assert.match(String(r.reason), /changed under the takeover/, `reason: ${r.reason}`);
+  assert.equal(fs.readFileSync(keep, 'utf8'), KEEP, 'the file the open landed on is byte-identical: it was neither truncated nor rewritten');
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), 'OLD LOCK BODY', 'and the lock the path check vetted was not rewritten either');
+});
+
+test('CodeQL #43/#44: a stale lock renamed away and ANOTHER plain file renamed to its name before the open is NOT taken over (the stale verdict belongs to one inode)', (t) => {
+  const { project } = sandbox(t, 'lockother');
+  const lockPath = path.join(project, '.coalwash.lock');
+  const other = path.join(project, 'someone-elses.file');
+  fs.writeFileSync(lockPath, 'OLD LOCK BODY');
+  fs.writeFileSync(other, 'someone else\n');
+  const restore = raceOpen(t, opensRdwr(lockPath), () => { fs.renameSync(other, lockPath); });
+  const r = acquireLock(lockPath, { sessionId: 'x', now: Date.now() + OLD_ENOUGH });
+  restore();
+  assert.equal(r.acquired, false, `reason: ${r.reason}`);
+  assert.match(String(r.reason), /changed under the takeover/, `reason: ${r.reason}`);
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), 'someone else\n', 'the file now at the name was judged by nobody and is byte-identical');
+});
+
+test('CodeQL #43/#44: a REAL file symlink swapped in at the name before the open is not taken over, and its target is untouched', (t) => {
+  const { project, keep } = sandbox(t, 'locksymswap');
+  const lockPath = path.join(project, '.coalwash.lock');
+  const swapIn = path.join(project, 'swap.link');
+  if (!fileLink(keep, swapIn)) { t.skip('this volume cannot make a file symlink (CI ubuntu/macOS legs run it; the simulated-follow tests above run everywhere)'); return; }
+  fs.writeFileSync(lockPath, 'OLD LOCK BODY');
+  const restore = raceOpen(t, opensRdwr(lockPath), () => { fs.renameSync(swapIn, lockPath); });
+  const r = acquireLock(lockPath, { sessionId: 'x', now: Date.now() + OLD_ENOUGH });
+  restore();
+  assert.equal(r.acquired, false, `reason: ${r.reason}`);
+  assert.equal(fs.readFileSync(keep, 'utf8'), KEEP, 'the symlink target is byte-identical');
+});
+
+// The post-open path check has its own leg: a name that turns into a link AFTER the open, with the handle still on the file the
+// first check vetted, is caught by the second lstat's KIND, not by inode arithmetic. `lstatSaysLinkAfterFirst` lets the first
+// lstat of the path through and answers every later one as a link with the same identity numbers.
+function lstatSaysLinkAfterFirst(t, file) {
+  const realLstat = fs.lstatSync;
+  let seen = 0;
+  fs.lstatSync = (p, ...rest) => {
+    const s = realLstat(p, ...rest);
+    if (String(p) !== file || ++seen < 2) return s;
+    const view = Object.create(s);
+    view.isSymbolicLink = () => true;
+    return view;
+  };
+  const restore = () => { fs.lstatSync = realLstat; };
+  t.after(restore);
+  return restore;
+}
+
+test('CodeQL #43/#44: a name that reads as a link on the check AFTER the open is refused as not a plain file, and the lock is not rewritten', (t) => {
+  const { project } = sandbox(t, 'lockpostlink');
+  const lockPath = path.join(project, '.coalwash.lock');
+  fs.writeFileSync(lockPath, 'OLD LOCK BODY');
+  const restore = lstatSaysLinkAfterFirst(t, lockPath);
+  const r = acquireLock(lockPath, { sessionId: 'x', now: Date.now() + OLD_ENOUGH });
+  restore();
+  assert.equal(r.acquired, false);
+  assert.match(String(r.reason), /not a plain file/, `reason: ${r.reason}`);
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), 'OLD LOCK BODY');
+});
+
+test('CodeQL #43/#44: a filesystem that reports NO file identity cannot prove the handle is the vetted file, so the takeover defers and says why', (t) => {
+  const { project } = sandbox(t, 'lockino0');
+  const lockPath = path.join(project, '.coalwash.lock');
+  fs.writeFileSync(lockPath, 'OLD LOCK BODY');
+  const restore = fakeHandleStat(t, opensRdwr(lockPath), (s) => { s.ino = 0n; });
+  const r = acquireLock(lockPath, { sessionId: 'x', now: Date.now() + OLD_ENOUGH });
+  restore();
+  assert.equal(r.acquired, false);
+  assert.match(String(r.reason), /no file identity/, `reason: ${r.reason}`);
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), 'OLD LOCK BODY', 'the lock was neither truncated nor rewritten');
+});
+
+test('CodeQL #43/#44: a FRESH lock that is a second name for another file is reported as not a plain file, before any open, and that file is untouched', (t) => {
+  const { project, keep } = sandbox(t, 'lockfreshhard');
+  const lockPath = path.join(project, '.coalwash.lock');
+  try { fs.linkSync(keep, lockPath); } catch { t.skip('this volume cannot make a hard link'); return; }
+  const r = acquireLock(lockPath, { sessionId: 'x', now: Date.now() });
+  assert.equal(r.acquired, false);
+  assert.match(String(r.reason), /not a plain file/, `reason: ${r.reason} (the message that tells the user to remove it by hand, not the generic "another run holds the store")`);
+  assert.equal(fs.readFileSync(keep, 'utf8'), KEEP, 'the other name of the lock is byte-identical');
+});
+
+test('CodeQL #43/#44 sibling: the death-log append does not write to the file its open landed on when the name was swapped after the path check', (t) => {
+  const { project, keep } = sandbox(t, 'logswap');
+  const { now, logPath } = binWithOneOldItem(project, 'y.md');
+  fs.writeFileSync(logPath, '');
+  const restore = raceOpen(t, (p, flags) => p === logPath && typeof flags === 'number' && (flags & fs.constants.O_APPEND) !== 0, () => keep);
+  const swept = sweepFatBin(project, { now });
+  restore();
+  assert.equal(swept.destroyed, 1, 'the sweep itself is not blocked by the refused certificate');
+  assert.equal(fs.readFileSync(keep, 'utf8'), KEEP, 'nothing was appended to the file the open landed on');
+  assert.equal(fs.readFileSync(logPath, 'utf8'), '', 'nor to the log the path check vetted');
+});
+
+// writeRepoFile's in-place fallback runs only when the rename fails (Windows: a held file gives EPERM). `renameFails` forces it.
+function renameFails(t) {
+  const realRename = fs.renameSync;
+  fs.renameSync = () => { const e = new Error('EPERM: operation not permitted, rename'); e.code = 'EPERM'; throw e; };
+  const restore = () => { fs.renameSync = realRename; };
+  t.after(restore);
+  return restore;
+}
+
+test('CodeQL #43/#44 sibling: writeRepoFile falls back to an in-place write for a plain single-link file when the rename fails (the control for the swap test below)', (t) => {
+  const { project } = sandbox(t, 'wrfplain');
+  const target = path.join(project, 'cfg.json');
+  fs.writeFileSync(target, 'OLD');
+  const restore = renameFails(t);
+  writeRepoFile(target, 'NEW BYTES', project);
+  restore();
+  assert.equal(fs.readFileSync(target, 'utf8'), 'NEW BYTES', 'the in-place fallback wrote through the verified handle');
+  assert.deepEqual(fs.readdirSync(project).sort(), ['cfg.json'], 'and left no temp file behind');
+});
+
+test('CodeQL #43/#44 sibling: writeRepoFile\'s in-place fallback does not write to the file its open landed on when the name was swapped after the check', (t) => {
+  const { project, keep } = sandbox(t, 'wrfswap');
+  const target = path.join(project, 'cfg.json');
+  fs.writeFileSync(target, 'OLD');
+  const restoreRename = renameFails(t);
+  const restoreOpen = raceOpen(t, (p, flags) => p === target && typeof flags === 'number' && (flags & 3) === fs.constants.O_WRONLY, () => keep);
+  assert.throws(() => writeRepoFile(target, 'NEW BYTES', project), { code: 'EPERM' }, 'the original rename error is what the caller sees');
+  restoreOpen();
+  restoreRename();
+  assert.equal(fs.readFileSync(keep, 'utf8'), KEEP, 'the file the open landed on is byte-identical');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'OLD', 'and the target was not rewritten either');
 });

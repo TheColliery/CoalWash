@@ -115,18 +115,58 @@ export function replaceFile(target, content) {
   }
 }
 
+// Open an EXISTING file (or, with O_CREAT in `flags`, create it) that the caller means to write IN PLACE, and prove the handle IS
+// the directory entry the caller vetted. CWK-137 fire 10 (CodeQL #43/#44, js/file-system-race).
+//
+// The shape this replaces: `lstat(path)` refuses a link, then `open(path)` opens it. That is two path lookups behind one check:
+// whatever a concurrent writer puts at the name between them is opened without ever having been vetted, and the fstat that
+// follows vouches for whatever the open landed on (a plain single-link file passes). O_NOFOLLOW stops a swapped-in LINK at the
+// open on POSIX; Windows has no O_NOFOLLOW (`fs.constants.O_NOFOLLOW` is undefined there, Node 24.19.0), so a link is FOLLOWED.
+// The order here is the cure, and every step is decided AFTER the open, on the path and the handle together:
+//   1. open (no caller passes O_TRUNC, so nothing is written or truncated by opening, even through a followed link);
+//   2. lstat the PATH now: a plain single-link regular file, not a link;
+//   3. fstat the HANDLE: a plain single-link regular file;
+//   4. dev + ino of the two are the SAME file -- and of `expect` (the caller's own earlier lstat) when the caller judged the entry
+//      on it (the takeover judged the lock STALE from that lstat, and that verdict belongs to that inode only). A link followed at
+//      the open, or another file renamed over the name, is a different inode.
+// dev and ino are compared as BigInt: an NTFS file id measured on this box is 28991922601746602, above 2**53, so the Number
+// form would round neighbouring ids together. A filesystem that reports no id (ino 0) cannot prove identity, so it is refused
+// ('unverifiable'), never waved through.
+//
+// Returns { fd } (the caller closes it) or { why, code? }: 'unopenable' (the open itself failed) · 'not-plain' (a link, a special
+// file or a second name) · 'changed' (the handle is not the entry the caller vetted) · 'unverifiable'. NAMED RESIDUALS: with
+// O_CREAT in `flags`, a link followed at the open creates its (empty) target before the refusal, which the linker could have
+// created itself; and a directory COMPONENT swapped for a junction is a different shape (ownSandboxDir's).
+export function openPlainFile(file, flags, expect = null) {
+  let fd;
+  try { fd = fs.openSync(file, flags); } catch (e) { return { why: 'unopenable', code: e && e.code }; }
+  const refuse = (why) => { try { fs.closeSync(fd); } catch { /* already closed */ } return { why }; };
+  try {
+    const onPath = fs.lstatSync(file, { bigint: true });
+    if (onPath.isSymbolicLink() || !onPath.isFile() || onPath.nlink > 1n) return refuse('not-plain');
+    const onHandle = fs.fstatSync(fd, { bigint: true });
+    if (!onHandle.isFile() || onHandle.nlink > 1n) return refuse('changed');
+    if (!onHandle.ino || !onPath.ino) return refuse('unverifiable');
+    if (onHandle.dev !== onPath.dev || onHandle.ino !== onPath.ino) return refuse('changed');
+    if (expect && (onHandle.dev !== expect.dev || onHandle.ino !== expect.ino)) return refuse('changed');
+    return { fd };
+  } catch {
+    return refuse('changed'); // the name vanished (or could not be inspected) between the open and the check
+  }
+}
+
 // Write `content` to `target` inside `root`, or throw RepoWriteRefused.
 //
 // Windows refuses to rename over a file another process holds open without
 // FILE_SHARE_DELETE (EPERM/EBUSY/EACCES). CoalMine hit it from inside a running git
 // hook; the same can happen to a config an editor holds open. Fall back to an
 // in-place write ONLY when the target is a plain regular file with a single link,
-// checked ON THE OPEN HANDLE (CoalMine's CodeQL #69 lesson): open without truncating,
-// O_NOFOLLOW and O_NONBLOCK where the platform has them, fstat that fd, and only then
-// truncate + write through the SAME fd. A symlink or a hard link (nlink > 1) would be
-// written THROUGH, so those still fail. RESIDUAL, named: Windows has no O_NOFOLLOW, so
-// a symlink planted in that window would be followed there -- it still has to resolve
-// to a single-link regular file, and creating one needs a privilege on Windows.
+// proved by openPlainFile (CoalMine's CodeQL #69 lesson, and CoalWash's #43/#44): open
+// without truncating, O_NOFOLLOW and O_NONBLOCK where the platform has them, then check
+// the path and the handle are the same plain single-link file, and only then truncate +
+// write through the SAME fd. A symlink, a hard link (nlink > 1) or a name swapped for
+// another file after the check-time lstat would be written THROUGH, so those still fail
+// with the original error.
 export function writeRepoFile(target, content, root) {
   const why = checkRepoWriteTarget(target, root);
   if (why) throw new RepoWriteRefused(why);
@@ -135,18 +175,15 @@ export function writeRepoFile(target, content, root) {
     replaceFile(target, content);
   } catch (e) {
     if (!['EPERM', 'EBUSY', 'EACCES'].includes(e && e.code)) throw e;
-    let fd;
-    const flags = fs.constants.O_WRONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0);
-    try { fd = fs.openSync(target, flags); } catch { throw e; }
+    const o = openPlainFile(target, fs.constants.O_WRONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0));
+    if (o.fd === undefined) throw e;
     try {
-      const st = fs.fstatSync(fd);
-      if (!st.isFile() || st.nlink > 1) throw e;
       const buf = Buffer.isBuffer(content) ? content : Buffer.from(String(content), 'utf8');
-      fs.ftruncateSync(fd, 0);
+      fs.ftruncateSync(o.fd, 0);
       let off = 0;
-      while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off, off);
+      while (off < buf.length) off += fs.writeSync(o.fd, buf, off, buf.length - off, off);
     } finally {
-      fs.closeSync(fd);
+      fs.closeSync(o.fd);
     }
   }
 }
