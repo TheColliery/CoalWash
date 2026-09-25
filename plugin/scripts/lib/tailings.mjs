@@ -335,10 +335,12 @@ function appendOwnLog(file, text) {
 }
 
 // CWK-120 row 4: the sweep is the SECOND writer of index.json, a read-modify-write (`loadIndex` ... `saveIndex(survivors)`)
-// exactly like recordBinItem's, so it takes the SAME bin lock. Without it a concurrent recordBinItem (the estate archive
-// records into the fat bin under the GLOBAL lock only, while a wash sweeps the same bin under the project lock) could
-// commit its row between the sweep's load and its save; the sweep then wrote `survivors`, which never held that row,
-// leaving its blob on disk with no index entry -- the undercount this module's header forbids. A bin with nothing in it
+// exactly like recordBinItem's, so it takes the SAME bin lock. Without it a concurrent recordBinItem could commit its row
+// between the sweep's load and its save. The concurrent recorder is `recoverDangling` (run by the CLI gauge, cli.mjs), which
+// records into the fat bin and takes NO transaction lock at all, so it can run in another session while a wash sweeps the
+// same bin under the project tx lock; the estate archive is NOT a writer here (it only READS the death log), and two
+// applyPlan runs already serialize on the tx lock. Without the bin lock the sweep then wrote `survivors`, which never held
+// that row, leaving its blob on disk with no index entry -- the undercount this module's header forbids. A bin with nothing in it
 // is peeked WITHOUT the lock and never touched (taking the lock creates the directory: an absent bin must stay absent).
 // A lock that stays held past the retry budget means the sweep waits for the next run (fail-silent housekeeping): nothing
 // is destroyed and the items are all still there.
