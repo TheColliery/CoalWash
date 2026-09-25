@@ -464,7 +464,7 @@ test('CWK-137: applyPlan refuses to STAGE a rewrite target over the read bound, 
   assert.equal(fs.statSync(big).size, MAX_DOC_BYTES + 1, 'the target is byte-length-identical');
 });
 
-// CWK-120 D3 / RESIDUAL_REREAD -- the census's four named rows (applyPlan's `cur` external-writer compare and `back` post-write
+// CWK-137 D3 / RESIDUAL_REREAD -- the census's four named rows (applyPlan's `cur` external-writer compare and `back` post-write
 // read-back; verifySnapshot's snapshot-copy read and source read). The staging read already admits a plan target at or under
 // MAX_DOC_BYTES, so these re-reads were only unbounded against a concurrent writer that GROWS the file in between. They now go
 // through the same bounded, kind-gated read: an over-bound file is REFUSED, never read whole.

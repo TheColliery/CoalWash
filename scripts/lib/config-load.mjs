@@ -1034,14 +1034,14 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 // shape that would silently mis-rank the sentinel.
 const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
 
-// CWK-120 D3 (head's ruling): sub-keys of an object-typed key that are read from the GLOBAL layer ONLY. Not a consent clamp
+// CWK-137 D3 (head's ruling): sub-keys of an object-typed key that are read from the GLOBAL layer ONLY. Not a consent clamp
 // (SAFER_OBJECT_BOOL above has a "safer value" to fall back to; these have none) but a REACH clamp: `estate.archiveDir` names
 // where the user's own session transcripts are copied to and then deleted from, and a project config ships with a cloned repo
 // (hooks-safety.md §9), so the project layer has no say in it at all. A project value is read-tolerated and ignored; the user's
-// own global value, or the default location, stands. It sits in this ONE merge site because every consumer (the CLI, the estate
-// report, RE-TIER, the wizard handshake) reads the merged config -- fixing it at one caller would have split the others (the
-// row-11 lesson: fix it where all callers route). Exported so configure.mjs can NAME the reason when a project write is ignored,
-// from this one list, never a second copy.
+// own global value, or the default location, stands. It sits in this ONE merge site because every consumer (the CLI's
+// estate-search and estate-restore, the estate report and archive, RE-TIER) reads the merged config -- fixing it at one caller
+// would have split the others (the row-11 lesson: fix it where all callers route). Exported so configure.mjs can NAME the reason
+// when a project write is ignored, from this one list, never a second copy.
 export const GLOBAL_ONLY_OBJECT_KEYS = { estate: ['archiveDir'] };
 export const GLOBAL_ONLY_KEYS = Object.entries(GLOBAL_ONLY_OBJECT_KEYS).flatMap(([obj, subs]) => subs.map((s) => `${obj}.${s}`));
 const OBJECT_SCHEMA_KEYS = CONFIG_SCHEMA.filter((s) => s.type === 'object').map((s) => s.key);
@@ -1078,7 +1078,7 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
       merged[subKey] = pv === undefined ? gv : (pv === safeValue ? safeValue : gv);
     }
   }
-  // CWK-120 D3: a global-only sub-key takes the GLOBAL layer's value or is ABSENT (never the project's). An unreadable global
+  // CWK-137 D3: a global-only sub-key takes the GLOBAL layer's value or is ABSENT (never the project's). An unreadable global
   // file means the user's own choice is unknown, so it is absent too: the default location, not whatever a repo asked for.
   for (const subKey of GLOBAL_ONLY_OBJECT_KEYS[key] || []) {
     if (globalUnreadable || g[subKey] === undefined) delete merged[subKey]; else merged[subKey] = g[subKey];

@@ -200,7 +200,7 @@ test('CWK-120 row 11: an in-range decimal falls back to the default, so the hook
   assert.strictEqual(resolveRetierCfg({ targetTokens: 5000 }).targetTokens, 5000, 'a real integer in range is still honoured');
 });
 
-// CWK-120 D3: a key the merge reads from the GLOBAL layer only must SAY so where a user reads about it (configure --help), or a
+// CWK-137 D3: a key the merge reads from the GLOBAL layer only must SAY so where a user reads about it (configure --help), or a
 // project value that is silently ignored reads as a bug. Tied to the clamp's own table, so a new global-only key cannot ship
 // without its help naming the fact.
 test('every GLOBAL-only sub-key is named as such in its object key\'s help text', async () => {

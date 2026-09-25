@@ -584,7 +584,7 @@ function main() {
       console.warn(`\nWarning: ${c.key} will NOT be read at the value you set.`);
       console.warn(`  written: ${JSON.stringify(c.wrote)}    every read returns: ${JSON.stringify(c.reads) ?? 'unset (the default)'}`);
       if (GLOBAL_ONLY_KEYS.includes(c.key)) {
-        // CWK-120 D3: a REACH key, not a consent key -- no "safer value" is involved, so the consent-clamp story below would be false.
+        // CWK-137 D3: a REACH key, not a consent key -- no "safer value" is involved, so the consent-clamp story below would be false.
         console.warn('  This key is read from the GLOBAL config only: a cloned repo ships a project config,');
         console.warn('  and it must not be able to choose where your own session transcripts are archived.');
       } else {

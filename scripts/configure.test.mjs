@@ -429,11 +429,11 @@ test('F-R32-3: --global IS honoured, so the warning fires on the PROJECT path on
   assert.match(r.stdout, /Successfully updated configuration/);
 });
 
-// CWK-120 D3: `estate.archiveDir` is read from the GLOBAL layer only, so a PROJECT write of it is ignored by every reader. The
+// CWK-137 D3: `estate.archiveDir` is read from the GLOBAL layer only, so a PROJECT write of it is ignored by every reader. The
 // F-R32-3 machinery above already notices (it compares the written value with the loader's own merged read); what it said
 // about WHY was the consent-clamp story ("safer-value-wins"), which is false for this key: nothing here is safer or weaker, the
 // project layer simply has no say in where a user's transcripts are archived. The write still proceeds (WARN, not REFUSE).
-test('CWK-120 D3: a PROJECT write of estate.archiveDir is named as ignored, for the RIGHT reason (global-only, not the consent clamp)', (t) => {
+test('CWK-137 D3: a PROJECT write of estate.archiveDir is named as ignored, for the RIGHT reason (global-only, not the consent clamp)', (t) => {
   const sb = sandbox(t);
   const dest = path.join(sb.home, 'my-archive');
   const r = run(sb, ['--estate.archiveDir', dest]);
@@ -448,7 +448,7 @@ test('CWK-120 D3: a PROJECT write of estate.archiveDir is named as ignored, for 
   assert.doesNotMatch(r.stdout, /Successfully updated configuration/);
 });
 
-test('CWK-120 D3: --global estate.archiveDir IS honoured, so no warning fires', (t) => {
+test('CWK-137 D3: --global estate.archiveDir IS honoured, so no warning fires', (t) => {
   const sb = sandbox(t);
   const dest = path.join(sb.home, 'my-archive');
   const r = run(sb, ['--global', '--estate.archiveDir', dest]);
