@@ -3717,3 +3717,23 @@ test('CWK-137: recoverDangling refuses a project whose .claude/coalwash is a lin
     assert.strictEqual(fs.existsSync(path.join(outside, 'journal.json')), true, 'the planted journal is neither replayed nor removed');
   } finally { clean(proj, outside); }
 });
+
+// CWK-137 F-9: the tx dir sits inside the repo, so a cloned repo can commit an ENTRY of it (`snap-1`) as a link out of
+// the project. sweepSnapshots removes old snapshot dirs with a recursive rm; the entry must go as a LINK (the target's
+// files stay), never be followed. The sweep must have visited the entry (it is gone) or "nothing was damaged" is vacuous.
+test('CWK-137 F-9: sweepSnapshots removes a committed link entry as a link -- the link target keeps its files', (t) => {
+  const { proj } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-swlink-')));
+  try {
+    const txDir = txDirFor(proj);
+    fs.mkdirSync(txDir, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'keep.txt'), 'KEEP');
+    try { fs.symlinkSync(outside, path.join(txDir, 'snap-1'), process.platform === 'win32' ? 'junction' : 'dir'); } catch { t.skip('this volume cannot make a directory link'); return; }
+    for (const n of ['snap-2', 'snap-3']) { fs.mkdirSync(path.join(txDir, n)); fs.writeFileSync(path.join(txDir, n, 'f0'), n); }
+    sweepSnapshots(txDir, 1);
+    assert.strictEqual(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'KEEP', 'the link target keeps its file: the sweep did not follow the link');
+    assert.throws(() => fs.lstatSync(path.join(txDir, 'snap-1')), { code: 'ENOENT' }, 'the sweep did visit the link entry and removed the link itself');
+    assert.throws(() => fs.lstatSync(path.join(txDir, 'snap-2')), { code: 'ENOENT' }, 'the other old snapshot went too');
+    assert.ok(fs.existsSync(path.join(txDir, 'snap-3')), 'the newest snapshot is kept');
+  } finally { clean(proj, outside); }
+});
