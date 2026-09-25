@@ -62,7 +62,7 @@ export const CONFIG_SCHEMA = [
   // the ruling; the key survives (documents the standing behavior, future-
   // proof) and a legacy obese:'full' config reads as 'quick' silently
   // (clampedRead's per-band safer-value-wins clamp, the CM v3.9.3 pattern).
-  { key: 'exercisePerBand', type: 'bandmap', values: { obese: ['quick'], full: ['quick', 'full'] }, def: { obese: 'quick', full: 'full' }, help: 'Per-ceiling exercise (obese: quick only — OBESE is auto-Quick-silent by ruling, never an ask; full: quick|full); the fat-only scoping refinement is a later release (default: {obese:quick, full:full})' },
+  { key: 'exercisePerBand', type: 'bandmap', values: { obese: ['quick'], full: ['quick', 'full'] }, def: { obese: 'quick', full: 'full' }, help: 'RETAINED FOR OLD CONFIGS: read-tolerated (validated and clamped, never rejected) and NOT read at runtime, so it has no effect; the exercise per ceiling is fixed by ruling (obese: auto-Quick, never an ask; full: a forced Quick pass, then one consent ask if still over) (default: {obese:quick, full:full})' },
   { key: 'managedPaths', type: 'stringList', def: [], help: 'Extra path PREFIXES (relative to their own project/global root, forward-slash form) to auto-declare MANAGED — sync-owned packs never proposed for a local wash, same class as skills (default: [], the byte-identical-across-roots heuristic already covers the common case)' },
   // RE-TIER envelope (the wizard's FOURTH choice, consumed by retier.mjs ONLY
   // inside a wizard-consented run — never a hook/band/BMI). A +/- BAND, never

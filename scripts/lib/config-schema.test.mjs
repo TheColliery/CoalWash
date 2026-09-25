@@ -214,3 +214,14 @@ test('every GLOBAL-only sub-key is named as such in its object key\'s help text'
     }
   }
 });
+
+// CWK-137 F-5: the same instrument for the other help-honesty class. A key kept in the schema only so an old config degrades quietly is
+// read-tolerated with NO runtime effect; its help must say so, or `configure.mjs --help` sells it as a live tunable (the D5 ruling swept the
+// config comment, README and blueprint and missed this dist surface). The list is the keys the schema itself calls retired or dead.
+test('every read-tolerated key with no runtime effect says so in its help (configure --help must not sell a dead key as live)', () => {
+  for (const key of ['exercisePerBand', 'fullPercent', 'fatMultiple']) {
+    const help = CONFIG_SCHEMA.find((s) => s.key === key).help;
+    assert.match(help, /read-tolerated/, `${key}'s help does not say it is read-tolerated`);
+    assert.match(help, /no effect|ignored/, `${key}'s help does not say it has no effect`);
+  }
+});
