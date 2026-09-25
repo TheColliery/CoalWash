@@ -2,7 +2,7 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.9.1] - 2026-09-25
 
 A link, or another file, swapped in at the name of the lock, the bin death log or a config after CoalWash checked the path is no longer opened without being vetted on Windows, and every platform now proves the open handle is the file it judged.
 
