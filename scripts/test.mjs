@@ -52,6 +52,7 @@ const TESTS = [
   'scripts/link-check.test.mjs',
   'scripts/git-env.test.mjs',
   'scripts/git-env-census.test.mjs',
+  'scripts/workflow-hygiene.test.mjs',
 ];
 
 // CWK-071 (node/runtime.md §7): process.exitCode + a natural exit at all three
@@ -70,6 +71,8 @@ const TESTS = [
 // pending output of its own to lose — the natural exit still carries the
 // child's status because nothing else sets exitCode afterwards. Proven by
 // running it both ways rather than assumed (see the CWK-071 commit).
+const TEST_TIMEOUT_MS = 120000;
+const RUN_TIMEOUT_MS = 600000;
 function main() {
   const missing = TESTS.filter((t) => !fs.existsSync(path.join(repo, t)));
   if (missing.length) {
@@ -95,7 +98,14 @@ function main() {
   // default of one per core. A seat that must leave the host breathing sets 1 (git passes the env on to the
   // pre-commit / pre-push hooks that call this runner). Nothing tests this line; it is read, not measured.
   const conc = /^[1-9]\d*$/.test(process.env.COALWASH_TEST_CONCURRENCY || '') ? [`--test-concurrency=${process.env.COALWASH_TEST_CONCURRENCY}`] : [];
-  const r = spawnSync(process.execPath, ['--test', ...conc, ...TESTS], { cwd: repo, stdio: 'inherit' });
+  // CWK-154 (2), testing.md "every test run has a finite clock": a hung test file used to hold this run, and the CI job behind it,
+  // until the platform's own ceiling. TEST_TIMEOUT_MS is per test (and per file child) and RUN_TIMEOUT_MS is the whole run.
+  // Basis, measured on this box (2026-10-02, serial, heap-capped): the slowest single test 2.2 s, the slowest file about 10 s, the
+  // whole suite 88.8 s; CI's slowest gate leg 2.28 min (REST, n=60). 120 s per test is the figure the supervised harness already
+  // uses per file; 10 min for the run is 6.8x the serial local run and 4.4x CI's slowest leg, under the 15-minute job clock.
+  // On Windows spawnSync's timeout kills the DIRECT child only (node --test's file children can outlive it): a bound, not a reaper.
+  const r = spawnSync(process.execPath, ['--test', `--test-timeout=${TEST_TIMEOUT_MS}`, ...conc, ...TESTS], { cwd: repo, stdio: 'inherit', timeout: RUN_TIMEOUT_MS });
+  if (r.error && r.error.code === 'ETIMEDOUT') console.error(`test runner: the run exceeded ${RUN_TIMEOUT_MS} ms and was stopped`);
   process.exitCode = r.status ?? 1;
 }
 main();

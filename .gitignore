@@ -61,3 +61,5 @@ scripts/lib/*.mutant-*.mjs
 # every run; CI makes it fresh each time). Room practice already ignores generated reports
 # (skillspector-*) and transient gate fixtures — same class, same cure: never stageable.
 coverage/
+# CoalBoard's own report/staging dir (CWK-154 (3), the .github deputy's courier): machine-local, never shipped
+.coalboard/

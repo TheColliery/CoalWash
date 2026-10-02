@@ -31,6 +31,7 @@ jobs:
   analyze:
     name: analyze (javascript)
     runs-on: ubuntu-latest
+    timeout-minutes: 15 # testing.md: every run has a finite clock; CWK-154 (2), sized from this room's REST-measured runs (n=12, median 1.7, max 2.4 min)
     permissions:
       security-events: write
     steps:

@@ -27,6 +27,7 @@ jobs:
   analysis:
     name: Scorecard analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 15 # testing.md: every run has a finite clock; CWK-154 (2), sized from this room's REST-measured runs (n=12, median 0.47, max 0.55 min)
     permissions:
       security-events: write
       id-token: write
