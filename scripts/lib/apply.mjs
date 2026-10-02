@@ -58,7 +58,8 @@ import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zer
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
+import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -303,8 +304,10 @@ function deadLinkScan(actionable, physRoots, txDir) {
   const files = [];
   for (const root of physRoots) collectMdFiles(root, txPhys, files);
   if (!files.length) return [];
+  // CWK-137: bounded + kind-gated. A surviving .md over MAX_DOC_BYTES (or one that turned out not to be a regular
+  // file) contributes nothing: the advisory then UNDER-reports, which is its safe direction, and no file is read whole.
   const surviving = files
-    .map((p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } })
+    .map((p) => readRepoFileBounded(p, null, MAX_DOC_BYTES) ?? '')
     .join('\n');
   const topics = deleted.map((a) => ({ path: a.phys, basename: path.basename(a.phys), text: '', mtimeMs: 0 }));
   const unref = new Set(unreferencedTopics({ topics }, surviving).map((t) => t.path));
@@ -592,7 +595,9 @@ function ownerToken(sessionId) {
   return `${sessionId}:${process.pid}:${process.hrtime.bigint()}`;
 }
 function readLockToken(lockPath) {
-  try { return JSON.parse(fs.readFileSync(lockPath, 'utf8')).token ?? null; } catch { return null; }
+  // CWK-137: bounded + kind-gated -- the lock lives in the project's .claude/coalwash/,
+  // which a cloned repo can pre-populate (a lock that is a link to /dev/zero hung this).
+  try { return JSON.parse(readRepoFileBounded(lockPath, null, MAX_CONFIG_BYTES)).token ?? null; } catch { return null; }
 }
 export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs = LOCK_STALE_MS, now = Date.now() } = {}) {
   const token = ownerToken(sessionId);
@@ -613,18 +618,36 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
     if (e && e.code !== 'EEXIST') return { acquired: false, reason: `lock error: ${e.message}` };
   }
   // Lock exists — stale takeover ONLY when demonstrably old; any doubt = defer.
+  // CWK-137: lstat, never stat, and only a plain single-link regular file is ever
+  // taken over. The old statSync + openSync('r+') FOLLOWED a link: a cloned repo that
+  // committed `.claude/coalwash/<lock>` as a link to an old file (~/.bashrc) had the
+  // next wash judge the TARGET's mtime stale, then truncate it and write the lock
+  // JSON into it.
+  // CodeQL #43/#44 (js/file-system-race), fire 10: that lstat is one PATH lookup and the
+  // open is a second one, so a link (or another file) swapped in at the name between them
+  // was opened without ever being vetted, and the fstat vouched for whatever it landed on
+  // (Windows has no O_NOFOLLOW, so there the link is followed). openPlainFile opens FIRST
+  // and then proves the handle is the entry this lstat judged stale: same dev+ino, the
+  // path still a plain single-link file, the handle too (repo-fs.mjs has the mechanism).
   try {
-    const st = fs.statSync(lockPath);
-    if (now - st.mtimeMs > staleMs) {
+    const st = fs.lstatSync(lockPath, { bigint: true }); // BigInt: a Windows file id can exceed 2**53
+    const notPlain = { acquired: false, reason: `the lock ${lockPath} is not a plain file (a link or special file) — refusing to take it over; remove it by hand if it is yours` };
+    if (st.isSymbolicLink() || !st.isFile() || st.nlink > 1n) return notPlain;
+    if (now - Number(st.mtimeMs) > staleMs) {
       // STEAL IN PLACE (no rm -> no missing-file window a third writer could slip
       // through). Two racing stealers overwrite the same file; whoever's write
       // lands last owns it, the other's compare-after-write fails -> it defers
       // (worst case both defer on a byte-interleave = a safe retry, never a
       // double-hold). Fixed width via truncate so a shorter write leaves no tail.
-      const fd = fs.openSync(lockPath, 'r+');
-      try { fs.ftruncateSync(fd, 0); fs.writeSync(fd, body, 0); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-      if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner };
-      return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
+      const o = openPlainFile(lockPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), st);
+      if (o.why === 'not-plain') return notPlain;
+      if (o.why === 'changed') return { acquired: false, reason: 'the lock changed under the takeover — deferring' };
+      if (o.why === 'unverifiable') return { acquired: false, reason: `the lock ${lockPath} is stale, but this filesystem reports no file identity number, so CoalWash cannot prove the file it opens is the one it checked — refusing to take it over; remove the lock by hand if it is yours` };
+      if (o.fd !== undefined) {
+        try { fs.ftruncateSync(o.fd, 0); fs.writeSync(o.fd, body, 0); fs.fsyncSync(o.fd); } finally { fs.closeSync(o.fd); }
+        if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner };
+        return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
+      }
     }
   } catch { /* unreadable lock = doubt = defer */ }
   return { acquired: false, reason: 'another CoalWash run (or a live session) holds the store — deferring' };
@@ -888,8 +911,11 @@ export function applyPlan(plan, opts = {}) {
         flagged.push({ path: a.phys, reason: 'cloud placeholder (dehydrated — 0 blocks, size>0): a plain read returns a stub, rewriting would clobber the real content on hydration — flagged, not rewritten (#57d)' });
         continue;
       }
-      let origBuf;
-      try { origBuf = fs.readFileSync(a.phys); } catch { return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed)` }; }
+      // CWK-137: bounded + kind-gated, and the ONE read that admits a plan target (the re-reads below see a file this
+      // one admitted). Over MAX_DOC_BYTES is refused by name, exactly as discovery already refuses to measure it.
+      const staged = repoReadOutcome(a.phys, null, MAX_DOC_BYTES);
+      if (!staged.buf) return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed${staged.why ? `: ${staged.why}` : ''})` };
+      const origBuf = staged.buf;
       if (a.type === 'rewrite') {
         const why = sniffUnrewritable(origBuf);
         if (why) { flagged.push({ path: a.phys, reason: why }); continue; }
@@ -991,7 +1017,11 @@ export function applyPlan(plan, opts = {}) {
     // (per-file failure, the sniffUnrewritable pattern). Keeps without the
     // handle (the pre-beta.12 {target, reason, date} shape) stay advisory —
     // zero behavior change for existing stores.
-    const txDir = opts.txDir || txDirFor(projectRoot);
+    // CWK-137: the DERIVED tx dir is `<project>/.claude/coalwash`, which a cloned repo
+    // can commit as (or under) a link; ownSandboxDir refuses any link between the
+    // project root and it, and the throw lands in this function's own catch as a
+    // loud `{ ok: false }`. A caller-supplied opts.txDir is the caller's own.
+    const txDir = opts.txDir || ownSandboxDir(projectRoot, '.claude', 'coalwash');
     {
       // #36 demand 10: this compare decides whether a pinned keep BINDS the action
       // about to delete or rewrite the file it names, and it used to fold case on
@@ -1183,6 +1213,11 @@ export function applyPlan(plan, opts = {}) {
       for (const a of actionable) {
         if (a.type === 'create') continue; // nothing to snapshot
         const snapName = `f${n++}`;
+        // CWK-137 F-8: the one re-read of a plan target NOT routed through the bounded read, on purpose. It is a kernel-side copy
+        // (no JS buffer holds the bytes), and its result is judged by `verifySnapshot` a few lines below, which reads BOTH sides
+        // bounded at MAX_DOC_BYTES: a target that grew past the staging bound since staging is refused there
+        // ("unverifiable: ... over-bound") before any mutation. Routing the copy through a buffered read would only add a second
+        // bounded read and replace this copy's durability path. Named in the census as the one RESIDUAL_REREAD member.
         fs.copyFileSync(a.phys, path.join(snapDir, snapName));
         const fd = fs.openSync(path.join(snapDir, snapName), 'r+');
         try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
@@ -1269,8 +1304,12 @@ export function applyPlan(plan, opts = {}) {
           // the snapshot, so nothing of this plan is left half-applied). A
           // target that can no longer be read counts as foreign interference.
           if (a.type === 'rewrite' || a.type === 'delete') {
-            let cur = null;
-            try { cur = fs.readFileSync(a.phys); } catch { /* handled below */ }
+            // CWK-137 RESIDUAL_REREAD: bounded + kind-gated like the staging read (MAX_DOC_BYTES, the bound that read already
+            // admitted this target under); a target that grew past it, or is no longer a regular file, is foreign interference:
+            // the same verdict as an unreadable one. The bound is deliberately NOT baseline-length + 1: that would make the size
+            // check a second refusal path beside the compare, and GATE-LIVENESS 7's compare-neutralized mutant would stop
+            // neutralizing the guard for any foreign content longer than the baseline.
+            const cur = repoReadOutcome(a.phys, null, MAX_DOC_BYTES).buf || null;
             if (!cur || Buffer.compare(cur, a.baseBuf) !== 0) {
               throw new Error(`external writer detected: ${a.phys} changed after the plan was gated — aborting the transaction`);
             }
@@ -1282,8 +1321,10 @@ export function applyPlan(plan, opts = {}) {
             writeDurable(a.phys, a.content); // U7: temp is O_EXCL + unpredictable; the destination is never opened for write
             if (a.type === 'create') createdPaths.push(a.phys);
             // verify: what landed is byte-for-byte what the plan said (blueprint step 3 "verify")
-            const back = fs.readFileSync(a.phys);
-            if (Buffer.compare(back, Buffer.from(a.content, 'utf8')) !== 0) {
+            // CWK-137 RESIDUAL_REREAD: bounded by what was just written, +1 byte so growth is seen as a mismatch, not read whole.
+            const wrote = Buffer.from(a.content, 'utf8');
+            const back = repoReadOutcome(a.phys, null, wrote.length + 1).buf;
+            if (!back || Buffer.compare(back, wrote) !== 0) {
               throw new Error(`post-write verify mismatch: ${a.phys}`);
             }
           } else {
@@ -1504,9 +1545,15 @@ export function verifySnapshot(snapDir, manifest) {
   const bad = [];
   for (const m of manifest) {
     try {
-      const snapBuf = fs.readFileSync(path.join(snapDir, m.snap));
-      const srcBuf = fs.readFileSync(m.original);
-      if (Buffer.compare(snapBuf, srcBuf) !== 0) bad.push(`${m.original} (copy does not match source)`);
+      // CWK-137 RESIDUAL_REREAD: both sides through the bounded, kind-gated read. Over the bound is UNVERIFIABLE by name (the
+      // staging read never admits such a target, so this is only reachable if one grew since), never read whole.
+      const snap = repoReadOutcome(path.join(snapDir, m.snap), null, MAX_DOC_BYTES);
+      const src = repoReadOutcome(m.original, null, MAX_DOC_BYTES);
+      if (!snap.buf || !src.buf) {
+        bad.push(`${m.original} (unverifiable: ${!snap.buf ? `copy ${snap.why || 'unreadable'}` : `source ${src.why || 'unreadable'}`})`);
+        continue;
+      }
+      if (Buffer.compare(snap.buf, src.buf) !== 0) bad.push(`${m.original} (copy does not match source)`);
     } catch (e) {
       bad.push(`${m.original} (unverifiable: ${e.message})`);
     }
@@ -1524,9 +1571,13 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
   try {
     let protect = null;
     const jp = path.join(txDir, JOURNAL_NAME);
-    if (fs.existsSync(jp)) {
+    // CWK-137: the journal lives in the directory a cloned repo can commit, so it is read bounded + kind-gated. Absent
+    // means no journal; ANY other refusal (a link, a special file, over the bound) is "cannot know" and freezes the sweep.
+    const jo = repoReadOutcome(jp, null, MAX_DOC_BYTES);
+    if (jo.why && jo.why !== 'absent') return;
+    if (jo.buf) {
       let j = null;
-      try { j = JSON.parse(fs.readFileSync(jp, 'utf8')); } catch { /* unreadable -> freeze below */ }
+      try { j = JSON.parse(jo.buf.toString('utf8')); } catch { /* unreadable -> freeze below */ }
       if (!j || typeof j !== 'object' || Number(j.version) > 1) return; // cannot know what it references -> sweep nothing
       if (j.status !== 'committed' && j.status !== 'rolled-back') protect = path.basename(String(j.snapDir || ''));
     }
@@ -1580,11 +1631,11 @@ export function recoverDangling(projectRoot, opts = {}) {
     // fail-closed reading of both legs.
     const anchorGate = trustedRootsForAnchor(projectRoot, home);
     if (!anchorGate.ok) return { recovered: 'none', error: anchorGate.error };
-    const txDir = opts.txDir || txDirFor(projectRoot);
+    const txDir = opts.txDir || ownSandboxDir(projectRoot, '.claude', 'coalwash'); // CWK-137, as in applyPlan
     const journalPath = path.join(txDir, JOURNAL_NAME);
     if (!fs.existsSync(journalPath)) return { recovered: 'none' };
     let journal;
-    try { journal = JSON.parse(fs.readFileSync(journalPath, 'utf8')); } catch {
+    try { journal = JSON.parse(readRepoFileBounded(journalPath, null, MAX_DOC_BYTES)); } catch { // CWK-137: bounded
       // an unreadable journal with NO readable snapDir cannot be replayed —
       // fail-closed: leave it for a human (never guess at memory state).
       return { recovered: 'none', error: 'journal unreadable — left in place for inspection' };
@@ -1645,7 +1696,7 @@ export function recoverDangling(projectRoot, opts = {}) {
     // canonicalization of the raw journal string. Every read below goes through it,
     // so the manifest is loaded from the bound location, never the raw one.
     const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
-    const manifest = JSON.parse(fs.readFileSync(path.join(snapPhys, 'manifest.json'), 'utf8'));
+    const manifest = JSON.parse(readRepoFileBounded(path.join(snapPhys, 'manifest.json'), null, MAX_DOC_BYTES)); // CWK-137: bounded
     let restored = 0, failed = 0, refused = 0, refusedPinned = 0;
     for (const m of manifest) {
       const src = path.join(snapPhys, m.snap);

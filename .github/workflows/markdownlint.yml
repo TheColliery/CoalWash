@@ -23,7 +23,12 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
+      # CWK-120 #5 -- persist-credentials: false: this job only reads files and lints the pull-request checkout with a
+      # third-party action, which could otherwise read the token `actions/checkout` leaves in .git/config (zizmor
+      # artipacked, CWE-522). scorecard.yml already set it; the flock precedent is CoalHearth's ci.yml.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
         continue-on-error: true  # report-only: a focused markdownlint cleanup is a separate pass
         with:

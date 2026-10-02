@@ -69,6 +69,7 @@
 // missing id, or a pipeline error prints to stderr and exits non-zero.
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
@@ -79,9 +80,9 @@ import {
 import { envelopeFor } from './retier.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin } from './tailings.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, binItemOutcome } from './tailings.mjs';
 import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
-import { loadMergedConfig, findProjectRoot } from './config-load.mjs';
+import { loadMergedConfig, loadMergedConfigReport, globalConfigPath, findProjectRoot, projectConfigResolution, discoverIgnoredConfigs } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { estateReport } from './estate.mjs';
@@ -279,17 +280,43 @@ export function gaugeLine(g) {
 // same reason, not a re-measured string length.
 export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   const projectRoot = findProjectRoot(cwd, home);
+  let refused = null;
   for (const bin of [FAT_BIN_NAME, STORE_OLD_NAME]) {
-    const content = restoreFromBin(projectRoot, bin, id);
-    if (content !== null) {
+    const r = binItemOutcome(projectRoot, bin, id);
+    if (r.buf) {
       const item = listBin(projectRoot, bin).find((i) => i && i.id === id) || {};
-      return { found: true, bin, id, original: item.original || null, bytes: content.length, content };
+      return { found: true, bin, id, original: item.original || null, bytes: r.buf.length, content: r.buf };
     }
+    // CWK-137: an item that is THERE but refused (over the read bound, not a regular
+    // file) is not "not found" -- say which, so the user knows to copy it by hand.
+    if (r.why && r.why !== 'absent' && !refused) refused = { bin, why: r.why };
   }
-  return { found: false, id };
+  return refused ? { found: false, id, refused } : { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>] | config-status [--json]';
+
+// UMB-133 — the READ-ONLY report for BOTH holes: was the config actually read
+// from a LEGACY path, and is there a `.coalwash.json` sitting somewhere this
+// walk will never look? Deliberately a SEPARATE, user-pulled subcommand
+// rather than SessionStart output: the migration notice (hole 2) is common —
+// this room's own hermetic conductor tests default every project to the
+// ROOT legacy shape, and plenty of real installs do too — so printing it on
+// every session would be a nag on the ordinary case, not a rare finding.
+// `/coalwash:stats` (or a direct call, for verification) is the pull channel;
+// hole (1)'s ignored-path report ALSO fires ambiently on SessionStart
+// (hooks/coalwash-conductor.js), because planting a bare dotfile under an
+// agent dir this walk does not honour for it is genuinely rare.
+function configStatusLines({ resolution, ignored }) {
+  const out = [];
+  if (resolution && resolution.legacy) {
+    out.push(`[CoalWash] Config read from a LEGACY path (${resolution.path}); canonical = .claude/coal/coalwash.json. Move it there when convenient — reading is unchanged either way.`);
+  }
+  for (const p of ignored) {
+    out.push(`[CoalWash] IGNORED: ${p} is not a config path; canonical = .claude/coal/coalwash.json`);
+  }
+  return out;
+}
 
 // estate-scan / estate-run / estate-search / estate-restore (ULTRA, blueprint
 // §19 P2 partial — estate-archive.mjs): estate-scan = the non-mutating bill
@@ -306,8 +333,32 @@ function argAfter(args, flag) {
 function estateOpts(args) {
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
-  const estate = clampedRead(loadMergedConfig({ cwd: process.cwd(), home }), 'estate');
-  return { projectRoot, home, estate, currentSessionId: argAfter(args, '--session') };
+  const { cfg, ignored } = loadMergedConfigReport({ cwd: process.cwd(), home });
+  const estate = clampedRead(cfg, 'estate');
+  return { projectRoot, home, estate, ignored, currentSessionId: argAfter(args, '--session') };
+}
+
+// CWK-137 D3 restore-door hint (the sizing ruling): estate.archiveDir is read from the GLOBAL config only, so a project value the
+// clamp dropped would leave estate-search / estate-restore looking in a different directory than the user once archived into,
+// with nothing to say so. `ignored` comes from the SAME bounded config read the merge made (never a second read). The line is
+// built from a cloned repo's bytes and lands in the agent's context, so every field is one line and bounded (security.md, log
+// injection). Printed on EVERY run, to stderr; stdout and the exit code are untouched.
+// R11d bounce 2: (N-2) the repo's value is named ONCE, as what the project config asked for, never inside an imperative, and every
+// remedy is conditional on the user having set the path themselves: the D3 clamp exists because a cloned repo must not choose where
+// the user's transcripts go, so the line must not launder the repo's choice as the user's to-do. The reason is configure.mjs's own
+// sentence. (N-3) Only an ABSOLUTE value is reported: resolveArchiveDir drops a relative one on either layer, so the clamp changed
+// nothing for it and there is nothing true to say. (N-4) Cf (a right-to-left override, zero-width characters) is flattened with the
+// rest, and the length cut is by code point so it can never leave half of a surrogate pair.
+const oneLine = (s, max = 300) => {
+  const t = String(s).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, ' '); // control, format (bidi, zero-width), U+2028, U+2029
+  const cps = Array.from(t);
+  return cps.length > max ? `${cps.slice(0, max).join('')}...` : t;
+};
+function archiveDirHint({ ignored, estate, home }) {
+  const hit = (ignored || []).find((i) => i.key === 'estate.archiveDir');
+  if (!hit || !path.isAbsolute(hit.value)) return null;
+  const read = oneLine(resolveArchiveDir(estate, home));
+  return `[CoalWash] estate.archiveDir: the project config (${oneLine(hit.path)}) asks for ${oneLine(hit.value)}, and that was ignored. A cloned repo ships a project config, and it must not be able to choose where your own session transcripts are archived, so this key is read from the GLOBAL config only. This run read ${read}. If you set that path yourself and want it used, set estate.archiveDir in ${oneLine(globalConfigPath(home))}, or move the archives that path holds into ${read}.`;
 }
 
 function main() {
@@ -321,6 +372,37 @@ function main() {
       console.error(`gauge failed: ${e.message}`);
       process.exitCode = 1;
     }
+  } else if (cmd === 'config-status') {
+    try {
+      const home = os.homedir();
+      const cwd = process.cwd();
+      const resolution = projectConfigResolution(cwd, home);
+      const ignored = discoverIgnoredConfigs(cwd, home);
+      if (args.includes('--json')) {
+        console.log(JSON.stringify({ resolution, ignored }, null, 1));
+      } else {
+        const lines = configStatusLines({ resolution, ignored });
+        // DECLARED EXCEPTION to the no-zero-line rule (UMB-133 INSPECT F4),
+        // stated here rather than left for the next reader to mistake for an
+        // oversight. `commands/stats.md` says of this section "print NOTHING
+        // ... never a 'config OK' line", and states the same rule twice more on
+        // that page -- but it binds the /coalwash:stats RENDERING, which reads
+        // the `--json` form: that form emits `{"resolution":…,"legacy":false},
+        // "ignored":[]}` and no prose at all, so the agent has nothing to
+        // print and the rule holds untouched on its own channel (measured, all
+        // four states). THIS branch is the human, directly-invoked one. A user
+        // who types the command and gets silence cannot tell success from a
+        // crash, so the confirmation line is the answer to a question that was
+        // asked -- not an unprompted status line, which is what the rule bans.
+        // PRECEDENT, not a new divergence: `writeguard-list` below has printed
+        // "[CoalWash] no write-guard snapshots this session." since a81df55
+        // (2026-07-11), the same shape for the same reason.
+        console.log(lines.length ? lines.join('\n') : '[CoalWash] config: canonical, nothing to report.');
+      }
+    } catch (e) {
+      console.error(`config-status failed: ${e.message}`);
+      process.exitCode = 1;
+    }
   } else if (cmd === 'restore') {
     const id = args[1];
     if (!id) {
@@ -331,7 +413,8 @@ function main() {
     try {
       const r = restore({ id });
       if (!r.found) {
-        console.error(`restore: id '${id}' not found in ${FAT_BIN_NAME} or ${STORE_OLD_NAME}`);
+        if (r.refused) console.error(`restore: '${id}' is in ${r.refused.bin} but was NOT read (${r.refused.why}${r.refused.why === 'over-bound' ? ': larger than the read bound' : ''}) -- nothing was written; copy it by hand from .claude/coalwash/${r.refused.bin}/${id}`);
+        else console.error(`restore: id '${id}' not found in ${FAT_BIN_NAME} or ${STORE_OLD_NAME}`);
         process.exitCode = 1;
         return;
       }
@@ -427,7 +510,10 @@ function main() {
     const query = args.slice(1).filter((a) => !a.startsWith('--')).join(' ');
     if (!query) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const { projectRoot, home, estate } = estateOpts(args);
+      const opts = estateOpts(args);
+      const { projectRoot, home, estate } = opts;
+      const hint = archiveDirHint(opts);
+      if (hint) console.error(hint);
       // #58 tombstone cross-check: a matching row is ANNOTATED (later-removed?),
       // never dropped — the search still returns everything it found.
       const tombstones = collectTombstones({ projectRoot, home });
@@ -471,7 +557,10 @@ function main() {
     const sessionId = args[1];
     if (!sessionId || sessionId.startsWith('--')) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const { projectRoot, home, estate } = estateOpts(args);
+      const opts = estateOpts(args);
+      const { projectRoot, home, estate } = opts;
+      const hint = archiveDirHint(opts);
+      if (hint) console.error(hint);
       const tombstones = collectTombstones({ projectRoot, home });
       const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: argAfter(args, '--to'), tombstones });
       if (!r.ok) { console.error(`estate-restore: ${r.error}`); process.exitCode = 1; return; }

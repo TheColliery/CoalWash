@@ -135,6 +135,55 @@ test('CWK-023: a first write lands in an agent dir the project ALREADY has, neve
   assert.ok(firstWriteTarget(bare, sb.home).includes(`.claude${path.sep}coal`));
 });
 
+// UMB-133 hole (2): the candidate list grew a second legacy entry
+// (`.claude/.coalwash.json`). `firstWriteTarget`'s existing `basename !==
+// 'coal'` check already excludes ANY non-canonical candidate by SHAPE, not by
+// a hand-enumerated list of legacy paths -- so it should skip the new one for
+// the same reason it already skips the root legacy, with no code change owed
+// here. Proven, not merely read: an EXISTING nested-legacy file at
+// `.claude/.coalwash.json` (the file the writer would plant a SECOND config
+// into if this check ever narrowed) still routes a first write to the
+// candidate the project ALREADY has, never to the legacy address itself.
+test('CWK-023: firstWriteTarget skips BOTH legacy shapes even when the nested one already exists -- never plants a second config beside it', (t) => {
+  const sb = sandbox(t);
+  fs.mkdirSync(path.join(sb.proj, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(sb.proj, '.claude', '.coalwash.json'), '{}\n');
+  const target = firstWriteTarget(sb.proj, sb.home);
+  // MESSAGE CORRECTED (UMB-133 INSPECT F3): this pins `firstWriteTarget`'s own
+  // SHAPE check and nothing else. It does NOT say where a real run writes --
+  // with this fixture's file on disk the production path never calls this
+  // function at all (`configure.mjs`: writePath = exists(found) ? found :
+  // firstWriteTarget(...)), so the composed behaviour is the NEXT test's, not
+  // this one's. The old message claimed the composed property and this
+  // assertion could not carry it.
+  assert.ok(target.includes(`.claude${path.sep}coal${path.sep}coalwash.json`),
+    `firstWriteTarget must return the canonical .claude/coal/coalwash.json for a project with no config anywhere, never either legacy address; got ${target}`);
+  assert.notStrictEqual(target, path.join(sb.proj, '.claude', '.coalwash.json'));
+});
+
+// UMB-133 INSPECT F3, the COMPOSED half -- the claim the unit above cannot
+// reach. `README.md`'s promise is that a config sitting at either LEGACY path
+// is written back THERE, never moved, and this unit is what newly extended
+// that promise to the nested shape, so it is precisely the claim that owes a
+// test. This spawns the REAL writer rather than calling a helper: the
+// discriminator lives in configure.mjs's own `exists(found) ? found :
+// firstWriteTarget(...)` line, which no test of `firstWriteTarget` can see.
+test('CWK-023: a real write with a NESTED legacy present lands IN that legacy and creates no canonical file -- the config is never silently relocated', (t) => {
+  const sb = sandbox(t);
+  const nested = path.join(sb.proj, '.claude', '.coalwash.json');
+  fs.mkdirSync(path.join(sb.proj, '.claude'), { recursive: true });
+  fs.writeFileSync(nested, `${JSON.stringify({ language: 'en' }, null, 2)}\n`);
+
+  const r = run(sb, ['--fileMaxSizeKb', '31']);
+  assert.strictEqual(r.status, 0, r.stderr);
+
+  const after = JSON.parse(fs.readFileSync(nested, 'utf8'));
+  assert.strictEqual(after.fileMaxSizeKb, 31, 'the key must land in the legacy file the loader actually reads');
+  assert.strictEqual(after.language, 'en', 'the pre-existing content must survive the write');
+  assert.ok(!fs.existsSync(projCfg(sb)),
+    'no canonical file may appear: a silent relocation would leave the user with two configs, one of which the loader stops reading');
+});
+
 // ----------------------------------------------------------------- the CLI
 
 test('CWK-023: --help exits 0, is generated from the schema, and names --global', (t) => {
@@ -380,6 +429,35 @@ test('F-R32-3: --global IS honoured, so the warning fires on the PROJECT path on
   assert.match(r.stdout, /Successfully updated configuration/);
 });
 
+// CWK-137 D3: `estate.archiveDir` is read from the GLOBAL layer only, so a PROJECT write of it is ignored by every reader. The
+// F-R32-3 machinery above already notices (it compares the written value with the loader's own merged read); what it said
+// about WHY was the consent-clamp story ("safer-value-wins"), which is false for this key: nothing here is safer or weaker, the
+// project layer simply has no say in where a user's transcripts are archived. The write still proceeds (WARN, not REFUSE).
+test('CWK-137 D3: a PROJECT write of estate.archiveDir is named as ignored, for the RIGHT reason (global-only, not the consent clamp)', (t) => {
+  const sb = sandbox(t);
+  const dest = path.join(sb.home, 'my-archive');
+  const r = run(sb, ['--estate.archiveDir', dest]);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(JSON.parse(fs.readFileSync(projCfg(sb), 'utf8')).estate.archiveDir, dest, 'WARN, not REFUSE: the value is still written');
+  const out = r.stdout + r.stderr;
+  assert.match(out, /estate\.archiveDir will NOT be read at the value you set/, 'the warning names the KEY');
+  assert.match(out, /GLOBAL config only/, 'and states the real reason');
+  assert.doesNotMatch(out, /SAFER-VALUE-WINS|consent-bearing/, 'the consent-clamp explanation is false for this key and must not be printed');
+  assert.match(out, /--global --estate\.archiveDir/, 'and points at the path that DOES take effect');
+  assert.doesNotMatch(out, /every read returns: undefined/, 'an unset effective value reads as unset, never the word "undefined"');
+  assert.doesNotMatch(r.stdout, /Successfully updated configuration/);
+});
+
+test('CWK-137 D3: --global estate.archiveDir IS honoured, so no warning fires', (t) => {
+  const sb = sandbox(t);
+  const dest = path.join(sb.home, 'my-archive');
+  const r = run(sb, ['--global', '--estate.archiveDir', dest]);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(sb.home, '.claude', '.coalwash.json'), 'utf8')).estate.archiveDir, dest);
+  assert.doesNotMatch(r.stdout + r.stderr, /will NOT be read/);
+  assert.match(r.stdout, /Successfully updated configuration/);
+});
+
 // r34c C: the main-module guard compared import.meta.url (Node resolves the entry file to its
 // REALPATH) with argv[1] (the path it was invoked by). Through a symlink or a junction the two
 // differ and main() never ran: exit 0, no output, and no config written. A host that cannot
@@ -397,4 +475,57 @@ test('r34c C: invoked through a directory junction, configure.mjs still runs (--
     { cwd: holder, encoding: 'utf8', env: { ...process.env, HOME: holder, USERPROFILE: holder } });
   assert.strictEqual(r.status, 0, r.stderr);
   assert.match(r.stdout, /CoalWash Configurator Utility/, `through the junction: output ${JSON.stringify(r.stdout + r.stderr)}`);
+});
+
+// CWK-137: the project write goes through writeRepoFile, contained in the project root.
+// The project's `.claude/coal` directory is a link to a directory OUTSIDE the project;
+// the write is refused loudly and the outside directory keeps exactly its one file.
+test('CWK-137: a project config write whose directory links OUTSIDE the project is REFUSED, and the outside file is untouched', (t) => {
+  const sb = sandbox(t);
+  const outside = path.join(sb.root, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'keep.txt'), 'keep me\n');
+  fs.mkdirSync(path.join(sb.proj, '.claude'));
+  try {
+    fs.symlinkSync(outside, path.join(sb.proj, '.claude', 'coal'), process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (e) {
+    return t.skip(`cannot create a directory link on this host (${e.code || e.message})`);
+  }
+  const before = sha(path.join(outside, 'keep.txt'));
+  const r = run(sb, ['--fileMaxSizeKb', '31']);
+  assert.strictEqual(r.status, 1, `exit ${r.status}: ${r.stderr}`);
+  assert.match(r.stderr, /\[refused\]/, 'the refusal is loud');
+  assert.match(r.stderr, /nothing was written/);
+  assert.deepStrictEqual(fs.readdirSync(outside), ['keep.txt'], 'no config and no temp file lands in the outside directory');
+  assert.strictEqual(sha(path.join(outside, 'keep.txt')), before);
+});
+
+// CWK-120 ride-along (a), UMB-174: a parsed body that is not a plain object is never accepted as the config.
+// The old `parseJsonc(raw) || {}` turned a FALSY body (null, 0, false, "") into an EMPTY config, so a write landed
+// on {} over a file that held something the tool did not understand; the truthy shapes ([], "x", 42) were already
+// refused by the shape check below it. Every body must exit 1, name the reason and leave the file byte-identical.
+for (const [name, body] of [['null', 'null'], ['0', '0'], ['false', 'false'], ['an empty string', '""'], ['an array', '[]'], ['a string', '"x"'], ['a number', '42']]) {
+  test(`CWK-120 (a): a config whose body is ${name} is REFUSED as not a JSON object, and the file stays byte-identical`, (t) => {
+    const sb = sandbox(t);
+    fs.mkdirSync(path.dirname(projCfg(sb)), { recursive: true });
+    fs.writeFileSync(projCfg(sb), body + '\n');
+    const before = sha(projCfg(sb));
+    const r = run(sb, ['--language', 'en']);
+    assert.strictEqual(r.status, 1, `a ${name} body must be refused (exit ${r.status}): ${r.stderr}`);
+    assert.match(r.stderr, /does not hold a JSON object/);
+    assert.match(r.stderr, /Nothing was written/);
+    assert.strictEqual(sha(projCfg(sb)), before, 'refusing beats rebuilding: the bytes are still there to fix');
+  });
+}
+
+test('UMB-174: a UTF-8 BOM before a valid object still PARSES, and the write keeps the key it held', (t) => {
+  const sb = sandbox(t);
+  fs.mkdirSync(path.dirname(projCfg(sb)), { recursive: true });
+  fs.writeFileSync(projCfg(sb), String.fromCharCode(0xfeff) + '{ "updateCheckDays": 9 }\n');
+  const r = run(sb, ['--language', 'en']);
+  assert.strictEqual(r.status, 0, `a BOM-prefixed valid config must be edited, not refused: ${r.stderr}`);
+  const written = fs.readFileSync(projCfg(sb), 'utf8');
+  const after = JSON.parse(written.charCodeAt(0) === 0xfeff ? written.slice(1) : written);
+  assert.strictEqual(after.updateCheckDays, 9, 'the key the BOM-prefixed file held survives the write');
+  assert.strictEqual(after.language, 'en');
 });

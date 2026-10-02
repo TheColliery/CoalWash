@@ -80,7 +80,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig } from './lib/config-schema.mjs';
 import { parseJsonc } from './lib/jsonc.mjs';
-import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig } from './lib/config-load.mjs';
+import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig, findProjectRoot, repoReadOutcome, MAX_CONFIG_BYTES, GLOBAL_ONLY_KEYS } from './lib/config-load.mjs';
+import { writeRepoFile, RepoWriteRefused } from './lib/repo-fs.mjs';
 
 // Prototype-pollution guard. `parseJsonc` already drops these at PARSE (so a
 // poisoned file on disk cannot reach us), and the flag map is built from the
@@ -346,11 +347,21 @@ function main() {
   // U+FEFF literal: a raw BOM pasted into source gets converted by the tool
   // layer, a hazard this room has paid for more than once).
   let readErr = null;
-  try {
-    let content = fs.readFileSync(cfgPath, 'utf8');
+  // CWK-137: the project config is REPO-DERIVED -- read bounded, kind-gated and
+  // contained in the project root (a link to ~/.bashrc, a FIFO, /dev/zero or a file
+  // outside the project is refused before open). The --global file is the user's own:
+  // a dotfile manager may link it anywhere, so it is bounded and kind-gated but not
+  // contained. A refusal on a path that EXISTS lands in the unreadable branch below,
+  // exactly like a failed read; `absent` keeps the ENOENT meaning it always had.
+  const projectRoot = isGlobal ? null : findProjectRoot(process.cwd());
+  const got = repoReadOutcome(cfgPath, projectRoot, MAX_CONFIG_BYTES);
+  if (got.buf) {
+    let content = got.buf.toString('utf8');
     if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
     raw = content;
-  } catch (err) { readErr = err; }
+  } else {
+    readErr = { code: got.why === 'absent' ? 'ENOENT' : (got.code || got.why) };
+  }
   // F-R32-2: AN EMPTY CATCH HERE MADE AN UNREADABLE FILE INDISTINGUISHABLE FROM
   // AN ABSENT ONE, and the difference is the user's whole config. On an
   // EPERM/EACCES read of a file that IS there, `raw` stayed null, `cfg` stayed
@@ -382,7 +393,10 @@ function main() {
   if (raw !== null) {
     hadComments = raw.includes('//');
     try {
-      cfg = parseJsonc(raw) || {}; // proto-pollution-guarded parse (jsonc.mjs)
+      // proto-pollution-guarded parse (jsonc.mjs). NO `|| {}` fallback (CWK-120 ride-along (a), UMB-174): it turned a
+      // FALSY body (null, 0, false, "") into an EMPTY config, so a write landed on {} over a file that held a value this
+      // tool did not understand. A parsed body that is not a plain object reaches the shape check just below and is refused.
+      cfg = parseJsonc(raw);
     } catch (e) {
       // A malformed config is a FAILURE the user must see, and it is also the
       // one case where refusing is strictly better than the siblings' rebuild:
@@ -507,10 +521,20 @@ function main() {
   // own wording), and the sharpest: the earlier one mis-described a mechanism
   // that fires, this one named one that cannot.
   try {
-    fs.mkdirSync(path.dirname(writePath), { recursive: true });
-    fs.writeFileSync(writePath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    if (isGlobal) {
+      // The user's own file, written as before (a dotfile manager's link is honoured).
+      fs.mkdirSync(path.dirname(writePath), { recursive: true });
+      fs.writeFileSync(writePath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    } else {
+      // CWK-137: contained in the project root, never through a link (temp + rename).
+      writeRepoFile(writePath, JSON.stringify(next, null, 2) + '\n', projectRoot);
+    }
   } catch (e) {
-    console.error(`Error: Failed to write to config file: ${e.message}`);
+    if (e instanceof RepoWriteRefused) {
+      console.error(`[refused] ${writePath}: ${e.message} -- nothing was written. Replace it with a regular file inside the project (or remove it) and re-run.`);
+    } else {
+      console.error(`Error: Failed to write to config file: ${e.message}`);
+    }
     process.exitCode = 1;
     return;
   }
@@ -558,10 +582,16 @@ function main() {
     console.log(JSON.stringify(next, null, 2));
     for (const c of clamped) {
       console.warn(`\nWarning: ${c.key} will NOT be read at the value you set.`);
-      console.warn(`  written: ${JSON.stringify(c.wrote)}    every read returns: ${JSON.stringify(c.reads)}`);
-      console.warn('  A consent-bearing key merges SAFER-VALUE-WINS (hooks-safety.md §9): a project');
-      console.warn('  config may make it quieter, never weaker, because a cloned repo ships a project');
-      console.warn('  config and its bytes are indistinguishable from yours.');
+      console.warn(`  written: ${JSON.stringify(c.wrote)}    every read returns: ${JSON.stringify(c.reads) ?? 'unset (the default)'}`);
+      if (GLOBAL_ONLY_KEYS.includes(c.key)) {
+        // CWK-137 D3: a REACH key, not a consent key -- no "safer value" is involved, so the consent-clamp story below would be false.
+        console.warn('  This key is read from the GLOBAL config only: a cloned repo ships a project config,');
+        console.warn('  and it must not be able to choose where your own session transcripts are archived.');
+      } else {
+        console.warn('  A consent-bearing key merges SAFER-VALUE-WINS (hooks-safety.md §9): a project');
+        console.warn('  config may make it quieter, never weaker, because a cloned repo ships a project');
+        console.warn('  config and its bytes are indistinguishable from yours.');
+      }
       console.warn(`  To make this take effect, set it on the GLOBAL layer instead:`);
       console.warn(`      node scripts/configure.mjs --global --${c.key} ${typeof c.wrote === 'string' ? c.wrote : JSON.stringify(c.wrote)}`);
     }

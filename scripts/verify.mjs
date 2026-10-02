@@ -26,7 +26,7 @@ const LIBS = [
   'class-b.mjs', 'caliper.mjs', 'fidelity-gate.mjs', 'apply.mjs', 'keeps.mjs', 'receipt.mjs',
   'retention.mjs', 'cli.mjs', 'ask.mjs', 'tailings.mjs', 'broom.mjs', 'wizard.mjs', 'parcel.mjs', 'writeguard.mjs',
   'anchor-diff.mjs', 'estate.mjs', 'estate-archive.mjs', 'retier.mjs', 'dig-gauge.mjs',
-  'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs',
+  'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs', 'repo-fs.mjs',
 ];
 
 // LIBS is hand-listed, so it silently rots: a new lib nobody adds here is never
@@ -169,7 +169,7 @@ try {
   if (pj.license === 'Apache-2.0') ok('plugin.json license = Apache-2.0'); else fail(`plugin.json license = '${pj.license}' (series license is Apache-2.0)`);
   const hj = fs.readFileSync(path.join(repo, 'hooks', 'hooks.json'), 'utf8');
   if (hj.includes('${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js')) ok('hooks.json wires SessionStart via ${CLAUDE_PLUGIN_ROOT}/hooks');
-  else fail('hooks.json does not wire SessionStart under ${CLAUDE_PLUGIN_ROOT}/bin');
+  else fail('hooks.json does not wire ${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js');
 } catch (e) { fail(`plugin manifest: ${e.message}`); }
 
 console.log('marketplace.json:');
@@ -253,7 +253,12 @@ try {
 // each with its measured reason in scripts/pointer-check.mjs.
 console.log('pointers (ship-text vs the tree):');
 try {
-  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8' });
+  // CWK-133: every git spawn in this gate gets its env from the ONE helper (an ambient GIT_DIR / GIT_INDEX_FILE from
+  // a linked worktree's hook would otherwise decide which repository these two calls answer for). Dynamic, inside the
+  // check that uses it: a missing helper is one FAIL line here, never a link-time crash (node/runtime.md §1).
+  const { gitEnv } = await import(pathToFileURL(path.join(repo, 'scripts', 'git-env.mjs')).href);
+  // The env is built INLINE at each spawn (not held in a variable) so the git-spawn census below can see it is the helper's.
+  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)) });
   if (lsAll.error || lsAll.status !== 0) {
     // A VISIBLE skip, never a silent carve-out: no git means no durability answer.
     console.log('  --   pointer check: git unavailable — cannot tell a tracked path from an untracked one; skipped');
@@ -356,7 +361,7 @@ try {
       agentHomes,
       runCheckIgnore: (names) => {
         const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-          { cwd: repo, encoding: 'utf8', input: names.map((n) => n + '/').join('\n') + '\n' });
+          { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)), input: names.map((n) => n + '/').join('\n') + '\n' });
         if (ci.error) { checkIgnoreFailure = `failed to spawn: ${ci.error.message}`; return ''; }
         if (ci.status !== 0 && ci.status !== 1) {
           const why = String(ci.stderr || '').split('\n')[0].trim();
@@ -406,6 +411,20 @@ try {
   }
 } catch (e) { fail(`pointer check: ${e.message}`); }
 
+// GIT SPAWNS (CWK-136). CWK-133 gave every fixture and gate one env helper (scripts/git-env.mjs); this is the tripwire
+// that keeps the NEXT git spawn from inheriting an ambient GIT_DIR / GIT_INDEX_FILE. It refuses a spawn with no `env:`
+// and an `env:` that names process.env, and it PRINTS its coverage: a census that matched nothing would report clean.
+// Detection lives in scripts/git-env-census.mjs (dynamic import, node/runtime.md 1); its named limits are in that
+// file's header (a local wrapper or variable is counted as unverified, never followed).
+console.log('git spawn census (every git spawn under scripts/ takes its env from gitEnv(), never the ambient process.env):');
+try {
+  const { censusGitSpawns, collectScriptsMjs } = await import(pathToFileURL(path.join(repo, 'scripts', 'git-env-census.mjs')).href);
+  const census = censusGitSpawns(collectScriptsMjs(repo));
+  for (const f of census.findings) fail(f);
+  if (!census.calls) fail('git spawn census found NO git spawn under scripts/: the locator is dead, and a census that matches nothing reports clean');
+  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly, ${census.other} a local wrapper or variable (text not verified)`);
+} catch (e) { fail(`git spawn census: ${e.message}`); }
+
 console.log('libs (import check):');
 for (const l of LIBS) {
   try { await import(pathToFileURL(path.join(repo, 'scripts', 'lib', l)).href); ok(`${l} imports`); }
@@ -414,9 +433,10 @@ for (const l of LIBS) {
 
 console.log('plugin/ dist (the clean CC plugin vs source SSoT):');
 try {
-  const { checkDist } = await import(pathToFileURL(path.join(repo, 'scripts', 'build-plugin.mjs')).href);
+  const { checkDist, DIST_ITEMS } = await import(pathToFileURL(path.join(repo, 'scripts', 'build-plugin.mjs')).href);
   const drift = checkDist();
-  if (!drift.length) ok('plugin/ matches source (manifest + bin + commands + hooks + skills + scripts/lib); nothing else leaked');
+  // Named FROM DIST_ITEMS, never retyped: the hand-written list said "bin" for a directory the dist has never shipped (CWK-120 row 16).
+  if (!drift.length) ok(`plugin/ matches source (${DIST_ITEMS.map((i) => i.split(path.sep).join('/')).join(' + ')}); nothing else leaked`);
   else for (const d of drift) fail(d);
 } catch (e) { fail(`plugin/ dist check: ${e.message}`); }
 

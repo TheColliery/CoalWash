@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig, clampedRead } from './config-schema.mjs';
+import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig, clampedRead, resolveRetierCfg, envelopeFor, envelopeForConfig } from './config-schema.mjs';
 
 test('every schema key carries a valid default (the clamp target)', () => {
   for (const spec of CONFIG_SCHEMA) {
@@ -175,4 +175,53 @@ test('0m: forceMode is RETIRED — not in the schema (force has no off switch), 
   assert.deepStrictEqual(validateConfig({ noSuchKey: 1 }), ["'noSuchKey' not in schema"]);
   // ...and no consumer can ever read it (no spec -> undefined).
   assert.strictEqual(clampedRead({ forceMode: 'off' }, 'forceMode'), undefined, 'a retired key has no clamped value — dead to all consumers');
+});
+
+// CWK-120 row 11 (CodeRabbit, adjudicated): the bot said the CLI should read `retier` through the clamped cascade. It is right
+// that an in-range DECIMAL slipped through (`resolveRetierCfg` only checked `Number.isFinite`, the schema says `int`), and wrong
+// about the place: the conductor (envelopeForConfig), the CLI gauge and runRetier all read the RAW config through this ONE
+// resolver, so a patch at cli.mjs alone would make the CLI disagree with the hook. The fix is at the resolver. A DIFFERENTIAL
+// against the schema's own clamp keeps the two implementations honest, non-circularly: same sweep, both sides, must agree.
+test('CWK-120 row 11: resolveRetierCfg agrees with clampedRead(cfg, "retier") on every value, decimals included', () => {
+  const values = [4125.5, 20.5, 10.5, 4125, 499, 500, 6250, 6251, 5, 50, 51, '4125', null, NaN, Infinity, -1, 0, 1e9, 0.5, true, [], {}, undefined];
+  const fields = ['targetTokens', 'armPct', 'disarmPct', 'headroomPct'];
+  for (const field of fields) {
+    for (const v of values) {
+      const raw = { [field]: v };
+      assert.deepStrictEqual(resolveRetierCfg(raw), clampedRead({ retier: raw }, 'retier'), `retier.${field} = ${JSON.stringify(v)}`);
+    }
+  }
+});
+
+test('CWK-120 row 11: an in-range decimal falls back to the default, so the hook and the CLI build the SAME envelope', () => {
+  assert.strictEqual(resolveRetierCfg({ targetTokens: 4125.5 }).targetTokens, 4125);
+  assert.deepStrictEqual(envelopeFor({ targetTokens: 4125.5 }), envelopeFor({}), 'a decimal is not a value the schema accepts, so it is the default');
+  assert.deepStrictEqual(envelopeForConfig({ retier: { targetTokens: 4125.5 } }), envelopeFor(undefined));
+  assert.strictEqual(resolveRetierCfg({ targetTokens: 5000 }).targetTokens, 5000, 'a real integer in range is still honoured');
+});
+
+// CWK-137 D3: a key the merge reads from the GLOBAL layer only must SAY so where a user reads about it (configure --help), or a
+// project value that is silently ignored reads as a bug. Tied to the clamp's own table, so a new global-only key cannot ship
+// without its help naming the fact.
+test('every GLOBAL-only sub-key is named as such in its object key\'s help text', async () => {
+  const { GLOBAL_ONLY_OBJECT_KEYS } = await import('./config-load.mjs');
+  for (const [obj, subs] of Object.entries(GLOBAL_ONLY_OBJECT_KEYS)) {
+    const help = CONFIG_SCHEMA.find((s) => s.key === obj).help;
+    for (const sub of subs) {
+      const at = help.indexOf(`${sub} =`);
+      assert.ok(at >= 0, `${obj}.${sub} is not described in its help`);
+      assert.match(help.slice(at, at + 200), /GLOBAL config only/, `${obj}.${sub}'s help does not say it is read from the global config only`);
+    }
+  }
+});
+
+// CWK-137 F-5: the same instrument for the other help-honesty class. A key kept in the schema only so an old config degrades quietly is
+// read-tolerated with NO runtime effect; its help must say so, or `configure.mjs --help` sells it as a live tunable (the D5 ruling swept the
+// config comment, README and blueprint and missed this dist surface). The list is the keys the schema itself calls retired or dead.
+test('every read-tolerated key with no runtime effect says so in its help (configure --help must not sell a dead key as live)', () => {
+  for (const key of ['exercisePerBand', 'fullPercent', 'fatMultiple']) {
+    const help = CONFIG_SCHEMA.find((s) => s.key === key).help;
+    assert.match(help, /read-tolerated/, `${key}'s help does not say it is read-tolerated`);
+    assert.match(help, /no effect|ignored/, `${key}'s help does not say it has no effect`);
+  }
 });

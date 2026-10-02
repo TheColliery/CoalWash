@@ -134,7 +134,11 @@ export function estimateBill(opts) {
 // project) — same machine + same store => same fingerprint; any config
 // divergence (or a config edit between spawn and clone start) flips it.
 export function wizardContract({ projectRoot, home = os.homedir() } = {}) {
-  const root = fs.realpathSync(path.resolve(projectRoot));
+  // CWK-120 row 14: `.native`, the form the clone's own root comes in (findProjectRoot resolves through canonicalOrNull, which is
+  // realpathSync.native, node/runtime.md 4): the plain variant leaves a win32 8.3 short name UNEXPANDED, so a main-side root
+  // spelled that way derived a different projectRoot AND slug than the clone re-derives, and the handshake refused a legitimate
+  // clone.
+  const root = fs.realpathSync.native(path.resolve(projectRoot));
   const cfg = loadMergedConfig({ cwd: root, home });
   return {
     projectRoot: root,

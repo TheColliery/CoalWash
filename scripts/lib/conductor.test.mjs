@@ -174,6 +174,38 @@ test('manual mode: gauge silent (no stamp), but the self-update scheduler still 
 });
 
 // ---------------------------------------------------------------------------
+// UMB-133 hole (1): a `.coalwash.json` planted at a path this room's walk
+// never reads is REPORTED on SessionStart, not silently skipped. Hole (2)'s
+// migration notice is deliberately NOT tested here (deliberately not wired
+// to this channel at all — see cli.mjs's config-status tests instead).
+// ---------------------------------------------------------------------------
+
+test('UMB-133: a .coalwash.json planted under .agents (bare, not nested/coal) is IGNORED and REPORTED on SessionStart', () => {
+  const { home, proj } = sandbox(); // default sandbox already seeds a ROOT legacy .coalwash.json
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
+    fs.mkdirSync(path.join(proj, '.agents'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.agents', '.coalwash.json'), '{}\n', 'utf8');
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.ok(r.stdout.includes(`[CoalWash] IGNORED: ${path.join(proj, '.agents', '.coalwash.json')} is not a config path; canonical = .claude/coal/coalwash.json`),
+      `expected an IGNORED line naming the stray file; got: ${r.stdout}`);
+  } finally { clean(home, proj); }
+});
+
+test('UMB-133: the ordinary ROOT legacy shape (this file\'s own sandbox default) is NOT reported as ignored -- it is a real candidate', () => {
+  const { home, proj } = sandbox(); // sandbox() itself writes proj/.coalwash.json
+  try {
+    muteUpdate(home);
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.ok(!r.stdout.includes('IGNORED:'), `the supported root legacy shape must never be reported as ignored; got: ${r.stdout}`);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
 // SessionStart — band-collapse: SILENT for every band, only the cache changes.
 // ---------------------------------------------------------------------------
 
@@ -1947,3 +1979,210 @@ test('CWK-081 (3): the FULL(capacity) surface speaks at most ONCE per session �
     assert.ok(parseBlock(third.stdout).includes('FULL (externalize)'), 'a new session re-arms the reminder');
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// UMB-174 (b) + CWK-135 (a): a config that EXISTS where the walk reads but cannot be used is REPORTED on SessionStart
+// (the only sanctioned channel, Phoenix #13) in the flock's ONE string, and the walk's SELECTION is unchanged. Hermetic
+// spawn tests: the real hook, a sandboxed HOME, the line asserted VERBATIM -- an em dash and all -- and stdout asserted
+// EXACTLY, so an extra or a doubled line fails.
+// ---------------------------------------------------------------------------
+const UNREADABLE_DASH = '—';
+const PROJECT_CANON = '.claude/coal/coalwash.json';
+const unreadableLine = (p, reason, canonical) =>
+  `[CoalWash] UNREADABLE: ${p} exists but is not a readable config (${reason}); it was skipped ${UNREADABLE_DASH} canonical = ${canonical}`;
+const rootLegacyConfig = (proj) => path.join(proj, '.coalwash.json'); // the sandbox()'s own project config: the walk's winner
+const globalConfig = (home) => path.join(home, '.claude', '.coalwash.json');
+function quietProject(home, proj) { muteUpdate(home); seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 }); }
+
+// Deny a FILE's CONTENT while its PATH still resolves (chmod 000 on POSIX; an icacls (RD) deny on Windows, which
+// surfaces as EPERM). Local to this file on purpose: a helper imported across test files has two owners. Acceptance is
+// both halves -- the read must throw AND the path must still exist. Returns a restore function, or null.
+function makeUnreadableFile(target) {
+  const attempts = [
+    () => { const m = fs.statSync(target).mode; fs.chmodSync(target, 0o000); return () => { try { fs.chmodSync(target, m); } catch { /* best effort */ } }; },
+    () => {
+      const who = process.env.USERNAME || process.env.USER || '';
+      if (!who) return null;
+      spawnSync('icacls', [target, '/deny', who + ':(RD)'], { stdio: 'ignore' });
+      return () => { try { spawnSync('icacls', [target, '/remove:d', who], { stdio: 'ignore' }); } catch { /* best effort */ } };
+    },
+  ];
+  for (const attempt of attempts) {
+    let restore = null;
+    try { restore = attempt(); } catch { restore = null; }
+    if (!restore) continue;
+    let threw = false;
+    try { fs.readFileSync(target, 'utf8'); } catch { threw = true; }
+    if (threw && fs.existsSync(target)) return restore;
+    restore();
+  }
+  return null;
+}
+
+const UNREADABLE_SHAPES = [
+  ['malformed JSON', 'malformed JSON', (p) => fs.writeFileSync(p, '{ this is not json')],
+  ['an EMPTY file (not JSON)', 'malformed JSON', (p) => fs.writeFileSync(p, '')],
+  ['a DIRECTORY', 'a directory', (p) => { fs.rmSync(p, { force: true }); fs.mkdirSync(p); }],
+  ['a JSON array', 'not a JSON object', (p) => fs.writeFileSync(p, '[]')],
+  ['a JSON string', 'not a JSON object', (p) => fs.writeFileSync(p, '"x"')],
+  ['a JSON number', 'not a JSON object', (p) => fs.writeFileSync(p, '42')],
+  ['JSON null (FALSY)', 'not a JSON object', (p) => fs.writeFileSync(p, 'null')],
+  ['JSON 0 (FALSY)', 'not a JSON object', (p) => fs.writeFileSync(p, '0')],
+  ['JSON false (FALSY)', 'not a JSON object', (p) => fs.writeFileSync(p, 'false')],
+  ['an empty JSON string (FALSY)', 'not a JSON object', (p) => fs.writeFileSync(p, '""')],
+  ['a config over the 1 MiB read bound (the room\'s own CWK-137 refusal)', 'unreadable', (p) => fs.writeFileSync(p, Buffer.alloc(1024 * 1024 + 1, 0x20))],
+];
+for (const [what, reason, plant] of UNREADABLE_SHAPES) {
+  test(`UMB-174 (b): ${what} at the PROJECT config path is REPORTED as (${reason}) in the flock string, verbatim canonical`, () => {
+    const { home, proj } = sandbox();
+    try {
+      quietProject(home, proj);
+      plant(rootLegacyConfig(proj));
+      const r = run(proj, home, { hook_event_name: 'SessionStart' });
+      assertGraceful(r);
+      assert.strictEqual(r.stdout, unreadableLine(rootLegacyConfig(proj), reason, PROJECT_CANON) + '\n', `got: ${JSON.stringify(r.stdout)}`);
+    } finally { clean(home, proj); }
+  });
+}
+
+test('UMB-174 (b): a config the OS DENIES (EACCES on POSIX, EPERM from a Windows ACL) is REPORTED as (unreadable)', (t) => {
+  const { home, proj } = sandbox();
+  let restore = null;
+  try {
+    quietProject(home, proj);
+    restore = makeUnreadableFile(rootLegacyConfig(proj));
+    if (!restore) return t.skip('cannot deny a read on this host/user (running as root, or no ACL rights): the EACCES and EPERM mappings are pinned by the injected-error leg in config-load.test.mjs');
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, unreadableLine(rootLegacyConfig(proj), 'unreadable', PROJECT_CANON) + '\n', `got: ${JSON.stringify(r.stdout)}`);
+  } finally { if (restore) restore(); clean(home, proj); }
+});
+
+test('CWK-135 (a): an unreadable GLOBAL config names ITS OWN path (in the path slot AND after canonical =), and is reported even though the skill fails safe to OFF', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
+    fs.mkdirSync(path.dirname(globalConfig(home)), { recursive: true });
+    fs.writeFileSync(globalConfig(home), '{ this is not json');
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, unreadableLine(globalConfig(home), 'malformed JSON', globalConfig(home)) + '\n',
+      `the global tier must say where ITS config lives, not point at a project path; got: ${JSON.stringify(r.stdout)}`);
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174 (b): BOTH tiers unreadable -> the fail-safe OFF prints the GLOBAL line only (the project config is beneath an off it cannot lift)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
+    fs.mkdirSync(path.dirname(globalConfig(home)), { recursive: true });
+    fs.writeFileSync(globalConfig(home), '[]');
+    fs.writeFileSync(rootLegacyConfig(proj), '{ this is not json');
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, unreadableLine(globalConfig(home), 'not a JSON object', globalConfig(home)) + '\n');
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174 (b): a READABLE global off stays FULLY silent, an unreadable project config beneath it included (the user switched the skill off)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 });
+    writeGlobalCfg(home, { coalwashMode: 'off' });
+    fs.writeFileSync(rootLegacyConfig(proj), '{ this is not json');
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.strictEqual(r.stdout, '');
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174 (b): the walk\'s SELECTION is unchanged -- an unreadable canonical config still wins over a valid legacy one, which is NOT honoured', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 }); // the update check is NOT muted: it is the probe
+    const canon = path.join(proj, '.claude', 'coal', 'coalwash.json');
+    fs.mkdirSync(path.dirname(canon), { recursive: true });
+    fs.writeFileSync(canon, '{ this is not json');
+    fs.writeFileSync(rootLegacyConfig(proj), JSON.stringify({ updateMode: 'off' })); // honoured only if the walk reached it
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.ok(r.stdout.includes(unreadableLine(canon, 'malformed JSON', PROJECT_CANON)), `the canonical file is the one named; got: ${r.stdout}`);
+    assert.ok(r.stdout.includes('[self-update due]'), 'the legacy updateMode:off was NOT read: the self-update check is still due');
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174: a UTF-8 BOM before a valid object PARSES -- the manual mode it holds is honoured and nothing is reported', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedClassB(home, proj, { claudeMdBytes: 60000 }); // would gauge (OBESE/FULL) in auto; manual keeps the gauge silent
+    fs.mkdirSync(path.dirname(globalConfig(home)), { recursive: true });
+    fs.writeFileSync(globalConfig(home), String.fromCharCode(0xfeff) + JSON.stringify({ coalwashMode: 'manual' }));
+    const r = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(r);
+    assert.ok(!r.stdout.includes('UNREADABLE'), `a BOM-prefixed valid config must not be reported; got: ${r.stdout}`);
+    assert.ok(r.stdout.includes('[self-update due]'), 'manual mode WAS read (an unreadable global would have failed safe to off and printed nothing of the kind)');
+    assert.strictEqual(fs.existsSync(projStatePath(home, proj)), false, 'manual mode: no gauge stamp');
+  } finally { clean(home, proj); }
+});
+
+// CWK-137 F-11: an absence proves nothing about a hook that never ran (a dead hook is as silent as a healthy one), so each
+// silence below is PAIRED with a liveness signal the same run must carry. The first case leaves the self-update check live
+// (a fresh sandbox home makes it due on the first boot) and asserts its directive, as the BOM test above does; each scenario
+// gets its own fresh home, because the first boot is the only one that is due. The second case seeds an unconsumed OBESE
+// crossing, so the Stop hook has a real block to emit, and adds a SessionStart control over the SAME broken config.
+test('UMB-174 (b): a healthy config and an absent one stay SILENT -- the report is for the exception, never a nag', () => {
+  for (const [what, arrange] of [['a healthy config', () => {}], ['an absent config', (proj) => fs.rmSync(rootLegacyConfig(proj))]]) {
+    const { home, proj } = sandbox(); // the sandbox() project config is a healthy {}
+    try {
+      seedClassB(home, proj, { claudeMdBytes: 200, indexBytes: 100 }); // NOT muted: the update directive is the liveness signal
+      arrange(proj);
+      const r = run(proj, home, { hook_event_name: 'SessionStart' });
+      assertGraceful(r);
+      assert.ok(r.stdout.includes('[self-update due]'), `${what}: liveness -- the hook ran through to its context injection; got: ${JSON.stringify(r.stdout)}`);
+      assert.ok(!r.stdout.includes('UNREADABLE'), `${what}: nothing to report, so nothing reported; got: ${r.stdout}`);
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, `${what}: the update directive is the ONLY line; got: ${r.stdout}`);
+    } finally { clean(home, proj); }
+  }
+});
+
+test('UMB-174 (b): the report rides SessionStart ONLY -- a Stop event over an unreadable project config prints nothing of it (Phoenix #13)', () => {
+  const { home, proj } = sandbox();
+  try {
+    quietProject(home, proj);
+    seedState(home, proj, {
+      lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false },
+      lastVerdict: { band: 'OBESE', reason: 'bmi', economical: false, fatTokens: 1234, at: Date.now() },
+    });
+    fs.writeFileSync(rootLegacyConfig(proj), '{ this is not json');
+    const r = run(proj, home, { hook_event_name: 'Stop' });
+    assertGraceful(r);
+    const reason = parseBlock(r.stdout);
+    assert.ok(reason.includes('memory crossed the OBESE ceiling'), `liveness -- the Stop hook ran through the broken config to its real block; got: ${reason}`);
+    assert.ok(!r.stdout.includes('UNREADABLE'), `no other channel carries the line; got: ${r.stdout}`);
+    const s = run(proj, home, { hook_event_name: 'SessionStart' });
+    assertGraceful(s);
+    assert.ok(s.stdout.includes('UNREADABLE'), `control -- the SAME fixture IS reported on SessionStart, so the Stop silence is not a config that never read as broken; got: ${s.stdout}`);
+  } finally { clean(home, proj); }
+});
+
+// CWK-120 row 7: `Number.isFinite(Number(proj.fullCleanAt))` read null, '' and false as 0 -- a finite number -- so an episode that
+// had NO Full clean spoke the pure FULL(externalize) ADVISORY instead of offering the Full-tier CONSENT. A Full clean is a
+// positive timestamp, judged on the value itself. Same fixture as the round-trip test above, which keeps its eligible side.
+for (const [what, value] of [['null', null], ['an empty string', ''], ['false', false], ['0', 0], ['a negative number', -5], ['a string', 'x']]) {
+  test(`CWK-120 row 7: fullCleanAt ${what} is NOT a Full clean -- the FULL(externalize) crossing offers the Full-tier consent, never the advisory`, () => {
+    const { home, proj } = sandbox();
+    try {
+      muteUpdate(home);
+      seedClassB(home, proj, { claudeMdBytes: 2400800, indexBytes: 0 });
+      seedState(home, proj, { leanFloorTokens: 600000, fullCleanAt: value });
+      const rs = run(proj, home, { hook_event_name: 'SessionStart' });
+      assertGraceful(rs);
+      assert.strictEqual(readProjState(home, proj).lastVerdict.reason, 'externalize', 'the fixture is the externalize-FULL crossing');
+      const rp = run(proj, home, { hook_event_name: 'Stop' });
+      assertGraceful(rp);
+      const reason = parseBlock(rp.stdout);
+      assert.ok(!reason.includes('FULL (externalize)'), `an episode with no Full clean must not speak the advisory: ${reason}`);
+      assert.ok(reason.includes('question tool'), `it offers the Full-tier consent instead: ${reason}`);
+    } finally { clean(home, proj); }
+  });
+}

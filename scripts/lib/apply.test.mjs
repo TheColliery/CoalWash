@@ -1874,22 +1874,25 @@ test('every production recordBinItem call passes the run\'s shared `now` — the
 test('#57 lock: an exclusive-create "win" whose re-read shows a FOREIGN token (a broken-O_EXCL lost race — the SVN BDB-on-NFS shape) DEFERS instead of proceeding', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-lock-'));
   const lockPath = path.join(dir, '.coalwash.lock');
-  const origRead = fs.readFileSync;
+  const origWrite = fs.writeSync;
   // Simulate: our 'wx' create + write "succeeded", but the bytes on disk at
   // verify time belong to ANOTHER writer (what a non-local mount can do).
-  fs.readFileSync = function (p, ...rest) {
-    if (String(p) === lockPath) {
-      fs.readFileSync = origRead;
-      return JSON.stringify({ token: 'foreign-token' });
+  // CWK-137: the re-read is now the bounded open/fstat/readSync reader, not
+  // readFileSync, so the simulation moved to the one place both readers agree on --
+  // the bytes ON DISK: our lock write lands a foreign token instead of ours.
+  fs.writeSync = function (fd, data, ...rest) {
+    if (typeof data === 'string' && data.includes('"token"')) {
+      fs.writeSync = origWrite;
+      return origWrite.call(fs, fd, JSON.stringify({ token: 'foreign-token' }), ...rest);
     }
-    return origRead.call(fs, p, ...rest);
+    return origWrite.call(fs, fd, data, ...rest);
   };
   try {
     const a = acquireLock(lockPath, { sessionId: 'a' });
     assert.strictEqual(a.acquired, false, 'a foreign token on re-read = the win was an illusion');
     assert.match(a.reason, /lost a race/);
   } finally {
-    fs.readFileSync = origRead;
+    fs.writeSync = origWrite;
     clean(dir);
   }
 });
@@ -3674,4 +3677,63 @@ test('CWK-081 A4 / trust anchor: applyPlan never READS plan.projectRoot — a fo
   const c = inputCensus(src, 'applyPlan');
   assert.ok(!c.plan.includes('projectRoot'),
     'the root is derived from opts.projectRoot || findProjectRoot(...) — if plan.projectRoot is being read, the trust anchor is gone');
+});
+
+// CWK-137: the DERIVED tx dir is `<project>/.claude/coalwash`, inside the repo. A cloned repo can commit
+// `.claude/coalwash` as a link out of the project; applyPlan and recoverDangling must REFUSE it (loudly),
+// and nothing may land in, or be deleted from, the link's target. One test per site: they are two call
+// sites of one primitive, and a mutant that reverts only one must not survive.
+function linkSandboxOut(proj, outside) {
+  fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+  try { fs.symlinkSync(outside, path.join(proj, '.claude', 'coalwash'), process.platform === 'win32' ? 'junction' : 'dir'); return true; } catch { return false; }
+}
+
+test('CWK-137: applyPlan refuses a project whose .claude/coalwash is a link out of it -- nothing lands in the target', (t) => {
+  const { proj, store } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-linkout-')));
+  try {
+    if (!linkSandboxOut(proj, outside)) { t.skip('this volume cannot make a directory link'); return; }
+    fs.writeFileSync(path.join(outside, 'victim.txt'), 'KEEP');
+    const f1 = path.join(store, 'f1.md');
+    write(f1, 'original one');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'rewritten one' }]));
+    assert.strictEqual(r.ok, false, 'a linked sandbox directory is a loud refusal, not a silent apply');
+    assert.match(String(r.error), /link/i, 'the refusal names the link');
+    assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'original one', 'the memory file is untouched');
+    assert.deepStrictEqual(fs.readdirSync(outside), ['victim.txt'], 'nothing was written into the link target, and nothing was removed from it');
+  } finally { clean(proj, outside); }
+});
+
+test('CWK-137: recoverDangling refuses a project whose .claude/coalwash is a link out of it -- the target is not read or replayed', (t) => {
+  const { proj } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-linkout-')));
+  try {
+    if (!linkSandboxOut(proj, outside)) { t.skip('this volume cannot make a directory link'); return; }
+    // a journal the attacker planted in the link target: a replay through the link would act on it
+    fs.writeFileSync(path.join(outside, 'journal.json'), JSON.stringify({ version: 1, status: 'applying', snapDir: outside, roots: [], steps: [] }));
+    const r = recoverDangling(proj);
+    assert.strictEqual(r.recovered, 'none');
+    assert.match(String(r.error), /link/i, 'the refusal names the link, it does not read as "no journal"');
+    assert.strictEqual(fs.existsSync(path.join(outside, 'journal.json')), true, 'the planted journal is neither replayed nor removed');
+  } finally { clean(proj, outside); }
+});
+
+// CWK-137 F-9: the tx dir sits inside the repo, so a cloned repo can commit an ENTRY of it (`snap-1`) as a link out of
+// the project. sweepSnapshots removes old snapshot dirs with a recursive rm; the entry must go as a LINK (the target's
+// files stay), never be followed. The sweep must have visited the entry (it is gone) or "nothing was damaged" is vacuous.
+test('CWK-137 F-9: sweepSnapshots removes a committed link entry as a link -- the link target keeps its files', (t) => {
+  const { proj } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-swlink-')));
+  try {
+    const txDir = txDirFor(proj);
+    fs.mkdirSync(txDir, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'keep.txt'), 'KEEP');
+    try { fs.symlinkSync(outside, path.join(txDir, 'snap-1'), process.platform === 'win32' ? 'junction' : 'dir'); } catch { t.skip('this volume cannot make a directory link'); return; }
+    for (const n of ['snap-2', 'snap-3']) { fs.mkdirSync(path.join(txDir, n)); fs.writeFileSync(path.join(txDir, n, 'f0'), n); }
+    sweepSnapshots(txDir, 1);
+    assert.strictEqual(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'KEEP', 'the link target keeps its file: the sweep did not follow the link');
+    assert.throws(() => fs.lstatSync(path.join(txDir, 'snap-1')), { code: 'ENOENT' }, 'the sweep did visit the link entry and removed the link itself');
+    assert.throws(() => fs.lstatSync(path.join(txDir, 'snap-2')), { code: 'ENOENT' }, 'the other old snapshot went too');
+    assert.ok(fs.existsSync(path.join(txDir, 'snap-3')), 'the newest snapshot is kept');
+  } finally { clean(proj, outside); }
 });

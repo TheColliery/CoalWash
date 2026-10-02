@@ -50,7 +50,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
-import { txDirFor, ensureSelfIgnore, acquireLock } from './apply.mjs';
+import { ensureSelfIgnore, acquireLock } from './apply.mjs';
+import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
+import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
 
 export const FAT_BIN_NAME = 'fat-bin';
@@ -85,14 +87,17 @@ const BIN_LOCK_NAME = '.bin.lock'; // per-bin (not per-tx) exclusive lock — se
 const BIN_LOCK_STALE_MS = 5000;
 // Perf-regression counter for tests only (the apply.mjs / fidelity-gate.mjs
 // `__testHooks` precedent, GATE COST ruling 2026-08-04: a count, not a clock).
-// `binLockAttempts` counts every acquireLock call recordBinItem makes, so a
+// `binLockAttempts` counts every acquireLock call recordBinItem or the sweep makes, so a
 // test can assert an orphan was reclaimed on the FIRST attempt instead of
 // timing the call against the retry budget. One increment per attempt; read
 // by nothing outside a test.
 export const __testHooks = { binLockAttempts: 0 };
 
+// CWK-137: a bin is `<project>/.claude/coalwash/<name>` -- repo-plantable. ownSandboxDir
+// THROWS when any directory between the project root and the bin is a link, and
+// every caller below catches it the way it already caught an I/O failure.
 function binDir(projectRoot, name) {
-  return path.join(txDirFor(projectRoot), name);
+  return ownSandboxDir(projectRoot, '.claude', 'coalwash', name);
 }
 
 // Bare-filename allowlist (F1 — the umbrella path-traversal lesson: allowlist
@@ -117,7 +122,7 @@ export function isBareId(id) {
 
 function loadIndex(dir) {
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(dir, INDEX_NAME), 'utf8'));
+    const parsed = JSON.parse(readRepoFileBounded(path.join(dir, INDEX_NAME), null, MAX_DOC_BYTES)); // CWK-137: bounded
     return Array.isArray(parsed) ? parsed.filter((i) => i && isBareId(i.id)) : [];
   } catch {
     return [];
@@ -226,17 +231,28 @@ function sleepMs(ms) {
     while (process.hrtime.bigint() < untilNs) { /* bounded busy-wait — no sync sleep primitive available */ }
   }
 }
+// The ONE way either writer of a bin's index.json takes its lock (CWK-120 rows 4 + 18): the same file, the same
+// staleMs, the same bounded jittered retry for recordBinItem and for the sweep, so the two can never disagree about
+// what "held" means. `acquireLock` judges staleness as `now - lockFile.mtimeMs > staleMs`, so `now` here is ALWAYS a live
+// clock reading, never an item's birth timestamp: callers legitimately backdate `now` (the tests bank items days in the
+// past), and a backdated value made every orphaned lock look fresh forever, burning the whole retry budget (row 18).
+function acquireBinLock(dir) {
+  let lock;
+  for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
+    if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
+    lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now: Date.now(), staleMs: BIN_LOCK_STALE_MS });
+    __testHooks.binLockAttempts++;
+  }
+  return lock;
+}
 export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now() } = {}) {
-  const dir = binDir(projectRoot, name);
+  let dir;
   let lock;
   try {
+    dir = binDir(projectRoot, name); // CWK-137: may throw on a planted link -> null, like any failure
     fs.mkdirSync(dir, { recursive: true });
     ensureSelfIgnore(dir);
-    for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
-      if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
-      lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now, staleMs: BIN_LOCK_STALE_MS });
-      __testHooks.binLockAttempts++;
-    }
+    lock = acquireBinLock(dir);
     if (!lock.acquired) return null;
     // U7 (7th site — found by apply.test.mjs's own FINAL-path guard, not by the
     // board enumeration): this id doubles as a WRITE PATH, so its unpredictability
@@ -264,7 +280,7 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
 // The PULL-ONLY discovery surface: every item currently in the bin (id/at/
 // original/origin). Never called automatically by anything in this codebase.
 export function listBin(projectRoot, name) {
-  return loadIndex(binDir(projectRoot, name));
+  try { return loadIndex(binDir(projectRoot, name)); } catch { return []; } // CWK-137: a refused bin lists nothing
 }
 
 // The deliberate walk-in restore door — read one item's BYTES by id. Returns a
@@ -281,9 +297,18 @@ export function listBin(projectRoot, name) {
 // picks the wrong one. A caller that wants text decodes at its own call site
 // and thereby declares that choice (anchor-diff does; the CLI pipes bytes).
 export function restoreFromBin(projectRoot, name, id) {
-  if (!isBareId(id)) return null;
-  try { return fs.readFileSync(path.join(binDir(projectRoot, name), id)); }
-  catch { return null; }
+  return binItemOutcome(projectRoot, name, id).buf || null;
+}
+
+// The same door WITH its reason (CWK-137): { buf } or { why }, where `why` is
+// `absent` (no such item -- the ordinary miss), `over-bound` (the item is THERE but
+// larger than MAX_DOC_BYTES, so it was refused, never truncated), or another refusal
+// from repoReadOutcome. A caller that REPORTS to a human (the CLI restore) uses this so
+// a real item is never told it does not exist.
+export function binItemOutcome(projectRoot, name, id) {
+  if (!isBareId(id)) return { why: 'absent' };
+  try { return repoReadOutcome(path.join(binDir(projectRoot, name), id), null, MAX_DOC_BYTES); }
+  catch { return { why: 'unreadable' }; } // binDir refused a linked sandbox dir
 }
 
 // Apply retention.mjs's pure policy to one bin: partition (keep/destroy),
@@ -293,8 +318,37 @@ export function restoreFromBin(projectRoot, name, id) {
 // that cannot be verified gone is NOT reported destroyed and stays in the
 // index (never a false "destroyed" — the broom asymmetry: leftover dust
 // waits for the next pass, that is the safe direction).
+// CWK-137: append to a log we own, never THROUGH a link a cloned repo planted at its
+// name (appendFileSync follows one: the certificate line landed in the link's target,
+// e.g. ~/.bashrc, carrying index.json's attacker-chosen `original`). The entry must be
+// a plain single-link regular file, and the handle must BE that entry: openPlainFile
+// opens first and then checks the path and the handle together (CodeQL #43/#44's shape,
+// fire 10: an lstat before the open left a window for a name swapped in between).
+function appendOwnLog(file, text) {
+  const o = openPlainFile(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  if (o.fd === undefined) throw new Error(`${file} is not a plain file, or changed under the append (${o.why})`);
+  try { fs.writeSync(o.fd, text); } finally { fs.closeSync(o.fd); }
+}
+
+// CWK-120 row 4: the sweep is the SECOND writer of index.json, a read-modify-write (`loadIndex` ... `saveIndex(survivors)`)
+// exactly like recordBinItem's, so it takes the SAME bin lock. Without it a concurrent recordBinItem could commit its row
+// between the sweep's load and its save. The concurrent recorder is `recoverDangling` (run by the CLI gauge, cli.mjs), which
+// records into the fat bin and takes NO transaction lock at all, so it can run in another session while a wash sweeps the
+// same bin under the project tx lock; the estate archive is NOT a writer here (it only READS the death log), and two
+// applyPlan runs already serialize on the tx lock. Without the bin lock the sweep then wrote `survivors`, which never held
+// that row, leaving its blob on disk with no index entry -- the undercount this module's header forbids. A bin with nothing in it
+// is peeked WITHOUT the lock and never touched (taking the lock creates the directory: an absent bin must stay absent).
+// A lock that stays held past the retry budget means the sweep waits for the next run (fail-silent housekeeping): nothing
+// is destroyed and the items are all still there.
 function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
-  const index = loadIndex(dir);
+  const peek = loadIndex(dir);
+  if (!peek.length) return { destroyed: 0, kept: 0 };
+  const lock = acquireBinLock(dir);
+  if (!lock.acquired) return { destroyed: 0, kept: peek.length };
+  try { return sweepBinLocked(dir, horizonMs, now, budgetBytes); } finally { lock.release(); }
+}
+function sweepBinLocked(dir, horizonMs, now, budgetBytes) {
+  const index = loadIndex(dir); // re-read INSIDE the lock: the peek above may be stale by now
   if (!index.length) return { destroyed: 0, kept: 0 };
   // Legacy index entries (pre-0i) carry no bytes — weigh them by a one-time
   // stat so they participate in the size cap instead of escaping it forever;
@@ -321,7 +375,11 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
       // survive the index entry's deletion.
       const rule = reasons.get(item) || 'horizon';
       const orig = (typeof item.original === 'string' && item.original) ? item.original : '-';
-      cert.push(`${new Date(now).toISOString()} destroyed ${item.id} (age ${ageDays}d, rule ${rule}) original ${orig}`);
+      // CWK-137 / CWE-117: `id` and `original` come out of index.json, which a cloned
+      // repo can plant, so CR and LF are neutralized before they reach a line-oriented
+      // log -- one certificate is one line, never a forged second one.
+      const oneLine = (v) => String(v).replace(/[\r\n]/g, ' ');
+      cert.push(`${new Date(now).toISOString()} destroyed ${oneLine(item.id)} (age ${ageDays}d, rule ${rule}) original ${oneLine(orig)}`);
     } else {
       survivors.push(item); // unverifiable death -> never claimed, kept for the next pass
     }
@@ -335,7 +393,7 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
     cert.push(`${new Date(now).toISOString()} cap-conflict kept ${capConflict.keptBytes}B > budget ${capConflict.budgetBytes}B — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor (+ newest/doubt protections) exceeds the cap; bin over budget this run, nothing young destroyed`);
   }
   if (cert.length) {
-    try { fs.mkdirSync(dir, { recursive: true }); fs.appendFileSync(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n', 'utf8'); } catch { /* the certificate is a record, not a gate */ }
+    try { fs.mkdirSync(dir, { recursive: true }); appendOwnLog(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n'); } catch { /* the certificate is a record, not a gate */ }
   }
   saveIndex(dir, survivors);
   // capConflict only present when live: existing callers/tests deepStrictEqual
@@ -375,7 +433,7 @@ export function sweepStoreOld(projectRoot, { now = Date.now(), storeBytes } = {}
 // never pushed/narrated, per the headroom-quiet doctrine). Returns '' on a
 // missing/unreadable log, never throws.
 export function readDeathLog(projectRoot, name) {
-  try { return fs.readFileSync(path.join(binDir(projectRoot, name), DEATH_LOG_NAME), 'utf8'); }
+  try { return readRepoFileBounded(path.join(binDir(projectRoot, name), DEATH_LOG_NAME), null, MAX_DOC_BYTES, true) ?? ''; } // CWK-137: bounded (a prefix is enough -- callers ask 'is there one')
   catch { return ''; }
 }
 

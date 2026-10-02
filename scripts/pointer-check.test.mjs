@@ -5,6 +5,7 @@ import { pointerCandidates, checkPointers, looksPathShaped, deriveIgnoredRoots, 
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { gitEnv } from './git-env.mjs';
 
 // FIXTURES ARE INPUT, NOT CLAIMS. Every backticked path below is DATA this test feeds
 // the gate, never a statement this repo makes about its own tree. They keep their
@@ -303,35 +304,19 @@ test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never
 // that expects 2 ignored roots read 0. A test that can reconfigure the
 // developer's own repo is not a hermetic test, whatever it asserts.
 // Scrubbed rather than overridden: an inherited value we do not know about is
-// exactly the class that produced this, so the list is DELETED, never re-set.
-// A DENY-LIST, against this room's own allowlist-over-denylist rule, and the
-// departure is stated rather than silent: git needs a real environment to run at
-// all on Windows (PATH, SystemRoot, USERPROFILE, TEMP, ...), so an allowlist here
-// would enumerate the OS rather than git and would break the moment a platform
-// wanted one more. So: scrub every git variable that can REDIRECT which
-// repository, object store, ref namespace or config a call resolves — the whole
-// set with that power — and NAME THE RESIDUE instead of implying completeness.
-// RESIDUE: a git environment variable outside this list that redirects
-// resolution. The list covers everything git exports to a hook (GIT_DIR,
-// GIT_INDEX_FILE, GIT_PREFIX) plus every documented redirect of the gitdir,
-// worktree, config, object store, ref namespace and discovery walk; a variable
-// that only changes formatting, paging or authorship cannot move which repo is
-// read and is deliberately left alone.
-const GIT_ENV_KEYS = [
-  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX',
-  'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
-  'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
-  'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
-];
-function hermeticGitEnv() {
-  const env = { ...process.env };
-  for (const k of GIT_ENV_KEYS) delete env[k];
-  return env;
-}
+// exactly the class that produced this, so the family is DELETED, never re-set.
+// CWK-133 CLOSED THE DENY-LIST'S OWN RESIDUE: this file used to carry a hand-listed set of
+// fourteen names and NAMED the residue ("a git variable outside this list that redirects
+// resolution"). A list is exactly what rots, so the scrub is now scripts/git-env.mjs's
+// `gitEnv`: every GIT_-prefixed key out, whatever git adds under that prefix next, and the
+// fixture's own parent as the ceiling. The variables it now also drops (authorship,
+// paging, formatting) cannot matter to the two calls below, which only `init` and
+// `check-ignore`; none of them commits.
+const hermeticGitEnv = (dir) => gitEnv(path.dirname(dir));
 
 function gitFixture(gitignoreText) {
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-079-')));
-  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8', env: hermeticGitEnv() });
+  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8', env: hermeticGitEnv(dir) });
   if (r.error || r.status !== 0) {
     // INSPECT F3 — the dir exists BEFORE git is probed, and on this path the caller gets
     // null, so its own finally{} holds no handle to remove. Leaving it re-opens board
@@ -347,7 +332,7 @@ const runner = (dir) => (names) => {
   // Same scrub as gitFixture above, same reason: an inherited GIT_DIR makes this
   // answer for the caller's repository rather than the fixture's.
   const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-    { cwd: dir, encoding: 'utf8', env: hermeticGitEnv(), input: names.map((n) => n + "/").join('\n') + '\n' });
+    { cwd: dir, encoding: 'utf8', env: hermeticGitEnv(dir), input: names.map((n) => n + "/").join('\n') + '\n' });
   return ci.error ? '' : ci.stdout;
 };
 

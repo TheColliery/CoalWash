@@ -228,16 +228,28 @@ function updateDue(cfg, clampedRead, caliper) {
 }
 
 async function handleSessionStart(input) {
-  const [{ loadMergedConfig, findProjectRoot }, { clampedRead, envelopeForConfig }, classB, caliper] = await Promise.all([
+  const [{ loadMergedConfigReport, unreadableNotice, findProjectRoot, discoverIgnoredConfigs }, { clampedRead, envelopeForConfig }, classB, caliper] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
     import(lib('class-b.mjs')),
     import(lib('caliper.mjs')),
   ]);
 
-  const cfg = loadMergedConfig();
+  const { cfg, unreadable } = loadMergedConfigReport();
+  // UMB-174 (b) + CWK-135 (a): a config that EXISTS where the walk reads but could not be used is REPORTED, once,
+  // on this sanctioned channel (Phoenix #13) -- the walk's SELECTION is unchanged, only the silence goes. ONE flock
+  // string, built by the lib (the global tier names its own path). Only the two paths the merge already read.
+  const notices = unreadable.map((u) => `[CoalWash] ${unreadableNotice(u)}`);
   const mode = clampedRead(cfg, 'coalwashMode');
-  if (mode === 'off') return; // fully silent
+  if (mode === 'off') {
+    // 'off' from an UNREADABLE GLOBAL config is the fail-safe reading of an unknown stance (config-load's W2-3),
+    // never the user's own off: staying fully silent then would hide the very reason the skill went quiet. A
+    // readable `off` stays fully silent, and so does an unreadable PROJECT config beneath it (nothing to report to
+    // someone who switched the skill off).
+    const failSafe = unreadable.filter((u) => u.tier === 'global').map((u) => `[CoalWash] ${unreadableNotice(u)}`);
+    if (failSafe.length) console.log(failSafe.join('\n')); // sanctioned SessionStart context-injection channel (Phoenix #13)
+    return;
+  }
   const language = clampedRead(cfg, 'language');
   // task #4: fullPercent/fatMultiple are no longer read — both walls they fed
   // are retired (read-tolerated in config, ignored). The reorg break-even
@@ -250,6 +262,27 @@ async function handleSessionStart(input) {
   const home = os.homedir();
   const projectRoot = findProjectRoot(process.cwd(), home);
   const out = [];
+  for (const n of notices) out.push(n);
+
+  // UMB-133 hole (1) ONLY, fail-silent by construction (a pure read over the
+  // walk this hook already pays for once per SessionStart; throwing is a
+  // no-op here, same as every other advisory line below). Hole (2)'s
+  // migration notice is DELIBERATELY NOT wired here -- see cli.mjs's
+  // `config-status` subcommand for why: this room's own hermetic conductor
+  // tests default every sandbox project to the ROOT LEGACY shape, and a real
+  // install commonly does too, so an unconditional per-SessionStart notice
+  // for it is a nag on the ordinary case, not a rare stray file. Hole (1) has
+  // no such collision -- planting a bare dotfile under .agents/.gemini is
+  // genuinely rare, so it stays on this sanctioned channel.
+  // The resolved root goes IN rather than being derived a third time: this hook
+  // already holds `projectRoot` from the line above, and the probe would
+  // otherwise walk the marker chain twice more per SessionStart (UMB-133
+  // INSPECT F2 -- measured 30 existsSync before, 0 after).
+  try {
+    for (const p of discoverIgnoredConfigs(process.cwd(), home, projectRoot)) {
+      out.push(`[CoalWash] IGNORED: ${p} is not a config path; canonical = .claude/coal/coalwash.json`);
+    }
+  } catch { /* fail-silent, per hooks-safety.md Phoenix #4 */ }
 
   // rc.2 SCHEMA MIGRATION + task #13 LOCATION MIGRATION are both LAZY now (in
   // caliper.loadState/saveState): the first gauge read below returns the
@@ -552,7 +585,9 @@ async function handleStop(input) {
     // The flag is per-TRANSACTION, not per-store (round-2 F1), so it gates only
     // WHICH text speaks; the advisory itself disclaims what the pass did not
     // touch rather than this branch pretending to know the coverage.
-    const fullCleaned = Number.isFinite(Number(proj.fullCleanAt));
+    // CWK-120 row 7: a Full clean is a POSITIVE TIMESTAMP, judged on the value itself. `Number(x)` first read `null`,
+    // `''` and `false` as 0, a finite number, so a corrupt or hand-edited state spoke the advisory instead of the consent.
+    const fullCleaned = Number.isFinite(proj.fullCleanAt) && proj.fullCleanAt > 0;
     // CWK-081 (3) — and either way this surface speaks at most ONCE per
     // session. Measured: 4 consecutive Stops during one live wizard run,
     // because a consumed FULL crossing can be re-armed inside the same session

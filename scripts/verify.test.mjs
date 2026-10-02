@@ -26,7 +26,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { gitEnv } from './git-env.mjs';
 
 const VERIFY = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify.mjs');
 
@@ -97,8 +98,11 @@ const notScratch = (s) => {
   return !(seg[0] === 'scripts' && seg[1] === 'lib' && (seg[2] || '').startsWith('.'));
 };
 
-test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the gate', () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-')));
+// The gate's own tree in a scratch dir: every top-level path verify.mjs itself reads. Three tests below need it; the copy
+// (and the reason its list is what it is) used to be inlined in each. The dir is cleaned HERE if the copy throws, and by the
+// caller's finally once this returns -- a helper that allocates must not leave the failure half of that to its caller.
+function copyGateTree(prefix) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   try {
     for (const rel of [
       '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
@@ -113,6 +117,13 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
       if (!fs.existsSync(src)) continue;
       fs.cpSync(src, path.join(root, rel), { recursive: true, filter: notScratch });
     }
+  } catch (e) { fs.rmSync(root, { recursive: true, force: true }); throw e; }
+  return root;
+}
+
+test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the gate', () => {
+  const root = copyGateTree('cw-desccap-');
+  try {
     const dest = path.join(root, 'scripts', 'verify.mjs');
     const run = () => spawnSync(process.execPath, [dest], { encoding: 'utf8' });
 
@@ -134,21 +145,8 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
 });
 
 test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never silently reads as 0 chars', () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-nonstring-')));
+  const root = copyGateTree('cw-desccap-nonstring-');
   try {
-    for (const rel of [
-      '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
-      'platform-configs', 'plugin', 'scripts', 'skills',
-      // The config-key drift gate NAMES its ship-text surfaces rather than
-      // existsSync-filtering them, so an absent one is REPORTED as unreadable
-      // instead of silently shrinking the scan. That is the property worth
-      // having, so the fixture grows to match rather than the gate softening.
-      'README.md', 'SECURITY.md', 'PRIVACY.md', 'CONTRIBUTING.md', 'INPUT-CONTRACT.md',
-    ]) {
-      const src = path.join(REPO, rel);
-      if (!fs.existsSync(src)) continue;
-      fs.cpSync(src, path.join(root, rel), { recursive: true, filter: notScratch });
-    }
     const pjPath = path.join(root, '.claude-plugin', 'plugin.json');
     const pj = JSON.parse(fs.readFileSync(pjPath, 'utf8'));
     pj.description = 123; // truthy non-string — must never read as 0 chars and pass
@@ -158,6 +156,32 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
     assert.strictEqual(r.status, 1, 'a non-string description must FAIL, not silently pass as 0 chars');
     assert.match(r.stdout, /FAIL\s+\.claude-plugin\/plugin\.json: description is not a string \(number\)/,
       `must name the actual type, not silently report 0 chars\n${r.stdout}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// CWK-120 row 16: two messages named a place the gate never checks. The SessionStart FAIL said `${CLAUDE_PLUGIN_ROOT}/bin` while the
+// check above it tests `${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js`, and the dist ok line listed `bin`, a directory the dist has
+// never shipped (DIST_ITEMS is manifest + commands + hooks + skills + scripts/lib). A maintainer reading either inspects the wrong path.
+// The ok line is now BUILT from DIST_ITEMS, so this asserts the relation (every shipped item is named, and no `bin`) rather than a copy of
+// today's list that would itself go stale the next time DIST_ITEMS moves.
+test('CWK-120 row 16: the hooks FAIL names the path the gate checks, and the dist ok line names exactly what DIST_ITEMS ships', async () => {
+  const root = copyGateTree('cw-verify-text-');
+  try {
+    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8' });
+    const clean = run();
+    assert.strictEqual(clean.status, 0, `pristine copy must PASS\n${clean.stdout}${clean.stderr}`);
+    const { DIST_ITEMS } = await import(pathToFileURL(path.join(REPO, 'scripts', 'build-plugin.mjs')).href);
+    const distLine = clean.stdout.split(/\r?\n/).find((l) => l.includes('plugin/ matches source'));
+    assert.ok(distLine, `the dist ok line must be printed\n${clean.stdout}`);
+    for (const item of DIST_ITEMS) assert.ok(distLine.includes(item.split(path.sep).join('/')), `the dist ok line must name ${item}\n${distLine}`);
+    assert.ok(!/\bbin\b/.test(distLine), `the dist ok line must not name a directory the dist does not ship\n${distLine}`);
+
+    const hj = path.join(root, 'hooks', 'hooks.json');
+    fs.writeFileSync(hj, fs.readFileSync(hj, 'utf8').split('coalwash-conductor.js').join('some-other-hook.js'));
+    const bad = run();
+    assert.strictEqual(bad.status, 1, 'a hooks.json that does not wire the conductor must FAIL the gate');
+    assert.match(bad.stdout, /FAIL\s+hooks\.json does not wire \$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/coalwash-conductor\.js/, `the FAIL must name the path the check reads\n${bad.stdout}`);
+    assert.ok(!bad.stdout.includes('CLAUDE_PLUGIN_ROOT}/bin'), `the FAIL must not name the never-checked bin path\n${bad.stdout}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -192,17 +216,18 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
 //
 // THE TREE IS THE TRACKED FILE LIST, copied from disk: it is what a clone has, which
 // is the question the pointer gate asks.
-const hermeticGit = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+// CWK-133: scripts/git-env.mjs's `gitEnv` -- the whole GIT_* family out, the given directory's parent as the ceiling.
+const hermeticGit = (dir) => gitEnv(path.dirname(dir));
 
 // The tracked tree in a real repo, fenced per the rail above. Returns null when git is
 // unavailable (the caller skips visibly). The dir is cleaned HERE if building it throws,
 // and by the caller's finally once this returns.
 function trackedTreeRepo() {
-  const listed = spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: hermeticGit() });
+  const listed = spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: hermeticGit(REPO) });
   if (listed.error || listed.status !== 0) return null;
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-git-')));
   try {
-    const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: hermeticGit() });
+    const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: hermeticGit(root) });
     const init = git('init', '-q', '-b', 'main');
     assert.strictEqual(init.status, 0, `git init in the fixture failed\n${init.stderr}`);
     assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(),
@@ -219,7 +244,7 @@ function trackedTreeRepo() {
     assert.strictEqual(added.status, 0, `git add in the fixture failed\n${added.stderr}`);
     const tracked = git('ls-files');
     assert.ok(tracked.stdout.includes('scripts/verify.mjs'), `the fixture index must hold the tree\n${tracked.stderr}`);
-    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hermeticGit() });
+    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hermeticGit(root) });
     return { root, git, run };
   } catch (e) { fs.rmSync(root, { recursive: true, force: true }); throw e; }
 }
@@ -297,5 +322,56 @@ test('verify.mjs in a BARE repo: a check-ignore that cannot answer FAILs the gat
       `the resolution ok line rests on the ignore set, so it must not print either\n${r.stdout}`);
     assert.match(r.stdout, /\nVERIFY: FAIL \(1\)/,
       `exactly one failure, this one — any other count means the exit code is not this probe's\n${r.stdout}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// CWK-133: an ABSOLUTE GIT_DIR in the caller's environment (a linked worktree's hook exports one) must not decide which
+// repository this gate's two git calls answer for. A decoy repository with an empty index stands in for the caller's:
+// without the strip `git ls-files` returns the decoy's index, no cited path reads as tracked, and the pointer block FAILs.
+test('verify.mjs inside a REAL git repo: an ambient absolute GIT_DIR cannot make its git calls answer for another repository (CWK-133)', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root } = fx;
+  const decoy = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-decoy-')));
+  try {
+    const made = spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: hermeticGit(decoy) });
+    assert.strictEqual(made.status, 0, `git init in the decoy failed\n${made.stderr}`);
+    // Observable on the check-ignore call too: were it to run against the DECOY's git dir, this exclude file (which
+    // `check-ignore` reads from the git dir, not from the work tree) would mark every root the ship-text cites as ignored.
+    fs.writeFileSync(path.join(decoy, '.git', 'info', 'exclude'), ['skills/', 'commands/', 'hooks/', 'scripts/', 'plugin/', 'references/', ''].join('\n'));
+    const hostile = { ...hermeticGit(root), GIT_DIR: path.join(decoy, '.git') };
+    const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hostile });
+    assert.strictEqual(r.status, 0, `the tracked tree must still PASS with a hostile GIT_DIR in the environment\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /ok\s+every path this repo points at/, `the pointer block must have run and resolved\n${r.stdout}`);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(decoy, { recursive: true, force: true });
+  }
+});
+
+// CWK-136: the git-spawn census inside the gate. A git spawn planted in the fixture's scripts/ that inherits the ambient env
+// (env: process.env) or names none at all must FAIL verify, and the clean tree must print the census's coverage line. The
+// planted text is built from parts: this file is itself scanned by the census, and a spelled-out spawn would be a finding.
+test('verify.mjs inside a REAL git repo: a planted git spawn with env: process.env FAILS the census, and so does one with no env: (CWK-136)', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root, run } = fx;
+  try {
+    const clean = run();
+    assert.strictEqual(clean.status, 0, `the tracked tree must PASS the census\n${clean.stdout}${clean.stderr}`);
+    assert.match(clean.stdout, /ok\s+\d+ git spawn call\(s\) across \d+ script file\(s\)/, `the census must print its coverage\n${clean.stdout}`);
+
+    const planted = path.join(root, 'scripts', 'zz-planted-spawn.mjs');
+    const spawn = (opts) => `${'spawn' + 'Sync'}(${JSON.stringify('git')}, ['status']${opts})`;
+    fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn(', { env: process.env }')};`, ''].join('\n'));
+    const inherit = run();
+    assert.strictEqual(inherit.status, 1, `env: process.env must FAIL the gate\n${inherit.stdout}${inherit.stderr}`);
+    assert.match(inherit.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) passes an 'env:' that names process\.env/, `the FAIL must name the file, the line and the reason\n${inherit.stdout}`);
+    assert.match(inherit.stdout, /\nVERIFY: FAIL \(1\)/, `exactly the planted spawn fails\n${inherit.stdout}`);
+
+    fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn('')};`, ''].join('\n'));
+    const bare = run();
+    assert.strictEqual(bare.status, 1, `a spawn with no env: must FAIL the gate\n${bare.stdout}${bare.stderr}`);
+    assert.match(bare.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) carries no 'env:'/, `the FAIL must name the missing env\n${bare.stdout}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

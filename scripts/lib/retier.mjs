@@ -49,6 +49,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
 import { tokensEst } from './caliper.mjs';
+import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
@@ -160,7 +161,9 @@ export function assertTreatmentAllowed(type, treatment) {
 // ---------------------------------------------------------------------------
 
 function readOrNull(p) {
-  try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
+  // CWK-137: bounded and kind-gated -- a store under <project>/.claude/agent-memory is
+  // repo-derived. The path is contained by the caller; a refusal reads as unreadable.
+  return readRepoFileBounded(p, null, MAX_DOC_BYTES);
 }
 
 // A STORE = a directory holding a MEMORY.md index: the CC main memory dir
@@ -761,18 +764,27 @@ export function moveVerify({ origIndex, indexNew, overflowText, movedLines }) {
 export function rollbackFromSnapshot(snapshotDir, createdPaths = [], trustedRoots = []) {
   let manifest;
   try { manifest = JSON.parse(fs.readFileSync(path.join(snapshotDir, 'manifest.json'), 'utf8')); } catch { return -1; }
+  // CWK-120 row 2: `JSON.parse` enforces no shape, and this is the LAST resort of a failed post-commit probe -- an
+  // exception escaping here means the rollback never completes. Reject a non-array at the read boundary (the same -1
+  // sentinel as an unreadable manifest; anchor-diff's manifest reader already does), and treat an entry that is not
+  // { snap: string, original: string }, or whose path arithmetic throws, as ONE failed restore that leaves the rest of
+  // the manifest to be restored: fail closed and keep going, never abort halfway.
+  if (!Array.isArray(manifest)) return -1;
   const snapPhys = physicalOrNull(snapshotDir);
   const roots = (Array.isArray(trustedRoots) ? trustedRoots : []).map((r) => physicalOrNull(r)).filter(Boolean);
   let failed = 0;
   for (const m of manifest) {
-    const src = path.join(snapshotDir, m.snap);
-    const srcPhys = physicalOrNull(src);
-    const dstPhys = physicalForCreate(m.original);
-    if (!snapPhys || !srcPhys || !containedIn(srcPhys, [snapPhys]) || !dstPhys || !containedIn(dstPhys, roots)) { failed++; continue; }
-    // Write to dstPhys — the form that was VALIDATED — not the raw `m.original`.
-    // Same check-one-spelling-act-on-another mismatch as apply.mjs's restore twin;
-    // fixed in the same commit so the two do not drift.
-    try { fs.copyFileSync(src, dstPhys); } catch { failed++; }
+    if (!m || typeof m.snap !== 'string' || typeof m.original !== 'string') { failed++; continue; }
+    try {
+      const src = path.join(snapshotDir, m.snap);
+      const srcPhys = physicalOrNull(src);
+      const dstPhys = physicalForCreate(m.original);
+      if (!snapPhys || !srcPhys || !containedIn(srcPhys, [snapPhys]) || !dstPhys || !containedIn(dstPhys, roots)) { failed++; continue; }
+      // Write to dstPhys — the form that was VALIDATED — not the raw `m.original`.
+      // Same check-one-spelling-act-on-another mismatch as apply.mjs's restore twin;
+      // fixed in the same commit so the two do not drift.
+      fs.copyFileSync(src, dstPhys);
+    } catch { failed++; }
   }
   for (const p of createdPaths) {
     const pp = physicalForCreate(p);

@@ -55,7 +55,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { physicalOrNull, containedIn } from './class-b.mjs';
-import { claudeBaseDir } from './config-load.mjs';
+import { claudeBaseDir, repoReadOutcome, readRepoBytesBounded, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { ownSandboxDir, replaceFile } from './repo-fs.mjs';
 import { gateFiles } from './fidelity-gate.mjs';
 
 // The root governance basenames, guarded anywhere in the trees. Memory-store
@@ -74,15 +75,21 @@ const GOV_BASENAMES = new Set(['CLAUDE.md', 'AGENTS.md', 'MEMORY.md']);
 // skips the diff) is what the hermetic tests pin.
 export const SEATBELT_MAX_BYTES = 262144;
 
+// `txDir` stays LEXICAL: it is only ever an exclusion (isGuardedTarget) and the
+// parent of a directory ownSandboxDir already walked. The two dirs this module
+// WRITES and DELETES in go through ownSandboxDir (CWK-137): a link a cloned repo
+// committed anywhere between the project root and them throws, and every caller
+// below is inside its own fail-silent try -- so a planted link means no snapshot and
+// no sweep, never a write or a recursive delete in the link's target.
 function txDir(projectRoot) { return path.join(projectRoot, '.claude', 'coalwash'); }
-function writeguardRoot(projectRoot) { return path.join(txDir(projectRoot), 'writeguard'); }
+function writeguardRoot(projectRoot) { return ownSandboxDir(projectRoot, '.claude', 'coalwash', 'writeguard'); }
 function sanitizeSession(sessionId) {
   // Traversal-safe (the CoalMine session-id lesson): a hostile session_id like
   // '../../x' can never escape the writeguard root.
   return String(sessionId || '').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 120) || 'nosession';
 }
 function sessionDir(projectRoot, sessionId) {
-  return path.join(writeguardRoot(projectRoot), sanitizeSession(sessionId));
+  return ownSandboxDir(projectRoot, '.claude', 'coalwash', 'writeguard', sanitizeSession(sessionId));
 }
 // grad7 ruling Root C (F3, worse than named): the OLD djb2 hash below was a
 // 32-bit, path-only, deliberately-invertible checksum. A round-8 worker
@@ -211,7 +218,7 @@ export function isGuardedTarget(touchedPath, { projectRoot, home } = {}) {
 function origPathSidecar(snap) { return `${snap}.origpath`; }
 function contentDigest(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 function recordOrigPath(snap, phys, blobBuf) {
-  fs.writeFileSync(origPathSidecar(snap), `${phys}\n${contentDigest(blobBuf)}`, 'utf8');
+  replaceFile(origPathSidecar(snap), `${phys}\n${contentDigest(blobBuf)}`); // CWK-137: temp + rename, never through a link
 }
 // Returns true (verified: path matches AND the blob's bytes, hashed right
 // now, still match what was recorded at write time), false (either a
@@ -238,13 +245,15 @@ function recordOrigPath(snap, phys, blobBuf) {
 // as "the one a human actually presses" is gated too.
 function verifyOrigPath(snap, phys) {
   try {
-    const raw = fs.readFileSync(origPathSidecar(snap), 'utf8');
+    const raw = readRepoFileBounded(origPathSidecar(snap), null, MAX_DOC_BYTES); // CWK-137: bounded
+    if (raw === null) return null;
     const nl = raw.indexOf('\n');
     if (nl === -1) return null; // legacy path-only sidecar, or malformed — unverifiable
     if (raw.slice(0, nl) !== phys) return false;
     const recordedHash = raw.slice(nl + 1).trim();
     let blobBuf;
-    try { blobBuf = fs.readFileSync(snap); } catch { return null; } // blob unreadable — can't verify content
+    blobBuf = readRepoBytesBounded(snap, null, MAX_DOC_BYTES); // CWK-137: bounded
+    if (!blobBuf) return null; // blob unreadable — can't verify content
     return contentDigest(blobBuf) === recordedHash;
   } catch { return null; }
 }
@@ -279,11 +288,23 @@ export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home
     selfIgnore(txDir(projectRoot));
     selfIgnore(writeguardRoot(projectRoot));
     selfIgnore(dir);
-    fs.copyFileSync(phys, snap); // the ms-copy
+    // CWK-137: a BOUNDED read of the file about to be edited, then a temp + rename
+    // into the snapshot slot -- copyFileSync opened `phys` with no kind check (a FIFO
+    // hangs the agent's Edit, a device copies without end) and wrote THROUGH a link at
+    // the destination. Over MAX_DOC_BYTES, or not a regular file, there is no snapshot
+    // (the airbag was always best-effort, never a gate on the write).
+    const bytes = readRepoBytesBounded(phys, null, MAX_DOC_BYTES);
+    if (!bytes) return null;
+    replaceFile(snap, bytes);
     // hash what's ACTUALLY on disk at `snap` now (not `phys` before the
     // copy) — this guards the copy step itself, not just a promise about
     // the source.
-    recordOrigPath(snap, phys, fs.readFileSync(snap));
+    // CWK-137: bounded re-read of the copy just written. A refusal here means there is
+    // nothing to attest -- never record the digest of an EMPTY buffer for a blob that
+    // holds real bytes (a false sidecar that no later verification could ever satisfy).
+    const written = readRepoBytesBounded(snap, null, MAX_DOC_BYTES);
+    if (!written) return null;
+    recordOrigPath(snap, phys, written);
     return snap;
   } catch { return null; }
 }
@@ -304,7 +325,9 @@ export function readSnapshot(projectRoot, sessionId, touchedPath, { home } = {})
     if (!phys) return null;
     const { path: snap, existing } = resolveSnapPath(sessionDir(projectRoot, sessionId), phys);
     if (!existing) return null;
-    return { phys, snapshotPath: snap, orig: fs.readFileSync(snap, 'utf8') };
+    const orig = readRepoFileBounded(snap, null, MAX_DOC_BYTES); // CWK-137: bounded
+    if (orig === null) return null;
+    return { phys, snapshotPath: snap, orig };
   } catch { return null; }
 }
 
@@ -318,8 +341,12 @@ export function readSnapshot(projectRoot, sessionId, touchedPath, { home } = {})
 export function seatbeltCheck(projectRoot, sessionId, touchedPath, { home } = {}) {
   const b = readSnapshot(projectRoot, sessionId, touchedPath, { home });
   if (!b) return null;
-  let cur;
-  try { cur = fs.readFileSync(b.phys, 'utf8'); } catch { return null; } // gone/unreadable -> silent
+  // CWK-137: bounded. Over MAX_DOC_BYTES is the oversize note (it always was, one
+  // step later); any other refusal stays silent, as a failed read always did.
+  const r = repoReadOutcome(b.phys, null, MAX_DOC_BYTES);
+  if (r.why === 'over-bound') return { file: b.phys, snapshotPath: b.snapshotPath, oversize: true, classes: [] };
+  if (!r.buf) return null; // gone/unreadable/not regular -> silent
+  const cur = r.buf.toString('utf8');
   if (Buffer.byteLength(b.orig, 'utf8') > SEATBELT_MAX_BYTES || Buffer.byteLength(cur, 'utf8') > SEATBELT_MAX_BYTES) {
     return { file: b.phys, snapshotPath: b.snapshotPath, oversize: true, classes: [] };
   }
@@ -395,11 +422,13 @@ export function listWriteguard(projectRoot, { home: _home } = {}) {
 // taken; this is the restore-side twin of that same trade).
 function verifyBlobIntegrity(snapPath) {
   try {
-    const raw = fs.readFileSync(origPathSidecar(snapPath), 'utf8');
+    const raw = readRepoFileBounded(origPathSidecar(snapPath), null, MAX_DOC_BYTES); // CWK-137: bounded
+    if (raw === null) return false;
     const nl = raw.indexOf('\n');
     if (nl === -1) return false; // legacy path-only sidecar — unverifiable, never trusted
     const recordedHash = raw.slice(nl + 1).trim();
-    const blobBuf = fs.readFileSync(snapPath);
+    const blobBuf = readRepoBytesBounded(snapPath, null, MAX_DOC_BYTES);
+    if (!blobBuf) return false;
     return contentDigest(blobBuf) === recordedHash;
   } catch { return false; }
 }
@@ -432,8 +461,8 @@ export function readWriteguardSnapshot(projectRoot, snapName, { home } = {}) {
   // non-UTF-8 byte as U+FFFD — so the CLI's own words, "byte-exact original on
   // stdout", were FALSE for exactly the files this net exists to save. `bytes`
   // already comes from a stat, so it was right while the content was wrong.
-  try { return { ...pick, content: fs.readFileSync(pick.snapshotPath) }; }
-  catch { return null; }
+  const content = readRepoBytesBounded(pick.snapshotPath, null, MAX_DOC_BYTES); // CWK-137: bounded bytes
+  return content ? { ...pick, content } : null;
 }
 
 // Run-gated cleanup (SessionStart, event-driven — NEVER a clock; 0h-GUARD

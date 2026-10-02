@@ -376,11 +376,14 @@ test('seatbelt: an OVERSIZE guarded file skips the diff — snapshot stands, ove
 
 test('perf (structural): a non-guarded write triggers ZERO snapshot copies; a guarded first-write triggers exactly ONE — no discovery walk on either path', () => {
   const { home, proj } = sandbox();
-  const realCopy = fs.copyFileSync;
+  const realRename = fs.renameSync;
   let copies = 0;
   try {
-    fs.copyFileSync = (...a) => { copies++; return realCopy(...a); };
-    const src = path.join(proj, 'index.js'); realCopy && fs.writeFileSync(src, 'code', 'utf8');
+    // CWK-137: the snapshot is published by a temp + rename (replaceFile), so a
+    // "copy" is one rename onto a snapshot slot; the identity sidecar's own rename is
+    // not a copy of the file and is not counted.
+    fs.renameSync = (from, to, ...r) => { if (!String(to).endsWith('.origpath')) copies++; return realRename(from, to, ...r); };
+    const src = path.join(proj, 'index.js'); fs.writeFileSync(src, 'code', 'utf8');
     copies = 0;
     snapshotOnFirstWrite(proj, 's', src, { home });
     assert.strictEqual(copies, 0, 'source code: zero copy work (skips at the cheap prefilter)');
@@ -390,7 +393,7 @@ test('perf (structural): a non-guarded write triggers ZERO snapshot copies; a gu
     assert.strictEqual(copies, 1, 'guarded first write: exactly one ms-copy');
     snapshotOnFirstWrite(proj, 's', gov, { home });
     assert.strictEqual(copies, 1, 'guarded second write: no further copy (already snapshotted)');
-  } finally { fs.copyFileSync = realCopy; clean(home, proj); }
+  } finally { fs.renameSync = realRename; clean(home, proj); }
 });
 
 test('read-only-except-sandbox: the seatbelt writes NOTHING (the target file + tree are byte/mtime identical after a check); only the airbag writes, and only under .claude/coalwash', () => {
@@ -507,4 +510,22 @@ test('G3-3 twin: readWriteguardSnapshot returns the ORIGINAL BYTES — a non-UTF
     assert.deepStrictEqual(Buffer.from(got.content), bytes, 'the undo net hands back the bytes it caught — "byte-exact" must be true, not a claim');
     assert.strictEqual(got.bytes, bytes.length, 'the reported size is the real byte count');
   } finally { clean(home, proj); }
+});
+
+// CWK-137 F-9: the writeguard root sits inside the repo, so a cloned repo can commit an ENTRY of it (a session dir) as a
+// link out of the project. The sweep removes prior sessions with a recursive rm; the entry must go as a LINK (the target
+// keeps its files), never be followed. The entry being gone proves the sweep visited it, so "no damage" is not vacuous.
+test('sweep: a committed session-dir LINK is removed as a link -- the link target keeps its files (CWK-137 F-9)', (t) => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-swlink-')));
+  try {
+    const gov = path.join(proj, 'MEMORY.md'); fs.writeFileSync(gov, GOV, 'utf8');
+    snapshotOnFirstWrite(proj, 'current-session', gov, { home });
+    fs.writeFileSync(path.join(outside, 'keep.txt'), 'KEEP');
+    try { fs.symlinkSync(outside, path.join(wgRoot(proj), 'old-session'), process.platform === 'win32' ? 'junction' : 'dir'); } catch { t.skip('this volume cannot make a directory link'); return; }
+    sweepWriteguard(proj, 'current-session', { home });
+    assert.strictEqual(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'KEEP', 'the link target keeps its file: the sweep did not follow the link');
+    assert.throws(() => fs.lstatSync(path.join(wgRoot(proj), 'old-session')), { code: 'ENOENT' }, 'the sweep did visit the link entry and removed the link itself');
+    assert.ok(fs.existsSync(path.join(wgRoot(proj), 'current-session')), 'the current session survives');
+  } finally { clean(home, proj, outside); }
 });

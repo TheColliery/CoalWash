@@ -22,6 +22,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { slugifyHeading, HeadingAnchors, headingAnchors, extractLinks, fragmentMatches, checkLinks } from './link-check.mjs';
+import { gitEnv } from './git-env.mjs';
 
 const ENGINE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'link-check.mjs');
 
@@ -219,16 +220,18 @@ test('checkLinks: an unreadable input file is a finding, never a skipped clean f
 // The CLI reads tracked-ness from git, so its checks run in a REAL repository — fenced the
 // way scripts/verify.test.mjs fences its own: os.tmpdir(), `-C` and a GIT_*-scrubbed env on
 // every git call, the fixture's own .git asserted first, and no `git config` anywhere.
-const hermeticGit = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+// CWK-133: the scrub is scripts/git-env.mjs's `gitEnv` (the whole GIT_* family out, the fixture's parent as the
+// ceiling), never a copy of it here.
 function cliRepo(t) {
-  const init = spawnSync('git', ['--version'], { encoding: 'utf8', env: hermeticGit() });
+  const init = spawnSync('git', ['--version'], { encoding: 'utf8', env: gitEnv(os.tmpdir()) });
   if (init.error || init.status !== 0) return null;
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-git-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: hermeticGit() });
+  const fixtureEnv = gitEnv(path.dirname(root));
+  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: fixtureEnv });
   assert.strictEqual(git('init', '-q', '-b', 'main').status, 0, 'git init in the fixture');
   assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(), 'FIXTURE RAIL: the fixture owns its .git');
-  const run = (...files) => spawnSync(process.execPath, [ENGINE, ...files], { cwd: root, encoding: 'utf8', env: hermeticGit() });
+  const run = (...files) => spawnSync(process.execPath, [ENGINE, ...files], { cwd: root, encoding: 'utf8', env: fixtureEnv });
   return { root, git, run };
 }
 
@@ -254,6 +257,26 @@ test('CLI: planted broken link and anchor exit 1 and are named; the fixed tree e
   const none = run();
   assert.strictEqual(none.status, 1);
   assert.match(none.stdout, /no files given/);
+});
+
+// CWK-133: the ENGINE's own `git ls-files` must not answer for a repository an ambient GIT_DIR names. A decoy
+// repository with an empty index stands in for the caller's: without the strip the engine reads the decoy's index,
+// sees no tracked file, and refuses a link the fixture really tracks.
+test('CLI: an ambient absolute GIT_DIR cannot make the engine answer tracked-ness for another repository (CWK-133)', (t) => {
+  const fx = cliRepo(t);
+  if (!fx) return t.skip('git unavailable');
+  const { root, git } = fx;
+  const decoy = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-decoy-')));
+  t.after(() => fs.rmSync(decoy, { recursive: true, force: true }));
+  const made = spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: gitEnv(path.dirname(decoy)) });
+  assert.strictEqual(made.status, 0, 'git init in the decoy');
+  fs.writeFileSync(path.join(root, 'A.md'), '# Alpha\n\nsee [b](B.md)\n');
+  fs.writeFileSync(path.join(root, 'B.md'), '# Beta\n');
+  assert.strictEqual(git('add', '-A').status, 0);
+  const hostile = { ...gitEnv(path.dirname(root)), GIT_DIR: path.join(decoy, '.git') };
+  const r = spawnSync(process.execPath, [ENGINE, 'A.md', 'B.md'], { cwd: root, encoding: 'utf8', env: hostile });
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^link-check: 0 finding\(s\) across 2 file\(s\)/m);
 });
 
 // r34c C: the main-module guard compared import.meta.url (Node resolves the entry file to its
