@@ -59,7 +59,7 @@ Cross-agent by design — the engine is plain Node scripts and class-B discovery
 
 ## 🚀 Releasing (Maintainers)
 
-Bump version in `.claude-plugin/plugin.json` ➡️ add a `CHANGELOG.md` entry ➡️ ensure `verify.mjs` and `test.mjs` pass ➡️ commit ➡️ create a signed git tag (`vX.Y.Z`) ➡️ push ➡️ the tag-push workflow (`.github/workflows/create-release.yml`) posts the GitHub Release from the tag's own CHANGELOG entry (stable tags only — with ONE named exception: the repo's FIRST public beta tag ships as a prerelease so the Releases panel is never empty at launch; later beta tags are history-only).
+Bump version in `.claude-plugin/plugin.json` ➡️ add a `CHANGELOG.md` entry ➡️ ensure `verify.mjs` and `test.mjs` pass ➡️ commit ➡️ create a signed git tag (`vX.Y.Z`) ➡️ push ➡️ the tag-push workflow (`.github/workflows/create-release.yml`) posts the GitHub Release from the tag's own CHANGELOG entry (stable tags only: a pre-release tag push posts nothing; the repo's one launch-form pre-release Release is posted by a `workflow_dispatch` run with `launch_form`, and later beta tags are history-only).
 
 ---
 
