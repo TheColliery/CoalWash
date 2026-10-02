@@ -4020,6 +4020,8 @@ test('R14 D3: the git spawn carries the rail\'s bounds -- an explicit timeout, t
   assert.match(call, /timeout: GIT_TRACKED_TIMEOUT_MS/);
   assert.match(call, /env: gitEnv\(\)/);
   assert.doesNotMatch(call, /shell:/);
+  assert.match(call, /maxBuffer: __testHooks\.gitMaxBuffer/);
+  assert.ok(__testHooks.gitMaxBuffer > (1 << 20), `the listing buffer is well above the old 1 MiB (${__testHooks.gitMaxBuffer})`);
   const ms = Number(/const GIT_TRACKED_TIMEOUT_MS = (\d+);/.exec(src)[1]);
   assert.ok(ms > 0 && ms <= 30000, `a real, short bound (${ms} ms)`);
   assert.strictEqual(src.split(needle).length - 1, 1, 'and it is the only git spawn in this lib');
@@ -4075,6 +4077,137 @@ test('R14 D3: where git cannot be run the behaviour is unchanged (the named resi
     if (savedPathExt !== undefined) process.env.Path = savedPathExt;
     clean(proj);
   }
+});
+
+// ---------------------------------------------------------------------------
+// R14 bounce 2 (RE-INSPECT item 2, two HIGH bypasses of the D3 interim's own refusal; the head's ruling: it fails CLOSED).
+//  (a) a journal git tracks under a CASE-VARIANT spelling (JOURNAL.json, journal's snapDir spelled SNAP-1 beside the tracked snap-1) was
+//      read by the filesystem and missed by the git query, which matched the literal spelling; the match is now by the PHYSICAL path.
+//  (b) the query's own failure (a listing over the buffer, a timeout, a non-zero exit) read as "nothing tracked"; where a repository is
+//      present it now reads as TRACKED. No git on PATH, or no repository at all, stays the named cannot-tell residual.
+// ---------------------------------------------------------------------------
+function volumeFoldsCase(dir) { // the capability, probed on the volume the fixture lives on -- never the platform's name
+  const probe = path.join(dir, 'CwCaseProbe');
+  fs.writeFileSync(probe, '');
+  try { return fs.existsSync(path.join(dir, 'cwcaseprobe')); } finally { fs.rmSync(probe, { force: true }); }
+}
+
+test('R14 D3 bounce 2 (HIGH): a journal and snapshot that git tracks under a CASE-VARIANT spelling are refused -- the match is by what the filesystem resolves, not by the spelling the query was given', (t) => {
+  if (!HAS_GIT) return t.skip('git is not available on this host');
+  const { proj, store } = sandbox();
+  try {
+    if (!volumeFoldsCase(proj)) return t.skip('this volume is case-sensitive: journal.json does not resolve to a committed JOURNAL.json, so the variant is not what recovery reads');
+    const victim = path.join(store, 'memory.md');
+    write(victim, D3_VICTIM);
+    const tx = path.join(proj, '.claude', 'coalwash');
+    const snap = path.join(tx, 'snap-1');
+    write(path.join(snap, 'snap.complete'), '1');
+    write(path.join(snap, 'f0'), D3_INJECTED);
+    write(path.join(snap, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: victim }]));
+    write(path.join(tx, 'JOURNAL.json'), JSON.stringify({ version: 1, status: 'pending', snapDir: path.join(tx, 'SNAP-1'), roots: [proj], steps: [] }));
+    gitFx(proj, ['init', '-q']);
+    gitFx(proj, ['add', '-f', '--', '.claude']);
+    gitFx(proj, ['commit', '-q', '-m', 'fixture']);
+    assert.ok(fs.existsSync(path.join(tx, 'journal.json')), 'the premise: the filesystem reads the committed JOURNAL.json as journal.json');
+    const r = recoverDangling(proj, { home: SANDBOX_HOME });
+    assert.strictEqual(r.recovered, 'none', `a refusal, never a clean recovery: ${JSON.stringify(r)}`);
+    assert.ok(r.refusedTracked >= 2, `the journal and the snapshot are both counted: ${JSON.stringify(r)}`);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), D3_VICTIM, 'the memory file was NOT rewritten');
+    assert.ok(fs.existsSync(path.join(tx, 'journal.json')), 'the journal is kept for a human');
+  } finally { clean(proj); }
+});
+
+test('R14 D3 bounce 2 (HIGH): a tracked listing over the old 1 MiB buffer (8,000 padded names under the snapshot dir) is refused, never replayed', (t) => {
+  if (!HAS_GIT) return t.skip('git is not available on this host');
+  const { proj, victim } = d3Fixture([]);
+  try {
+    const snap = path.join(proj, '.claude', 'coalwash', 'snap-1');
+    const pad = 'x'.repeat(140);
+    let listingBytes = 0;
+    for (let i = 0; i < 8000; i++) {
+      const name = `p${String(i).padStart(5, '0')}-${pad}`;
+      fs.writeFileSync(path.join(snap, name), '');
+      listingBytes += Buffer.byteLength(`snap-1/${name}`) + 1; // one `ls-files -z` entry, relative to the transaction directory
+    }
+    assert.ok(listingBytes > (1 << 20), `the premise: the listing (${listingBytes} bytes) is over the old 1 MiB buffer`);
+    gitFx(proj, ['add', '-f', '--', '.claude']);
+    gitFx(proj, ['commit', '-q', '-m', 'forged and padded']);
+    const r = recoverDangling(proj, { home: SANDBOX_HOME });
+    assert.strictEqual(r.recovered, 'none', `refused, not "rolled-back": ${JSON.stringify(r)}`);
+    assert.ok(r.refusedTracked >= 1, JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), D3_VICTIM, 'the memory file was NOT rewritten');
+  } finally { clean(proj); }
+});
+
+test('R14 D3 bounce 2 (HIGH): a git query that cannot finish in a repository (the listing overflows its buffer) fails CLOSED -- the fail-closed branch, not the buffer size, is the fix', (t) => {
+  if (!HAS_GIT) return t.skip('git is not available on this host');
+  const { proj, victim, journal } = d3Fixture([]); // a repository whose journal and snapshot are NOT tracked: only the failure can refuse it
+  write(path.join(proj, '.claude', 'coalwash', 'keeps.json'), '{}'); // one unrelated tracked file, so the listing is not empty
+  gitFx(proj, ['add', '-f', '--', '.claude/coalwash/keeps.json']);
+  gitFx(proj, ['commit', '-q', '-m', 'one unrelated tracked file']);
+  const saved = __testHooks.gitMaxBuffer;
+  try {
+    __testHooks.gitMaxBuffer = 4; // far below one listing entry: spawnSync reports ENOBUFS
+    const r = recoverDangling(proj, { home: SANDBOX_HOME });
+    assert.strictEqual(r.recovered, 'none', `fail closed: ${JSON.stringify(r)}`);
+    assert.strictEqual(r.refusedTracked, 1, `counted once, as one refused subject: ${JSON.stringify(r)}`);
+    assert.match(r.error, /could not say/);
+    assert.match(r.error, /ENOBUFS/);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), D3_VICTIM);
+    assert.ok(fs.existsSync(journal), 'the journal is kept for a human');
+  } finally { __testHooks.gitMaxBuffer = saved; clean(proj); }
+});
+
+test('R14 D3 bounce 2: a tracked listing with more paths than the examination bound fails CLOSED too (resolving each path is the cost an attacker could set)', (t) => {
+  if (!HAS_GIT) return t.skip('git is not available on this host');
+  const under = d3Fixture([]);
+  const over = d3Fixture([]);
+  const saved = __testHooks.gitMaxPaths;
+  try {
+    for (const { proj } of [under, over]) { // two unrelated tracked files, the journal and snapshot untracked
+      write(path.join(proj, '.claude', 'coalwash', 'keeps.json'), '{}');
+      write(path.join(proj, '.claude', 'coalwash', 'state.json'), '{}');
+      gitFx(proj, ['add', '-f', '--', '.claude/coalwash/keeps.json', '.claude/coalwash/state.json']);
+      gitFx(proj, ['commit', '-q', '-m', 'two unrelated tracked files']);
+    }
+    __testHooks.gitMaxPaths = 2; // the bound is inclusive: two paths are examined
+    const ok = recoverDangling(under.proj, { home: SANDBOX_HOME });
+    assert.strictEqual(ok.recovered, 'rolled-back', `at the bound: examined, nothing of ours tracked, the untracked journal replays: ${JSON.stringify(ok)}`);
+    __testHooks.gitMaxPaths = 1;
+    const r = recoverDangling(over.proj, { home: SANDBOX_HOME });
+    assert.strictEqual(r.recovered, 'none', `over the bound: refused, fail closed: ${JSON.stringify(r)}`);
+    assert.strictEqual(r.refusedTracked, 1);
+    assert.match(r.error, /listing too large to examine/);
+    assert.strictEqual(fs.readFileSync(over.victim, 'utf8'), D3_VICTIM, 'the memory file was NOT rewritten');
+  } finally { __testHooks.gitMaxPaths = saved; clean(under.proj, over.proj); }
+});
+
+test('R14 D3 bounce 2: a repository git cannot read (a .git file pointing nowhere) fails CLOSED; a directory in NO repository stays the named cannot-tell residual and replays', (t) => {
+  if (!HAS_GIT) return t.skip('git is not available on this host');
+  const broken = d3Fixture([]);
+  const none = d3Fixture([], { init: false });
+  try {
+    fs.rmSync(path.join(broken.proj, '.git'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(broken.proj, '.git'), `gitdir: ${path.join(broken.proj, 'nowhere')}\n`);
+    const r = recoverDangling(broken.proj, { home: SANDBOX_HOME });
+    assert.strictEqual(r.recovered, 'none', `a repository present and unreadable: refused, fail closed: ${JSON.stringify(r)}`);
+    assert.strictEqual(r.refusedTracked, 1, JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(broken.victim, 'utf8'), D3_VICTIM);
+    const c = recoverDangling(none.proj, { home: SANDBOX_HOME });
+    assert.strictEqual(c.recovered, 'rolled-back', `no repository at all: unchanged, the named residual: ${JSON.stringify(c)}`);
+    assert.strictEqual(fs.readFileSync(none.victim, 'utf8'), D3_INJECTED);
+  } finally { clean(broken.proj, none.proj); }
+});
+
+test('R14 D3 bounce 2: a stray .git directory that git would not accept (an archive\'s .git/config alone) is no repository: the cannot-tell residual, the journal replays', (t) => {
+  if (!HAS_GIT) return t.skip('git is not available on this host');
+  const stray = d3Fixture([], { init: false });
+  try {
+    write(path.join(stray.proj, '.git', 'config'), '[core]\n\tbare = false\n');
+    const r = recoverDangling(stray.proj, { home: SANDBOX_HOME });
+    assert.strictEqual(r.recovered, 'rolled-back', `git answers "not a repository" and no marker git would accept exists above: unchanged: ${JSON.stringify(r)}`);
+    assert.strictEqual(fs.readFileSync(stray.victim, 'utf8'), D3_INJECTED);
+  } finally { clean(stray.proj); }
 });
 
 test('R14 D3: there is ONE git-env helper -- the shipped lib/git-env.mjs, which the dev import path scripts/git-env.mjs re-exports (no fork the census cannot see), and it strips the whole GIT_* family in any case', () => {

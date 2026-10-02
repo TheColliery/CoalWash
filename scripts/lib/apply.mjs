@@ -142,34 +142,72 @@ function inGitDir(p, roots) {
 }
 // R14 D3 (the interim, pending the provenance unit): a real crash journal is never committed, and a clone delivers ONLY the files git
 // tracks, so a journal or snapshot that git tracks in the project came from a repository, not from an interrupted run. recoverDangling
-// refuses to replay it (`refusedTracked`). git is OPTIONAL (no-external-assumption, Phoenix #7's spirit): no git on PATH, a directory that
-// is not a repo, a refusal by git (dubious ownership), a timeout, any non-zero exit all read as "cannot tell", and behaviour is then
-// UNCHANGED. NAMED residual: a download with no git history (a zip, a tarball) still replays; only journal provenance closes that.
+// refuses to replay it (`refusedTracked`). git is OPTIONAL (no-external-assumption, Phoenix #7's spirit), and the check FAILS CLOSED:
+//   - where a repository is present (a `.git` git would accept in the transaction directory or any ancestor, what its own discovery looks for)
+//     and the query errors, times out, exits non-zero or overflows its buffer, the journal reads as TRACKED and is refused (counted once);
+//     "too much to measure" and "cannot run" are never "nothing tracked" (R14 RE-INSPECT: an 8,000-name listing overflowed the old 1 MiB
+//     buffer and the committed journal replayed).
+//   - NAMED cannot-tell residual, behaviour UNCHANGED: git is not on PATH (spawn ENOENT), or there is no repository at all (no `.git`
+//     that git would accept anywhere above; see isGitMarker), so the query could not have answered. Also NAMED, and not closed here: a download with no git history (a zip, a
+//     tarball) still replays; only journal provenance closes that.
+// The tracked paths are matched by what the FILESYSTEM resolves them to, never by spelling: git lists every tracked path under the
+// transaction directory in the spelling that was committed, and each is resolved (realpath, native) and compared with the journal's own
+// resolved path and the snapshot directory's. A case-variant name (JOURNAL.json, SNAP-1 beside the committed snap-1), a short name and a
+// link all land on the same physical path, so the volume decides what folds, not this code, and a miss can only come from a path the
+// filesystem cannot resolve (a tracked file absent from disk: nothing there to replay).
 // The command runs from the transaction directory itself, so git reads whichever repository holds the journal (a transaction directory
-// that is its own repository, a submodule, is read as that repository). `--literal-pathspecs` keeps a name from being a pattern;
-// `--no-optional-locks` and `core.fsmonitor=false` keep a repository's own config from running a program or taking a lock.
-const GIT_TRACKED_TIMEOUT_MS = 5000; // `git ls-files` on an index of any realistic project answers in tens of ms; a hang is a "cannot tell"
+// that is its own repository, a submodule, is read as that repository). It takes NO pathspec; `--no-optional-locks` and
+// `core.fsmonitor=false` keep a repository's own config from running a program or taking a lock.
+const GIT_TRACKED_TIMEOUT_MS = 5000; // `git ls-files` on an index of any realistic project answers in tens of ms; past this the query FAILED (closed, where a repository is present)
+const GIT_TRACKED_MAX_BYTES = 16 << 20; // the listing buffer: ~100,000 paths. A listing over it is a failure of the query, refused, never read as empty
+const GIT_TRACKED_MAX_PATHS = 20000; // more tracked paths than this under one transaction directory is not a project's own state, and resolving each is the cost: refused
+// Is the `.git` at `p` something git itself would accept: a directory holding HEAD, objects and refs, or a file naming a gitdir (a
+// worktree, a submodule)? A directory that is not one (an archive's stray `.git/config`) is no repository: git says "not a repository" and
+// walks on, so it is the same cannot-tell residual as no `.git` at all. An entry that cannot be read counts as present (fail closed).
+function isGitMarker(p) {
+  let st;
+  try { st = fs.lstatSync(p); } catch (e) { return !(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')); }
+  if (st.isDirectory()) return ['HEAD', 'objects', 'refs'].every((n) => fs.existsSync(path.join(p, n)));
+  try { return /^gitdir:/.test(fs.readFileSync(p, 'utf8').slice(0, 64)); } catch { return true; }
+}
+// A git marker in `dir` or any ancestor: what git's own discovery looks for.
+function repoMarkerAbove(dir) {
+  for (let d = path.resolve(dir); ; d = path.dirname(d)) {
+    if (isGitMarker(path.join(d, '.git'))) return true;
+    if (path.dirname(d) === d) return false;
+  }
+}
 // The environment is the room's ONE helper (git-env.mjs, CWK-133): the whole GIT_* family deleted, case-insensitively, so an inherited
 // GIT_DIR / GIT_INDEX_FILE cannot point the check at a different repository. No ceiling is passed: the transaction directory sits
 // INSIDE the repository this must find, which may be an ancestor of the project root.
-function gitTrackedUnder(cwd, rels) {
-  const wanted = rels.filter((r) => typeof r === 'string' && r !== '');
-  if (!wanted.length) return [];
+// Returns { tracked, failed }: `tracked` = how many tracked paths are the journal or lie under its snapshot directory; `failed` = why the
+// query could not answer in a repository (null when it answered, or when it could not have: the cannot-tell residual).
+function gitTrackedRecoveryInputs(txDir, journalPath, snapDir) {
+  let r;
   try {
-    const r = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', '--literal-pathspecs', 'ls-files', '-z', '--', ...wanted],
-      { cwd, env: gitEnv(), encoding: 'utf8', timeout: GIT_TRACKED_TIMEOUT_MS, windowsHide: true, maxBuffer: 1 << 20 });
-    if (r.error || r.status !== 0) return [];
-    return String(r.stdout).split('\0').filter(Boolean);
-  } catch { return []; }
+    r = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', 'ls-files', '-z'],
+      { cwd: txDir, env: gitEnv(), encoding: 'utf8', timeout: GIT_TRACKED_TIMEOUT_MS, windowsHide: true, maxBuffer: __testHooks.gitMaxBuffer });
+  } catch (e) { r = { error: e }; }
+  if (r.error && r.error.code === 'ENOENT') return { tracked: 0, failed: null }; // git is absent: the named cannot-tell residual
+  if (r.error || r.status !== 0) {
+    if (!repoMarkerAbove(txDir)) return { tracked: 0, failed: null }; // no repository at all (git said so): the same residual
+    return { tracked: 0, failed: r.error ? String(r.error.code || r.error.name || 'error') : r.signal ? `signal ${r.signal}` : `exit ${r.status}` };
+  }
+  const listed = String(r.stdout).split('\0').filter(Boolean);
+  if (listed.length > __testHooks.gitMaxPaths) return { tracked: 0, failed: 'listing too large to examine' };
+  if (!listed.length) return { tracked: 0, failed: null };
+  const physJournal = physicalOrNull(journalPath);
+  const txPhys = physicalOrNull(txDir);
+  if (!physJournal || !txPhys) return { tracked: 0, failed: 'journal path not resolvable' };
+  const physSnap = typeof snapDir === 'string' && snapDir !== '' ? physicalForCreate(snapDir) : null;
+  let tracked = 0;
+  for (const rel of listed) {
+    const phys = physicalOrNull(path.join(txDir, rel));
+    if (phys && (phys === physJournal || (physSnap && containedIn(phys, [txPhys]) && containedIn(phys, [physSnap])))) tracked++; // physSnap is journal-derived: it only NARROWS the trusted tx dir
+  }
+  return { tracked, failed: null };
 }
-// the journal's snapDir as a pathspec relative to the transaction directory, or null when it is not lexically below it (the binding below refuses that case)
-function snapRelUnder(txDir, snapDir) {
-  if (typeof snapDir !== 'string' || snapDir === '') return null;
-  const rel = path.relative(txDir, path.resolve(snapDir));
-  if (rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) return null;
-  return rel.split(path.sep).join('/');
-}
-export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, STAGED_BYTES_MAX };
+export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -1681,8 +1719,9 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 //   'cleaned'      — a terminal journal (committed/rolled-back) was just removed.
 //   'none'         — nothing done. WITH an `error` field this is a REFUSAL (the
 //                    anchor gate, an unreadable/schema-newer journal, an out-of-tx
-//                    snapDir, no verifiable roots, a journal or snapshot git TRACKS
-//                    — R14 D3, counted as `refusedTracked`); WITHOUT one it means there was
+//                    snapDir, no verifiable roots, a journal or snapshot git TRACKS, or
+//                    a git query that could not finish in a repository — R14 D3, counted
+//                    as `refusedTracked`); WITHOUT one it means there was
 //                    no journal at all. A caller that treats those two alike is
 //                    the gaugeLine defect (see cli.mjs).
 // `restored` accompanies 'rolled-back' and 'partial'.
@@ -1725,9 +1764,13 @@ export function recoverDangling(projectRoot, opts = {}) {
     }
     // R14 D3 (interim): a journal or snapshot that git TRACKS came from a repository, never from an interrupted run (see gitTrackedUnder).
     // Before the terminal-status branch on purpose: a tracked file is not ours to delete either, and nothing below may touch it.
-    const trackedPaths = gitTrackedUnder(txDir, [JOURNAL_NAME, snapRelUnder(txDir, journal && journal.snapDir)]);
-    if (trackedPaths.length) {
-      return { recovered: 'none', refusedTracked: trackedPaths.length, error: `the journal or its snapshot is tracked by git (${trackedPaths.length} tracked path(s) under the transaction directory) — refusing to replay: a real crash journal is never committed and a clone delivers only tracked files, so this one came from a repository, not from an interrupted run (left for inspection)` };
+    const gitCheck = gitTrackedRecoveryInputs(txDir, journalPath, journal && journal.snapDir);
+    if (gitCheck.failed) {
+      // fail CLOSED: in a repository, a query that could not finish is not "nothing tracked". The reason is a code (ENOBUFS, ETIMEDOUT, exit N), never repo text.
+      return { recovered: 'none', refusedTracked: 1, error: `git could not say whether the journal or its snapshot is tracked (${gitCheck.failed}) in a project that is a git repository — refusing to replay, failing closed (left for inspection)` };
+    }
+    if (gitCheck.tracked) {
+      return { recovered: 'none', refusedTracked: gitCheck.tracked, error: `the journal or its snapshot is tracked by git (${gitCheck.tracked} tracked path(s) under the transaction directory) — refusing to replay: a real crash journal is never committed and a clone delivers only tracked files, so this one came from a repository, not from an interrupted run (left for inspection)` };
     }
     if (journal.status === 'committed' || journal.status === 'rolled-back') {
       fs.rmSync(journalPath, { force: true });
