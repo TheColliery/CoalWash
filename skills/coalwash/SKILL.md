@@ -4,7 +4,7 @@ description: >-
   Memory washer/defragmenter for agent memory — two lanes: class-B (memory+governance) cleans the FAT, never the MEAT; class-A (transcripts) is byte-identity-only. Fidelity-first: a free mechanical Quick pass + a CODE gate blocking any STRUCTURED-token drop by diff; the paid Full pass is a separate consent; every DELETE/MERGE is plan-sourced + snapshot-backed. Session-start gauge; Fat hysteresis arms OBESE (auto-Quick, standing config, never asks). FULL = the economic cut-point (break-even proven, numbers shown): force-runs Quick; still over → one wizard ask, re-armed on growth. A capacity wall forces FULL (wash-if-fat, else consent, externalize). NO calendar cadence — never loop it. A manual `/coalwash` runs a fat-only, muscle-reorg, or estate pass. localOnly = Quick-only, no sub sees memory content. Honest: slows memory-overhead growth, does NOT eliminate it. Triggers: "/coalwash", "clean memory", "defrag memory", a [CoalWash] band nudge. Cross-agent (Claude Code validated). Zero-dep, offline, no API keys.
 ---
 
-# CoalWash — the memory washer
+# CoalWash
 
 > **Fidelity scope — CLASS-B wash tiers only** (class-A estate = the byte-identity contract two notes down): the gate PROVES every STRUCTURED token that went in came out (the classes at step 3) by mechanical diff; it CANNOT SEE survivors trading places (`pass 878/fail 0` → `pass 0/fail 878` passes it) — re-pairing + load-bearing **prose** facts are the semantic reviewers' + YOUR job, never the gate's. Deletes ride the adjudicated plan, not a separate approval; safety is the transactional apply (snapshot → whole-run rollback; a rollback whose own restore fails reports **partial**, never a silent mixed state). CoalWash **slows** memory-overhead growth — it does not eliminate it.
 

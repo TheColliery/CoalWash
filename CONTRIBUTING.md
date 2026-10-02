@@ -22,7 +22,7 @@ node scripts/verify.mjs         # gate: manifests, factory config vs schema, dis
 node scripts/test.mjs           # zero-dependency test suite (node --test, explicit file list)
 ```
 
-The tracked git hooks (`.githooks/pre-commit`, `.githooks/pre-push`) run `node scripts/verify.mjs` and then `node scripts/test.mjs`, so every commit and push runs the whole suite. `scripts/test.mjs` runs `node --test` at node's default concurrency (one file-child per core) unless `COALWASH_TEST_CONCURRENCY=<n>` is set to a positive integer, which adds `--test-concurrency=<n>`. On a small machine, run a serial, memory-capped suite: set `NODE_OPTIONS=--max-old-space-size=2048` (it has to be in the environment; a flag on the command line does not reach `node --test`'s per-file children) and `COALWASH_TEST_CONCURRENCY=1`. Git hands both on to the hooks, e.g. `COALWASH_TEST_CONCURRENCY=1 NODE_OPTIONS=--max-old-space-size=2048 git commit`.
+The tracked git hooks (`.githooks/pre-commit`, `.githooks/pre-push`) run the house secret scan (`node scripts/secret-gate.mjs`) first, then `node scripts/verify.mjs` and then `node scripts/test.mjs`, so every commit and push is scanned for secrets and runs the whole suite. `scripts/test.mjs` runs `node --test` at node's default concurrency (one file-child per core) unless `COALWASH_TEST_CONCURRENCY=<n>` is set to a positive integer, which adds `--test-concurrency=<n>`. On a small machine, run a serial, memory-capped suite: set `NODE_OPTIONS=--max-old-space-size=2048` (it has to be in the environment; a flag on the command line does not reach `node --test`'s per-file children) and `COALWASH_TEST_CONCURRENCY=1`. Git hands both on to the hooks, e.g. `COALWASH_TEST_CONCURRENCY=1 NODE_OPTIONS=--max-old-space-size=2048 git commit`.
 
 ### Development Rules
 
@@ -59,7 +59,7 @@ Cross-agent by design — the engine is plain Node scripts and class-B discovery
 
 ## 🚀 Releasing (Maintainers)
 
-Bump version in `.claude-plugin/plugin.json` ➡️ add a `CHANGELOG.md` entry ➡️ ensure `verify.mjs` and `test.mjs` pass ➡️ commit ➡️ create a signed git tag (`vX.Y.Z`) ➡️ push ➡️ create a GitHub Release (stable tags only — with ONE named exception: the repo's FIRST public beta tag ships as a prerelease so the Releases panel is never empty at launch; later beta tags are history-only).
+Bump version in `.claude-plugin/plugin.json` ➡️ add a `CHANGELOG.md` entry ➡️ ensure `verify.mjs` and `test.mjs` pass ➡️ commit ➡️ create a signed git tag (`vX.Y.Z`) ➡️ push ➡️ the tag-push workflow (`.github/workflows/create-release.yml`) posts the GitHub Release from the tag's own CHANGELOG entry (stable tags only — with ONE named exception: the repo's FIRST public beta tag ships as a prerelease so the Releases panel is never empty at launch; later beta tags are history-only).
 
 ---
 
