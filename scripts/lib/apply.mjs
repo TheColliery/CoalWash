@@ -112,7 +112,32 @@ export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup 
 // counts real builds of the round-9 Root B memo (apply.test.mjs's CALL
 // COUNT test at the KEEPS-GATE) — a count does not vary by runner, disk, or
 // load.
-export const __testHooks = { normPostTextsBuilds: 0 };
+// CWK-162 (AI Deep Scan B12): the most staged bytes ONE plan may read before any mutation. Each staged file is already bounded by
+// MAX_DOC_BYTES (4 MiB); this bounds the SUM, which the per-file bound never did (a plan is agent-written and has no action-count
+// limit). 64 MiB = 16 files at the per-file bound, about 25 times the WHOLE class-B store (recall tier included) of the largest
+// real project measured here: 2.6 MB over 380 files at the umbrella root, 2026-10-02, the largest single file 340 KB. A plan that
+// rewrote every file of that store would still stage a twenty-fifth of the cap.
+export const STAGED_BYTES_MAX = 16 * MAX_DOC_BYTES;
+
+// CWK-162 (AI Deep Scan B9, B11): git's control directory is never a recovery target. The journal, the manifest and the snapshot
+// that drive recoverDangling all live in <project>/.claude/coalwash, which a clone supplies, and git itself never transmits
+// .git/config or .git/hooks in a clone: a repository author can reach them ONLY through a door like this one (witness: a forged
+// journal rewrote .git/config to `fsmonitor = EVIL-COMMAND`). A path segment names git's control directory when, before any NTFS
+// stream suffix (":..."), it is `.git` or its 8.3 short name `GIT~<n>`, in any case, with any trailing dots and spaces that
+// Windows strips when it resolves the name (so `.git.` and `.git ` are `.git`). `.github`, `.gitignore` and `.gitmodules` are
+// not it. NOT closed here, named: a forged journal can still overwrite any OTHER file inside the trusted roots; that needs the
+// journal to carry provenance (pending decision D3 in scratchpad/r14/cwk162-ruling.md).
+const GIT_SEGMENT = /^(?:\.git|git~\d+)[. ]*$/i;
+function isGitSegment(seg) { return GIT_SEGMENT.test(String(seg).split(':')[0]); }
+function inGitDir(p, roots) {
+  for (const r of roots) {
+    const rel = path.relative(r, p); // callers proved containment already; this finds the segments BELOW the root that holds p
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+    if (rel.split(/[\\/]/).some(isGitSegment)) return true;
+  }
+  return false;
+}
+export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, STAGED_BYTES_MAX };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -891,6 +916,20 @@ export function applyPlan(plan, opts = {}) {
       }
       resolved.push({ ...a, phys });
     }
+    // CWK-162 B12: ONE action per physical target. Every action on a target was staged, snapshotted and gated separately, and the
+    // second always lost to the external-writer check anyway (it sees the first's write): the plan was refused late, after the
+    // work. A merge is a delete of one file plus a rewrite of ANOTHER, never two actions on one path. A create has no file to
+    // canonicalize, so two spellings of one new name are probed on the volume (a miss refuses: the safe direction here).
+    const targetSeen = new Set();
+    const targetSeenLower = new Set();
+    for (const a of resolved) {
+      const lower = a.phys.toLowerCase();
+      if (targetSeen.has(a.phys) || (targetSeenLower.has(lower) && volumeCaseFolds(path.dirname(a.phys), true))) {
+        return { ok: false, error: `plan names the same target more than once: ${a.phys} (one action per file; a merge is a delete of one file plus a rewrite of another)` };
+      }
+      targetSeen.add(a.phys);
+      targetSeenLower.add(lower);
+    }
 
     // ---- staging read + content sniff ----
     // Each rewrite/delete target is read ONCE as raw bytes here — the shared
@@ -900,6 +939,7 @@ export function applyPlan(plan, opts = {}) {
     const flagged = [];
     const isPlaceholder = opts.isPlaceholder || isCloudPlaceholder; // injectable for tests
     let actionable = []; // let: the KEEPS-GATE below may exclude entries (per-file failure, the sniff pattern)
+    let stagedBytes = 0;
     for (const a of resolved) {
       if (a.type === 'create') { actionable.push(a); continue; }
       // #57(d) cloud-placeholder read poison: sniff the dehydrated stub from
@@ -916,6 +956,8 @@ export function applyPlan(plan, opts = {}) {
       const staged = repoReadOutcome(a.phys, null, MAX_DOC_BYTES);
       if (!staged.buf) return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed${staged.why ? `: ${staged.why}` : ''})` };
       const origBuf = staged.buf;
+      stagedBytes += origBuf.length; // CWK-162 B12: the SUM is bounded, not only each file
+      if (stagedBytes > STAGED_BYTES_MAX) return { ok: false, error: `the plan's staged bytes exceed ${STAGED_BYTES_MAX} in total (fail-closed: split the plan, nothing was applied)` };
       if (a.type === 'rewrite') {
         const why = sniffUnrewritable(origBuf);
         if (why) { flagged.push({ path: a.phys, reason: why }); continue; }
@@ -1697,7 +1739,8 @@ export function recoverDangling(projectRoot, opts = {}) {
     // so the manifest is loaded from the bound location, never the raw one.
     const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
     const manifest = JSON.parse(readRepoFileBounded(path.join(snapPhys, 'manifest.json'), null, MAX_DOC_BYTES)); // CWK-137: bounded
-    let restored = 0, failed = 0, refused = 0, refusedPinned = 0;
+    let restored = 0, failed = 0, refused = 0, refusedPinned = 0, refusedGit = 0;
+    const replayed = new Set(); // CWK-162 B8: each distinct target is replayed once, however many manifest rows name it
     for (const m of manifest) {
       const src = path.join(snapPhys, m.snap);
       // A DELETED FILE IS THE ONLY DAMAGE A DELETE-PHASE CRASH LEAVES — deletes run
@@ -1715,6 +1758,12 @@ export function recoverDangling(projectRoot, opts = {}) {
       // CALLER-TRUSTED root (the outer gate a poisoned journal can't widen) AND
       // the journal's own declared roots (secondary narrowing).
       if (!inSnap(src) || !origPhys || !containedIn(origPhys, trustedRoots) || !containedIn(origPhys, jroots)) { refused++; continue; }
+      // CWK-162 B8: the snapshot is taken BEFORE the first mutation of a file, so a legitimate manifest has one row per target and the
+      // first row is the pre-transaction state; a repeated row is waste at best and a stale snapshot at worst.
+      if (replayed.has(origPhys)) continue;
+      replayed.add(origPhys);
+      // CWK-162 B9/B11: never git's control directory (see inGitDir). Counted on its own so the report says what was refused.
+      if (inGitDir(origPhys, trustedRoots)) { refusedGit++; continue; }
       // THE PIN PROMISE RIDES THE RECOVERY DOOR TOO (lab-grad2 N3 — the
       // recovery-paths class, 4th instance in this room). This replay had 7
       // fs-mutation lines and ZERO isPinned sites while the module header
@@ -1747,6 +1796,7 @@ export function recoverDangling(projectRoot, opts = {}) {
         if (!fs.existsSync(step.path)) continue; // never written (or already gone) = nothing to undo
         const p = physicalOrNull(step.path);
         if (!p || !containedIn(p, trustedRoots) || !containedIn(p, jroots)) { refused++; continue; } // exists but out-of-(trusted∩journal)-root = refuse
+        if (inGitDir(p, trustedRoots)) { refusedGit++; continue; } // CWK-162 B9: banking then removing a hook or a config is still a delete of it
         // N3, the delete side: the file at this create path EXISTS (checked
         // above) and carries `pinned: true` — an applyPlan create cannot have
         // produced a pinned file the plan gate would then refuse to touch, so
@@ -1798,8 +1848,8 @@ export function recoverDangling(projectRoot, opts = {}) {
     }
     // Only clear the WAL when the recovery was CLEAN. A partial/refused replay keeps
     // the journal + snapshot for a human (never report a mixed state as done).
-    if (failed || refused || refusedPinned) {
-      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, refusedPinned, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root, ${refusedPinned} refused as pinned; journal + snapshot kept at ${snapDir}` };
+    if (failed || refused || refusedPinned || refusedGit) {
+      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, refusedPinned, refusedGit, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root, ${refusedPinned} refused as pinned, ${refusedGit} refused as inside a .git directory; journal + snapshot kept at ${snapDir}` };
     }
     fs.rmSync(journalPath, { force: true });
     return { recovered: 'rolled-back', restored };

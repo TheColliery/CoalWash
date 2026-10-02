@@ -51,6 +51,17 @@ function planFor(proj, store, actions, extra = {}) {
 const SANDBOX_HOME = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-shared-')));
 after(() => fs.rmSync(SANDBOX_HOME, { recursive: true, force: true }));
 const apply = (plan, opts = {}) => applyPlan(plan, { projectRoot: plan && plan.projectRoot, home: SANDBOX_HOME, ...opts });
+// CWK-162 B12: a plan that names one target twice is refused at plan time, so the old way to make a mutation throw mid-transaction
+// (delete the same file twice: the second rmSync hits ENOENT) no longer reaches the mutation. The same failure is injected: rmSync
+// throws ENOENT for ONE named path. Returns the restore function; call it in a finally.
+function failDeleteOf(target) {
+  const real = fs.rmSync;
+  fs.rmSync = (p, ...rest) => {
+    if (String(p) === target) { const e = new Error(`ENOENT: no such file or directory, rm '${target}'`); e.code = 'ENOENT'; throw e; }
+    return real.call(fs, p, ...rest);
+  };
+  return () => { fs.rmSync = real; };
+}
 
 test('happy path: rewrite + create + approved delete, all-or-nothing artifacts correct', () => {
   const { proj, store } = sandbox();
@@ -98,18 +109,28 @@ test('mid-transaction failure rolls back EVERYTHING (mutated files restored, cre
   const { proj, store } = sandbox();
   try {
     const f1 = path.join(store, 'f1.md');
+    const f2 = path.join(store, 'f2.md');
+    const f3 = path.join(store, 'f3.md');
     write(f1, 'original one');
-    // rewrite f1, create f9, then delete f1 TWICE: the second delete throws
-    // ENOENT mid-transaction -> the whole run must roll back.
-    const r = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f1, content: 'rewritten one' },
-      { type: 'create', path: path.join(store, 'f9.md'), content: 'should vanish' },
-      { type: 'delete', path: f1 },
-      { type: 'delete', path: f1 },
-    ])); // no deletesApproved — rollback-on-delete-path holds without it (item c)
+    write(f2, 'original two');
+    write(f3, 'original three');
+    // rewrite f1, create f9, delete f2 (lands), then delete f3 with the removal made to throw ENOENT mid-transaction -> the whole
+    // run must roll back. (Was: delete f1 TWICE; see failDeleteOf.)
+    const restoreRm = failDeleteOf(f3);
+    let r;
+    try {
+      r = apply(planFor(proj, store, [
+        { type: 'rewrite', path: f1, content: 'rewritten one' },
+        { type: 'create', path: path.join(store, 'f9.md'), content: 'should vanish' },
+        { type: 'delete', path: f2 },
+        { type: 'delete', path: f3 },
+      ])); // no deletesApproved — rollback-on-delete-path holds without it (item c)
+    } finally { restoreRm(); }
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.rolledBack, true);
     assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'original one', 'mutated file restored from snapshot');
+    assert.strictEqual(fs.readFileSync(f2, 'utf8'), 'original two', 'the delete that LANDED before the failure is restored too');
+    assert.strictEqual(fs.readFileSync(f3, 'utf8'), 'original three', 'the file whose removal failed is untouched');
     assert.strictEqual(fs.existsSync(path.join(store, 'f9.md')), false, 'created file removed');
     assert.strictEqual(fs.readdirSync(store).some((n) => n.includes('.coalwash-tmp')), false, 'no tmp litter');
     assert.strictEqual(fs.existsSync(path.join(txDirFor(proj), '.coalwash.lock')), false, 'lock released after rollback');
@@ -1747,13 +1768,18 @@ test('0h: a pure-addition rewrite (nothing removed) banks nothing; a ROLLED-BACK
     assert.strictEqual(ok.ok, true, ok.error);
     assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 0, 'an addition cut nothing -> the bin stays empty');
 
-    // Roll back: the double-delete fixture (the second delete throws mid-txn).
+    // Roll back: a delete whose removal throws mid-txn (injected; the old double-delete fixture is refused at plan time, CWK-162 B12).
     write(f, 'original');
-    const rb = apply(planFor(proj, store, [
-      { type: 'rewrite', path: f, content: 'would-be cut\n' },
-      { type: 'delete', path: f },
-      { type: 'delete', path: f },
-    ]));
+    const g = path.join(store, 'g.md');
+    write(g, 'g original');
+    const restoreRm = failDeleteOf(g);
+    let rb;
+    try {
+      rb = apply(planFor(proj, store, [
+        { type: 'rewrite', path: f, content: 'would-be cut\n' },
+        { type: 'delete', path: g },
+      ]));
+    } finally { restoreRm(); }
     assert.strictEqual(rb.ok, false);
     assert.strictEqual(rb.rolledBack, true);
     assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 0, 'a rolled-back run cut nothing -> nothing banked');
@@ -2141,24 +2167,28 @@ test('BREAK B: a rollback that cannot remove a created file reports PARTIAL, nev
   const { proj, store } = sandbox();
   const created = path.join(store, 'created.md');
   const f1 = path.join(store, 'f1.md');
+  const f2 = path.join(store, 'f2.md');
   write(f1, 'f1 original');
+  write(f2, 'f2 original');
   // Make ONLY the created file's removal FAIL during rollback (the held-handle
   // hazard). Patch fs.rmSync to throw for that exact path; everything else (the
   // delete step, the lock release, the tmp/snapshot sweeps) delegates to the
   // real rm — same monkey-patch shape the #57 EXDEV test uses on renameSync.
+  // The same patch also makes the removal of f2 throw ENOENT mid-transaction (CWK-162 B12: this fixture used to delete f1 TWICE).
   const origRm = fs.rmSync;
   fs.rmSync = (p, ...rest) => {
     if (String(p) === created) { const e = new Error('EPERM: operation not permitted'); e.code = 'EPERM'; throw e; }
+    if (String(p) === f2) { const e = new Error('ENOENT: no such file or directory'); e.code = 'ENOENT'; throw e; }
     return origRm.call(fs, p, ...rest);
   };
   let r;
   try {
-    // create `created`, then delete f1 TWICE: the second delete throws ENOENT
+    // create `created`, delete f1 (lands), then delete f2 -> its removal throws ENOENT
     // mid-txn -> rollback runs -> it restores f1 (ok) but CANNOT rm `created`.
     r = apply(planFor(proj, store, [
       { type: 'create', path: created, content: 'partial creation' },
       { type: 'delete', path: f1 },
-      { type: 'delete', path: f1 },
+      { type: 'delete', path: f2 },
     ]));
   } finally { fs.rmSync = origRm; }
   try {
@@ -3798,5 +3828,157 @@ test('CWK-156 NFD: where the NFC and NFD spellings are TWO files, a keep on one 
     // NON-VACUITY: the gate is live on this volume -- erasing the anchor in the keep's OWN file is still excluded.
     const r2 = apply(planFor(proj, path.dirname(nfc), [{ type: 'rewrite', path: nfc, content: 'The pinned clause: (compressed).' }]));
     assert.ok(r2.flagged.some((f) => /keep enforcement/.test(f.reason)), 'control: the keep still binds its own file');
+  } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-162 unit C6 (AI Deep Scan B9 + B11 + B8 + B12): recoverDangling treated every file inside the project root as an eligible
+// restore target, .git included, on the word of a journal, manifest and snapshot that all live in the repo-controlled
+// .claude/coalwash dir (witness on the 0cde430 source: `recovered: rolled-back, restored: 2`, .git/config now reads
+// `fsmonitor = EVIL-COMMAND`, .git/hooks/pre-commit reads `EVIL-HOOK`); a repeated manifest row was replayed every time (5,000
+// rows, ONE target = 5,000 copyFileSync calls); and a plan naming one target 40 times was staged and snapshotted 40 times.
+// The authority half (who may authorize a recovery at all) is NOT closed here: it is returned as pending decision D3.
+// ---------------------------------------------------------------------------
+function forgeJournal(proj, rows, steps = [], rowFiles = true) {
+  const tx = path.join(proj, '.claude', 'coalwash');
+  const snap = path.join(tx, 'snap-1');
+  write(path.join(snap, 'snap.complete'), '1');
+  if (rowFiles) rows.forEach((r, i) => write(path.join(snap, `f${i}`), r.bytes));
+  write(path.join(snap, 'manifest.json'), JSON.stringify(rows.map((r, i) => ({ snap: rowFiles ? `f${i}` : 'f0', original: r.original }))));
+  write(path.join(tx, 'journal.json'), JSON.stringify({ version: 1, status: 'pending', snapDir: snap, roots: [proj], steps }));
+  return { tx, snap };
+}
+
+test('CWK-162 B9/B11: a forged journal cannot restore over .git/config or .git/hooks -- the .git targets are refused and counted, a legitimate target in the same manifest is still restored', () => {
+  const { proj, store } = sandbox();
+  try {
+    const gitCfg = path.join(proj, '.git', 'config');
+    const hook = path.join(proj, '.git', 'hooks', 'pre-commit');
+    const nested = path.join(proj, 'sub', '.git', 'config');
+    const legit = path.join(store, 'a.md');
+    write(gitCfg, '[core]\n\tbare = false\n');
+    write(hook, '#!/bin/sh\n# the user\'s own hook\n');
+    write(nested, '[core]\n\tbare = false\n');
+    write(legit, 'current\n');
+    forgeJournal(proj, [
+      { original: gitCfg, bytes: '[core]\n\tfsmonitor = EVIL-COMMAND\n' },
+      { original: hook, bytes: '#!/bin/sh\nEVIL-HOOK\n' },
+      { original: nested, bytes: '[core]\n\tfsmonitor = EVIL-NESTED\n' },
+      { original: legit, bytes: 'original\n' },
+    ]);
+    const r = recoverDangling(proj, { home: SANDBOX_HOME });
+    assert.strictEqual(r.recovered, 'partial', JSON.stringify(r));
+    assert.strictEqual(r.refusedGit, 3, `three .git targets refused: ${JSON.stringify(r)}`);
+    assert.strictEqual(r.restored, 1, 'only the legitimate target is restored');
+    assert.strictEqual(fs.readFileSync(gitCfg, 'utf8'), '[core]\n\tbare = false\n', '.git/config untouched');
+    assert.strictEqual(fs.readFileSync(hook, 'utf8'), '#!/bin/sh\n# the user\'s own hook\n', '.git/hooks/pre-commit untouched');
+    assert.strictEqual(fs.readFileSync(nested, 'utf8'), '[core]\n\tbare = false\n', 'a nested repository\'s .git too');
+    assert.strictEqual(fs.readFileSync(legit, 'utf8'), 'original\n');
+    assert.ok(fs.existsSync(path.join(proj, '.claude', 'coalwash', 'journal.json')), 'a partial recovery keeps the journal for a human');
+  } finally { clean(proj); }
+});
+
+test('CWK-162 B9: the create-undo half cannot remove a file inside .git either (it banks, then removes)', () => {
+  const { proj } = sandbox();
+  try {
+    const victim = path.join(proj, '.git', 'hooks', 'pre-push');
+    write(victim, '#!/bin/sh\n# the user\'s own hook\n');
+    forgeJournal(proj, [], [{ type: 'create', path: victim }], false);
+    const r = recoverDangling(proj, { home: SANDBOX_HOME });
+    assert.strictEqual(r.recovered, 'partial', JSON.stringify(r));
+    assert.strictEqual(r.refusedGit, 1);
+    assert.strictEqual(fs.existsSync(victim), true, 'the hook was not removed');
+  } finally { clean(proj); }
+});
+
+test('CWK-162 B9: which path segments name git\'s control directory -- .git in any case, its 8.3 alias, NTFS trailing dots and spaces and stream suffixes; .github and .gitignore are not it', () => {
+  const isGit = __testHooks.isGitSegment;
+  assert.strictEqual(typeof isGit, 'function', '__testHooks.isGitSegment exists');
+  for (const seg of ['.git', '.GIT', '.Git', 'GIT~1', 'git~12', '.git.', '.git ', '.git. .', '.git::$INDEX_ALLOCATION', '.git:$I30:$INDEX_ALLOCATION']) assert.strictEqual(isGit(seg), true, `${JSON.stringify(seg)} is git's`);
+  for (const seg of ['.github', '.gitignore', '.gitattributes', '.gitmodules', 'git', 'gitx', 'git~', 'my.git', 'x.git', '.git-keep', 'git~1x', '']) assert.strictEqual(isGit(seg), false, `${JSON.stringify(seg)} is not`);
+});
+
+test('CWK-162 B8: a manifest that names ONE target on 5,000 rows is replayed once (witness: 5,000 copyFileSync calls)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'a.md');
+    write(f, 'current\n');
+    const rows = Array.from({ length: 5000 }, () => ({ original: f }));
+    forgeJournal(proj, rows, [], false);
+    write(path.join(proj, '.claude', 'coalwash', 'snap-1', 'f0'), 'original\n');
+    const real = fs.copyFileSync;
+    let copies = 0;
+    fs.copyFileSync = (...a) => { copies++; return real.apply(fs, a); };
+    let r;
+    try { r = recoverDangling(proj, { home: SANDBOX_HOME }); } finally { fs.copyFileSync = real; }
+    assert.strictEqual(r.recovered, 'rolled-back', JSON.stringify(r));
+    assert.strictEqual(r.restored, 1, 'one distinct target, one restore');
+    assert.ok(copies <= 1, `copyFileSync calls: ${copies}`);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), 'original\n');
+  } finally { clean(proj); }
+});
+
+test('CWK-162 B12: a plan that names one target more than once is refused BEFORE anything is snapshotted (witness: 40 actions on one file = a 40-row snapshot manifest)', () => {
+  const { proj, store } = sandbox();
+  try {
+    const f = path.join(store, 'a.md');
+    const body = 'one two three\n'.repeat(50);
+    write(f, body);
+    const plan = planFor(proj, store, Array.from({ length: 40 }, () => ({ type: 'rewrite', path: f, content: `${body}extra\n` })));
+    const r = apply(plan);
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /more than once/);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), body, 'untouched');
+    const tx = path.join(proj, '.claude', 'coalwash');
+    const snaps = fs.existsSync(tx) ? fs.readdirSync(tx).filter((n) => n.startsWith('snap-')) : [];
+    assert.deepStrictEqual(snaps, [], 'no snapshot was written for a refused plan');
+  } finally { clean(proj); }
+});
+
+test('CWK-162 B12: rewrite + delete of one file, and two creates of one path, are the same refusal; a merge (delete of ANOTHER file + rewrite) is not', () => {
+  const { proj, store } = sandbox();
+  try {
+    const a = path.join(store, 'a.md');
+    const b = path.join(store, 'b.md');
+    const c = path.join(store, 'c.md');
+    write(a, 'alpha\n'); write(b, 'beta\n');
+    const rd = apply(planFor(proj, store, [{ type: 'rewrite', path: a, content: 'alpha2\n' }, { type: 'delete', path: a }]));
+    assert.strictEqual(rd.ok, false); assert.match(rd.error, /more than once/);
+    const cc = apply(planFor(proj, store, [{ type: 'create', path: c, content: 'x\n' }, { type: 'create', path: c, content: 'y\n' }]));
+    assert.strictEqual(cc.ok, false); assert.match(cc.error, /more than once/);
+    assert.strictEqual(fs.existsSync(c), false);
+    const merge = apply(planFor(proj, store, [{ type: 'rewrite', path: a, content: 'alpha\nbeta\n' }, { type: 'delete', path: b }]));
+    assert.strictEqual(merge.ok, true, merge.error);
+  } finally { clean(proj); }
+});
+
+test('CWK-162 B12: two creates whose names differ only by case are one target on a case-folding volume (probed on the volume; skips visibly where it does not fold)', (t) => {
+  const { proj, store } = sandbox();
+  try {
+    write(path.join(store, 'probe-fold.md'), 'x');
+    if (!fs.existsSync(path.join(store, 'PROBE-FOLD.MD'))) { t.skip('this volume does not fold case'); return; }
+    const r = apply(planFor(proj, store, [{ type: 'create', path: path.join(store, 'New.md'), content: 'x\n' }, { type: 'create', path: path.join(store, 'NEW.md'), content: 'y\n' }]));
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /more than once/);
+  } finally { clean(proj); }
+});
+
+test('CWK-162 B12: a plan whose staged bytes exceed STAGED_BYTES_MAX is refused at staging, before any mutation', () => {
+  const { proj, store } = sandbox();
+  try {
+    assert.strictEqual(typeof __testHooks.STAGED_BYTES_MAX, 'number', '__testHooks.STAGED_BYTES_MAX exists');
+    const per = 4 * 1024 * 1024; // MAX_DOC_BYTES: the per-file read bound
+    const n = Math.floor(__testHooks.STAGED_BYTES_MAX / per) + 1;
+    const files = [];
+    for (let i = 0; i < n; i++) {
+      const f = path.join(store, `big${i}.md`);
+      const fd = fs.openSync(f, 'w');
+      try { fs.writeSync(fd, `# big ${i}\n`); fs.ftruncateSync(fd, per); } finally { fs.closeSync(fd); }
+      files.push(f);
+    }
+    const r = apply(planFor(proj, store, files.map((f) => ({ type: 'delete', path: f }))));
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /staged/i);
+    for (const f of files) assert.strictEqual(fs.existsSync(f), true, `${path.basename(f)} untouched`);
   } finally { clean(proj); }
 });
