@@ -1015,23 +1015,19 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 // edge is not the same kind of escalation `estate.deleteCold` is -- which is
 // why only the boolean is clamped here.
 //
-// `estate.purgeAfterDays` is DELIBERATELY NOT listed below (a named decline,
-// not an oversight, and NOT because "deleteCold already gates it" -- that
-// claim is false, per the WARM-band reasoning above). The real reason: (1)
-// the action it paces (WARM's archive-then-remove-original) was never
-// consent-gated to begin with, so a project shifting its boundary is not
-// unlocking a new capability the way a `deleteCold` escalation would; (2) a
-// SENTINEL HAZARD makes it unsafe to clamp with the ordered-list mechanism
-// this file already has: `0` means "never becomes cold" (estate-archive.mjs
-// resolveEstateCfg's own comment) -- the WIDEST possible WARM window, since
-// nothing ever graduates out of WARM's unconditional archive-then-delete
-// into COLD's report-only rest state -- yet `0` sits at the schema's
-// numeric FLOOR, where an ordinary safer-index clamp would read it as the
-// SAFEST value. Safety here is not monotone in the raw number (narrowest,
-// safest WARM window sits NEAR `compressAfterDays`; it widens again toward
-// either extreme), so SAFER_ENUM's ordered-list pattern cannot be reused
-// as-is. Left as a named, flagged decline rather than force-fit a clamp
-// shape that would silently mis-rank the sentinel.
+// CWK-162 (AI Deep Scan B10, B4): the decline that stood here was HALF wrong, and is amended where it stood.
+// `estate.purgeAfterDays` as a NUMBER is still not clamped by the ordered-list mechanism: safety is not monotone in the raw
+// number, and `0` sits at the numeric FLOOR, where that mechanism would read it as the safest value. But the premise that a
+// project shifting the boundary "is not unlocking a new capability" is false for the sentinel itself. `0` means "never becomes
+// cold" (estate-archive.mjs resolveEstateCfg), which sends EVERY aged session to the WARM band, whose original is removed after
+// the verified archive: a session the user's global `deleteCold: false` keeps in place becomes one that is archived and removed,
+// which is exactly the transition `deleteCold` exists to gate. So mergeObjectKey ignores a project `purgeAfterDays: 0` unless the
+// EFFECTIVE `deleteCold` (after the clamp above) is already true; every other value stays plain project-wins, as before.
+// `estate.runBudget` follows the same finding: it paces how MUCH one user-invoked estate run does, and a project can only LOWER
+// it (the smaller of the two per field, against the user's own global value or the schema default). hooks-safety.md section 9
+// declined numeric rate dials because the action they pace is already gated by an enum the clamp covers; a user-invoked estate
+// run has no such enum, so this dial is the exception that reason itself names. That paragraph is the CoalWorks zone's and is
+// not edited here (pending decision D2 in scratchpad/r14/cwk162-ruling.md).
 const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
 
 // CWK-137 D3 (head's ruling): sub-keys of an object-typed key that are read from the GLOBAL layer ONLY. Not a consent clamp
@@ -1076,6 +1072,30 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
       // (the escalated value, OR junk -- K1's "junk gets no say") only wins
       // if the effective global itself already holds it.
       merged[subKey] = pv === undefined ? gv : (pv === safeValue ? safeValue : gv);
+    }
+  }
+  if (key === 'estate') {
+    // CWK-162 B4: a project runBudget can only LOWER each limit. Effective global = the user's valid number, else the schema
+    // default (also when the whole global file is unreadable: the user's stance is unknown). Junk gets no say.
+    if (p.runBudget !== undefined) {
+      if (!isPlainObject(p.runBudget)) {
+        if (g.runBudget === undefined) delete merged.runBudget; else merged.runBudget = g.runBudget;
+      } else {
+        const gRB = !globalUnreadable && isPlainObject(g.runBudget) ? g.runBudget : {};
+        const def = isPlainObject(SCHEMA_DEFAULT.estate) && isPlainObject(SCHEMA_DEFAULT.estate.runBudget) ? SCHEMA_DEFAULT.estate.runBudget : {};
+        const rb = { ...gRB };
+        for (const f of ['maxSessionsPerRun', 'maxBytesPerRun']) {
+          const pv = p.runBudget[f];
+          if (typeof pv !== 'number' || !Number.isFinite(pv)) continue;
+          const gv = Number.isFinite(gRB[f]) ? gRB[f] : def[f];
+          if (Number.isFinite(gv)) rb[f] = Math.min(pv, gv);
+        }
+        merged.runBudget = rb;
+      }
+    }
+    // CWK-162 B10: a project's "never becomes cold" (0) is honored only where the user's effective deleteCold is already true.
+    if (p.purgeAfterDays === 0 && merged.deleteCold !== true) {
+      if (!globalUnreadable && g.purgeAfterDays !== undefined) merged.purgeAfterDays = g.purgeAfterDays; else delete merged.purgeAfterDays;
     }
   }
   // CWK-137 D3: a global-only sub-key takes the GLOBAL layer's value or is ABSENT (never the project's). An unreadable global

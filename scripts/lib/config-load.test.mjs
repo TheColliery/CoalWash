@@ -1754,3 +1754,58 @@ test('CWK-137 D3 hint: nothing to report when the project carries no archiveDir,
     assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'an unreadable project is absent, exactly as the merge treats it');
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// CWK-162 unit C8 (AI Deep Scan B4 + B10): a project config (it ships with a cloned repo, hooks-safety.md section 9) could raise
+// the estate run's work limits above the user's global ones, and `estate.purgeAfterDays: 0` ("never becomes cold") sent every aged
+// session to the WARM band, whose original is removed after the verified archive, past a global `deleteCold: false`.
+// Witness on the 0cde430 source (scratchpad/r14/witness-prefix.txt): global maxSessionsPerRun=5 / purgeAfterDays=90 / deleteCold=false,
+// project 100000 / 0 -> merged 100000 / 0.
+// ---------------------------------------------------------------------------
+const RB_DEFAULT = { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 }; // the schema default (config-schema.mjs, estate.runBudget)
+
+test('CWK-162 B4: a project estate.runBudget can only LOWER the work limits -- the smaller of the two per field (witness: 5 -> 100000)', () => {
+  const g = { estate: { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 5000000 } } };
+  const up = mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: 100000, maxBytesPerRun: 999999999999 } } }).estate.runBudget;
+  assert.deepStrictEqual(up, { maxSessionsPerRun: 5, maxBytesPerRun: 5000000 }, 'a higher project value never widens the user\'s limit');
+  const down = mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: 2, maxBytesPerRun: 2000000 } } }).estate.runBudget;
+  assert.deepStrictEqual(down, { maxSessionsPerRun: 2, maxBytesPerRun: 2000000 }, 'a lower project value is honored (quietening is always allowed)');
+  const mixed = mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: 2, maxBytesPerRun: 999999999999 } } }).estate.runBudget;
+  assert.deepStrictEqual(mixed, { maxSessionsPerRun: 2, maxBytesPerRun: 5000000 }, 'each field is judged on its own');
+  const equal = mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: 5 } } }).estate.runBudget;
+  assert.deepStrictEqual(equal, { maxSessionsPerRun: 5, maxBytesPerRun: 5000000 }, 'equal is a no-op and an absent field keeps the global one');
+});
+
+test('CWK-162 B4: with NO global runBudget the schema default is the ceiling, and an unreadable global file means the default too', () => {
+  const wide = { estate: { runBudget: { maxSessionsPerRun: 100000, maxBytesPerRun: 999999999999 } } };
+  assert.deepStrictEqual(mergeSafety({}, wide).estate.runBudget, RB_DEFAULT, 'no global value: the default stands, not the project\'s');
+  assert.deepStrictEqual(mergeSafety({ estate: { runBudget: { maxSessionsPerRun: 5000 } } }, wide, { globalUnreadable: true }).estate.runBudget, RB_DEFAULT, 'an unreadable global file: the user\'s stance is unknown, so the default');
+  assert.strictEqual(mergeSafety({}, { estate: { runBudget: { maxSessionsPerRun: 10 } } }).estate.runBudget.maxSessionsPerRun, 10, 'and a LOWER project value still wins over the default');
+});
+
+test('CWK-162 B4: junk in a project runBudget gets no say (a string, NaN, a non-object runBudget)', () => {
+  const g = { estate: { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 5000000 } } };
+  assert.deepStrictEqual(mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: '1', maxBytesPerRun: null } } }).estate.runBudget, g.estate.runBudget);
+  assert.deepStrictEqual(mergeSafety(g, { estate: { runBudget: 7 } }).estate.runBudget, g.estate.runBudget, 'a non-object runBudget does not replace the global object');
+});
+
+test('CWK-162 B10: a project purgeAfterDays 0 is ignored unless the EFFECTIVE deleteCold is already true (witness: 90 -> 0 past a global deleteCold:false)', () => {
+  const closed = { estate: { deleteCold: false, purgeAfterDays: 90 } };
+  const m = mergeSafety(closed, { estate: { purgeAfterDays: 0 } }).estate;
+  assert.strictEqual(m.purgeAfterDays, 90, 'the global value stands');
+  assert.strictEqual(m.deleteCold, false);
+  // the pair attack: the project also asks deleteCold:true, which the existing clamp already refuses, so the 0 stays ignored too
+  const pair = mergeSafety(closed, { estate: { deleteCold: true, purgeAfterDays: 0 } }).estate;
+  assert.strictEqual(pair.deleteCold, false);
+  assert.strictEqual(pair.purgeAfterDays, 90);
+  // no global purgeAfterDays at all: the 0 must not survive (the default applies downstream)
+  assert.notStrictEqual(mergeSafety({}, { estate: { purgeAfterDays: 0 } }).estate.purgeAfterDays, 0);
+  assert.notStrictEqual(mergeSafety({ estate: { deleteCold: true } }, { estate: { purgeAfterDays: 0 } }, { globalUnreadable: true }).estate.purgeAfterDays, 0, 'an unreadable global file reads deleteCold as false');
+});
+
+test('CWK-162 B10 control: with the user\'s own deleteCold true a project 0 is honored, a global 0 is never touched, and every other purgeAfterDays value stays plain project-wins', () => {
+  assert.strictEqual(mergeSafety({ estate: { deleteCold: true, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 0 } }).estate.purgeAfterDays, 0, 'the user already opted in to cold deletes');
+  assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 0 } }, {}).estate.purgeAfterDays, 0, 'the user\'s own global 0 is theirs');
+  assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 1 } }).estate.purgeAfterDays, 1, 'a non-sentinel value is unchanged');
+  assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 400 } }).estate.purgeAfterDays, 400);
+});
