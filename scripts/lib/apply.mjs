@@ -55,6 +55,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zero-dep builtin)
+import { spawnSync } from 'node:child_process'; // R14 D3 only: the one optional `git ls-files` in gitTrackedUnder (recoverDangling; never a hook path)
+import { gitEnv } from './git-env.mjs'; // the room's one GIT_*-stripping helper (CWK-133), shipped since R14 D3
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
@@ -137,6 +139,35 @@ function inGitDir(p, roots) {
     if (rel.split(/[\\/]/).some(isGitSegment)) return true;
   }
   return false;
+}
+// R14 D3 (the interim, pending the provenance unit): a real crash journal is never committed, and a clone delivers ONLY the files git
+// tracks, so a journal or snapshot that git tracks in the project came from a repository, not from an interrupted run. recoverDangling
+// refuses to replay it (`refusedTracked`). git is OPTIONAL (no-external-assumption, Phoenix #7's spirit): no git on PATH, a directory that
+// is not a repo, a refusal by git (dubious ownership), a timeout, any non-zero exit all read as "cannot tell", and behaviour is then
+// UNCHANGED. NAMED residual: a download with no git history (a zip, a tarball) still replays; only journal provenance closes that.
+// The command runs from the transaction directory itself, so git reads whichever repository holds the journal (a transaction directory
+// that is its own repository, a submodule, is read as that repository). `--literal-pathspecs` keeps a name from being a pattern;
+// `--no-optional-locks` and `core.fsmonitor=false` keep a repository's own config from running a program or taking a lock.
+const GIT_TRACKED_TIMEOUT_MS = 5000; // `git ls-files` on an index of any realistic project answers in tens of ms; a hang is a "cannot tell"
+// The environment is the room's ONE helper (git-env.mjs, CWK-133): the whole GIT_* family deleted, case-insensitively, so an inherited
+// GIT_DIR / GIT_INDEX_FILE cannot point the check at a different repository. No ceiling is passed: the transaction directory sits
+// INSIDE the repository this must find, which may be an ancestor of the project root.
+function gitTrackedUnder(cwd, rels) {
+  const wanted = rels.filter((r) => typeof r === 'string' && r !== '');
+  if (!wanted.length) return [];
+  try {
+    const r = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', '--literal-pathspecs', 'ls-files', '-z', '--', ...wanted],
+      { cwd, env: gitEnv(), encoding: 'utf8', timeout: GIT_TRACKED_TIMEOUT_MS, windowsHide: true, maxBuffer: 1 << 20 });
+    if (r.error || r.status !== 0) return [];
+    return String(r.stdout).split('\0').filter(Boolean);
+  } catch { return []; }
+}
+// the journal's snapDir as a pathspec relative to the transaction directory, or null when it is not lexically below it (the binding below refuses that case)
+function snapRelUnder(txDir, snapDir) {
+  if (typeof snapDir !== 'string' || snapDir === '') return null;
+  const rel = path.relative(txDir, path.resolve(snapDir));
+  if (rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) return null;
+  return rel.split(path.sep).join('/');
 }
 export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, STAGED_BYTES_MAX };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
@@ -1650,7 +1681,8 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 //   'cleaned'      — a terminal journal (committed/rolled-back) was just removed.
 //   'none'         — nothing done. WITH an `error` field this is a REFUSAL (the
 //                    anchor gate, an unreadable/schema-newer journal, an out-of-tx
-//                    snapDir, no verifiable roots); WITHOUT one it means there was
+//                    snapDir, no verifiable roots, a journal or snapshot git TRACKS
+//                    — R14 D3, counted as `refusedTracked`); WITHOUT one it means there was
 //                    no journal at all. A caller that treats those two alike is
 //                    the gaugeLine defect (see cli.mjs).
 // `restored` accompanies 'rolled-back' and 'partial'.
@@ -1690,6 +1722,12 @@ export function recoverDangling(projectRoot, opts = {}) {
     // tool must not even delete a newer tool's "terminal-looking" journal.
     if (journal && typeof journal === 'object' && Number(journal.version) > 1) {
       return { recovered: 'none', error: `journal schema version ${journal.version} is newer than this CoalWash understands — left untouched (for a newer version, or a human)` };
+    }
+    // R14 D3 (interim): a journal or snapshot that git TRACKS came from a repository, never from an interrupted run (see gitTrackedUnder).
+    // Before the terminal-status branch on purpose: a tracked file is not ours to delete either, and nothing below may touch it.
+    const trackedPaths = gitTrackedUnder(txDir, [JOURNAL_NAME, snapRelUnder(txDir, journal && journal.snapDir)]);
+    if (trackedPaths.length) {
+      return { recovered: 'none', refusedTracked: trackedPaths.length, error: `the journal or its snapshot is tracked by git (${trackedPaths.length} tracked path(s) under the transaction directory) — refusing to replay: a real crash journal is never committed and a clone delivers only tracked files, so this one came from a repository, not from an interrupted run (left for inspection)` };
     }
     if (journal.status === 'committed' || journal.status === 'rolled-back') {
       fs.rmSync(journalPath, { force: true });
