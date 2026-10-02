@@ -19,9 +19,9 @@ import {
   discoverCapacity, markFullClean, armExternalize, externalizableResidue,
   CAPACITY_STANDARD_WINDOW_TOKENS, CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, CAPACITY_DISCOVERY_MIN_TOKENS,
   CAPACITY_FILE_SCHEMA, capacityFilePath,
-  __testHooks,
+  __testHooks, deadProjectStateFiles, rootIsGone, rootState,
 } from './caliper.mjs';
-import { discoverClassB } from './class-b.mjs';
+import { discoverClassB, ccProjectSlug } from './class-b.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR; // hermetic: sandbox home only
 
@@ -2336,4 +2336,177 @@ test('CWK-081 L1: a modelUsage ARRAY is refused by the shape guard (typeof [] ==
     assert.strictEqual(c.discovered, false, 'an array is doubt, and this function fails closed on doubt');
     assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
   } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-157 -- the writer's self-clean for a state file whose recorded project root no longer exists (hooks-safety.md
+// section 8). Fixture HOME under os.tmpdir() only: the real ~/.claude/coal/coalwash/ is never read or written here.
+// ---------------------------------------------------------------------------
+function coalDir(home) { return path.join(home, '.claude', 'coal', 'coalwash'); }
+function plantState(home, root, extra = {}, nameOverride = null) {
+  const dir = coalDir(home);
+  fs.mkdirSync(dir, { recursive: true });
+  const name = nameOverride || `state-${ccProjectSlug(root)}.json`;
+  fs.writeFileSync(path.join(dir, name), JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: root, stamps: [], strayPruneDone: true, ...extra }), 'utf8');
+  return path.join(dir, name);
+}
+// A root that never existed, whose parent (the temp dir) is a reachable directory: provably GONE.
+function goneRoot(tag) { return path.join(fs.realpathSync.native(os.tmpdir()), `cwk157-gone-${tag}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`); }
+
+test('CWK-157: a state file whose recorded project root no longer exists is removed on the next state write; a live root, a foreign file and a bad shape are left alone', () => {
+  const { home, proj } = sandbox();
+  const live = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk157-live-')));
+  try {
+    const dead = plantState(home, goneRoot('a'));
+    const alive = plantState(home, live);
+    // everything below must SURVIVE
+    const dir = coalDir(home);
+    const foreignJson = path.join(dir, 'state-notours.json');
+    fs.writeFileSync(foreignJson, JSON.stringify({ hello: 'world', projectRoot: goneRoot('b') }), 'utf8');        // no stateSchema: not our shape
+    const unparseable = path.join(dir, 'state-unparseable.json');
+    fs.writeFileSync(unparseable, '{ this is not json', 'utf8');
+    const otherName = path.join(dir, 'update-check');
+    fs.writeFileSync(otherName, '12345', 'utf8');
+    const wrongName = plantState(home, goneRoot('c'), {}, 'state-someone-elses-slug.json');                       // name != its recorded root's slug: a planted nomination
+    const relRoot = plantState(home, 'relative/path', {}, 'state-relative-path.json');                          // not an absolute root
+    const eRoot = goneRoot('e');
+    const shapeless = path.join(dir, `state-${ccProjectSlug(eRoot)}.json`);                                    // right NAME for its root, but no stateSchema: not our shape
+    fs.writeFileSync(shapeless, JSON.stringify({ projectRoot: eRoot, note: 'someone else wrote this' }), 'utf8');
+    const bakName = path.join(dir, `state-${ccProjectSlug(goneRoot('d'))}.json.bak`);
+    fs.writeFileSync(bakName, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: goneRoot('d') }), 'utf8'); // not our name pattern
+
+    setLeanFloor(home, proj, 1000); // a state write: the self-clean rides it
+
+    assert.strictEqual(fs.existsSync(dead), false, 'the dead-root state file is gone');
+    for (const [label, p] of [['live root', alive], ['foreign shape', foreignJson], ['unparseable', unparseable], ['other file', otherName], ['wrong slug name', wrongName], ['relative root', relRoot], ['.bak name', bakName], ['right name, no stateSchema', shapeless]]) {
+      assert.strictEqual(fs.existsSync(p), true, `${label} must be left untouched`);
+    }
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 1000, 'the write itself landed');
+  } finally { clean(home, proj, live); }
+});
+
+test('CWK-157 cannot-check means ALIVE: an absent root outside home/temp (a missing drive, an unmounted volume) keeps its file, and any stat error other than ENOENT/ENOTDIR keeps it', () => {
+  const { home, proj } = sandbox();
+  try {
+    // A root whose nearest live ancestor is the FILESYSTEM ROOT (outside the home and temp anchors): the shape a missing
+    // drive letter or an unmounted /Volumes entry leaves behind. Absent root, reachable ancestor, wrong place: keep.
+    const detached = path.join(path.parse(fs.realpathSync.native(os.tmpdir())).root, `cwk157-detached-${process.pid}`, 'proj');
+    assert.strictEqual(rootState(detached), 'absent', 'precondition: the fixture root really is absent');
+    const keptDetached = plantState(home, detached);
+    setLeanFloor(home, proj, 1000);
+    assert.strictEqual(fs.existsSync(keptDetached), true, 'absent but not provably DELETED (no live ancestor inside home/temp): cannot check, so alive');
+    assert.strictEqual(rootIsGone(detached, [home, os.tmpdir()]), false);
+
+    // CONTROL: the same shape INSIDE the temp anchor is dead (the helper is not a constant false).
+    assert.strictEqual(rootIsGone(goneRoot('ctl'), [home, os.tmpdir()]), true, 'absent root, live ancestor inside the temp anchor: dead');
+    assert.strictEqual(rootIsGone(path.join(goneRoot('ctl2'), 'deep', 'er'), [home, os.tmpdir()]), true, 'a whole deleted SUBTREE (parent gone too) is dead as soon as a live ancestor sits inside an anchor');
+    assert.strictEqual(rootIsGone(goneRoot('ctl3'), []), false, 'no anchors, nothing is ever dead');
+
+    // the stat error classes, by injection (an EACCES cannot be built portably)
+    const err = (code) => () => { const e = new Error(code); e.code = code; throw e; };
+    const fsRoot = path.parse(fs.realpathSync.native(os.tmpdir())).root; // an anchor that WOULD admit any ancestor: only the stat answer can keep the file
+    for (const code of ['EACCES', 'EPERM', 'EIO', 'ETIMEDOUT']) {
+      assert.strictEqual(rootState('/x/y', err(code)), 'unknown', `${code}: cannot check`);
+      assert.strictEqual(rootIsGone('/x/y', [fsRoot], err(code)), false, `${code} on the root: alive`);
+    }
+    assert.strictEqual(rootIsGone('/x/y', [fsRoot], err('ENOENT')), true, 'CONTROL: the same call with ENOENT is dead, so the four false answers above come from the stat class and nothing else');
+    assert.strictEqual(rootState('/x/y', err('ENOENT')), 'absent');
+    assert.strictEqual(rootState('/x/y', err('ENOTDIR')), 'absent');
+    assert.strictEqual(rootState(os.tmpdir()), 'present');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-157 oversize: a state-named file over 1 MiB is not parsed and not touched', () => {
+  const { home, proj } = sandbox();
+  try {
+    const big = plantState(home, goneRoot('big'), { pad: 'x'.repeat(1048576 + 10) });
+    assert.ok(fs.statSync(big).size > 1048576, 'precondition: the fixture really is over the cap');
+    setLeanFloor(home, proj, 1000);
+    assert.strictEqual(fs.existsSync(big), true, 'over the size cap: left alone');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-157 bound (Phoenix #3): the sweep runs at most once per 24 h per project -- the stamp rides the state record, and an aged stamp re-arms it', () => {
+  const { home, proj } = sandbox();
+  try {
+    __testHooks.reset();
+    setLeanFloor(home, proj, 1);                         // write #1: due (no stamp yet) -> sweeps
+    assert.strictEqual(__testHooks.deadStateSweepCalls, 1);
+    const stamp = loadState(proj, home).deadStateSweepAt;
+    assert.ok(Number.isFinite(stamp) && stamp > 0, 'the stamp is persisted in the project state');
+
+    const later = plantState(home, goneRoot('later'));
+    setLeanFloor(home, proj, 2);                         // write #2 inside the window: must NOT sweep
+    assert.strictEqual(__testHooks.deadStateSweepCalls, 1, 'second write inside 24 h does not sweep');
+    assert.strictEqual(fs.existsSync(later), true, 'a file that went dead after the sweep waits for the next window');
+
+    const p = statePath(proj, home);
+    const cur = JSON.parse(fs.readFileSync(p, 'utf8'));
+    cur.deadStateSweepAt = Date.now() - 25 * 3600 * 1000; // age the stamp past the window
+    fs.writeFileSync(p, JSON.stringify(cur), 'utf8');
+    setLeanFloor(home, proj, 3);                         // write #3: due again
+    assert.strictEqual(__testHooks.deadStateSweepCalls, 2, 'an aged stamp re-arms the sweep');
+    assert.strictEqual(fs.existsSync(later), false, 'and it collects the file that went dead meanwhile');
+
+    // a stamp from the FUTURE (clock skew) must not suppress the sweep forever
+    const cur2 = JSON.parse(fs.readFileSync(p, 'utf8'));
+    cur2.deadStateSweepAt = Date.now() + 10 * 24 * 3600 * 1000;
+    fs.writeFileSync(p, JSON.stringify(cur2), 'utf8');
+    setLeanFloor(home, proj, 4);
+    assert.strictEqual(__testHooks.deadStateSweepCalls, 3, 'a future stamp reads as due');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-157: the project being WRITTEN is never swept, even if its own recorded root is gone (the sweep must not eat the write it rides on)', () => {
+  const { home } = sandbox();
+  try {
+    const ghost = goneRoot('own');
+    setLeanFloor(home, ghost, 777);
+    assert.strictEqual(loadState(ghost, home).leanFloorTokens, 777, 'the state just written for a root that is gone is still there');
+  } finally { clean(home); }
+});
+
+test('CWK-157: a coal/coalwash directory that is a LINK out of the sandbox is not swept through (realpath-and-contain before any rm)', (t) => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk157-outside-')));
+  try {
+    const coalParent = path.join(home, '.claude', 'coal');
+    fs.mkdirSync(coalParent, { recursive: true });
+    try { fs.symlinkSync(outside, path.join(coalParent, 'coalwash'), 'junction'); } catch (e) { t.skip(`junction creation unavailable here: ${e.code}`); return; }
+    const victim = path.join(outside, `state-${ccProjectSlug(goneRoot('lnk'))}.json`);
+    const root = goneRoot('lnk2');
+    fs.writeFileSync(path.join(outside, `state-${ccProjectSlug(root)}.json`), JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: root }), 'utf8');
+    setLeanFloor(home, proj, 1000);
+    assert.strictEqual(fs.existsSync(path.join(outside, `state-${ccProjectSlug(root)}.json`)), true, 'a state-shaped file reached THROUGH a link out of the sandbox is not deleted');
+    assert.strictEqual(fs.existsSync(victim), false, 'precondition: the other name was never created');
+  } finally { clean(home, proj, outside); }
+});
+
+test('CWK-157: a state-named LINK is not swept (lstat: a link is never a regular file), even when it points at a state-shaped file for a root that is gone', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = coalDir(home);
+    fs.mkdirSync(dir, { recursive: true });
+    const root = goneRoot('lnk3');
+    const target = path.join(proj, 'elsewhere.json');
+    fs.writeFileSync(target, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: root }), 'utf8');
+    const link = path.join(dir, `state-${ccProjectSlug(root)}.json`);
+    try { fs.symlinkSync(target, link, 'file'); } catch (e) { t.skip(`file symlink creation unavailable here: ${e.code} (the leg runs on Linux and macOS CI)`); return; }
+    setLeanFloor(home, proj, 1000);
+    assert.strictEqual(fs.lstatSync(link).isSymbolicLink(), true, 'the link is still there');
+    assert.strictEqual(fs.existsSync(target), true, 'and so is its target');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-157 dry derivation: deadProjectStateFiles names what WOULD go and deletes nothing', () => {
+  const { home, proj } = sandbox();
+  const live = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk157-live-')));
+  try {
+    const dead = plantState(home, goneRoot('dry'));
+    plantState(home, live);
+    const found = deadProjectStateFiles(home);
+    assert.deepStrictEqual(found.map((c) => c.file), [dead]);
+    assert.strictEqual(fs.existsSync(dead), true, 'read-only: the file is still there');
+    assert.deepStrictEqual(deadProjectStateFiles(path.join(home, 'no-such-home')), [], 'an absent namespace is an empty answer, never a throw');
+  } finally { clean(home, proj, live); }
 });

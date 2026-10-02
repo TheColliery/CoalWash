@@ -1104,7 +1104,8 @@ function rmdirIfEmpty(dir) {
 // one thing that is both load-independent and cannot pass vacuously.
 export const __testHooks = {
   strayPruneCalls: 0,
-  reset() { this.strayPruneCalls = 0; },
+  deadStateSweepCalls: 0, // CWK-157: the dead-root sweep below is bounded by a stamp; counting calls is the load-independent pin
+  reset() { this.strayPruneCalls = 0; this.deadStateSweepCalls = 0; },
 };
 
 // Self-clean CW's OWN pre-fix scatter (no-old-version-leftover, rc.3 precedent):
@@ -1159,6 +1160,96 @@ function pruneStrayStateDirs(projectRoot, home) {
   } catch { /* fail-silent — cleanup is best-effort, never blocks a write */ }
 }
 
+// CWK-157 -- the writer's self-clean for a state file keyed by a project root that has VANISHED (hooks-safety.md section 8:
+// self-clean the tool's own stray state on write). pruneStrayStateDirs above covers a stray cwd INSIDE a live project; a state
+// file for a root that no longer exists at all (a deleted worktree, a removed checkout, a temp fixture) was never collected,
+// and the coal/coalwash/ namespace carried 16 such tombstones of 20 (main's survey 2026-09-26).
+//
+// NARROW BY CONSTRUCTION -- every clause below is a reason a file is LEFT ALONE:
+//   - only a regular file (lstat: never a link) in OUR directory, named `state-<slug>.json`, at most 1 MiB;
+//   - it must parse as an object carrying OUR shape: an integer `stateSchema` and an absolute `projectRoot` string, and its
+//     name must BE that root's own slug (the anti-plant check pruneStrayStateDirs uses: a planted file cannot nominate
+//     another file for deletion). Foreign, unparseable, oversized or shapeless = untouched;
+//   - the root is DEAD only by rootIsGone's three-part test below (absent, nearest live ancestor reachable, and that ancestor
+//     inside the user's home or the OS temp dir). EACCES, EPERM, EIO, a timeout, a missing drive, an unmounted volume or an
+//     offline share all read "cannot check", and cannot check means ALIVE: keep.
+// Read-only half (deadProjectStateFiles) is exported so the head can list what WOULD go without deleting anything.
+const STATE_FILE_RE = /^state-[A-Za-z0-9-]+\.json$/;
+const STATE_FILE_MAX_BYTES = 1048576;
+// What stat says about a path: 'present', 'absent' (ENOENT/ENOTDIR only) or 'unknown' (EACCES, EPERM, EIO, a timeout ...).
+// `statSyncFn` is a test seam (an injected EACCES cannot be built portably); production passes nothing.
+export function rootState(root, statSyncFn = fs.statSync) {
+  try { statSyncFn(root); return 'present'; } catch (e) {
+    return e && (e.code === 'ENOENT' || e.code === 'ENOTDIR') ? 'absent' : 'unknown';
+  }
+}
+// The nearest EXISTING DIRECTORY above an absent path, or null when the walk meets an 'unknown' answer, a non-directory,
+// or the top of the tree.
+function nearestLiveAncestor(root) {
+  let cur = root;
+  for (;;) {
+    const up = path.dirname(cur);
+    if (up === cur) return null;
+    const st = rootState(up);
+    if (st === 'unknown') return null;
+    if (st === 'present') { try { return fs.statSync(up).isDirectory() ? up : null; } catch { return null; } }
+    cur = up;
+  }
+}
+// DEAD means three things at once, and anything less keeps the file: (1) the root itself is 'absent'; (2) walking up, the
+// nearest directory that still exists is reachable; (3) that directory sits INSIDE one of `anchors` (the user's home and the
+// OS temp dir -- the places this tool's roots live). Clause (3) is how "deleted" is told from "detached": a missing drive
+// letter, an unmounted /Volumes entry or an offline share leaves its nearest live ancestor at (or above) a filesystem root,
+// outside both anchors, so it can never read as dead. NAMED RESIDUAL, the safe direction: a project deleted outright from a
+// second internal drive is kept forever (a ~300-byte file), because that cannot be told from a drive that is not mounted.
+export function rootIsGone(root, anchors, statSyncFn = fs.statSync) {
+  if (rootState(root, statSyncFn) !== 'absent') return false;
+  const anc = nearestLiveAncestor(root);
+  const ancPhys = anc && physicalOrNull(anc);
+  if (!ancPhys) return false;
+  // `roots` = the caller-derived anchors parameter (the user's home and the OS temp dir), physical forms; never read from a file.
+  const roots = (Array.isArray(anchors) ? anchors : []).map(physicalOrNull).filter(Boolean);
+  return containedIn(ancPhys, roots);
+}
+export function deadProjectStateFiles(home = os.homedir()) {
+  const dir = path.join(claudeBaseDir(home), 'coal', 'coalwash');
+  const out = [];
+  const anchors = [home, os.tmpdir()];
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return out; }
+  for (const name of names) {
+    if (!STATE_FILE_RE.test(name)) continue;
+    const file = path.join(dir, name);
+    try {
+      const st = fs.lstatSync(file);
+      if (!st.isFile() || st.size > STATE_FILE_MAX_BYTES) continue;
+      const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!j || typeof j !== 'object' || Array.isArray(j) || !Number.isInteger(j.stateSchema)) continue;
+      const rec = j.projectRoot;
+      if (typeof rec !== 'string' || !rec || !path.isAbsolute(rec)) continue;
+      if (name !== `state-${ccProjectSlug(rec)}.json`) continue; // the file must BE that root's own state file
+      if (rootIsGone(rec, anchors)) out.push({ file, name, projectRoot: rec });
+    } catch { /* unreadable / unparseable / vanished: not ours to judge, keep */ }
+  }
+  return out;
+}
+// BOUND (Phoenix #3): a sweep is a readdir plus one small read and one stat per candidate, so it runs at most once per
+// DEAD_SWEEP_EVERY_MS per project -- the stamp rides the state record saveState already holds (zero extra reads on the
+// ordinary write). Version-STABLE bookkeeping, no field's semantics change, so no STATE_SCHEMA bump.
+const DEAD_SWEEP_EVERY_MS = 24 * 60 * 60 * 1000;
+function sweepDeadProjectStates(home, projectRoot) {
+  __testHooks.deadStateSweepCalls++;
+  try {
+    const base = claudeBaseDir(home);
+    const mine = `state-${ccProjectSlug(projectRoot)}.json`;
+    for (const c of deadProjectStateFiles(home)) {
+      if (c.name === mine) continue;                       // never the project being written
+      if (!containedNewPath(c.file, base)) continue;       // realpath-and-contain before ANY rm (junction escape)
+      try { fs.rmSync(c.file, { force: true }); } catch { /* best-effort */ }
+    }
+  } catch { /* fail-silent -- cleanup is best-effort, never blocks a write */ }
+}
+
 function saveState(proj, projectRoot, home) {
   try {
     const p = statePath(projectRoot, home);
@@ -1180,7 +1271,10 @@ function saveState(proj, projectRoot, home) {
     // version-STABLE bookkeeping — no field's semantics
     // change, so no STATE_SCHEMA bump (this file's own rule).
     const alreadySwept = base.strayPruneDone === true;
-    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true };
+    const nowMs = Date.now();
+    const sinceSweep = nowMs - Number(base.deadStateSweepAt);
+    const deadSweepDue = !(Number.isFinite(sinceSweep) && sinceSweep >= 0 && sinceSweep < DEAD_SWEEP_EVERY_MS); // CWK-157; a future stamp (clock skew) is "due"
+    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
     // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
     // carries (read its comment for the full reasoning; this module cannot import
     // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
@@ -1202,6 +1296,7 @@ function saveState(proj, projectRoot, home) {
     const fb = stateFallbackPath(projectRoot, home);
     if (path.resolve(p) !== path.resolve(fb)) { try { fs.rmSync(fb, { force: true }); } catch { /* best-effort */ } }
     if (!alreadySwept) pruneStrayStateDirs(projectRoot, home);
+    if (deadSweepDue) sweepDeadProjectStates(home, projectRoot); // CWK-157: after our own write, so a failed sweep never costs the write
     return true;
   } catch {
     return false;
