@@ -132,12 +132,13 @@ function isGitSegment(seg) { return GIT_SEGMENT.test(String(seg).split(':')[0]);
 function inGitDir(p, roots) {
   for (const r of roots) {
     const rel = path.relative(r, p); // callers proved containment already; this finds the segments BELOW the root that holds p
-    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+    // a child directory NAMED "..x" is below the root (its .git is git's); only the segment ".." itself, or an absolute rel (another drive), is an escape
+    if (rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) continue;
     if (rel.split(/[\\/]/).some(isGitSegment)) return true;
   }
   return false;
 }
-export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, STAGED_BYTES_MAX };
+export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, STAGED_BYTES_MAX };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)

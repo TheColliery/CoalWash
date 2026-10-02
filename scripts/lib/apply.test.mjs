@@ -3898,6 +3898,25 @@ test('CWK-162 B9: which path segments name git\'s control directory -- .git in a
   for (const seg of ['.github', '.gitignore', '.gitattributes', '.gitmodules', 'git', 'gitx', 'git~', 'my.git', 'x.git', '.git-keep', 'git~1x', '']) assert.strictEqual(isGit(seg), false, `${JSON.stringify(seg)} is not`);
 });
 
+test('CWK-162 B9: inGitDir tells a git control directory BELOW a root from a path that is outside it -- a child directory NAMED "..x" is below the root, never an escape (rot-canary, fire 12)', () => {
+  const inGit = __testHooks.inGitDir;
+  assert.strictEqual(typeof inGit, 'function', '__testHooks.inGitDir exists');
+  const root = path.resolve(SANDBOX_HOME, 'inGitDir-root'); // a pure path compare: nothing is created on disk
+  const roots = [root];
+  // the plain cases the old test never held in one place
+  assert.strictEqual(inGit(path.join(root, '.git', 'config'), roots), true, 'root/.git/config');
+  assert.strictEqual(inGit(path.join(root, 'sub', '.GIT', 'hooks', 'pre-commit'), roots), true, 'a nested repository in any case');
+  assert.strictEqual(inGit(path.join(root, '.github', 'workflows', 'ci.yml'), roots), false, '.github is not it');
+  assert.strictEqual(inGit(path.join(root, 'notes.md'), roots), false, 'an ordinary file');
+  assert.strictEqual(inGit(path.join(path.dirname(root), 'elsewhere', '.git', 'config'), roots), false, 'outside every root: the caller\'s containment check owns that');
+  // the witness: "..x" and "...", "..git" are legal directory names, so a nested repository inside one is BELOW the root
+  for (const dir of ['..x', '...', '..git']) {
+    assert.strictEqual(inGit(path.join(root, dir, '.git', 'config'), roots), true, `${JSON.stringify(dir)}: a directory named so is below the root and its .git is git's`);
+  }
+  // and a REAL escape still is one: the sibling of the root, spelled through ..
+  assert.strictEqual(inGit(path.resolve(root, '..', 'sibling', '.git', 'config'), roots), false, 'an escape is not below the root');
+});
+
 test('CWK-162 B8: a manifest that names ONE target on 5,000 rows is replayed once (witness: 5,000 copyFileSync calls)', () => {
   const { proj, store } = sandbox();
   try {
