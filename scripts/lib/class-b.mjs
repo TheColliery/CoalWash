@@ -44,7 +44,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape, repoEntryKind, repoReadOutcome, readRepoBytesBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape, repoEntryKind, repoReadOutcome, readRepoBytesBounded, volumeCaseFolds, MAX_DOC_BYTES } from './config-load.mjs';
 
 const IMPORT_DEPTH_MAX = 5; // CC @import recursion cap (docs: max 5 hops)
 const RULES_FILE_CAP = 500; // defensive cap on a runaway rules tree
@@ -421,9 +421,26 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // mutation exposure in one move, and leaves the cost REPORTABLE (returned as
   // its own field) rather than invisible.
   const inherited = [];
-  // Windows paths are case-insensitive -> lowercase the dedupe key there ONLY
-  // (lowercasing on POSIX would wrongly merge two case-distinct files).
-  const dedupeKey = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  // CWK-156: two spellings of one path are ONE entry only where the VOLUME folds case
+  // (node/runtime.md section 4: a volume property, never `process.platform` -- wrong in both
+  // directions: APFS folds and is not win32, an fsutil-enabled NTFS directory does not).
+  // `phys` is already canonical (physicalOrNull), so equal strings dedupe with no probe; the
+  // probe runs only when a DIFFERENT spelling with the same lowercase is already seen, which
+  // keeps the SessionStart walk free of extra stats in the ordinary case.
+  // MISS DIRECTION = true (an undecidable probe merges): a merge can only DROP an entry from
+  // the measurement -- this room's stated fail direction is undercount (unseen = unmeasured =
+  // uncut), while a wrong split would hand the wash the same file twice, on a tool that deletes.
+  const seenByLower = new Map(); // lowercased phys -> [phys, ...] already added
+  const isSeen = (phys) => {
+    if (seen.has(phys)) return true;
+    return seenByLower.has(phys.toLowerCase()) && volumeCaseFolds(phys, true);
+  };
+  const markSeen = (phys) => {
+    seen.add(phys);
+    const k = phys.toLowerCase();
+    const bucket = seenByLower.get(k);
+    if (bucket) bucket.push(phys); else seenByLower.set(k, [phys]);
+  };
   // rules-tree entries only, tracked separately for the byte-identical-
   // across-roots cross-check below (relTail = the path under its OWN
   // rules root, forward-slashed — the generalizable pairing key: never
@@ -464,7 +481,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       flags.push(`skipped (outside home/project trees): ${candidate}`);
       return null;
     }
-    if (seen.has(dedupeKey(phys))) return phys;
+    if (isSeen(phys)) return phys;
     const bytes = statBytes(phys);
     if (bytes == null) {
       // Same class, one call later: `phys` canonicalized, so the file EXISTED a
@@ -472,7 +489,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       flags.push(`unstattable file: ${relLabel(phys, [projPhys, homePhys])} — its bytes are NOT counted`);
       return null;
     }
-    seen.add(dedupeKey(phys));
+    markSeen(phys);
     const isInherited = upTree && projPhys && !containedIn(phys, [projPhys]);
     (isInherited ? inherited : entries).push({ path: phys, bytes, scope, kind, alwaysLoaded, managed: false });
     return phys;

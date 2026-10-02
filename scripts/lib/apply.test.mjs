@@ -3737,3 +3737,66 @@ test('CWK-137 F-9: sweepSnapshots removes a committed link entry as a link -- th
     assert.ok(fs.existsSync(path.join(txDir, 'snap-3')), 'the newest snapshot is kept');
   } finally { clean(proj, outside); }
 });
+
+// ---------------------------------------------------------------------------
+// CWK-156, second half: the macOS NFD filename check, which had never been run. macOS normalizes filenames (HFS+ to
+// NFD, APFS preserves the stored form and compares normalization-insensitively), so one file has two spellings there, and
+// a pinned keep recorded under one must still BIND an action that names the file under the other -- the keep is the
+// user's shield and a miss is the bypass direction.
+//
+// DECISION (CWK-156): the engine adds NO filename normalization. Both sides of every keep/plan path compare already go
+// through `physicalOrNull`/`canonicalOrNull` (`fs.realpathSync.native`), which hands back the file's stored spelling on a
+// volume that resolves both -- the same mechanism that makes a case-variant of an existing file compare equal (measured on
+// NTFS; the macOS leg is where this probe runs). Normalizing the comparison KEY on a volume that does not normalize
+// would merge two genuinely different files (NFC and NFD names are two files on ext4 and NTFS), the same two-direction
+// wrongness as folding case on `process.platform`; and it must never touch file CONTENT (node/runtime.md section 4:
+// NFC for filenames only, never NFKC/NFKD). So the volume is PROBED, never the platform name:
+//   - where one file answers to both spellings, the keep must bind (skipped VISIBLY on every other volume);
+//   - where the two spellings are two files, the keep on one must NOT bind the other (runs on NTFS and ext4, pins that
+//     the engine did not grow a normalization the volume does not have).
+// NOT MEASURED HERE: this box is NTFS, so the normalizing leg has not run on a volume that normalizes. If the macOS CI
+// leg goes red on it, realpath did not canonicalize the spelling and the fix is a dev+ino identity fallback in
+// samePathForKeep (the OS's own answer), never a normalization form.
+// ---------------------------------------------------------------------------
+function nfdPair(store) {
+  fs.mkdirSync(store, { recursive: true });
+  const nfc = path.join(store, 'caf\u00e9-pinned.md');
+  const nfd = path.join(store, 'cafe\u0301-pinned.md');
+  return { nfc, nfd };
+}
+
+test('CWK-156 NFD: on a volume that NORMALIZES filenames, a keep recorded under the NFC spelling still BINDS an action naming the same file in NFD', (t) => {
+  const { proj } = sandbox();
+  try {
+    const { nfc, nfd } = nfdPair(path.join(proj, 'nfd-store'));
+    write(nfc, 'The pinned clause: never trust a raw floor value.');
+    let normalizes = false;
+    try { normalizes = fs.statSync(nfc, { bigint: true }).ino === fs.statSync(nfd, { bigint: true }).ino; } catch { normalizes = false; }
+    if (!normalizes) { t.skip('this volume does not normalize filenames (the NFD spelling of the NFC-created file does not resolve to the same file)'); return; }
+    recordKeep(proj, { target: 'cafe:pinned', reason: 'user-adjudicated', anchor: 'never trust a raw floor value', anchorFile: nfc });
+    const r = apply(planFor(proj, path.dirname(nfc), [{ type: 'rewrite', path: nfd, content: 'The pinned clause: (compressed).' }]));
+    assert.ok(r.flagged.some((f) => /keep enforcement/.test(f.reason)),
+      `the keep must bind across spellings of one file (got: ${r.error})`);
+    assert.strictEqual(fs.readFileSync(nfc, 'utf8'), 'The pinned clause: never trust a raw floor value.', 'the pinned file is untouched');
+  } finally { clean(proj); }
+});
+
+test('CWK-156 NFD: where the NFC and NFD spellings are TWO files, a keep on one does NOT bind the other (the engine adds no normalization the volume lacks)', (t) => {
+  const { proj } = sandbox();
+  try {
+    const { nfc, nfd } = nfdPair(path.join(proj, 'nfd-store'));
+    write(nfc, 'The pinned clause: never trust a raw floor value.');
+    write(nfd, 'unrelated content the plan legitimately rewrites');
+    const a = fs.statSync(nfc, { bigint: true });
+    const b = fs.statSync(nfd, { bigint: true });
+    if (a.ino === b.ino) { t.skip('this volume normalizes filenames: NFC and NFD are one file here (the sibling test above owns that leg)'); return; }
+    recordKeep(proj, { target: 'cafe:pinned', reason: 'user-adjudicated', anchor: 'never trust a raw floor value', anchorFile: nfc });
+    const r = apply(planFor(proj, path.dirname(nfc), [{ type: 'rewrite', path: nfd, content: 'rewritten' }]));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.applied, 1, 'the keep names a DIFFERENT file on this volume, so it must not bind');
+    assert.ok(!r.flagged.some((f) => /keep enforcement/.test(f.reason)), 'no keep enforced against an unrelated file');
+    // NON-VACUITY: the gate is live on this volume -- erasing the anchor in the keep's OWN file is still excluded.
+    const r2 = apply(planFor(proj, path.dirname(nfc), [{ type: 'rewrite', path: nfc, content: 'The pinned clause: (compressed).' }]));
+    assert.ok(r2.flagged.some((f) => /keep enforcement/.test(f.reason)), 'control: the keep still binds its own file');
+  } finally { clean(proj); }
+});

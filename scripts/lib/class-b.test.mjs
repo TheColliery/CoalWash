@@ -1145,3 +1145,49 @@ test('F-T3: a DANGLING link is SILENT, never called refused — an absence code 
       + 'never a permission word: ' + JSON.stringify(d.flags));
   } finally { clean(home, proj); }
 });
+
+// CWK-156 helper: make `dir` a directory whose own case policy is SENSITIVE and PROVE it by two distinct
+// inodes ({bigint:true} is load-bearing: NTFS file ids exceed 2**53). `fsutil file setCaseSensitiveInfo` is
+// per-directory on Windows 10 1803+ (no admin); ext4 is sensitive by itself; macOS APFS is not, so the
+// proof comes back false there and the caller skips VISIBLY -- capability-probed, never platform-gated.
+function caseSensitiveDirAt(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  spawnSync('fsutil', ['file', 'setCaseSensitiveInfo', dir, 'enable'], { stdio: 'ignore', timeout: 20000 });
+  try {
+    const lo = path.join(dir, 'cb-probe.md');
+    const up = path.join(dir, 'cb-Probe.md');
+    fs.writeFileSync(lo, 'a');
+    fs.writeFileSync(up, 'b'); // on a FOLDING volume this OVERWRITES lo instead of creating a sibling
+    const a = fs.statSync(lo, { bigint: true });
+    const b = fs.statSync(up, { bigint: true });
+    fs.rmSync(lo, { force: true });
+    fs.rmSync(up, { force: true });
+    return a.ino !== b.ino;
+  } catch { return false; }
+}
+
+// CWK-156 (class-b dedupe key): MISS DIRECTION = true (merge). Two spellings are ONE entry only where the volume folds
+// case. On a case-SENSITIVE rules directory Rule.md and rule.md are two real files and BOTH belong in the measurement;
+// the old dedupe key lowercased on `process.platform === 'win32'`, merged them and silently dropped one.
+test('CWK-156: two case-variant files in a case-SENSITIVE rules directory are BOTH discovered (the old win32 dedupe key merged them and dropped one)', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const rules = path.join(proj, '.claude', 'rules');
+    if (!caseSensitiveDirAt(rules)) { t.skip('no case-sensitive directory can be built here (capability proven absent by a distinct-inode check, not assumed)'); return; }
+    write(path.join(rules, 'Rule.md'), 'upper-case spelling');
+    write(path.join(rules, 'rule.md'), 'lower-case spelling');
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    const names = d.entries.map((e) => path.basename(e.path)).filter((n) => n.toLowerCase() === 'rule.md').sort();
+    assert.deepStrictEqual(names, ['Rule.md', 'rule.md'], 'both real files are measured, neither is dropped as a "duplicate"');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-156 control: ONE file reached by two routes (the rules walk and an @import) is still ONE entry -- the dedupe was narrowed, not removed', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, '.claude', 'rules', 'shared.md'), 'reached twice');
+    write(path.join(proj, 'CLAUDE.md'), '@.claude/rules/shared.md\n');
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.filter((e) => path.basename(e.path) === 'shared.md').length, 1);
+  } finally { clean(home, proj); }
+});

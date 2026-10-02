@@ -2,6 +2,14 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+Three paths that compared file names with an operating-system test now ask the volume whether case folds.
+
+### Fixed
+
+- **Three paths compared file names with a case-fold keyed on the operating system, not on the volume; they now ask the volume (CWK-156).** The restore-candidate match in `anchor-diff.mjs`, the always-loaded de-duplication in `class-b.mjs` and the parcel-versus-adapter compare in `parcel.mjs` lower-cased paths whenever `process.platform` was `win32`. That is wrong both ways: a case-sensitive directory on Windows (`fsutil file setCaseSensitiveInfo`) holds `Memory.md` and `memory.md` as two files, and macOS (APFS) folds case without being `win32`. Each site now probes the volume (`volumeCaseFolds`), and only when two spellings collide once lower-cased, so an ordinary compare costs no extra stat. When the probe cannot decide, each site answers in the direction that is cheap to be wrong in: `anchor-diff` says "different" (a wrong match would attach one file's recorded tokens to another file), `parcel` says "different" (a drift line is read by a human, a hidden one is not), `class-b` says "same" (a merge can only drop an entry from the measurement, never hand the wash one file twice). — test: `scripts/lib/anchor-diff.test.mjs`, `scripts/lib/class-b.test.mjs`, `scripts/lib/parcel.test.mjs` (the case-sensitive legs skip visibly where the volume cannot be made case-sensitive)
+
 ## [1.9.1] - 2026-09-25
 
 A link, or another file, swapped in at the name of the lock, the bin death log or a config after CoalWash checked the path is no longer opened without being vetted on Windows, and every platform now proves the open handle is the file it judged.

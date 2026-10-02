@@ -5,6 +5,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { applyPlan } from './apply.mjs';
 import { computeCandidates, anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 
@@ -174,5 +175,65 @@ test('R5/F2 CONTROL: a normal flat snap name (f0, as apply.mjs writes) is still 
     // a real snapshot now exists with a program-generated flat snap name
     const r = anchorDiff(target, { projectRoot: proj });
     assert.ok(r && typeof r === 'object', 'a genuine snapshot is still found and diffed');
+  } finally { clean(proj); }
+});
+
+// CWK-156 helper: make `dir` a directory whose own case policy is SENSITIVE and PROVE it by two distinct
+// inodes ({bigint:true} is load-bearing: NTFS file ids exceed 2**53). `fsutil file setCaseSensitiveInfo` is
+// per-directory on Windows 10 1803+ (no admin); ext4 is sensitive by itself; macOS APFS is not, so the
+// proof comes back false there and the caller skips VISIBLY -- capability-probed, never platform-gated.
+function caseSensitiveDirAt(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  spawnSync('fsutil', ['file', 'setCaseSensitiveInfo', dir, 'enable'], { stdio: 'ignore', timeout: 20000 });
+  try {
+    const lo = path.join(dir, 'ad-probe.md');
+    const up = path.join(dir, 'ad-Probe.md');
+    fs.writeFileSync(lo, 'a');
+    fs.writeFileSync(up, 'b'); // on a FOLDING volume this OVERWRITES lo instead of creating a sibling
+    const a = fs.statSync(lo, { bigint: true });
+    const b = fs.statSync(up, { bigint: true });
+    fs.rmSync(lo, { force: true });
+    fs.rmSync(up, { force: true });
+    return a.ino !== b.ino;
+  } catch { return false; }
+}
+
+// CWK-156 (anchor-diff samePath): MISS DIRECTION = false. Two spellings that differ only by case are the same file
+// ONLY where the volume folds case; on a case-SENSITIVE directory Memory.md and memory.md are two files, and a
+// snapshot recorded for one must never be attached to the other as restore candidates (rail c: never invented).
+// The old rule folded on `process.platform === 'win32'`, so it matched them on a case-sensitive NTFS directory.
+test('CWK-156: on a case-SENSITIVE directory a snapshot recorded for Memory.md is NOT attached to the different file memory.md', (t) => {
+  const { proj } = sandbox();
+  try {
+    const store = path.join(proj, 'cs-memory');
+    if (!caseSensitiveDirAt(store)) { t.skip('no case-sensitive directory can be built here (capability proven absent by a distinct-inode check, not assumed)'); return; }
+    const upper = path.join(store, 'Memory.md');
+    const lower = path.join(store, 'memory.md');
+    write(upper, ORIGINAL);
+    write(lower, ORIGINAL);
+    const r1 = apply(planFor(proj, store, [{ type: 'rewrite', path: upper, content: ORIGINAL + 'Extra note.\n' }]), { now: 1000 });
+    assert.strictEqual(r1.ok, true, r1.error);
+    assert.ok(anchorDiff(upper, { projectRoot: proj }), 'CONTROL: the snapshotted file itself still has its anchor, so the null below is not a dead instrument');
+    assert.strictEqual(anchorDiff(lower, { projectRoot: proj }), null, 'the DIFFERENT file (same name folded) has no snapshot of its own: no anchor, nothing invented');
+  } finally { clean(proj); }
+});
+
+test('CWK-156 miss leg: a manifest spelling that resolves to NOTHING on a case-sensitive directory does not fold onto the real file (the probe MISS answers false)', (t) => {
+  const { proj } = sandbox();
+  try {
+    const store = path.join(proj, 'cs-memory');
+    if (!caseSensitiveDirAt(store)) { t.skip('no case-sensitive directory can be built here (capability proven absent by a distinct-inode check, not assumed)'); return; }
+    const real = path.join(store, 'memory.md');
+    write(real, ORIGINAL);
+    const r1 = apply(planFor(proj, store, [{ type: 'rewrite', path: real, content: ORIGINAL + 'Extra note.\n' }]), { now: 1000 });
+    assert.strictEqual(r1.ok, true, r1.error);
+    assert.ok(anchorDiff(real, { projectRoot: proj }), 'CONTROL: the manifest as written names the real spelling and anchors');
+    // Re-spell the manifest entry to a name that does not exist on this directory.
+    const manifestPath = path.join(proj, '.claude', 'coalwash', 'snap-1000', 'manifest.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    manifest[0].original = path.join(store, 'Memory.md');
+    assert.strictEqual(fs.existsSync(manifest[0].original), false, 'non-vacuity: the re-spelled name must genuinely not exist');
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    assert.strictEqual(anchorDiff(real, { projectRoot: proj }), null, 'an unresolvable spelling is a probe MISS, and a miss must not turn into a match');
   } finally { clean(proj); }
 });

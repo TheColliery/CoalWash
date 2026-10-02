@@ -33,7 +33,7 @@
 // strictly READ-ONLY (reads + stats, zero writes of any kind).
 import fs from 'node:fs';
 import { physicalOrNull, containedIn } from './class-b.mjs';
-import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { readRepoFileBounded, volumeCaseFolds, MAX_DOC_BYTES } from './config-load.mjs';
 import { tokensEstFromBytes } from './caliper.mjs';
 
 // Head-compare window: the agent quotes roughly the first ~200 chars of the
@@ -133,7 +133,10 @@ export function verifyParcelCandidates(candidates, { home, projectRoot } = {}) {
 }
 
 // DRIFT CANARY (0l role b) — set-diff the L2-verified parcel against the L1
-// adapter's entries, physical paths, case-folded on Windows. Pure function.
+// adapter's entries, physical paths. Two spellings that differ only by case are
+// the SAME entry only where the VOLUME folds case (CWK-156, node/runtime.md
+// section 4 -- never `process.platform`); the probe runs only on such a pair, so
+// the function stays stat-free for ordinary input.
 //   onlyInParcel  = the agent SAW it load, the adapter missed it → the
 //                   platform added a surface / adapter rot — the flag.
 //   onlyInAdapter = the adapter lists it, the agent did not see it —
@@ -141,20 +144,40 @@ export function verifyParcelCandidates(candidates, { home, projectRoot } = {}) {
 //                   (they load on demand, not per-session), so only the
 //                   adapter's alwaysLoaded entries join this side of the diff.
 //   matched       = both agree.
+// MISS DIRECTION = false (an undecidable probe says "different"): this is a canary, and the
+// loud wrong answer is the cheap one -- a spurious onlyInParcel/onlyInAdapter line is a flag a
+// human reads, while a wrong merge would hide a real drift. Measurement-only either way (L2
+// never feeds the knife).
 export function compareParcelToAdapter(verified, adapterEntries) {
-  const fold = (p) => (process.platform === 'win32' ? String(p).toLowerCase() : String(p));
-  const parcel = new Map();
+  const parcel = new Set();
   for (const v of Array.isArray(verified) ? verified : []) {
-    if (v && typeof v.path === 'string' && v.path) parcel.set(fold(v.path), v.path);
+    if (v && typeof v.path === 'string' && v.path) parcel.add(v.path);
   }
-  const adapter = new Map();
+  const adapter = new Set();
   for (const e of Array.isArray(adapterEntries) ? adapterEntries : []) {
-    if (e && typeof e.path === 'string' && e.path && e.alwaysLoaded === true) adapter.set(fold(e.path), e.path);
+    if (e && typeof e.path === 'string' && e.path && e.alwaysLoaded === true) adapter.add(e.path);
   }
+  const adapterByLower = new Map();
+  for (const q of adapter) {
+    const k = q.toLowerCase();
+    const bucket = adapterByLower.get(k);
+    if (bucket) bucket.push(q); else adapterByLower.set(k, [q]);
+  }
+  const twinOf = (p) => { // the adapter spelling that IS this path on a folding volume, else null
+    if (adapter.has(p)) return p;
+    for (const q of adapterByLower.get(p.toLowerCase()) || []) {
+      if (volumeCaseFolds(p, false) || volumeCaseFolds(q, false)) return q;
+    }
+    return null;
+  };
   const matched = [];
   const onlyInParcel = [];
-  const onlyInAdapter = [];
-  for (const [k, p] of parcel) (adapter.has(k) ? matched : onlyInParcel).push(p);
-  for (const [k, p] of adapter) { if (!parcel.has(k)) onlyInAdapter.push(p); }
+  const claimed = new Set(); // adapter spellings some parcel entry matched
+  for (const p of parcel) {
+    const q = twinOf(p);
+    if (q === null) onlyInParcel.push(p);
+    else { matched.push(p); claimed.add(q); }
+  }
+  const onlyInAdapter = [...adapter].filter((q) => !claimed.has(q));
   return { matched, onlyInParcel, onlyInAdapter };
 }

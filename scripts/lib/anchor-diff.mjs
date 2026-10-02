@@ -35,7 +35,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { inventory } from './fidelity-gate.mjs';
-import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { readRepoFileBounded, volumeCaseFolds, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir } from './repo-fs.mjs';
 import { physicalOrNull, containedIn } from './class-b.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin, isBareId } from './tailings.mjs';
@@ -51,7 +51,18 @@ function samePath(a, b) {
   const pa = physicalOrNull(a) || (typeof a === 'string' && a ? path.resolve(a) : null);
   const pb = physicalOrNull(b) || (typeof b === 'string' && b ? path.resolve(b) : null);
   if (!pa || !pb) return false;
-  return process.platform === 'win32' ? pa.toLowerCase() === pb.toLowerCase() : pa === pb;
+  if (pa === pb) return true;
+  // CWK-156: a case-variant pair is the SAME file only where the VOLUME folds case
+  // (node/runtime.md section 4) -- the old `process.platform === 'win32'` fold was wrong in both
+  // directions (APFS folds and is not win32; an fsutil-enabled NTFS directory does not fold).
+  // The probe runs only on a lowercase collision, so an ordinary compare costs no stat.
+  // MISS DIRECTION = false (a probe that cannot decide says "different"): a match ATTACHES a
+  // snapshot's tokens to this file as restore candidates and a bin item's text to its
+  // approved-drop list, so a wrong match shows one file another file's content, against rail (c)
+  // above (no verified snapshot => null, never invented); a wrong non-match only yields null.
+  // Both spellings are usually canonical already (physicalOrNull), so this branch is reached
+  // for an unresolvable recorded spelling or a case-sensitive directory.
+  return pa.toLowerCase() === pb.toLowerCase() && (volumeCaseFolds(pa, false) || volumeCaseFolds(pb, false));
 }
 
 // The pure computation — no filesystem. Which of anchorText's structured
