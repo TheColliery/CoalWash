@@ -472,6 +472,21 @@ test('R14 E1: a PROJECT write above the user\'s bound (purgeAfterDays, a runBudg
   assert.doesNotMatch(down.stdout + down.stderr, /will NOT be read/, 'a value at or below the default is honored: no warning');
 });
 
+test('R14 bounce 2 (F-R14-6): a PROJECT write of estate.compressAfterDays below the user\'s bound is named as bounded, for the RIGHT reason (it may only keep sessions active longer), and a RAISE warns nothing', (t) => {
+  const sb = sandbox(t);
+  const low = run(sb, ['--estate.compressAfterDays', '1']);
+  assert.strictEqual(low.status, 0, low.stderr);
+  assert.strictEqual(JSON.parse(fs.readFileSync(projCfg(sb), 'utf8')).estate.compressAfterDays, 1, 'WARN, not REFUSE: the value is still written');
+  const out = low.stdout + low.stderr;
+  assert.match(out, /estate\.compressAfterDays will NOT be read at the value you set/);
+  assert.match(out, /may only keep sessions active longer/, 'the real reason for this key');
+  assert.doesNotMatch(out, /SAFER-VALUE-WINS|consent-bearing/, 'the consent-clamp explanation is false for this key');
+  assert.match(out, /--global --estate\.compressAfterDays/, 'and points at the layer that DOES take effect');
+  const high = run(sb, ['--estate.compressAfterDays', '60']);
+  assert.strictEqual(high.status, 0, high.stderr);
+  assert.doesNotMatch(high.stdout + high.stderr, /will NOT be read/, 'a raise above the default is honored: no warning');
+});
+
 test('CWK-137 D3: --global estate.archiveDir IS honoured, so no warning fires', (t) => {
   const sb = sandbox(t);
   const dest = path.join(sb.home, 'my-archive');

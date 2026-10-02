@@ -702,7 +702,7 @@ test('CWK-137 D3 hint: the 300-character cut never splits a surrogate pair (N-4)
 // PROJECT layer carries an estate.runBudget field or an estate.purgeAfterDays the bounded merge dropped: the project's value, the value
 // this run used, the global config to set it in. It is built from a cloned repo's bytes, so every field is one line and bounded.
 // ---------------------------------------------------------------------------
-const E1_HINT = /^\[CoalWash\] estate\.(runBudget(\.\w+)?|purgeAfterDays)[: ]/;
+const E1_HINT = /^\[CoalWash\] estate\.(runBudget(\.\w+)?|purgeAfterDays|compressAfterDays)[: ]/;
 const e1Lines = (stderr) => stderr.split(/\r?\n/).filter((l) => E1_HINT.test(l));
 function e1Configs(home, proj, globalEstate, projectEstate) {
   fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ estate: globalEstate }));
@@ -738,6 +738,24 @@ test('E1: estate-scan names every dropped PROJECT runBudget field and purgeAfter
     assert.strictEqual(e1Lines(without.stderr).length, 0, 'no project value, no hint');
     assert.strictEqual(r.stdout, without.stdout, 'stdout is the ordinary output, byte for byte');
     assert.strictEqual(r.status, without.status, 'and so is the exit code');
+  } finally { clean(home, proj); }
+});
+
+test('E1 (R14 bounce 2, F-R14-6): estate-scan names a dropped PROJECT compressAfterDays on stderr -- the value it asked for, the value this run used, the reason (it may only keep sessions active LONGER), the global config -- and a raise draws nothing', () => {
+  const { home, proj } = sandbox();
+  try {
+    e1Configs(home, proj, { deleteCold: false, compressAfterDays: 30 }, { compressAfterDays: 1 });
+    const r = run(proj, home, ['estate-scan']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const lines = e1Lines(r.stderr);
+    assert.strictEqual(lines.length, 1, `one line for the dropped key, got: ${r.stderr}`);
+    assert.ok(lines[0].startsWith('[CoalWash] estate.compressAfterDays: the project config ('), lines[0]);
+    assert.ok(lines[0].includes('asks for 1, and that was ignored.'), 'names what the project asked for');
+    assert.ok(lines[0].includes('This run used 30.'), 'and what this run used');
+    assert.ok(/while estate\.deleteCold is not true in your own config, a project value may only keep sessions active LONGER \(at or above your own compressAfterDays\)/.test(lines[0]), 'the reason for the warm boundary');
+    assert.ok(lines[0].includes(`If you want that value, set estate.compressAfterDays in ${path.join(home, '.claude', '.coalwash.json')}.`), 'the conditional remedy names the GLOBAL config');
+    e1Configs(home, proj, { deleteCold: false, compressAfterDays: 30 }, { compressAfterDays: 60 });
+    assert.strictEqual(e1Lines(run(proj, home, ['estate-scan']).stderr).length, 0, 'a raise was honored: nothing was ignored');
   } finally { clean(home, proj); }
 });
 

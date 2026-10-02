@@ -362,7 +362,7 @@ function archiveDirHint({ ignored, estate, home }) {
 }
 
 // R14 bounce 1 (E1, the head's ruling: the break is made LOUD): the same shape as archiveDirHint for the two estate values a PROJECT
-// config may only LOWER (runBudget, purgeAfterDays; the merge is config-load.mjs's mergeObjectKey). One line per key the merge dropped,
+// config may only LOWER (runBudget, purgeAfterDays) or only RAISE (compressAfterDays); the merge is config-load.mjs's mergeObjectKey. One line per key the merge dropped,
 // from the SAME bounded read, on every run, to stderr; stdout and the exit code are untouched. The value is a cloned repo's bytes of any
 // JSON type, so it is serialized, flattened to one line and bounded (security.md, log injection), and named ONCE as what the project
 // asked for, never inside an imperative; the only remedy is conditional on the user wanting that value, and names the layer that has no bound.
@@ -371,10 +371,13 @@ function projectBoundHints({ ignored, estate, home }) {
   for (const hit of ignored || []) {
     if (hit.key !== 'estate.runBudget' && !PROJECT_BOUNDED_KEYS.includes(hit.key)) continue;
     const isPurge = hit.key === 'estate.purgeAfterDays';
-    const used = isPurge ? estate.purgeAfterDays : hit.key === 'estate.runBudget' ? estate.runBudget : estate.runBudget[hit.key.slice('estate.runBudget.'.length)];
+    const isCompress = hit.key === 'estate.compressAfterDays';
+    const used = isPurge ? estate.purgeAfterDays : isCompress ? estate.compressAfterDays : hit.key === 'estate.runBudget' ? estate.runBudget : estate.runBudget[hit.key.slice('estate.runBudget.'.length)];
     const rule = isPurge
       ? 'while estate.deleteCold is not true in your own config, a project value may only bring the cold boundary earlier (at or below your own purgeAfterDays, with 0, "never cold", counted as the highest)'
-      : 'a project value may only LOWER this work limit, and only with a number the schema accepts';
+      : isCompress
+        ? 'while estate.deleteCold is not true in your own config, a project value may only keep sessions active LONGER (at or above your own compressAfterDays)'
+        : 'a project value may only LOWER this work limit, and only with a number the schema accepts';
     out.push(`[CoalWash] ${hit.key}: the project config (${oneLine(hit.path)}) asks for ${oneLine(JSON.stringify(hit.value))}, and that was ignored. A cloned repo ships a project config, and it must not be able to widen what an estate run archives and removes, so ${rule}. This run used ${oneLine(JSON.stringify(used))}. If you want that value, set ${hit.key} in ${oneLine(globalConfigPath(home))}.`);
   }
   return out;

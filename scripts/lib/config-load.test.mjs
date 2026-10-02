@@ -11,7 +11,8 @@ import { globalConfigPath, projectConfigPath, projectConfigCandidates, projectCo
 // assertion (a TypeError at the call) instead of crashing the whole file at link time, so the red-first evidence
 // for the new API is per-test, not "the file did not load".
 import * as ConfigLoad from './config-load.mjs';
-import { resolveArchiveDir } from './estate-archive.mjs';
+import { resolveArchiveDir, classifySessions } from './estate-archive.mjs';
+import { ccProjectSlug } from './class-b.mjs';
 import { clampedRead } from './config-schema.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
@@ -1888,7 +1889,7 @@ test('E1: loadMergedConfigReport().ignored names every project runBudget field a
     ]);
     assert.deepStrictEqual(rep.cfg.estate.runBudget, { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 }, 'and the merge did drop them: the report describes what the merge did');
     assert.strictEqual(rep.cfg.estate.purgeAfterDays, 90);
-    assert.deepStrictEqual([...ConfigLoad.PROJECT_BOUNDED_KEYS], ['estate.runBudget.maxSessionsPerRun', 'estate.runBudget.maxBytesPerRun', 'estate.purgeAfterDays'], 'the one list configure.mjs and the cli read');
+    assert.deepStrictEqual([...ConfigLoad.PROJECT_BOUNDED_KEYS], ['estate.runBudget.maxSessionsPerRun', 'estate.runBudget.maxBytesPerRun', 'estate.purgeAfterDays', 'estate.compressAfterDays'], 'the one list configure.mjs and the cli read (compressAfterDays joined it at R14 bounce 2: the old three-key list was written before F-R14-6)');
   } finally { clean(home, proj); }
 });
 
@@ -1908,5 +1909,68 @@ test('E1: a project value that was HONORED (lower, equal, or deleteCold already 
     assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [{ key: 'estate.runBudget', tier: 'project', path: p, value: 7 }]);
     fs.writeFileSync(p, '{ not json');
     assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'an unreadable project reports nothing');
+  } finally { clean(home, proj); }
+});
+
+// R14 bounce 2, F-R14-6 (RE-INSPECT [MEDIUM]): compressAfterDays is the WARM boundary and was plain project-wins, so a project value LOWER
+// than the user's moved a session from active (untouched) to warm (archived, original removed after the verified archive): the escalation
+// the purgeAfterDays rule closes, one edge earlier. While the user's effective deleteCold is not true a project may only RAISE it.
+test('F-R14-6: while deleteCold is not true a project compressAfterDays is honored only when it is >= the user\'s own (witness: a 5-day-old session is active at 14, warm at 1)', () => {
+  const g = { estate: { deleteCold: false, compressAfterDays: 30 } };
+  const eff = (v, gg = g) => effectiveEstate(gg, { estate: { compressAfterDays: v } }).compressAfterDays;
+  for (const v of [1, 14, 29]) assert.strictEqual(eff(v), 30, `project ${v} is below the user's 30: not honored`);
+  for (const v of [30, 31, 365, 3650]) assert.strictEqual(eff(v), v, `project ${v} is >= the user's 30: honored (a raise keeps sessions active longer)`);
+  for (const v of [0, -1, 3651, 30.5, '60', null]) assert.strictEqual(eff(v), 30, `project ${JSON.stringify(v)} is not a valid compressAfterDays: no say`);
+  const pair = effectiveEstate(g, { estate: { deleteCold: true, compressAfterDays: 1 } });
+  assert.strictEqual(pair.deleteCold, false, 'the pair attack: the project also asks deleteCold:true, which the existing clamp refuses');
+  assert.strictEqual(pair.compressAfterDays, 30, 'so the lower value stays ignored too');
+});
+
+test('F-R14-6: the user\'s own boundary is their global value, else the schema default 14; an unreadable global is the default; no global value is a deletion of the project one', () => {
+  assert.strictEqual(effectiveEstate({}, { estate: { compressAfterDays: 1 } }).compressAfterDays, 14, 'no global: the default 14 is the boundary, a lower project value leaves it');
+  assert.strictEqual(effectiveEstate({}, { estate: { compressAfterDays: 60 } }).compressAfterDays, 60, 'no global: a raise is honored');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false, compressAfterDays: 3 } }, { estate: { compressAfterDays: 1 } }, { globalUnreadable: true }).compressAfterDays, 14, 'an unreadable global: the user\'s stance is unknown, so the default, never the readable-looking 3');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false, compressAfterDays: 3 } }, { estate: { compressAfterDays: 5 } }, { globalUnreadable: true }).compressAfterDays, 14, 'an unreadable global: a 5 is below the default 14, dropped');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false, compressAfterDays: 3 } }, { estate: { compressAfterDays: 2 } }).compressAfterDays, 3, 'the user\'s own LOW value is theirs to hold: a lower project value does not undercut it');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false, compressAfterDays: 'x' } }, { estate: { compressAfterDays: 7 } }).compressAfterDays, 14, 'an invalid global value reads as the default: 7 is below it');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false } }, { estate: { compressAfterDays: 20 } }).compressAfterDays, 20, 'a global estate with no compressAfterDays: the default 14, so a 20 is a raise');
+});
+
+test('F-R14-6 control: once the user\'s OWN effective deleteCold is true a project compressAfterDays (lower or higher) is honored, as before', () => {
+  const open = { estate: { deleteCold: true, compressAfterDays: 30 } };
+  for (const v of [1, 29, 30, 365]) assert.strictEqual(effectiveEstate(open, { estate: { compressAfterDays: v } }).compressAfterDays, v, `deleteCold true: project ${v} stands`);
+});
+
+test('F-R14-6 (the reviewer\'s witness): a 5-day-old session stays ACTIVE under a project compressAfterDays 1 -- through mergeSafety -> clampedRead -> classifySessions, the path an estate run takes', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const pdir = path.join(home, '.claude', 'projects', ccProjectSlug(proj));
+    fs.mkdirSync(pdir, { recursive: true });
+    const sid = 'aaaaaaaa-bbbb-cccc-dddd-000000000005';
+    const f = path.join(pdir, `${sid}.jsonl`);
+    fs.writeFileSync(f, '{"x":1}\n');
+    const now = Date.now();
+    const t = (now - 5 * 86400000) / 1000;
+    fs.utimesSync(f, t, t);
+    const bandOf = (project) => classifySessions({ projectRoot: proj, home, now, estate: clampedRead(mergeSafety({}, project), 'estate') }).sessions.find((x) => x.id === sid).band;
+    assert.strictEqual(bandOf({}), 'active', 'no project value: 5 days is under the default 14');
+    assert.strictEqual(bandOf({ estate: { compressAfterDays: 1 } }), 'active', 'the project\'s 1 is dropped: the session is not made warm');
+    assert.strictEqual(bandOf({ estate: { compressAfterDays: 30 } }), 'active', 'a raise keeps it active');
+  } finally { clean(home, proj); }
+});
+
+test('E1: a dropped project compressAfterDays is reported (key, tier, path, value); a raised or equal one is not', () => {
+  const { home, proj } = rootedProject();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { deleteCold: false, compressAfterDays: 30 } }));
+    const p = plantProjectConfig(proj, JSON.stringify({ estate: { compressAfterDays: 1 } }));
+    const dropped = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(dropped.ignored, [{ key: 'estate.compressAfterDays', tier: 'project', path: p, value: 1 }]);
+    assert.strictEqual(dropped.cfg.estate.compressAfterDays, 30, 'and the merge did drop it: the report describes what the merge did');
+    plantProjectConfig(proj, JSON.stringify({ estate: { compressAfterDays: 60 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'a raise was honored: nothing ignored');
+    plantProjectConfig(proj, JSON.stringify({ estate: { compressAfterDays: 30 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'a value equal to the user\'s own was honored');
   } finally { clean(home, proj); }
 });

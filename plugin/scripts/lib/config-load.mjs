@@ -1028,6 +1028,10 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 // declined numeric rate dials because the action they pace is already gated by an enum the clamp covers; a user-invoked estate
 // run has no such enum, so this dial is the exception that reason itself names. That paragraph is the CoalWorks zone's and is
 // not edited here (pending decision D2 in scratchpad/r14/cwk162-ruling.md).
+// R14 bounce 2 (F-R14-6): the CORRECTED paragraph above is HALF wrong for `compressAfterDays` too. The WARM edge is consent-free for the
+// USER's own boundary, but a project that LOWERS it moves sessions from active (untouched) to archived-and-removed with no say from the
+// user, the same escalation the purgeAfterDays rule closes. hooks-safety.md section 9 (AMENDED 2026-10-03) now clamps a removal-edge
+// numeric key by direction: while deleteCold is not true a project may only RAISE compressAfterDays (mergeObjectKey, below).
 const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
 
 // R14 F-R14-1/2: the schema's own field specs the bounded estate merge below judges a project value with (one validator, never a second
@@ -1035,7 +1039,8 @@ const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
 const ESTATE_FIELDS = CONFIG_SCHEMA.find((s) => s.key === 'estate').fields;
 const RUNBUDGET_FIELDS = ESTATE_FIELDS.runBudget.fields;
 const PURGE_SPEC = ESTATE_FIELDS.purgeAfterDays;
-export const PROJECT_BOUNDED_KEYS = Object.freeze([...Object.keys(RUNBUDGET_FIELDS).map((f) => `estate.runBudget.${f}`), 'estate.purgeAfterDays']);
+const COMPRESS_SPEC = ESTATE_FIELDS.compressAfterDays;
+export const PROJECT_BOUNDED_KEYS = Object.freeze([...Object.keys(RUNBUDGET_FIELDS).map((f) => `estate.runBudget.${f}`), 'estate.purgeAfterDays', 'estate.compressAfterDays']);
 
 // CWK-137 D3 (head's ruling): sub-keys of an object-typed key that are read from the GLOBAL layer ONLY. Not a consent clamp
 // (SAFER_OBJECT_BOOL above has a "safer value" to fall back to; these have none) but a REACH clamp: `estate.archiveDir` names
@@ -1114,6 +1119,18 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
       const age = (n) => (n === 0 ? Infinity : n);
       if (validateValue(PURGE_SPEC, p.purgeAfterDays) !== null || age(p.purgeAfterDays) > age(userValue)) {
         if (!globalUnreadable && g.purgeAfterDays !== undefined) merged.purgeAfterDays = g.purgeAfterDays; else delete merged.purgeAfterDays;
+      }
+    }
+    // R14 bounce 2 F-R14-6, the same rule on the sibling edge (hooks-safety.md section 9, AMENDED 2026-10-03: a numeric key that moves a
+    // removal edge is clamped BY DIRECTION). compressAfterDays is the WARM boundary: a session older than it (and not cold) is archived and
+    // its original removed after the verified archive, so a project LOWER value moves sessions from "active, left untouched" to "archived and
+    // removed" (a 5-day-old session is active at 14 and warm at 1), the transition deleteCold gates. While the user's effective deleteCold is
+    // not true, a project value is honored only when the schema accepts it AND it is >= the user's own value (their global value, else the
+    // schema default): a project may only RAISE it, keeping sessions active longer. Once deleteCold is true the user opted in.
+    if (p.compressAfterDays !== undefined && merged.deleteCold !== true) {
+      const userValue = !globalUnreadable && validateValue(COMPRESS_SPEC, g.compressAfterDays) === null ? g.compressAfterDays : COMPRESS_SPEC.def;
+      if (validateValue(COMPRESS_SPEC, p.compressAfterDays) !== null || p.compressAfterDays < userValue) {
+        if (!globalUnreadable && g.compressAfterDays !== undefined) merged.compressAfterDays = g.compressAfterDays; else delete merged.compressAfterDays;
       }
     }
   }
@@ -1263,6 +1280,7 @@ export function loadMergedConfigReport({ cwd = process.cwd(), home = os.homedir(
       }
     }
     if (pEstate.purgeAfterDays !== undefined) dropped('estate.purgeAfterDays', pEstate.purgeAfterDays, eEstate.purgeAfterDays);
+    if (pEstate.compressAfterDays !== undefined) dropped('estate.compressAfterDays', pEstate.compressAfterDays, eEstate.compressAfterDays);
   }
   return { cfg, unreadable, ignored };
 }
