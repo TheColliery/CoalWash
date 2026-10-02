@@ -2,7 +2,7 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.10.0] - 2026-10-03
 
 Recovery skips git's control files and, where git can say, refuses a journal it tracks, a project config can only narrow the estate limits and bands, the restore bounds its inflate, and the gates gain a secret scan, finite clocks and a Release poster.
 
