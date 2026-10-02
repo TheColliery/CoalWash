@@ -64,6 +64,7 @@ import zlib from 'node:zlib';
 import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
 import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort } from './apply.mjs';
+import { ownSandboxDir } from './repo-fs.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
 // death-log (destroyed cuts). Function-declaration imports used only at CALL
 // time (collectTombstones), so the existing apply<->retier<->estate cycle stays
@@ -871,6 +872,21 @@ function isBareId(id) {
   return typeof id === 'string' && !!id && id !== '.' && id !== '..' && path.basename(id) === id;
 }
 
+// CWK-162 (AI Deep Scan B6): the restore inflated a gzip into ONE buffer with no output limit (a 130,478-byte file expanded to
+// 134,217,728 bytes, 1029:1) and read the compressed file whole. The inflate is now bounded by max(FLOOR, ratio x compressed size),
+// never above CEIL, and the compressed file itself is capped. Measured on this box's real archives (read-only probe, n=9,
+// 2026-10-02): ratio min 2.1, median 2.3, max 3.1; the largest inflated file 49,544,480 bytes (~24 MB compressed). So the ratio
+// bound of 64 leaves 20x headroom over the largest ratio seen; the floor of 64 MiB means a small archive is never refused for
+// being highly redundant; the ceiling of 1 GiB is 20x the largest real session; and 256 MiB is ~10x the largest compressed
+// file. A zip bomb (1000:1 and up) is refused by the ratio term, a huge-but-honest session by neither.
+export const RESTORE_FLOOR_BYTES = 64 * 1024 * 1024;
+export const RESTORE_MAX_RATIO = 64;
+export const RESTORE_CEIL_BYTES = 1024 * 1024 * 1024;
+export const RESTORE_MAX_GZ_BYTES = 256 * 1024 * 1024;
+export function restoreInflateBound(gzBytes) {
+  return Math.min(RESTORE_CEIL_BYTES, Math.max(RESTORE_FLOOR_BYTES, gzBytes * RESTORE_MAX_RATIO));
+}
+
 // Decompress ONE archived session's files to `to` (default: a fresh scratch
 // dir under os.tmpdir(), printed to the caller) — RESTORE-BY-REFERENCE: code
 // moves the byte-exact bytes; content is never re-authored. NEVER writes into
@@ -923,7 +939,23 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones } 
   let combinedText = '';
   for (const s of sources) {
     try {
-      const buf = zlib.gunzipSync(fs.readFileSync(s.gzPath));
+      // CWK-162 B3: every directory component BELOW the destination root must be a real directory. A link planted at <to>/<sid>
+      // (or deeper) used to carry the restored bytes outside the destination with ok:true; an explicit `--to` is the exposed
+      // door (the default is a fresh mkdtemp dir). The root itself may be a link (the user's own choice); only what sits under it
+      // is checked. A refusal reads "... is a link" (ownSandboxDir) and stops the restore: files already written stay, as before.
+      const relDir = path.dirname(s.rel);
+      try { ownSandboxDir(dir, ...(relDir === '.' ? [] : relDir.split(path.sep))); } catch (e) {
+        if (e && e.code === 'COALWASH_WRITE_REFUSED') return { ok: false, error: `restore refused on ${s.rel}: ${String(e.message).split(' -- ')[0]} (a restore never writes through a link under its destination)`, dir, files };
+        throw e;
+      }
+      const gzSize = fs.statSync(s.gzPath).size;
+      if (gzSize > RESTORE_MAX_GZ_BYTES) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is ${gzSize} bytes, over the ${RESTORE_MAX_GZ_BYTES}-byte bound`, dir, files };
+      const gz = fs.readFileSync(s.gzPath);
+      let buf;
+      try { buf = zlib.gunzipSync(gz, { maxOutputLength: restoreInflateBound(gz.length) }); } catch (e) {
+        if (e && e.code === 'ERR_BUFFER_TOO_LARGE') return { ok: false, error: `restore refused on ${s.rel}: it would inflate past ${restoreInflateBound(gz.length)} bytes for a ${gz.length}-byte archive`, dir, files };
+        throw e;
+      }
       const dest = path.join(dir, s.rel);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       writeDurable(dest, buf); // MED: recovery write matches the forward path's durability (this tier keeps no snapshot)
