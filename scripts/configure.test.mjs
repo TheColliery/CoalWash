@@ -448,6 +448,30 @@ test('CWK-137 D3: a PROJECT write of estate.archiveDir is named as ignored, for 
   assert.doesNotMatch(r.stdout, /Successfully updated configuration/);
 });
 
+// R14 bounce 1 (E1): a PROJECT value of estate.purgeAfterDays or an estate.runBudget field may only LOWER the user's own (config-load.mjs
+// mergeObjectKey). The F-R32-3 machinery notices a write the loader will not honor; the consent-clamp story it tells ("safer-value-wins")
+// is the wrong reason for these keys (nothing here is a consent value), so each is named for its own reason. WARN, not REFUSE.
+test('R14 E1: a PROJECT write above the user\'s bound (purgeAfterDays, a runBudget field) is named as bounded, for the RIGHT reason, and a LOWER write warns nothing', (t) => {
+  const sb = sandbox(t);
+  const up = run(sb, ['--estate.purgeAfterDays', '36500']);
+  assert.strictEqual(up.status, 0, up.stderr);
+  assert.strictEqual(JSON.parse(fs.readFileSync(projCfg(sb), 'utf8')).estate.purgeAfterDays, 36500, 'WARN, not REFUSE: the value is still written');
+  const out = up.stdout + up.stderr;
+  assert.match(out, /estate\.purgeAfterDays will NOT be read at the value you set/);
+  assert.match(out, /may only bring the cold boundary earlier/, 'the real reason for this key');
+  assert.doesNotMatch(out, /SAFER-VALUE-WINS|consent-bearing/, 'the consent-clamp explanation is false for this key');
+  assert.match(out, /--global --estate\.purgeAfterDays/, 'and points at the layer that DOES take effect');
+  const rb = run(sb, ['--estate.runBudget.maxSessionsPerRun', '100000']);
+  assert.strictEqual(rb.status, 0, rb.stderr);
+  const rbOut = rb.stdout + rb.stderr;
+  assert.match(rbOut, /estate\.runBudget\.maxSessionsPerRun will NOT be read at the value you set/);
+  assert.match(rbOut, /may only LOWER a work limit/);
+  assert.doesNotMatch(rbOut, /SAFER-VALUE-WINS|consent-bearing/);
+  const down = run(sb, ['--estate.runBudget.maxSessionsPerRun', '10']);
+  assert.strictEqual(down.status, 0, down.stderr);
+  assert.doesNotMatch(down.stdout + down.stderr, /will NOT be read/, 'a value at or below the default is honored: no warning');
+});
+
 test('CWK-137 D3: --global estate.archiveDir IS honoured, so no warning fires', (t) => {
   const sb = sandbox(t);
   const dest = path.join(sb.home, 'my-archive');

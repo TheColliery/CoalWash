@@ -27,7 +27,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { parseJsonc } from './jsonc.mjs';
-import { CONFIG_SCHEMA } from './config-schema.mjs';
+import { CONFIG_SCHEMA, validateValue } from './config-schema.mjs';
 
 // The ONE dir CoalWash writes to. Must agree with claudeBaseDirs() below or the dir
 // the code actually writes to ends up outside the guarded set — which is exactly what
@@ -1030,6 +1030,13 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 // not edited here (pending decision D2 in scratchpad/r14/cwk162-ruling.md).
 const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
 
+// R14 F-R14-1/2: the schema's own field specs the bounded estate merge below judges a project value with (one validator, never a second
+// copy of the ranges). PROJECT_BOUNDED_KEYS names the keys a project value may only LOWER, for the loud-break report and configure.mjs.
+const ESTATE_FIELDS = CONFIG_SCHEMA.find((s) => s.key === 'estate').fields;
+const RUNBUDGET_FIELDS = ESTATE_FIELDS.runBudget.fields;
+const PURGE_SPEC = ESTATE_FIELDS.purgeAfterDays;
+export const PROJECT_BOUNDED_KEYS = Object.freeze([...Object.keys(RUNBUDGET_FIELDS).map((f) => `estate.runBudget.${f}`), 'estate.purgeAfterDays']);
+
 // CWK-137 D3 (head's ruling): sub-keys of an object-typed key that are read from the GLOBAL layer ONLY. Not a consent clamp
 // (SAFER_OBJECT_BOOL above has a "safer value" to fall back to; these have none) but a REACH clamp: `estate.archiveDir` names
 // where the user's own session transcripts are copied to and then deleted from, and a project config ships with a cloned repo
@@ -1075,27 +1082,39 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
     }
   }
   if (key === 'estate') {
-    // CWK-162 B4: a project runBudget can only LOWER each limit. Effective global = the user's valid number, else the schema
-    // default (also when the whole global file is unreadable: the user's stance is unknown). Junk gets no say.
+    // CWK-162 B4 + R14 F-R14-1: a project runBudget can only LOWER each limit, and only with a value the SCHEMA ITSELF accepts
+    // (validateValue, the validator clampedRead uses). A finite number outside the schema's range (0, -1, 2.5, below the 1 MiB
+    // floor, past the max) used to win as "the smaller" and clampedRead then replaced it with the field DEFAULT, which can be
+    // far above the user's own limit: a rejected value must have no say at all. Effective user value = their valid number, else
+    // the schema default (also when the whole global file is unreadable: the user's stance is unknown). Each field is judged alone.
     if (p.runBudget !== undefined) {
       if (!isPlainObject(p.runBudget)) {
         if (g.runBudget === undefined) delete merged.runBudget; else merged.runBudget = g.runBudget;
       } else {
         const gRB = !globalUnreadable && isPlainObject(g.runBudget) ? g.runBudget : {};
-        const def = isPlainObject(SCHEMA_DEFAULT.estate) && isPlainObject(SCHEMA_DEFAULT.estate.runBudget) ? SCHEMA_DEFAULT.estate.runBudget : {};
         const rb = { ...gRB };
-        for (const f of ['maxSessionsPerRun', 'maxBytesPerRun']) {
+        for (const [f, spec] of Object.entries(RUNBUDGET_FIELDS)) {
           const pv = p.runBudget[f];
-          if (typeof pv !== 'number' || !Number.isFinite(pv)) continue;
-          const gv = Number.isFinite(gRB[f]) ? gRB[f] : def[f];
-          if (Number.isFinite(gv)) rb[f] = Math.min(pv, gv);
+          if (validateValue(spec, pv) !== null) continue;
+          const gv = validateValue(spec, gRB[f]) === null ? gRB[f] : spec.def;
+          rb[f] = Math.min(pv, gv);
         }
         merged.runBudget = rb;
       }
     }
-    // CWK-162 B10: a project's "never becomes cold" (0) is honored only where the user's effective deleteCold is already true.
-    if (p.purgeAfterDays === 0 && merged.deleteCold !== true) {
-      if (!globalUnreadable && g.purgeAfterDays !== undefined) merged.purgeAfterDays = g.purgeAfterDays; else delete merged.purgeAfterDays;
+    // CWK-162 B10 + R14 F-R14-2, ONE RULE: while the user's effective deleteCold is not true, a project purgeAfterDays is honored
+    // only when the schema accepts it AND it is <= the user's own boundary (their global value, else the schema default; 0 = "never
+    // cold" is ordered as +infinity). Why: cold is report-only without deleteCold, but a session that is NOT cold is warm, and a warm
+    // session's original is removed once its archive is verified, so every project value ABOVE the user's boundary moves sessions
+    // from "kept in place" to "archived and removed" (a 200-day session: cold at 90, warm at 365 or 36500), the transition deleteCold
+    // gates. A value at or below it only makes sessions cold sooner, which is report-only here. Once deleteCold is true the user
+    // already opted in, and the project value stands as before.
+    if (p.purgeAfterDays !== undefined && merged.deleteCold !== true) {
+      const userValue = !globalUnreadable && validateValue(PURGE_SPEC, g.purgeAfterDays) === null ? g.purgeAfterDays : PURGE_SPEC.def;
+      const age = (n) => (n === 0 ? Infinity : n);
+      if (validateValue(PURGE_SPEC, p.purgeAfterDays) !== null || age(p.purgeAfterDays) > age(userValue)) {
+        if (!globalUnreadable && g.purgeAfterDays !== undefined) merged.purgeAfterDays = g.purgeAfterDays; else delete merged.purgeAfterDays;
+      }
     }
   }
   // CWK-137 D3: a global-only sub-key takes the GLOBAL layer's value or is ABSENT (never the project's). An unreadable global
@@ -1227,7 +1246,25 @@ export function loadMergedConfigReport({ cwd = process.cwd(), home = os.homedir(
       ignored.push({ key: `${obj}.${sub}`, tier: 'project', path: pPath, value });
     }
   }
-  return { cfg: mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable }), unreadable, ignored };
+  const cfg = mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable });
+  // R14 bounce 1 (E1, the head's ruling: the break is LOUD): a project estate.runBudget field or purgeAfterDays the bounded merge
+  // above DROPPED is named too, from the same read. "Dropped" is read off the merge's own result, never a second copy of the rule: the
+  // project asked for a value and the effective config holds a different one. A value that was honored (lower, equal, or deleteCold
+  // already true) ignored nothing. `value` is whatever the cloned repo wrote (any JSON type), so the caller must sanitize it for print.
+  const pEstate = isPlainObject(p.data.estate) ? p.data.estate : null;
+  if (pEstate) {
+    const eEstate = isPlainObject(cfg.estate) ? cfg.estate : {};
+    const dropped = (key, value, effective) => { if (!Object.is(value, effective)) ignored.push({ key, tier: 'project', path: pPath, value }); };
+    if (pEstate.runBudget !== undefined) {
+      if (!isPlainObject(pEstate.runBudget)) ignored.push({ key: 'estate.runBudget', tier: 'project', path: pPath, value: pEstate.runBudget });
+      else {
+        const eRB = isPlainObject(eEstate.runBudget) ? eEstate.runBudget : {};
+        for (const f of Object.keys(RUNBUDGET_FIELDS)) if (pEstate.runBudget[f] !== undefined) dropped(`estate.runBudget.${f}`, pEstate.runBudget[f], eRB[f]);
+      }
+    }
+    if (pEstate.purgeAfterDays !== undefined) dropped('estate.purgeAfterDays', pEstate.purgeAfterDays, eEstate.purgeAfterDays);
+  }
+  return { cfg, unreadable, ignored };
 }
 
 export function loadMergedConfig(opts = {}) {
