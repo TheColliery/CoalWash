@@ -4,7 +4,11 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
-Three paths that compared file names with an operating-system test now ask the volume whether case folds, a state file left behind by a deleted project is cleaned up, a cloned repository can no longer make the SessionStart gauge walk the same files over and over, steer crash recovery at git's own files, raise the estate run limits or switch off the cold-session gate, the estate restore refuses a link under its destination and bounds what it inflates, the link checker reads and prints contributed text safely, and the write-guard advisory no longer builds a shell line from a file name.
+A cloned repository can no longer steer crash recovery, the estate restore or the config merge, the link checker and write-guard advisory handle contributed text safely, and the commit gate and CI gain a secret scan, finite clocks and a Release poster.
+
+### Added
+
+- **Contributor-facing: a stable tag push now posts the GitHub Release by itself (CWK-124, UMB-182).** `.github/workflows/create-release.yml`, the org canon's tag-push Release creator, is adopted byte for byte with the three scripts it calls (`scripts/release-notes.mjs`, `scripts/verify-release-shape.mjs`, `scripts/lib/release-shape.mjs`) and their tests. On a stable `v*` tag it derives the Release title and body from that tag's own CHANGELOG entry, creates the Release as a draft, re-reads it byte for byte and only then publishes it. A `workflow_dispatch` run from the default branch posts the Release for a tag that already exists, so a person never posts one by hand. The deriver is CI tooling and, like the secret scan's library, is excluded from the installed plugin. A local, offline rehearsal against this repository's own `v1.9.1` CHANGELOG derived the title and body and the shape check matched them byte for byte, and refused a body altered by one byte. — test: `scripts/release-notes.test.mjs`, `scripts/verify-release-shape.test.mjs`, `scripts/lib/release-shape.test.mjs`, `scripts/build-plugin.test.mjs`
 
 ### Changed
 

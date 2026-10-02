@@ -54,13 +54,14 @@ const UNWIRED_ENGINE = [
 ];
 const isUnwiredEngine = (rel) => UNWIRED_ENGINE.includes(rel);
 
-// DEV TOOLING IN scripts/lib/, DELIBERATELY NOT SHIPPED (CWK-174) -- the house secret scan's library. The org canon puts it at
+// DEV TOOLING IN scripts/lib/, DELIBERATELY NOT SHIPPED (CWK-174) -- the house secret scan's library, and the release deriver's. The org canon puts it at
 // scripts/lib/secret-scan.mjs (byte-equal in every room, scripts/scanner-parity.mjs keeps the copies equal), but it serves the
 // commit and push gate (scripts/secret-gate.mjs), not the installed skill: nothing shipped imports it. So it is excluded from the
 // build AND from both directions of the dist check, with its absence asserted, the same explicit-absence belt UNWIRED_ENGINE uses.
 // It stays in the suite and in source; verify.mjs's lib roster exempts it by name for the same reason.
 const DEV_ONLY_LIBS = [
   path.join('scripts', 'lib', 'secret-scan.mjs'),
+  path.join('scripts', 'lib', 'release-shape.mjs'), // the create-release workflow's CHANGELOG deriver (scripts/release-notes.mjs): CI tooling, never imported by shipped code
 ];
 const isDevOnlyLib = (rel) => DEV_ONLY_LIBS.includes(rel);
 const isNotShipped = (rel) => isUnwiredEngine(rel) || isDevOnlyLib(rel);

@@ -55,6 +55,9 @@ const TESTS = [
   'scripts/workflow-hygiene.test.mjs',
   'scripts/secret-scan.test.mjs',
   'scripts/secret-gate.test.mjs',
+  'scripts/release-notes.test.mjs',
+  'scripts/verify-release-shape.test.mjs',
+  'scripts/lib/release-shape.test.mjs',
 ];
 
 // CWK-071 (node/runtime.md §7): process.exitCode + a natural exit at all three
