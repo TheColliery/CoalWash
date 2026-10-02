@@ -53,6 +53,8 @@ const TESTS = [
   'scripts/git-env.test.mjs',
   'scripts/git-env-census.test.mjs',
   'scripts/workflow-hygiene.test.mjs',
+  'scripts/secret-scan.test.mjs',
+  'scripts/secret-gate.test.mjs',
 ];
 
 // CWK-071 (node/runtime.md §7): process.exitCode + a natural exit at all three

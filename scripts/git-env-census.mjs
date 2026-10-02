@@ -34,6 +34,25 @@
 // spawn / execFile / execSync, it refuses `process.env` inside an env value (refusal 2), and it returns coverage.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
+
+// CWK-174: BLOB-PINNED EXEMPTION for the house secret scan's two canon TEST files. They spawn git with no `env:` (the canon test helper
+// inherits the ambient env, so an absolute GIT_INDEX_FILE exported by a git hook under a pathspec or `-a` commit reaches the fixture's
+// git; routed to the `.github` deputy to fix upstream), and they are carried BYTE-EQUAL from the canon, so they cannot be edited here
+// without breaking the org's scanner-parity check. Each path is exempt ONLY while the git blob id of its content equals the id pinned
+// below (`git hash-object --no-filters`): an edit, a re-sync that moves the blob, or the same bytes at another path is a finding again.
+// A named, room-local divergence: DELETE an entry the day the canon fix lands and the carrier is re-copied. The report lists what it
+// exempted (`exempted`), so the size of the unverified set is visible and never implied away.
+export const EXEMPT_CARRIERS = Object.freeze({
+  'scripts/secret-gate.test.mjs': '3fcd3f0d020ea3b3f369feca01dc770d102ca5b3',
+  'scripts/secret-scan.test.mjs': 'a9cb7145e31139ec3c490dd7714df8fa7dc6cf86',
+});
+
+// The git blob id of a text read as UTF-8 (a carrier is valid UTF-8, so the re-encode is byte-exact): sha1 of "blob <bytes>\0" + bytes.
+export function gitBlobId(text) {
+  const bytes = Buffer.from(text, 'utf8');
+  return crypto.createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+}
 
 // The command must be a string literal starting with git: `'git'` for the argv forms, `'git add ...'` for execSync.
 const CALL_RE = /\b(spawnSync|execFileSync|spawn|execFile|execSync)\(\s*['"`]git(?=['"`\s])/g;
@@ -81,7 +100,12 @@ export function censusGitSpawns(files) {
   let calls = 0;
   let viaHelper = 0;
   let other = 0;
+  const exempted = [];
   for (const { rel, text } of files) {
+    const pin = Object.hasOwn(EXEMPT_CARRIERS, rel) ? EXEMPT_CARRIERS[rel] : null;
+    const exempt = pin !== null && gitBlobId(text) === pin;
+    if (exempt) exempted.push(rel);
+    const mark = findings.length; // this file's findings start here; an exempt carrier drops them below
     CALL_RE.lastIndex = 0;
     let m;
     while ((m = CALL_RE.exec(text))) {
@@ -110,8 +134,9 @@ export function censusGitSpawns(files) {
         other++;
       }
     }
+    if (exempt) findings.splice(mark);
   }
-  return { findings, calls, viaHelper, other, scanned: files.length };
+  return { findings, calls, viaHelper, other, scanned: files.length, exempted };
 }
 
 // Every scripts/**/*.mjs, `rel` relative to `repo` and slash-separated. Sorted (node/runtime.md 9): directory order is

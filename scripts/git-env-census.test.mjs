@@ -128,3 +128,56 @@ test('the three NAMED bypasses pass unseen (a named limit, pinned so the header 
   // control: the SAME shape through a located form IS refused, so the zeros above are the bypass and not a dead locator
   assert.equal(census(call('spawnSync', 'git', "['status']", 'cwd: dir')).findings.length, 1);
 });
+
+// CWK-174: the house secret scan's two canon TEST files spawn git with no env: (the canon helper inherits the ambient env, so an absolute
+// GIT_INDEX_FILE exported by a git hook under a pathspec or `-a` commit reaches the fixture's git; routed to the .github deputy to fix
+// upstream). They are carried BYTE-EQUAL from the canon and cannot be edited room-side, so the census exempts exactly those two paths, and
+// ONLY while each file's git blob id equals the id pinned below: an edit, or a template re-sync that moves the blob, turns the entry back
+// into a finding. A room-local, named divergence; DELETE the entry when the canon fix lands and the carrier is re-copied.
+import * as CENSUS from './git-env-census.mjs'; // namespace import: a name the pre-fix tree never exported fails an ASSERTION, not the link
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { gitEnv } from './git-env.mjs';
+
+const CARRIERS = {
+  'scripts/secret-gate.test.mjs': '3fcd3f0d020ea3b3f369feca01dc770d102ca5b3',
+  'scripts/secret-scan.test.mjs': 'a9cb7145e31139ec3c490dd7714df8fa7dc6cf86',
+};
+const carrierText = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf8');
+
+test('CWK-174: the exemption names EXACTLY the two canon test files, with their pinned blob ids', () => {
+  assert.ok(CENSUS.EXEMPT_CARRIERS, 'EXEMPT_CARRIERS is exported');
+  assert.deepEqual(Object.fromEntries(Object.entries(CENSUS.EXEMPT_CARRIERS).sort()), CARRIERS);
+});
+
+test('CWK-174: the pinned ids are the real canon blobs -- the carriers on disk hash to them (git hash-object --no-filters)', () => {
+  for (const [rel, id] of Object.entries(CARRIERS)) {
+    const viaGit = execFileSync('git', ['hash-object', '--no-filters', rel], { cwd: REPO, encoding: 'utf8', env: gitEnv(REPO) }).trim();
+    assert.equal(viaGit, id, `${rel} is the pinned canon blob`);
+    assert.equal(CENSUS.gitBlobId?.(carrierText(rel)), id, `gitBlobId() (the census's own hash) agrees for ${rel}`);
+  }
+});
+
+test('CWK-174: a carrier whose bytes equal its pinned blob is exempt, and the exemption is REPORTED', () => {
+  for (const rel of Object.keys(CARRIERS)) {
+    const text = carrierText(rel);
+    const bare = censusGitSpawns([{ rel: 'scripts/elsewhere.test.mjs', text }]); // the same text at an UNPINNED path: what it would cost without the pin
+    const r = censusGitSpawns([{ rel, text }]);
+    assert.deepEqual(r.findings, [], `${rel} is exempt while it is the pinned blob`);
+    assert.deepEqual(r.exempted, [rel], 'and the exemption is named in the report');
+    if (rel.endsWith('secret-scan.test.mjs')) assert.ok(bare.findings.length > 0, 'control: without the pin the same text IS a finding (the locator sees it)');
+  }
+});
+
+test('CWK-174: ONE edited byte makes a carrier a finding again (the exemption is the blob, never the path)', () => {
+  const rel = 'scripts/secret-scan.test.mjs';
+  const r = censusGitSpawns([{ rel, text: `${carrierText(rel)}\n// one more line\n` }]);
+  assert.ok(r.findings.length > 0, 'an edited carrier is refused');
+  assert.deepEqual(r.exempted, [], 'and no longer exempt');
+});
+
+test('CWK-174: the same bytes at another path are NOT exempt (the pin is keyed by path AND blob)', () => {
+  const r = censusGitSpawns([{ rel: 'scripts/copy-of-secret-scan.test.mjs', text: carrierText('scripts/secret-scan.test.mjs') }]);
+  assert.ok(r.findings.length > 0);
+  assert.deepEqual(r.exempted, []);
+});

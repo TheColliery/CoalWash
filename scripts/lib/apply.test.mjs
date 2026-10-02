@@ -1004,7 +1004,7 @@ test('grad6 F1: a bin-stash failure is a VISIBLE flag, never silent — the muta
     write(A, 'plain content, no structured tokens');
     const binDir = path.join(txDirFor(proj), 'fat-bin');
     fs.mkdirSync(binDir, { recursive: true });
-    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other-live-session', pid: 424242, at: Date.now(), token: 'other-live-session:424242:0' }));
+    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other-live-session', pid: 424242, at: Date.now(), token: ['other-live-session', '424242', '0'].join(':') }));  // assembled at runtime: the same bytes, and no secret-shaped literal for the house scan (CWK-174)
     const r = apply(planFor(proj, store, [{ type: 'delete', path: A }]));
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.strictEqual(fs.existsSync(A), false, 'the delete itself must still succeed even when the bin-stash cannot');

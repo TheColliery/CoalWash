@@ -34,7 +34,7 @@ const LIBS = [
 // roster — listed-but-missing is caught by the file loop below, this catches
 // on-disk-but-unlisted. Tests + the deliberately-unshipped class-A engine are
 // gated by the suite and build-plugin respectively, not here.
-const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs']);
+const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs', 'secret-scan.mjs']); // + the dev-only house secret scan (build-plugin DEV_ONLY_LIBS, CWK-174)
 console.log('lib roster drift:');
 try {
   const onDisk = fs.readdirSync(path.join(repo, 'scripts', 'lib'))
@@ -422,7 +422,7 @@ try {
   const census = censusGitSpawns(collectScriptsMjs(repo));
   for (const f of census.findings) fail(f);
   if (!census.calls) fail('git spawn census found NO git spawn under scripts/: the locator is dead, and a census that matches nothing reports clean');
-  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly, ${census.other} a local wrapper or variable (text not verified)`);
+  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly, ${census.other} a local wrapper or variable (text not verified)${census.exempted && census.exempted.length ? `; ${census.exempted.length} blob-pinned canon carrier(s) EXEMPT: ${census.exempted.join(', ')}` : ''}`);
 } catch (e) { fail(`git spawn census: ${e.message}`); }
 
 console.log('libs (import check):');
