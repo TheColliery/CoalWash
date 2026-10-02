@@ -2405,13 +2405,17 @@ test('CWK-157 cannot-check means ALIVE: an absent root outside home/temp (a miss
     // the stat error classes, by injection (an EACCES cannot be built portably)
     const err = (code) => () => { const e = new Error(code); e.code = code; throw e; };
     const fsRoot = path.parse(fs.realpathSync.native(os.tmpdir())).root; // an anchor that WOULD admit any ancestor: only the stat answer can keep the file
+    // The fixture root is built UNDER that anchor's own filesystem root, never as '/x/y': on Windows a drive-relative path resolves to the
+    // CURRENT drive (a CI workspace on D:\ with the temp dir on C:\), whose root is outside the anchor, and the rule's third clause then
+    // rightly answers "not provably deleted", so the CONTROL below read false for a reason that is not the stat class (R14 CI red, fire 15).
+    const injected = path.join(fsRoot, `cwk157-injected-${process.pid}`, 'y');
     for (const code of ['EACCES', 'EPERM', 'EIO', 'ETIMEDOUT']) {
-      assert.strictEqual(rootState('/x/y', err(code)), 'unknown', `${code}: cannot check`);
-      assert.strictEqual(rootIsGone('/x/y', [fsRoot], err(code)), false, `${code} on the root: alive`);
+      assert.strictEqual(rootState(injected, err(code)), 'unknown', `${code}: cannot check`);
+      assert.strictEqual(rootIsGone(injected, [fsRoot], err(code)), false, `${code} on the root: alive`);
     }
-    assert.strictEqual(rootIsGone('/x/y', [fsRoot], err('ENOENT')), true, 'CONTROL: the same call with ENOENT is dead, so the four false answers above come from the stat class and nothing else');
-    assert.strictEqual(rootState('/x/y', err('ENOENT')), 'absent');
-    assert.strictEqual(rootState('/x/y', err('ENOTDIR')), 'absent');
+    assert.strictEqual(rootIsGone(injected, [fsRoot], err('ENOENT')), true, 'CONTROL: the same call with ENOENT is dead, so the four false answers above come from the stat class and nothing else');
+    assert.strictEqual(rootState(injected, err('ENOENT')), 'absent');
+    assert.strictEqual(rootState(injected, err('ENOTDIR')), 'absent');
     assert.strictEqual(rootState(os.tmpdir()), 'present');
   } finally { clean(home, proj); }
 });
