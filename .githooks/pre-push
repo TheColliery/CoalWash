@@ -1,0 +1,19 @@
+#!/bin/sh
+# Repo gate — wired as BOTH pre-commit and pre-push (identical bytes).
+# Runs the same fail-loud pair CI runs (.github/workflows/ci.yml).
+#
+# Enable once per clone — git deliberately refuses to let a repo configure its
+# own hooks, so the files travel with the clone but the pointer does not:
+#   git config core.hooksPath .githooks
+#
+# Fails CLOSED on purpose: a missing node or a missing script blocks the commit
+# instead of passing quietly (hooks-safety.md 1.0 — a git pre-* hook MUST be
+# able to abort; scripts-quality.md 1 — CLI scripts fail loud).
+#
+# ponytail: lives in .githooks/, not hooks/ — hooks/ is the SHIPPED plugin-hook
+# source dir, so a dev-only gate there would depend on this repo's build filter
+# to keep it out of plugin/. CoalMine keeps its twins at hooks/pre-commit.sh and
+# its build does filter them; .githooks/ needs no filter to be safe. Named
+# divergence, one reason: the shipped dir stays shipped-only.
+node scripts/verify.mjs || exit 1
+node scripts/test.mjs

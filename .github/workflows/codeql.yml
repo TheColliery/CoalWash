@@ -1,0 +1,48 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      # CodeQL analyzes js/ts AND the workflow files (the actions language) — markdown still needs no security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
+      - '**.md'
+      - 'LICENSE'
+  # NO paths-ignore here (CWK-120 finding #1): the ruleset `dependabot-auto-merge-gate` requires BOTH `all-green`
+  # (ci.yml) AND `analyze (javascript)` (this job) on every PR into main, so a filter on this trigger leaves the
+  # same Pending-forever check on this half of the gate. `push` keeps its filter: no PR merge is gated on a
+  # push-triggered analyze run. The flock precedent is CoalFace's codeql.yml (same finding, same ruleset).
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+# CWK-058 concurrency. cancel-in-progress: TRUE, and this is the case that shows the test is
+# ATOMICITY rather than publishes-vs-not: codeql.yml DOES publish (a SARIF upload), and still
+# cancels — a killed run simply never uploads, leaving the PRIOR analysis standing intact.
+# Stale, never corrupt. Contrast scorecard.yml, which cancels NOT for exactly this reason.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (javascript)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      # CWK-120 #5 -- persist-credentials: false: the analysis only reads the checkout (its one write is the SARIF
+      # upload under `security-events: write`, never a ref), so the token `actions/checkout` leaves in .git/config
+      # buys nothing and is readable by anything run against the pull-request checkout (zizmor artipacked, CWE-522).
+      # scorecard.yml already set it; the flock precedent is CoalHearth's ci.yml.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with:
+          languages: javascript-typescript, actions
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
