@@ -951,6 +951,7 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones } 
       const gzSize = fs.statSync(s.gzPath).size;
       if (gzSize > RESTORE_MAX_GZ_BYTES) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is ${gzSize} bytes, over the ${RESTORE_MAX_GZ_BYTES}-byte bound`, dir, files };
       const gz = fs.readFileSync(s.gzPath);
+      if (gz.length > RESTORE_MAX_GZ_BYTES) return { ok: false, error: `restore refused on ${s.rel}: the compressed file read is ${gz.length} bytes, over the ${RESTORE_MAX_GZ_BYTES}-byte bound (it grew after its size was checked)`, dir, files }; // R14 NIT 3: the stat above is a race window; bound what was actually read
       let buf;
       try { buf = zlib.gunzipSync(gz, { maxOutputLength: restoreInflateBound(gz.length) }); } catch (e) {
         if (e && e.code === 'ERR_BUFFER_TOO_LARGE') return { ok: false, error: `restore refused on ${s.rel}: it would inflate past ${restoreInflateBound(gz.length)} bytes for a ${gz.length}-byte archive`, dir, files };

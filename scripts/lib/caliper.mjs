@@ -1178,8 +1178,14 @@ const STATE_FILE_RE = /^state-[A-Za-z0-9-]+\.json$/;
 const STATE_FILE_MAX_BYTES = 1048576;
 // What stat says about a path: 'present', 'absent' (ENOENT/ENOTDIR only) or 'unknown' (EACCES, EPERM, EIO, a timeout ...).
 // `statSyncFn` is a test seam (an injected EACCES cannot be built portably); production passes nothing.
+// R14 F-R14-4: stat FOLLOWS a link, so a root that is a link (a junction or a mount-point folder) whose target is gone answers ENOENT.
+// The root itself is THERE; what is missing is what it points at (a detached drive, an unmounted volume), which is "cannot tell it from
+// deleted", and cannot check means ALIVE. So an ENOENT/ENOTDIR from stat is confirmed with lstat (which does not follow): found = present.
 export function rootState(root, statSyncFn = fs.statSync) {
   try { statSyncFn(root); return 'present'; } catch (e) {
+    if (!(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR'))) return 'unknown';
+  }
+  try { fs.lstatSync(root); return 'present'; } catch (e) {
     return e && (e.code === 'ENOENT' || e.code === 'ENOTDIR') ? 'absent' : 'unknown';
   }
 }

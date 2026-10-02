@@ -998,6 +998,25 @@ test('CWK-162 B6 control: the FLOOR is a real term -- a high-ratio archive that 
   assert.strictEqual(fs.statSync(path.join(to, `${SID_C7}.jsonl`)).size, under);
 });
 
+// R14 INSPECT NIT 3: the size bound read the file's size with statSync and then read the file; a file that grows (or is swapped) between
+// the two was read whole. The bound is now ALSO checked on the length of the buffer actually read. Witness: stat says 1 byte, the file is
+// one byte over the cap.
+test('R14 NIT 3 (B6): the compressed-size bound is checked on the bytes actually READ, not only on the earlier stat', (t) => {
+  const arch = c7Dir('arch');
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const gz = path.join(arch, 'slug', `${SID_C7}.jsonl.gz`);
+  fs.mkdirSync(path.dirname(gz), { recursive: true });
+  const fd = fs.openSync(gz, 'w');
+  try { fs.ftruncateSync(fd, C7_GZCAP + 1); } finally { fs.closeSync(fd); }
+  const realStat = fs.statSync;
+  fs.statSync = function spy(p, ...rest) { return String(p) === gz ? { size: 1 } : realStat.call(fs, p, ...rest); };
+  let r;
+  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.statSync = realStat; }
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
+  assert.match(r.error, /compressed/, 'refused as over the compressed bound, not as a gzip parse error');
+});
+
 test('CWK-162 B6: a compressed file over RESTORE_MAX_GZ_BYTES is refused by its size, before it is read', (t) => {
   const arch = c7Dir('arch');
   const to = c7Dir('to');

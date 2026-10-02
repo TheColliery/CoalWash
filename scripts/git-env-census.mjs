@@ -36,15 +36,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-// CWK-174: BLOB-PINNED EXEMPTION for the house secret scan's two canon TEST files. They spawn git with no `env:` (the canon test helper
+// CWK-174: BLOB-PINNED EXEMPTION for the house secret scan's canon TEST file that needs one (R14 F-R14-5: scripts/secret-gate.test.mjs
+// takes its environment where it spawns and hides no finding, so its pin was inert and was dropped; a test refuses an entry that hides
+// nothing). The file spawns git with no `env:` (the canon test helper
 // inherits the ambient env, so an absolute GIT_INDEX_FILE exported by a git hook under a pathspec or `-a` commit reaches the fixture's
-// git; routed to the `.github` deputy to fix upstream), and they are carried BYTE-EQUAL from the canon, so they cannot be edited here
+// git; routed to the `.github` deputy to fix upstream), and it is carried BYTE-EQUAL from the canon, so it cannot be edited here
 // without breaking the org's scanner-parity check. Each path is exempt ONLY while the git blob id of its content equals the id pinned
 // below (`git hash-object --no-filters`): an edit, a re-sync that moves the blob, or the same bytes at another path is a finding again.
 // A named, room-local divergence: DELETE an entry the day the canon fix lands and the carrier is re-copied. The report lists what it
 // exempted (`exempted`), so the size of the unverified set is visible and never implied away.
 export const EXEMPT_CARRIERS = Object.freeze({
-  'scripts/secret-gate.test.mjs': '3fcd3f0d020ea3b3f369feca01dc770d102ca5b3',
   'scripts/secret-scan.test.mjs': 'a9cb7145e31139ec3c490dd7714df8fa7dc6cf86',
 });
 

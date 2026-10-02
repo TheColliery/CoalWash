@@ -2416,6 +2416,26 @@ test('CWK-157 cannot-check means ALIVE: an absent root outside home/temp (a miss
   } finally { clean(home, proj); }
 });
 
+// R14 INSPECT F-R14-4: stat FOLLOWS a link, so a project root that is a link (a junction or a mount-point folder inside the home, to a
+// drive that is detached) whose target is gone read ENOENT, "absent", and its state file was swept. lstat finds the link itself: the
+// root is THERE, and cannot-check-means-alive keeps the file.
+test('R14 F-R14-4: a project root that is a LINK whose target is gone reads PRESENT, never dead; a truly absent path still reads absent (CWK-157)', (t) => {
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwr14-link-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const target = path.join(base, 'target');
+  const link = path.join(base, 'proj-link');
+  fs.mkdirSync(target);
+  try { fs.symlinkSync(target, link, 'junction'); } catch (e) { return t.skip(`cannot create a junction or directory symlink on this host (${e.code || e.message})`); }
+  assert.strictEqual(rootState(link), 'present', 'control: a live link reads present');
+  fs.rmSync(target, { recursive: true });
+  assert.throws(() => fs.statSync(link), (e) => e.code === 'ENOENT', 'precondition: stat through the link now says ENOENT (the old reading of "absent")');
+  assert.strictEqual(rootState(link), 'present', 'lstat finds the link itself');
+  assert.strictEqual(rootIsGone(link, [base, os.tmpdir()]), false, 'a root behind a link with a missing target is detached, not deleted: keep');
+  const nothing = path.join(base, 'nothing');
+  assert.strictEqual(rootState(nothing), 'absent', 'control: a path with no link and no target is still absent');
+  assert.strictEqual(rootIsGone(nothing, [base]), true, 'and still dead, so the answer above comes from the link and nothing else');
+});
+
 test('CWK-157 oversize: a state-named file over 1 MiB is not parsed and not touched', () => {
   const { home, proj } = sandbox();
   try {

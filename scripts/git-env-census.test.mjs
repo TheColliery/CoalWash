@@ -129,23 +129,24 @@ test('the three NAMED bypasses pass unseen (a named limit, pinned so the header 
   assert.equal(census(call('spawnSync', 'git', "['status']", 'cwd: dir')).findings.length, 1);
 });
 
-// CWK-174: the house secret scan's two canon TEST files spawn git with no env: (the canon helper inherits the ambient env, so an absolute
-// GIT_INDEX_FILE exported by a git hook under a pathspec or `-a` commit reaches the fixture's git; routed to the .github deputy to fix
-// upstream). They are carried BYTE-EQUAL from the canon and cannot be edited room-side, so the census exempts exactly those two paths, and
-// ONLY while each file's git blob id equals the id pinned below: an edit, or a template re-sync that moves the blob, turns the entry back
-// into a finding. A room-local, named divergence; DELETE the entry when the canon fix lands and the carrier is re-copied.
+// CWK-174: the house secret scan's canon TEST file scripts/secret-scan.test.mjs spawns git with no env: (the canon helper inherits the ambient
+// env, so an absolute GIT_INDEX_FILE exported by a git hook under a pathspec or `-a` commit reaches the fixture's git; routed to the .github
+// deputy to fix upstream). It is carried BYTE-EQUAL from the canon and cannot be edited room-side, so the census exempts exactly that path, and
+// ONLY while its git blob id equals the id pinned below: an edit, or a template re-sync that moves the blob, turns the entry back into a
+// finding. (R14 F-R14-5: scripts/secret-gate.test.mjs was pinned too and exempted nothing; it takes its environment where it spawns, and an
+// entry that hides no finding is refused by the last test below.) A room-local, named divergence; DELETE the entry when the canon fix lands
+// and the carrier is re-copied.
 import * as CENSUS from './git-env-census.mjs'; // namespace import: a name the pre-fix tree never exported fails an ASSERTION, not the link
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { gitEnv } from './git-env.mjs';
 
 const CARRIERS = {
-  'scripts/secret-gate.test.mjs': '3fcd3f0d020ea3b3f369feca01dc770d102ca5b3',
   'scripts/secret-scan.test.mjs': 'a9cb7145e31139ec3c490dd7714df8fa7dc6cf86',
 };
 const carrierText = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf8');
 
-test('CWK-174: the exemption names EXACTLY the two canon test files, with their pinned blob ids', () => {
+test('CWK-174: the exemption names EXACTLY the one canon test file that needs it, with its pinned blob id (R14 F-R14-5: the secret-gate test spawns git with its own env and needs none)', () => {
   assert.ok(CENSUS.EXEMPT_CARRIERS, 'EXEMPT_CARRIERS is exported');
   assert.deepEqual(Object.fromEntries(Object.entries(CENSUS.EXEMPT_CARRIERS).sort()), CARRIERS);
 });
@@ -165,8 +166,21 @@ test('CWK-174: a carrier whose bytes equal its pinned blob is exempt, and the ex
     const r = censusGitSpawns([{ rel, text }]);
     assert.deepEqual(r.findings, [], `${rel} is exempt while it is the pinned blob`);
     assert.deepEqual(r.exempted, [rel], 'and the exemption is named in the report');
-    if (rel.endsWith('secret-scan.test.mjs')) assert.ok(bare.findings.length > 0, 'control: without the pin the same text IS a finding (the locator sees it)');
+    assert.ok(bare.findings.length > 0, 'control: without the pin the same text IS a finding (the locator sees it)');
   }
+});
+
+// R14 INSPECT F-R14-5: the pin for scripts/secret-gate.test.mjs exempted NOTHING (the same bytes at an unpinned path yield 0 findings; only
+// secret-scan.test.mjs yields 3), while the header and verify's "2 ... EXEMPT" line claimed two. An exemption that hides no finding is
+// attack surface for nothing, and it makes the printed size of the unverified set a claim the code does not back. So every entry must
+// EARN its place: without its pin, its own bytes are a finding.
+test('R14 F-R14-5: every exempt carrier earns its entry -- the same bytes at an unpinned path ARE findings (an inert pin is refused)', () => {
+  for (const rel of Object.keys(CENSUS.EXEMPT_CARRIERS)) {
+    const bare = censusGitSpawns([{ rel: 'scripts/unpinned-copy.test.mjs', text: carrierText(rel) }]);
+    assert.ok(bare.findings.length > 0, `${rel}: the pin hides nothing, so it must not be there`);
+  }
+  const gate = censusGitSpawns([{ rel: 'scripts/unpinned-copy.test.mjs', text: carrierText('scripts/secret-gate.test.mjs') }]);
+  assert.deepEqual(gate.findings, [], 'control: the secret-gate test really does need no exemption (it takes its environment where it spawns)');
 });
 
 test('CWK-174: ONE edited byte makes a carrier a finding again (the exemption is the blob, never the path)', () => {
