@@ -87,6 +87,47 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gitEnv } from './git-env.mjs';
 
+// CWK-162 (AI Deep Scan A4): every Markdown file this gate reads is contributed text (a PR can add any file at any path), and
+// it was read with a bare readFileSync: no kind gate (a link was followed, a device or FIFO was opened) and no byte bound.
+// readDocBounded refuses a symlink, a non-regular file and anything over MAX_DOC_BYTES BEFORE reading, opens with O_NONBLOCK
+// (a FIFO swapped in after the lstat cannot hang the open) and O_NOFOLLOW where the platform has it, then proves the open
+// handle is the file the lstat judged (dev+ino, BigInt: NTFS file ids exceed 2**53). 4 MiB is the bound config-load.mjs puts
+// on any governance or doc read; the largest Markdown file in this repo is a CHANGELOG far below it.
+export const MAX_DOC_BYTES = 4 * 1024 * 1024;
+const DOC_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0);
+function docRefused(code, detail) { const e = new Error(code); e.code = code; e.detail = detail || ''; return e; }
+function readDocBounded(abs) {
+  const lst = fs.lstatSync(abs, { bigint: true }); // ENOENT, EACCES ... propagate with their own code, as readFileSync's did
+  if (lst.isSymbolicLink()) throw docRefused('SYMLINK');
+  if (!lst.isFile()) throw docRefused('NOT_REGULAR');
+  if (lst.size > BigInt(MAX_DOC_BYTES)) throw docRefused('OVER_BOUND', `${lst.size} bytes > ${MAX_DOC_BYTES}`);
+  const fd = fs.openSync(abs, DOC_READ_FLAGS);
+  try {
+    const st = fs.fstatSync(fd, { bigint: true });
+    if (!st.isFile()) throw docRefused('NOT_REGULAR');
+    if (st.dev !== lst.dev || st.ino !== lst.ino) throw docRefused('CHANGED', 'the path was swapped after it was checked');
+    if (st.size > BigInt(MAX_DOC_BYTES)) throw docRefused('OVER_BOUND', `${st.size} bytes > ${MAX_DOC_BYTES}`);
+    const want = Number(st.size);
+    const buf = Buffer.alloc(want);
+    let got = 0;
+    while (got < want) {
+      const n = fs.readSync(fd, buf, got, want - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    return buf.toString('utf8', 0, got);
+  } finally { fs.closeSync(fd); }
+}
+
+// CWK-162 (AI Deep Scan A5): a finding quotes text FROM the scanned file (a link destination, a fragment, a file name), and a
+// destination holding ESC [2J or an OSC title sequence reached the terminal raw. The print site now writes every control
+// character (Cc: C0, DEL, C1), line and paragraph separators and bidirectional controls as a visible \uXXXX escape; letters, an
+// em dash and punctuation are untouched. The findings array stays raw, so a caller reading it sees the true text (security.md,
+// "Log injection is injection too": neutralize at the line-oriented sink).
+export function escapeControls(text) {
+  return String(text).replace(/[\p{Cc}\p{Zl}\p{Zp}\p{Bidi_Control}]/gu, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, '0')}`);
+}
+
 const BT = String.fromCharCode(96);
 const ESC_BASE = 0xF0000;   // an escaped ASCII punctuation char, held as a private-use code point
 const CODE_BASE = 0xF1000;  // an inline code span, held as ONE private-use code point (index)
@@ -332,14 +373,14 @@ export function checkLinks({ root, files, tracked }) {
   const anchorCache = new Map();
   const anchorsOf = (rel) => {
     if (!anchorCache.has(rel)) {
-      try { anchorCache.set(rel, headingAnchors(fs.readFileSync(path.join(root, rel), 'utf8'))); } catch { anchorCache.set(rel, null); }
+      try { anchorCache.set(rel, headingAnchors(readDocBounded(path.join(root, rel)))); } catch { anchorCache.set(rel, null); }
     }
     return anchorCache.get(rel);
   };
   for (const file of files) {
     let text;
-    try { text = fs.readFileSync(path.join(root, file), 'utf8'); } catch (e) {
-      findings.push({ file, line: 0, msg: `cannot read this file (${e.code || e.message})` });
+    try { text = readDocBounded(path.join(root, file)); } catch (e) {
+      findings.push({ file, line: 0, msg: `cannot read this file (${e.code || e.message}${e.detail ? `: ${e.detail}` : ''})` });
       continue;
     }
     for (const { line, dest } of extractLinks(text)) {
@@ -415,7 +456,7 @@ function main(argv) {
     tracked = new Set(ls.stdout.split('\0').filter(Boolean));
   }
   const r = checkLinks({ root, files, tracked });
-  for (const f of r.findings) console.log(`FAIL ${f.file}:${f.line}: ${f.msg}`);
+  for (const f of r.findings) console.log(`FAIL ${escapeControls(f.file)}:${f.line}: ${escapeControls(f.msg)}`);
   console.log(`link-check: ${r.findings.length} finding(s) across ${r.files} file(s) — ${r.checked} internal link(s) checked, ${r.external} external skipped`);
   if (r.findings.length) process.exitCode = 1;
 }
