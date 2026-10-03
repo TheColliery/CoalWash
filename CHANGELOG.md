@@ -2,6 +2,20 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.11.0] - 2026-10-04
+
+Project estate age limits stay clamped with deleteCold on
+
+A cloned project's config can no longer move the estate's archive-then-remove age edges, even after you turn on `estate.deleteCold`, and the Release deriver now bounds the title and carries this paragraph into the Release body.
+
+### Security
+
+- **The project clamps on `estate.purgeAfterDays` and `estate.compressAfterDays` now hold after you turn on `estate.deleteCold` too (owner ruling BB-5).** In 1.10.0 and 1.10.1 a cloned project's value was bounded only while your own effective `deleteCold` was not true; once it was true, a project value stood, in either direction. Now a project may only RAISE `compressAfterDays` (sessions stay active longer) and only LOWER `purgeAfterDays` (sessions turn cold sooner; `0`, "never cold", counts as the highest), whatever `deleteCold` says. A user who turned on `deleteCold` set those edges at numbers, and a cloned project file never moves them. With `deleteCold` true a warm and a cold session are both archived and their originals removed, so `compressAfterDays` is the edge that decides which sessions are removed at all; a lower project `purgeAfterDays` only relabels warm as cold. The two 1.10.0 Security bullets on these keys say "Once your own `deleteCold` is true the project value stands": that no longer holds from 1.11.0. The keys and their defaults are unchanged. A dropped project value is named on stderr by `estate-scan` and `estate-run` and by `configure.mjs`, and those messages no longer say the bound applies only while `deleteCold` is not true. — test: `scripts/lib/config-load.test.mjs`, `scripts/lib/cli.test.mjs`, `scripts/configure.test.mjs`
+
+### Changed
+
+- **Contributor-facing: the Release deriver is the org canon's newer copy.** `scripts/release-notes.mjs`, `scripts/verify-release-shape.mjs` and `scripts/lib/release-shape.mjs`, with their tests, are adopted byte for byte from the org canon (`.github` `5b52a54`). The one-line summary under a version heading, which becomes the Release title, is now a signal with a band (aim 60 characters, 45 to 75 clean, a warning outside it), and a lead paragraph after the summary is carried into the Release body. These are CI tooling, excluded from the installed plugin. — test: `scripts/release-notes.test.mjs`, `scripts/verify-release-shape.test.mjs`, `scripts/lib/release-shape.test.mjs`
+
 ## [1.10.1] - 2026-10-03
 
 Three file checks now judge the handle they opened.

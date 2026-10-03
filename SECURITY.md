@@ -8,6 +8,16 @@ Report a security issue in this repo through GitHub's private vulnerability repo
 
 ## Advisories
 
+### 2026-10-04 — a cloned project's estate age limits no longer move after you turn on deleteCold
+
+**What.** `v1.10.0` bounded a cloned project's `estate.purgeAfterDays` and `estate.compressAfterDays` (a project may only lower the first and only raise the second) but only while your own `estate.deleteCold` was not true. If you had turned `deleteCold` on, a project value stood: a cloned project could lower `compressAfterDays` and bring sessions into the archive-then-remove band sooner than your own number, and CoalWash then archived them and removed the originals once the archive verified.
+
+**What `v1.11.0` refuses.** Both bounds hold whether or not `deleteCold` is true. A project value outside the allowed direction is ignored and named on stderr by `estate-scan` and `estate-run` and by `configure.mjs`. With `deleteCold` true, `compressAfterDays` is the edge that decides which sessions are removed; a lower project `purgeAfterDays` only relabels warm as cold.
+
+**Affected versions.** `v1.10.0` and `v1.10.1`, and only for a user whose own `deleteCold` is true. Earlier versions carry no such bound at all, as the `2026-10-03` advisory below states. The measurement behind "which edge removes" is the coder's reading of `estate-archive.mjs` at the commit that closed this; the tags before `v1.10.0` were not re-run for this advisory.
+
+**Until you update to `v1.11.0`,** if your own config sets `estate.deleteCold: true`, do not open an untrusted clone with CoalWash installed.
+
 ### 2026-10-03 — a cloned repo could steer crash recovery, the estate restore and the config merge (CWK-162)
 
 **What.** An AI deep scan of the repository (CWK-162) found paths where repository-controlled content steered CoalWash's own work. The ones that matter for safety: crash recovery replays a journal that lives inside the project, and treated every file inside the project as a valid target, so a forged journal could rewrite or delete git's control files (`.git/config`, `.git/hooks/*`); `estate-restore --to` wrote through a link planted under the destination and inflated an archive with no limit; and a cloned project config could raise the estate run limits above yours or set `estate.purgeAfterDays: 0`, which sends every aged session to the archive-then-remove band past your own `deleteCold: false`. Smaller ones (the `@import` closure, the `managedPaths` match, the write-guard advisory's restore line, the link checker) are in the `CHANGELOG.md` `### Security` entry.
@@ -55,15 +65,15 @@ git tag -v "$(git describe --tags --abbrev=0)"
 
 `plugin/` is generated, never hand-edited. `node scripts/build-plugin.mjs` reproduces it from source; `node scripts/verify.mjs` byte-checks dist-sync in BOTH directions (stale file and source-less orphan both fail) plus manifests, factory-config-vs-schema, and version pins; `node scripts/test.mjs` runs the zero-dependency suite with an explicit file list. Zero dependencies — no lockfile, nothing to `npm audit`.
 
-<!-- version-transition: SkillSpector scan — re-scan is event-driven (a new SkillSpector version or a genuinely new attack surface, maintainer-commanded), NOT per release; record the version/score/date/commit here only after a real scan. -->
-## Independent Scanning — NVIDIA SkillSpector
+<!-- version-transition: SkillSpector scan—re-scan is event-driven (a new SkillSpector version or a genuinely new attack surface, maintainer-commanded), NOT per release; record the version/score/date/commit here only after a real scan. -->
+## Independent Scanning—NVIDIA SkillSpector
 
-Last scan: CoalWash **v0.1.0-beta.1** dist (`plugin/`), on **2026-07-09** (launch day), with [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) **v2.3.11** (self-reported version string; no commit was recorded for this scan, and it predates upstream's first tag, `v2.5.0`), static stage (`--no-llm`, the documented FP-prone baseline). **Score 43/100 (MEDIUM), 8 findings — all adjudicated FALSE POSITIVE:**
+Last scan: CoalWash **v0.1.0-beta.1** dist (`plugin/`), on **2026-07-09** (launch day), with [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) **v2.3.11** (self-reported version string; no commit was recorded for this scan, and it predates upstream's first tag, `v2.5.0`), static stage (`--no-llm`, the documented FP-prone baseline). **Score 43/100 (MEDIUM), 8 findings—all adjudicated FALSE POSITIVE:**
 
 - **7 × `RA1` Self-Modification** (`commands/update.md` ×2 · `hooks/coalwash-conductor.js` ×3 · `scripts/lib/config-schema.mjs` ×2): every hit is the series' **consent-gated kind-1 self-update** — the hook only *schedules* a check via a local stamp (no network, no writes to skill files); the *agent* verifies online and *offers* `claude plugin update`, which the user runs. Nothing modifies skill code or config at runtime. This is the family-wide FP baseline (the same pattern trips RA1 on every sibling).
 - **1 × `AR2` Anti-Refusal** (`skills/coalwash/references/method.md:34`, confidence 0.24): the flagged phrase "definable **without judgment**" describes the *mechanical Quick tier* — operations deterministic enough to define without LLM judgment — not an instruction to suppress warnings or disclaimers.
 
-Re-scan stays event-driven (a new SkillSpector version or a genuinely new attack surface), not per release — this pins the last version actually verified.
+Re-scan stays event-driven (a new SkillSpector version or a genuinely new attack surface), not per release—this pins the last version actually verified.
 
 ## Structural Safety
 
