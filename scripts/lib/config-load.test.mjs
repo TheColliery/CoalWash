@@ -1804,8 +1804,11 @@ test('CWK-162 B10: a project purgeAfterDays 0 is ignored unless the EFFECTIVE de
   assert.notStrictEqual(mergeSafety({ estate: { deleteCold: true } }, { estate: { purgeAfterDays: 0 } }, { globalUnreadable: true }).estate.purgeAfterDays, 0, 'an unreadable global file reads deleteCold as false');
 });
 
-test('CWK-162 B10 control: with the user\'s own deleteCold true a project 0 is honored, a global 0 is never touched, and every other purgeAfterDays value stays plain project-wins', () => {
-  assert.strictEqual(mergeSafety({ estate: { deleteCold: true, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 0 } }).estate.purgeAfterDays, 0, 'the user already opted in to cold deletes');
+test('CWK-162 B10 control: a global 0 is never touched, a LOWER project value is honored, and (R18, owner sheet BB-5) a project 0 stays ignored with the user\'s own deleteCold true', () => {
+  // R18 (BB-5, Z-2): this assertion used to read `deleteCold: true ... purgeAfterDays: 0 -> 0` ("the user already opted in to cold deletes").
+  // That was the consented-case exception the owner ruled out on 2026-10-03: a user who turned on deleteCold set the cold edge at a number,
+  // and a cloned project file never moves it. Changed here by name; the rule it now pins is the R18 BB-5 tests below.
+  assert.strictEqual(mergeSafety({ estate: { deleteCold: true, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 0 } }).estate.purgeAfterDays, 90, 'deleteCold true: the clamp still holds, a project 0 does not move the user\'s 90');
   assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 0 } }, {}).estate.purgeAfterDays, 0, 'the user\'s own global 0 is theirs');
   assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 1 } }).estate.purgeAfterDays, 1, 'a LOWER value is unchanged: it only makes sessions cold sooner, and cold is report-only here');
   // R14 bounce 1 (F-R14-2): this assertion used to read `{ purgeAfterDays: 400 } -> 400` ("plain project-wins"). That WAS the defect: 400 is
@@ -1842,7 +1845,7 @@ test('F-R14-1: with no valid global value the DEFAULT is the ceiling -- no globa
   assert.deepStrictEqual(effectiveEstate({ estate: { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 } } }, bad, { globalUnreadable: true }).runBudget, RB_DEFAULT, 'an unreadable global: the user\'s stance is unknown, so the default');
 });
 
-test('F-R14-2: while deleteCold is not true a project purgeAfterDays is honored only when it is <= the user\'s own, 0 ordered as +infinity (witness: a 200-day session is cold at 90, warm at 365 or 36500)', () => {
+test('F-R14-2: with deleteCold false a project purgeAfterDays is honored only when it is <= the user\'s own, 0 ordered as +infinity (witness: a 200-day session is cold at 90, warm at 365 or 36500)', () => {
   const g = { estate: { deleteCold: false, purgeAfterDays: 90 } };
   const eff = (v) => effectiveEstate(g, { estate: { purgeAfterDays: v } }).purgeAfterDays;
   for (const v of [36500, 365, 91, 0]) assert.strictEqual(eff(v), 90, `project ${v} is above the user's 90 (0 = never): not honored`);
@@ -1867,9 +1870,25 @@ test('F-R14-2: the user\'s own boundary is their global value, else the schema d
   assert.strictEqual(effectiveEstate(closed(undefined), { estate: { purgeAfterDays: 36500 } }).purgeAfterDays, 180, 'a global estate with no purgeAfterDays: the default');
 });
 
-test('F-R14-2 control: once the user\'s OWN effective deleteCold is true a project purgeAfterDays (a raise, 0) is honored, as before', () => {
+// R18 (owner sheet BB-5 = (a), zone hooks-safety.md section 9 AMENDED 2026-10-03, "the clamp holds AFTER consent too"): these two tests
+// used to be the F-R14-2 / F-R14-6 CONTROLS, asserting that once the user's own deleteCold is true a project value (raise, lower, 0) stands.
+// That consented-case exception IS the residue Z-2 named; the owner ruled it out, so the controls become the refusal, by name.
+test('R18 BB-5: with the user\'s OWN deleteCold true a project purgeAfterDays above the user\'s value, or 0 while it is not 0, is still DROPPED; a lower or equal one is honored', () => {
   const open = { estate: { deleteCold: true, purgeAfterDays: 90 } };
-  for (const v of [36500, 365, 0, 1]) assert.strictEqual(effectiveEstate(open, { estate: { purgeAfterDays: v } }).purgeAfterDays, v, `deleteCold true: project ${v} stands`);
+  const eff = (v, g = open) => effectiveEstate(g, { estate: { purgeAfterDays: v } }).purgeAfterDays;
+  for (const v of [36500, 365, 91, 0]) assert.strictEqual(eff(v), 90, `deleteCold true: project ${v} is above the user's 90 (0 = never): not honored`);
+  for (const v of [90, 89, 30, 1]) assert.strictEqual(eff(v), v, `deleteCold true: project ${v} is <= the user's 90: honored`);
+  for (const v of [-1, 36501, 90.5, '30', null]) assert.strictEqual(eff(v), 90, `deleteCold true: project ${JSON.stringify(v)} is not a valid purgeAfterDays: no say`);
+  // no global purgeAfterDays: the schema default 180 is the user's value
+  const openNoValue = { estate: { deleteCold: true } };
+  for (const v of [365, 181, 0]) assert.strictEqual(eff(v, openNoValue), 180, `deleteCold true, no global value: project ${v} is above the default 180: not honored`);
+  for (const v of [180, 100]) assert.strictEqual(eff(v, openNoValue), v, `deleteCold true, no global value: project ${v} is <= 180: honored`);
+  // the user's own global 0 is theirs: it bounds nothing, so any valid project value is honored
+  assert.strictEqual(eff(365, { estate: { deleteCold: true, purgeAfterDays: 0 } }), 365, 'the user already holds "never cold": a project 365 is <= infinity');
+  // deleteCold true from the GLOBAL file is the consent; the project asking deleteCold:true too changes nothing
+  const both = effectiveEstate(open, { estate: { deleteCold: true, purgeAfterDays: 0 } });
+  assert.strictEqual(both.deleteCold, true);
+  assert.strictEqual(both.purgeAfterDays, 90, 'the project also saying deleteCold:true does not reopen the edge');
 });
 
 // R14 bounce 1 (E1, the head's ruling: the break is made LOUD): a project value the bounded estate merge DROPPED is named in the
@@ -1893,7 +1912,7 @@ test('E1: loadMergedConfigReport().ignored names every project runBudget field a
   } finally { clean(home, proj); }
 });
 
-test('E1: a project value that was HONORED (lower, equal, or deleteCold already true) ignored nothing and draws no report; a non-object runBudget is reported as a whole', () => {
+test('E1: a project value that was HONORED (lower, equal) ignored nothing and draws no report; with deleteCold true a raise is now dropped and reported (R18 BB-5); a non-object runBudget is reported as a whole', () => {
   const { home, proj } = rootedProject();
   try {
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
@@ -1902,9 +1921,15 @@ test('E1: a project value that was HONORED (lower, equal, or deleteCold already 
     assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'lower values were honored');
     plantProjectConfig(proj, JSON.stringify({ estate: { runBudget: { maxSessionsPerRun: 5 }, purgeAfterDays: 90 } }));
     assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'values equal to the user\'s own were honored');
-    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { deleteCold: true, purgeAfterDays: 90 } }));
-    plantProjectConfig(proj, JSON.stringify({ estate: { purgeAfterDays: 36500 } }));
-    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'deleteCold true: the project value stands');
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { deleteCold: true, purgeAfterDays: 90, compressAfterDays: 30 } }));
+    const pc = plantProjectConfig(proj, JSON.stringify({ estate: { purgeAfterDays: 36500, compressAfterDays: 1 } }));
+    const consented = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(consented.ignored, [
+      { key: 'estate.purgeAfterDays', tier: 'project', path: pc, value: 36500 },
+      { key: 'estate.compressAfterDays', tier: 'project', path: pc, value: 1 },
+    ], 'R18 BB-5: deleteCold true, the project raise and the project lower are both dropped and named');
+    assert.strictEqual(consented.cfg.estate.purgeAfterDays, 90);
+    assert.strictEqual(consented.cfg.estate.compressAfterDays, 30);
     const p = plantProjectConfig(proj, JSON.stringify({ estate: { runBudget: 7 } }));
     assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [{ key: 'estate.runBudget', tier: 'project', path: p, value: 7 }]);
     fs.writeFileSync(p, '{ not json');
@@ -1914,8 +1939,8 @@ test('E1: a project value that was HONORED (lower, equal, or deleteCold already 
 
 // R14 bounce 2, F-R14-6 (RE-INSPECT [MEDIUM]): compressAfterDays is the WARM boundary and was plain project-wins, so a project value LOWER
 // than the user's moved a session from active (untouched) to warm (archived, original removed after the verified archive): the escalation
-// the purgeAfterDays rule closes, one edge earlier. While the user's effective deleteCold is not true a project may only RAISE it.
-test('F-R14-6: while deleteCold is not true a project compressAfterDays is honored only when it is >= the user\'s own (witness: a 5-day-old session is active at 14, warm at 1)', () => {
+// the purgeAfterDays rule closes, one edge earlier. A project may only RAISE it (with deleteCold true too since R18, owner sheet BB-5).
+test('F-R14-6: with deleteCold false a project compressAfterDays is honored only when it is >= the user\'s own (witness: a 5-day-old session is active at 14, warm at 1)', () => {
   const g = { estate: { deleteCold: false, compressAfterDays: 30 } };
   const eff = (v, gg = g) => effectiveEstate(gg, { estate: { compressAfterDays: v } }).compressAfterDays;
   for (const v of [1, 14, 29]) assert.strictEqual(eff(v), 30, `project ${v} is below the user's 30: not honored`);
@@ -1936,9 +1961,35 @@ test('F-R14-6: the user\'s own boundary is their global value, else the schema d
   assert.strictEqual(effectiveEstate({ estate: { deleteCold: false } }, { estate: { compressAfterDays: 20 } }).compressAfterDays, 20, 'a global estate with no compressAfterDays: the default 14, so a 20 is a raise');
 });
 
-test('F-R14-6 control: once the user\'s OWN effective deleteCold is true a project compressAfterDays (lower or higher) is honored, as before', () => {
+test('R18 BB-5: with the user\'s OWN deleteCold true a project compressAfterDays below the user\'s value is still DROPPED; a raise or an equal one is honored', () => {
   const open = { estate: { deleteCold: true, compressAfterDays: 30 } };
-  for (const v of [1, 29, 30, 365]) assert.strictEqual(effectiveEstate(open, { estate: { compressAfterDays: v } }).compressAfterDays, v, `deleteCold true: project ${v} stands`);
+  const eff = (v, g = open) => effectiveEstate(g, { estate: { compressAfterDays: v } }).compressAfterDays;
+  for (const v of [1, 14, 29]) assert.strictEqual(eff(v), 30, `deleteCold true: project ${v} is below the user's 30: not honored`);
+  for (const v of [30, 31, 365, 3650]) assert.strictEqual(eff(v), v, `deleteCold true: project ${v} is >= the user's 30: honored`);
+  for (const v of [0, -1, 3651, 30.5, '60', null]) assert.strictEqual(eff(v), 30, `deleteCold true: project ${JSON.stringify(v)} is not a valid compressAfterDays: no say`);
+  // no global compressAfterDays: the schema default 14 is the user's value
+  const openNoValue = { estate: { deleteCold: true } };
+  for (const v of [1, 13]) assert.strictEqual(eff(v, openNoValue), 14, `deleteCold true, no global value: project ${v} is below the default 14: not honored`);
+  for (const v of [14, 60]) assert.strictEqual(eff(v, openNoValue), v, `deleteCold true, no global value: project ${v} is >= 14: honored`);
+});
+
+test('R18 BB-5 (the witness, through mergeSafety -> clampedRead -> classifySessions): with the user\'s own deleteCold true, a 5-day-old session stays ACTIVE under a project compressAfterDays 1', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const pdir = path.join(home, '.claude', 'projects', ccProjectSlug(proj));
+    fs.mkdirSync(pdir, { recursive: true });
+    const sid = 'aaaaaaaa-bbbb-cccc-dddd-000000000018';
+    const f = path.join(pdir, `${sid}.jsonl`);
+    fs.writeFileSync(f, '{"x":1}\n');
+    const now = Date.now();
+    const t = (now - 5 * 86400000) / 1000;
+    fs.utimesSync(f, t, t);
+    const g = { estate: { deleteCold: true } };
+    const bandOf = (project) => classifySessions({ projectRoot: proj, home, now, estate: clampedRead(mergeSafety(g, project), 'estate') }).sessions.find((x) => x.id === sid).band;
+    assert.strictEqual(bandOf({}), 'active', 'no project value: 5 days is under the default 14');
+    assert.strictEqual(bandOf({ estate: { compressAfterDays: 1 } }), 'active', 'deleteCold true: the project\'s 1 is still dropped, the session is not archived and removed');
+    assert.strictEqual(bandOf({ estate: { compressAfterDays: 3 } }), 'active', 'and so is a 3');
+  } finally { clean(home, proj); }
 });
 
 test('F-R14-6 (the reviewer\'s witness): a 5-day-old session stays ACTIVE under a project compressAfterDays 1 -- through mergeSafety -> clampedRead -> classifySessions, the path an estate run takes', () => {

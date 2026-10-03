@@ -374,9 +374,9 @@ function projectBoundHints({ ignored, estate, home }) {
     const isCompress = hit.key === 'estate.compressAfterDays';
     const used = isPurge ? estate.purgeAfterDays : isCompress ? estate.compressAfterDays : hit.key === 'estate.runBudget' ? estate.runBudget : estate.runBudget[hit.key.slice('estate.runBudget.'.length)];
     const rule = isPurge
-      ? 'while estate.deleteCold is not true in your own config, a project value may only bring the cold boundary earlier (at or below your own purgeAfterDays, with 0, "never cold", counted as the highest)'
+      ? 'a project value may only bring the cold boundary earlier (at or below your own purgeAfterDays, with 0, "never cold", counted as the highest), whether or not estate.deleteCold is true in your own config'
       : isCompress
-        ? 'while estate.deleteCold is not true in your own config, a project value may only keep sessions active LONGER (at or above your own compressAfterDays)'
+        ? 'a project value may only keep sessions active LONGER (at or above your own compressAfterDays), whether or not estate.deleteCold is true in your own config'
         : 'a project value may only LOWER this work limit, and only with a number the schema accepts';
     out.push(`[CoalWash] ${hit.key}: the project config (${oneLine(hit.path)}) asks for ${oneLine(JSON.stringify(hit.value))}, and that was ignored. A cloned repo ships a project config, and it must not be able to widen what an estate run archives and removes, so ${rule}. This run used ${oneLine(JSON.stringify(used))}. If you want that value, set ${hit.key} in ${oneLine(globalConfigPath(home))}.`);
   }

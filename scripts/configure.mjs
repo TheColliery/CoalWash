@@ -590,9 +590,9 @@ function main() {
       } else if (PROJECT_BOUNDED_KEYS.includes(c.key)) {
         // R14 E1: a value a project may only LOWER (config-load.mjs mergeObjectKey) -- not a consent value either, so its own reason.
         console.warn(c.key === 'estate.purgeAfterDays'
-          ? '  While estate.deleteCold is not true in your own config, a project config may only bring the cold boundary earlier (at or below your own purgeAfterDays; 0, "never cold", counts as the highest),'
+          ? '  A project config may only bring the cold boundary earlier (at or below your own purgeAfterDays; 0, "never cold", counts as the highest), whether or not estate.deleteCold is true in your own config,'
           : c.key === 'estate.compressAfterDays'
-            ? '  While estate.deleteCold is not true in your own config, a project config may only keep sessions active longer (at or above your own compressAfterDays),'
+            ? '  A project config may only keep sessions active longer (at or above your own compressAfterDays), whether or not estate.deleteCold is true in your own config,'
             : '  A project config may only LOWER a work limit, with a number the schema accepts,');
         console.warn('  because a cloned repo ships a project config and it must not be able to widen what an estate run archives and removes.');
       } else {

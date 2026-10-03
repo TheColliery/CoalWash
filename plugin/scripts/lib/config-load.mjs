@@ -1021,8 +1021,9 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 // project shifting the boundary "is not unlocking a new capability" is false for the sentinel itself. `0` means "never becomes
 // cold" (estate-archive.mjs resolveEstateCfg), which sends EVERY aged session to the WARM band, whose original is removed after
 // the verified archive: a session the user's global `deleteCold: false` keeps in place becomes one that is archived and removed,
-// which is exactly the transition `deleteCold` exists to gate. So mergeObjectKey ignores a project `purgeAfterDays: 0` unless the
-// EFFECTIVE `deleteCold` (after the clamp above) is already true; every other value stays plain project-wins, as before.
+// which is exactly the transition `deleteCold` exists to gate. So mergeObjectKey ignores a project `purgeAfterDays: 0` (R14 F-R14-2
+// widened this to every value above the user's own; R18, owner sheet BB-5, removed the old "unless the effective deleteCold is already
+// true" exception: the clamp holds after consent too).
 // `estate.runBudget` follows the same finding: it paces how MUCH one user-invoked estate run does, and a project can only LOWER
 // it (the smaller of the two per field, against the user's own global value or the schema default). hooks-safety.md section 9
 // declined numeric rate dials because the action they pace is already gated by an enum the clamp covers; a user-invoked estate
@@ -1031,7 +1032,8 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 // R14 bounce 2 (F-R14-6): the CORRECTED paragraph above is HALF wrong for `compressAfterDays` too. The WARM edge is consent-free for the
 // USER's own boundary, but a project that LOWERS it moves sessions from active (untouched) to archived-and-removed with no say from the
 // user, the same escalation the purgeAfterDays rule closes. hooks-safety.md section 9 (AMENDED 2026-10-03) now clamps a removal-edge
-// numeric key by direction: while deleteCold is not true a project may only RAISE compressAfterDays (mergeObjectKey, below).
+// numeric key by direction: a project may only RAISE compressAfterDays (mergeObjectKey, below), whether or not deleteCold is true
+// (R18, owner sheet BB-5: the clamp holds after consent too).
 const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
 
 // R14 F-R14-1/2: the schema's own field specs the bounded estate merge below judges a project value with (one validator, never a second
@@ -1107,14 +1109,15 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
         merged.runBudget = rb;
       }
     }
-    // CWK-162 B10 + R14 F-R14-2, ONE RULE: while the user's effective deleteCold is not true, a project purgeAfterDays is honored
-    // only when the schema accepts it AND it is <= the user's own boundary (their global value, else the schema default; 0 = "never
-    // cold" is ordered as +infinity). Why: cold is report-only without deleteCold, but a session that is NOT cold is warm, and a warm
-    // session's original is removed once its archive is verified, so every project value ABOVE the user's boundary moves sessions
-    // from "kept in place" to "archived and removed" (a 200-day session: cold at 90, warm at 365 or 36500), the transition deleteCold
-    // gates. A value at or below it only makes sessions cold sooner, which is report-only here. Once deleteCold is true the user
-    // already opted in, and the project value stands as before.
-    if (p.purgeAfterDays !== undefined && merged.deleteCold !== true) {
+    // CWK-162 B10 + R14 F-R14-2, ONE RULE: a project purgeAfterDays is honored only when the schema accepts it AND it is <= the user's
+    // own boundary (their global value, else the schema default; 0 = "never cold" is ordered as +infinity). Why: cold is report-only
+    // without deleteCold, but a session that is NOT cold is warm, and a warm session's original is removed once its archive is verified,
+    // so every project value ABOVE the user's boundary moves sessions from "kept in place" to "archived and removed" (a 200-day session:
+    // cold at 90, warm at 365 or 36500), the transition deleteCold gates. A value at or below it only makes sessions cold sooner.
+    // R18 (owner sheet BB-5 = (a), 2026-10-03; zone hooks-safety.md section 9, "the clamp holds AFTER consent too"): the clamp holds
+    // whether or not the user's deleteCold is true. It used to stop at `merged.deleteCold !== true`, so once the user consented a cloned
+    // project's value stood (Z-2). A user who turned on deleteCold set the cold edge at a number, and a cloned project file never moves it.
+    if (p.purgeAfterDays !== undefined) {
       const userValue = !globalUnreadable && validateValue(PURGE_SPEC, g.purgeAfterDays) === null ? g.purgeAfterDays : PURGE_SPEC.def;
       const age = (n) => (n === 0 ? Infinity : n);
       if (validateValue(PURGE_SPEC, p.purgeAfterDays) !== null || age(p.purgeAfterDays) > age(userValue)) {
@@ -1124,10 +1127,12 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
     // R14 bounce 2 F-R14-6, the same rule on the sibling edge (hooks-safety.md section 9, AMENDED 2026-10-03: a numeric key that moves a
     // removal edge is clamped BY DIRECTION). compressAfterDays is the WARM boundary: a session older than it (and not cold) is archived and
     // its original removed after the verified archive, so a project LOWER value moves sessions from "active, left untouched" to "archived and
-    // removed" (a 5-day-old session is active at 14 and warm at 1), the transition deleteCold gates. While the user's effective deleteCold is
-    // not true, a project value is honored only when the schema accepts it AND it is >= the user's own value (their global value, else the
-    // schema default): a project may only RAISE it, keeping sessions active longer. Once deleteCold is true the user opted in.
-    if (p.compressAfterDays !== undefined && merged.deleteCold !== true) {
+    // removed" (a 5-day-old session is active at 14 and warm at 1). A project value is honored only when the schema accepts it AND it is
+    // >= the user's own value (their global value, else the schema default): a project may only RAISE it, keeping sessions active longer.
+    // R18 (owner sheet BB-5 = (a)): this holds whether or not the user's deleteCold is true. With deleteCold true a warm AND a cold session
+    // are both archived and their originals removed, so this edge is the one that decides which sessions are removed at all: a project
+    // value below the user's must not move it after consent either.
+    if (p.compressAfterDays !== undefined) {
       const userValue = !globalUnreadable && validateValue(COMPRESS_SPEC, g.compressAfterDays) === null ? g.compressAfterDays : COMPRESS_SPEC.def;
       if (validateValue(COMPRESS_SPEC, p.compressAfterDays) !== null || p.compressAfterDays < userValue) {
         if (!globalUnreadable && g.compressAfterDays !== undefined) merged.compressAfterDays = g.compressAfterDays; else delete merged.compressAfterDays;
@@ -1266,8 +1271,8 @@ export function loadMergedConfigReport({ cwd = process.cwd(), home = os.homedir(
   const cfg = mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable });
   // R14 bounce 1 (E1, the head's ruling: the break is LOUD): a project estate.runBudget field or purgeAfterDays the bounded merge
   // above DROPPED is named too, from the same read. "Dropped" is read off the merge's own result, never a second copy of the rule: the
-  // project asked for a value and the effective config holds a different one. A value that was honored (lower, equal, or deleteCold
-  // already true) ignored nothing. `value` is whatever the cloned repo wrote (any JSON type), so the caller must sanitize it for print.
+  // project asked for a value and the effective config holds a different one. A value that was honored (in the allowed direction,
+  // or equal) ignored nothing; since R18 (BB-5) the user's deleteCold no longer exempts a value. `value` is whatever the cloned repo wrote (any JSON type), so the caller must sanitize it for print.
   const pEstate = isPlainObject(p.data.estate) ? p.data.estate : null;
   if (pEstate) {
     const eEstate = isPlainObject(cfg.estate) ? cfg.estate : {};

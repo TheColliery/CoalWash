@@ -727,7 +727,8 @@ test('E1: estate-scan names every dropped PROJECT runBudget field and purgeAfter
     assert.ok(byKey['estate.purgeAfterDays'].includes('asks for 36500, and that was ignored.'));
     assert.ok(byKey['estate.purgeAfterDays'].includes('This run used 90.'));
     assert.ok(/may only LOWER this work limit/.test(byKey['estate.runBudget.maxSessionsPerRun']), 'the reason for a run limit');
-    assert.ok(/while estate\.deleteCold is not true in your own config, a project value may only bring the cold boundary earlier/.test(byKey['estate.purgeAfterDays']), 'the reason for the cold boundary');
+    assert.ok(/a project value may only bring the cold boundary earlier \(at or below your own purgeAfterDays, with 0, "never cold", counted as the highest\), whether or not estate\.deleteCold is true in your own config\./.test(byKey['estate.purgeAfterDays']), 'the reason for the cold boundary (R18 BB-5: it holds whether or not deleteCold is true)');
+    assert.ok(!/while estate\.deleteCold is not true/.test(byKey['estate.purgeAfterDays']), 'R18 BB-5: the consented exception is no longer stated');
     for (const l of lines) {
       assert.ok(l.includes(`If you want that value, set ${/^\[CoalWash\] (\S+?):/.exec(l)[1]} in ${globalCfg}.`), 'the conditional remedy names the GLOBAL config');
       assert.ok(l.includes('A cloned repo ships a project config, and it must not be able to widen what an estate run archives and removes'), 'states the security reason');
@@ -752,14 +753,15 @@ test('E1 (R14 bounce 2, F-R14-6): estate-scan names a dropped PROJECT compressAf
     assert.ok(lines[0].startsWith('[CoalWash] estate.compressAfterDays: the project config ('), lines[0]);
     assert.ok(lines[0].includes('asks for 1, and that was ignored.'), 'names what the project asked for');
     assert.ok(lines[0].includes('This run used 30.'), 'and what this run used');
-    assert.ok(/while estate\.deleteCold is not true in your own config, a project value may only keep sessions active LONGER \(at or above your own compressAfterDays\)/.test(lines[0]), 'the reason for the warm boundary');
+    assert.ok(/a project value may only keep sessions active LONGER \(at or above your own compressAfterDays\), whether or not estate\.deleteCold is true in your own config\./.test(lines[0]), 'the reason for the warm boundary (R18 BB-5: it holds whether or not deleteCold is true)');
+    assert.ok(!/while estate\.deleteCold is not true/.test(lines[0]), 'R18 BB-5: the consented exception is no longer stated');
     assert.ok(lines[0].includes(`If you want that value, set estate.compressAfterDays in ${path.join(home, '.claude', '.coalwash.json')}.`), 'the conditional remedy names the GLOBAL config');
     e1Configs(home, proj, { deleteCold: false, compressAfterDays: 30 }, { compressAfterDays: 60 });
     assert.strictEqual(e1Lines(run(proj, home, ['estate-scan']).stderr).length, 0, 'a raise was honored: nothing was ignored');
   } finally { clean(home, proj); }
 });
 
-test('E1: estate-run prints it on EVERY run; a HONORED project value (lower, equal) and a deleteCold-true raise draw no hint', () => {
+test('E1: estate-run prints it on EVERY run; a HONORED project value (lower, equal) draws no hint, and (R18 BB-5) a raise draws one with the user\'s own deleteCold true too', () => {
   const { home, proj } = sandbox();
   try {
     e1Configs(home, proj, { runBudget: { maxSessionsPerRun: 5 }, deleteCold: false, purgeAfterDays: 90 }, { runBudget: { maxSessionsPerRun: 1000 } });
@@ -769,8 +771,12 @@ test('E1: estate-run prints it on EVERY run; a HONORED project value (lower, equ
     }
     e1Configs(home, proj, { runBudget: { maxSessionsPerRun: 5 }, deleteCold: false, purgeAfterDays: 90 }, { runBudget: { maxSessionsPerRun: 2 }, purgeAfterDays: 90 });
     assert.strictEqual(e1Lines(run(proj, home, ['estate-scan']).stderr).length, 0, 'lower and equal values were honored: nothing was ignored');
+    // R18 (BB-5): this used to assert 0 lines ('deleteCold already true: the project value stands'), the consented exception the owner
+    // ruled out on 2026-10-03; changed here by name. The clamp holds after consent, so the raise is dropped and named.
     e1Configs(home, proj, { deleteCold: true, purgeAfterDays: 90 }, { purgeAfterDays: 36500 });
-    assert.strictEqual(e1Lines(run(proj, home, ['estate-scan']).stderr).length, 0, 'deleteCold already true: the project value stands');
+    const consented = e1Lines(run(proj, home, ['estate-scan']).stderr);
+    assert.strictEqual(consented.length, 1, 'deleteCold true: the raise is still dropped and named');
+    assert.ok(consented[0].includes('asks for 36500, and that was ignored.') && consented[0].includes('This run used 90.'), consented[0]);
   } finally { clean(home, proj); }
 });
 

@@ -487,6 +487,26 @@ test('R14 bounce 2 (F-R14-6): a PROJECT write of estate.compressAfterDays below 
   assert.doesNotMatch(high.stdout + high.stderr, /will NOT be read/, 'a raise above the default is honored: no warning');
 });
 
+// R18 (owner sheet BB-5 = (a)): the clamp on both removal edges holds whether or not the user's own estate.deleteCold is true, so a
+// PROJECT write past the user's bound warns with deleteCold on too, and the printed reason no longer states a consented exception.
+test('R18 BB-5: with the user\'s own deleteCold true a PROJECT write past the bound (purgeAfterDays raise, compressAfterDays lower) still warns, and the reason says it holds whether or not deleteCold is true', (t) => {
+  const sb = sandbox(t);
+  fs.mkdirSync(path.join(sb.home, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(sb.home, '.claude', '.coalwash.json'), JSON.stringify({ estate: { deleteCold: true, purgeAfterDays: 90, compressAfterDays: 30 } }));
+  const up = run(sb, ['--estate.purgeAfterDays', '36500']);
+  assert.strictEqual(up.status, 0, up.stderr);
+  const upOut = up.stdout + up.stderr;
+  assert.match(upOut, /estate\.purgeAfterDays will NOT be read at the value you set/, 'deleteCold true: the raise is still bounded');
+  assert.match(upOut, /may only bring the cold boundary earlier \(at or below your own purgeAfterDays; 0, "never cold", counts as the highest\), whether or not estate\.deleteCold is true in your own config,/);
+  assert.doesNotMatch(upOut, /While estate\.deleteCold is not true/, 'the consented exception is no longer stated');
+  const low = run(sb, ['--estate.compressAfterDays', '1']);
+  assert.strictEqual(low.status, 0, low.stderr);
+  const lowOut = low.stdout + low.stderr;
+  assert.match(lowOut, /estate\.compressAfterDays will NOT be read at the value you set/, 'deleteCold true: the lower value is still bounded');
+  assert.match(lowOut, /may only keep sessions active longer \(at or above your own compressAfterDays\), whether or not estate\.deleteCold is true in your own config,/);
+  assert.doesNotMatch(lowOut, /While estate\.deleteCold is not true/, 'the consented exception is no longer stated');
+});
+
 test('CWK-137 D3: --global estate.archiveDir IS honoured, so no warning fires', (t) => {
   const sb = sandbox(t);
   const dest = path.join(sb.home, 'my-archive');
