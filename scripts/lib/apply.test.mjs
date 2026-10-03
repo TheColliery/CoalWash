@@ -4210,6 +4210,83 @@ test('R14 D3 bounce 2: a stray .git directory that git would not accept (an arch
   } finally { clean(stray.proj); }
 });
 
+// ---------------------------------------------------------------------------
+// R15 (fire 16). CodeQL #45/#48 js/file-system-race at isGitMarker (= RE-INSPECT 2 F-R14r2-B): the `.git` entry was lstat-ed and then read
+// whole by path, so a crafted archive's multi-hundred-MB `.git` FILE was allocated before the first 64 characters were looked at. The
+// entry is now OPENED first, judged on the HANDLE (a directory, or a file), and at most 64 bytes are read through that handle.
+// ---------------------------------------------------------------------------
+test('R15 CodeQL #48/#45 (F-R14r2-B): isGitMarker reads a `.git` FILE through its own handle, 64 bytes at most -- a 3 MiB file is never read whole, by path or by handle', () => {
+  const { isGitMarker } = __testHooks;
+  const { proj } = sandbox();
+  try {
+    const big = path.join(proj, 'big-git');
+    const head = Buffer.from('gitdir: ../elsewhere/.git/worktrees/w\n');
+    fs.writeFileSync(big, Buffer.concat([head, Buffer.alloc(3 * 1024 * 1024, 0x78)]));
+    const notGit = path.join(proj, 'not-git');
+    fs.writeFileSync(notGit, Buffer.concat([Buffer.from('this is not a gitdir pointer\n'), Buffer.alloc(3 * 1024 * 1024, 0x78)]));
+    const realReadFile = fs.readFileSync;
+    const realReadSync = fs.readSync;
+    const wholeReads = [];
+    const handleReads = [];
+    fs.readFileSync = function spy(p, ...rest) { if (String(p) === big || String(p) === notGit) wholeReads.push(String(p)); return realReadFile.call(fs, p, ...rest); };
+    fs.readSync = function spy(fd, buf, off, len, ...rest) { handleReads.push(len); return realReadSync.call(fs, fd, buf, off, len, ...rest); };
+    let a;
+    let b;
+    try { a = isGitMarker(big); b = isGitMarker(notGit); } finally { fs.readFileSync = realReadFile; fs.readSync = realReadSync; }
+    assert.strictEqual(a, true, 'a file that names a gitdir is a marker');
+    assert.strictEqual(b, false, 'a big file that does not is not');
+    assert.deepStrictEqual(wholeReads, [], 'the file was never read whole by path');
+    assert.ok(handleReads.length >= 2 && Math.max(...handleReads) <= 64, `every read through the handle asked for at most 64 bytes: ${JSON.stringify(handleReads)}`);
+  } finally { clean(proj); }
+});
+
+test('R15 isGitMarker: a directory is a marker only with HEAD, objects and refs; an absent entry is none; a stray `.git/config` directory is none', () => {
+  const { isGitMarker } = __testHooks;
+  const { proj } = sandbox();
+  try {
+    const real = path.join(proj, 'real-git');
+    for (const n of ['HEAD']) write(path.join(real, n), 'ref: refs/heads/main\n');
+    fs.mkdirSync(path.join(real, 'objects'), { recursive: true });
+    fs.mkdirSync(path.join(real, 'refs'), { recursive: true });
+    const stray = path.join(proj, 'stray-git');
+    write(path.join(stray, 'config'), '[core]\n');
+    assert.strictEqual(isGitMarker(real), true, 'HEAD + objects + refs');
+    assert.strictEqual(isGitMarker(stray), false, 'a lone config is no repository');
+    assert.strictEqual(isGitMarker(path.join(proj, 'nothing-here')), false, 'absent');
+    assert.strictEqual(isGitMarker(path.join(proj, 'nothing-here', 'deeper')), false, 'absent under an absent parent');
+    write(path.join(proj, 'plain-file'), 'x');
+    assert.strictEqual(isGitMarker(path.join(proj, 'plain-file', 'under-a-file')), false, 'a file used as a directory (ENOTDIR)');
+  } finally { clean(proj); }
+});
+
+// RE-INSPECT 2 F-R14r2-A (LOW): the journal leg of the physical-path match had no isolating test. The existing case-variant test commits the
+// SNAPSHOT as well, so its refusal rides the snapshot leg and a regression of the journal leg to the committed spelling (`rel === 'journal.json'`,
+// mutant M2) shipped green. Here ONLY the journal is tracked, and under a case-variant name, so only the journal leg can refuse it.
+test('R15 F-R14r2-A: a journal committed under a CASE-VARIANT name with NO tracked snapshot is refused by the journal leg alone (kills the spelling-match mutant)', (t) => {
+  if (!HAS_GIT) return t.skip('git is not available on this host');
+  const { proj, store } = sandbox();
+  try {
+    if (!volumeFoldsCase(proj)) return t.skip('this volume is case-sensitive: journal.json does not resolve to a committed JOURNAL.json, so the variant is not what recovery reads');
+    const victim = path.join(store, 'memory.md');
+    write(victim, D3_VICTIM);
+    const tx = path.join(proj, '.claude', 'coalwash');
+    const snap = path.join(tx, 'snap-1');
+    write(path.join(snap, 'snap.complete'), '1');
+    write(path.join(snap, 'f0'), D3_INJECTED);
+    write(path.join(snap, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: victim }]));
+    write(path.join(tx, 'JOURNAL.json'), JSON.stringify({ version: 1, status: 'pending', snapDir: snap, roots: [proj], steps: [] }));
+    gitFx(proj, ['init', '-q']);
+    gitFx(proj, ['add', '-f', '--', '.claude/coalwash/JOURNAL.json']); // the journal ONLY: the snapshot stays untracked
+    gitFx(proj, ['commit', '-q', '-m', 'journal only']);
+    assert.ok(fs.existsSync(path.join(tx, 'journal.json')), 'the premise: the filesystem reads the committed JOURNAL.json as journal.json');
+    assert.strictEqual(gitFx(proj, ['ls-files', '--', '.claude/coalwash/snap-1']).trim(), '', 'the premise: no snapshot file is tracked');
+    const r = recoverDangling(proj, { home: SANDBOX_HOME });
+    assert.strictEqual(r.recovered, 'none', `refused through the journal leg: ${JSON.stringify(r)}`);
+    assert.strictEqual(r.refusedTracked, 1, `exactly the journal is counted: ${JSON.stringify(r)}`);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), D3_VICTIM, 'the memory file was NOT rewritten');
+  } finally { clean(proj); }
+});
+
 test('R14 D3: there is ONE git-env helper -- the shipped lib/git-env.mjs, which the dev import path scripts/git-env.mjs re-exports (no fork the census cannot see), and it strips the whole GIT_* family in any case', () => {
   assert.strictEqual(gitEnv, shippedGitEnv, 'scripts/git-env.mjs exports the very function the plugin ships');
   const planted = { GIT_DIR: 'x', git_work_tree: 'x', GIT_INDEX_FILE: 'x', GIT_CEILING_DIRECTORIES: 'x', Git_Object_Directory: 'x' };

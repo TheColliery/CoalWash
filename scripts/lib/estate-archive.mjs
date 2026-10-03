@@ -887,6 +887,30 @@ export function restoreInflateBound(gzBytes) {
   return Math.min(RESTORE_CEIL_BYTES, Math.max(RESTORE_FLOOR_BYTES, gzBytes * RESTORE_MAX_RATIO));
 }
 
+// One compressed archive file read through ONE handle (R15, CodeQL #47/#50): open, judge the handle, read what it reported and nothing more.
+// Returns { buf } | { notFile: true } | { over: <bytes> } | { grew: <bytes the handle reported> }. The open itself throws as statSync and
+// readFileSync did (ENOENT, EACCES ...), and the caller's catch reports it. A file that shrank after its size was read returns the shorter
+// buffer, which the gunzip then refuses as it always did; one that GREW is refused here, by a probe read of the byte after the reported end.
+const ARCHIVE_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0); // O_NONBLOCK: a FIFO swapped in cannot hang the open
+function readArchiveHandle(gzPath, bound) {
+  const fd = fs.openSync(gzPath, ARCHIVE_READ_FLAGS);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { notFile: true };
+    if (st.size > bound) return { over: st.size };
+    const want = st.size;
+    const buf = Buffer.alloc(want);
+    let got = 0;
+    while (got < want) {
+      const n = fs.readSync(fd, buf, got, want - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    if (got === want && fs.readSync(fd, Buffer.alloc(1), 0, 1, got) > 0) return { grew: want };
+    return { buf: got === want ? buf : buf.subarray(0, got) };
+  } finally { try { fs.closeSync(fd); } catch { /* already closed */ } }
+}
+
 // Decompress ONE archived session's files to `to` (default: a fresh scratch
 // dir under os.tmpdir(), printed to the caller) — RESTORE-BY-REFERENCE: code
 // moves the byte-exact bytes; content is never re-authored. NEVER writes into
@@ -948,10 +972,14 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones } 
         if (e && e.code === 'COALWASH_WRITE_REFUSED') return { ok: false, error: `restore refused on ${s.rel}: ${String(e.message).split(' -- ')[0]} (a restore never writes through a link under its destination)`, dir, files };
         throw e;
       }
-      const gzSize = fs.statSync(s.gzPath).size;
-      if (gzSize > RESTORE_MAX_GZ_BYTES) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is ${gzSize} bytes, over the ${RESTORE_MAX_GZ_BYTES}-byte bound`, dir, files };
-      const gz = fs.readFileSync(s.gzPath);
-      if (gz.length > RESTORE_MAX_GZ_BYTES) return { ok: false, error: `restore refused on ${s.rel}: the compressed file read is ${gz.length} bytes, over the ${RESTORE_MAX_GZ_BYTES}-byte bound (it grew after its size was checked)`, dir, files }; // R14 NIT 3: the stat above is a race window; bound what was actually read
+      // R15 (CodeQL #47/#50 js/file-system-race; supersedes R14 NIT 3's after-the-fact length check): the archive is OPENED first, its kind and size
+      // are judged on the HANDLE, and only that many bytes (plus one probe byte) are read through it. The path is looked up once, so what is
+      // bounded is what is read, with no window between a stat and a read.
+      const got = readArchiveHandle(s.gzPath, RESTORE_MAX_GZ_BYTES);
+      if (got.notFile) return { ok: false, error: `restore refused on ${s.rel}: the archive entry is not a regular file`, dir, files };
+      if (got.over !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is ${got.over} bytes, over the ${RESTORE_MAX_GZ_BYTES}-byte bound`, dir, files };
+      if (got.grew !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is longer than the ${got.grew} bytes its handle reported (it grew after its size was read)`, dir, files };
+      const gz = got.buf;
       let buf;
       try { buf = zlib.gunzipSync(gz, { maxOutputLength: restoreInflateBound(gz.length) }); } catch (e) {
         if (e && e.code === 'ERR_BUFFER_TOO_LARGE') return { ok: false, error: `restore refused on ${s.rel}: it would inflate past ${restoreInflateBound(gz.length)} bytes for a ${gz.length}-byte archive`, dir, files };

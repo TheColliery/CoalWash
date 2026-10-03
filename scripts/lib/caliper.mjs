@@ -90,6 +90,7 @@ import { parseJsonc } from './jsonc.mjs';
 // + the SAME realpath containment primitives (physicalOrNull/containedIn) the
 // write path uses — never a re-hardcoded path or a hand-rolled containment.
 import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
+import { openPlainFile } from './repo-fs.mjs';
 
 // ---------------------------------------------------------------------------
 // constants — PLACEHOLDERS, calibrate at the fidelity benchmark (2026-07-08
@@ -1176,6 +1177,7 @@ function pruneStrayStateDirs(projectRoot, home) {
 // Read-only half (deadProjectStateFiles) is exported so the head can list what WOULD go without deleting anything.
 const STATE_FILE_RE = /^state-[A-Za-z0-9-]+\.json$/;
 const STATE_FILE_MAX_BYTES = 1048576;
+const STATE_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0); // openPlainFile's flags for a state file: no hang on a FIFO, no followed link where the platform has O_NOFOLLOW
 // What stat says about a path: 'present', 'absent' (ENOENT/ENOTDIR only) or 'unknown' (EACCES, EPERM, EIO, a timeout ...).
 // `statSyncFn` is a test seam (an injected EACCES cannot be built portably); production passes nothing.
 // R14 F-R14-4: stat FOLLOWS a link, so a root that is a link (a junction or a mount-point folder) whose target is gone answers ENOENT.
@@ -1226,16 +1228,32 @@ export function deadProjectStateFiles(home = os.homedir()) {
   for (const name of names) {
     if (!STATE_FILE_RE.test(name)) continue;
     const file = path.join(dir, name);
+    let fd;
     try {
-      const st = fs.lstatSync(file);
+      // R15 (CodeQL #46/#49 js/file-system-race): the state file is OPENED first, through the room's openPlainFile (a link, a special file, a
+      // second name, or a name swapped after the open is refused on the handle and the path TOGETHER; on a filesystem that reports no file id
+      // it cannot be proved plain and is kept), and its size is bounded on the HANDLE, never on an earlier lstat of the path.
+      const opened = openPlainFile(file, STATE_READ_FLAGS);
+      if (opened.fd === undefined) continue; // unopenable or not provably a plain file: not ours to judge, keep
+      fd = opened.fd;
+      const st = fs.fstatSync(fd);
       if (!st.isFile() || st.size > STATE_FILE_MAX_BYTES) continue;
-      const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const raw = Buffer.alloc(st.size);
+      let got = 0;
+      while (got < st.size) {
+        const n = fs.readSync(fd, raw, got, st.size - got, got);
+        if (n === 0) break;
+        got += n;
+      }
+      const j = JSON.parse(raw.toString('utf8', 0, got));
       if (!j || typeof j !== 'object' || Array.isArray(j) || !Number.isInteger(j.stateSchema)) continue;
       const rec = j.projectRoot;
       if (typeof rec !== 'string' || !rec || !path.isAbsolute(rec)) continue;
       if (name !== `state-${ccProjectSlug(rec)}.json`) continue; // the file must BE that root's own state file
       if (rootIsGone(rec, anchors)) out.push({ file, name, projectRoot: rec });
-    } catch { /* unreadable / unparseable / vanished: not ours to judge, keep */ }
+    } catch { /* unreadable / unparseable / vanished: not ours to judge, keep */ } finally {
+      if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+    }
   }
   return out;
 }

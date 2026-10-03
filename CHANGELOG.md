@@ -2,6 +2,16 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Fixed
+
+- **Crash recovery no longer allocates a whole `.git` file to read its first 64 characters (CodeQL `js/file-system-race`, R14 re-inspection F-R14r2-B).** The check that asks whether a directory above the project is a git repository lstat-ed the `.git` entry and then read it by path, whole: a crafted archive's multi-hundred-megabyte `.git` file was loaded into memory on every `/coalwash` gauge before its first 64 characters were looked at. The entry is now opened first, judged on the open handle (a directory, or a file), and at most 64 bytes are read through that handle. The verdicts are unchanged: a directory holding `HEAD`, `objects` and `refs`, or a file that names a gitdir, is a repository; a stray `.git/config` alone is not; an entry that cannot be inspected counts as present. The two comments that still named the renamed `gitTrackedUnder` now name `gitTrackedRecoveryInputs`. — test: `scripts/lib/apply.test.mjs`
+
+### Security
+
+- **The estate restore reads a compressed archive through one handle, and the stale-state sweep opens a state file before judging it (CodeQL `js/file-system-race`).** `estate-restore` used to read an archive's size with a stat and then read the file by path, with a length check after the read added in 1.10.0: a file that grew or was swapped between the two was still read before it was refused. It now opens the archive first, judges its kind and size on the handle, and reads only the size the handle reported plus one probe byte; a file that is not a regular file is refused (`the archive entry is not a regular file`), and one that grew past its reported size is refused without being read whole. The sweep that removes the state file of a project that no longer exists now opens each state file through the same open-then-judge routine the lock files use: a state file that is a link, a special file, or has a second name (a hard link), or that sits on a filesystem that reports no file id, cannot be proved a plain file and is kept (the sweep is advisory and its file is about 300 bytes). — test: `scripts/lib/estate-archive.test.mjs`, `scripts/lib/caliper.test.mjs`
+
 ## [1.10.0] - 2026-10-03
 
 Recovery skips git's control files and, where git can say, refuses a journal it tracks, a project config can only narrow the estate limits and bands, the restore bounds its inflate, and the gates gain a secret scan, finite clocks and a Release poster.

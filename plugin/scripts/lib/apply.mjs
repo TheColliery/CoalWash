@@ -55,7 +55,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zero-dep builtin)
-import { spawnSync } from 'node:child_process'; // R14 D3 only: the one optional `git ls-files` in gitTrackedUnder (recoverDangling; never a hook path)
+import { spawnSync } from 'node:child_process'; // R14 D3 only: the one optional `git ls-files` in gitTrackedRecoveryInputs (recoverDangling; never a hook path)
 import { gitEnv } from './git-env.mjs'; // the room's one GIT_*-stripping helper (CWK-133), shipped since R14 D3
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
@@ -164,11 +164,30 @@ const GIT_TRACKED_MAX_PATHS = 20000; // more tracked paths than this under one t
 // Is the `.git` at `p` something git itself would accept: a directory holding HEAD, objects and refs, or a file naming a gitdir (a
 // worktree, a submodule)? A directory that is not one (an archive's stray `.git/config`) is no repository: git says "not a repository" and
 // walks on, so it is the same cannot-tell residual as no `.git` at all. An entry that cannot be read counts as present (fail closed).
+// R15 (CodeQL #45/#48 js/file-system-race, RE-INSPECT 2 F-R14r2-B): the entry is OPENED first and judged on the HANDLE (a directory, or a file),
+// and at most 64 bytes are read through that handle. The first cut lstat-ed the path and then read it whole by path: a crafted archive's
+// multi-hundred-MB `.git` FILE (the one place a `.git` can be an attacker-sized file, since git refuses tracked paths under `.git`) was
+// allocated before its first 64 characters were looked at, and what the path held at the read was never what the lstat had judged.
+const GIT_MARKER_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0); // O_NONBLOCK: a FIFO named `.git` cannot hang the open
+const GIT_MARKER_READ_BYTES = 64; // `gitdir:` and the start of a path: all the check looks at
+function hasGitDirParts(p) { return ['HEAD', 'objects', 'refs'].every((n) => fs.existsSync(path.join(p, n))); }
 function isGitMarker(p) {
-  let st;
-  try { st = fs.lstatSync(p); } catch (e) { return !(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')); }
-  if (st.isDirectory()) return ['HEAD', 'objects', 'refs'].every((n) => fs.existsSync(path.join(p, n)));
-  try { return /^gitdir:/.test(fs.readFileSync(p, 'utf8').slice(0, 64)); } catch { return true; }
+  let fd;
+  try { fd = fs.openSync(p, GIT_MARKER_FLAGS); } catch (e) {
+    const code = e && e.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    // The open failed for another reason (a directory this host will not open for reading, a permission, a link loop). Decide on what the entry
+    // IS, after the failed open, and read nothing; an entry that cannot even be inspected counts as present (fail closed).
+    try { return fs.lstatSync(p).isDirectory() ? hasGitDirParts(p) : true; } catch { return true; }
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (st.isDirectory()) return hasGitDirParts(p);
+    if (!st.isFile()) return true; // a FIFO, a device: not something git accepts, and not ours to read; present, fail closed
+    const buf = Buffer.alloc(GIT_MARKER_READ_BYTES);
+    const n = fs.readSync(fd, buf, 0, GIT_MARKER_READ_BYTES, 0);
+    return buf.toString('utf8', 0, n).startsWith('gitdir:');
+  } catch { return true; } finally { try { fs.closeSync(fd); } catch { /* already closed */ } }
 }
 // A git marker in `dir` or any ancestor: what git's own discovery looks for.
 function repoMarkerAbove(dir) {
@@ -207,7 +226,7 @@ function gitTrackedRecoveryInputs(txDir, journalPath, snapDir) {
   }
   return { tracked, failed: null };
 }
-export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS };
+export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, isGitMarker, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -1762,7 +1781,7 @@ export function recoverDangling(projectRoot, opts = {}) {
     if (journal && typeof journal === 'object' && Number(journal.version) > 1) {
       return { recovered: 'none', error: `journal schema version ${journal.version} is newer than this CoalWash understands — left untouched (for a newer version, or a human)` };
     }
-    // R14 D3 (interim): a journal or snapshot that git TRACKS came from a repository, never from an interrupted run (see gitTrackedUnder).
+    // R14 D3 (interim): a journal or snapshot that git TRACKS came from a repository, never from an interrupted run (see gitTrackedRecoveryInputs).
     // Before the terminal-status branch on purpose: a tracked file is not ours to delete either, and nothing below may touch it.
     const gitCheck = gitTrackedRecoveryInputs(txDir, journalPath, journal && journal.snapDir);
     if (gitCheck.failed) {

@@ -345,7 +345,7 @@ test('CWK-162 A4: a symlinked Markdown file is refused, never followed (skips vi
   assert.match(r.findings[0].msg, /cannot read this file \(SYMLINK/);
 });
 
-test('CWK-162 A4: a directory given as a file is a finding (the kind gate answers before any open)', (t) => {
+test('CWK-162 A4: a directory given as a file is a finding (the kind gate answers on the handle or the entry, before any read; R15 moved it after the open)', (t) => {
   const { root } = docsTree(t);
   fs.mkdirSync(path.join(root, 'dir.md'));
   const r = checkLinks({ root, files: ['dir.md'], tracked: null });

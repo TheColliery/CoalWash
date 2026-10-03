@@ -998,10 +998,11 @@ test('CWK-162 B6 control: the FLOOR is a real term -- a high-ratio archive that 
   assert.strictEqual(fs.statSync(path.join(to, `${SID_C7}.jsonl`)).size, under);
 });
 
-// R14 INSPECT NIT 3: the size bound read the file's size with statSync and then read the file; a file that grows (or is swapped) between
-// the two was read whole. The bound is now ALSO checked on the length of the buffer actually read. Witness: stat says 1 byte, the file is
-// one byte over the cap.
-test('R14 NIT 3 (B6): the compressed-size bound is checked on the bytes actually READ, not only on the earlier stat', (t) => {
+// R14 INSPECT NIT 3, reworked at R15 (CodeQL #47/#50): the size bound used to read the size with statSync and then read the file by path, so a
+// file that grew (or was swapped) between the two was read whole; NIT 3 added a length check AFTER the read. The archive is now opened first
+// and its size is judged on the HANDLE, and only that many bytes plus one probe byte are read through it. Witness: the handle reports 1 byte
+// and the file is one byte over the cap; a read of 1 byte plus the probe finds more, and the restore is refused without reading the file.
+test('R14 NIT 3 / R15 (B6): a compressed file that grew past the size its handle reported is refused, and only that many bytes plus one probe byte are read', (t) => {
   const arch = c7Dir('arch');
   const to = c7Dir('to');
   t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
@@ -1009,12 +1010,20 @@ test('R14 NIT 3 (B6): the compressed-size bound is checked on the bytes actually
   fs.mkdirSync(path.dirname(gz), { recursive: true });
   const fd = fs.openSync(gz, 'w');
   try { fs.ftruncateSync(fd, C7_GZCAP + 1); } finally { fs.closeSync(fd); }
-  const realStat = fs.statSync;
-  fs.statSync = function spy(p, ...rest) { return String(p) === gz ? { size: 1 } : realStat.call(fs, p, ...rest); };
+  const realOpen = fs.openSync;
+  const realFstat = fs.fstatSync;
+  const realReadSync = fs.readSync;
+  let gzFd = null;
+  const asked = [];
+  fs.openSync = function spy(p, ...rest) { const h = realOpen.call(fs, p, ...rest); if (String(p) === gz) gzFd = h; return h; };
+  fs.fstatSync = function spy(h, ...rest) { return h === gzFd ? { size: 1, isFile: () => true } : realFstat.call(fs, h, ...rest); };
+  fs.readSync = function spy(h, buf, off, len, ...rest) { if (h === gzFd) asked.push(len); return realReadSync.call(fs, h, buf, off, len, ...rest); };
   let r;
-  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.statSync = realStat; }
+  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.openSync = realOpen; fs.fstatSync = realFstat; fs.readSync = realReadSync; }
   assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
-  assert.match(r.error, /compressed/, 'refused as over the compressed bound, not as a gzip parse error');
+  assert.match(r.error, /compressed/, 'refused as longer than the handle reported, not as a gzip parse error');
+  assert.match(r.error, /grew/);
+  assert.deepStrictEqual(asked, [1, 1], 'one byte for the 1 reported, one probe byte, never the whole file');
 });
 
 test('CWK-162 B6: a compressed file over RESTORE_MAX_GZ_BYTES is refused by its size, before it is read', (t) => {
@@ -1026,11 +1035,16 @@ test('CWK-162 B6: a compressed file over RESTORE_MAX_GZ_BYTES is refused by its 
   const fd = fs.openSync(gz, 'w');
   try { fs.ftruncateSync(fd, C7_GZCAP + 1); } finally { fs.closeSync(fd); }
   const real = fs.readFileSync;
+  const realReadSync = fs.readSync;
+  const realOpen = fs.openSync;
   let readIt = false;
+  let gzFd = null;
   fs.readFileSync = function spy(p, ...rest) { if (String(p) === gz) readIt = true; return real.call(fs, p, ...rest); };
+  fs.openSync = function spy(p, ...rest) { const h = realOpen.call(fs, p, ...rest); if (String(p) === gz) gzFd = h; return h; };
+  fs.readSync = function spy(h, ...rest) { if (h === gzFd) readIt = true; return realReadSync.call(fs, h, ...rest); };
   let r;
-  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.readFileSync = real; }
+  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.readFileSync = real; fs.openSync = realOpen; fs.readSync = realReadSync; }
   assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
   assert.match(r.error, /compressed/);
-  assert.strictEqual(readIt, false, 'its bytes were never read');
+  assert.strictEqual(readIt, false, 'its bytes were never read, by path or through the handle');
 });

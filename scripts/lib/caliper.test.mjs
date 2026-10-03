@@ -2385,6 +2385,20 @@ test('CWK-157: a state file whose recorded project root no longer exists is remo
   } finally { clean(home, proj, live); }
 });
 
+// R15 (CodeQL #46/#49 js/file-system-race): the sweep lstat-ed a state file and then read it by path. It now opens the file first through
+// openPlainFile and judges the HANDLE and the path together, so a file that cannot be proved a plain single-name file is kept, never read.
+test('R15 CodeQL #46/#49: a state file that has a SECOND NAME (a hard link) is not provably plain and is kept even though its root is gone; the same file with one name is swept', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const oneName = plantState(home, goneRoot('hl1'));
+    const twoNames = plantState(home, goneRoot('hl2'));
+    try { fs.linkSync(twoNames, path.join(home, 'second-name.json')); } catch (e) { return t.skip(`cannot create a hard link on this host (${e.code || e.message})`); }
+    setLeanFloor(home, proj, 1000); // a state write: the self-clean rides it
+    assert.strictEqual(fs.existsSync(oneName), false, 'control: the single-name dead-root state file is swept');
+    assert.strictEqual(fs.existsSync(twoNames), true, 'the file with a second name is kept');
+  } finally { clean(home, proj); }
+});
+
 test('CWK-157 cannot-check means ALIVE: an absent root outside home/temp (a missing drive, an unmounted volume) keeps its file, and any stat error other than ENOENT/ENOTDIR keeps it', () => {
   const { home, proj } = sandbox();
   try {

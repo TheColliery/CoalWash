@@ -89,23 +89,34 @@ import { gitEnv } from './git-env.mjs';
 
 // CWK-162 (AI Deep Scan A4): every Markdown file this gate reads is contributed text (a PR can add any file at any path), and
 // it was read with a bare readFileSync: no kind gate (a link was followed, a device or FIFO was opened) and no byte bound.
-// readDocBounded refuses a symlink, a non-regular file and anything over MAX_DOC_BYTES BEFORE reading, opens with O_NONBLOCK
-// (a FIFO swapped in after the lstat cannot hang the open) and O_NOFOLLOW where the platform has it, then proves the open
-// handle is the file the lstat judged (dev+ino, BigInt: NTFS file ids exceed 2**53). 4 MiB is the bound config-load.mjs puts
-// on any governance or doc read; the largest Markdown file in this repo is a CHANGELOG far below it.
+// readDocBounded refuses a symlink, a non-regular file and anything over MAX_DOC_BYTES BEFORE reading. R15 (CodeQL #51 js/file-system-race):
+// the file is OPENED first (O_NONBLOCK, so a FIFO cannot hang the open; O_NOFOLLOW where the platform has it, so a link fails at the open) and
+// the PATH is judged afterwards, together with the handle (the order openPlainFile uses in the shipped libs): a link, a special file, or a
+// name whose inode is not the handle's (dev+ino, BigInt: NTFS file ids exceed 2**53) is refused, and nothing is read until all agree. The
+// first cut lstat-ed, then opened, and proved the handle against that earlier lstat. 4 MiB is the bound config-load.mjs puts on any
+// governance or doc read; the largest Markdown file in this repo is a CHANGELOG far below it.
 export const MAX_DOC_BYTES = 4 * 1024 * 1024;
 const DOC_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0);
 function docRefused(code, detail) { const e = new Error(code); e.code = code; e.detail = detail || ''; return e; }
 function readDocBounded(abs) {
-  const lst = fs.lstatSync(abs, { bigint: true }); // ENOENT, EACCES ... propagate with their own code, as readFileSync's did
-  if (lst.isSymbolicLink()) throw docRefused('SYMLINK');
-  if (!lst.isFile()) throw docRefused('NOT_REGULAR');
-  if (lst.size > BigInt(MAX_DOC_BYTES)) throw docRefused('OVER_BOUND', `${lst.size} bytes > ${MAX_DOC_BYTES}`);
-  const fd = fs.openSync(abs, DOC_READ_FLAGS);
+  let fd;
+  try { fd = fs.openSync(abs, DOC_READ_FLAGS); } catch (e) {
+    const code = e && e.code;
+    if (code === 'ELOOP') throw docRefused('SYMLINK'); // O_NOFOLLOW refused a link at the open (POSIX)
+    if (code === 'ENOENT' || code === 'ENOTDIR') throw e; // ENOENT ... propagate with their own code, as readFileSync's did
+    // Another open failure (a directory some hosts will not open for reading, a permission): say what the entry IS, after the failed open.
+    let kind = null;
+    try { const l = fs.lstatSync(abs); kind = l.isSymbolicLink() ? 'SYMLINK' : (!l.isFile() ? 'NOT_REGULAR' : null); } catch { kind = null; }
+    if (kind) throw docRefused(kind);
+    throw e;
+  }
   try {
     const st = fs.fstatSync(fd, { bigint: true });
     if (!st.isFile()) throw docRefused('NOT_REGULAR');
-    if (st.dev !== lst.dev || st.ino !== lst.ino) throw docRefused('CHANGED', 'the path was swapped after it was checked');
+    const onPath = fs.lstatSync(abs, { bigint: true }); // the PATH, after the open, judged against the handle
+    if (onPath.isSymbolicLink()) throw docRefused('SYMLINK');
+    if (!onPath.isFile()) throw docRefused('NOT_REGULAR');
+    if (st.dev !== onPath.dev || st.ino !== onPath.ino) throw docRefused('CHANGED', 'the path was swapped after it was opened');
     if (st.size > BigInt(MAX_DOC_BYTES)) throw docRefused('OVER_BOUND', `${st.size} bytes > ${MAX_DOC_BYTES}`);
     const want = Number(st.size);
     const buf = Buffer.alloc(want);
