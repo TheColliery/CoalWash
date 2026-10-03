@@ -4,6 +4,8 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
+Recovery's git check reads at most 64 bytes of a .git entry through one handle, the estate restore judges an archive's size on the handle it reads, and the state-file sweep keeps any file it cannot prove plain.
+
 ### Fixed
 
 - **Crash recovery no longer allocates a whole `.git` file to read its first 64 characters (CodeQL `js/file-system-race`, R14 re-inspection F-R14r2-B).** The check that asks whether a directory above the project is a git repository lstat-ed the `.git` entry and then read it by path, whole: a crafted archive's multi-hundred-megabyte `.git` file was loaded into memory on every `/coalwash` gauge before its first 64 characters were looked at. The entry is now opened first, judged on the open handle (a directory, or a file), and at most 64 bytes are read through that handle. The verdicts are unchanged: a directory holding `HEAD`, `objects` and `refs`, or a file that names a gitdir, is a repository; a stray `.git/config` alone is not; an entry that cannot be inspected counts as present. The two comments that still named the renamed `gitTrackedUnder` now name `gitTrackedRecoveryInputs`. — test: `scripts/lib/apply.test.mjs`
