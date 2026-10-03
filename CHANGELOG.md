@@ -6,7 +6,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 Project estate age limits stay clamped with deleteCold on
 
-A cloned project's config can no longer move the estate's archive-then-remove age edges, even after you turn on `estate.deleteCold`, and the Release deriver now bounds the title and carries this paragraph into the Release body.
+A cloned project's config can no longer move the estate's archive-then-remove age edges toward removing more sessions, even after you turn on `estate.deleteCold`, and the Release deriver now warns on a title outside its length band and carries this paragraph into the Release body.
 
 ### Security
 
