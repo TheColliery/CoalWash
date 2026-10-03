@@ -1013,7 +1013,9 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 // move the EDGE of a mechanism that was already running, already safe, and
 // already consent-free before this fix existed. Widening or narrowing that
 // edge is not the same kind of escalation `estate.deleteCold` is -- which is
-// why only the boolean is clamped here.
+// why, when this was written, the boolean was the only clamp here. It no
+// longer is: the numeric removal edges are clamped by direction too
+// (CWK-162 B10, R14 F-R14-2 / F-R14-6, R18 BB-5, the amendments below).
 //
 // CWK-162 (AI Deep Scan B10, B4): the decline that stood here was HALF wrong, and is amended where it stood.
 // `estate.purgeAfterDays` as a NUMBER is still not clamped by the ordered-list mechanism: safety is not monotone in the raw
@@ -1037,7 +1039,8 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
 
 // R14 F-R14-1/2: the schema's own field specs the bounded estate merge below judges a project value with (one validator, never a second
-// copy of the ranges). PROJECT_BOUNDED_KEYS names the keys a project value may only LOWER, for the loud-break report and configure.mjs.
+// copy of the ranges). PROJECT_BOUNDED_KEYS names the keys whose project value is bounded by direction, for the loud-break report and
+// configure.mjs: each runBudget field and purgeAfterDays may only be LOWERED, compressAfterDays may only be RAISED.
 const ESTATE_FIELDS = CONFIG_SCHEMA.find((s) => s.key === 'estate').fields;
 const RUNBUDGET_FIELDS = ESTATE_FIELDS.runBudget.fields;
 const PURGE_SPEC = ESTATE_FIELDS.purgeAfterDays;

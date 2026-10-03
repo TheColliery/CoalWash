@@ -588,7 +588,8 @@ function main() {
         console.warn('  This key is read from the GLOBAL config only: a cloned repo ships a project config,');
         console.warn('  and it must not be able to choose where your own session transcripts are archived.');
       } else if (PROJECT_BOUNDED_KEYS.includes(c.key)) {
-        // R14 E1: a value a project may only LOWER (config-load.mjs mergeObjectKey) -- not a consent value either, so its own reason.
+        // R14 E1: a value a project may move in one direction only (config-load.mjs mergeObjectKey): a runBudget field and purgeAfterDays
+        // only LOWER, compressAfterDays only RAISE -- not a consent value either, so each key gets its own reason.
         console.warn(c.key === 'estate.purgeAfterDays'
           ? '  A project config may only bring the cold boundary earlier (at or below your own purgeAfterDays; 0, "never cold", counts as the highest), whether or not estate.deleteCold is true in your own config,'
           : c.key === 'estate.compressAfterDays'
