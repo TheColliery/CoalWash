@@ -158,6 +158,18 @@ jobs:
         working-directory: tag-src
         run: node ../canon/scripts/release-notes.mjs
 
+      # A room that adopted this workflow without the script it runs, or kept an older copy of that script, reaches the Release step
+      # with a missing file and a gh usage dump. Stop here instead, by name, before any gh release call.
+      - name: Check the derive step wrote its four release files (a stale release-notes.mjs stops here)
+        if: steps.gate.outputs.post == 'true'
+        working-directory: tag-src
+        run: |
+          for f in release-title.txt release-body.md release-prerelease.txt release-latest.txt; do
+            if [[ ! -s "${f}" ]]; then
+              echo "::error::the derive step did not write ${f} (or wrote it empty). The scripts/release-notes.mjs this workflow ran is stale or is not the canon's: compare it with the overlay's by blob id (git hash-object scripts/release-notes.mjs) and adopt the whole overlay set (templates/overlay-coal-skill/OVERLAY-README.md). No Release call was made."; exit 1
+            fi
+          done
+
       # A NEW Release is created as a DRAFT and published only after the byte re-read below (git-workflow.md: a release
       # workflow drafts and publishes last; no asset here, so the re-read is the only thing the draft waits for). A re-run's
       # edit leaves a published Release published. gh finds a draft by its tag name. `--latest` is NOT passed on the draft
