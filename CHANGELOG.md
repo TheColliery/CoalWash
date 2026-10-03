@@ -4,7 +4,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [1.10.1] - 2026-10-03
 
-File checks now judge the handle they opened, not the path
+Three file checks now judge the handle they opened.
 
 Recovery's git check reads at most 64 bytes of a .git entry through one handle, the estate restore judges an archive's size on the handle it reads, and the state-file sweep keeps any file it cannot prove plain.
 
