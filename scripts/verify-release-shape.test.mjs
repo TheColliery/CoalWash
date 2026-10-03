@@ -81,3 +81,40 @@ test('verify-release-shape.mjs: the derived files are missing (release-notes.mjs
   assert.match(res.stderr, /could not read the derived title\/body/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// UMB-392 / BA-14: outside the band the rail prints a NAMED warning and PASSES (a signal, never a refusal); a mismatch still fails.
+function bandRun(summaryLen) {
+  const dir = scratch();
+  const title = `v1.0.0 - ${'a'.repeat(summaryLen)}`;
+  fs.writeFileSync(path.join(dir, 'release-title.txt'), title + '\n');
+  fs.writeFileSync(path.join(dir, 'release-body.md'), 'A fix.\n');
+  const res = run(dir, JSON.stringify({ name: title, body: 'A fix.' }));
+  fs.rmSync(dir, { recursive: true, force: true });
+  return res;
+}
+
+test('verify-release-shape.mjs: a summary of 60 or 75 characters (and 45) prints no warning', () => {
+  for (const n of [60, 75, 45]) {
+    const res = bandRun(n);
+    assert.equal(res.status, 0, res.stderr);
+    assert.doesNotMatch(res.stdout + res.stderr, /release-title-band/, String(n));
+  }
+});
+
+test('verify-release-shape.mjs: a summary of 76 or 44 characters warns by name and still passes, exit 0 -- nothing refuses', () => {
+  for (const n of [76, 44, 211]) {
+    const res = bandRun(n);
+    assert.equal(res.status, 0, `${n}: ${res.stderr}`);
+    assert.match(res.stdout, new RegExp(`WARNING release-title-band: the summary in the title is ${n} characters`), String(n));
+    assert.match(res.stdout, /verify-release-shape: published title \+ body match/, 'the byte check still reports');
+  }
+});
+
+test('verify-release-shape.mjs: a mismatch still fails with exit 1 even when the title is inside the band', () => {
+  const dir = scratch();
+  fs.writeFileSync(path.join(dir, 'release-title.txt'), 'v1.0.0 - ' + 'a'.repeat(60) + '\n');
+  fs.writeFileSync(path.join(dir, 'release-body.md'), 'A fix.\n');
+  const res = run(dir, JSON.stringify({ name: 'v1.0.0 - ' + 'b'.repeat(60), body: 'A fix.' }));
+  assert.equal(res.status, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

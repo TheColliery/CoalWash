@@ -139,3 +139,48 @@ test('makeLatestFlag: no current Latest, or a tag newer than or equal to it, is 
 test('makeLatestFlag: a Latest tag that is not a bare vX.Y.Z throws a named error -- never a guessed flag', () => {
   assert.throws(() => makeLatestFlag('1.0.0', 'nightly'), ReleaseRefError);
 });
+
+// UMB-392 / BA-14 (the owner: fix it at the source of the river): the Release title is derived from the CHANGELOG summary line, so the
+// length bound lives there. A SIGNAL with a band, never a hard cap: aim 60 characters, 45 to 75 passes clean, outside the band a named
+// warning. The numbers are the house's own (no formal standard sets one), declared in RELEASE-PATTERN.md.
+import { SUMMARY_AIM, SUMMARY_BAND, titleBandWarning } from './release-shape.mjs';
+
+const titleOf = (n) => `v1.2.3 - ${'a'.repeat(n)}`;
+
+test('the summary band: aim 60, clean from 45 to 75', () => {
+  assert.equal(SUMMARY_AIM, 60);
+  assert.deepEqual(SUMMARY_BAND, [45, 75]);
+});
+
+test('titleBandWarning: 60, 45 and 75 pass clean; 44 and 76 warn, naming the length, the band and the way out; nothing refuses', () => {
+  for (const n of [60, 45, 75]) assert.equal(titleBandWarning(titleOf(n)), null, String(n));
+  for (const n of [44, 76, 140, 1]) {
+    const w = titleBandWarning(titleOf(n));
+    assert.ok(w.startsWith(`release-title-band: the summary in the title is ${n} characters, outside the band 45 to 75 (aim 60)`), String(n));
+    assert.match(w, /lead paragraph/, 'it says where a longer explanation goes');
+  }
+});
+
+test('titleBandWarning counts characters, not UTF-16 units, and reads only the part after the first " - "', () => {
+  assert.equal(titleBandWarning('v1.0.0 - ' + '\u{1F600}'.repeat(60)), null, '60 astral characters are 60 characters');
+  assert.equal(titleBandWarning('v1.0.0 - ' + 'a'.repeat(30) + ' - ' + 'b'.repeat(30)), null, 'a hyphen inside the summary does not split it');
+  assert.equal(titleBandWarning('v1.0.0'), null, 'a title with no summary has nothing to measure (the shape rail owns that)');
+});
+
+// The lead paragraph under the summary line: text between the summary and the first "### " heading rides into the body right after the
+// Lead (it used to be dropped, so a longer explanation had nowhere to go).
+test('extractChangelogEntry: the text between the summary line and the first "### " heading is the lead paragraph', () => {
+  const e = extractChangelogEntry('## [1.2.3] - 2026-10-03\n\nShort summary.\n\nA longer explanation that\nspans two lines.\n\n### Fixed\n- x\n', '1.2.3');
+  assert.equal(e.summary, 'Short summary.');
+  assert.equal(e.lead, 'A longer explanation that\nspans two lines.');
+  assert.equal(e.sectionsBody, '### Fixed\n- x');
+  assert.equal(extractChangelogEntry('## [1.2.3] - 2026-10-03\n\nShort summary.\n\n### Fixed\n- x\n', '1.2.3').lead, '');
+  assert.equal(extractChangelogEntry('## [1.2.3] - 2026-10-03\n\nShort summary.\n', '1.2.3').lead, '');
+});
+
+test('buildReleaseBody: Lead, then the lead paragraph, then the sections, a blank line between each; without a lead paragraph the body is unchanged', () => {
+  assert.equal(buildReleaseBody('Short.', '### Fixed\n- x', 'More words.'), 'Short.\n\nMore words.\n\n### Fixed\n- x\n');
+  assert.equal(buildReleaseBody('Short.', '', 'More words.'), 'Short.\n\nMore words.\n');
+  assert.equal(buildReleaseBody('Short.', '### Fixed\n- x', ''), 'Short.\n\n### Fixed\n- x\n');
+  assert.equal(buildReleaseBody('Short.', '### Fixed\n- x'), 'Short.\n\n### Fixed\n- x\n');
+});

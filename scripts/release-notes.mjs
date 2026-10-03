@@ -48,11 +48,11 @@ function main() {
   }
 
   try {
-    const { summary, sectionsBody } = extractChangelogEntry(changelog, tagVersion, { previousStable: prev.slice(1) });
+    const { summary, lead, sectionsBody } = extractChangelogEntry(changelog, tagVersion, { previousStable: prev.slice(1) });
     // A pre-release is never Latest, even when the repo has no Latest yet.
     const latestFlag = launch ? 'false' : makeLatestFlag(tagVersion, latest);
     fs.writeFileSync('release-title.txt', buildReleaseTitle(tagVersion, summary));
-    fs.writeFileSync('release-body.md', buildReleaseBody(summary, sectionsBody));
+    fs.writeFileSync('release-body.md', buildReleaseBody(summary, sectionsBody, lead));
     fs.writeFileSync('release-latest.txt', latestFlag);
     fs.writeFileSync('release-prerelease.txt', launch ? 'true' : 'false');
     console.log(`release-notes: derived the Release title + body for ${ref} from CHANGELOG.md's [${tagVersion}] entry`);

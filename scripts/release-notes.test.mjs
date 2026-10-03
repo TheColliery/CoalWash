@@ -149,3 +149,14 @@ test('release-notes.mjs: a hyphenated tag without LAUNCH_FORM, and LAUNCH_FORM o
   assert.equal(fs.existsSync(path.join(dir, 'release-title.txt')), false);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// UMB-392: a lead paragraph under the summary line rides into the body (right after the Lead, before the sections); the title stays the summary only.
+test('release-notes.mjs: a lead paragraph under the summary line is carried into release-body.md after the Lead -- RED before UMB-392', () => {
+  const dir = scratchWithLib();
+  fs.writeFileSync(path.join(dir, 'CHANGELOG.md'), '## [1.2.0] - 2026-10-03\n\nA short summary line.\n\nThe longer explanation, in a paragraph.\n\n### Added\n- x\n');
+  const res = run(dir, { GITHUB_REF_NAME: 'v1.2.0' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(fs.readFileSync(path.join(dir, 'release-title.txt'), 'utf8'), 'v1.2.0 - a short summary line');
+  assert.equal(fs.readFileSync(path.join(dir, 'release-body.md'), 'utf8'), 'A short summary line.\n\nThe longer explanation, in a paragraph.\n\n### Added\n- x\n');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
