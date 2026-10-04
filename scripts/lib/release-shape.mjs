@@ -117,9 +117,12 @@ export function buildReleaseTitle(version, summary) {
   // project..."), but leave an acronym/identifier-shaped first word alone -- one whose first
   // TWO characters are both capitals ("SHA256SUMS.txt", "CI") reads as an acronym or a file
   // name, never an ordinary sentence opener; an ordinary word has at most one leading capital.
+  // Only an ORDINARY opener lower-cases: ONE capital followed by lower-case letters (with an optional contraction, hyphenated
+  // lower-case compound or closing punctuation: "Fixed,", "It's", "Two-phase"). Every other opener is left as written: "CoalFace",
+  // "McKinsey", "SHA256SUMS.txt", "CI", "V8", "Node.js", "Python3" (UMB-417, pass 14 A-2).
   const firstWord = s.match(/^\S+/)?.[0] ?? '';
-  const looksLikeIdentifier = /^[A-Z]{2}/.test(firstWord);
-  if (!looksLikeIdentifier && /^[A-Z]/.test(s)) s = s[0].toLowerCase() + s.slice(1);
+  const ordinaryOpener = /^[A-Z][a-z]*(?:['\u2019][a-z]+)?(?:-[a-z]+)*[.,;:!?)]*$/.test(firstWord);
+  if (ordinaryOpener) s = s[0].toLowerCase() + s.slice(1);
   return `v${version} - ${s}`;
 }
 
