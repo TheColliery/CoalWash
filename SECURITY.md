@@ -8,7 +8,7 @@ Report a security issue in this repo through GitHub's private vulnerability repo
 
 ## Advisories
 
-### 2026-10-04 — a cloned project's estate age limits no longer move after you turn on deleteCold
+### 2026-10-04 — a cloned project's estate age limits stay clamped after you turn on deleteCold
 
 **What.** `v1.10.0` bounded a cloned project's `estate.purgeAfterDays` and `estate.compressAfterDays` (a project may only lower the first and only raise the second) but only while your own `estate.deleteCold` was not true. If you had turned `deleteCold` on, a project value stood: a cloned project could lower `compressAfterDays` and bring sessions into the archive-then-remove band sooner than your own number, and CoalWash then archived them and removed the originals once the archive verified.
 
