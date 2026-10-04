@@ -1807,7 +1807,8 @@ test('CWK-162 B10: a project purgeAfterDays 0 is ignored, whether or not the use
 test('CWK-162 B10 control: a global 0 is never touched, a LOWER project value is honored, and (R18, owner sheet BB-5) a project 0 stays ignored with the user\'s own deleteCold true', () => {
   // R18 (BB-5, Z-2): this assertion used to read `deleteCold: true ... purgeAfterDays: 0 -> 0` ("the user already opted in to cold deletes").
   // That was the consented-case exception the owner ruled out on 2026-10-03: a user who turned on deleteCold set the cold edge at a number,
-  // and a cloned project file never moves it. Changed here by name; the rule it now pins is the R18 BB-5 tests below.
+  // and a cloned project file never moves it toward removing more (it may only lower purgeAfterDays or raise compressAfterDays). Changed
+  // here by name; the rule it now pins is the R18 BB-5 tests below.
   assert.strictEqual(mergeSafety({ estate: { deleteCold: true, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 0 } }).estate.purgeAfterDays, 90, 'deleteCold true: the clamp still holds, a project 0 does not move the user\'s 90');
   assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 0 } }, {}).estate.purgeAfterDays, 0, 'the user\'s own global 0 is theirs');
   assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 1 } }).estate.purgeAfterDays, 1, 'a LOWER value is unchanged: it only makes sessions cold sooner, and cold is report-only here');

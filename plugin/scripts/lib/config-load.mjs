@@ -1119,7 +1119,8 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
     // cold at 90, warm at 365 or 36500), the transition deleteCold gates. A value at or below it only makes sessions cold sooner.
     // R18 (owner sheet BB-5 = (a), 2026-10-03; zone hooks-safety.md section 9, "the clamp holds AFTER consent too"): the clamp holds
     // whether or not the user's deleteCold is true. It used to stop at `merged.deleteCold !== true`, so once the user consented a cloned
-    // project's value stood (Z-2). A user who turned on deleteCold set the cold edge at a number, and a cloned project file never moves it.
+    // project's value stood (Z-2). A user who turned on deleteCold set the cold edge at a number, and a cloned project file never moves it
+    // toward removing more (it may only lower purgeAfterDays or raise compressAfterDays).
     if (p.purgeAfterDays !== undefined) {
       const userValue = !globalUnreadable && validateValue(PURGE_SPEC, g.purgeAfterDays) === null ? g.purgeAfterDays : PURGE_SPEC.def;
       const age = (n) => (n === 0 ? Infinity : n);
