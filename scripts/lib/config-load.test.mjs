@@ -1790,7 +1790,7 @@ test('CWK-162 B4: junk in a project runBudget gets no say (a string, NaN, a non-
   assert.deepStrictEqual(mergeSafety(g, { estate: { runBudget: 7 } }).estate.runBudget, g.estate.runBudget, 'a non-object runBudget does not replace the global object');
 });
 
-test('CWK-162 B10: a project purgeAfterDays 0 is ignored unless the EFFECTIVE deleteCold is already true (witness: 90 -> 0 past a global deleteCold:false)', () => {
+test('CWK-162 B10: a project purgeAfterDays 0 is ignored, whether or not the user\'s deleteCold is true (witness: 90 -> 0 past a global deleteCold:false)', () => {
   const closed = { estate: { deleteCold: false, purgeAfterDays: 90 } };
   const m = mergeSafety(closed, { estate: { purgeAfterDays: 0 } }).estate;
   assert.strictEqual(m.purgeAfterDays, 90, 'the global value stands');

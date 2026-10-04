@@ -4259,6 +4259,85 @@ test('R15 isGitMarker: a directory is a marker only with HEAD, objects and refs;
   } finally { clean(proj); }
 });
 
+// R19 (fire 20, F-R16-2): isGitMarker's three fail-closed arms each SURVIVED the R14 D3|R15 mutation table (18/18): each fell to `return false`
+// with the suite green, so a regression to fail OPEN would ship. One test per arm. Each fixture is a plain FILE whose content is not a gitdir
+// pointer, so a normal read answers false and a `true` can only come from the arm under test; the fs call is patched around one isGitMarker
+// call and restored in `finally`, and each test ends with the unpatched control.
+const fsErr = (code) => Object.assign(new Error(`${code}: simulated by the test`), { code });
+
+test('R19 F-R16-2 M6: an open that fails with a code other than ENOENT/ENOTDIR on a non-directory counts the entry as present, and so does an lstat that fails after it', () => {
+  const { isGitMarker } = __testHooks;
+  const { proj } = sandbox();
+  try {
+    const p = path.join(proj, 'locked-git');
+    write(p, 'not a gitdir pointer\n');
+    const realOpen = fs.openSync;
+    const realLstat = fs.lstatSync;
+    let afterOpenFails;
+    let afterLstatFails;
+    try {
+      fs.openSync = function deny(q, ...rest) { if (String(q) === p) throw fsErr('EACCES'); return realOpen.call(fs, q, ...rest); };
+      afterOpenFails = isGitMarker(p);
+      fs.lstatSync = function deny(q, ...rest) { if (String(q) === p) throw fsErr('EACCES'); return realLstat.call(fs, q, ...rest); };
+      afterLstatFails = isGitMarker(p);
+    } finally { fs.openSync = realOpen; fs.lstatSync = realLstat; }
+    assert.strictEqual(afterOpenFails, true, 'the open failed (EACCES) and lstat says a file: present, fail closed');
+    assert.strictEqual(afterLstatFails, true, 'the open and the lstat both failed: the entry cannot be inspected, present, fail closed');
+    assert.strictEqual(isGitMarker(p), false, 'control: the same file, opened normally, is no marker');
+  } finally { clean(proj); }
+});
+
+test('R19 F-R16-2 M7: a handle that is neither a directory nor a regular file (a FIFO, a device) counts the entry as present and is never read', () => {
+  const { isGitMarker } = __testHooks;
+  const { proj } = sandbox();
+  try {
+    const p = path.join(proj, 'special-git');
+    write(p, 'not a gitdir pointer\n');
+    const realFstat = fs.fstatSync;
+    const realReadSync = fs.readSync;
+    let reads = 0;
+    let special;
+    try {
+      fs.fstatSync = function fake() { return { isDirectory: () => false, isFile: () => false }; };
+      fs.readSync = function spy(...args) { reads++; return realReadSync.call(fs, ...args); };
+      special = isGitMarker(p);
+    } finally { fs.fstatSync = realFstat; fs.readSync = realReadSync; }
+    assert.strictEqual(special, true, 'not a directory, not a regular file: present, fail closed');
+    assert.strictEqual(reads, 0, 'and nothing was read through the handle');
+    assert.strictEqual(isGitMarker(p), false, 'control: the same file, judged as a regular file, is no marker');
+  } finally { clean(proj); }
+});
+
+test('R19 F-R16-2 M7 (a real named pipe): a `.git` that is a FIFO is present, and its open does not hang', (t) => {
+  const { isGitMarker } = __testHooks;
+  const { proj } = sandbox();
+  try {
+    const p = path.join(proj, 'fifo-git');
+    spawnSync('mkfifo', [p], { timeout: 10000, windowsHide: true });
+    let isFifo = false;
+    try { isFifo = fs.lstatSync(p).isFIFO(); } catch { /* not created */ }
+    if (!isFifo) return t.skip('this host cannot make a named pipe here (no mkfifo, or the filesystem keeps no FIFOs): the patched M7 test above pins the arm');
+    assert.strictEqual(isGitMarker(p), true, 'a FIFO is not something git accepts and not ours to read: present, fail closed');
+  } finally { clean(proj); }
+});
+
+test('R19 F-R16-2 M8: a read error on the open handle counts the entry as present', () => {
+  const { isGitMarker } = __testHooks;
+  const { proj } = sandbox();
+  try {
+    const p = path.join(proj, 'unreadable-git');
+    write(p, 'not a gitdir pointer\n');
+    const realReadSync = fs.readSync;
+    let readFails;
+    try {
+      fs.readSync = function fail() { throw fsErr('EIO'); };
+      readFails = isGitMarker(p);
+    } finally { fs.readSync = realReadSync; }
+    assert.strictEqual(readFails, true, 'the read through the handle failed (EIO): present, fail closed');
+    assert.strictEqual(isGitMarker(p), false, 'control: the same file, read normally, is no marker');
+  } finally { clean(proj); }
+});
+
 // RE-INSPECT 2 F-R14r2-A (LOW): the journal leg of the physical-path match had no isolating test. The existing case-variant test commits the
 // SNAPSHOT as well, so its refusal rides the snapshot leg and a regression of the journal leg to the committed spelling (`rel === 'journal.json'`,
 // mutant M2) shipped green. Here ONLY the journal is tracked, and under a case-variant name, so only the journal leg can refuse it.
