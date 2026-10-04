@@ -143,7 +143,7 @@ test('makeLatestFlag: a Latest tag that is not a bare vX.Y.Z throws a named erro
 // UMB-392 / BA-14 (the owner: fix it at the source of the river): the Release title is derived from the CHANGELOG summary line, so the
 // length bound lives there. A SIGNAL with a band, never a hard cap: aim 60 characters, 45 to 75 passes clean, outside the band a named
 // warning. The numbers are the house's own (no formal standard sets one), declared in RELEASE-PATTERN.md.
-import { SUMMARY_AIM, SUMMARY_BAND, titleBandWarning } from './release-shape.mjs';
+import { SUMMARY_AIM, SUMMARY_BAND, titleBandWarning, MIRROR_TITLE_CAP, mirroredTitle, mirroredTitleOverflow } from './release-shape.mjs';
 
 const titleOf = (n) => `v1.2.3 - ${'a'.repeat(n)}`;
 
@@ -218,4 +218,38 @@ test('buildReleaseTitle: V8, Node.js and every other non-ordinary opener keeps i
   assert.equal(t('Two-phase commit now ships'), 'v1.0.0 - two-phase commit now ships');
   assert.equal(t('A fix'), 'v1.0.0 - a fix');
   assert.equal(t('I moved the file'), 'v1.0.0 - i moved the file');
+});
+
+// UMB-433 (the owner on org discussion #23: "if it really overflows, re-compose it, never leave the text off"): the org announcement mirrors
+// "<Repo> <Release title>" as a discussion title, and GitHub's title ceiling is a hard 200 (it stored a 211-character title as 199, n = 1).
+// A title that fits posts whole; a real overflow is never cut by a machine and never posted bare, so the DRAFTER re-composes the summary
+// BEFORE the tag. One definition of the mirrored title and its ceiling, here, used by the announcer and by the pre-tag check.
+test('mirroredTitle: "<Repo> <Release title>" when the title opens with its tag, else "<Repo> <tag> - <name>", else "<Repo> <tag>"', () => {
+  assert.equal(MIRROR_TITLE_CAP, 200);
+  assert.equal(mirroredTitle('CoalBoard', 'v2.7.0', 'v2.7.0 - a summary'), 'CoalBoard v2.7.0 - a summary');
+  assert.equal(mirroredTitle('CoalBoard', 'v2.7.0', 'a hand-named release'), 'CoalBoard v2.7.0 - a hand-named release');
+  assert.equal(mirroredTitle('CoalBoard', 'v2.7.0', ''), 'CoalBoard v2.7.0');
+  assert.equal(mirroredTitle('CoalBoard', 'v2.7.0', '  v2.7.0 - padded  '), 'CoalBoard v2.7.0 - padded');
+});
+
+test('mirroredTitleOverflow: null at 200 characters and below, a named message at 201 and above; CoalBoard v2.7.0 (name 201) overflows -- RED before UMB-433', () => {
+  const nameOf = (total) => 'v1.0.0 - ' + 'a'.repeat(total - 'CoalBoard '.length - 'v1.0.0 - '.length);
+  assert.equal(mirroredTitle('CoalBoard', 'v1.0.0', nameOf(200)).length, 200);
+  assert.equal(mirroredTitleOverflow('CoalBoard', 'v1.0.0', nameOf(200)), null);
+  assert.equal(mirroredTitleOverflow('CoalBoard', 'v1.0.0', nameOf(150)), null);
+  for (const n of [201, 211, 400]) {
+    const m = mirroredTitleOverflow('CoalBoard', 'v1.0.0', nameOf(n));
+    assert.match(m, new RegExp('^release-title-cap: the announcement title "CoalBoard v1\\.0\\.0 - a+" is ' + n + ' characters, over GitHub\'s ' + MIRROR_TITLE_CAP + '-character title ceiling'), String(n));
+    assert.match(m, /re-compose|shorten/i, 'it says what to do');
+  }
+  const v270 = 'v2.7.0 - ' + 'word '.repeat(40).slice(0, 192).trimEnd();
+  assert.ok(mirroredTitleOverflow('CoalBoard', 'v2.7.0', 'v2.7.0 - ' + 'x'.repeat(192)) !== null, 'the real v2.7.0 shape (a 201-character Release name) overflows');
+  void v270;
+});
+
+test('mirroredTitleOverflow counts UTF-16 units (the conservative count: an astral character may count twice at GitHub)', () => {
+  const emoji = '\u{1F600}';
+  const name = 'v1.0.0 - ' + emoji.repeat(100);
+  assert.equal(Array.from(mirroredTitle('R', 'v1.0.0', name)).length < 200, true);
+  assert.ok(mirroredTitleOverflow('R', 'v1.0.0', name) !== null, '100 emoji are 200 units: held, never risked');
 });

@@ -49,6 +49,17 @@ export const EXEMPT_CARRIERS = Object.freeze({
   'scripts/secret-scan.test.mjs': 'a9cb7145e31139ec3c490dd7714df8fa7dc6cf86',
 });
 
+// TWO MORE named, room-local divergences, with NO entry above (this header is where the room names a canon carrier it does not carry
+// at the canon's blob). The rest of the release overlay set sits at .github b4cf4ab (order 05a, UMB-444); these two are HELD:
+//   - scripts/release-notes.test.mjs at d2f5b830fafa775ab2f54443a454f311aecbcd03 (canon a8f3ba69). The canon test asserts that the spawned
+//     child's environment holds nothing but what node needs; macOS injects __CF_USER_TEXT_ENCODING and the coverage leg injects
+//     NODE_V8_COVERAGE, so it went red on CoalBoard's CI (run 37224469491). Re-sync it the day the canon fix lands.
+//   - scripts/release-notes.mjs at e9bd70b78f46dca7de16d12b4acda5a61d2c2716 (canon 674592e0). The canon file adds one PRODUCTION git
+//     spawn (`--check`'s repoName) whose env is an explicit allowlist passed as the `{ env }` shorthand. The census counts that as
+//     `other`, and git-env-census.test.mjs refuses any `other` in a non-test script; a pin above cannot clear it (an exemption drops
+//     findings, never `other`, and a pin that hides no finding is refused). Taking it needs a census-rule ruling, not a room edit.
+//     The held blob spawns no git at all.
+
 // The git blob id of a text read as UTF-8 (a carrier is valid UTF-8, so the re-encode is byte-exact): sha1 of "blob <bytes>\0" + bytes.
 export function gitBlobId(text) {
   const bytes = Buffer.from(text, 'utf8');
