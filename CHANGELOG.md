@@ -2,6 +2,21 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.11.1] - 2026-10-04
+
+Comments now state that the estate age clamps are one-way
+
+Two source comments said a cloned project file never moves the estate age limits after you turn on `estate.deleteCold`; they now say it never moves them toward removing more, and the Release deriver is the org canon's newer copy. No behaviour changed.
+
+### Fixed
+
+- **A forward note on the released 1.11.0 Security bullet.** That bullet ends "a cloned project file never moves them". It means never toward removing more: a cloned project may still LOWER `estate.purgeAfterDays` or RAISE `estate.compressAfterDays`, which is the safer direction for each, whatever `deleteCold` says. The code already did exactly this; the 1.11.0 sentence was the loose part, and a released entry is not edited.
+- **Two comments now say what the clamp does.** The BB-5 comment above the `purgeAfterDays` clamp in `scripts/lib/config-load.mjs` (and its dist twin) and the comment in the CWK-162 B10 control now read "never moves it toward removing more (it may only lower `purgeAfterDays` or raise `compressAfterDays`)". Comment-only: no assertion or test title moved. — test: `scripts/lib/config-load.test.mjs`
+
+### Changed
+
+- **Contributor-facing: the Release deriver follows the org canon again (`.github` `8ae2f70`).** `scripts/lib/release-shape.mjs` and its test now keep the case of a CamelCase first word, `V8` and `Node.js` in the derived Release title instead of lower-casing them. Dev tooling only: it is not in the installed plugin. — test: `scripts/lib/release-shape.test.mjs`
+
 ## [1.11.0] - 2026-10-04
 
 Project estate age limits stay clamped with deleteCold on
