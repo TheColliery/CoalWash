@@ -2049,6 +2049,10 @@ test('CWK-081 adapter: a POPULATED contextWindow is discovered, takes the MIN ac
     fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({
       modelUsage: {
         'claude-opus-5': { contextWindow: 1000000 },
+        // Dated 2026-10-08: claude-haiku-4-5 is a previous-generation id. Since Claude Code 2.1.293 the `haiku` alias on the
+        // Anthropic API is Haiku 5.5 (claude-haiku-5-5, 1M); it stays Haiku 4.5 on the Claude Platform on AWS, Amazon Bedrock,
+        // Google Cloud's Agent Platform and Microsoft Foundry. The MIN branch this pins does not depend on which id carries the
+        // small window.
         'claude-haiku-4-5': { contextWindow: 200000 }, // the smallest = the conservative reading
         'claude-fable-5-1': { contextWindow: 0 },      // unpopulated, ignored
       },
