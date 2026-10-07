@@ -16,9 +16,12 @@
 # its build does filter them; .githooks/ needs no filter to be safe. Named
 # divergence, one reason: the shipped dir stays shipped-only.
 # The house secret scan (UMB-282 (a), scripts/secret-gate.mjs). A public repository gets GitHub's provider-token scan
-# for free, but not the generic kinds (a private key, a connection string, an HTTP authentication header). git hands
-# only pre-push the ref lines on stdin, so only pre-push passes --pre-push (every pushed commit, message and tag);
-# pre-commit scans the tracked tree. One file, two hook names, identical bytes: the branch is on the name git invoked.
+# for free; this is the repository's own check. Its scanner (scripts/lib/secret-scan.mjs) finds a provider-shaped
+# token, a PEM private-key header and a high-entropy value assigned to a name like secret, token, password or key. It
+# does NOT see a credential inside a URL or connection string, an HTTP authentication header that is not on such a
+# named assignment, or a key split across lines. git hands only pre-push the ref lines on stdin, so only pre-push
+# passes --pre-push (every pushed commit, message and tag); pre-commit scans the tracked tree. One file, two hook
+# names, identical bytes: the branch is on the name git invoked.
 if [ "$(basename "$0")" = "pre-push" ]; then
   node scripts/secret-gate.mjs --pre-push "--remote=$1" || exit 1
 else
