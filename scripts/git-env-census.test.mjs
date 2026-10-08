@@ -368,6 +368,19 @@ test('the six NAMED locator bypasses are not counted (a named limit, pinned so t
   assert.deepEqual(shape(census(`cp.${'spawnSync'}(${Q}git${Q}, ['status'], { env: process.env });`)), [1, 1, 0, 0, 1], 'a member call is counted');
 });
 
+// CodeQL #52 (fire 31): the census builds RegExps from names. Every caller passes an identifier today, so no census route reaches a
+// metacharacter; the escape is tested directly: a RegExp built from a name with any metacharacter matches that name and nothing else.
+test('fire 31 (CodeQL #52): escapeRegExp escapes every regex metacharacter, so a RegExp built from a name matches only that name', () => {
+  const wrong = [];
+  for (const m of ['.', '*', '+', '?', '^', '$', '{', '}', '(', ')', '|', '[', ']', BS]) {
+    const name = `a${m}b`;
+    let ok;
+    try { const re = new RegExp(`^${CENSUS.escapeRegExp(name)}${DL}`); ok = re.test(name) && !re.test('axb') && !re.test('ab'); } catch { ok = false; }
+    if (!ok) wrong.push(m);
+  }
+  assert.deepEqual(wrong, [], 'each listed metacharacter makes the built RegExp match something other than the name, or throw');
+});
+
 // CWK-174 + 08d: the BLOB-PINNED carriers. Each is carried BYTE-EQUAL from its source and cannot be edited room-side, so the census
 // exempts exactly its path, and ONLY while its git blob id equals the pinned id: an edit, or a re-sync that moves the blob, turns the
 // entry back into findings. Each entry quotes, exactly, the findings it hides (the trailing remedy text cut). A room-local, named

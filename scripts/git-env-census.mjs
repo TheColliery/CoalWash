@@ -195,7 +195,8 @@ export function lex(text) {
 
 const skipWs = (s, i) => { while (i < s.length && SPACE.test(s[i])) i++; return i; };
 const backWs = (s, i) => { while (i >= 0 && SPACE.test(s[i])) i--; return i; };
-const esc = (name) => name.replace(/\$/g, '\\$');
+// Every RegExp metacharacter escaped, so a RegExp built from a name matches that name only (CodeQL #52; the census passes identifiers).
+export const escapeRegExp = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const lineOf = (text, i) => text.slice(0, i).split('\n').length;
 const cut = (s) => { const one = s.trim().replace(/\s+/g, ' '); return one.length > 60 ? `${one.slice(0, 57)}...` : one; }; // source text quoted in a finding
 
@@ -252,7 +253,7 @@ function blockOf(code, at) {
 
 // The nearest `const <name> = ...` before `before` whose block still holds `before`, or null.
 function findConst(lx, name, before) {
-  const re = new RegExp(`(?<![\\w$.])const\\s+${esc(name)}\\s*=(?![=>])`, 'g');
+  const re = new RegExp(`(?<![\\w$.])const\\s+${escapeRegExp(name)}\\s*=(?![=>])`, 'g');
   let found = null;
   for (let m; (m = re.exec(lx.code)) && m.index < before;) {
     const block = blockOf(lx.code, m.index);
@@ -266,7 +267,7 @@ function findConst(lx, name, before) {
 
 // Every reference to `name` in [a, b): a member name (`x.name`) and an object key (`{ name: ...`) are not references.
 function references(code, name, a, b) {
-  const re = new RegExp(`(?<![\\w$])${esc(name)}(?![\\w$])`, 'g');
+  const re = new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`, 'g');
   re.lastIndex = a;
   const out = [];
   for (let m; (m = re.exec(code)) && m.index < b;) {
@@ -471,7 +472,7 @@ function judgeLiteral(lx, s, e, level = 0) {
 // A same-file helper `name`: ONE definition whose body is one return of an allowlist literal, and a name that is only ever called.
 function judgeHelper(lx, name) {
   const { code } = lx;
-  const defs = [...code.matchAll(new RegExp(`(?<![\\w$.])(?:function\\s+${esc(name)}\\s*\\(|(const|let|var)\\s+${esc(name)}\\s*=(?![=>]))`, 'g'))];
+  const defs = [...code.matchAll(new RegExp(`(?<![\\w$.])(?:function\\s+${escapeRegExp(name)}\\s*\\(|(const|let|var)\\s+${escapeRegExp(name)}\\s*=(?![=>]))`, 'g'))];
   if (defs.length !== 1) return { why: defs.length ? `'${name}' is defined more than once in this file` : `'${name}' is not defined in this file (a helper from another file is not read)` };
   const def = defs[0];
   if (def[1] && def[1] !== 'const') return { why: `'${name}' is a ${def[1]}, which can be reassigned` };
@@ -509,7 +510,7 @@ function judgeHelper(lx, name) {
 }
 
 function helperResult(lx, name, defAt, lit, litEnd) {
-  const nameAt = defAt + lx.code.slice(defAt).search(new RegExp(`(?<![\\w$])${esc(name)}(?![\\w$])`));
+  const nameAt = defAt + lx.code.slice(defAt).search(new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`));
   const call = references(lx.code, name, 0, lx.code.length).find((i) => i !== nameAt && lx.code[skipWs(lx.code, i + name.length)] !== '(');
   if (call !== undefined) return { why: `'${name}' is used at line ${lineOf(lx.text, call)} other than as a call` };
   const r = judgeLiteral(lx, lit, litEnd);
@@ -626,7 +627,7 @@ const COMMAND_ONLY = new Set(['execsync', 'exec']); // (command, options): node 
 function restArray(code, s, e) {
   const name = code.slice(s, e);
   if (!NAME.test(name)) return false;
-  const re = new RegExp(`\\.\\.\\.\\s*${esc(name)}\\s*\\)`, 'g');
+  const re = new RegExp(`\\.\\.\\.\\s*${escapeRegExp(name)}\\s*\\)`, 'g');
   for (let m; (m = re.exec(code)) && m.index < s;) {
     const params = m.index + m[0].length - 1;
     const open = enclosingOpen(code, params);
