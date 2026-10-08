@@ -294,6 +294,13 @@ for (const [id, make, forms, cls] of MUST_PASS) {
   }
 }
 
+test('08d witness P2: the real scripts/release-notes.test.mjs (the canon overlay, blob 7e779ef8) passes with no pin: both its git spawns take sandboxEnv(), one allowlist literal', () => {
+  const rel = 'scripts/release-notes.test.mjs';
+  const files = collectScriptsMjs(REPO).filter((f) => f.rel === rel);
+  const r = censusGitSpawns(files);
+  assert.deepEqual([CENSUS.gitBlobId(files[0].text), shape(r), r.exempted], ['7e779ef8b224c4c0942e11899ed29da4ee847269', [0, 2, 0, 2, 0], []]);
+});
+
 test('08d witness P1: the real scripts/release-notes.mjs (the canon overlay, blob f8d998d8) passes alone as one allowlist, with no pin', () => {
   const rel = 'scripts/release-notes.mjs';
   const r = censusGitSpawns(collectScriptsMjs(REPO).filter((f) => f.rel === rel));
@@ -345,27 +352,23 @@ const STRIP = "its fromEntries reads Object.entries(process.env).filter(([k]) =>
 const viaGitEnv = (more) => `${OPEN}the helper 'gitEnv' returns a literal that is no allowlist: ${STRIP}; ${more}`;
 const NO_NOSYS = "it does not set GIT_CONFIG_NOSYSTEM: '1' in its own text";
 const GLOBAL = 'it names GIT_CONFIG_GLOBAL, which can aim git at another repository';
-const OLD_SANDBOX = `${OPEN}the helper 'sandboxEnv' returns a literal that is no allowlist: it holds a nested object or block; it spreads (process.platform === 'win32' ? { HOMEDRIVE: path.parse(d...; 'extra' is no const the census can read here; ${NO_NOSYS}`;
+const ASSIGNED = `${OPEN}'gitEnv' does not return one object literal`; // d0db994d: gitEnv = () => (envSeen = { ...withoutGit(), ... })
 const CARRIERS = {
-  'scripts/release-notes.test.mjs': ['8cf7e5fd58b89d051395efc53cc0a4f6c86848da', [
-    `269 spawnSync('git', ...) ${OLD_SANDBOX}`,
-    `282 spawnSync('git', ...) ${OLD_SANDBOX}`,
+  'scripts/secret-gate.mjs': ['856956a1cca6f716e5507f6c23ac90ed34cbbe5f', [
+    `57 execFileSync('git', ...) ${viaGitEnv(NO_NOSYS)}`,
+    `60 execFileSync('git', ...) ${viaGitEnv(NO_NOSYS)}`,
   ]],
-  'scripts/secret-gate.mjs': ['044ec4464e83895f1a988198c93b73300652bdf2', [
-    `56 execFileSync('git', ...) ${viaGitEnv(NO_NOSYS)}`,
-    `59 execFileSync('git', ...) ${viaGitEnv(NO_NOSYS)}`,
-  ]],
-  'scripts/secret-gate.test.mjs': ['a17ae233275c05c6d030f7aa7f0654002b310356', [
+  'scripts/secret-gate.test.mjs': ['71452210d6a6f793895bc502557fce7e1f3e890c', [
     `40 execFileSync('git', ...) ${OPEN}it spreads gitEnv(); 'extra' is no const the census can read here; ${NO_NOSYS}`,
-    `197 execFileSync('git', ...) ${viaGitEnv(GLOBAL)}`,
-    `222 execFileSync('git', ...) ${viaGitEnv(GLOBAL)}`,
+    `200 execFileSync('git', ...) ${viaGitEnv(GLOBAL)}`,
+    `225 execFileSync('git', ...) ${viaGitEnv(GLOBAL)}`,
   ]],
-  'scripts/secret-scan.test.mjs': ['4433fb56bc97d1facc3fb27804e1934c0577115f', [
-    `545 execFileSync('git', ...) ${viaGitEnv(GLOBAL)}`,
-    `593 spawnSync('git', ...) ${OPEN}'cleanEnv' is built as neither gitEnv() nor an allowlist literal`,
-    `622 spawnSync('git', ...) ${viaGitEnv(GLOBAL)}`,
-    `728 execFileSync('git', ...) ${viaGitEnv(GLOBAL)}`,
-    `733 execFileSync('git', ...) ${viaGitEnv(GLOBAL)}`,
+  'scripts/secret-scan.test.mjs': ['d0db994df855ccd647f3ded878a6867bb198e196', [
+    `547 spawnSync('git', ...) ${ASSIGNED}`,
+    `548 execFileSync('git', ...) ${ASSIGNED}`,
+    `715 spawnSync('git', ...) ${ASSIGNED}`,
+    `820 execFileSync('git', ...) ${ASSIGNED}`,
+    `825 execFileSync('git', ...) ${ASSIGNED}`,
   ]],
 };
 const carrierText = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf8');

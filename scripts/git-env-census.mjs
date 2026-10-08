@@ -1,4 +1,4 @@
-// ponytail: 646 lines at declaration -- the lexer, the call locator and the grammar judge one shape (the env a git spawn takes) and
+// ponytail: 644 lines at declaration -- the lexer, the call locator and the grammar judge one shape (the env a git spawn takes) and
 // share one lexed view per file; split apart they would each re-lex the file and drift on what "the same text" means.
 // CWK-136 -- a textual census: does every git spawn under scripts/ take an env the census can READ as safe?
 // CWK-133 gave every fixture and gate one helper (scripts/git-env.mjs); nothing stopped the NEXT spawn from inheriting whatever
@@ -63,20 +63,18 @@ import crypto from 'node:crypto';
 // --no-filters`): an edit, a re-sync that moves the blob, or the same bytes at another path is a finding again. A named, room-local
 // divergence: DELETE an entry the day its source carries an env this grammar reads and the carrier is re-copied. The report lists
 // what it exempted (`exempted`), and every entry must hide a finding (git-env-census.test.mjs refuses an inert pin). What each hides:
-//   - scripts/secret-scan.test.mjs (Bankfire, the scanner source): its file-local gitEnv() strips GIT_* from a WHOLE copy of
-//     process.env and sets GIT_CONFIG_GLOBAL (not one of the three names), and its decoy read takes `cleanEnv`, the same strip with
-//     no GIT_CONFIG_NOSYSTEM.
-//   - scripts/secret-gate.mjs (the .github canon): its file-local gitEnv() strips GIT_* from a whole copy of process.env and KEEPS
-//     GIT_INDEX_FILE, which the pre-commit scan of the staged set needs.
-//   - scripts/secret-gate.test.mjs (the .github canon): its file-local gitEnv() strips GIT_* from a whole copy of process.env and
-//     sets GIT_CONFIG_GLOBAL, and one spawn spreads a caller's `extra` over it.
-//   - scripts/release-notes.test.mjs (the .github overlay, blob 8cf7e5fd): its sandboxEnv() spreads the caller's `extra`.
+//   - scripts/secret-scan.test.mjs (Bankfire, the scanner source, blob d0db994d): its file-local gitEnv() returns an assignment,
+//     `envSeen = { ...withoutGit(), ... }`, and withoutGit() strips GIT_* from a WHOLE copy of process.env; every git spawn in the
+//     file, its decoy read included, takes that gitEnv().
+//   - scripts/secret-gate.mjs (the .github canon, blob 856956a1): its file-local gitEnv() strips GIT_* from a whole copy of
+//     process.env and KEEPS GIT_INDEX_FILE, which the pre-commit scan of the staged set needs.
+//   - scripts/secret-gate.test.mjs (the .github canon, blob 71452210): its file-local gitEnv() strips GIT_* from a whole copy of
+//     process.env and sets GIT_CONFIG_GLOBAL, and one spawn spreads a caller's `extra` over it.
 // The findings, quoted, are in git-env-census.test.mjs's CARRIERS table.
 export const EXEMPT_CARRIERS = Object.freeze({
-  'scripts/release-notes.test.mjs': '8cf7e5fd58b89d051395efc53cc0a4f6c86848da',
-  'scripts/secret-gate.mjs': '044ec4464e83895f1a988198c93b73300652bdf2',
-  'scripts/secret-gate.test.mjs': 'a17ae233275c05c6d030f7aa7f0654002b310356',
-  'scripts/secret-scan.test.mjs': '4433fb56bc97d1facc3fb27804e1934c0577115f',
+  'scripts/secret-gate.mjs': '856956a1cca6f716e5507f6c23ac90ed34cbbe5f',
+  'scripts/secret-gate.test.mjs': '71452210d6a6f793895bc502557fce7e1f3e890c',
+  'scripts/secret-scan.test.mjs': 'd0db994df855ccd647f3ded878a6867bb198e196',
 });
 
 // The git blob id of a text read as UTF-8 (a carrier is valid UTF-8, so the re-encode is byte-exact): sha1 of "blob <bytes>\0" + bytes.

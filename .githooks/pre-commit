@@ -15,14 +15,18 @@
 # to keep it out of plugin/. CoalMine keeps its twins at hooks/pre-commit.sh and
 # its build does filter them; .githooks/ needs no filter to be safe. Named
 # divergence, one reason: the shipped dir stays shipped-only.
-# The house secret scan (UMB-282 (a), scripts/secret-gate.mjs). A public repository gets GitHub's provider-token scan
-# for free; this is the repository's own check. Its scanner (scripts/lib/secret-scan.mjs) finds a provider-shaped
-# token, a PEM private-key header and a high-entropy value assigned to a name like secret, token, password or key. It
-# does NOT see a credential inside a URL or connection string, or an HTTP authentication header, unless the value is
-# provider-shaped (such a key is found anywhere on a line) or is a high-entropy value on such a named assignment; nor
-# a key split across lines. git hands only pre-push the ref lines on stdin, so only pre-push passes --pre-push (every
-# pushed commit, message and tag); pre-commit scans the tracked tree. One file, two hook names, identical bytes: the
-# branch is on the name git invoked.
+# The secret scan (scripts/secret-gate.mjs). A public repository gets GitHub's provider-token scan for free. This scan
+# catches three things: a provider-shaped token anywhere on a line (a URL or an HTTP header included; refused before the push reaches GitHub), a private-key header, and a
+# high-entropy value assigned to a name like secret, token, password or key. It does NOT catch a credential inside a
+# URL or connection string (scheme://user:pass@host) unless the credential is provider-shaped or the whole URL is a high-entropy
+# value assigned to such a name, an HTTP authentication header
+# whose value is a scheme and a token (Authorization: Bearer <key>, X-Api-Token: Bearer <key>) unless that token is provider-shaped,
+# or a key split across lines. (CoalWash keeps the URL clause "or the whole URL is a high-entropy value assigned to such a name"
+# beside the canon text, a named divergence: the generic rule judges a secret-named value whole, scripts/lib/secret-scan.mjs
+# lines 30-31 "a key inside a secret-named value is reported only if the whole value passes the content test", and it finds
+# password = "https://user:<key>@host" (measured 08d).) git hands
+# only pre-push the ref lines on stdin, so only pre-push passes --pre-push (every pushed commit, message and tag);
+# pre-commit scans the tracked tree. One file, two hook names, identical bytes: the branch is on the name git invoked.
 if [ "$(basename "$0")" = "pre-push" ]; then
   node scripts/secret-gate.mjs --pre-push "--remote=$1" || exit 1
 else
