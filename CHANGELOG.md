@@ -2,6 +2,23 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.11.2] - 2026-10-08
+
+Capacity comment and method.md name the smallest window
+
+The caliper capacity comment and the budget paragraph of `method.md` now say what the smallest context window is: 200,000 is the smallest the code can discover or default to, and a user may still set an auto-compact window from 100K to 1M. Comments and reference text only: the code and the installed plugin's behaviour did not change.
+
+### Fixed
+
+- **The caliper capacity comment states what 200,000 is.** In `scripts/lib/caliper.mjs` (and its dist twin) the comment now reads that 200,000 is the smallest window the code can discover or default to and still a live one (Opus 4.8 and later on Bedrock, Google Cloud or Foundry, or `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`), and that it is NOT the smallest window a session can compact at: a user may set an auto-compact window of 100K to 1M, which the code does not read today. The residual is named, not closed. (F-08a-1)
+- **`skills/coalwash/references/method.md` no longer names a model list it cannot ground.** The budget paragraph said Sonnet 5, 4.6 and Haiku 4.5 receive a `<system_warning>` token feed after every tool call; no page the house fetched states that, so it now says "a platform that reports tokens remaining after a tool call". The "200k worker" in the same paragraph is now "the SMALLEST window in the fleet (a 200K deployment, or an auto-compact window a user set anywhere from 100K to 1M)". (F-08a-2)
+- **A forward note on the released 1.11.1 lead paragraph.** It ends "No behaviour changed". That meant no behaviour of the INSTALLED plugin changed; the Release-title deriver, a contributor tool that is not in the installed plugin, did change in 1.11.1. The released line is not edited. (F-R20-1)
+- **A forward note on the released 1.10.0 house secret-scan bullet.** That bullet says a public repository gets GitHub's provider-token scan but "not a private key, a connection string or an HTTP authentication header", and reads as if the house scan covers them. It does not: the scanner never caught a connection string or an HTTP authentication header. The `.githooks/pre-commit` and `.githooks/pre-push` comments were corrected to name only what `scripts/lib/secret-scan.mjs` detects (`72ad9a4`). The released bullet is not edited. (F-05a-1)
+
+### Changed
+
+- **`SECURITY.md` line 71 carries the corrected SkillSpector scan headline.** The "Last scan" line for the v1.11.1 dist said none of the 50 findings sits on executable code. The deputy's per-site count shows five of the 49 sit on a line of code, matching words inside a string literal (two refusal messages in `apply.mjs`, two schema rows, one conductor line), so the headline now says every finding is text, none program logic, with the 36 / 8 / 2 / 3 split by kind. The line names the scanned version, v1.11.1, and stays so. A root doc takes no version of its own. (F-05a-2)
+
 ## [1.11.1] - 2026-10-04
 
 Comments now state that the estate age clamps are one-way
