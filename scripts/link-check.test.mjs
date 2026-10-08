@@ -228,7 +228,7 @@ function cliRepo(t) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-git-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const fixtureEnv = gitEnv(path.dirname(root));
-  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: fixtureEnv });
+  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnv(path.dirname(root)) }); // 08d: the census reads gitEnv() at the spawn
   assert.strictEqual(git('init', '-q', '-b', 'main').status, 0, 'git init in the fixture');
   assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(), 'FIXTURE RAIL: the fixture owns its .git');
   const run = (...files) => spawnSync(process.execPath, [ENGINE, ...files], { cwd: root, encoding: 'utf8', env: fixtureEnv });

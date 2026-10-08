@@ -412,18 +412,18 @@ try {
 } catch (e) { fail(`pointer check: ${e.message}`); }
 
 // GIT SPAWNS (CWK-136). CWK-133 gave every fixture and gate one env helper (scripts/git-env.mjs); this is the tripwire
-// that keeps the NEXT git spawn from inheriting an ambient GIT_DIR / GIT_INDEX_FILE. It refuses a spawn with no `env:`
-// and an `env:` that names process.env, and it PRINTS its coverage: a census that matched nothing would report clean.
-// Detection lives in scripts/git-env-census.mjs (dynamic import, node/runtime.md 1); its named limits are in that
-// file's header (a variable env is followed to its const declaration and judged; a local wrapper is counted as
-// unverified, never followed).
-console.log('git spawn census (every git spawn under scripts/ takes its env from gitEnv(), never the ambient process.env):');
+// that keeps the NEXT git spawn from inheriting an ambient GIT_DIR / GIT_INDEX_FILE. A spawn passes only with an env the
+// census reads as safe (the room's gitEnv(), or an allowlist built from named keys with GIT_CONFIG_NOSYSTEM: '1'); every
+// other env, and a spawn with none, is a finding. It PRINTS its coverage: a census that matched nothing would report clean.
+// Detection lives in scripts/git-env-census.mjs (dynamic import, node/runtime.md 1); the accepted grammar and its named
+// limits are in that file's header.
+console.log("git spawn census (every git spawn under scripts/ takes the room's gitEnv() or an allowlist env the census reads whole):");
 try {
   const { censusGitSpawns, collectScriptsMjs } = await import(pathToFileURL(path.join(repo, 'scripts', 'git-env-census.mjs')).href);
   const census = censusGitSpawns(collectScriptsMjs(repo));
   for (const f of census.findings) fail(f);
   if (!census.calls) fail('git spawn census found NO git spawn under scripts/: the locator is dead, and a census that matches nothing reports clean');
-  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly or through a const, ${census.allowlist} an allowlist env (UMB-456 (2)), ${census.other} a local wrapper or an unfollowed variable (text not verified)${census.exempted && census.exempted.length ? `; ${census.exempted.length} blob-pinned carrier(s) EXEMPT: ${census.exempted.join(', ')}` : ''}`);
+  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take the room's gitEnv() directly or through a const, ${census.allowlist} an allowlist env read whole (UMB-456 (2))${census.exempted && census.exempted.length ? `; ${census.exempted.length} blob-pinned carrier(s) EXEMPT: ${census.exempted.join(', ')}` : ''}`);
 } catch (e) { fail(`git spawn census: ${e.message}`); }
 
 console.log('libs (import check):');

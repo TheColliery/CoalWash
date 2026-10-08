@@ -216,18 +216,18 @@ test('CWK-120 row 16: the hooks FAIL names the path the gate checks, and the dis
 //
 // THE TREE IS THE TRACKED FILE LIST, copied from disk: it is what a clone has, which
 // is the question the pointer gate asks.
-// CWK-133: scripts/git-env.mjs's `gitEnv` -- the whole GIT_* family out, the given directory's parent as the ceiling.
-const hermeticGit = (dir) => gitEnv(path.dirname(dir));
+// CWK-133: scripts/git-env.mjs's `gitEnv` -- the whole GIT_* family out, the given directory's parent as the ceiling. Each call
+// takes it itself (08d: the git-spawn census reads no wrapper).
 
 // The tracked tree in a real repo, fenced per the rail above. Returns null when git is
 // unavailable (the caller skips visibly). The dir is cleaned HERE if building it throws,
 // and by the caller's finally once this returns.
 function trackedTreeRepo() {
-  const listed = spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: hermeticGit(REPO) });
+  const listed = spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: gitEnv(path.dirname(REPO)) });
   if (listed.error || listed.status !== 0) return null;
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-git-')));
   try {
-    const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: hermeticGit(root) });
+    const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnv(path.dirname(root)) });
     const init = git('init', '-q', '-b', 'main');
     assert.strictEqual(init.status, 0, `git init in the fixture failed\n${init.stderr}`);
     assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(),
@@ -244,7 +244,7 @@ function trackedTreeRepo() {
     assert.strictEqual(added.status, 0, `git add in the fixture failed\n${added.stderr}`);
     const tracked = git('ls-files');
     assert.ok(tracked.stdout.includes('scripts/verify.mjs'), `the fixture index must hold the tree\n${tracked.stderr}`);
-    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hermeticGit(root) });
+    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: gitEnv(path.dirname(root)) });
     return { root, git, run };
   } catch (e) { fs.rmSync(root, { recursive: true, force: true }); throw e; }
 }
@@ -334,12 +334,12 @@ test('verify.mjs inside a REAL git repo: an ambient absolute GIT_DIR cannot make
   const { root } = fx;
   const decoy = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-decoy-')));
   try {
-    const made = spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: hermeticGit(decoy) });
+    const made = spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: gitEnv(path.dirname(decoy)) });
     assert.strictEqual(made.status, 0, `git init in the decoy failed\n${made.stderr}`);
     // Observable on the check-ignore call too: were it to run against the DECOY's git dir, this exclude file (which
     // `check-ignore` reads from the git dir, not from the work tree) would mark every root the ship-text cites as ignored.
     fs.writeFileSync(path.join(decoy, '.git', 'info', 'exclude'), ['skills/', 'commands/', 'hooks/', 'scripts/', 'plugin/', 'references/', ''].join('\n'));
-    const hostile = { ...hermeticGit(root), GIT_DIR: path.join(decoy, '.git') };
+    const hostile = { ...gitEnv(path.dirname(root)), GIT_DIR: path.join(decoy, '.git') };
     const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hostile });
     assert.strictEqual(r.status, 0, `the tracked tree must still PASS with a hostile GIT_DIR in the environment\n${r.stdout}${r.stderr}`);
     assert.match(r.stdout, /ok\s+every path this repo points at/, `the pointer block must have run and resolved\n${r.stdout}`);
@@ -351,7 +351,7 @@ test('verify.mjs inside a REAL git repo: an ambient absolute GIT_DIR cannot make
 
 // CWK-136: the git-spawn census inside the gate. A git spawn planted in the fixture's scripts/ that inherits the ambient env
 // (env: process.env) or names none at all must FAIL verify, and the clean tree must print the census's coverage line. The
-// planted text is built from parts: this file is itself scanned by the census, and a spelled-out spawn would be a finding.
+// planted text is built from parts, so it reads the same under every census (since 08d a spawn inside a string is not code).
 test('verify.mjs inside a REAL git repo: a planted git spawn with env: process.env FAILS the census, and so does one with no env: (CWK-136)', (t) => {
   const fx = trackedTreeRepo();
   if (!fx) return t.skip('git unavailable');
@@ -366,7 +366,7 @@ test('verify.mjs inside a REAL git repo: a planted git spawn with env: process.e
     fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn(', { env: process.env }')};`, ''].join('\n'));
     const inherit = run();
     assert.strictEqual(inherit.status, 1, `env: process.env must FAIL the gate\n${inherit.stdout}${inherit.stderr}`);
-    assert.match(inherit.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) passes an 'env:' that names process\.env/, `the FAIL must name the file, the line and the reason\n${inherit.stdout}`);
+    assert.match(inherit.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) passes an env that is no allowlist: it names process\.env/, `the FAIL must name the file, the line and the reason\n${inherit.stdout}`);
     assert.match(inherit.stdout, /\nVERIFY: FAIL \(1\)/, `exactly the planted spawn fails\n${inherit.stdout}`);
 
     fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn('')};`, ''].join('\n'));
