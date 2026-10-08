@@ -245,6 +245,31 @@ const MUST_FAIL = [
   ['N1', withEnv(KEEP, `  const env = { ${PICK}, __proto__: d, GIT_CONFIG_NOSYSTEM: '1' };`), BOTH],
   ['N2', withEnv(`  const keep = ['PATH', 'GIT${BS}x5fDIR'];`, `  const env = ${ALLOW};`), BOTH],
   ['N3', withEnv(KEEP, `  const env = { ${PICK}, GIT${BS}u005fDIR: d, GIT_CONFIG_NOSYSTEM: '1' };`), BOTH],
+  // 08d RE-INSPECT rows (fire 24's NR-*). NR-1: a call on a line the lexer may read as regex text is COUNTED, never hidden (R24-2);
+  // `() => {} / 1` is a SyntaxError on one line and the census still counts it, and an `of` it cannot read refuses even a clean env.
+  ['NR-1a', () => file(fnBody(`  const v = {} / 1; const r = ${'spawnSync'}(${Q}git${Q}, ['status'], { env: process.env }); const w = 2 / 1;`)), ['{} / 1']],
+  ['NR-1b', () => file(fnBody(`  const v = () => {} / 1; const r = ${'spawnSync'}(${Q}git${Q}, ['status'], { env: process.env }); const w = 2 / 1;`)), ['() => {} / 1']],
+  ['NR-1c', () => file(fnBody(`  const of = 4; const v = of / 2; const r = ${'spawnSync'}(${Q}git${Q}, ['status'], { env: process.env }); const w = 1 / 1;`)), ['of / 2']],
+  ['NR-1d', () => file(IMPORT, fnBody(`  const of = 4; const v = of / 2; const r = ${'spawnSync'}(${Q}git${Q}, ['status'], { env: gitEnv(d) }); const w = 1 / 1;`)), ['of / 2, a clean env']],
+  // ...and a write to a followed const hidden by such a guess refuses the const (a function value's `}`, or `of`, then `/`).
+  ['NR-1e', withEnv(KEEP, `  const env = ${ALLOW};`, '  const g = function () {} / 1; env.GIT_DIR = d; const h = 2 / 1;'), BOTH],
+  ['NR-1f', withEnv(KEEP, `  const env = ${ALLOW};`, '  const of = 4; const v = of / 2; env.GIT_DIR = d; const w = 1 / 1;'), BOTH],
+  // NR-2: the options are the argument node reads -- the one after the args array, else the 2nd; execSync and exec the 2nd (R24-1).
+  ['NR-2a', () => file(IMPORT, fnBody(`  const r = ${'spawnSync'}(${Q}git${Q}, ['status'], { env: process.env }, { env: gitEnv(d) });`)), ['a 4th object after the options']],
+  ['NR-2b', () => file(IMPORT, fnBody(`  const r = ${'spawnSync'}(${Q}git${Q}, { env: process.env }, { env: gitEnv(d) });`)), ['the options as the 2nd argument, then an extra object']],
+  ['NR-2c', () => file(IMPORT, fnBody(`  const r = ${'execSync'}(${Q}git status${Q}, { env: process.env }, { env: gitEnv(d) });`)), ['execSync, then an extra object']],
+  ['NR-2d', () => file(IMPORT, fnBody("  const a = ['status'];", `  const r = ${'spawnSync'}(${Q}git${Q}, a, { env: process.env }, { env: gitEnv(d) });`)), ['the args a variable (W-B)']],
+  ['NR-2e', () => file(IMPORT, `const git = (a) => ${'spawnSync'}(${Q}git${Q}, a, { env: gitEnv(a) });`), ['the args a plain parameter']],
+  ['NR-2f', () => file(IMPORT, `const git = (...a) => ${'spawnSync'}(${Q}git${Q}, a, { env: gitEnv(a) });`), ['a rest parameter named again in its body']],
+  // NR-3: gitEnv bound by a destructured parameter, a for-of pattern or a method parameter is not the room helper (R24-3).
+  ['NR-3a', () => file(IMPORT, `function f({ gitEnv }) { const r = ${'spawnSync'}(${Q}git${Q}, ['init'], { env: gitEnv(d) }); return r; }`), ['function f({ gitEnv })']],
+  ['NR-3b', () => file(IMPORT, `const f = ({ gitEnv }) => ${'spawnSync'}(${Q}git${Q}, ['init'], { env: gitEnv(d) });`), ['({ gitEnv }) =>']],
+  ['NR-3c', () => file(IMPORT, `for (const { gitEnv } of mods) ${'spawnSync'}(${Q}git${Q}, ['init'], { env: gitEnv(d) });`), ['for (const { gitEnv } of mods)']],
+  ['NR-3d', () => file(IMPORT, `const o = { run(gitEnv) { return ${'spawnSync'}(${Q}git${Q}, ['init'], { env: gitEnv(d) }); } };`), ['a method parameter']],
+  // NR-7: the locator counts a space, a newline or `?.` between the name and its paren (R24-4).
+  ['NR-7a', () => file(fnBody(`  const r = ${'spawnSync'} (${Q}git${Q}, ['status'], { env: process.env });`)), ['a space before the paren']],
+  ['NR-7b', () => file(fnBody(`  const r = ${'spawnSync'}\n    (${Q}git${Q}, ['status'], { env: process.env });`)), ['a newline before the paren']],
+  ['NR-7c', () => file(fnBody(`  const r = ${'spawnSync'}?.(${Q}git${Q}, ['status'], { env: process.env });`)), ['an optional call']],
   // R1/R2 (recognition): the spawn is COUNTED, then judged.
   ['R1', () => file(fnBody(`  const r = ${'spawnSync'}(${BT}git${BT}, ['status'], { env: process.env });`)), ['template']],
   ['R2', () => file(fnBody(`  const r = ${'spawnSync'}(${Q}git.exe${Q}, ['status'], { env: process.env });`)), ['git.exe']],
@@ -281,6 +306,7 @@ const MUST_PASS = [
   ['P4', (o) => file(fnBody(sp(o))), ["env: { PATH: process.env.PATH, HOME: process.env.HOME, GIT_CONFIG_NOSYSTEM: '1' }"], 'allowlist'],
   ['P5', withEnv("  const keep = ['PATH', 'HOME'];", "  const env = { ...Object.fromEntries(keep.filter((k) => k in process.env).map((k) => [k, process.env[k]])), GIT_CONFIG_NOSYSTEM: '1' };"), BOTH, 'allowlist'],
   ['P6', withEnv(KEEP, `  const env = { ${PICK}, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_CEILING_DIRECTORIES: d };`), BOTH, 'allowlist'],
+  ['P7 ({} / 1 is a division, as node reads it)', () => file(IMPORT, fnBody(`  const v = {} / 1; const r = ${'spawnSync'}(${Q}git${Q}, ['status'], { env: gitEnv(d) }); const w = 2 / 1;`)), ['{} / 1'], 'helper'],
   ['P6 (a pick const)', withEnv(KEEP, `  const pick = ${PICK.slice(3)};`, "  const env = { ...pick, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_CEILING_DIRECTORIES: d };"), BOTH, 'allowlist'],
 ];
 
@@ -326,16 +352,20 @@ test('the REAL tree: every git spawn under scripts/ is clean, and the locator fi
 // The census header NAMES four bypasses of the call LOCATOR instead of widening it. This pins them, so the named list cannot rot:
 // if one is ever closed, this test goes red on purpose, and the fix is to delete that item from the header's list (and this leg)
 // in the same change. Every fixture is a spawn that would be a FINDING if the census saw it.
-test('the four NAMED locator bypasses are not counted (a named limit, pinned so the header list cannot rot)', () => {
+test('the six NAMED locator bypasses are not counted (a named limit, pinned so the header list cannot rot)', () => {
   const unseen = [
     ['(1) a command that is not a literal', `const GIT = ${Q}git${Q};\n${'spawnSync'}(GIT, ['status'], { env: process.env });`],
     ['(2) a renamed import', `import { ${'spawnSync'} as run } from 'node:child_process';\nrun(${Q}git${Q}, ['status'], { env: process.env });`],
+    ['(2) an alias', `const run = ${'spawnSync'};\nrun(${Q}git${Q}, ['status'], { env: process.env });`],
     ['(3) a shell that runs git', `${'spawnSync'}(${Q}sh${Q}, ['-c', 'git status'], { env: process.env });`],
     ['(4) a command string that quotes the path', `${'execSync'}(${Q}"C:/Program Files/Git/bin/git.exe" status${Q}, { env: process.env });`],
+    ['(5) a computed member', `const cp = await import('node:child_process');\ncp[${Q}spawnSync${Q}](${Q}git${Q}, ['status'], { env: process.env });`],
+    ['(6) an indirect call', `${'spawnSync'}.call(null, ${Q}git${Q}, ['status'], { env: process.env });\nReflect.apply(${'spawnSync'}, null, [${Q}git${Q}, ['status'], { env: process.env }]);`],
   ];
   for (const [name, text] of unseen) assert.deepEqual([census(text).calls, census(text).findings.length], [0, 0], `${name}: not counted at all`);
   // control: the SAME env through a located form IS counted and refused, so the zeros above are the bypass and not a dead locator
   assert.deepEqual(shape(census(`${'spawnSync'}(${Q}git${Q}, ['status'], { env: process.env });`)), [1, 1, 0, 0, 1]);
+  assert.deepEqual(shape(census(`cp.${'spawnSync'}(${Q}git${Q}, ['status'], { env: process.env });`)), [1, 1, 0, 0, 1], 'a member call is counted');
 });
 
 // CWK-174 + 08d: the BLOB-PINNED carriers. Each is carried BYTE-EQUAL from its source and cannot be edited room-side, so the census
@@ -353,9 +383,10 @@ const viaGitEnv = (more) => `${OPEN}the helper 'gitEnv' returns a literal that i
 const NO_NOSYS = "it does not set GIT_CONFIG_NOSYSTEM: '1' in its own text";
 const GLOBAL = 'it names GIT_CONFIG_GLOBAL, which can aim git at another repository';
 const ASSIGNED = `${OPEN}'gitEnv' does not return one object literal`; // d0db994d: gitEnv = () => (envSeen = { ...withoutGit(), ... })
+const ARGS = (name) => `passes ${name} where node reads the args array or the options, so the census cannot tell which argument is the options`;
 const CARRIERS = {
   'scripts/secret-gate.mjs': ['856956a1cca6f716e5507f6c23ac90ed34cbbe5f', [
-    `57 execFileSync('git', ...) ${viaGitEnv(NO_NOSYS)}`,
+    `57 execFileSync('git', ...) ${ARGS('a')}`,
     `60 execFileSync('git', ...) ${viaGitEnv(NO_NOSYS)}`,
   ]],
   'scripts/secret-gate.test.mjs': ['71452210d6a6f793895bc502557fce7e1f3e890c', [
@@ -364,8 +395,8 @@ const CARRIERS = {
     `225 execFileSync('git', ...) ${viaGitEnv(GLOBAL)}`,
   ]],
   'scripts/secret-scan.test.mjs': ['d0db994df855ccd647f3ded878a6867bb198e196', [
-    `547 spawnSync('git', ...) ${ASSIGNED}`,
-    `548 execFileSync('git', ...) ${ASSIGNED}`,
+    `547 spawnSync('git', ...) ${ARGS('args')}`,
+    `548 execFileSync('git', ...) ${ARGS('args')}`,
     `715 spawnSync('git', ...) ${ASSIGNED}`,
     `820 execFileSync('git', ...) ${ASSIGNED}`,
     `825 execFileSync('git', ...) ${ASSIGNED}`,

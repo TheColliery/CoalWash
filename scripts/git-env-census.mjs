@@ -1,4 +1,4 @@
-// ponytail: 644 lines at declaration -- the lexer, the call locator and the grammar judge one shape (the env a git spawn takes) and
+// ponytail: 726 lines at declaration -- the lexer, the call locator and the grammar judge one shape (the env a git spawn takes) and
 // share one lexed view per file; split apart they would each re-lex the file and drift on what "the same text" means.
 // CWK-136 -- a textual census: does every git spawn under scripts/ take an env the census can READ as safe?
 // CWK-133 gave every fixture and gate one helper (scripts/git-env.mjs); nothing stopped the NEXT spawn from inheriting whatever
@@ -8,7 +8,8 @@
 // PASSES only as one of four shapes; ANYTHING else is a FINDING (counted in `refused`), never an unverified pass:
 //   (i)   a direct call `gitEnv(...)` where gitEnv is the room helper: a static `import { gitEnv } from './git-env.mjs'` (or
 //         '../git-env.mjs'), or a `const { gitEnv } = await import(... 'git-env.mjs' ...)` whose block holds the spawn; no other
-//         binding of the name in the file, and no `process.env` in the call (counted `viaHelper`);
+//         binding of the name in the file (a declaration, an assignment, a parameter plain, defaulted, destructured or a method's,
+//         or a name in a destructuring pattern), and no `process.env` in the call (counted `viaHelper`);
 //   (ii)  a variable whose nearest `const` in scope is built as `gitEnv(...)` (as (i), `viaHelper`) or as an ALLOWLIST LITERAL
 //         (`allowlist`), declared in the spawn's own function, and whose name appears nowhere else in its block but as a git
 //         spawn's env: a member write, an alias, a method call, an argument, a loop write or a shadowing declaration is a finding;
@@ -25,29 +26,39 @@
 // the ONLY GIT_CONFIG_NOSYSTEM in it, its spreads and its key lists (a second one could override it); and no GIT_* name (matched
 // case-insensitively, as Windows reads env names) appears in it, its spreads or its key lists except GIT_CONFIG_NOSYSTEM,
 // GIT_TERMINAL_PROMPT and GIT_CEILING_DIRECTORIES. A followed const (a key list, a spread) is used nowhere in its block but inside
-// the literal that reads it. The spawn's options object holds no spread and one `env` only.
+// the literal that reads it. The spawn's OPTIONS are the argument node reads them from: the 2nd for execSync and exec; for spawnSync,
+// spawn, execFileSync and execFile the one after the args array (an array literal, or the function's rest parameter named nowhere else
+// in its body), or the 2nd when that is an object literal. Any other 2nd argument leaves the position unknown, and options that are no
+// object literal cannot be read: both are findings. The options object holds no spread and one `env` only.
 //
 // THE LEXER. Every file is read once into a view where comments, string and template-literal text and regex bodies are blank (their
 // delimiters kept), so a quote inside a regex or a template cannot open a string the scanner never closes (F41). Template `${...}`
-// is read as code. A call or a declaration inside a comment, a string or a template's text is not code and is not seen.
+// is read as code. A call or a declaration inside a comment, a string or a template's text is not code and is not seen. A `/` is read
+// as the JS grammar reads it from the token before it: a DIVISION after a `)`, a `]`, an identifier, a number, a string, a template
+// or a `}` that closes an object literal; a REGEX after any other punctuator, after the `)` of an if / while / for / with head, after a
+// `}` that closes a block, and after the keywords return typeof instanceof in of new delete void throw case do else yield await extends
+// default (REGEX_AFTER_WORD). A call whose text falls inside a regex the lexer read is COUNTED and refused, never skipped.
 //
 // NAMED LIMITS, because a textual gate is a tripwire and never a proof:
-//   - the lexer GUESSES at a `/` in two places: after a `)` it reads a division unless the `)` closes an if / while / for / with
-//     head, and after a `}` it reads a regex (a block ended there; after an object literal it would be a division). A wrong guess can
-//     hide text, so the grammar refuses where a guess could decide: an allowlist literal or helper body that holds a division, a
-//     template literal or a regex with a quote in it, and a followed const whose block holds a regex right after a `}`.
+//   - the lexer GUESSES at a `/` in two places, and reads a regex in both: after a `}` it cannot class (a function or class body,
+//     which may be a value; a `{` after a `:` outside an object literal), and after `of` (a keyword in a for-of head, a variable
+//     elsewhere). A wrong guess can hide text: a call inside it is counted and refused (above), and the grammar refuses where a guess
+//     could decide: an allowlist literal or helper body that holds a division, a template literal or a regex with a quote in it, and
+//     a followed const whose block holds a guessed regex.
 //   - a function boundary is seen at `function` and `=>`; a method shorthand (`run() { ... }`) or a class method is not, so a const
 //     declared outside one can pass the same-function test. The usage rule still reads the whole block the const lives in.
 //   - the dynamic binding of (i) is trusted by the string 'git-env.mjs' in its import argument; the directory it is joined to is
 //     not read.
 //   - code the census cannot read as text (`eval`, `new Function`, a `with` block) is not modelled.
-//   - FOUR BYPASSES of the call LOCATOR, named rather than widened, and pinned by a test so this list cannot rot (a widening turns
+//   - SIX BYPASSES of the call LOCATOR, named rather than widened, and pinned by a test so this list cannot rot (a widening turns
 //     that test red, and the fix is to move the item off this list): (1) a command that is not a literal (`spawnSync(GIT, ...)`;
-//     git-env.test.mjs uses that on purpose for its one hostile-env control leg); (2) a renamed import (`import { spawnSync as run }`
-//     then `run('git', ...)`); (3) a shell that runs git (`spawnSync('sh', ['-c', 'git status'])`); (4) a command string that quotes
-//     git's path (`execSync('"C:/Program Files/Git/bin/git.exe" status')`). A spawn written any of these ways is not counted at all.
-//     The locator DOES count spawnSync, execFileSync, spawn, execFile, execSync and the async exec, a template-literal command, and
-//     `git` given as `git.exe` or as an absolute path.
+//     git-env.test.mjs uses that on purpose for its one hostile-env control leg); (2) a renamed import or an alias
+//     (`import { spawnSync as run }` then `run('git', ...)`); (3) a shell that runs git (`spawnSync('sh', ['-c', 'git status'])`);
+//     (4) a command string that quotes git's path (`execSync('"C:/Program Files/Git/bin/git.exe" status')`); (5) a computed member
+//     (`cp['spawnSync']('git', ...)`); (6) an indirect call (`spawnSync.call(null, 'git', ...)`, `.apply`, `Reflect.apply`). A spawn
+//     written any of these ways is not counted at all. The locator DOES count spawnSync, execFileSync, spawn, execFile, execSync and
+//     the async exec, as a member (`cp.spawnSync`) or an optional call (`?.(`), with a space or a newline before the paren, a
+//     template-literal command, and `git` given as `git.exe` or as an absolute path.
 // The gate PRINTS its coverage (files, calls, per-class counts) because a locator that matches nothing reports clean.
 //
 // censusGitSpawns() is pure (a { rel, text } list in, a report out) so it is unit-tested directly, red-first; collectScriptsMjs()
@@ -65,9 +76,10 @@ import crypto from 'node:crypto';
 // what it exempted (`exempted`), and every entry must hide a finding (git-env-census.test.mjs refuses an inert pin). What each hides:
 //   - scripts/secret-scan.test.mjs (Bankfire, the scanner source, blob d0db994d): its file-local gitEnv() returns an assignment,
 //     `envSeen = { ...withoutGit(), ... }`, and withoutGit() strips GIT_* from a WHOLE copy of process.env; every git spawn in the
-//     file, its decoy read included, takes that gitEnv().
+//     file, its decoy read included, takes that gitEnv(), and two of them take their args as a plain parameter.
 //   - scripts/secret-gate.mjs (the .github canon, blob 856956a1): its file-local gitEnv() strips GIT_* from a whole copy of
-//     process.env and KEEPS GIT_INDEX_FILE, which the pre-commit scan of the staged set needs.
+//     process.env and KEEPS GIT_INDEX_FILE, which the pre-commit scan of the staged set needs; its gitIn takes its args as a plain
+//     parameter.
 //   - scripts/secret-gate.test.mjs (the .github canon, blob 71452210): its file-local gitEnv() strips GIT_* from a whole copy of
 //     process.env and sets GIT_CONFIG_GLOBAL, and one spawn spreads a caller's `extra` over it.
 // The findings, quoted, are in git-env-census.test.mjs's CARRIERS table.
@@ -83,13 +95,18 @@ export function gitBlobId(text) {
   return crypto.createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
 }
 
-const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
-const REGEX_AFTER_CHAR = '(,=:[!&|?{};+-*%<>~^}';
+// The keywords after which a `/` starts a regex: every reserved word that is followed by an expression in a strict-mode module,
+// plus `of`, the one word here that is not reserved (an identifier may be named `of`, so a `/` after it is a guess).
+const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await', 'extends', 'default']);
+const REGEX_AFTER_CHAR = '(,=:[!&|?{};+-*%<>~^}'; // `}` here is a block's: a `}` that closes an object literal reads as a value
+const EXPR_BEFORE_BRACE = '([,=?!&|+-*%<>~^/'; // a `{` after one of these (an `=>` aside) opens an object literal
+const BLOCK_AFTER_WORD = new Set(['else', 'do', 'try', 'finally']);
 const CONTROL_HEAD = new Set(['if', 'while', 'for', 'with']); // a `/` after the `)` of one of these heads starts a regex
+const BLOCK_HEAD = new Set([...CONTROL_HEAD, 'switch', 'catch']); // a `{` after the `)` of one of these heads opens a block
 const WORD = /[\w$]/;
 const SPACE = /\s/;
 
-// ponytail: 68 lines at declaration -- one state machine; the template and regex branches share its cursor and brace depth.
+// ponytail: 82 lines at declaration -- one state machine; the template, regex and brace branches share its cursor and token history.
 // One pass over a file: `code` blanks comments, string and template text and regex bodies (delimiters and newlines kept); `sv` blanks
 // only comments and regex bodies, so string text stays readable for the GIT_* name scan. Also returns where every regex literal,
 // every `/` read as a division and every template literal starts, for the refusals where the lexer has to guess.
@@ -102,10 +119,13 @@ export function lex(text) {
   const templates = [];
   const blank = (arr, a, b) => { for (let k = a; k < b && k < n; k++) if (text[k] !== '\n' && text[k] !== '\r') arr[k] = ' '; };
   const tpl = []; // the brace depth each open `${` closes at
+  const kinds = []; // per open `{`: 'expr' (an object literal), 'block', or 'unsure' (a function or class body, a `{` after a `:`)
   let depth = 0;
-  let prev = ''; // the last significant character read as code; 'a' after a word, a number, a string or a regex
+  let prev = ''; // the last significant character read as code; 'a' after a word, a number, a string, a regex or an object literal's `}`
+  let prevAt = -1;
   let word = '';
-  let ctrl = false; // the last `)` closed an if / while / for / with head
+  let head = ''; // the word before the `(` that the last `)` closed
+  let unsureBrace = false; // the last `}` closed an 'unsure' brace
   const parens = [];
   let i = text.startsWith('#!') ? text.indexOf('\n') : 0; // a shebang line is not code
   if (i === -1) i = n;
@@ -114,9 +134,17 @@ export function lex(text) {
     for (; i < n; i++) {
       if (text[i] === '\\') { blank(code, i, i + 2); i++; continue; }
       if (text[i] === '`') { i++; prev = 'a'; word = ''; return; }
-      if (text[i] === '$' && text[i + 1] === '{') { blank(code, i, i + 1); i += 2; tpl.push(depth); depth++; prev = '{'; word = ''; return; }
+      if (text[i] === '$' && text[i + 1] === '{') { blank(code, i, i + 1); i += 2; tpl.push(depth); depth++; kinds.push('expr'); prev = '('; word = ''; return; }
       blank(code, i, i + 1);
     }
+  };
+  const braceKind = () => { // what the `{` at i opens, read from the token before it
+    if (prev === '>' && text[prevAt - 1] === '=') return 'block'; // an arrow body: a `/` after its `}` is a regex in every program node parses
+    if (EXPR_BEFORE_BRACE.includes(prev)) return 'expr';
+    if (prev === ':') return kinds[kinds.length - 1] === 'expr' ? 'expr' : 'unsure'; // a property value, or a label / case / ternary
+    if (prev === ')') return BLOCK_HEAD.has(head) ? 'block' : 'unsure'; // a statement body, or a function body (a function may be a value)
+    if (prev === 'a') return BLOCK_AFTER_WORD.has(word) ? 'block' : REGEX_AFTER_WORD.has(word) ? 'expr' : 'unsure'; // `class X {` is unsure
+    return prev === '' || ';{}'.includes(prev) ? 'block' : 'unsure';
   };
   while (i < n) {
     const c = text[i];
@@ -130,7 +158,7 @@ export function lex(text) {
     }
     if (c === '`') { templates.push(i); i++; templateText(); continue; }
     if (c === '/') {
-      if (prev === '' || REGEX_AFTER_CHAR.includes(prev) || REGEX_AFTER_WORD.has(word) || (prev === ')' && ctrl)) {
+      if (prev === '' || REGEX_AFTER_CHAR.includes(prev) || REGEX_AFTER_WORD.has(word) || (prev === ')' && CONTROL_HEAD.has(head))) {
         let k = i + 1;
         let cls = false;
         while (k < n && text[k] !== '\n' && (cls || text[k] !== '/')) {
@@ -142,21 +170,24 @@ export function lex(text) {
         if (text[k] === '/') {
           let f = k + 1;
           while (f < n && /[A-Za-z]/.test(text[f])) f++;
-          regexes.push({ at: i, body: text.slice(i + 1, k), afterBrace: prev === '}' });
+          const guess = prev === '}' && unsureBrace ? "a '}' that may close an expression" : word === 'of' ? "the word 'of', which may name a variable" : null;
+          regexes.push({ at: i, body: text.slice(i + 1, k), guess });
           blank(code, i + 1, k); blank(sv, i + 1, k); blank(code, k + 1, f); blank(sv, k + 1, f);
           i = f; prev = 'a'; word = ''; continue;
         }
       }
       divisions.push(i); prev = '/'; word = ''; i++; continue;
     }
-    if (c === '{') depth++;
+    if (c === '{') { kinds.push(braceKind()); depth++; }
     else if (c === '}') {
       depth--;
+      const kind = kinds.pop();
       if (tpl.length && depth === tpl[tpl.length - 1]) { tpl.pop(); i++; templateText(); continue; }
+      prev = kind === 'expr' ? 'a' : '}'; prevAt = i; word = ''; unsureBrace = kind === 'unsure'; i++; continue; // an object literal is a value
     }
     if (WORD.test(c)) { let k = i; while (k < n && WORD.test(text[k])) k++; word = text.slice(i, k); prev = 'a'; i = k; continue; }
-    if (c === '(') parens.push(prev === 'a' && CONTROL_HEAD.has(word));
-    if (!SPACE.test(c)) { ctrl = c === ')' && parens.pop() === true; prev = c; word = ''; }
+    if (c === '(') parens.push(prev === 'a' ? word : '');
+    if (!SPACE.test(c)) { if (c === ')') head = parens.pop() ?? ''; prev = c; prevAt = i; word = ''; }
     i++;
   }
   return { text, code: code.join(''), sv: sv.join(''), regexes, divisions, templates };
@@ -274,10 +305,10 @@ function functionBetween(code, from, to) {
   return false;
 }
 
-// Where the lexer had to guess inside [a, b): a regex right after `}` (a block ends there; after an object literal it would be a division).
+// Where the lexer had to guess inside [a, b): a regex after a `}` that may close a function or class used as a value, or after `of`.
 function guessRisk(lx, a, b) {
-  const r = lx.regexes.find((x) => x.at >= a && x.at < b && x.afterBrace);
-  return r ? `a regex at line ${lineOf(lx.text, r.at)} follows a '}' (it could be a division)` : null;
+  const r = lx.regexes.find((x) => x.at >= a && x.at < b && x.guess);
+  return r ? `a regex at line ${lineOf(lx.text, r.at)} follows ${r.guess} (it could be a division)` : null;
 }
 
 const ALLOWED_GIT_KEYS = new Set(['GIT_CONFIG_NOSYSTEM', 'GIT_TERMINAL_PROMPT', 'GIT_CEILING_DIRECTORIES']);
@@ -510,14 +541,27 @@ function roomGitEnv(lx, at) {
     const prev = code.slice(0, i).match(/([\w$]+)\s*$/);
     if (prev && ['const', 'let', 'var', 'function', 'class'].includes(prev[1])) return false;
     if ((code[next] === '=' && code[next + 1] !== '=') || code.startsWith('=>', next)) return false; // an assignment, a default, an arrow parameter
-    const open = enclosingOpen(code, i);
-    if (open !== -1 && code[open] === '(') {
-      const after = skipWs(code, closeOf(code, open) + 1);
-      if (code.startsWith('=>', after) || /(?:function\s*[\w$]*|catch)\s*$/.test(code.slice(0, open))) return false; // a parameter
-    }
-    if (open !== -1 && code[open] !== '(') { const after = skipWs(code, closeOf(code, open) + 1); if (code[after] === '=' && !'=>'.includes(code[after + 1])) return false; } // a destructured name
+    if (inPattern(code, i)) return false; // a parameter (plain, defaulted or destructured), or a name in a destructuring pattern
   }
   return true;
+}
+
+// Does the name at `i` sit in a parameter list or a destructuring pattern? Walks out through the `{` / `[` around it: a pattern is one
+// that is assigned to (`] =`, `} =`) or declared (`const {`, `for (let [`); the first `(` reached decides: a parameter list is an
+// arrow's, a function's, a catch's or a method's (`run(x) {`; a call followed by a block on the next line reads as one, a refusal).
+function inPattern(code, i) {
+  for (let open = enclosingOpen(code, i); open !== -1; open = enclosingOpen(code, open)) {
+    const close = closeOf(code, open);
+    const after = close === -1 ? code.length : skipWs(code, close + 1);
+    const before = code.slice(0, open);
+    if (code[open] === '(') {
+      const word = /([\w$]+)\s*$/.exec(before)?.[1];
+      return code.startsWith('=>', after) || /(?<![\w$.])(?:function(?:\s*\*)?\s*[\w$]*|catch)\s*$/.test(before)
+        || (code[after] === '{' && word !== undefined && !BLOCK_HEAD.has(word));
+    }
+    if ((code[after] === '=' && !'=>'.includes(code[after + 1])) || /(?<![\w$.])(?:const|let|var)\s*$/.test(before)) return true;
+  }
+  return false;
 }
 
 // The nearest unclosed bracket before `i`, or -1.
@@ -572,10 +616,33 @@ function judgeConst(lx, name, at, envAt) {
   return { why: `'${name}' is built as neither gitEnv() nor an allowlist literal` };
 }
 
-// Accept a command literal: git, git.exe, or an absolute path to either, in any case; the async exec too (08d R1, R2).
-const CALL_RE = /(?<![\w$])(spawnSync|execFileSync|spawn|execFile|execSync|exec)\(\s*(['"`])(?:[^'"`\n]*[\\/])?git(?:\.exe)?(?=\2|\s)/gi;
+// Accept a command literal: git, git.exe, or an absolute path to either, in any case; the async exec too (08d R1, R2); a space, a
+// newline or `?.` between the name and its paren (fire 30, NR-7).
+const CALL_RE = /(?<![\w$])(spawnSync|execFileSync|spawn|execFile|execSync|exec)\s*(?:\?\.\s*)?\(\s*(['"`])(?:[^'"`\n]*[\\/])?git(?:\.exe)?(?=\2|\s)/gi;
+const COMMAND_ONLY = new Set(['execsync', 'exec']); // (command, options): node reads the options from the 2nd argument
 
-// ponytail: 52 lines at declaration -- two passes over one file's calls (locate, then judge with every env position known).
+// Is the argument at [s, e) the rest parameter `...name` of the function whose body holds it, named nowhere else in that body? A rest
+// parameter is always an array, so node reads the options from the next argument (P2's `(cwd, ...a) => spawnSync('git', a, ...)`).
+function restArray(code, s, e) {
+  const name = code.slice(s, e);
+  if (!NAME.test(name)) return false;
+  const re = new RegExp(`\\.\\.\\.\\s*${esc(name)}\\s*\\)`, 'g');
+  for (let m; (m = re.exec(code)) && m.index < s;) {
+    const params = m.index + m[0].length - 1;
+    const open = enclosingOpen(code, params);
+    const arrow = skipWs(code, params + 1);
+    let start;
+    if (code.startsWith('=>', arrow)) start = skipWs(code, arrow + 2);
+    else if (open !== -1 && /(?<![\w$.])function(?:\s*\*)?\s*[\w$]*\s*$/.test(code.slice(0, open)) && code[arrow] === '{') start = arrow;
+    else continue;
+    const end = code[start] === '{' ? closeOf(code, start) : exprEnd(code, start);
+    const refs = references(code, name, start, end === -1 ? code.length : end);
+    if (start <= s && s < end && refs.length === 1 && refs[0] === s) return true;
+  }
+  return false;
+}
+
+// ponytail: 67 lines at declaration -- two passes over one file's calls (locate by argument position, then judge each env).
 export function censusGitSpawns(files) {
   const findings = [];
   let calls = 0;
@@ -594,15 +661,30 @@ export function censusGitSpawns(files) {
     const located = [];
     CALL_RE.lastIndex = 0;
     for (let m; (m = CALL_RE.exec(text));) {
-      if (code.slice(m.index, m.index + m[1].length) !== m[1]) continue; // in a comment, a string or a template's text
       const fn = m[1];
       const line = lineOf(text, m.index);
-      const open = m.index + fn.length;
+      const re = lx.regexes.find((x) => x.at < m.index && m.index <= x.at + x.body.length);
+      if (re) { // the lexer read this text as a regex body; whichever way it guessed, the call is counted, never hidden (R24-2)
+        calls++; refused++;
+        findings.push(`${rel}:${line} ${fn}('git', ...) sits inside text the lexer read as a regex literal (from line ${lineOf(text, re.at)}) -- the census cannot verify it; write the '/' before it so it reads as a division (a variable, or parentheses)`);
+        continue;
+      }
+      if (code.slice(m.index, m.index + fn.length) !== fn) continue; // in a comment, a string or a template's text
+      const open = m.index + m[0].indexOf('(');
       const close = closeOf(code, open);
       if (close === -1) { findings.push(`${rel}:${line} unbalanced parens scanning a ${fn}('git', ...) call -- the census cannot verify it`); continue; }
       calls++;
       const said = (why) => { refused++; findings.push(`${rel}:${line} ${fn}('git', ...) ${why} -- take gitEnv() from scripts/git-env.mjs, or build the env as one literal of named keys with GIT_CONFIG_NOSYSTEM: '1' (UMB-456 (2))`); };
-      const opts = splitTop(code, open + 1, close).filter(([s, e]) => code[s] === '{' && closeOf(code, s) === e - 1).pop();
+      // The argument node reads the options from (R24-1): the 2nd for execSync and exec; for spawn and execFile the one after the args
+      // array, or the 2nd when that is an object. A 2nd argument the census cannot classify leaves the position unknown: a finding.
+      const args = splitTop(code, open + 1, close);
+      const lit = (a, c) => a !== undefined && code[a[0]] === c && closeOf(code, a[0]) === a[1] - 1;
+      let opts = args[1];
+      if (!COMMAND_ONLY.has(fn.toLowerCase()) && args[1]) {
+        if (lit(args[1], '[') || restArray(code, args[1][0], args[1][1])) opts = args[2];
+        else if (!lit(args[1], '{')) { said(`passes ${cut(text.slice(args[1][0], args[1][1]))} where node reads the args array or the options, so the census cannot tell which argument is the options`); continue; }
+      }
+      if (opts && !lit(opts, '{')) { said(`takes its options from ${cut(text.slice(opts[0], opts[1]))}, which is no object literal the census can read`); continue; }
       const envs = [];
       let spread = null;
       if (opts) {
