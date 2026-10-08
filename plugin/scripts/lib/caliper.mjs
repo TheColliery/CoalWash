@@ -137,13 +137,17 @@ export const FLOOR_MIN_TOKENS = 2500;
 // discoverCapacity() below, and every caller that can reach it should.
 //
 // THE TWO TERMS, each sourced rather than guessed:
-//   (a) 200,000 — the smallest window this code can DISCOVER or default to,
-//       and still a live one: Opus 4.8 and later run with a 200K context
-//       window on platforms such as Amazon Bedrock, Google Cloud's Agent
-//       Platform and Microsoft Foundry, and CLAUDE_CODE_DISABLE_1M_CONTEXT=1
-//       holds the native-1M models at the 200K boundary (Claude Code's model
-//       configuration page, read 2026-10-08). It is NOT the smallest window a
-//       session can compact at: a user may set a smaller auto-compact window
+//   (a) 200,000 — the window this code DEFAULTS to when it discovers none
+//       (CAPACITY_TOKENS, 167,000 usable). Discovery itself accepts a
+//       reported raw window from 133,000 (100,000 usable) up to 5,000,000:
+//       CAPACITY_DISCOVERY_MIN_TOKENS/_MAX_TOKENS and usableFromRawWindow,
+//       below. The default is still a live window: Opus 4.8 and later can run
+//       with a 200K context window on platforms such as Amazon Bedrock,
+//       Google Cloud's Agent Platform and Microsoft Foundry, and
+//       CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds the native-1M models at the
+//       200K boundary (Claude Code's model configuration page, read
+//       2026-10-08). It is NOT the smallest window a session can compact at:
+//       a user may set a smaller auto-compact window
 //       (/autocompact and --autocompact accept 100K to 1M; the
 //       autoCompactWindow setting and CLAUDE_CODE_AUTO_COMPACT_WINDOW set the
 //       same window), and this code does not read that setting today, so on
