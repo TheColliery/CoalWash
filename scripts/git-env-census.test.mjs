@@ -53,6 +53,72 @@ test('a LOCAL wrapper or variable passes and is COUNTED as unverified (the named
   assert.deepEqual([shorthand.findings.length, shorthand.other], [0, 1]);
 });
 
+// UMB-456 (2): a VARIABLE env is followed to its `const` declaration, and an ALLOWLIST built from named keys passes. Every
+// fixture is a whole function built from parts; the spawn line is never a literal (the real gate scans this file).
+const fn = (...body) => ['function repoName() {', ...body, '  return r;', '}', ''].join('\n');
+const spawnWith = (opts) => `  const r = ${'spawnSync'}(${Q}git${Q}, ['config', '--local', '--get', 'remote.origin.url'], { ${opts} });`;
+const KEEP = "  const keep = ['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'GIT_CEILING_DIRECTORIES'];";
+const PICK = '...Object.fromEntries(keep.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]))';
+// The canon's own repoName() (.github templates/overlay-coal-skill/scripts/release-notes.mjs, blob f8d998d8, lines 34-36), byte
+// for byte except the spawn line, which is built from parts.
+const CANON_REPONAME = fn(KEEP, `  const env = { ${PICK}, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' };`, spawnWith("encoding: 'utf8', timeout: 30000, env"));
+const shape = (r) => [r.findings.length, r.calls, r.viaHelper, r.allowlist, r.refused, r.other];
+
+test('UMB-456 (2) witness 1: the canon release-notes allowlist (the { env } shorthand) passes, counted as allowlist, with no pin', () => {
+  const r = census(CANON_REPONAME, 'scripts/release-notes.mjs');
+  assert.deepEqual(shape(r), [0, 1, 0, 1, 0, 0], JSON.stringify(r.findings));
+  assert.deepEqual(r.exempted, []);
+});
+
+test('UMB-456 (2) witness 2: a planted { ...process.env, GIT_CONFIG_NOSYSTEM } is REFUSED, by shorthand and by name', () => {
+  for (const [decl, opts] of [['env', 'env'], ['built', 'env: built']]) {
+    const r = census(fn(`  const ${decl} = { ...process.env, GIT_CONFIG_NOSYSTEM: '1' };`, spawnWith(opts)));
+    assert.deepEqual(shape(r), [1, 1, 0, 0, 1, 0], opts);
+    assert.match(r.findings[0], /^scripts\/fixture\.mjs:3 spawnSync\('git', \.\.\.\) passes an env, '\w+', that is no allowlist: it takes process\.env as a whole object, unfiltered/);
+  }
+});
+
+test('UMB-456 (2) witness 3: a planted Object.assign({}, process.env) is REFUSED even with GIT_CONFIG_NOSYSTEM set', () => {
+  const r = census(fn("  const env = Object.assign({}, process.env, { GIT_CONFIG_NOSYSTEM: '1' });", spawnWith('env')));
+  assert.deepEqual(shape(r), [1, 1, 0, 0, 1, 0]);
+  assert.match(r.findings[0], /whole object, unfiltered/);
+});
+
+test('UMB-456 (2) witness 4: an allowlist that adds GIT_DIR is REFUSED, in its key list or in the declaration', () => {
+  const inList = census(fn(KEEP.replace("'HOME'", "'HOME', 'GIT_DIR'"), `  const env = { ${PICK}, GIT_CONFIG_NOSYSTEM: '1' };`, spawnWith('env')));
+  assert.deepEqual(shape(inList), [1, 1, 0, 0, 1, 0]);
+  assert.match(inList.findings[0], /it names GIT_DIR, which can aim git at another repository/);
+  const inDecl = census(fn(KEEP, `  const env = { ${PICK}, GIT_CONFIG_NOSYSTEM: '1', GIT_DIR: dir };`, spawnWith('env')));
+  assert.deepEqual(shape(inDecl), [1, 1, 0, 0, 1, 0]);
+  assert.match(inDecl.findings[0], /it names GIT_DIR/);
+});
+
+test('UMB-456 (2) witness 5: an allowlist missing GIT_CONFIG_NOSYSTEM is REFUSED', () => {
+  const r = census(fn(KEEP, `  const env = { ${PICK}, GIT_TERMINAL_PROMPT: '0' };`, spawnWith('env')));
+  assert.deepEqual(shape(r), [1, 1, 0, 0, 1, 0]);
+  assert.match(r.findings[0], /it does not set GIT_CONFIG_NOSYSTEM: '1'/);
+});
+
+test('UMB-456 (2): Object.entries(process.env) with no .filter( is REFUSED; with .filter( after it, that rule passes', () => {
+  const bare = census(fn("  const env = { ...Object.fromEntries(Object.entries(process.env)), GIT_CONFIG_NOSYSTEM: '1' };", spawnWith('env')));
+  assert.deepEqual(shape(bare), [1, 1, 0, 0, 1, 0]);
+  const filtered = census(fn("  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k === 'PATH')), GIT_CONFIG_NOSYSTEM: '1' };", spawnWith('env')));
+  assert.deepEqual(shape(filtered), [0, 1, 0, 1, 0, 0], JSON.stringify(filtered.findings));
+});
+
+test('UMB-456 (2): a variable env that leads to gitEnv() counts as the helper; one that adds process.env beside it is refused', () => {
+  const helper = census(fn('  const fixtureEnv = gitEnv(path.dirname(root));', spawnWith('env: fixtureEnv')));
+  assert.deepEqual(shape(helper), [0, 1, 1, 0, 0, 0]);
+  const mixed = census(fn('  const env = { ...gitEnv(d), ...process.env };', spawnWith('env')));
+  assert.deepEqual(shape(mixed), [1, 1, 0, 0, 1, 0]);
+  assert.match(mixed.findings[0], /names process\.env beside gitEnv\(\)/);
+});
+
+test('UMB-456 (2) control: a const in a CLOSED block is out of scope and not followed; a parameter env stays other (the named limit)', () => {
+  const text = ['function a() { const env = { ...process.env }; return env; }', 'function b(env) {', spawnWith('env'), '  return r;', '}', ''].join('\n');
+  assert.deepEqual(shape(census(text)), [0, 1, 0, 0, 0, 1]);
+});
+
 test('process.env inside a STRING in the env value is not a reference', () => {
   assert.equal(census(call('spawnSync', 'git', "['init']", "env: gitEnv('process.env is a word here')")).findings.length, 0);
 });

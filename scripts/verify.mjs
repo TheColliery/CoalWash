@@ -415,14 +415,15 @@ try {
 // that keeps the NEXT git spawn from inheriting an ambient GIT_DIR / GIT_INDEX_FILE. It refuses a spawn with no `env:`
 // and an `env:` that names process.env, and it PRINTS its coverage: a census that matched nothing would report clean.
 // Detection lives in scripts/git-env-census.mjs (dynamic import, node/runtime.md 1); its named limits are in that
-// file's header (a local wrapper or variable is counted as unverified, never followed).
+// file's header (a variable env is followed to its const declaration and judged; a local wrapper is counted as
+// unverified, never followed).
 console.log('git spawn census (every git spawn under scripts/ takes its env from gitEnv(), never the ambient process.env):');
 try {
   const { censusGitSpawns, collectScriptsMjs } = await import(pathToFileURL(path.join(repo, 'scripts', 'git-env-census.mjs')).href);
   const census = censusGitSpawns(collectScriptsMjs(repo));
   for (const f of census.findings) fail(f);
   if (!census.calls) fail('git spawn census found NO git spawn under scripts/: the locator is dead, and a census that matches nothing reports clean');
-  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly, ${census.other} a local wrapper or variable (text not verified)${census.exempted && census.exempted.length ? `; ${census.exempted.length} blob-pinned canon carrier(s) EXEMPT: ${census.exempted.join(', ')}` : ''}`);
+  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly or through a const, ${census.allowlist} an allowlist env (UMB-456 (2)), ${census.other} a local wrapper or an unfollowed variable (text not verified)${census.exempted && census.exempted.length ? `; ${census.exempted.length} blob-pinned canon carrier(s) EXEMPT: ${census.exempted.join(', ')}` : ''}`);
 } catch (e) { fail(`git spawn census: ${e.message}`); }
 
 console.log('libs (import check):');

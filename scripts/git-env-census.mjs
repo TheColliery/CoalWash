@@ -8,10 +8,29 @@
 //       gitEnv() already copies process.env, so naming it again beside the helper (`{ ...gitEnv(d), ...process.env }`)
 //       can only re-add what the strip removed, and the spread order would decide it silently.
 //
+// A spawn whose env is a VARIABLE (`env: fixtureEnv`, or the `{ env }` shorthand) is FOLLOWED (UMB-456 (2)) to the nearest
+// `const <name> = ...` before the call whose block still encloses the call, and that declaration is judged:
+//   - one that calls gitEnv() is judged as if its value were written in the call: refused when it names `process.env`
+//     (refusal (2)), else counted as the helper (`viaHelper`);
+//   - otherwise it must be an ALLOWLIST (`allowlist`): (a) it never takes process.env as a whole object (`...process.env`,
+//     `Object.assign(<x>, process.env)`, `= process.env`, and an `Object.entries` / `Object.keys` of it with no `.filter(`
+//     after are refused; a read of one key, `process.env[k]` or `process.env.NAME`, passes); (b) it sets
+//     `GIT_CONFIG_NOSYSTEM: '1'`; (c) no GIT_* name appears in it or in a `const` it names, other than GIT_CONFIG_NOSYSTEM,
+//     GIT_TERMINAL_PROMPT and GIT_CEILING_DIRECTORIES (the last only narrows where git searches). A declaration that fails is
+//     a REFUSAL (a finding, counted in `refused`), never `other`.
+//
 // NAMED LIMITS, because a textual gate is a tripwire and never a proof:
-//   - a spawn whose env is a local wrapper or a variable (`env: hermeticGit(root)`, `env: fixtureEnv`, a `{ env }`
-//     shorthand) passes: its TEXT holds neither `process.env` nor `gitEnv(`, and the wrapper's own body is not followed.
-//     Those are COUNTED and printed (`other`), so the size of the unverified set is visible, never implied away.
+//   - a spawn whose env is a local WRAPPER (`env: hermeticGit(root)`) passes: its TEXT holds neither `process.env` nor
+//     `gitEnv(`, and the wrapper's own body is not followed. A variable with no `const` declaration in scope before the call
+//     (a parameter, a `let` or `var`, a destructured name, a declaration after the call) is not followed either. Those are
+//     COUNTED and printed (`other`), so the size of the unverified set is visible, never implied away.
+//   - the declaration locator is textual: a block is read by counting `{` and `}` outside string literals, so a brace inside
+//     a comment can move it, and a parameter or inner `let` that SHADOWS the const is not seen. A declaration's value runs to
+//     its `;` (a declaration that ends on ASI reads on to the next `;`, which can only add text, so it can only refuse more).
+//     A `const` the declaration names is followed ONE level (its own names are not followed), and only to read GIT_* names
+//     and a whole-object process.env.
+//   - a filtered `Object.entries(process.env).filter(...)` passes on the presence of `.filter(`; what the filter keeps is
+//     not read.
 //   - a command that is not a string literal (`spawnSync(GIT, ...)`) is invisible to the locator. git-env.test.mjs uses
 //     that on purpose for its one hostile-env control leg.
 //   - a `//` earlier on the same line hides a call after it (a `//` inside a string too): under-detection, the same
@@ -55,10 +74,9 @@ export const EXEMPT_CARRIERS = Object.freeze({
 //     child's environment holds nothing but what node needs; macOS injects __CF_USER_TEXT_ENCODING and the coverage leg injects
 //     NODE_V8_COVERAGE, so it went red on CoalBoard's CI (run 37224469491). Re-sync it the day the canon fix lands.
 //   - scripts/release-notes.mjs at e9bd70b78f46dca7de16d12b4acda5a61d2c2716 (canon 674592e0). The canon file adds one PRODUCTION git
-//     spawn (`--check`'s repoName) whose env is an explicit allowlist passed as the `{ env }` shorthand. The census counts that as
-//     `other`, and git-env-census.test.mjs refuses any `other` in a non-test script; a pin above cannot clear it (an exemption drops
-//     findings, never `other`, and a pin that hides no finding is refused). Taking it needs a census-rule ruling, not a room edit.
-//     The held blob spawns no git at all.
+//     spawn (`--check`'s repoName) whose env is an explicit allowlist passed as the `{ env }` shorthand. Since UMB-456 (2) the census
+//     follows that shorthand and classifies the allowlist (the header above), so the canon file can land with no pin; the re-sync is
+//     its own commit. The held blob spawns no git at all.
 
 // The git blob id of a text read as UTF-8 (a carrier is valid UTF-8, so the re-encode is byte-exact): sha1 of "blob <bytes>\0" + bytes.
 export function gitBlobId(text) {
@@ -107,10 +125,92 @@ function valueText(text, from) {
   return out;
 }
 
+// The raw text and the string-blanked text of a declaration's value, from `from` to its `;` at depth 0 (or the bracket
+// that closes the enclosing one).
+function declValue(text, from) {
+  let depth = 0;
+  let quote = null;
+  let code = '';
+  let i = from;
+  for (; i < text.length; i++) {
+    const c = text[i];
+    if (quote) { if (c === '\\') { code += '  '; i++; } else if (c === quote) { quote = null; code += c; } else code += ' '; continue; }
+    if (c === '\'' || c === '"' || c === '`') { quote = c; code += c; continue; }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') { if (depth === 0) break; depth--; }
+    else if (c === ';' && depth === 0) break;
+    code += c;
+  }
+  return { raw: text.slice(from, i), code };
+}
+
+// Does the block open at `from` still enclose `to`? Braces counted outside string literals (the named limit: not comments).
+function encloses(text, from, to) {
+  let depth = 0;
+  let quote = null;
+  for (let i = from; i < to; i++) {
+    const c = text[i];
+    if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; continue; }
+    if (c === '\'' || c === '"' || c === '`') { quote = c; continue; }
+    if (c === '{') depth++;
+    else if (c === '}' && --depth < 0) return false;
+  }
+  return true;
+}
+
+// The nearest `const <name> = ...` before `before` that is still in scope there: { at, raw, code } or null.
+function findConst(text, name, before) {
+  const re = new RegExp(`\\bconst\\s+${name.replace(/\$/g, '\\$')}\\s*=(?![=>])`, 'g');
+  let found = null;
+  for (let m; (m = re.exec(text)) && m.index < before;) {
+    if (!isInLineComment(text, m.index) && encloses(text, m.index, before)) found = { at: m.index, ...declValue(text, m.index + m[0].length) };
+  }
+  return found;
+}
+
+const ALLOWED_GIT_KEYS = new Set(['GIT_CONFIG_NOSYSTEM', 'GIT_TERMINAL_PROMPT', 'GIT_CEILING_DIRECTORIES']);
+
+// process.env taken as a whole object (not one key read off it), unless it is an Object.entries/keys(...) with .filter( after.
+function wholeEnvUses(code) {
+  const bad = [];
+  const re = /\bprocess\.env\b(?!\s*[.[])/g;
+  for (let m; (m = re.exec(code));) {
+    const filtered = /\bObject\.(?:entries|keys)\(\s*$/.test(code.slice(0, m.index)) && /^process\.env\s*\)\s*\.filter\(/.test(code.slice(m.index));
+    if (!filtered) bad.push(m.index);
+  }
+  return bad;
+}
+
+// Judge the declaration a variable env leads to: 'helper' | 'allowlist' | a refusal reason string | null (not followed).
+function judgeEnvVariable(text, name, before) {
+  const decl = findConst(text, name, before);
+  if (!decl) return null;
+  if (/\bgitEnv\s*\(/.test(decl.code)) {
+    return /\bprocess\.env\b/.test(decl.code) ? 'it names process.env beside gitEnv() (refusal 2)' : 'helper';
+  }
+  let raw = decl.raw;
+  let code = decl.code;
+  const seen = new Set([name]);
+  for (const m of decl.code.matchAll(/(?<![.\w$])[A-Za-z_$][\w$]*/g)) { // the consts it names, one level
+    if (seen.has(m[0])) continue;
+    seen.add(m[0]);
+    const named = findConst(text, m[0], decl.at);
+    if (named) { raw += `\n${named.raw}`; code += `\n${named.code}`; }
+  }
+  const why = [];
+  if (wholeEnvUses(code).length) why.push('it takes process.env as a whole object, unfiltered');
+  if (!/['"]?GIT_CONFIG_NOSYSTEM['"]?\s*:\s*['"`]1['"`]/.test(decl.raw)) why.push("it does not set GIT_CONFIG_NOSYSTEM: '1'");
+  const keys = [...new Set(raw.match(/\bGIT_[A-Z0-9_]+/g) || [])].filter((k) => !ALLOWED_GIT_KEYS.has(k));
+  if (keys.length) why.push(`it names ${keys.join(', ')}, which can aim git at another repository`);
+  return why.length ? why.join('; ') : 'allowlist';
+}
+
 export function censusGitSpawns(files) {
   const findings = [];
   let calls = 0;
   let viaHelper = 0;
+  let allowlist = 0;
+  let refused = 0;
   let other = 0;
   const exempted = [];
   for (const { rel, text } of files) {
@@ -118,6 +218,7 @@ export function censusGitSpawns(files) {
     const exempt = pin !== null && gitBlobId(text) === pin;
     if (exempt) exempted.push(rel);
     const mark = findings.length; // this file's findings start here; an exempt carrier drops them below
+    const refusedMark = refused;
     CALL_RE.lastIndex = 0;
     let m;
     while ((m = CALL_RE.exec(text))) {
@@ -132,23 +233,36 @@ export function censusGitSpawns(files) {
       calls++;
       const callText = text.slice(openIdx, closeIdx + 1);
       const key = /\benv\s*:/.exec(callText);
+      let variable = null;
       if (!key) {
-        if (/[{,]\s*env\s*[,}]/.test(callText)) { other++; continue; } // `{ env }` shorthand: text unverifiable
-        findings.push(`${rel}:${line} ${m[1]}('git', ...) carries no 'env:' -- it must take gitEnv() from scripts/git-env.mjs (CWK-133)`);
-        continue;
-      }
-      const value = valueText(callText, key.index + key[0].length);
-      if (/\bprocess\.env\b/.test(value)) {
-        findings.push(`${rel}:${line} ${m[1]}('git', ...) passes an 'env:' that names process.env -- take gitEnv() from scripts/git-env.mjs, which already copies it minus the GIT_* family (CWK-133)`);
-      } else if (/\bgitEnv\s*\(/.test(value)) {
-        viaHelper++;
+        if (!/[{,]\s*env\s*[,}]/.test(callText)) {
+          findings.push(`${rel}:${line} ${m[1]}('git', ...) carries no 'env:' -- it must take gitEnv() from scripts/git-env.mjs (CWK-133)`);
+          continue;
+        }
+        variable = 'env'; // the `{ env }` shorthand
       } else {
-        other++;
+        const value = valueText(callText, key.index + key[0].length);
+        if (/\bprocess\.env\b/.test(value)) {
+          findings.push(`${rel}:${line} ${m[1]}('git', ...) passes an 'env:' that names process.env -- take gitEnv() from scripts/git-env.mjs, which already copies it minus the GIT_* family (CWK-133)`);
+          continue;
+        }
+        if (/\bgitEnv\s*\(/.test(value)) { viaHelper++; continue; }
+        const bare = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(value);
+        if (!bare) { other++; continue; } // a wrapper call or an expression: not followed
+        variable = bare[1];
+      }
+      const verdict = judgeEnvVariable(text, variable, m.index);
+      if (verdict === null) other++;
+      else if (verdict === 'helper') viaHelper++;
+      else if (verdict === 'allowlist') allowlist++;
+      else {
+        refused++;
+        findings.push(`${rel}:${line} ${m[1]}('git', ...) passes an env, '${variable}', that is no allowlist: ${verdict} -- take gitEnv() from scripts/git-env.mjs, or build the env from named keys with GIT_CONFIG_NOSYSTEM: '1' (UMB-456 (2))`);
       }
     }
-    if (exempt) findings.splice(mark);
+    if (exempt) { findings.splice(mark); refused = refusedMark; }
   }
-  return { findings, calls, viaHelper, other, scanned: files.length, exempted };
+  return { findings, calls, viaHelper, allowlist, refused, other, scanned: files.length, exempted };
 }
 
 // Every scripts/**/*.mjs, `rel` relative to `repo` and slash-separated. Sorted (node/runtime.md 9): directory order is
