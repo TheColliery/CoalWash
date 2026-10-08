@@ -137,16 +137,28 @@ export const FLOOR_MIN_TOKENS = 2500;
 // discoverCapacity() below, and every caller that can reach it should.
 //
 // THE TWO TERMS, each sourced rather than guessed:
-//   (a) 200,000 — the SMALLEST window a supported Claude Code session runs on.
-//       This file's own prior comment already recorded the range ("a 200k
-//       standard to a 1M-token beta ceiling depending on tier/org"), so the
-//       lower bound is this room's own recorded figure, not a fresh guess.
-//       SMALLEST is the conservative direction for a CEILING: assuming the 1M
-//       beta on a 200k session leaves CoalWash silent while the session is
-//       genuinely out of room (the CWK-086 shape — a governance layer that grew
-//       past what the platform could load, with nothing warning), whereas
-//       assuming 200k on a 1M session costs one early FULL band, which routes
-//       to a free mechanical sweep and one ask, never to data loss.
+//   (a) 200,000 — the smallest window this code can DISCOVER or default to,
+//       and still a live one: Opus 4.8 and later run with a 200K context
+//       window on platforms such as Amazon Bedrock, Google Cloud's Agent
+//       Platform and Microsoft Foundry, and CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+//       holds the native-1M models at the 200K boundary (Claude Code's model
+//       configuration page, read 2026-10-08). It is NOT the smallest window a
+//       session can compact at: a user may set a smaller auto-compact window
+//       (/autocompact and --autocompact accept 100K to 1M; the
+//       autoCompactWindow setting and CLAUDE_CODE_AUTO_COMPACT_WINDOW set the
+//       same window), and this code does not read that setting today, so on
+//       such a session this default overstates the room. That residual is
+//       named, not closed.
+//       History: this file's earlier comment recorded the range as "a 200k
+//       standard to a 1M-token beta ceiling depending on tier/org". On the
+//       Anthropic API the current models now run the 1M window on every plan.
+//       The smaller window is the conservative direction for a CEILING:
+//       assuming a 1M window on a 200k session leaves CoalWash silent while
+//       the session is genuinely out of room (the CWK-086 shape — a governance
+//       layer that grew past what the platform could load, with nothing
+//       warning), whereas assuming 200k on a 1M session costs one early FULL
+//       band, which routes to a free mechanical sweep and one ask, never to
+//       data loss.
 //   (b) 33,000 — the AUTO-COMPACT RESERVE, measured by this room's own record:
 //       a 1M-window model reports 967k usable in the platform's own /context
 //       readout. The denominator is the USABLE window, never the raw one, so
