@@ -161,11 +161,13 @@ test('the census reports its coverage: files scanned, calls found', () => {
   assert.deepEqual([r.scanned, r.calls], [2, 1]);
 });
 
-test('the REAL tree: every PRODUCTION git spawn (a non-test script) takes gitEnv() directly, none via a wrapper', () => {
+test('the REAL tree: every PRODUCTION git spawn (a non-test script) takes gitEnv() or an allowlist env, verified in its own text, none via a wrapper', () => {
   const prod = collectScriptsMjs(REPO).filter((f) => !f.rel.endsWith('.test.mjs'));
   const r = censusGitSpawns(prod);
   assert.ok(r.calls >= 3, `verify.mjs (two) and link-check.mjs (one) must be found (${r.calls} calls)`);
-  assert.deepEqual([r.findings.length, r.other], [0, 0], `every non-test git spawn is the helper's, verified in its own text: ${JSON.stringify(r.findings)}`);
+  assert.deepEqual([r.findings.length, r.other], [0, 0], `every non-test git spawn is the helper's or an allowlist, verified in its own text: ${JSON.stringify(r.findings)}`);
+  const notes = censusGitSpawns(prod.filter((f) => f.rel === 'scripts/release-notes.mjs'));
+  assert.deepEqual([notes.calls, notes.allowlist, notes.exempted.length], [1, 1, 0], 'UMB-456 (2): the canon release-notes.mjs repoName() is followed and judged an allowlist, with no pin');
 });
 
 test('the REAL tree: every git spawn under scripts/ is clean, and the locator finds some (a zero would be a dead locator)', () => {
@@ -195,24 +197,24 @@ test('the three NAMED bypasses pass unseen (a named limit, pinned so the header 
   assert.equal(census(call('spawnSync', 'git', "['status']", 'cwd: dir')).findings.length, 1);
 });
 
-// CWK-174: the house secret scan's canon TEST file scripts/secret-scan.test.mjs spawns git with no env: (the canon helper inherits the ambient
-// env, so an absolute GIT_INDEX_FILE exported by a git hook under a pathspec or `-a` commit reaches the fixture's git; routed to the .github
-// deputy to fix upstream). It is carried BYTE-EQUAL from the canon and cannot be edited room-side, so the census exempts exactly that path, and
-// ONLY while its git blob id equals the id pinned below: an edit, or a template re-sync that moves the blob, turns the entry back into a
-// finding. (R14 F-R14-5: scripts/secret-gate.test.mjs was pinned too and exempted nothing; it takes its environment where it spawns, and an
-// entry that hides no finding is refused by the last test below.) A room-local, named divergence; DELETE the entry when the canon fix lands
-// and the carrier is re-copied.
+// CWK-174: the house secret scan's TEST file scripts/secret-scan.test.mjs (Bankfire source blob 4433fb56, order 08c) carries ONE refused
+// spawn, its control read of a decoy repository at line 593 with an env that strips every GIT_* key but sets no GIT_CONFIG_NOSYSTEM (the
+// UMB-456 (2) allowlist rule; routed to the source to fix there). It is carried BYTE-EQUAL and cannot be edited room-side, so the census
+// exempts exactly that path, and ONLY while its git blob id equals the id pinned below: an edit, or a re-sync that moves the blob, turns the
+// entry back into a finding. (R14 F-R14-5: scripts/secret-gate.test.mjs was pinned too and exempted nothing; it takes its environment where
+// it spawns, and an entry that hides no finding is refused by the last test below.) A room-local, named divergence; DELETE the entry when
+// the source fix lands and the carrier is re-copied.
 import * as CENSUS from './git-env-census.mjs'; // namespace import: a name the pre-fix tree never exported fails an ASSERTION, not the link
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { gitEnv } from './git-env.mjs';
 
 const CARRIERS = {
-  'scripts/secret-scan.test.mjs': 'a9cb7145e31139ec3c490dd7714df8fa7dc6cf86',
+  'scripts/secret-scan.test.mjs': '4433fb56bc97d1facc3fb27804e1934c0577115f',
 };
 const carrierText = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf8');
 
-test('CWK-174: the exemption names EXACTLY the one canon test file that needs it, with its pinned blob id (R14 F-R14-5: the secret-gate test spawns git with its own env and needs none)', () => {
+test('CWK-174: the exemption names EXACTLY the one carried test file that needs it, with its pinned blob id (R14 F-R14-5: the secret-gate test spawns git with its own env and needs none)', () => {
   assert.ok(CENSUS.EXEMPT_CARRIERS, 'EXEMPT_CARRIERS is exported');
   assert.deepEqual(Object.fromEntries(Object.entries(CENSUS.EXEMPT_CARRIERS).sort()), CARRIERS);
 });

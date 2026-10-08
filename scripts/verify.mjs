@@ -423,7 +423,7 @@ try {
   const census = censusGitSpawns(collectScriptsMjs(repo));
   for (const f of census.findings) fail(f);
   if (!census.calls) fail('git spawn census found NO git spawn under scripts/: the locator is dead, and a census that matches nothing reports clean');
-  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly or through a const, ${census.allowlist} an allowlist env (UMB-456 (2)), ${census.other} a local wrapper or an unfollowed variable (text not verified)${census.exempted && census.exempted.length ? `; ${census.exempted.length} blob-pinned canon carrier(s) EXEMPT: ${census.exempted.join(', ')}` : ''}`);
+  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly or through a const, ${census.allowlist} an allowlist env (UMB-456 (2)), ${census.other} a local wrapper or an unfollowed variable (text not verified)${census.exempted && census.exempted.length ? `; ${census.exempted.length} blob-pinned carrier(s) EXEMPT: ${census.exempted.join(', ')}` : ''}`);
 } catch (e) { fail(`git spawn census: ${e.message}`); }
 
 console.log('libs (import check):');

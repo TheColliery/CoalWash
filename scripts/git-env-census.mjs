@@ -55,28 +55,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-// CWK-174: BLOB-PINNED EXEMPTION for the house secret scan's canon TEST file that needs one (R14 F-R14-5: scripts/secret-gate.test.mjs
-// takes its environment where it spawns and hides no finding, so its pin was inert and was dropped; a test refuses an entry that hides
-// nothing). The file spawns git with no `env:` (the canon test helper
-// inherits the ambient env, so an absolute GIT_INDEX_FILE exported by a git hook under a pathspec or `-a` commit reaches the fixture's
-// git; routed to the `.github` deputy to fix upstream), and it is carried BYTE-EQUAL from the canon, so it cannot be edited here
-// without breaking the org's scanner-parity check. Each path is exempt ONLY while the git blob id of its content equals the id pinned
-// below (`git hash-object --no-filters`): an edit, a re-sync that moves the blob, or the same bytes at another path is a finding again.
-// A named, room-local divergence: DELETE an entry the day the canon fix lands and the carrier is re-copied. The report lists what it
-// exempted (`exempted`), so the size of the unverified set is visible and never implied away.
+// CWK-174: BLOB-PINNED EXEMPTION for the house secret scan's TEST file, carried BYTE-EQUAL from its source (Bankfire
+// scripts/secret-scan.test.mjs, blob 4433fb56; order 08c), so it cannot be edited here without breaking the org's scanner-parity
+// check. It hides ONE finding, quoted: "scripts/secret-scan.test.mjs:593 spawnSync('git', ...) passes an env, 'cleanEnv', that is
+// no allowlist: it does not set GIT_CONFIG_NOSYSTEM: '1'". That spawn is the test's own control read of a decoy repository, with an
+// env that strips every GIT_* key from process.env but sets no GIT_CONFIG_NOSYSTEM (routed to the scanner's source to fix there).
+// The path is exempt ONLY while the git blob id of its content equals the id pinned below (`git hash-object --no-filters`): an edit, a
+// re-sync that moves the blob, or the same bytes at another path is a finding again. A named, room-local divergence: DELETE the entry
+// the day the source fix lands and the carrier is re-copied. The report lists what it exempted (`exempted`), so the size of the
+// unverified set is visible and never implied away. Every entry must hide a finding (git-env-census.test.mjs refuses an inert pin).
 export const EXEMPT_CARRIERS = Object.freeze({
-  'scripts/secret-scan.test.mjs': 'a9cb7145e31139ec3c490dd7714df8fa7dc6cf86',
+  'scripts/secret-scan.test.mjs': '4433fb56bc97d1facc3fb27804e1934c0577115f',
 });
-
-// TWO MORE named, room-local divergences, with NO entry above (this header is where the room names a canon carrier it does not carry
-// at the canon's blob). The rest of the release overlay set sits at .github b4cf4ab (order 05a, UMB-444); these two are HELD:
-//   - scripts/release-notes.test.mjs at d2f5b830fafa775ab2f54443a454f311aecbcd03 (canon a8f3ba69). The canon test asserts that the spawned
-//     child's environment holds nothing but what node needs; macOS injects __CF_USER_TEXT_ENCODING and the coverage leg injects
-//     NODE_V8_COVERAGE, so it went red on CoalBoard's CI (run 37224469491). Re-sync it the day the canon fix lands.
-//   - scripts/release-notes.mjs at e9bd70b78f46dca7de16d12b4acda5a61d2c2716 (canon 674592e0). The canon file adds one PRODUCTION git
-//     spawn (`--check`'s repoName) whose env is an explicit allowlist passed as the `{ env }` shorthand. Since UMB-456 (2) the census
-//     follows that shorthand and classifies the allowlist (the header above), so the canon file can land with no pin; the re-sync is
-//     its own commit. The held blob spawns no git at all.
 
 // The git blob id of a text read as UTF-8 (a carrier is valid UTF-8, so the re-encode is byte-exact): sha1 of "blob <bytes>\0" + bytes.
 export function gitBlobId(text) {
