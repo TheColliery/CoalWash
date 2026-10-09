@@ -14,7 +14,7 @@ CoalWash is the fidelity-first memory-defragment/cleanup engine of the [TheColli
 
 ## 💻 Developing & Testing
 
-CoalWash is **zero-dependency** (Node.js built-ins only, Node 18+). No `npm install` and no `package.json` — the gates run directly:
+CoalWash is **zero-dependency** (Node.js built-ins only, Node 22+: CI tests 22 and 24, and 22 is the shipped hooks' floor). No `npm install` and no `package.json` — the gates run directly:
 
 ```bash
 node scripts/build-plugin.mjs   # regenerate plugin/ from source
