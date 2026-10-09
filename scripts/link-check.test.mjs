@@ -22,7 +22,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { slugifyHeading, HeadingAnchors, headingAnchors, extractLinks, fragmentMatches, checkLinks } from './link-check.mjs';
-import { gitEnv } from './git-env.mjs';
+import { gitEnv } from './lib/git-env.mjs';
 
 const ENGINE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'link-check.mjs');
 
@@ -220,7 +220,7 @@ test('checkLinks: an unreadable input file is a finding, never a skipped clean f
 // The CLI reads tracked-ness from git, so its checks run in a REAL repository — fenced the
 // way scripts/verify.test.mjs fences its own: os.tmpdir(), `-C` and a GIT_*-scrubbed env on
 // every git call, the fixture's own .git asserted first, and no `git config` anywhere.
-// CWK-133: the scrub is scripts/git-env.mjs's `gitEnv` (the whole GIT_* family out, the fixture's parent as the
+// CWK-133: the scrub is scripts/lib/git-env.mjs's `gitEnv` (the whole GIT_* family out, the fixture's parent as the
 // ceiling), never a copy of it here.
 function cliRepo(t) {
   const init = spawnSync('git', ['--version'], { encoding: 'utf8', env: gitEnv(os.tmpdir()) });

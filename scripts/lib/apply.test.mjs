@@ -5,8 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync, spawnSync } from 'node:child_process';
-import { gitEnv } from '../git-env.mjs';
-import { gitEnv as shippedGitEnv } from './git-env.mjs';
+import { gitEnv } from './git-env.mjs';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks, writeDurable } from './apply.mjs';
 import { recordKeep, recordGlobalKeep, loadKeeps } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
@@ -4366,13 +4365,12 @@ test('R15 F-R14r2-A: a journal committed under a CASE-VARIANT name with NO track
   } finally { clean(proj); }
 });
 
-test('R14 D3: there is ONE git-env helper -- the shipped lib/git-env.mjs, which the dev import path scripts/git-env.mjs re-exports (no fork the census cannot see), and it strips the whole GIT_* family in any case', () => {
-  assert.strictEqual(gitEnv, shippedGitEnv, 'scripts/git-env.mjs exports the very function the plugin ships');
+test('R14 D3: the ONE git-env helper is the shipped lib/git-env.mjs (since 09a every gate and fixture imports it by that path, the one the canon census trusts), and it strips the whole GIT_* family in any case', () => {
   const planted = { GIT_DIR: 'x', git_work_tree: 'x', GIT_INDEX_FILE: 'x', GIT_CEILING_DIRECTORIES: 'x', Git_Object_Directory: 'x' };
   const saved = Object.fromEntries(Object.keys(planted).map((k) => [k, process.env[k]]));
   try {
     Object.assign(process.env, planted);
-    const env = shippedGitEnv();
+    const env = gitEnv();
     for (const k of Object.keys(planted)) assert.ok(!(k in env), `${k} stripped`);
     assert.ok('PATH' in env || 'Path' in env, 'and the rest of the OS environment stays (git needs it to run at all)');
   } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }

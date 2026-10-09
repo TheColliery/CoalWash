@@ -85,7 +85,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { gitEnv } from './git-env.mjs';
+import { gitEnv } from './lib/git-env.mjs';
 
 // CWK-162 (AI Deep Scan A4): every Markdown file this gate reads is contributed text (a PR can add any file at any path), and
 // it was read with a bare readFileSync: no kind gate (a link was followed, a device or FIFO was opened) and no byte bound.
@@ -203,7 +203,7 @@ function decodeEntities(s) {
       const cp = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
       return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : String.fromCodePoint(0xFFFD);
     }
-    return Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, e) ? NAMED_ENTITIES[e] : m;
+    return Object.hasOwn(NAMED_ENTITIES, e) ? NAMED_ENTITIES[e] : m;
   });
 }
 
@@ -454,7 +454,7 @@ function main(argv) {
   }
   let tracked = null;
   // CWK-133: no ambient GIT_* reaches this spawn. No ceiling: `root` is wherever the contributor stands, which may
-  // be a subdirectory of the repository git has to find (scripts/git-env.mjs, the `ceilingDir` paragraph).
+  // be a subdirectory of the repository git has to find (scripts/lib/git-env.mjs, the `ceilingDir` paragraph).
   const ls = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: gitEnv() });
   if (ls.error && ls.error.code === 'ENOENT') {
     console.log('  --   git not found: targets are checked for existence only, not for being tracked');

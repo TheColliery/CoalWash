@@ -5,7 +5,7 @@ import { pointerCandidates, checkPointers, looksPathShaped, deriveIgnoredRoots, 
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { gitEnv } from './git-env.mjs';
+import { gitEnv } from './lib/git-env.mjs';
 
 // FIXTURES ARE INPUT, NOT CLAIMS. Every backticked path below is DATA this test feeds
 // the gate, never a statement this repo makes about its own tree. They keep their
@@ -307,7 +307,7 @@ test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never
 // exactly the class that produced this, so the family is DELETED, never re-set.
 // CWK-133 CLOSED THE DENY-LIST'S OWN RESIDUE: this file used to carry a hand-listed set of
 // fourteen names and NAMED the residue ("a git variable outside this list that redirects
-// resolution"). A list is exactly what rots, so the scrub is now scripts/git-env.mjs's
+// resolution"). A list is exactly what rots, so the scrub is now scripts/lib/git-env.mjs's
 // `gitEnv`: every GIT_-prefixed key out, whatever git adds under that prefix next, and the
 // fixture's own parent as the ceiling. The variables it now also drops (authorship,
 // paging, formatting) cannot matter to the two calls below, which only `init` and

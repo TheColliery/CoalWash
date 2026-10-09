@@ -1,5 +1,5 @@
 // CWK-133 -- gitEnv(): the one place a fixture or gate git spawn gets its environment.
-// One caution baked into this file: the git-spawn CENSUS (scripts/git-env-census.mjs, wired into verify.mjs)
+// One caution baked into this file: the git-spawn CENSUS (the canon scripts/lib/git-env-census.mjs, wired into verify.mjs)
 // scans every scripts/**/*.mjs, this one included. The hostile-env CONTROL leg below is the one git spawn
 // here that deliberately does NOT route through gitEnv(), so it names the binary through a variable (GIT),
 // which the census's literal match cannot see; every other spawn in this file is written the ordinary way.
@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { gitEnv } from './git-env.mjs';
+import { gitEnv } from './lib/git-env.mjs';
 
 const TMP_ROOT = fs.realpathSync.native(os.tmpdir());
 const GIT = 'git';

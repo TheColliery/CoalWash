@@ -31,7 +31,7 @@ The tracked git hooks (`.githooks/pre-commit`, `.githooks/pre-push`) run the hou
 - **Safety gates live in code, keep them there:** delete/merge authorization is plan-sourced (no separate approval flag), `pinned: true` is refused, every path is realpath-and-contained fail-closed, the apply is snapshot + WAL + rollback — safety is UNDO, not pre-approval. Never move one of these into prompt text.
 - **Keep the hook Phoenix-pure:** zero dependencies, fail-silent (try/catch, exit 0, never `process.exit()`), no network, no child processes, silent except the sanctioned channel.
 - **Add tests:** every lib change gets a unit test; every hook-behavior change gets a **hermetic spawn test** (spawn the real hook, sandbox TEMP + HOME). Register a new test *file* in `scripts/test.mjs` (the runner fails on an unlisted orphan).
-- **A git child in a test or a gate takes its environment from `gitEnv()`** (`scripts/git-env.mjs`), which strips the whole `GIT_*` family — an ambient `GIT_DIR` from a hook or a linked worktree would otherwise aim the fixture's git at the real repository. `verify.mjs` fails a git spawn under `scripts/` that does not, and prints what it covered.
+- **A git child in a test or a gate takes its environment from `gitEnv()`** (`scripts/lib/git-env.mjs`), which strips the whole `GIT_*` family — an ambient `GIT_DIR` from a hook or a linked worktree would otherwise aim the fixture's git at the real repository. `verify.mjs` fails a git spawn under `scripts/` that does not, and prints what it covered.
 - **Language & tone:** shipped source and docs stay in English.
 
 ---

@@ -62,6 +62,15 @@ const isUnwiredEngine = (rel) => UNWIRED_ENGINE.includes(rel);
 const DEV_ONLY_LIBS = [
   path.join('scripts', 'lib', 'secret-scan.mjs'),
   path.join('scripts', 'lib', 'release-shape.mjs'), // the create-release workflow's CHANGELOG deriver (scripts/release-notes.mjs): CI tooling, never imported by shipped code
+  // 09a: the canon git-spawn census (its witness vectors and this room's pins) and the canon test runner in waves (with the machine
+  // reading and the stdout preload it uses): verify.mjs and scripts/test.mjs import them, shipped code never does.
+  path.join('scripts', 'lib', 'git-env-census.mjs'),
+  path.join('scripts', 'lib', 'git-env-census.vectors.mjs'),
+  path.join('scripts', 'lib', 'git-env-pins.mjs'),
+  path.join('scripts', 'lib', 'wave-run.mjs'),
+  path.join('scripts', 'lib', 'machine-reading.mjs'),
+  path.join('scripts', 'lib', 'stdout-sync.mjs'),
+  path.join('scripts', 'lib', 'test-plan.mjs'), // the room's numbers for the wave runner and its declared-test floor
 ];
 const isDevOnlyLib = (rel) => DEV_ONLY_LIBS.includes(rel);
 const isNotShipped = (rel) => isUnwiredEngine(rel) || isDevOnlyLib(rel);

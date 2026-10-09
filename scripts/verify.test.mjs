@@ -27,7 +27,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gitEnv } from './git-env.mjs';
+import { gitEnv } from './lib/git-env.mjs';
 
 const VERIFY = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify.mjs');
 
@@ -216,7 +216,7 @@ test('CWK-120 row 16: the hooks FAIL names the path the gate checks, and the dis
 //
 // THE TREE IS THE TRACKED FILE LIST, copied from disk: it is what a clone has, which
 // is the question the pointer gate asks.
-// CWK-133: scripts/git-env.mjs's `gitEnv` -- the whole GIT_* family out, the given directory's parent as the ceiling. Each call
+// CWK-133: scripts/lib/git-env.mjs's `gitEnv` -- the whole GIT_* family out, the given directory's parent as the ceiling. Each call
 // takes it itself (08d: the git-spawn census reads no wrapper).
 
 // The tracked tree in a real repo, fenced per the rail above. Returns null when git is
@@ -366,7 +366,7 @@ test('verify.mjs inside a REAL git repo: a planted git spawn with env: process.e
     fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn(', { env: process.env }')};`, ''].join('\n'));
     const inherit = run();
     assert.strictEqual(inherit.status, 1, `env: process.env must FAIL the gate\n${inherit.stdout}${inherit.stderr}`);
-    assert.match(inherit.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) passes an env that is no allowlist: it names process\.env/, `the FAIL must name the file, the line and the reason\n${inherit.stdout}`);
+    assert.match(inherit.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) env: holds process\.env without gitEnv\(\)/, `the FAIL must name the file, the line and the reason (the canon census's wording since 09a)\n${inherit.stdout}`);
     assert.match(inherit.stdout, /\nVERIFY: FAIL \(1\)/, `exactly the planted spawn fails\n${inherit.stdout}`);
 
     fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn('')};`, ''].join('\n'));

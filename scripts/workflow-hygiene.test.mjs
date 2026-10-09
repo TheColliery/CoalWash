@@ -78,13 +78,15 @@ test('CWK-154 (3): .gitignore names .coalboard/', () => {
   assert.match(read(path.join(repo, '.gitignore')), /^\.coalboard\/\s*$/m);
 });
 
-test('CWK-154 (2): the suite runner has a finite clock -- a per-test bound on node --test and a whole-run bound on its spawn, under the CI job clock', () => {
+// 09a: the suite runs through the canon wave runner, so the clocks are the room's numbers in scripts/lib/test-plan.mjs, handed to runWaves
+// (the per-test bound becomes each file child's --test-timeout, the run bound its whole-run deadline that kills the tree).
+test('CWK-154 (2): the suite runner has a finite clock -- a per-test bound, a per-file clock and a whole-run deadline handed to the wave runner, under the CI job clock', () => {
   const src = read(path.join(repo, 'scripts', 'test.mjs'));
-  const per = /const TEST_TIMEOUT_MS = (\d+);/.exec(src);
-  const run = /const RUN_TIMEOUT_MS = (\d+);/.exec(src);
-  assert.ok(per && run, 'both constants are declared');
-  assert.ok(src.includes('`--test-timeout=${TEST_TIMEOUT_MS}`'), 'node --test receives --test-timeout');
-  assert.match(src, /spawnSync\([^)]*timeout:\s*RUN_TIMEOUT_MS/, 'the spawn carries the whole-run timeout');
+  const plan = read(path.join(repo, 'scripts', 'lib', 'test-plan.mjs'));
+  const per = /export const TEST_TIMEOUT_MS = (\d+);/.exec(plan);
+  const run = /export const RUN_TIMEOUT_MS = (\d+);/.exec(plan);
+  assert.ok(per && run && /export const FILE_CLOCK_MS = \d+;/.test(plan), 'the three constants are declared');
+  assert.match(src, /runWaves\(\{[^}]*fileTimeoutMs: plan\.TEST_TIMEOUT_MS[^}]*fileClockMs: plan\.FILE_CLOCK_MS[^}]*deadlineMs: plan\.RUN_TIMEOUT_MS/, 'the wave runner receives all three clocks');
   const gate = workflows.find((w) => w.file === 'ci.yml');
   const gateMin = Number(/timeout-minutes:\s*(\d+)/.exec(gate.text)[1]);
   assert.ok(Number(run[1]) < gateMin * 60000, `the run bound ${run[1]} ms stays under the CI gate's ${gateMin}-minute clock`);
