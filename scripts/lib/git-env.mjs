@@ -23,9 +23,10 @@
 // WHERE IT LIVES (R14 D3): this file was `scripts/git-env.mjs`, dev tooling that ships nothing. The shipped crash
 // recovery (apply.mjs recoverDangling) now makes ONE optional `git ls-files` (a journal that git tracks is refused),
 // a PRODUCTION spawn inside the plugin, which cannot import a file outside scripts/lib/. So the implementation is
-// HERE (on verify.mjs's LIBS roster, in the dist) and `scripts/git-env.mjs` re-exports it: the gates and fixtures keep
-// their import path, there is one helper, and the git-spawn census (git-env-census.mjs) still requires every spawn
-// to take `gitEnv()` directly. Zero-dep (reads `process.env` only), so it is safe to ship.
+// HERE (on verify.mjs's LIBS roster, in the dist), and since 09a it is the only copy: the `scripts/git-env.mjs`
+// re-export is gone, gates and fixtures under scripts/ import `./lib/git-env.mjs` and files in scripts/lib/
+// import `./git-env.mjs`, the one path the canon git-spawn census (scripts/lib/git-env-census.mjs) trusts, and that
+// census still requires every spawn to take `gitEnv()` directly. Zero-dep (reads `process.env` only), so it is safe to ship.
 //
 // `ceilingDir` is the one directory a spawn is never allowed to walk up past (its own parent,
 // ordinarily) -- belt-and-suspenders on top of the strip. It is OPTIONAL, and omitted only where the
