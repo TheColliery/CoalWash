@@ -2,6 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.12.0] - 2026-10-09
+
+The capacity read follows a smaller auto-compact window
+
+CoalWash now reads the session's auto-compact window and uses it as the capacity wall when it is smaller than the window it found before, so FULL can fire earlier on a session set to compact at, say, 100K. This is the first change to shipped behaviour since 1.11.0. The rest of the range is contributor tooling that moved no shipped byte; see Changed.
+
+### Changed
+
+- **The capacity read takes the session's auto-compact window when it is smaller.** `discoverCapacity` in `scripts/lib/caliper.mjs` (and its dist twin) gains a probe for the window Claude Code compacts at. Before this, a session compacting at 100K read a 167,000 wall, or 967,000 with a 1M stats-cache; it now reads 100,000. The window is read from `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the hook's environment (as Claude Code reads it: its leading digits, clamped to 100,000..1,000,000) and from `autoCompactWindow` and every `modelSettings.<model>.autoCompactWindow` in the user settings and the project's `.claude/settings.json` and `.claude/settings.local.json`. The smallest readable value wins and a larger one never raises the wall; a cloned project can only lower it, never raise it, and an unparseable or unreadable value counts as no window. A winning window reports `source: 'auto-compact-window'`. Not read: a launch's `--autocompact` flag, a managed-settings scope, and a window given only in a launch's `--settings` file; on such a session the wall stays where the other probes put it. `skills/coalwash/references/platform-cc.md` states the probe. — test: `scripts/lib/caliper.test.mjs`
+- **Contributor-facing: the git-spawn census, the secret scan and the release overlay (dev tooling and records; none of it is in the installed plugin).** The git-spawn census (`scripts/git-env-census.mjs`) now follows a variable env to its const and passes an env only when it reads the whole of it, reads the options where node reads them, counts a call the lexer read as a regular expression, and escapes every RegExp metacharacter in a name it builds a RegExp from, which closed CodeQL alert #52 (a latent escape) (`05fcfc6`, `402f68f`, `b904f48`, `e9730f7`). The house secret scan, the gate pair, the release-shape overlay tests and the hook text were re-copied from their sources by blob id (`ae78580`, `88cecc6`). `0e76195` merged Dependabot's bump of `actions/upload-code-coverage` from 1.4.2 to 1.4.4 (`2adac9b`, #21). — test: `scripts/git-env-census.test.mjs`
+- **`SECURITY.md` line 71 carries the SkillSpector scan of the v1.11.2 dist.** The record names the scanned version (v1.11.2, commit `6d910c3`), and the finding counts and kinds are unchanged. A root doc takes no version of its own.
+
 ## [1.11.2] - 2026-10-08
 
 Capacity comment and method.md state the window range
