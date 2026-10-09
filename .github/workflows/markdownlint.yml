@@ -1,0 +1,36 @@
+name: markdownlint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.md'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.md'
+
+permissions:
+  contents: read
+
+# CWK-058 concurrency. cancel-in-progress: TRUE — reads markdown, publishes nothing, no
+# external state to leave partial.
+concurrency:
+  group: markdownlint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5 # testing.md: every run has a finite clock; CWK-154 (2), sized from this room's REST-measured runs (n=12, median 0.12, max 0.13 min)
+    steps:
+      # CWK-120 #5 -- persist-credentials: false: this job only reads files and lints the pull-request checkout with a
+      # third-party action, which could otherwise read the token `actions/checkout` leaves in .git/config (zizmor
+      # artipacked, CWE-522). scorecard.yml already set it; the flock precedent is CoalHearth's ci.yml.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        continue-on-error: true  # report-only: a focused markdownlint cleanup is a separate pass
+        with:
+          globs: '**/*.md'
