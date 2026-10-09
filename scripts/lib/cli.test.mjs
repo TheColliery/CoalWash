@@ -696,3 +696,100 @@ test('CWK-137 D3 hint: the 300-character cut never splits a surrogate pair (N-4)
     assert.ok(lines[0].includes(`${emoji}...`), 'the whole character was kept and the cut marker follows it (the cut is by code point)');
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// R14 bounce 1 (E1, the head's ruling: the break is made LOUD). estate-scan and estate-run say, on STDERR and on every run, when the
+// PROJECT layer carries an estate.runBudget field or an estate.purgeAfterDays the bounded merge dropped: the project's value, the value
+// this run used, the global config to set it in. It is built from a cloned repo's bytes, so every field is one line and bounded.
+// ---------------------------------------------------------------------------
+const E1_HINT = /^\[CoalWash\] estate\.(runBudget(\.\w+)?|purgeAfterDays|compressAfterDays)[: ]/;
+const e1Lines = (stderr) => stderr.split(/\r?\n/).filter((l) => E1_HINT.test(l));
+function e1Configs(home, proj, globalEstate, projectEstate) {
+  fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ estate: globalEstate }));
+  fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ estate: projectEstate }));
+}
+
+test('E1: estate-scan names every dropped PROJECT runBudget field and purgeAfterDays on stderr -- the value it asked for, the value this run used, the global config -- and leaves stdout and the exit code alone', () => {
+  const { home, proj } = sandbox();
+  try {
+    e1Configs(home, proj, { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 }, deleteCold: false, purgeAfterDays: 90 },
+      { runBudget: { maxSessionsPerRun: 0, maxBytesPerRun: 999999999999 }, purgeAfterDays: 36500 });
+    const r = run(proj, home, ['estate-scan']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const lines = e1Lines(r.stderr);
+    assert.strictEqual(lines.length, 3, `one line per dropped key, got: ${r.stderr}`);
+    const byKey = Object.fromEntries(lines.map((l) => [/^\[CoalWash\] (\S+?):/.exec(l)[1], l]));
+    const globalCfg = path.join(home, '.claude', '.coalwash.json');
+    assert.ok(byKey['estate.runBudget.maxSessionsPerRun'].includes('asks for 0, and that was ignored.'), 'names what the project asked for');
+    assert.ok(byKey['estate.runBudget.maxSessionsPerRun'].includes('This run used 5.'), 'and what this run used');
+    assert.ok(byKey['estate.runBudget.maxBytesPerRun'].includes('asks for 999999999999, and that was ignored.'));
+    assert.ok(byKey['estate.runBudget.maxBytesPerRun'].includes('This run used 10485760.'));
+    assert.ok(byKey['estate.purgeAfterDays'].includes('asks for 36500, and that was ignored.'));
+    assert.ok(byKey['estate.purgeAfterDays'].includes('This run used 90.'));
+    assert.ok(/may only LOWER this work limit/.test(byKey['estate.runBudget.maxSessionsPerRun']), 'the reason for a run limit');
+    assert.ok(/a project value may only bring the cold boundary earlier \(at or below your own purgeAfterDays, with 0, "never cold", counted as the highest\), whether or not estate\.deleteCold is true in your own config\./.test(byKey['estate.purgeAfterDays']), 'the reason for the cold boundary (R18 BB-5: it holds whether or not deleteCold is true)');
+    assert.ok(!/while estate\.deleteCold is not true/.test(byKey['estate.purgeAfterDays']), 'R18 BB-5: the consented exception is no longer stated');
+    for (const l of lines) {
+      assert.ok(l.includes(`If you want that value, set ${/^\[CoalWash\] (\S+?):/.exec(l)[1]} in ${globalCfg}.`), 'the conditional remedy names the GLOBAL config');
+      assert.ok(l.includes('A cloned repo ships a project config, and it must not be able to widen what an estate run archives and removes'), 'states the security reason');
+    }
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), '{}');
+    const without = run(proj, home, ['estate-scan']);
+    assert.strictEqual(without.status, 0, without.stderr);
+    assert.strictEqual(e1Lines(without.stderr).length, 0, 'no project value, no hint');
+    assert.strictEqual(r.stdout, without.stdout, 'stdout is the ordinary output, byte for byte');
+    assert.strictEqual(r.status, without.status, 'and so is the exit code');
+  } finally { clean(home, proj); }
+});
+
+test('E1 (R14 bounce 2, F-R14-6): estate-scan names a dropped PROJECT compressAfterDays on stderr -- the value it asked for, the value this run used, the reason (it may only keep sessions active LONGER), the global config -- and a raise draws nothing', () => {
+  const { home, proj } = sandbox();
+  try {
+    e1Configs(home, proj, { deleteCold: false, compressAfterDays: 30 }, { compressAfterDays: 1 });
+    const r = run(proj, home, ['estate-scan']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const lines = e1Lines(r.stderr);
+    assert.strictEqual(lines.length, 1, `one line for the dropped key, got: ${r.stderr}`);
+    assert.ok(lines[0].startsWith('[CoalWash] estate.compressAfterDays: the project config ('), lines[0]);
+    assert.ok(lines[0].includes('asks for 1, and that was ignored.'), 'names what the project asked for');
+    assert.ok(lines[0].includes('This run used 30.'), 'and what this run used');
+    assert.ok(/a project value may only keep sessions active LONGER \(at or above your own compressAfterDays\), whether or not estate\.deleteCold is true in your own config\./.test(lines[0]), 'the reason for the warm boundary (R18 BB-5: it holds whether or not deleteCold is true)');
+    assert.ok(!/while estate\.deleteCold is not true/.test(lines[0]), 'R18 BB-5: the consented exception is no longer stated');
+    assert.ok(lines[0].includes(`If you want that value, set estate.compressAfterDays in ${path.join(home, '.claude', '.coalwash.json')}.`), 'the conditional remedy names the GLOBAL config');
+    e1Configs(home, proj, { deleteCold: false, compressAfterDays: 30 }, { compressAfterDays: 60 });
+    assert.strictEqual(e1Lines(run(proj, home, ['estate-scan']).stderr).length, 0, 'a raise was honored: nothing was ignored');
+  } finally { clean(home, proj); }
+});
+
+test('E1: estate-run prints it on EVERY run; a HONORED project value (lower, equal) draws no hint, and (R18 BB-5) a raise draws one with the user\'s own deleteCold true too', () => {
+  const { home, proj } = sandbox();
+  try {
+    e1Configs(home, proj, { runBudget: { maxSessionsPerRun: 5 }, deleteCold: false, purgeAfterDays: 90 }, { runBudget: { maxSessionsPerRun: 1000 } });
+    for (let i = 0; i < 2; i++) {
+      const r = run(proj, home, ['estate-run']);
+      assert.strictEqual(e1Lines(r.stderr).length, 1, `run ${i}: the hint is there every time, got: ${r.stderr}`);
+    }
+    e1Configs(home, proj, { runBudget: { maxSessionsPerRun: 5 }, deleteCold: false, purgeAfterDays: 90 }, { runBudget: { maxSessionsPerRun: 2 }, purgeAfterDays: 90 });
+    assert.strictEqual(e1Lines(run(proj, home, ['estate-scan']).stderr).length, 0, 'lower and equal values were honored: nothing was ignored');
+    // R18 (BB-5): this used to assert 0 lines ('deleteCold already true: the project value stands'), the consented exception the owner
+    // ruled out on 2026-10-03; changed here by name. The clamp holds after consent, so the raise is dropped and named.
+    e1Configs(home, proj, { deleteCold: true, purgeAfterDays: 90 }, { purgeAfterDays: 36500 });
+    const consented = e1Lines(run(proj, home, ['estate-scan']).stderr);
+    assert.strictEqual(consented.length, 1, 'deleteCold true: the raise is still dropped and named');
+    assert.ok(consented[0].includes('asks for 36500, and that was ignored.') && consented[0].includes('This run used 90.'), consented[0]);
+  } finally { clean(home, proj); }
+});
+
+test('E1: the value comes from a cloned repo, so the line is ONE line and bounded -- a newline or a control character in it cannot forge a second stderr line (log injection)', () => {
+  const { home, proj } = sandbox();
+  try {
+    e1Configs(home, proj, { deleteCold: false, purgeAfterDays: 90 }, { purgeAfterDays: `x\nFORGED-LINE ${String.fromCharCode(27)}[2J ${'a'.repeat(5000)}` });
+    const r = run(proj, home, ['estate-scan']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(r.stderr.split(/\r?\n/).every((l) => !l.startsWith('FORGED-LINE')), 'the forged text did not start a line of its own');
+    assert.ok(!r.stderr.includes(String.fromCharCode(27)), 'no raw ESC reached stderr');
+    const lines = e1Lines(r.stderr);
+    assert.strictEqual(lines.length, 1);
+    assert.ok(lines[0].length < 1500, `bounded, not ${lines[0].length} characters`);
+  } finally { clean(home, proj); }
+});

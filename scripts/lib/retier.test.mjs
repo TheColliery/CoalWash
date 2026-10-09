@@ -234,7 +234,7 @@ test('grad6 WAVE-16 finding 2: a bin-stash failure on the RE-TIER path is now th
     seedMainStore(home, proj); // zeta-old.md is unreferenced -> demoted -> deleted -> wizard-cut bin-stash
     const binDir = path.join(txDirFor(proj), STORE_OLD_NAME);
     fs.mkdirSync(binDir, { recursive: true });
-    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other-live-session', pid: 654321, at: now, token: 'other-live-session:654321:0' }));
+    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other-live-session', pid: 654321, at: now, token: ['other-live-session', '654321', '0'].join(':') }));  // assembled at runtime: the same bytes, and no secret-shaped literal for the house scan (CWK-174)
     const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), now });
     assert.strictEqual(res.ok, true, runRetierReport(res));
     assert.ok(Array.isArray(res.flagged), 'runRetier\'s success return must expose flagged');

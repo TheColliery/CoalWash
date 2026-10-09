@@ -22,7 +22,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { slugifyHeading, HeadingAnchors, headingAnchors, extractLinks, fragmentMatches, checkLinks } from './link-check.mjs';
-import { gitEnv } from './git-env.mjs';
+import { gitEnv } from './lib/git-env.mjs';
 
 const ENGINE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'link-check.mjs');
 
@@ -220,7 +220,7 @@ test('checkLinks: an unreadable input file is a finding, never a skipped clean f
 // The CLI reads tracked-ness from git, so its checks run in a REAL repository — fenced the
 // way scripts/verify.test.mjs fences its own: os.tmpdir(), `-C` and a GIT_*-scrubbed env on
 // every git call, the fixture's own .git asserted first, and no `git config` anywhere.
-// CWK-133: the scrub is scripts/git-env.mjs's `gitEnv` (the whole GIT_* family out, the fixture's parent as the
+// CWK-133: the scrub is scripts/lib/git-env.mjs's `gitEnv` (the whole GIT_* family out, the fixture's parent as the
 // ceiling), never a copy of it here.
 function cliRepo(t) {
   const init = spawnSync('git', ['--version'], { encoding: 'utf8', env: gitEnv(os.tmpdir()) });
@@ -228,7 +228,7 @@ function cliRepo(t) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-git-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const fixtureEnv = gitEnv(path.dirname(root));
-  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: fixtureEnv });
+  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnv(path.dirname(root)) }); // 08d: the census reads gitEnv() at the spawn
   assert.strictEqual(git('init', '-q', '-b', 'main').status, 0, 'git init in the fixture');
   assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(), 'FIXTURE RAIL: the fixture owns its .git');
   const run = (...files) => spawnSync(process.execPath, [ENGINE, ...files], { cwd: root, encoding: 'utf8', env: fixtureEnv });
@@ -295,4 +295,87 @@ test('CLI: invoked through a directory junction, the engine still runs (no files
   const r = spawnSync(process.execPath, [path.join(link, 'link-check.mjs')], { cwd: holder, encoding: 'utf8' });
   assert.strictEqual(r.status, 1, `through the junction: exit ${r.status}, output ${JSON.stringify(r.stdout + r.stderr)}`);
   assert.match(r.stdout, /no files given/);
+});
+
+// ---------------------------------------------------------------------------
+// CWK-162 unit C4 (AI Deep Scan A4 + A5): the checker read contributed Markdown with a bare readFileSync (no kind gate, no byte
+// bound, a link followed), and printed a link destination from that file with its control characters raw.
+// Witnesses on the 0cde430 source (scratchpad/r14/witness-prefix.txt): a 16 MiB regular .md was read whole (16,777,216 chars);
+// a destination holding ESC [2J, an OSC title and BEL reached stdout as 2 ESC + 1 BEL bytes.
+// ---------------------------------------------------------------------------
+import * as LC from './link-check.mjs'; // namespace import: a name the pre-fix tree never exported fails an ASSERTION, not the link
+
+const DOC_BOUND = LC.MAX_DOC_BYTES ?? 4 * 1024 * 1024;
+
+function bigFile(file, size) {
+  const fd = fs.openSync(file, 'w');
+  try { fs.writeSync(fd, '# Big\n'); fs.ftruncateSync(fd, size); } finally { fs.closeSync(fd); }
+}
+
+test('CWK-162 A4: the byte bound on a read Markdown file exists and is the engine\'s doc bound', () => {
+  assert.strictEqual(LC.MAX_DOC_BYTES, 4 * 1024 * 1024, 'MAX_DOC_BYTES = 4 MiB, the bound config-load.mjs puts on any governance or doc read');
+});
+
+test('CWK-162 A4: a Markdown file over the bound is REFUSED as a finding, never read; a file AT the bound is read (witness: 16 MiB read whole)', (t) => {
+  const { root } = docsTree(t);
+  bigFile(path.join(root, 'over.md'), DOC_BOUND + 1);
+  bigFile(path.join(root, 'at.md'), DOC_BOUND);
+  const over = checkLinks({ root, files: ['over.md'], tracked: null });
+  assert.strictEqual(over.findings.length, 1, JSON.stringify(over.findings));
+  assert.match(over.findings[0].msg, /cannot read this file \(OVER_BOUND/);
+  const at = checkLinks({ root, files: ['at.md'], tracked: null });
+  assert.deepStrictEqual(at.findings, [], 'exactly at the bound is still read');
+});
+
+test('CWK-162 A4: the heading-target read has the same bound -- a link to an over-bound file reports it cannot be read for headings', (t) => {
+  const { root } = docsTree(t);
+  bigFile(path.join(root, 'over.md'), DOC_BOUND + 1);
+  fs.writeFileSync(path.join(root, 'small.md'), '# Small\n\nsee [x](over.md#big)\n');
+  const r = checkLinks({ root, files: ['small.md'], tracked: null });
+  assert.strictEqual(r.findings.length, 1, JSON.stringify(r.findings));
+  assert.match(r.findings[0].msg, /its target cannot be read for headings/);
+});
+
+test('CWK-162 A4: a symlinked Markdown file is refused, never followed (skips visibly where a file symlink cannot be created, as on this Windows box without developer mode)', (t) => {
+  const { root } = docsTree(t);
+  fs.writeFileSync(path.join(root, 'real.md'), '# Real\n');
+  try { fs.symlinkSync(path.join(root, 'real.md'), path.join(root, 'link.md'), 'file'); } catch (e) { t.skip(`file symlink creation unavailable here: ${e.code} (the leg runs on Linux and macOS CI)`); return; }
+  const r = checkLinks({ root, files: ['link.md'], tracked: null });
+  assert.strictEqual(r.findings.length, 1, JSON.stringify(r.findings));
+  assert.match(r.findings[0].msg, /cannot read this file \(SYMLINK/);
+});
+
+test('CWK-162 A4: a directory given as a file is a finding (the kind gate answers on the handle or the entry, before any read; R15 moved it after the open)', (t) => {
+  const { root } = docsTree(t);
+  fs.mkdirSync(path.join(root, 'dir.md'));
+  const r = checkLinks({ root, files: ['dir.md'], tracked: null });
+  assert.strictEqual(r.findings.length, 1);
+  assert.match(r.findings[0].msg, /cannot read this file \(NOT_REGULAR/);
+});
+
+test('CWK-162 A5: control characters in a link destination are printed ESCAPED -- no raw ESC, BEL or C1 byte reaches stdout (witness: 2 ESC + 1 BEL raw)', (t) => {
+  const fx = cliRepo(t);
+  if (!fx) return t.skip('git unavailable');
+  const { root, git, run } = fx;
+  const ESC = String.fromCharCode(0x1b);
+  const BEL = String.fromCharCode(7);
+  const C1 = String.fromCharCode(0x9b);
+  fs.writeFileSync(path.join(root, 'doc.md'), `[bad](${ESC}[2J${ESC}]0;PWNED${BEL}${C1}.md)\n`);
+  assert.strictEqual(git('add', '-A').status, 0);
+  const r = run('doc.md');
+  assert.strictEqual(r.status, 1, r.stdout + r.stderr);
+  assert.ok(/FAIL doc\.md:1: link /.test(r.stdout), r.stdout);
+  assert.strictEqual(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(r.stdout), false, `a raw control byte reached stdout: ${JSON.stringify(r.stdout)}`);
+  assert.ok(r.stdout.includes('\\u001b[2J'), `the ESC is visible as text: ${JSON.stringify(r.stdout)}`);
+  assert.ok(r.stdout.includes('\\u0007') && r.stdout.includes('\\u009b'), 'BEL and the C1 byte too');
+});
+
+test('CWK-162 A5: ordinary destinations print unchanged (Unicode letters, an em dash and punctuation are not "escaped")', (t) => {
+  const fx = cliRepo(t);
+  if (!fx) return t.skip('git unavailable');
+  const { root, git, run } = fx;
+  fs.writeFileSync(path.join(root, 'doc.md'), '[x](café—notes.md#über)\n');
+  assert.strictEqual(git('add', '-A').status, 0);
+  const r = run('doc.md');
+  assert.ok(r.stdout.includes('café—notes.md#über'), JSON.stringify(r.stdout));
 });

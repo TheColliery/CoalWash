@@ -5,7 +5,7 @@ import { pointerCandidates, checkPointers, looksPathShaped, deriveIgnoredRoots, 
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { gitEnv } from './git-env.mjs';
+import { gitEnv } from './lib/git-env.mjs';
 
 // FIXTURES ARE INPUT, NOT CLAIMS. Every backticked path below is DATA this test feeds
 // the gate, never a statement this repo makes about its own tree. They keep their
@@ -307,16 +307,15 @@ test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never
 // exactly the class that produced this, so the family is DELETED, never re-set.
 // CWK-133 CLOSED THE DENY-LIST'S OWN RESIDUE: this file used to carry a hand-listed set of
 // fourteen names and NAMED the residue ("a git variable outside this list that redirects
-// resolution"). A list is exactly what rots, so the scrub is now scripts/git-env.mjs's
+// resolution"). A list is exactly what rots, so the scrub is now scripts/lib/git-env.mjs's
 // `gitEnv`: every GIT_-prefixed key out, whatever git adds under that prefix next, and the
 // fixture's own parent as the ceiling. The variables it now also drops (authorship,
 // paging, formatting) cannot matter to the two calls below, which only `init` and
-// `check-ignore`; none of them commits.
-const hermeticGitEnv = (dir) => gitEnv(path.dirname(dir));
+// `check-ignore`; none of them commits. Each call takes gitEnv() itself (08d: the git-spawn census reads no wrapper).
 
 function gitFixture(gitignoreText) {
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-079-')));
-  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8', env: hermeticGitEnv(dir) });
+  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8', env: gitEnv(path.dirname(dir)) });
   if (r.error || r.status !== 0) {
     // INSPECT F3 — the dir exists BEFORE git is probed, and on this path the caller gets
     // null, so its own finally{} holds no handle to remove. Leaving it re-opens board
@@ -332,7 +331,7 @@ const runner = (dir) => (names) => {
   // Same scrub as gitFixture above, same reason: an inherited GIT_DIR makes this
   // answer for the caller's repository rather than the fixture's.
   const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-    { cwd: dir, encoding: 'utf8', env: hermeticGitEnv(dir), input: names.map((n) => n + "/").join('\n') + '\n' });
+    { cwd: dir, encoding: 'utf8', env: gitEnv(path.dirname(dir)), input: names.map((n) => n + "/").join('\n') + '\n' });
   return ci.error ? '' : ci.stdout;
 };
 

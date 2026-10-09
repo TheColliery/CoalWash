@@ -82,7 +82,7 @@ import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, binItemOutcome } from './tailings.mjs';
 import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
-import { loadMergedConfig, loadMergedConfigReport, globalConfigPath, findProjectRoot, projectConfigResolution, discoverIgnoredConfigs } from './config-load.mjs';
+import { loadMergedConfig, loadMergedConfigReport, globalConfigPath, findProjectRoot, projectConfigResolution, discoverIgnoredConfigs, PROJECT_BOUNDED_KEYS } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { estateReport } from './estate.mjs';
@@ -361,6 +361,28 @@ function archiveDirHint({ ignored, estate, home }) {
   return `[CoalWash] estate.archiveDir: the project config (${oneLine(hit.path)}) asks for ${oneLine(hit.value)}, and that was ignored. A cloned repo ships a project config, and it must not be able to choose where your own session transcripts are archived, so this key is read from the GLOBAL config only. This run read ${read}. If you set that path yourself and want it used, set estate.archiveDir in ${oneLine(globalConfigPath(home))}, or move the archives that path holds into ${read}.`;
 }
 
+// R14 bounce 1 (E1, the head's ruling: the break is made LOUD): the same shape as archiveDirHint for the two estate values a PROJECT
+// config may only LOWER (runBudget, purgeAfterDays) or only RAISE (compressAfterDays); the merge is config-load.mjs's mergeObjectKey. One line per key the merge dropped,
+// from the SAME bounded read, on every run, to stderr; stdout and the exit code are untouched. The value is a cloned repo's bytes of any
+// JSON type, so it is serialized, flattened to one line and bounded (security.md, log injection), and named ONCE as what the project
+// asked for, never inside an imperative; the only remedy is conditional on the user wanting that value, and names the layer that has no bound.
+function projectBoundHints({ ignored, estate, home }) {
+  const out = [];
+  for (const hit of ignored || []) {
+    if (hit.key !== 'estate.runBudget' && !PROJECT_BOUNDED_KEYS.includes(hit.key)) continue;
+    const isPurge = hit.key === 'estate.purgeAfterDays';
+    const isCompress = hit.key === 'estate.compressAfterDays';
+    const used = isPurge ? estate.purgeAfterDays : isCompress ? estate.compressAfterDays : hit.key === 'estate.runBudget' ? estate.runBudget : estate.runBudget[hit.key.slice('estate.runBudget.'.length)];
+    const rule = isPurge
+      ? 'a project value may only bring the cold boundary earlier (at or below your own purgeAfterDays, with 0, "never cold", counted as the highest), whether or not estate.deleteCold is true in your own config'
+      : isCompress
+        ? 'a project value may only keep sessions active LONGER (at or above your own compressAfterDays), whether or not estate.deleteCold is true in your own config'
+        : 'a project value may only LOWER this work limit, and only with a number the schema accepts';
+    out.push(`[CoalWash] ${hit.key}: the project config (${oneLine(hit.path)}) asks for ${oneLine(JSON.stringify(hit.value))}, and that was ignored. A cloned repo ships a project config, and it must not be able to widen what an estate run archives and removes, so ${rule}. This run used ${oneLine(JSON.stringify(used))}. If you want that value, set ${hit.key} in ${oneLine(globalConfigPath(home))}.`);
+  }
+  return out;
+}
+
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -491,7 +513,9 @@ function main() {
     }
   } else if (cmd === 'estate-scan') {
     try {
-      const scan = estateUltraScan(estateOpts(args));
+      const opts = estateOpts(args);
+      for (const line of projectBoundHints(opts)) console.error(line);
+      const scan = estateUltraScan(opts);
       console.log(args.includes('--json') ? JSON.stringify(scan, null, 1) : ultraBillLine(scan));
     } catch (e) {
       console.error(`estate-scan failed: ${e.message}`);
@@ -499,7 +523,9 @@ function main() {
     }
   } else if (cmd === 'estate-run') {
     try {
-      const res = runEstate(estateOpts(args));
+      const opts = estateOpts(args);
+      for (const line of projectBoundHints(opts)) console.error(line);
+      const res = runEstate(opts);
       console.log(runEstateReport(res));
       if (!res.ok) process.exitCode = 1; // deferred/lock-held = loud, nothing touched
     } catch (e) {

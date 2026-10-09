@@ -55,6 +55,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zero-dep builtin)
+import { spawnSync } from 'node:child_process'; // R14 D3 only: the one optional `git ls-files` in gitTrackedRecoveryInputs (recoverDangling; never a hook path)
+import { gitEnv } from './git-env.mjs'; // the room's one GIT_*-stripping helper (CWK-133), shipped since R14 D3
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
@@ -112,7 +114,119 @@ export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup 
 // counts real builds of the round-9 Root B memo (apply.test.mjs's CALL
 // COUNT test at the KEEPS-GATE) — a count does not vary by runner, disk, or
 // load.
-export const __testHooks = { normPostTextsBuilds: 0 };
+// CWK-162 (AI Deep Scan B12): the most staged bytes ONE plan may read before any mutation. Each staged file is already bounded by
+// MAX_DOC_BYTES (4 MiB); this bounds the SUM, which the per-file bound never did (a plan is agent-written and has no action-count
+// limit). 64 MiB = 16 files at the per-file bound, about 25 times the WHOLE class-B store (recall tier included) of the largest
+// real project measured here: 2.6 MB over 380 files at the umbrella root, 2026-10-02, the largest single file 340 KB. A plan that
+// rewrote every file of that store would still stage a twenty-fifth of the cap.
+export const STAGED_BYTES_MAX = 16 * MAX_DOC_BYTES;
+
+// CWK-162 (AI Deep Scan B9, B11): git's control directory is never a recovery target. The journal, the manifest and the snapshot
+// that drive recoverDangling all live in <project>/.claude/coalwash, which a clone supplies, and git itself never transmits
+// .git/config or .git/hooks in a clone: a repository author can reach them ONLY through a door like this one (witness: a forged
+// journal rewrote .git/config to `fsmonitor = EVIL-COMMAND`). A path segment names git's control directory when, before any NTFS
+// stream suffix (":..."), it is `.git` or its 8.3 short name `GIT~<n>`, in any case, with any trailing dots and spaces that
+// Windows strips when it resolves the name (so `.git.` and `.git ` are `.git`). `.github`, `.gitignore` and `.gitmodules` are
+// not it. NOT closed here, named: a forged journal can still overwrite any OTHER file inside the trusted roots; that needs the
+// journal to carry provenance (pending decision D3 in scratchpad/r14/cwk162-ruling.md).
+const GIT_SEGMENT = /^(?:\.git|git~\d+)[. ]*$/i;
+function isGitSegment(seg) { return GIT_SEGMENT.test(String(seg).split(':')[0]); }
+function inGitDir(p, roots) {
+  for (const r of roots) {
+    const rel = path.relative(r, p); // callers proved containment already; this finds the segments BELOW the root that holds p
+    // a child directory NAMED "..x" is below the root (its .git is git's); only the segment ".." itself, or an absolute rel (another drive), is an escape
+    if (rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) continue;
+    if (rel.split(/[\\/]/).some(isGitSegment)) return true;
+  }
+  return false;
+}
+// R14 D3 (the interim, pending the provenance unit): a real crash journal is never committed, and a clone delivers ONLY the files git
+// tracks, so a journal or snapshot that git tracks in the project came from a repository, not from an interrupted run. recoverDangling
+// refuses to replay it (`refusedTracked`). git is OPTIONAL (no-external-assumption, Phoenix #7's spirit), and the check FAILS CLOSED:
+//   - where a repository is present (a `.git` git would accept in the transaction directory or any ancestor, what its own discovery looks for)
+//     and the query errors, times out, exits non-zero or overflows its buffer, the journal reads as TRACKED and is refused (counted once);
+//     "too much to measure" and "cannot run" are never "nothing tracked" (R14 RE-INSPECT: an 8,000-name listing overflowed the old 1 MiB
+//     buffer and the committed journal replayed).
+//   - NAMED cannot-tell residual, behaviour UNCHANGED: git is not on PATH (spawn ENOENT), or there is no repository at all (no `.git`
+//     that git would accept anywhere above; see isGitMarker), so the query could not have answered. Also NAMED, and not closed here: a download with no git history (a zip, a
+//     tarball) still replays; only journal provenance closes that.
+// The tracked paths are matched by what the FILESYSTEM resolves them to, never by spelling: git lists every tracked path under the
+// transaction directory in the spelling that was committed, and each is resolved (realpath, native) and compared with the journal's own
+// resolved path and the snapshot directory's. A case-variant name (JOURNAL.json, SNAP-1 beside the committed snap-1), a short name and a
+// link all land on the same physical path, so the volume decides what folds, not this code, and a miss can only come from a path the
+// filesystem cannot resolve (a tracked file absent from disk: nothing there to replay).
+// The command runs from the transaction directory itself, so git reads whichever repository holds the journal (a transaction directory
+// that is its own repository, a submodule, is read as that repository). It takes NO pathspec; `--no-optional-locks` and
+// `core.fsmonitor=false` keep a repository's own config from running a program or taking a lock.
+const GIT_TRACKED_TIMEOUT_MS = 5000; // `git ls-files` on an index of any realistic project answers in tens of ms; past this the query FAILED (closed, where a repository is present)
+const GIT_TRACKED_MAX_BYTES = 16 << 20; // the listing buffer: ~100,000 paths. A listing over it is a failure of the query, refused, never read as empty
+const GIT_TRACKED_MAX_PATHS = 20000; // more tracked paths than this under one transaction directory is not a project's own state, and resolving each is the cost: refused
+// Is the `.git` at `p` something git itself would accept: a directory holding HEAD, objects and refs, or a file naming a gitdir (a
+// worktree, a submodule)? A directory that is not one (an archive's stray `.git/config`) is no repository: git says "not a repository" and
+// walks on, so it is the same cannot-tell residual as no `.git` at all. An entry that cannot be read counts as present (fail closed).
+// R15 (CodeQL #45/#48 js/file-system-race, RE-INSPECT 2 F-R14r2-B): the entry is OPENED first and judged on the HANDLE (a directory, or a file),
+// and at most 64 bytes are read through that handle. The first cut lstat-ed the path and then read it whole by path: a crafted archive's
+// multi-hundred-MB `.git` FILE (the one place a `.git` can be an attacker-sized file, since git refuses tracked paths under `.git`) was
+// allocated before its first 64 characters were looked at, and what the path held at the read was never what the lstat had judged.
+const GIT_MARKER_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0); // O_NONBLOCK: a FIFO named `.git` cannot hang the open
+const GIT_MARKER_READ_BYTES = 64; // `gitdir:` and the start of a path: all the check looks at
+function hasGitDirParts(p) { return ['HEAD', 'objects', 'refs'].every((n) => fs.existsSync(path.join(p, n))); }
+function isGitMarker(p) {
+  let fd;
+  try { fd = fs.openSync(p, GIT_MARKER_FLAGS); } catch (e) {
+    const code = e && e.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    // The open failed for another reason (a directory this host will not open for reading, a permission, a link loop). Decide on what the entry
+    // IS, after the failed open, and read nothing; an entry that cannot even be inspected counts as present (fail closed).
+    try { return fs.lstatSync(p).isDirectory() ? hasGitDirParts(p) : true; } catch { return true; }
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (st.isDirectory()) return hasGitDirParts(p);
+    if (!st.isFile()) return true; // a FIFO, a device: not something git accepts, and not ours to read; present, fail closed
+    const buf = Buffer.alloc(GIT_MARKER_READ_BYTES);
+    const n = fs.readSync(fd, buf, 0, GIT_MARKER_READ_BYTES, 0);
+    return buf.toString('utf8', 0, n).startsWith('gitdir:');
+  } catch { return true; } finally { try { fs.closeSync(fd); } catch { /* already closed */ } }
+}
+// A git marker in `dir` or any ancestor: what git's own discovery looks for.
+function repoMarkerAbove(dir) {
+  for (let d = path.resolve(dir); ; d = path.dirname(d)) {
+    if (isGitMarker(path.join(d, '.git'))) return true;
+    if (path.dirname(d) === d) return false;
+  }
+}
+// The environment is the room's ONE helper (git-env.mjs, CWK-133): the whole GIT_* family deleted, case-insensitively, so an inherited
+// GIT_DIR / GIT_INDEX_FILE cannot point the check at a different repository. No ceiling is passed: the transaction directory sits
+// INSIDE the repository this must find, which may be an ancestor of the project root.
+// Returns { tracked, failed }: `tracked` = how many tracked paths are the journal or lie under its snapshot directory; `failed` = why the
+// query could not answer in a repository (null when it answered, or when it could not have: the cannot-tell residual).
+function gitTrackedRecoveryInputs(txDir, journalPath, snapDir) {
+  let r;
+  try {
+    r = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', 'ls-files', '-z'],
+      { cwd: txDir, env: gitEnv(), encoding: 'utf8', timeout: GIT_TRACKED_TIMEOUT_MS, windowsHide: true, maxBuffer: __testHooks.gitMaxBuffer });
+  } catch (e) { r = { error: e }; }
+  if (r.error && r.error.code === 'ENOENT') return { tracked: 0, failed: null }; // git is absent: the named cannot-tell residual
+  if (r.error || r.status !== 0) {
+    if (!repoMarkerAbove(txDir)) return { tracked: 0, failed: null }; // no repository at all (git said so): the same residual
+    return { tracked: 0, failed: r.error ? String(r.error.code || r.error.name || 'error') : r.signal ? `signal ${r.signal}` : `exit ${r.status}` };
+  }
+  const listed = String(r.stdout).split('\0').filter(Boolean);
+  if (listed.length > __testHooks.gitMaxPaths) return { tracked: 0, failed: 'listing too large to examine' };
+  if (!listed.length) return { tracked: 0, failed: null };
+  const physJournal = physicalOrNull(journalPath);
+  const txPhys = physicalOrNull(txDir);
+  if (!physJournal || !txPhys) return { tracked: 0, failed: 'journal path not resolvable' };
+  const physSnap = typeof snapDir === 'string' && snapDir !== '' ? physicalForCreate(snapDir) : null;
+  let tracked = 0;
+  for (const rel of listed) {
+    const phys = physicalOrNull(path.join(txDir, rel));
+    if (phys && (phys === physJournal || (physSnap && containedIn(phys, [txPhys]) && containedIn(phys, [physSnap])))) tracked++; // physSnap is journal-derived: it only NARROWS the trusted tx dir
+  }
+  return { tracked, failed: null };
+}
+export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, isGitMarker, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -891,6 +1005,20 @@ export function applyPlan(plan, opts = {}) {
       }
       resolved.push({ ...a, phys });
     }
+    // CWK-162 B12: ONE action per physical target. Every action on a target was staged, snapshotted and gated separately, and the
+    // second always lost to the external-writer check anyway (it sees the first's write): the plan was refused late, after the
+    // work. A merge is a delete of one file plus a rewrite of ANOTHER, never two actions on one path. A create has no file to
+    // canonicalize, so two spellings of one new name are probed on the volume (a miss refuses: the safe direction here).
+    const targetSeen = new Set();
+    const targetSeenLower = new Set();
+    for (const a of resolved) {
+      const lower = a.phys.toLowerCase();
+      if (targetSeen.has(a.phys) || (targetSeenLower.has(lower) && volumeCaseFolds(path.dirname(a.phys), true))) {
+        return { ok: false, error: `plan names the same target more than once: ${a.phys} (one action per file; a merge is a delete of one file plus a rewrite of another)` };
+      }
+      targetSeen.add(a.phys);
+      targetSeenLower.add(lower);
+    }
 
     // ---- staging read + content sniff ----
     // Each rewrite/delete target is read ONCE as raw bytes here — the shared
@@ -900,6 +1028,7 @@ export function applyPlan(plan, opts = {}) {
     const flagged = [];
     const isPlaceholder = opts.isPlaceholder || isCloudPlaceholder; // injectable for tests
     let actionable = []; // let: the KEEPS-GATE below may exclude entries (per-file failure, the sniff pattern)
+    let stagedBytes = 0;
     for (const a of resolved) {
       if (a.type === 'create') { actionable.push(a); continue; }
       // #57(d) cloud-placeholder read poison: sniff the dehydrated stub from
@@ -916,6 +1045,8 @@ export function applyPlan(plan, opts = {}) {
       const staged = repoReadOutcome(a.phys, null, MAX_DOC_BYTES);
       if (!staged.buf) return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed${staged.why ? `: ${staged.why}` : ''})` };
       const origBuf = staged.buf;
+      stagedBytes += origBuf.length; // CWK-162 B12: the SUM is bounded, not only each file
+      if (stagedBytes > STAGED_BYTES_MAX) return { ok: false, error: `the plan's staged bytes exceed ${STAGED_BYTES_MAX} in total (fail-closed: split the plan, nothing was applied)` };
       if (a.type === 'rewrite') {
         const why = sniffUnrewritable(origBuf);
         if (why) { flagged.push({ path: a.phys, reason: why }); continue; }
@@ -1607,7 +1738,9 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 //   'cleaned'      — a terminal journal (committed/rolled-back) was just removed.
 //   'none'         — nothing done. WITH an `error` field this is a REFUSAL (the
 //                    anchor gate, an unreadable/schema-newer journal, an out-of-tx
-//                    snapDir, no verifiable roots); WITHOUT one it means there was
+//                    snapDir, no verifiable roots, a journal or snapshot git TRACKS, or
+//                    a git query that could not finish in a repository — R14 D3, counted
+//                    as `refusedTracked`); WITHOUT one it means there was
 //                    no journal at all. A caller that treats those two alike is
 //                    the gaugeLine defect (see cli.mjs).
 // `restored` accompanies 'rolled-back' and 'partial'.
@@ -1647,6 +1780,16 @@ export function recoverDangling(projectRoot, opts = {}) {
     // tool must not even delete a newer tool's "terminal-looking" journal.
     if (journal && typeof journal === 'object' && Number(journal.version) > 1) {
       return { recovered: 'none', error: `journal schema version ${journal.version} is newer than this CoalWash understands — left untouched (for a newer version, or a human)` };
+    }
+    // R14 D3 (interim): a journal or snapshot that git TRACKS came from a repository, never from an interrupted run (see gitTrackedRecoveryInputs).
+    // Before the terminal-status branch on purpose: a tracked file is not ours to delete either, and nothing below may touch it.
+    const gitCheck = gitTrackedRecoveryInputs(txDir, journalPath, journal && journal.snapDir);
+    if (gitCheck.failed) {
+      // fail CLOSED: in a repository, a query that could not finish is not "nothing tracked". The reason is a code (ENOBUFS, ETIMEDOUT, exit N), never repo text.
+      return { recovered: 'none', refusedTracked: 1, error: `git could not say whether the journal or its snapshot is tracked (${gitCheck.failed}) in a project that is a git repository — refusing to replay, failing closed (left for inspection)` };
+    }
+    if (gitCheck.tracked) {
+      return { recovered: 'none', refusedTracked: gitCheck.tracked, error: `the journal or its snapshot is tracked by git (${gitCheck.tracked} tracked path(s) under the transaction directory) — refusing to replay: a real crash journal is never committed and a clone delivers only tracked files, so this one came from a repository, not from an interrupted run (left for inspection)` };
     }
     if (journal.status === 'committed' || journal.status === 'rolled-back') {
       fs.rmSync(journalPath, { force: true });
@@ -1697,7 +1840,8 @@ export function recoverDangling(projectRoot, opts = {}) {
     // so the manifest is loaded from the bound location, never the raw one.
     const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
     const manifest = JSON.parse(readRepoFileBounded(path.join(snapPhys, 'manifest.json'), null, MAX_DOC_BYTES)); // CWK-137: bounded
-    let restored = 0, failed = 0, refused = 0, refusedPinned = 0;
+    let restored = 0, failed = 0, refused = 0, refusedPinned = 0, refusedGit = 0;
+    const replayed = new Set(); // CWK-162 B8: each distinct target is replayed once, however many manifest rows name it
     for (const m of manifest) {
       const src = path.join(snapPhys, m.snap);
       // A DELETED FILE IS THE ONLY DAMAGE A DELETE-PHASE CRASH LEAVES — deletes run
@@ -1715,6 +1859,12 @@ export function recoverDangling(projectRoot, opts = {}) {
       // CALLER-TRUSTED root (the outer gate a poisoned journal can't widen) AND
       // the journal's own declared roots (secondary narrowing).
       if (!inSnap(src) || !origPhys || !containedIn(origPhys, trustedRoots) || !containedIn(origPhys, jroots)) { refused++; continue; }
+      // CWK-162 B8: the snapshot is taken BEFORE the first mutation of a file, so a legitimate manifest has one row per target and the
+      // first row is the pre-transaction state; a repeated row is waste at best and a stale snapshot at worst.
+      if (replayed.has(origPhys)) continue;
+      replayed.add(origPhys);
+      // CWK-162 B9/B11: never git's control directory (see inGitDir). Counted on its own so the report says what was refused.
+      if (inGitDir(origPhys, trustedRoots)) { refusedGit++; continue; }
       // THE PIN PROMISE RIDES THE RECOVERY DOOR TOO (lab-grad2 N3 — the
       // recovery-paths class, 4th instance in this room). This replay had 7
       // fs-mutation lines and ZERO isPinned sites while the module header
@@ -1747,6 +1897,7 @@ export function recoverDangling(projectRoot, opts = {}) {
         if (!fs.existsSync(step.path)) continue; // never written (or already gone) = nothing to undo
         const p = physicalOrNull(step.path);
         if (!p || !containedIn(p, trustedRoots) || !containedIn(p, jroots)) { refused++; continue; } // exists but out-of-(trusted∩journal)-root = refuse
+        if (inGitDir(p, trustedRoots)) { refusedGit++; continue; } // CWK-162 B9: banking then removing a hook or a config is still a delete of it
         // N3, the delete side: the file at this create path EXISTS (checked
         // above) and carries `pinned: true` — an applyPlan create cannot have
         // produced a pinned file the plan gate would then refuse to touch, so
@@ -1798,8 +1949,8 @@ export function recoverDangling(projectRoot, opts = {}) {
     }
     // Only clear the WAL when the recovery was CLEAN. A partial/refused replay keeps
     // the journal + snapshot for a human (never report a mixed state as done).
-    if (failed || refused || refusedPinned) {
-      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, refusedPinned, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root, ${refusedPinned} refused as pinned; journal + snapshot kept at ${snapDir}` };
+    if (failed || refused || refusedPinned || refusedGit) {
+      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, refusedPinned, refusedGit, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root, ${refusedPinned} refused as pinned, ${refusedGit} refused as inside a .git directory; journal + snapshot kept at ${snapDir}` };
     }
     fs.rmSync(journalPath, { force: true });
     return { recovered: 'rolled-back', restored };

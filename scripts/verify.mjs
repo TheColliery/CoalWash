@@ -26,7 +26,7 @@ const LIBS = [
   'class-b.mjs', 'caliper.mjs', 'fidelity-gate.mjs', 'apply.mjs', 'keeps.mjs', 'receipt.mjs',
   'retention.mjs', 'cli.mjs', 'ask.mjs', 'tailings.mjs', 'broom.mjs', 'wizard.mjs', 'parcel.mjs', 'writeguard.mjs',
   'anchor-diff.mjs', 'estate.mjs', 'estate-archive.mjs', 'retier.mjs', 'dig-gauge.mjs',
-  'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs', 'repo-fs.mjs',
+  'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs', 'repo-fs.mjs', 'git-env.mjs',
 ];
 
 // LIBS is hand-listed, so it silently rots: a new lib nobody adds here is never
@@ -34,7 +34,8 @@ const LIBS = [
 // roster — listed-but-missing is caught by the file loop below, this catches
 // on-disk-but-unlisted. Tests + the deliberately-unshipped class-A engine are
 // gated by the suite and build-plugin respectively, not here.
-const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs']);
+const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs', 'secret-scan.mjs', 'release-shape.mjs', // + the dev-only libs (build-plugin DEV_ONLY_LIBS: the house secret scan, the release deriver; CWK-174)
+  'git-env-census.mjs', 'git-env-census.vectors.mjs', 'git-env-pins.mjs', 'wave-run.mjs', 'machine-reading.mjs', 'stdout-sync.mjs', 'test-plan.mjs']); // + the canon census and wave-run trios, and the room's wave-run numbers (09a)
 console.log('lib roster drift:');
 try {
   const onDisk = fs.readdirSync(path.join(repo, 'scripts', 'lib'))
@@ -256,7 +257,7 @@ try {
   // CWK-133: every git spawn in this gate gets its env from the ONE helper (an ambient GIT_DIR / GIT_INDEX_FILE from
   // a linked worktree's hook would otherwise decide which repository these two calls answer for). Dynamic, inside the
   // check that uses it: a missing helper is one FAIL line here, never a link-time crash (node/runtime.md §1).
-  const { gitEnv } = await import(pathToFileURL(path.join(repo, 'scripts', 'git-env.mjs')).href);
+  const { gitEnv } = await import('./lib/git-env.mjs'); // a literal specifier, so the git-spawn census reads where gitEnv comes from
   // The env is built INLINE at each spawn (not held in a variable) so the git-spawn census below can see it is the helper's.
   const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)) });
   if (lsAll.error || lsAll.status !== 0) {
@@ -411,18 +412,21 @@ try {
   }
 } catch (e) { fail(`pointer check: ${e.message}`); }
 
-// GIT SPAWNS (CWK-136). CWK-133 gave every fixture and gate one env helper (scripts/git-env.mjs); this is the tripwire
-// that keeps the NEXT git spawn from inheriting an ambient GIT_DIR / GIT_INDEX_FILE. It refuses a spawn with no `env:`
-// and an `env:` that names process.env, and it PRINTS its coverage: a census that matched nothing would report clean.
-// Detection lives in scripts/git-env-census.mjs (dynamic import, node/runtime.md 1); its named limits are in that
-// file's header (a local wrapper or variable is counted as unverified, never followed).
-console.log('git spawn census (every git spawn under scripts/ takes its env from gitEnv(), never the ambient process.env):');
+// GIT SPAWNS (CWK-136). CWK-133 gave every fixture and gate one env helper (scripts/lib/git-env.mjs); this is the tripwire
+// that keeps the NEXT git spawn from inheriting an ambient GIT_DIR / GIT_INDEX_FILE. A spawn passes only with an env the
+// census reads as safe (the room's gitEnv(), or an allowlist built from named keys with GIT_CONFIG_NOSYSTEM: '1'); every
+// other env, and a spawn with none, is a finding. It PRINTS its coverage: a census that matched nothing would report clean.
+// Detection is the CANON census, scripts/lib/git-env-census.mjs (adopted by blob id from the .github canon, 09a; dynamic
+// import, node/runtime.md 1); its grammar and named limits are in its header, and this room's blob pins are
+// scripts/lib/git-env-pins.mjs, held by git-env-pins.test.mjs.
+console.log("git spawn census (every git spawn under scripts/ takes the room's gitEnv() or an allowlist env the census reads whole):");
 try {
-  const { censusGitSpawns, collectScriptsMjs } = await import(pathToFileURL(path.join(repo, 'scripts', 'git-env-census.mjs')).href);
-  const census = censusGitSpawns(collectScriptsMjs(repo));
+  const { scanGitSpawns, collectScriptsMjs } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'git-env-census.mjs')).href);
+  const { CENSUS_PINS } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'git-env-pins.mjs')).href);
+  const census = scanGitSpawns(collectScriptsMjs(repo), CENSUS_PINS);
   for (const f of census.findings) fail(f);
   if (!census.calls) fail('git spawn census found NO git spawn under scripts/: the locator is dead, and a census that matches nothing reports clean');
-  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.scanned} script file(s): ${census.viaHelper} take gitEnv() directly, ${census.other} a local wrapper or variable (text not verified)`);
+  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.files} script file(s), ${census.safe} read safe; ${census.exempted} blob-pinned file(s) EXEMPT: see scripts/lib/git-env-pins.mjs`);
 } catch (e) { fail(`git spawn census: ${e.message}`); }
 
 console.log('libs (import check):');

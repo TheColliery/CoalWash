@@ -902,3 +902,149 @@ test('#58 (restore): recovering a session whose FULL content holds pre-cut wordi
     assert.strictEqual(r2.laterRemoved, undefined, 'without a registry the restore is unannotated (unchanged behavior)');
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// CWK-162 unit C7 (AI Deep Scan B3 + B6): restoreSession wrote nested files through whatever sits under the destination, and it
+// inflated a gzip into one buffer with no output limit. Witnesses on the 0cde430 source (scratchpad/r14/witness-prefix.txt): a
+// junction planted at <to>/<sid> made the restored file land OUTSIDE the destination with ok:true; a 130,478-byte .gz expanded to
+// 134,217,728 bytes (1029:1) with ok:true. Real archives on this box (read-only probe, n=9): ratio min 2.1, median 2.3, max 3.1,
+// largest inflated 49,544,480 bytes.
+// ---------------------------------------------------------------------------
+import * as EA from './estate-archive.mjs'; // namespace import: a name the pre-fix tree never exported fails an ASSERTION, not the link
+
+const SID_C7 = 'cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee';
+const C7_FLOOR = EA.RESTORE_FLOOR_BYTES ?? 64 * 1024 * 1024; // fallbacks keep a pre-fix tree failing on an ASSERTION, not on a NaN size
+const C7_GZCAP = EA.RESTORE_MAX_GZ_BYTES ?? 256 * 1024 * 1024;
+function c7Archive(files) { // files: { 'rel/under/slug': Buffer } -> an archive dir holding each gzipped under slug/
+  const arch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc7-arch-')));
+  for (const [rel, buf] of Object.entries(files)) {
+    const p = path.join(arch, 'slug', `${rel}.gz`);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, zlib.gzipSync(buf));
+  }
+  return arch;
+}
+function c7Dir(tag) { return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `cwc7-${tag}-`))); }
+
+test('CWK-162 B3: a link planted at <to>/<sid> is refused, and nothing lands outside the destination (witness: ok:true, file written outside)', (t) => {
+  const arch = c7Archive({ [`${SID_C7}/sub.jsonl`]: Buffer.from('RESTORED-BYTES\n') });
+  const to = c7Dir('to');
+  const outside = c7Dir('out');
+  t.after(() => { for (const d of [arch, to, outside]) fs.rmSync(d, { recursive: true, force: true }); });
+  try { fs.symlinkSync(outside, path.join(to, SID_C7), 'junction'); } catch (e) { t.skip(`link creation unavailable here: ${e.code}`); return; }
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /is a link/);
+  assert.deepStrictEqual(fs.readdirSync(outside), [], 'the directory the link points at is untouched');
+});
+
+test('CWK-162 B3: a link planted deeper (<to>/<sid>/subagents) is refused the same way', (t) => {
+  const arch = c7Archive({ [`${SID_C7}/subagents/a.jsonl`]: Buffer.from('DEEP\n') });
+  const to = c7Dir('to');
+  const outside = c7Dir('out');
+  t.after(() => { for (const d of [arch, to, outside]) fs.rmSync(d, { recursive: true, force: true }); });
+  fs.mkdirSync(path.join(to, SID_C7));
+  try { fs.symlinkSync(outside, path.join(to, SID_C7, 'subagents'), 'junction'); } catch (e) { t.skip(`link creation unavailable here: ${e.code}`); return; }
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /is a link/);
+  assert.deepStrictEqual(fs.readdirSync(outside), []);
+});
+
+test('CWK-162 B3 control: a plain destination restores byte-exactly, and a destination ROOT that is itself a link (the user\'s own choice) still works -- only components BELOW it are checked', (t) => {
+  const bytes = Buffer.from('line one\nline two\n');
+  const arch = c7Archive({ [`${SID_C7}/sub.jsonl`]: bytes, [`${SID_C7}/subagents/a.jsonl`]: bytes });
+  const real = c7Dir('real');
+  const holder = c7Dir('holder');
+  t.after(() => { for (const d of [arch, real, holder]) fs.rmSync(d, { recursive: true, force: true }); });
+  const plain = restoreSession(SID_C7, { archiveDir: arch, to: path.join(real, 'plain') });
+  assert.strictEqual(plain.ok, true, JSON.stringify(plain));
+  assert.ok(fs.readFileSync(path.join(real, 'plain', SID_C7, 'sub.jsonl')).equals(bytes));
+  assert.ok(fs.readFileSync(path.join(real, 'plain', SID_C7, 'subagents', 'a.jsonl')).equals(bytes));
+  const linkRoot = path.join(holder, 'rootlink');
+  try { fs.symlinkSync(real, linkRoot, 'junction'); } catch { return; /* the control's second half needs a link; the first half ran */ }
+  const viaLink = restoreSession(SID_C7, { archiveDir: arch, to: linkRoot });
+  assert.strictEqual(viaLink.ok, true, JSON.stringify(viaLink));
+  assert.ok(fs.readFileSync(path.join(real, SID_C7, 'sub.jsonl')).equals(bytes), 'it landed in the real directory the root pointed at');
+});
+
+test('CWK-162 B6: the restore bounds exist (floor, ratio, ceiling, compressed-size cap)', () => {
+  for (const n of ['RESTORE_FLOOR_BYTES', 'RESTORE_MAX_RATIO', 'RESTORE_CEIL_BYTES', 'RESTORE_MAX_GZ_BYTES']) assert.ok(Number.isInteger(EA[n]) && EA[n] > 0, `${n} = ${EA[n]}`);
+  assert.strictEqual(typeof EA.restoreInflateBound, 'function');
+  assert.strictEqual(EA.restoreInflateBound(1000), EA.RESTORE_FLOOR_BYTES, 'a tiny archive gets the floor');
+  assert.strictEqual(EA.restoreInflateBound(10 * 1024 * 1024), 10 * 1024 * 1024 * EA.RESTORE_MAX_RATIO, 'a mid-size archive gets the ratio');
+  assert.strictEqual(EA.restoreInflateBound(EA.RESTORE_MAX_GZ_BYTES), EA.RESTORE_CEIL_BYTES, 'and never more than the ceiling');
+  assert.ok(EA.RESTORE_MAX_RATIO >= 20 * 3.1, 'the ratio bound leaves at least 20x headroom over the largest ratio measured on real archives (3.1)');
+});
+
+test('CWK-162 B6: an archive that inflates past the bound is REFUSED, not expanded (witness: 130 KB -> 128 MiB, ok:true)', (t) => {
+  const over = C7_FLOOR + 16 * 1024 * 1024; // past the floor, and a ratio of ~1000:1
+  const arch = c7Archive({ [`${SID_C7}.jsonl`]: Buffer.alloc(over) });
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
+  assert.match(r.error, /inflate/);
+  assert.strictEqual(fs.existsSync(path.join(to, `${SID_C7}.jsonl`)), false, 'nothing was written');
+});
+
+test('CWK-162 B6 control: the FLOOR is a real term -- a high-ratio archive that inflates to less than the floor still restores', (t) => {
+  const under = 24 * 1024 * 1024; // ~1000:1, but well under the floor
+  const arch = c7Archive({ [`${SID_C7}.jsonl`]: Buffer.alloc(under) });
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, true, JSON.stringify(r).slice(0, 200));
+  assert.strictEqual(fs.statSync(path.join(to, `${SID_C7}.jsonl`)).size, under);
+});
+
+// R14 INSPECT NIT 3, reworked at R15 (CodeQL #47/#50): the size bound used to read the size with statSync and then read the file by path, so a
+// file that grew (or was swapped) between the two was read whole; NIT 3 added a length check AFTER the read. The archive is now opened first
+// and its size is judged on the HANDLE, and only that many bytes plus one probe byte are read through it. Witness: the handle reports 1 byte
+// and the file is one byte over the cap; a read of 1 byte plus the probe finds more, and the restore is refused without reading the file.
+test('R14 NIT 3 / R15 (B6): a compressed file that grew past the size its handle reported is refused, and only that many bytes plus one probe byte are read', (t) => {
+  const arch = c7Dir('arch');
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const gz = path.join(arch, 'slug', `${SID_C7}.jsonl.gz`);
+  fs.mkdirSync(path.dirname(gz), { recursive: true });
+  const fd = fs.openSync(gz, 'w');
+  try { fs.ftruncateSync(fd, C7_GZCAP + 1); } finally { fs.closeSync(fd); }
+  const realOpen = fs.openSync;
+  const realFstat = fs.fstatSync;
+  const realReadSync = fs.readSync;
+  let gzFd = null;
+  const asked = [];
+  fs.openSync = function spy(p, ...rest) { const h = realOpen.call(fs, p, ...rest); if (String(p) === gz) gzFd = h; return h; };
+  fs.fstatSync = function spy(h, ...rest) { return h === gzFd ? { size: 1, isFile: () => true } : realFstat.call(fs, h, ...rest); };
+  fs.readSync = function spy(h, buf, off, len, ...rest) { if (h === gzFd) asked.push(len); return realReadSync.call(fs, h, buf, off, len, ...rest); };
+  let r;
+  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.openSync = realOpen; fs.fstatSync = realFstat; fs.readSync = realReadSync; }
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
+  assert.match(r.error, /compressed/, 'refused as longer than the handle reported, not as a gzip parse error');
+  assert.match(r.error, /grew/);
+  assert.deepStrictEqual(asked, [1, 1], 'one byte for the 1 reported, one probe byte, never the whole file');
+});
+
+test('CWK-162 B6: a compressed file over RESTORE_MAX_GZ_BYTES is refused by its size, before it is read', (t) => {
+  const arch = c7Dir('arch');
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const gz = path.join(arch, 'slug', `${SID_C7}.jsonl.gz`);
+  fs.mkdirSync(path.dirname(gz), { recursive: true });
+  const fd = fs.openSync(gz, 'w');
+  try { fs.ftruncateSync(fd, C7_GZCAP + 1); } finally { fs.closeSync(fd); }
+  const real = fs.readFileSync;
+  const realReadSync = fs.readSync;
+  const realOpen = fs.openSync;
+  let readIt = false;
+  let gzFd = null;
+  fs.readFileSync = function spy(p, ...rest) { if (String(p) === gz) readIt = true; return real.call(fs, p, ...rest); };
+  fs.openSync = function spy(p, ...rest) { const h = realOpen.call(fs, p, ...rest); if (String(p) === gz) gzFd = h; return h; };
+  fs.readSync = function spy(h, ...rest) { if (h === gzFd) readIt = true; return realReadSync.call(fs, h, ...rest); };
+  let r;
+  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.readFileSync = real; fs.openSync = realOpen; fs.readSync = realReadSync; }
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
+  assert.match(r.error, /compressed/);
+  assert.strictEqual(readIt, false, 'its bytes were never read, by path or through the handle');
+});

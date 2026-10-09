@@ -46,6 +46,24 @@ test('the UNWIRED class-A engine never ships: absent from a fresh dist, checkDis
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
+test('CWK-174: the dev-only libs (the house secret scan, the release-shape deriver) never ship: absent from a fresh dist, checkDist still PASSES with them in source, and a hand-copied one fails loud', () => {
+  const dist = scratchDist();
+  try {
+    buildDist(dist);
+    for (const name of ['secret-scan.mjs', 'release-shape.mjs']) {
+      assert.ok(fs.existsSync(path.join(repoRoot, 'scripts', 'lib', name)), `${name} IS in source (a byte-equal org carrier, gated by the suite)`);
+      assert.strictEqual(fs.existsSync(path.join(dist, 'scripts', 'lib', name)), false, `${name} is NOT in the dist (commit-gate and release tooling, not plugin payload)`);
+    }
+    assert.deepStrictEqual(checkDist(dist), [], 'source-present + dist-absent is IN SYNC: the exclusion is what makes verify PASS');
+    // ...and the exclusion is not a blind spot: a hand-copied dev-only lib in the dist is caught.
+    for (const name of ['secret-scan.mjs', 'release-shape.mjs']) {
+      fs.copyFileSync(path.join(repoRoot, 'scripts', 'lib', name), path.join(dist, 'scripts', 'lib', name));
+      assert.ok(checkDist(dist).some((d) => d.includes('dev-only lib present in plugin/') && d.includes(name)), `a leaked ${name} fails loud`);
+      fs.rmSync(path.join(dist, 'scripts', 'lib', name));
+    }
+  } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
 test('checkDist fails loud in both directions: stale file and orphan', () => {
   const dist = scratchDist();
   try {

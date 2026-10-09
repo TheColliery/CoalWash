@@ -51,6 +51,7 @@ const TRUSTED_ROOTS = new Map([
 // never appear in a root position"; refusing these would break a real control.
 const LEGAL_NARROWINGS = new Map([
   ['jroots', 'journal.roots — only ever ANDed with trustedRoots on the same call (apply.mjs recoverDangling)'],
+  ['[physSnap]', 'the journal\'s snapDir (journal-derived) — only ever ANDed with [txPhys], the caller-derived tx dir, on the same line (apply.mjs gitTrackedRecoveryInputs, R14 D3): it narrows which tracked paths count as the snapshot, and the snapDir binding in recoverDangling still refuses one outside the tx dir'],
 ]);
 
 // The THIRD legal pattern, which the first cut of this gate wrongly folded into

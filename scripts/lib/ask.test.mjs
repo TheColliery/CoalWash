@@ -348,3 +348,50 @@ test('CWK-081: a DISCOVERED capacity is labelled as discovered on both capacity 
   assert.ok(adv.includes('discovered from stats-cache'), adv);
   assert.ok(!adv.includes('CONSERVATIVE DEFAULT'));
 });
+
+// ---------------------------------------------------------------------------
+// CWK-162 unit C5 (AI Deep Scan A6): the restore example embedded the guarded file's path inside double quotes. The file name
+// is repo-controlled and the line is text an agent is told to act on. Witness on the 0cde430 source (scratchpad/r14/witness-prefix.txt):
+// for a guarded file named $(touch PWNED).md the advisory emitted
+//   node scripts/lib/cli.mjs writeguard-restore snap-abc > "/proj/.claude/rules/$(touch PWNED).md"
+// ---------------------------------------------------------------------------
+const restoreCommands = (s) => s.match(/`node scripts\/lib\/cli\.mjs writeguard-restore[^`]*`/g) || [];
+
+test('CWK-162 A6: a guarded file whose name is shell syntax gets NO path interpolated into any command; the placeholder form and the snapshot pointer stay', () => {
+  const snap = '/p/.claude/coalwash/writeguard/s/snap-abc';
+  const hostile = [
+    '/proj/.claude/rules/$(touch PWNED).md',
+    '/proj/rules/`id`.md',
+    '/proj/rules/a"; rm -rf ~; ".md',
+    '/proj/rules/a\nb.md',
+    '/proj/rules/x;y.md',
+    '/proj/rules/a&b.md',
+    '/proj/rules/it\'s.md',
+    '/proj/rules/$HOME.md',
+    'C:\\proj\\rules\\dir\\',
+    '(unknown file)',
+  ];
+  for (const f of hostile) {
+    const r = seatbeltAdvisory({ file: f, classes: ['links'], snapshotPath: snap });
+    for (const cmd of restoreCommands(r)) {
+      assert.ok(!cmd.includes(f), `the path is interpolated into a command for ${JSON.stringify(f)}: ${cmd}`);
+      assert.ok(!/\s>\s/.test(cmd), `no redirect target for ${JSON.stringify(f)}: ${cmd}`);
+    }
+    assert.ok(r.includes('writeguard-restore <the snapshot file name above>'), `the placeholder form for ${JSON.stringify(f)}`);
+    assert.ok(r.includes(snap), 'the snapshot pointer stays');
+  }
+});
+
+test('CWK-162 A6: plain names keep the ready-made line, in any script (control: the fix is not "never print it")', () => {
+  const snap = '/p/.claude/coalwash/writeguard/s/snap-abc';
+  for (const f of ['/p/MEMORY.md', 'C:\\proj\\notes file.md', '/proj/rules/my-rule_v2.1.md', '/proj/\u0e01\u0e0e/\u0e04\u0e27\u0e32\u0e21\u0e08\u0e33.md', '/proj/r\u00e4gler/\u00fcber.md']) {
+    const r = seatbeltAdvisory({ file: f, classes: ['links'], snapshotPath: snap });
+    assert.ok(restoreCommands(r).some((c) => c.includes(`> "${f}"`)), `the one-liner for ${JSON.stringify(f)}: ${r}`);
+  }
+});
+
+test('CWK-162 A6: a snapshot file name that is shell syntax also removes the ready-made line', () => {
+  const r = seatbeltAdvisory({ file: '/p/MEMORY.md', classes: ['links'], snapshotPath: '/p/.claude/coalwash/writeguard/s/snap-$(id)' });
+  for (const cmd of restoreCommands(r)) assert.ok(!cmd.includes('$(id)') && !/\s>\s/.test(cmd), cmd);
+  assert.ok(r.includes('writeguard-restore <the snapshot file name above>'));
+});

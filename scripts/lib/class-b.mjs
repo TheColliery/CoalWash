@@ -44,9 +44,30 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape, repoEntryKind, repoReadOutcome, readRepoBytesBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape, repoEntryKind, repoReadOutcome, readRepoBytesBounded, volumeCaseFolds, MAX_DOC_BYTES } from './config-load.mjs';
 
 const IMPORT_DEPTH_MAX = 5; // CC @import recursion cap (docs: max 5 hops)
+// CWK-162 (AI Deep Scan A3): the closure had a DEPTH cap and no visited set, so one CLAUDE.md of 8 self-imports was read
+// 4,681 times (1+8+8^2+8^3+8^4) at SessionStart. Every physical file is now expanded once per depth improvement, and the
+// TOTAL number of @import edges followed in one discovery is capped. 500 = 20x the largest real closure measured on this
+// box (25 governance files at the umbrella root, 2026-10-02). Hitting it FLAGS and stops following: the rest is NOT
+// measured, which is the room's stated fail direction (undercount: unseen = unmeasured = uncut).
+export const IMPORT_EDGES_MAX = 500;
+
+// CWK-162 (AI Deep Scan A2): the managedPaths signal compared every entry against every configured prefix with a
+// startsWith each (linear in prefixes x entries, 80,000 prefixes fit under the 1 MiB config read cap). Same predicate,
+// indexed: `rel === pfx || rel.startsWith(pfx ends with "/" ? pfx : pfx + "/")` is "rel equals a prefix, or one of rel's
+// slash-terminated ancestors IS a prefix with a slash". An equivalence sweep in class-b.test.mjs pins it to the old expression.
+export function managedMatcher(prefixes) {
+  const exact = new Set();
+  const dirs = new Set();
+  for (const pfx of prefixes) { exact.add(pfx); dirs.add(pfx.endsWith('/') ? pfx : pfx + '/'); }
+  return (rel) => {
+    if (exact.has(rel)) return true;
+    for (let i = rel.indexOf('/'); i >= 0; i = rel.indexOf('/', i + 1)) if (dirs.has(rel.slice(0, i + 1))) return true;
+    return false;
+  };
+}
 const RULES_FILE_CAP = 500; // defensive cap on a runaway rules tree
 
 // The conservative fallback flag for a non-Claude-Code platform. ONE source of
@@ -421,9 +442,26 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // mutation exposure in one move, and leaves the cost REPORTABLE (returned as
   // its own field) rather than invisible.
   const inherited = [];
-  // Windows paths are case-insensitive -> lowercase the dedupe key there ONLY
-  // (lowercasing on POSIX would wrongly merge two case-distinct files).
-  const dedupeKey = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  // CWK-156: two spellings of one path are ONE entry only where the VOLUME folds case
+  // (node/runtime.md section 4: a volume property, never `process.platform` -- wrong in both
+  // directions: APFS folds and is not win32, an fsutil-enabled NTFS directory does not).
+  // `phys` is already canonical (physicalOrNull), so equal strings dedupe with no probe; the
+  // probe runs only when a DIFFERENT spelling with the same lowercase is already seen, which
+  // keeps the SessionStart walk free of extra stats in the ordinary case.
+  // MISS DIRECTION = true (an undecidable probe merges): a merge can only DROP an entry from
+  // the measurement -- this room's stated fail direction is undercount (unseen = unmeasured =
+  // uncut), while a wrong split would hand the wash the same file twice, on a tool that deletes.
+  const seenByLower = new Map(); // lowercased phys -> [phys, ...] already added
+  const isSeen = (phys) => {
+    if (seen.has(phys)) return true;
+    return seenByLower.has(phys.toLowerCase()) && volumeCaseFolds(phys, true);
+  };
+  const markSeen = (phys) => {
+    seen.add(phys);
+    const k = phys.toLowerCase();
+    const bucket = seenByLower.get(k);
+    if (bucket) bucket.push(phys); else seenByLower.set(k, [phys]);
+  };
   // rules-tree entries only, tracked separately for the byte-identical-
   // across-roots cross-check below (relTail = the path under its OWN
   // rules root, forward-slashed — the generalizable pairing key: never
@@ -464,7 +502,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       flags.push(`skipped (outside home/project trees): ${candidate}`);
       return null;
     }
-    if (seen.has(dedupeKey(phys))) return phys;
+    if (isSeen(phys)) return phys;
     const bytes = statBytes(phys);
     if (bytes == null) {
       // Same class, one call later: `phys` canonicalized, so the file EXISTED a
@@ -472,19 +510,30 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       flags.push(`unstattable file: ${relLabel(phys, [projPhys, homePhys])} — its bytes are NOT counted`);
       return null;
     }
-    seen.add(dedupeKey(phys));
+    markSeen(phys);
     const isInherited = upTree && projPhys && !containedIn(phys, [projPhys]);
     (isInherited ? inherited : entries).push({ path: phys, bytes, scope, kind, alwaysLoaded, managed: false });
     return phys;
   };
 
   // A governance file + its @import closure (depth-capped, cycle-safe).
+  // CWK-162 A3: `expandedAt` maps a physical file to the SHALLOWEST depth its imports were already followed from. A plain
+  // visited set would be wrong here: the first route to a file can be a deep one (depth 5 is added but never expanded), and a
+  // later root reaching the same file at depth 1 must still expand it, or its closure silently shrinks. So a file is expanded
+  // again only when reached SHALLOWER than before (at most IMPORT_DEPTH_MAX + 1 times), which keeps the closure exactly the
+  // set of files within IMPORT_DEPTH_MAX hops of a root, with no walk repeated.
+  const expandedAt = new Map();
+  let edgesFollowed = 0;
+  let edgeCapFlagged = false;
   const addWithImports = (file, scope, upTree = false) => {
     const queue = [{ file, depth: 0 }];
     while (queue.length) {
       const { file: f, depth } = queue.shift();
       const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true, upTree });
       if (!phys || depth >= IMPORT_DEPTH_MAX) continue;
+      const prior = expandedAt.get(phys);
+      if (prior !== undefined && prior <= depth) continue; // its imports were already followed from here or shallower
+      expandedAt.set(phys, depth);
       // CWK-137: BOUNDED and kind-gated. `phys` is already contained (add() above), so
       // no root here -- but an @import may name ANY file under home (`@~/big.iso`), and a
       // plain readFileSync read it whole. Over MAX_DOC_BYTES, or not a regular file, it is
@@ -534,7 +583,15 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
         flags.push(`unreadable governance file: ${relLabel(phys, [projPhys, homePhys])} [${code}] — its own bytes ARE counted, its @import closure is NOT`);
         continue;
       }
-      for (const imp of parseImports(text, path.dirname(phys), home)) {
+      for (const imp of new Set(parseImports(text, path.dirname(phys), home))) {
+        if (edgesFollowed >= IMPORT_EDGES_MAX) {
+          if (!edgeCapFlagged) {
+            edgeCapFlagged = true;
+            flags.push(`@import closure capped: ${IMPORT_EDGES_MAX} imports followed in one discovery, the rest are NOT measured`);
+          }
+          break;
+        }
+        edgesFollowed++;
         queue.push({ file: imp, depth: depth + 1 });
       }
     }
@@ -748,12 +805,13 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   if (Array.isArray(managedPaths) && managedPaths.length) {
     const prefixes = managedPaths.filter((s) => typeof s === 'string' && s).map((s) => s.split(path.sep).join('/'));
     if (prefixes.length) {
+      const isManaged = managedMatcher(prefixes);
       for (const e of entries) {
         if (e.managed) continue; // already tagged by signal (1)
         const scopeRoot = e.scope === 'global' ? homePhys : projPhys;
         if (!scopeRoot) continue;
         const rel = path.relative(scopeRoot, e.path).split(path.sep).join('/');
-        if (prefixes.some((pfx) => rel === pfx || rel.startsWith(pfx.endsWith('/') ? pfx : pfx + '/'))) e.managed = true;
+        if (isManaged(rel)) e.managed = true;
       }
     }
   }

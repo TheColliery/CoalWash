@@ -80,7 +80,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig } from './lib/config-schema.mjs';
 import { parseJsonc } from './lib/jsonc.mjs';
-import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig, findProjectRoot, repoReadOutcome, MAX_CONFIG_BYTES, GLOBAL_ONLY_KEYS } from './lib/config-load.mjs';
+import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig, findProjectRoot, repoReadOutcome, MAX_CONFIG_BYTES, GLOBAL_ONLY_KEYS, PROJECT_BOUNDED_KEYS } from './lib/config-load.mjs';
 import { writeRepoFile, RepoWriteRefused } from './lib/repo-fs.mjs';
 
 // Prototype-pollution guard. `parseJsonc` already drops these at PARSE (so a
@@ -587,6 +587,15 @@ function main() {
         // CWK-137 D3: a REACH key, not a consent key -- no "safer value" is involved, so the consent-clamp story below would be false.
         console.warn('  This key is read from the GLOBAL config only: a cloned repo ships a project config,');
         console.warn('  and it must not be able to choose where your own session transcripts are archived.');
+      } else if (PROJECT_BOUNDED_KEYS.includes(c.key)) {
+        // R14 E1: a value a project may move in one direction only (config-load.mjs mergeObjectKey): a runBudget field and purgeAfterDays
+        // only LOWER, compressAfterDays only RAISE -- not a consent value either, so each key gets its own reason.
+        console.warn(c.key === 'estate.purgeAfterDays'
+          ? '  A project config may only bring the cold boundary earlier (at or below your own purgeAfterDays; 0, "never cold", counts as the highest), whether or not estate.deleteCold is true in your own config,'
+          : c.key === 'estate.compressAfterDays'
+            ? '  A project config may only keep sessions active longer (at or above your own compressAfterDays), whether or not estate.deleteCold is true in your own config,'
+            : '  A project config may only LOWER a work limit, with a number the schema accepts,');
+        console.warn('  because a cloned repo ships a project config and it must not be able to widen what an estate run archives and removes.');
       } else {
         console.warn('  A consent-bearing key merges SAFER-VALUE-WINS (hooks-safety.md §9): a project');
         console.warn('  config may make it quieter, never weaker, because a cloned repo ships a project');

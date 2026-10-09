@@ -83,13 +83,14 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 // findProjectRoot/physicalDir: the room's ONE root resolver — the stray-state
 // detector re-uses it rather than hand-rolling a second walk.
-import { claudeBaseDir, findProjectRoot, physicalDir, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, physicalDir, readRepoFileBounded, MAX_DOC_BYTES, MAX_CONFIG_BYTES } from './config-load.mjs';
 import { parseJsonc } from './jsonc.mjs';
 // task #13 (OS-citizen state): the per-project state path RIDES the CC memory
 // dir, so we reuse the SAME adapter discovery computes (ccMemoryDir/ccProjectSlug)
 // + the SAME realpath containment primitives (physicalOrNull/containedIn) the
 // write path uses — never a re-hardcoded path or a hand-rolled containment.
 import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
+import { openPlainFile } from './repo-fs.mjs';
 
 // ---------------------------------------------------------------------------
 // constants — PLACEHOLDERS, calibrate at the fidelity benchmark (2026-07-08
@@ -136,16 +137,32 @@ export const FLOOR_MIN_TOKENS = 2500;
 // discoverCapacity() below, and every caller that can reach it should.
 //
 // THE TWO TERMS, each sourced rather than guessed:
-//   (a) 200,000 — the SMALLEST window a supported Claude Code session runs on.
-//       This file's own prior comment already recorded the range ("a 200k
-//       standard to a 1M-token beta ceiling depending on tier/org"), so the
-//       lower bound is this room's own recorded figure, not a fresh guess.
-//       SMALLEST is the conservative direction for a CEILING: assuming the 1M
-//       beta on a 200k session leaves CoalWash silent while the session is
-//       genuinely out of room (the CWK-086 shape — a governance layer that grew
-//       past what the platform could load, with nothing warning), whereas
-//       assuming 200k on a 1M session costs one early FULL band, which routes
-//       to a free mechanical sweep and one ask, never to data loss.
+//   (a) 200,000 — the window this code DEFAULTS to when it discovers none
+//       (CAPACITY_TOKENS, 167,000 usable). Discovery itself accepts a
+//       reported raw window from 133,000 (100,000 usable) up to 5,000,000:
+//       CAPACITY_DISCOVERY_MIN_TOKENS/_MAX_TOKENS and usableFromRawWindow,
+//       below. The default is still a live window: Opus 4.8 and later can run
+//       with a 200K context window on platforms such as Amazon Bedrock,
+//       Google Cloud's Agent Platform and Microsoft Foundry, and
+//       CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds the native-1M models at the
+//       200K boundary (Claude Code's model configuration page, read
+//       2026-10-08). It is NOT the smallest window a session can compact at:
+//       a user may set a smaller auto-compact window
+//       (/autocompact and --autocompact accept 100K to 1M; the
+//       autoCompactWindow setting and CLAUDE_CODE_AUTO_COMPACT_WINDOW set the
+//       same window), and this code does not read that setting today, so on
+//       such a session this default overstates the room. That residual is
+//       named, not closed.
+//       History: this file's earlier comment recorded the range as "a 200k
+//       standard to a 1M-token beta ceiling depending on tier/org". On the
+//       Anthropic API the current models now run the 1M window on every plan.
+//       The smaller window is the conservative direction for a CEILING:
+//       assuming a 1M window on a 200k session leaves CoalWash silent while
+//       the session is genuinely out of room (the CWK-086 shape — a governance
+//       layer that grew past what the platform could load, with nothing
+//       warning), whereas assuming 200k on a 1M session costs one early FULL
+//       band, which routes to a free mechanical sweep and one ask, never to
+//       data loss.
 //   (b) 33,000 — the AUTO-COMPACT RESERVE, measured by this room's own record:
 //       a 1M-window model reports 967k usable in the platform's own /context
 //       readout. The denominator is the USABLE window, never the raw one, so
@@ -772,6 +789,8 @@ export function oldStatePath(home = os.homedir()) {
 //
 // THE PROBE ORDER IS WRITTEN DOWN so a platform that starts exposing a window
 // is picked up BY CONSTRUCTION rather than by someone remembering to look:
+//   P0  the session's AUTO-COMPACT WINDOW (fire 32, at probeCompactWindow below):
+//       read beside P1/P2 and the default, and taken whenever it is smaller.
 //   P1  <claudeBase>/stats-cache.json -> modelUsage[<model>].contextWindow.
 //       Real, structured, in-sandbox (Phoenix #10: ~/.claude/), zero-dep, no
 //       network, one small JSON. MEASURED ON THIS BOX 2026-09-10: the field
@@ -903,8 +922,69 @@ function probeCapacityFile(home) {
 function conservativeCapacity() {
   return { capacityTokens: CAPACITY_TOKENS, source: 'conservative-default', discovered: false };
 }
-export function discoverCapacity({ home = os.homedir() } = {}) {
-  return probeStatsCache(home) || probeCapacityFile(home) || conservativeCapacity();
+// P0 (08c/08d unit 2, fire 32): THE SESSION'S AUTO-COMPACT WINDOW. Claude Code compacts when the conversation reaches it ("how full
+// the context window can get before Claude Code compacts", cc-model-config), so it IS the denominator, with no reserve to take off: a
+// session compacting at 100K read a 167,000 wall here, or 967,000 with a 1M cache, before this probe (scratchpad/08b/cap100k.mjs).
+// Read from:
+//   - CLAUDE_CODE_AUTO_COMPACT_WINDOW in the hook's environment (measured 2026-10-09, Claude Code 2.1.295: a session launched with it
+//     hands it to a hook, and the settings value never reaches a hook's env), as Claude Code reads it: its leading digits (`500k` is
+//     500, env-vars.md), clamped to 100K..1M. When it is readable it is the session's window ALONE: it "takes precedence over the
+//     command, the flag, and the setting" (cc-model-config), so the settings are not read (fire 33, R27-2);
+//   - otherwise the top-level `autoCompactWindow` of the user settings (<claudeBase>/settings.json) and of the project's
+//     .claude/settings.json and .claude/settings.local.json, and every `modelSettings.<model>.autoCompactWindow` (v2.1.288+) of the
+//     USER settings only: a project file, which a cloned repo writes, keeps only its top-level key (fire 34, P1 (B)). Every file is
+//     read bounded (MAX_CONFIG_BYTES; the user file too, fire 34, AS1 (a)), the project files inside the root findProjectRoot
+//     resolves (the gauge's own anchor). A settings value counts only as the vendor's settings
+//     type, an integer from 100,000 to 1,000,000; "auto", any string, a non-integer or an out-of-range number is no window (R27-1).
+// The window is taken against the one the other probes found: a readable smaller window wins, a larger one never raises it (Claude
+// Code also caps the window at the model's). Across the settings, the MIN, as P1 takes it. That MIN IS the direction clamp
+// hooks-safety section 9 asks of a cloned project: a project window above the user's, or above the default an absent user window
+// leaves, changes nothing; a lower one wins. Unparseable, absent or unreadable = no window, never a guess.
+// THE RESIDUAL, named: a launch's --autocompact flag (Claude Code's own argv, which a hook cannot read), a managed-settings scope, and
+// a window given only in a launch's --settings file are unread; on such a session the wall stays where the other probes put it.
+// And a hook has no reliable model identity, so a per-model value, read from the USER settings only, is taken as a MIN across models:
+// a session on a model with a larger per-model window, or with none, reads the smallest window the user saved for any model; a
+// project's modelSettings is not read at all, so a per-model window saved only in a project file is unread too.
+export const AUTO_COMPACT_WINDOW_MIN_TOKENS = 100000;
+export const AUTO_COMPACT_WINDOW_MAX_TOKENS = 1000000;
+function envCompactWindow(v) {
+  const n = typeof v === 'string' ? Number.parseInt(v, 10) : Number.NaN;
+  return Number.isFinite(n) ? Math.min(AUTO_COMPACT_WINDOW_MAX_TOKENS, Math.max(AUTO_COMPACT_WINDOW_MIN_TOKENS, n)) : null;
+}
+function settingsCompactWindow(v) {
+  return Number.isInteger(v) && v >= AUTO_COMPACT_WINDOW_MIN_TOKENS && v <= AUTO_COMPACT_WINDOW_MAX_TOKENS ? v : null;
+}
+function settingsWindows(j, perModel) {
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return [];
+  const raw = [j.autoCompactWindow];
+  const ms = j.modelSettings;
+  if (perModel && ms && typeof ms === 'object' && !Array.isArray(ms)) {
+    for (const m of Object.values(ms)) if (m && typeof m === 'object' && !Array.isArray(m)) raw.push(m.autoCompactWindow);
+  }
+  return raw.map(settingsCompactWindow).filter((w) => w !== null);
+}
+// A settings file, read bounded (MAX_CONFIG_BYTES) and parsed; null when absent, refused, over the bound or unparseable. `root` null = the
+// user's own file, which no project root contains (a project file is read inside its root).
+function readSettings(file, root) {
+  const text = readRepoFileBounded(file, root, MAX_CONFIG_BYTES);
+  try { return text === null ? null : parseJsonc(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text); } catch { return null; } // unparseable = no window
+}
+function probeCompactWindow(home, projectRoot, env) {
+  try {
+    const fromEnv = envCompactWindow(env ? env.CLAUDE_CODE_AUTO_COMPACT_WINDOW : undefined);
+    if (fromEnv !== null) return fromEnv; // the env takes precedence over every setting
+    const found = settingsWindows(readSettings(path.join(claudeBaseDir(home), 'settings.json'), null), true);
+    const root = projectRoot ?? findProjectRoot(process.cwd(), home);
+    for (const name of ['settings.json', 'settings.local.json']) found.push(...settingsWindows(readSettings(path.join(root, '.claude', name), root), false));
+    return found.length ? Math.min(...found) : null;
+  } catch {
+    return null; // any doubt -> no window, the other probes answer (Phoenix #4)
+  }
+}
+export function discoverCapacity({ home = os.homedir(), projectRoot, env = process.env } = {}) {
+  const found = probeStatsCache(home) || probeCapacityFile(home) || conservativeCapacity();
+  const window = probeCompactWindow(home, projectRoot, env);
+  return window !== null && window < found.capacityTokens ? { capacityTokens: window, source: 'auto-compact-window', discovered: true } : found;
 }
 
 function projKey(projectRoot) {
@@ -1104,7 +1184,8 @@ function rmdirIfEmpty(dir) {
 // one thing that is both load-independent and cannot pass vacuously.
 export const __testHooks = {
   strayPruneCalls: 0,
-  reset() { this.strayPruneCalls = 0; },
+  deadStateSweepCalls: 0, // CWK-157: the dead-root sweep below is bounded by a stamp; counting calls is the load-independent pin
+  reset() { this.strayPruneCalls = 0; this.deadStateSweepCalls = 0; },
 };
 
 // Self-clean CW's OWN pre-fix scatter (no-old-version-leftover, rc.3 precedent):
@@ -1159,6 +1240,119 @@ function pruneStrayStateDirs(projectRoot, home) {
   } catch { /* fail-silent — cleanup is best-effort, never blocks a write */ }
 }
 
+// CWK-157 -- the writer's self-clean for a state file keyed by a project root that has VANISHED (hooks-safety.md section 8:
+// self-clean the tool's own stray state on write). pruneStrayStateDirs above covers a stray cwd INSIDE a live project; a state
+// file for a root that no longer exists at all (a deleted worktree, a removed checkout, a temp fixture) was never collected,
+// and the coal/coalwash/ namespace carried 16 such tombstones of 20 (main's survey 2026-09-26).
+//
+// NARROW BY CONSTRUCTION -- every clause below is a reason a file is LEFT ALONE:
+//   - only a regular file (lstat: never a link) in OUR directory, named `state-<slug>.json`, at most 1 MiB;
+//   - it must parse as an object carrying OUR shape: an integer `stateSchema` and an absolute `projectRoot` string, and its
+//     name must BE that root's own slug (the anti-plant check pruneStrayStateDirs uses: a planted file cannot nominate
+//     another file for deletion). Foreign, unparseable, oversized or shapeless = untouched;
+//   - the root is DEAD only by rootIsGone's three-part test below (absent, nearest live ancestor reachable, and that ancestor
+//     inside the user's home or the OS temp dir). EACCES, EPERM, EIO, a timeout, a missing drive, an unmounted volume or an
+//     offline share all read "cannot check", and cannot check means ALIVE: keep.
+// Read-only half (deadProjectStateFiles) is exported so the head can list what WOULD go without deleting anything.
+const STATE_FILE_RE = /^state-[A-Za-z0-9-]+\.json$/;
+const STATE_FILE_MAX_BYTES = 1048576;
+const STATE_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0); // openPlainFile's flags for a state file: no hang on a FIFO, no followed link where the platform has O_NOFOLLOW
+// What stat says about a path: 'present', 'absent' (ENOENT/ENOTDIR only) or 'unknown' (EACCES, EPERM, EIO, a timeout ...).
+// `statSyncFn` is a test seam (an injected EACCES cannot be built portably); production passes nothing.
+// R14 F-R14-4: stat FOLLOWS a link, so a root that is a link (a junction or a mount-point folder) whose target is gone answers ENOENT.
+// The root itself is THERE; what is missing is what it points at (a detached drive, an unmounted volume), which is "cannot tell it from
+// deleted", and cannot check means ALIVE. So an ENOENT/ENOTDIR from stat is confirmed with lstat (which does not follow): found = present.
+export function rootState(root, statSyncFn = fs.statSync) {
+  try { statSyncFn(root); return 'present'; } catch (e) {
+    if (!(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR'))) return 'unknown';
+  }
+  try { fs.lstatSync(root); return 'present'; } catch (e) {
+    return e && (e.code === 'ENOENT' || e.code === 'ENOTDIR') ? 'absent' : 'unknown';
+  }
+}
+// The nearest EXISTING DIRECTORY above an absent path, or null when the walk meets an 'unknown' answer, a non-directory,
+// or the top of the tree.
+function nearestLiveAncestor(root) {
+  let cur = root;
+  for (;;) {
+    const up = path.dirname(cur);
+    if (up === cur) return null;
+    const st = rootState(up);
+    if (st === 'unknown') return null;
+    if (st === 'present') { try { return fs.statSync(up).isDirectory() ? up : null; } catch { return null; } }
+    cur = up;
+  }
+}
+// DEAD means three things at once, and anything less keeps the file: (1) the root itself is 'absent'; (2) walking up, the
+// nearest directory that still exists is reachable; (3) that directory sits INSIDE one of `anchors` (the user's home and the
+// OS temp dir -- the places this tool's roots live). Clause (3) is how "deleted" is told from "detached": a missing drive
+// letter, an unmounted /Volumes entry or an offline share leaves its nearest live ancestor at (or above) a filesystem root,
+// outside both anchors, so it can never read as dead. NAMED RESIDUAL, the safe direction: a project deleted outright from a
+// second internal drive is kept forever (a ~300-byte file), because that cannot be told from a drive that is not mounted.
+export function rootIsGone(root, anchors, statSyncFn = fs.statSync) {
+  if (rootState(root, statSyncFn) !== 'absent') return false;
+  const anc = nearestLiveAncestor(root);
+  const ancPhys = anc && physicalOrNull(anc);
+  if (!ancPhys) return false;
+  // `roots` = the caller-derived anchors parameter (the user's home and the OS temp dir), physical forms; never read from a file.
+  const roots = (Array.isArray(anchors) ? anchors : []).map(physicalOrNull).filter(Boolean);
+  return containedIn(ancPhys, roots);
+}
+export function deadProjectStateFiles(home = os.homedir()) {
+  const dir = path.join(claudeBaseDir(home), 'coal', 'coalwash');
+  const out = [];
+  const anchors = [home, os.tmpdir()];
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return out; }
+  for (const name of names) {
+    if (!STATE_FILE_RE.test(name)) continue;
+    const file = path.join(dir, name);
+    let fd;
+    try {
+      // R15 (CodeQL #46/#49 js/file-system-race): the state file is OPENED first, through the room's openPlainFile (a link, a special file, a
+      // second name, or a name swapped after the open is refused on the handle and the path TOGETHER; on a filesystem that reports no file id
+      // it cannot be proved plain and is kept), and its size is bounded on the HANDLE, never on an earlier lstat of the path.
+      const opened = openPlainFile(file, STATE_READ_FLAGS);
+      if (opened.fd === undefined) continue; // unopenable or not provably a plain file: not ours to judge, keep
+      fd = opened.fd;
+      const st = fs.fstatSync(fd);
+      if (!st.isFile() || st.size > STATE_FILE_MAX_BYTES) continue;
+      const raw = Buffer.alloc(st.size);
+      let got = 0;
+      while (got < st.size) {
+        const n = fs.readSync(fd, raw, got, st.size - got, got);
+        if (n === 0) break;
+        got += n;
+      }
+      const j = JSON.parse(raw.toString('utf8', 0, got));
+      if (!j || typeof j !== 'object' || Array.isArray(j) || !Number.isInteger(j.stateSchema)) continue;
+      const rec = j.projectRoot;
+      if (typeof rec !== 'string' || !rec || !path.isAbsolute(rec)) continue;
+      if (name !== `state-${ccProjectSlug(rec)}.json`) continue; // the file must BE that root's own state file
+      if (rootIsGone(rec, anchors)) out.push({ file, name, projectRoot: rec });
+    } catch { /* unreadable / unparseable / vanished: not ours to judge, keep */ } finally {
+      if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+    }
+  }
+  return out;
+}
+// BOUND (Phoenix #3): a sweep is a readdir plus one small read and one stat per candidate, so it runs at most once per
+// DEAD_SWEEP_EVERY_MS per project -- the stamp rides the state record saveState already holds (zero extra reads on the
+// ordinary write). Version-STABLE bookkeeping, no field's semantics change, so no STATE_SCHEMA bump.
+const DEAD_SWEEP_EVERY_MS = 24 * 60 * 60 * 1000;
+function sweepDeadProjectStates(home, projectRoot) {
+  __testHooks.deadStateSweepCalls++;
+  try {
+    const base = claudeBaseDir(home);
+    const mine = `state-${ccProjectSlug(projectRoot)}.json`;
+    for (const c of deadProjectStateFiles(home)) {
+      if (c.name === mine) continue;                       // never the project being written
+      if (!containedNewPath(c.file, base)) continue;       // realpath-and-contain before ANY rm (junction escape)
+      try { fs.rmSync(c.file, { force: true }); } catch { /* best-effort */ }
+    }
+  } catch { /* fail-silent -- cleanup is best-effort, never blocks a write */ }
+}
+
 function saveState(proj, projectRoot, home) {
   try {
     const p = statePath(projectRoot, home);
@@ -1180,7 +1374,10 @@ function saveState(proj, projectRoot, home) {
     // version-STABLE bookkeeping — no field's semantics
     // change, so no STATE_SCHEMA bump (this file's own rule).
     const alreadySwept = base.strayPruneDone === true;
-    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true };
+    const nowMs = Date.now();
+    const sinceSweep = nowMs - Number(base.deadStateSweepAt);
+    const deadSweepDue = !(Number.isFinite(sinceSweep) && sinceSweep >= 0 && sinceSweep < DEAD_SWEEP_EVERY_MS); // CWK-157; a future stamp (clock skew) is "due"
+    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
     // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
     // carries (read its comment for the full reasoning; this module cannot import
     // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
@@ -1202,6 +1399,7 @@ function saveState(proj, projectRoot, home) {
     const fb = stateFallbackPath(projectRoot, home);
     if (path.resolve(p) !== path.resolve(fb)) { try { fs.rmSync(fb, { force: true }); } catch { /* best-effort */ } }
     if (!alreadySwept) pruneStrayStateDirs(projectRoot, home);
+    if (deadSweepDue) sweepDeadProjectStates(home, projectRoot); // CWK-157: after our own write, so a failed sweep never costs the write
     return true;
   } catch {
     return false;

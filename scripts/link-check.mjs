@@ -85,7 +85,59 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { gitEnv } from './git-env.mjs';
+import { gitEnv } from './lib/git-env.mjs';
+
+// CWK-162 (AI Deep Scan A4): every Markdown file this gate reads is contributed text (a PR can add any file at any path), and
+// it was read with a bare readFileSync: no kind gate (a link was followed, a device or FIFO was opened) and no byte bound.
+// readDocBounded refuses a symlink, a non-regular file and anything over MAX_DOC_BYTES BEFORE reading. R15 (CodeQL #51 js/file-system-race):
+// the file is OPENED first (O_NONBLOCK, so a FIFO cannot hang the open; O_NOFOLLOW where the platform has it, so a link fails at the open) and
+// the PATH is judged afterwards, together with the handle (the order openPlainFile uses in the shipped libs): a link, a special file, or a
+// name whose inode is not the handle's (dev+ino, BigInt: NTFS file ids exceed 2**53) is refused, and nothing is read until all agree. The
+// first cut lstat-ed, then opened, and proved the handle against that earlier lstat. 4 MiB is the bound config-load.mjs puts on any
+// governance or doc read; the largest Markdown file in this repo is a CHANGELOG far below it.
+export const MAX_DOC_BYTES = 4 * 1024 * 1024;
+const DOC_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0);
+function docRefused(code, detail) { const e = new Error(code); e.code = code; e.detail = detail || ''; return e; }
+function readDocBounded(abs) {
+  let fd;
+  try { fd = fs.openSync(abs, DOC_READ_FLAGS); } catch (e) {
+    const code = e && e.code;
+    if (code === 'ELOOP') throw docRefused('SYMLINK'); // O_NOFOLLOW refused a link at the open (POSIX)
+    if (code === 'ENOENT' || code === 'ENOTDIR') throw e; // ENOENT ... propagate with their own code, as readFileSync's did
+    // Another open failure (a directory some hosts will not open for reading, a permission): say what the entry IS, after the failed open.
+    let kind = null;
+    try { const l = fs.lstatSync(abs); kind = l.isSymbolicLink() ? 'SYMLINK' : (!l.isFile() ? 'NOT_REGULAR' : null); } catch { kind = null; }
+    if (kind) throw docRefused(kind);
+    throw e;
+  }
+  try {
+    const st = fs.fstatSync(fd, { bigint: true });
+    if (!st.isFile()) throw docRefused('NOT_REGULAR');
+    const onPath = fs.lstatSync(abs, { bigint: true }); // the PATH, after the open, judged against the handle
+    if (onPath.isSymbolicLink()) throw docRefused('SYMLINK');
+    if (!onPath.isFile()) throw docRefused('NOT_REGULAR');
+    if (st.dev !== onPath.dev || st.ino !== onPath.ino) throw docRefused('CHANGED', 'the path was swapped after it was opened');
+    if (st.size > BigInt(MAX_DOC_BYTES)) throw docRefused('OVER_BOUND', `${st.size} bytes > ${MAX_DOC_BYTES}`);
+    const want = Number(st.size);
+    const buf = Buffer.alloc(want);
+    let got = 0;
+    while (got < want) {
+      const n = fs.readSync(fd, buf, got, want - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    return buf.toString('utf8', 0, got);
+  } finally { fs.closeSync(fd); }
+}
+
+// CWK-162 (AI Deep Scan A5): a finding quotes text FROM the scanned file (a link destination, a fragment, a file name), and a
+// destination holding ESC [2J or an OSC title sequence reached the terminal raw. The print site now writes every control
+// character (Cc: C0, DEL, C1), line and paragraph separators and bidirectional controls as a visible \uXXXX escape; letters, an
+// em dash and punctuation are untouched. The findings array stays raw, so a caller reading it sees the true text (security.md,
+// "Log injection is injection too": neutralize at the line-oriented sink).
+export function escapeControls(text) {
+  return String(text).replace(/[\p{Cc}\p{Zl}\p{Zp}\p{Bidi_Control}]/gu, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, '0')}`);
+}
 
 const BT = String.fromCharCode(96);
 const ESC_BASE = 0xF0000;   // an escaped ASCII punctuation char, held as a private-use code point
@@ -151,7 +203,7 @@ function decodeEntities(s) {
       const cp = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
       return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : String.fromCodePoint(0xFFFD);
     }
-    return Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, e) ? NAMED_ENTITIES[e] : m;
+    return Object.hasOwn(NAMED_ENTITIES, e) ? NAMED_ENTITIES[e] : m;
   });
 }
 
@@ -332,14 +384,14 @@ export function checkLinks({ root, files, tracked }) {
   const anchorCache = new Map();
   const anchorsOf = (rel) => {
     if (!anchorCache.has(rel)) {
-      try { anchorCache.set(rel, headingAnchors(fs.readFileSync(path.join(root, rel), 'utf8'))); } catch { anchorCache.set(rel, null); }
+      try { anchorCache.set(rel, headingAnchors(readDocBounded(path.join(root, rel)))); } catch { anchorCache.set(rel, null); }
     }
     return anchorCache.get(rel);
   };
   for (const file of files) {
     let text;
-    try { text = fs.readFileSync(path.join(root, file), 'utf8'); } catch (e) {
-      findings.push({ file, line: 0, msg: `cannot read this file (${e.code || e.message})` });
+    try { text = readDocBounded(path.join(root, file)); } catch (e) {
+      findings.push({ file, line: 0, msg: `cannot read this file (${e.code || e.message}${e.detail ? `: ${e.detail}` : ''})` });
       continue;
     }
     for (const { line, dest } of extractLinks(text)) {
@@ -402,7 +454,7 @@ function main(argv) {
   }
   let tracked = null;
   // CWK-133: no ambient GIT_* reaches this spawn. No ceiling: `root` is wherever the contributor stands, which may
-  // be a subdirectory of the repository git has to find (scripts/git-env.mjs, the `ceilingDir` paragraph).
+  // be a subdirectory of the repository git has to find (scripts/lib/git-env.mjs, the `ceilingDir` paragraph).
   const ls = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: gitEnv() });
   if (ls.error && ls.error.code === 'ENOENT') {
     console.log('  --   git not found: targets are checked for existence only, not for being tracked');
@@ -415,7 +467,7 @@ function main(argv) {
     tracked = new Set(ls.stdout.split('\0').filter(Boolean));
   }
   const r = checkLinks({ root, files, tracked });
-  for (const f of r.findings) console.log(`FAIL ${f.file}:${f.line}: ${f.msg}`);
+  for (const f of r.findings) console.log(`FAIL ${escapeControls(f.file)}:${f.line}: ${escapeControls(f.msg)}`);
   console.log(`link-check: ${r.findings.length} finding(s) across ${r.files} file(s) — ${r.checked} internal link(s) checked, ${r.external} external skipped`);
   if (r.findings.length) process.exitCode = 1;
 }

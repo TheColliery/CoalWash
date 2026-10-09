@@ -1145,3 +1145,224 @@ test('F-T3: a DANGLING link is SILENT, never called refused — an absence code 
       + 'never a permission word: ' + JSON.stringify(d.flags));
   } finally { clean(home, proj); }
 });
+
+// CWK-156 helper: make `dir` a directory whose own case policy is SENSITIVE and PROVE it by two distinct
+// inodes ({bigint:true} is load-bearing: NTFS file ids exceed 2**53). `fsutil file setCaseSensitiveInfo` is
+// per-directory on Windows 10 1803+ (no admin); ext4 is sensitive by itself; macOS APFS is not, so the
+// proof comes back false there and the caller skips VISIBLY -- capability-probed, never platform-gated.
+function caseSensitiveDirAt(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  spawnSync('fsutil', ['file', 'setCaseSensitiveInfo', dir, 'enable'], { stdio: 'ignore', timeout: 20000 });
+  try {
+    const lo = path.join(dir, 'cb-probe.md');
+    const up = path.join(dir, 'cb-Probe.md');
+    fs.writeFileSync(lo, 'a');
+    fs.writeFileSync(up, 'b'); // on a FOLDING volume this OVERWRITES lo instead of creating a sibling
+    const a = fs.statSync(lo, { bigint: true });
+    const b = fs.statSync(up, { bigint: true });
+    fs.rmSync(lo, { force: true });
+    fs.rmSync(up, { force: true });
+    return a.ino !== b.ino;
+  } catch { return false; }
+}
+
+// CWK-156 (class-b dedupe key): MISS DIRECTION = true (merge). Two spellings are ONE entry only where the volume folds
+// case. On a case-SENSITIVE rules directory Rule.md and rule.md are two real files and BOTH belong in the measurement;
+// the old dedupe key lowercased on `process.platform === 'win32'`, merged them and silently dropped one.
+test('CWK-156: two case-variant files in a case-SENSITIVE rules directory are BOTH discovered (the old win32 dedupe key merged them and dropped one)', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const rules = path.join(proj, '.claude', 'rules');
+    if (!caseSensitiveDirAt(rules)) { t.skip('no case-sensitive directory can be built here (capability proven absent by a distinct-inode check, not assumed)'); return; }
+    write(path.join(rules, 'Rule.md'), 'upper-case spelling');
+    write(path.join(rules, 'rule.md'), 'lower-case spelling');
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    const names = d.entries.map((e) => path.basename(e.path)).filter((n) => n.toLowerCase() === 'rule.md').sort();
+    assert.deepStrictEqual(names, ['Rule.md', 'rule.md'], 'both real files are measured, neither is dropped as a "duplicate"');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-156 control: ONE file reached by two routes (the rules walk and an @import) is still ONE entry -- the dedupe was narrowed, not removed', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, '.claude', 'rules', 'shared.md'), 'reached twice');
+    write(path.join(proj, 'CLAUDE.md'), '@.claude/rules/shared.md\n');
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.filter((e) => path.basename(e.path) === 'shared.md').length, 1);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-162 unit C3 (AI Deep Scan A3 + A2): the @import closure was DEPTH-capped with no visited set
+// (exponential in the fan-out), and the managedPaths signal scanned every prefix for every entry.
+// Witnesses were captured on the 0cde430 source (scratchpad/r14/witness-prefix.txt): 4,681 opens of ONE file for
+// 8 self-import lines; 80,000 prefixes (788,891 bytes of config, under the 1 MiB read cap) = ~340 ms for 300 entries.
+// ---------------------------------------------------------------------------
+import * as CBNS from './class-b.mjs'; // namespace import: a name the pre-fix tree never exported fails an ASSERTION, not the link
+
+// Count real file opens during `fn` (the closure's reads go through fs.openSync in repoReadOutcome). Restores in finally.
+function countOpens(fn) {
+  const real = fs.openSync;
+  let n = 0;
+  fs.openSync = (...a) => { n++; return real.apply(fs, a); };
+  try { fn(); } finally { fs.openSync = real; }
+  return n;
+}
+
+test('CWK-162 A3: the named total cap on followed @import edges exists', () => {
+  assert.ok(Number.isInteger(CBNS.IMPORT_EDGES_MAX) && CBNS.IMPORT_EDGES_MAX > 0, `IMPORT_EDGES_MAX = ${CBNS.IMPORT_EDGES_MAX}`);
+});
+
+test('CWK-162 A3: a CLAUDE.md that imports itself on 8 lines is read ONCE, not once per walk of the closure (witness: 4,681 opens)', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, 'CLAUDE.md'), '@CLAUDE.md\n'.repeat(8));
+    let d;
+    const opens = countOpens(() => { d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' }); });
+    assert.deepStrictEqual(d.entries.map((e) => path.basename(e.path)), ['CLAUDE.md'], 'still ONE entry');
+    assert.ok(opens <= d.entries.length + 4, `opens ${opens} for ${d.entries.length} entries: each file is read once (+ the memory-store probes)`);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-162 A3: an 8-wide, 4-deep @import lattice (33 distinct files, 4,096 walks to the last layer) opens each file once', () => {
+  const { home, proj } = sandbox();
+  try {
+    const layer = (k) => Array.from({ length: 8 }, (_, i) => `l${k}-${i}.md`);
+    write(path.join(proj, 'CLAUDE.md'), layer(1).map((n) => `@${n}`).join('\n'));
+    for (let k = 1; k <= 4; k++) for (const n of layer(k)) write(path.join(proj, n), k < 4 ? layer(k + 1).map((m) => `@${m}`).join('\n') : 'leaf');
+    let d;
+    const opens = countOpens(() => { d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' }); });
+    assert.strictEqual(d.entries.length, 33, 'the closure is the 33 distinct files');
+    assert.ok(opens <= 33 + 4, `opens ${opens}`);
+  } finally { clean(home, proj); }
+});
+
+// The exactness trap a PLAIN visited set falls into: the first route to a file can be a deep one (added at depth 5, never
+// expanded); a later root reaching it at depth 1 must still expand it. Global CLAUDE.md -> g1 -> g2 -> g3 -> g4 -> s (depth 5);
+// project CLAUDE.md -> s (depth 1) -> t1 -> t2 -> t3 -> t4 (depth 5). All of t1..t4 are in the closure.
+test('CWK-162 A3: a file first reached at the depth limit is still EXPANDED when a later root reaches it shallower (a plain visited set loses t1..t4)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const g = (n) => path.join(proj, `${n}.md`);
+    write(path.join(home, '.claude', 'CLAUDE.md'), `@${g('g1')}`);
+    write(g('g1'), `@${g('g2')}`); write(g('g2'), `@${g('g3')}`); write(g('g3'), `@${g('g4')}`); write(g('g4'), `@${g('s')}`);
+    write(g('s'), `@${g('t1')}`); write(g('t1'), `@${g('t2')}`); write(g('t2'), `@${g('t3')}`); write(g('t3'), `@${g('t4')}`); write(g('t4'), 'end');
+    write(path.join(proj, 'CLAUDE.md'), `@${g('s')}`);
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    const names = new Set(d.entries.map((e) => path.basename(e.path)));
+    for (const n of ['s.md', 't1.md', 't2.md', 't3.md', 't4.md']) assert.ok(names.has(n), `${n} is in the closure`);
+  } finally { clean(home, proj); }
+});
+
+function mulberry32(a) {
+  return () => { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+test('CWK-162 A3: on random import graphs (cycles, self-imports, two roots) the closure equals an independent breadth-first reference to the depth limit', () => {
+  const DEPTH = 5; // CC's documented @import hop limit; the engine's IMPORT_DEPTH_MAX
+  for (let seed = 1; seed <= 12; seed++) {
+    const rnd = mulberry32(seed);
+    const N = 30;
+    const pick = (k) => Array.from({ length: k }, () => Math.floor(rnd() * N));
+    const edges = Array.from({ length: N }, () => pick(Math.floor(rnd() * 5)));
+    const globalRoots = pick(1 + Math.floor(rnd() * 2));
+    const projectRoots = pick(1 + Math.floor(rnd() * 2));
+    const { home, proj } = sandbox();
+    try {
+      const p = (i) => path.join(proj, `n${i}.md`);
+      for (let i = 0; i < N; i++) write(p(i), edges[i].map((j) => `@${p(j)}`).join('\n') || 'x');
+      write(path.join(home, '.claude', 'CLAUDE.md'), globalRoots.map((j) => `@${p(j)}`).join('\n'));
+      write(path.join(proj, 'CLAUDE.md'), projectRoots.map((j) => `@${p(j)}`).join('\n'));
+      // reference: per root, a node at distance <= DEPTH hops (the root is distance 0) is in the closure; union of both roots
+      const want = new Set([path.join(home, '.claude', 'CLAUDE.md'), path.join(proj, 'CLAUDE.md')]);
+      for (const roots of [globalRoots, projectRoots]) {
+        const dist = new Map();
+        let frontier = [];
+        for (const j of roots) if (!dist.has(j)) { dist.set(j, 1); frontier.push(j); }
+        for (let depth = 1; depth < DEPTH && frontier.length; depth++) {
+          const next = [];
+          for (const i of frontier) for (const j of edges[i]) if (!dist.has(j)) { dist.set(j, depth + 1); next.push(j); }
+          frontier = next;
+        }
+        for (const j of dist.keys()) want.add(p(j));
+      }
+      const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+      const got = new Set(d.entries.map((e) => e.path));
+      assert.deepStrictEqual([...got].sort(), [...want].sort(), `seed ${seed}`);
+    } finally { clean(home, proj); }
+  }
+});
+
+test('CWK-162 A3: more than IMPORT_EDGES_MAX distinct imports are followed only up to the cap, and the cap SAYS so; under the cap there is no such flag', () => {
+  const cap = CBNS.IMPORT_EDGES_MAX;
+  const { home, proj } = sandbox();
+  try {
+    const n = cap + 50;
+    for (let i = 0; i < n; i++) write(path.join(proj, `m${i}.md`), 'x');
+    write(path.join(proj, 'CLAUDE.md'), Array.from({ length: n }, (_, i) => `@m${i}.md`).join('\n'));
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.length, 1 + cap, 'CLAUDE.md plus exactly the cap');
+    assert.strictEqual(d.flags.filter((f) => /@import closure capped/.test(f)).length, 1, `one flag: ${JSON.stringify(d.flags)}`);
+    assert.ok(d.flags.some((f) => f.includes(String(cap)) && /NOT measured/.test(f)), 'it names the cap and that the rest is unmeasured');
+  } finally { clean(home, proj); }
+  const small = sandbox();
+  try {
+    for (let i = 0; i < 10; i++) write(path.join(small.proj, `m${i}.md`), 'x');
+    write(path.join(small.proj, 'CLAUDE.md'), Array.from({ length: 10 }, (_, i) => `@m${i}.md`).join('\n'));
+    const d = discoverClassB({ projectRoot: small.proj, home: small.home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.length, 11);
+    assert.strictEqual(d.flags.some((f) => /@import closure capped/.test(f)), false, 'no flag under the cap');
+  } finally { clean(small.home, small.proj); }
+});
+
+test('CWK-162 A2: the managedPaths matcher is the OLD predicate exactly, over every prefix and path built from a hostile segment set (trailing slashes, empty segments, spaces, dots)', () => {
+  assert.strictEqual(typeof CBNS.managedMatcher, 'function', 'managedMatcher exists');
+  const segs = ['a', 'b', '', 'a b', '.x'];
+  const all = new Set();
+  const build = (parts) => { for (const t of ['', '/']) all.add(parts.join('/') + t); };
+  const rec = (parts, left) => { if (parts.length) build(parts); if (!left) return; for (const sg of segs) rec([...parts, sg], left - 1); };
+  rec([], 4);
+  const strings = [...all].filter((x) => x !== '');
+  const oldPredicate = (rel, pfx) => rel === pfx || rel.startsWith(pfx.endsWith('/') ? pfx : pfx + '/');
+  let checked = 0;
+  for (const pfx of strings) {
+    const m = CBNS.managedMatcher([pfx]);
+    for (const rel of strings) { assert.strictEqual(m(rel), oldPredicate(rel, pfx), `pfx ${JSON.stringify(pfx)} rel ${JSON.stringify(rel)}`); checked++; }
+  }
+  const whole = CBNS.managedMatcher(strings);
+  for (const rel of strings) assert.strictEqual(whole(rel), strings.some((pfx) => oldPredicate(rel, pfx)), `whole list, rel ${JSON.stringify(rel)}`);
+  assert.ok(checked > 1000000, `the sweep really ran: ${checked} pairs`);
+});
+
+test('CWK-162 A2: 20,000 managedPaths prefixes cost no per-entry scan -- the startsWith calls do not grow with the prefix count (witness: 80,000 prefixes ~340 ms for 300 entries)', () => {
+  const { home, proj } = sandbox();
+  try {
+    for (let i = 0; i < 40; i++) write(path.join(proj, '.claude', 'rules', 'pack', `f${i}.md`), 'x');
+    write(path.join(proj, 'CLAUDE.md'), 'x');
+    const real = String.prototype.startsWith;
+    let calls = 0;
+    const run = (managedPaths) => {
+      calls = 0;
+      String.prototype.startsWith = function spy(...a) { calls++; return real.apply(this, a); };
+      try { return discoverClassB({ projectRoot: proj, home, platform: 'claude-code', managedPaths }); } finally { String.prototype.startsWith = real; }
+    };
+    const base = run(['.claude/rules/pack']);
+    const baseCalls = calls;
+    assert.ok(base.entries.filter((e) => e.path.includes('pack')).every((e) => e.managed), 'the matching prefix still tags its entries');
+    const many = Array.from({ length: 20000 }, (_, i) => `no/such/prefix-${i}`);
+    const big = run([...many, '.claude/rules/pack']);
+    assert.ok(big.entries.filter((e) => e.path.includes('pack')).every((e) => e.managed), 'and still does with 20,000 other prefixes');
+    assert.ok(calls - baseCalls < 100, `startsWith calls: ${baseCalls} with 1 prefix, ${calls} with 20,001 (the old scan made prefixes x entries)`);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-162 A3: the same import written on 600 lines is ONE edge -- duplicates never spend the cap', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, 'a.md'), 'x');
+    write(path.join(proj, 'CLAUDE.md'), '@a.md\n'.repeat(600));
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.deepStrictEqual(d.entries.map((e) => path.basename(e.path)).sort(), ['CLAUDE.md', 'a.md']);
+    assert.strictEqual(d.flags.some((f) => /@import closure capped/.test(f)), false, 'no cap flag: 600 identical lines are one edge');
+  } finally { clean(home, proj); }
+});

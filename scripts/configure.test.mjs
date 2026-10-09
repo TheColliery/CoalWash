@@ -448,6 +448,65 @@ test('CWK-137 D3: a PROJECT write of estate.archiveDir is named as ignored, for 
   assert.doesNotMatch(r.stdout, /Successfully updated configuration/);
 });
 
+// R14 bounce 1 (E1): a PROJECT value of estate.purgeAfterDays or an estate.runBudget field may only LOWER the user's own (config-load.mjs
+// mergeObjectKey). The F-R32-3 machinery notices a write the loader will not honor; the consent-clamp story it tells ("safer-value-wins")
+// is the wrong reason for these keys (nothing here is a consent value), so each is named for its own reason. WARN, not REFUSE.
+test('R14 E1: a PROJECT write above the user\'s bound (purgeAfterDays, a runBudget field) is named as bounded, for the RIGHT reason, and a LOWER write warns nothing', (t) => {
+  const sb = sandbox(t);
+  const up = run(sb, ['--estate.purgeAfterDays', '36500']);
+  assert.strictEqual(up.status, 0, up.stderr);
+  assert.strictEqual(JSON.parse(fs.readFileSync(projCfg(sb), 'utf8')).estate.purgeAfterDays, 36500, 'WARN, not REFUSE: the value is still written');
+  const out = up.stdout + up.stderr;
+  assert.match(out, /estate\.purgeAfterDays will NOT be read at the value you set/);
+  assert.match(out, /may only bring the cold boundary earlier/, 'the real reason for this key');
+  assert.doesNotMatch(out, /SAFER-VALUE-WINS|consent-bearing/, 'the consent-clamp explanation is false for this key');
+  assert.match(out, /--global --estate\.purgeAfterDays/, 'and points at the layer that DOES take effect');
+  const rb = run(sb, ['--estate.runBudget.maxSessionsPerRun', '100000']);
+  assert.strictEqual(rb.status, 0, rb.stderr);
+  const rbOut = rb.stdout + rb.stderr;
+  assert.match(rbOut, /estate\.runBudget\.maxSessionsPerRun will NOT be read at the value you set/);
+  assert.match(rbOut, /may only LOWER a work limit/);
+  assert.doesNotMatch(rbOut, /SAFER-VALUE-WINS|consent-bearing/);
+  const down = run(sb, ['--estate.runBudget.maxSessionsPerRun', '10']);
+  assert.strictEqual(down.status, 0, down.stderr);
+  assert.doesNotMatch(down.stdout + down.stderr, /will NOT be read/, 'a value at or below the default is honored: no warning');
+});
+
+test('R14 bounce 2 (F-R14-6): a PROJECT write of estate.compressAfterDays below the user\'s bound is named as bounded, for the RIGHT reason (it may only keep sessions active longer), and a RAISE warns nothing', (t) => {
+  const sb = sandbox(t);
+  const low = run(sb, ['--estate.compressAfterDays', '1']);
+  assert.strictEqual(low.status, 0, low.stderr);
+  assert.strictEqual(JSON.parse(fs.readFileSync(projCfg(sb), 'utf8')).estate.compressAfterDays, 1, 'WARN, not REFUSE: the value is still written');
+  const out = low.stdout + low.stderr;
+  assert.match(out, /estate\.compressAfterDays will NOT be read at the value you set/);
+  assert.match(out, /may only keep sessions active longer/, 'the real reason for this key');
+  assert.doesNotMatch(out, /SAFER-VALUE-WINS|consent-bearing/, 'the consent-clamp explanation is false for this key');
+  assert.match(out, /--global --estate\.compressAfterDays/, 'and points at the layer that DOES take effect');
+  const high = run(sb, ['--estate.compressAfterDays', '60']);
+  assert.strictEqual(high.status, 0, high.stderr);
+  assert.doesNotMatch(high.stdout + high.stderr, /will NOT be read/, 'a raise above the default is honored: no warning');
+});
+
+// R18 (owner sheet BB-5 = (a)): the clamp on both removal edges holds whether or not the user's own estate.deleteCold is true, so a
+// PROJECT write past the user's bound warns with deleteCold on too, and the printed reason no longer states a consented exception.
+test('R18 BB-5: with the user\'s own deleteCold true a PROJECT write past the bound (purgeAfterDays raise, compressAfterDays lower) still warns, and the reason says it holds whether or not deleteCold is true', (t) => {
+  const sb = sandbox(t);
+  fs.mkdirSync(path.join(sb.home, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(sb.home, '.claude', '.coalwash.json'), JSON.stringify({ estate: { deleteCold: true, purgeAfterDays: 90, compressAfterDays: 30 } }));
+  const up = run(sb, ['--estate.purgeAfterDays', '36500']);
+  assert.strictEqual(up.status, 0, up.stderr);
+  const upOut = up.stdout + up.stderr;
+  assert.match(upOut, /estate\.purgeAfterDays will NOT be read at the value you set/, 'deleteCold true: the raise is still bounded');
+  assert.match(upOut, /may only bring the cold boundary earlier \(at or below your own purgeAfterDays; 0, "never cold", counts as the highest\), whether or not estate\.deleteCold is true in your own config,/);
+  assert.doesNotMatch(upOut, /While estate\.deleteCold is not true/, 'the consented exception is no longer stated');
+  const low = run(sb, ['--estate.compressAfterDays', '1']);
+  assert.strictEqual(low.status, 0, low.stderr);
+  const lowOut = low.stdout + low.stderr;
+  assert.match(lowOut, /estate\.compressAfterDays will NOT be read at the value you set/, 'deleteCold true: the lower value is still bounded');
+  assert.match(lowOut, /may only keep sessions active longer \(at or above your own compressAfterDays\), whether or not estate\.deleteCold is true in your own config,/);
+  assert.doesNotMatch(lowOut, /While estate\.deleteCold is not true/, 'the consented exception is no longer stated');
+});
+
 test('CWK-137 D3: --global estate.archiveDir IS honoured, so no warning fires', (t) => {
   const sb = sandbox(t);
   const dest = path.join(sb.home, 'my-archive');

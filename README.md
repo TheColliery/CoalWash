@@ -125,7 +125,7 @@ On Claude Code the plugin ships the three `/coalwash…` commands; a file-copy i
 | `node scripts/lib/cli.mjs writeguard-list` | Lists this session's write-guard (airbag) snapshots — metadata only, no content |
 | `node scripts/lib/cli.mjs writeguard-restore <snapName> > <file>` | Writes one airbag snapshot's byte-exact original to stdout — redirect it over the file it came from |
 | `node scripts/lib/cli.mjs estate-search <query>` | Searches the ULTRA dig-index of archived transcripts without unpacking them |
-| `node scripts/lib/cli.mjs estate-restore <sessionId>` | Round-trips one archived transcript back byte-exact, into a scratch dir — never the live tree |
+| `node scripts/lib/cli.mjs estate-restore <sessionId>` | Round-trips one archived transcript back byte-exact, into a scratch dir — never the live tree. It bounds what it inflates, with or without `--to`; with `--to <dir>` it also refuses a link under the destination |
 
 The remaining subcommands (`estate`, `estate-scan`, `estate-run`, `retier-scan`, `retier-run`, `dig-gauge`, `anchor-diff`) are steps the skill runs for you: the read-only ones inside `/coalwash:stats`, and `estate-run`/`retier-run` inside the wizard, behind its cost estimate and your start/cancel. `node scripts/lib/cli.mjs` with no argument prints the full usage.
 

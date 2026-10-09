@@ -54,6 +54,27 @@ const UNWIRED_ENGINE = [
 ];
 const isUnwiredEngine = (rel) => UNWIRED_ENGINE.includes(rel);
 
+// DEV TOOLING IN scripts/lib/, DELIBERATELY NOT SHIPPED (CWK-174) -- the house secret scan's library, and the release deriver's. The org canon puts it at
+// scripts/lib/secret-scan.mjs (byte-equal in every room, scripts/scanner-parity.mjs keeps the copies equal), but it serves the
+// commit and push gate (scripts/secret-gate.mjs), not the installed skill: nothing shipped imports it. So it is excluded from the
+// build AND from both directions of the dist check, with its absence asserted, the same explicit-absence belt UNWIRED_ENGINE uses.
+// It stays in the suite and in source; verify.mjs's lib roster exempts it by name for the same reason.
+const DEV_ONLY_LIBS = [
+  path.join('scripts', 'lib', 'secret-scan.mjs'),
+  path.join('scripts', 'lib', 'release-shape.mjs'), // the create-release workflow's CHANGELOG deriver (scripts/release-notes.mjs): CI tooling, never imported by shipped code
+  // 09a: the canon git-spawn census (its witness vectors and this room's pins) and the canon test runner in waves (with the machine
+  // reading and the stdout preload it uses): verify.mjs and scripts/test.mjs import them, shipped code never does.
+  path.join('scripts', 'lib', 'git-env-census.mjs'),
+  path.join('scripts', 'lib', 'git-env-census.vectors.mjs'),
+  path.join('scripts', 'lib', 'git-env-pins.mjs'),
+  path.join('scripts', 'lib', 'wave-run.mjs'),
+  path.join('scripts', 'lib', 'machine-reading.mjs'),
+  path.join('scripts', 'lib', 'stdout-sync.mjs'),
+  path.join('scripts', 'lib', 'test-plan.mjs'), // the room's numbers for the wave runner and its declared-test floor
+];
+const isDevOnlyLib = (rel) => DEV_ONLY_LIBS.includes(rel);
+const isNotShipped = (rel) => isUnwiredEngine(rel) || isDevOnlyLib(rel);
+
 // THE DIST WALK IS A DENYLIST, SO ANY STRAY UNDER A DIST_ITEM RIDES ALONG. A
 // CoalHearth journal written by a command whose cwd happened to be scripts/lib
 // left `scripts/lib/.claude/coalhearth/session_handoff.json` in the tree; the
@@ -84,7 +105,7 @@ export function buildDist(distRoot = dist) {
     const src = path.join(repo, rel);
     const dst = path.join(distRoot, rel);
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isUnwiredEngine(path.relative(repo, s)) && !hasStrayDotDir(path.relative(src, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine + any stray dot-dir BELOW the item
+    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isNotShipped(path.relative(repo, s)) && !hasStrayDotDir(path.relative(src, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine + any stray dot-dir BELOW the item
   }
 }
 
@@ -117,7 +138,7 @@ function contentEquals(pathA, pathB) {
 export function checkDist(distRoot = dist) {
   const out = [];
   const filesUnder = (root, rel, item = rel) => {
-    if (isTest(rel) || isUnwiredEngine(rel) || hasStrayDotDir(path.relative(item, rel))) return []; // excluded from the dist -> excluded here too, both directions
+    if (isTest(rel) || isNotShipped(rel) || hasStrayDotDir(path.relative(item, rel))) return []; // excluded from the dist -> excluded here too, both directions
     const abs = path.join(root, rel);
     if (!fs.existsSync(abs)) return [];
     if (fs.statSync(abs).isDirectory()) return fs.readdirSync(abs).flatMap((n) => filesUnder(root, path.join(rel, n), item));
@@ -138,6 +159,9 @@ export function checkDist(distRoot = dist) {
   // orphan check clears it). Assert absence explicitly instead.
   for (const rel of UNWIRED_ENGINE) {
     if (fs.existsSync(path.join(distRoot, rel))) out.push(`unwired class-A engine present in plugin/ (must not ship until the SKILL surface wires it): ${rel}`);
+  }
+  for (const rel of DEV_ONLY_LIBS) {
+    if (fs.existsSync(path.join(distRoot, rel))) out.push(`dev-only lib present in plugin/ (a commit-gate scanner, never plugin payload): ${rel}`);
   }
   // ASSERT ABSENCE OVER EXACTLY THE SET THE EXCLUSION REMOVES — no wider, no
   // NARROWER. The exclusion drops any dot-named SEGMENT, files included; the first
