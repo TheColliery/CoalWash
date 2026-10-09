@@ -120,16 +120,15 @@ async function main() {
   const serial = process.env.COALWASH_TEST_CONCURRENCY === '1';
   let run;
   try {
-    run = await wave.runWaves({ files: TESTS.filter((f) => !plan.DIRECT_FILES.includes(f)), cwd: repo, env: process.env, heapMb: plan.HEAP_MB, fileTimeoutMs: plan.TEST_TIMEOUT_MS, fileClockMs: plan.FILE_CLOCK_MS, deadlineMs: plan.RUN_TIMEOUT_MS, serial });
+    run = await wave.runWaves({ files: TESTS, cwd: repo, env: process.env, heapMb: plan.HEAP_MB, fileTimeoutMs: plan.TEST_TIMEOUT_MS, fileClockMs: plan.FILE_CLOCK_MS, deadlineMs: plan.RUN_TIMEOUT_MS, serial });
   } catch (e) {
     console.log(`FAIL test runner: the run did not start (${e && e.message ? e.message : 'error'})`);
     process.exitCode = 1;
     return;
   }
-  // The direct files run after the waves (test-plan.mjs, a named divergence), then every file is put back in roster order, the declared-test floor is
-  // applied, and ONE summary line reconciles the whole roster.
+  // Every file is put back in roster order, the declared-test floor is applied, and ONE summary line reconciles the whole roster. Since 09b
+  // every file runs under the wave runner, wave-run.test.mjs included (the canon's recorder child sets its own NODE_OPTIONS, K3).
   const byFile = new Map(run.results.map((r) => [r.file, r]));
-  for (const f of plan.DIRECT_FILES) if (TESTS.includes(f)) byFile.set(f, plan.runDirect(f, { cwd: repo, env: process.env }));
   const results = plan.shortfallResults(TESTS.map((f) => byFile.get(f)), (f) => { try { return fs.readFileSync(path.join(repo, f), 'utf8'); } catch { return null; } });
   for (const r of results) {
     if (r.status === 'PASS' || r.status === 'SKIP') continue;

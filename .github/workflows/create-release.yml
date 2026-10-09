@@ -195,10 +195,10 @@ jobs:
           done
 
       # BB-112 (a), CoalLedger issue 25: the launch-form Release is the repository's ONE pre-release Release, and a newer
-      # pre-release tag takes it over, so a repository whose only Release is the launch form can carry the newer tag's
-      # ZIPs. The gate found the old tag and proved the new one ahead of it. Order: back to a DRAFT, its assets deleted
-      # (the new tag's ZIPs and SHA256SUMS.txt are attached as on a first run, and an old checksum file would make the
-      # upload decision refuse), THEN the tag moved. Each call is safe to repeat, so a run that died part-way converges
+      # pre-release tag takes it over, so a repository whose only Release is the launch form can carry the newer tag.
+      # The gate found the old tag and proved the new one ahead of it. Order: back to a DRAFT, its assets deleted (a room
+      # with assets attaches the new tag's as on a first run, and an old checksum file would make the upload decision
+      # refuse), THEN the tag moved. Each call is safe to repeat, so a run that died part-way converges
       # when it is run again. It sits after every build and check above, so a failed build leaves the old Release as it
       # was, and it never publishes: the publish step stays last. This edits a PUBLISHED Release, a path that Immutable Releases
       # closes once the owner switches it on (AR-71 (a1), unsigned today): the launch form is re-decided before that switch.

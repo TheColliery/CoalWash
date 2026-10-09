@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { declaredTopLevelTests, shortfallResults, DIRECT_FILES, HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS } from './test-plan.mjs';
+import * as plan from './test-plan.mjs';
+import { declaredTopLevelTests, shortfallResults, HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS } from './test-plan.mjs';
 
 const ROOM = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -37,10 +38,13 @@ test('shortfallResults turns a PASS that reported fewer tests than it declares i
   assert.equal(results[0].status, 'PASS', 'the input array is not mutated');
 });
 
-test('the room numbers are finite and nest (test < file < run), and every direct file is on the roster of scripts/test.mjs', () => {
+test('the room numbers are finite and nest (test < file < run), and every roster file runs under the wave runner (no direct run, 09b)', () => {
   for (const n of [HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS]) assert.ok(Number.isInteger(n) && n > 0);
   assert.ok(HEAP_MB <= 2048, 'dispatch-transport.md: a test child runs under a heap cap of 2048 MB or lower');
   assert.ok(TEST_TIMEOUT_MS < FILE_CLOCK_MS && FILE_CLOCK_MS < RUN_TIMEOUT_MS);
+  assert.equal(plan.DIRECT_FILES, undefined, 'the 09a direct run is gone');
+  assert.equal(plan.runDirect, undefined, 'the 09a direct run is gone');
   const runner = fs.readFileSync(path.join(ROOM, 'scripts', 'test.mjs'), 'utf8');
-  for (const f of DIRECT_FILES) assert.ok(runner.includes(`'${f}'`), `${f} is on the roster`);
+  assert.match(runner, /runWaves\(\{ files: TESTS, /, 'the whole roster goes to the wave runner');
+  assert.ok(runner.includes("'scripts/lib/wave-run.test.mjs'"), 'wave-run.test.mjs is on the roster');
 });

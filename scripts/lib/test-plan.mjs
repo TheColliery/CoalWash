@@ -4,8 +4,8 @@
 // fewer tests than it declares is turned into a FAIL result (shortfallResults), so the run's ONE summary line reconciles it and reads RED.
 //
 // Dev tooling: scripts/test.mjs imports it, shipped code never does (build-plugin.mjs DEV_ONLY_LIBS; verify.mjs's lib roster names it).
-import { spawnSync } from 'node:child_process';
-import { classifyFile, nodeOptionsWithHeap } from './wave-run.mjs';
+// Since 09b every roster file runs under the canon runner: the 09a direct run of wave-run.test.mjs is gone (the canon's recorder child sets its own
+// NODE_OPTIONS, K3), so this file holds only the numbers and the floor.
 
 // BASIS, measured on this box, Node 24.19, 2026-10-09, 48 files through runWaves (scratchpad/09a/measure-waves.out; re-derive: that script, or the wave
 // events of a run): the slowest file 78.3 s (apply.test.mjs) with up to three files running on a box already 73.6% busy; the whole run 333 s wall.
@@ -38,23 +38,4 @@ export function shortfallResults(results, read) {
     if (declared <= reported) return r;
     return { ...r, status: 'FAIL', reason: `declares ${declared} top-level test(s) but the run reported ${reported} (it stopped before registering the rest: an exit, a throw the runner swallowed, or a hang the force-exit ended)` };
   });
-}
-
-// NAMED DIVERGENCE FROM THE CANON RUNNER (CoalLedger's, measured again here 2026-10-09): one test of scripts/lib/wave-run.test.mjs ("the stdout preload switches
-// BOTH pipes") spawns a child that inherits NODE_OPTIONS; run BY wave-run, that env already carries the runner's own --import stdout-sync.mjs, which loads before
-// the test's recorder and hides the two calls it counts, so the file is RED under the canon runner and GREEN under a plain `node --test`. It is run directly,
-// with the same heap cap, clocks and TAP reading, and held out of the wave roster; delete this the day the canon test sets its own NODE_OPTIONS.
-export const DIRECT_FILES = ['scripts/lib/wave-run.test.mjs'];
-
-export function runDirect(file, { cwd, env }) {
-  const childEnv = { ...env, NODE_OPTIONS: nodeOptionsWithHeap(env.NODE_OPTIONS, HEAP_MB) };
-  delete childEnv.NODE_TEST_CONTEXT;
-  const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', `--test-timeout=${TEST_TIMEOUT_MS}`, '--test-force-exit', file], {
-    cwd, env: childEnv, encoding: 'utf8', timeout: FILE_CLOCK_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: 1 << 26,
-  });
-  const killedBy = r.error ? `killed at the file clock (${FILE_CLOCK_MS} ms): ${r.error.code || r.error.message}` : null;
-  const res = classifyFile({ file, code: r.status, signal: r.signal, stdout: r.stdout || '', killedBy });
-  res.name = file;
-  if (res.status === 'FAIL' || res.status === 'VACUOUS') { res.stdout = r.stdout || ''; res.stderr = r.stderr || ''; }
-  return res;
 }
