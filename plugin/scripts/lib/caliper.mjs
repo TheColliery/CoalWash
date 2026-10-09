@@ -928,21 +928,28 @@ function conservativeCapacity() {
 // Read from:
 //   - CLAUDE_CODE_AUTO_COMPACT_WINDOW in the hook's environment (measured 2026-10-09, Claude Code 2.1.295: a session launched with it
 //     hands it to a hook, and the settings value never reaches a hook's env), as Claude Code reads it: its leading digits (`500k` is
-//     500, env-vars.md), clamped to 100K..1M;
-//   - the top-level `autoCompactWindow` and every `modelSettings.<model>.autoCompactWindow` (v2.1.288+; tokens, or "auto") in the user
-//     settings (<claudeBase>/settings.json) and the project's .claude/settings.json and .claude/settings.local.json, the project files
-//     read bounded inside the root findProjectRoot resolves (the gauge's own anchor).
-// The MIN across all of them and the window the other probes found: a readable smaller window wins, a larger one never raises it
-// (Claude Code also caps the window at the model's). A hook has no model identity, so the MIN, as P1 takes it. The MIN IS the direction
-// clamp hooks-safety section 9 asks of a cloned project: a project window above the user's, or above the default an absent user window
+//     500, env-vars.md), clamped to 100K..1M. When it is readable it is the session's window ALONE: it "takes precedence over the
+//     command, the flag, and the setting" (cc-model-config), so the settings are not read (fire 33, R27-2);
+//   - otherwise the top-level `autoCompactWindow` and every `modelSettings.<model>.autoCompactWindow` (v2.1.288+) in the user settings
+//     (<claudeBase>/settings.json) and the project's .claude/settings.json and .claude/settings.local.json, the project files read
+//     bounded inside the root findProjectRoot resolves (the gauge's own anchor). A settings value counts only as the vendor's settings
+//     type, an integer from 100,000 to 1,000,000; "auto", any string, a non-integer or an out-of-range number is no window (R27-1).
+// The window is taken against the one the other probes found: a readable smaller window wins, a larger one never raises it (Claude
+// Code also caps the window at the model's). Across the settings, the MIN, as P1 takes it. That MIN IS the direction clamp
+// hooks-safety section 9 asks of a cloned project: a project window above the user's, or above the default an absent user window
 // leaves, changes nothing; a lower one wins. Unparseable, absent or unreadable = no window, never a guess.
 // THE RESIDUAL, named: a launch's --autocompact flag (Claude Code's own argv, which a hook cannot read), a managed-settings scope, and
 // a window given only in a launch's --settings file are unread; on such a session the wall stays where the other probes put it.
+// And a hook has no reliable model identity, so a per-model value is taken as a MIN across models: a session on a model with a larger
+// per-model window, or with none, reads the smallest window saved for any model.
 export const AUTO_COMPACT_WINDOW_MIN_TOKENS = 100000;
 export const AUTO_COMPACT_WINDOW_MAX_TOKENS = 1000000;
-function compactWindowFrom(v) {
-  const n = typeof v === 'number' ? Math.floor(v) : typeof v === 'string' ? Number.parseInt(v, 10) : Number.NaN;
+function envCompactWindow(v) {
+  const n = typeof v === 'string' ? Number.parseInt(v, 10) : Number.NaN;
   return Number.isFinite(n) ? Math.min(AUTO_COMPACT_WINDOW_MAX_TOKENS, Math.max(AUTO_COMPACT_WINDOW_MIN_TOKENS, n)) : null;
+}
+function settingsCompactWindow(v) {
+  return Number.isInteger(v) && v >= AUTO_COMPACT_WINDOW_MIN_TOKENS && v <= AUTO_COMPACT_WINDOW_MAX_TOKENS ? v : null;
 }
 function settingsWindows(j) {
   if (!j || typeof j !== 'object' || Array.isArray(j)) return [];
@@ -951,13 +958,13 @@ function settingsWindows(j) {
   if (ms && typeof ms === 'object' && !Array.isArray(ms)) {
     for (const m of Object.values(ms)) if (m && typeof m === 'object' && !Array.isArray(m)) raw.push(m.autoCompactWindow);
   }
-  return raw.map(compactWindowFrom).filter((w) => w !== null);
+  return raw.map(settingsCompactWindow).filter((w) => w !== null);
 }
 function probeCompactWindow(home, projectRoot, env) {
   try {
+    const fromEnv = envCompactWindow(env ? env.CLAUDE_CODE_AUTO_COMPACT_WINDOW : undefined);
+    if (fromEnv !== null) return fromEnv; // the env takes precedence over every setting
     const found = settingsWindows(readStateFile(path.join(claudeBaseDir(home), 'settings.json')));
-    const fromEnv = compactWindowFrom(env ? env.CLAUDE_CODE_AUTO_COMPACT_WINDOW : undefined);
-    if (fromEnv !== null) found.push(fromEnv);
     const root = projectRoot ?? findProjectRoot(process.cwd(), home);
     for (const name of ['settings.json', 'settings.local.json']) {
       const text = readRepoFileBounded(path.join(root, '.claude', name), root, MAX_CONFIG_BYTES);

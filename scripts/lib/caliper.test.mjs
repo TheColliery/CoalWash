@@ -2438,6 +2438,67 @@ test('fire 32 P0: the env value is read the way Claude Code reads it (its leadin
   } finally { clean(home, proj); }
 });
 
+// 08d fire 33 (INSPECT R27-1, R27-2). A SETTINGS window is the vendor's settings type: an integer from 100,000 to 1,000,000 (or
+// "auto", which is no window); the env's leading-digits reading belongs to the env alone. And a readable env is the window ALONE.
+test('fire 33 R27-1: an invalid SETTINGS value is no window (B1-B7: a string, out of range, a non-integer), never clamped to 100,000', () => {
+  const legs = [
+    ['B1 user "500k"', (h, p) => writeJson(userSettings(h), { autoCompactWindow: '500k' })],
+    ['B2 user 200', (h, p) => writeJson(userSettings(h), { autoCompactWindow: 200 })],
+    ['B3 user 0', (h, p) => writeJson(userSettings(h), { autoCompactWindow: 0 })],
+    ['B4 user -5', (h, p) => writeJson(userSettings(h), { autoCompactWindow: -5 })],
+    ['B5 project 1', (h, p) => writeJson(path.join(p, '.claude', 'settings.json'), { autoCompactWindow: 1 })],
+    ['B6 user 150000.5', (h, p) => writeJson(userSettings(h), { autoCompactWindow: 150000.5 })],
+    ['B7 per-model "200000"', (h, p) => writeJson(userSettings(h), { modelSettings: { 'claude-opus-5-5': { autoCompactWindow: '200000' } } })],
+  ];
+  const wrong = [];
+  for (const [name, plant] of legs) {
+    const { home, proj } = sandbox();
+    try {
+      oneMillionCache(home);
+      plant(home, proj);
+      const c = discoverCapacity({ home, projectRoot: proj, env: {} });
+      if (c.capacityTokens !== 967000 || c.source !== 'stats-cache') wrong.push(`${name}: ${c.capacityTokens} ${c.source}`);
+    } finally { clean(home, proj); }
+  }
+  assert.deepStrictEqual(wrong, [], 'each listed value was read as a window');
+  const { home, proj } = sandbox();
+  try { // control: the same file with a valid integer IS a window, so the zeros above are the rule and not a dead reader
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 150000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 150000);
+    // B8: above the range is no window either, seen where it would lower: beside a 3M cache (P1 reads windows up to 5M)
+    writeJson(path.join(home, '.claude', 'stats-cache.json'), { modelUsage: { 'claude-opus-5-5': { contextWindow: 3000000 } } });
+    writeJson(userSettings(home), { autoCompactWindow: 2000000 });
+    assert.deepStrictEqual(Object.values(discoverCapacity({ home, projectRoot: proj, env: {} })).slice(0, 2), [2967000, 'stats-cache'], 'B8 user 2000000');
+  } finally { clean(home, proj); }
+});
+
+test('fire 33 R27-2: a readable env window is the session window ALONE (it takes precedence over the setting), still capped by the discovered capacity', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 200000 });
+    writeJson(path.join(proj, '.claude', 'settings.json'), { autoCompactWindow: 100000 });
+    const c = discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '800000' } });
+    assert.deepStrictEqual([c.capacityTokens, c.source], [800000, 'auto-compact-window'], 'C1: the settings are not read when the env is');
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'abc' } }).capacityTokens, 100000, 'an unreadable env leaves the settings MIN');
+    fs.rmSync(path.join(home, '.claude', 'stats-cache.json'));
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '800000' } }).capacityTokens, CAPACITY_TOKENS, 'an env window never raises the discovered capacity');
+  } finally { clean(home, proj); }
+});
+
+test('fire 33 NAMED RESIDUAL (C2, C3): with no readable env a per-model window is taken as a MIN across models, so a session on a model with a larger window reads the smallest', () => {
+  // A hook has no reliable model identity, so per-model precedence cannot be applied: this pins the conservative reading as the residual.
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 200000, modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 800000 } } });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 200000, 'C2: an opus session reads the top-level 200000, not its own 800000');
+    writeJson(userSettings(home), { modelSettings: { 'claude-haiku-4-5': { autoCompactWindow: 100000 } } });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 100000, 'C3: a window saved for another model only is read for every session');
+  } finally { clean(home, proj); }
+});
+
 // ---------------------------------------------------------------------------
 // CWK-157 -- the writer's self-clean for a state file whose recorded project root no longer exists (hooks-safety.md
 // section 8). Fixture HOME under os.tmpdir() only: the real ~/.claude/coal/coalwash/ is never read or written here.
