@@ -103,7 +103,9 @@ function oldestAnchor(txDir, physTarget) {
     const dir = path.join(txDir, d);
     if (!fs.existsSync(path.join(dir, SNAP_MARKER))) continue;
     let manifest;
-    try { manifest = JSON.parse(readRepoFileBounded(path.join(dir, 'manifest.json'), null, MAX_DOC_BYTES)); } catch { continue; } // CWK-137: bounded
+    // E2-4: contained to txDir ITSELF -- a snap-<n> a cloned repo planted as a link (or a manifest that is one) resolves
+    // outside it and is refused, never read.
+    try { manifest = JSON.parse(readRepoFileBounded(path.join(dir, 'manifest.json'), txDir, MAX_DOC_BYTES)); } catch { continue; }
     if (!Array.isArray(manifest)) continue;
     const hit = manifest.find((m) => m && samePath(m.original, physTarget));
     if (!hit) continue;
@@ -150,10 +152,12 @@ export function anchorDiff(filePath, { projectRoot, home = os.homedir() } = {}) 
     const physRoot = physicalOrNull(projectRoot);
     const phys = physicalOrNull(filePath);
     if (!physRoot || !phys || !containedIn(phys, [physRoot])) return null; // fail-closed, out of tree
-    const anchor = oldestAnchor(ownSandboxDir(projectRoot, '.claude', 'coalwash'), phys); // CWK-137: throws on a planted link -> the catch below -> null
+    const txDir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); // CWK-137: throws on a planted link -> the catch below -> null
+    const anchor = oldestAnchor(txDir, phys);
     if (!anchor) return null; // no ground truth on disk for this file — nothing to compare
-    // CWK-137: both reads bounded and kind-gated; a refusal is `unreadable` (null).
-    const anchorText = readRepoFileBounded(anchor.snapFile, null, MAX_DOC_BYTES);
+    // CWK-137: both reads bounded and kind-gated; a refusal is `unreadable` (null). E2-4: the snapshot copy is contained to
+    // txDir ITSELF; `phys` keeps root null: it is the realpath containedIn checked against the project above.
+    const anchorText = readRepoFileBounded(anchor.snapFile, txDir, MAX_DOC_BYTES);
     const currentText = readRepoFileBounded(phys, null, MAX_DOC_BYTES);
     if (anchorText === null || currentText === null) return null; // unreadable — fail-silent, never guess
     const approvedTexts = approvedSince(projectRoot, phys, anchor.at);

@@ -101,7 +101,7 @@ export function verifyParcelCandidates(candidates, { home, projectRoot } = {}) {
         rejected.push({ path: c.path, reason: 'not a readable file' });
         continue;
       }
-      // CWK-137: a PREFIX read, bounded and kind-gated -- only the head is compared.
+      // CWK-137: a PREFIX read, bounded and kind-gated -- only the head is compared. E2-4: root null kept: `phys` is the realpath containedIn checked against the home/project trees above.
       let raw = readRepoFileBounded(phys, null, MAX_DOC_BYTES, true);
       if (raw === null) {
         rejected.push({ path: c.path, reason: 'exists but unreadable' });

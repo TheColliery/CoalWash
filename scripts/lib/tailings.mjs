@@ -122,7 +122,8 @@ export function isBareId(id) {
 
 function loadIndex(dir) {
   try {
-    const parsed = JSON.parse(readRepoFileBounded(path.join(dir, INDEX_NAME), null, MAX_DOC_BYTES)); // CWK-137: bounded
+    // CWK-137: bounded. E2-4: contained to the bin dir ITSELF (`dir` is binDir's ownSandboxDir answer).
+    const parsed = JSON.parse(readRepoFileBounded(path.join(dir, INDEX_NAME), dir, MAX_DOC_BYTES));
     return Array.isArray(parsed) ? parsed.filter((i) => i && isBareId(i.id)) : [];
   } catch {
     return [];
@@ -307,7 +308,8 @@ export function restoreFromBin(projectRoot, name, id) {
 // a real item is never told it does not exist.
 export function binItemOutcome(projectRoot, name, id) {
   if (!isBareId(id)) return { why: 'absent' };
-  try { return repoReadOutcome(path.join(binDir(projectRoot, name), id), null, MAX_DOC_BYTES); }
+  // E2-4: contained to the bin dir ITSELF -- an item planted as a link that resolves anywhere else is `outside-root`.
+  try { const dir = binDir(projectRoot, name); return repoReadOutcome(path.join(dir, id), dir, MAX_DOC_BYTES); }
   catch { return { why: 'unreadable' }; } // binDir refused a linked sandbox dir
 }
 
@@ -433,7 +435,8 @@ export function sweepStoreOld(projectRoot, { now = Date.now(), storeBytes } = {}
 // never pushed/narrated, per the headroom-quiet doctrine). Returns '' on a
 // missing/unreadable log, never throws.
 export function readDeathLog(projectRoot, name) {
-  try { return readRepoFileBounded(path.join(binDir(projectRoot, name), DEATH_LOG_NAME), null, MAX_DOC_BYTES, true) ?? ''; } // CWK-137: bounded (a prefix is enough -- callers ask 'is there one')
+  // CWK-137: bounded (a prefix is enough -- callers ask 'is there one'). E2-4: contained to the bin dir ITSELF.
+  try { const dir = binDir(projectRoot, name); return readRepoFileBounded(path.join(dir, DEATH_LOG_NAME), dir, MAX_DOC_BYTES, true) ?? ''; }
   catch { return ''; }
 }
 

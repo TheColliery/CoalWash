@@ -541,7 +541,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       // still counted from stat, its @import closure is not.
       let text;
       try {
-        const r = repoReadOutcome(phys, null, MAX_DOC_BYTES);
+        const r = repoReadOutcome(phys, null, MAX_DOC_BYTES); // E2-4: root null kept: a class-B entry discovery already realpath-checked inside the home/project trees (add() above)
         if (!r.buf) throw Object.assign(new Error(r.why), { code: r.code || r.why.toUpperCase() });
         text = r.buf.toString('utf8');
       } catch (err) {
@@ -787,7 +787,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
           if (p.entry.bytes !== g.entry.bytes) continue; // cheap pre-check
           let same = false;
           try {
-            // CWK-137: bounded bytes, both sides; a refusal is simply not-the-same.
+            // CWK-137: bounded bytes, both sides; a refusal is simply not-the-same. E2-4: root null kept: a class-B entry discovery already realpath-checked inside the home/project trees.
             const pb = readRepoBytesBounded(p.entry.path, null, MAX_DOC_BYTES);
             const gb = readRepoBytesBounded(g.entry.path, null, MAX_DOC_BYTES);
             same = !!pb && !!gb && Buffer.compare(pb, gb) === 0;

@@ -220,8 +220,10 @@ function contentDigest(buf) { return crypto.createHash('sha256').update(buf).dig
 function recordOrigPath(snap, phys, blobBuf) {
   replaceFile(origPathSidecar(snap), `${phys}\n${contentDigest(blobBuf)}`); // CWK-137: temp + rename, never through a link
 }
-// Returns true (verified: path matches AND the blob's bytes, hashed right
-// now, still match what was recorded at write time), false (either a
+// Returns the verified BYTES (E2-4: a Buffer, not `true` -- the caller uses the
+// very bytes that were hashed, never a second read of the same path; path matches
+// AND the blob's bytes, hashed right now, still match what was recorded at write
+// time), false (either a
 // DIFFERENT phys owns this name — the collision case — or the SAME phys's
 // blob was altered after the fact; either way, never trust it), or null
 // (unverifiable — no sidecar at all, a pre-content-hash legacy sidecar
@@ -243,18 +245,19 @@ function recordOrigPath(snap, phys, blobBuf) {
 // real snapshot. See `verifyBlobIntegrity` below, now wired into
 // `readWriteguardSnapshot` — the restore door the round-10 dispatch names
 // as "the one a human actually presses" is gated too.
-function verifyOrigPath(snap, phys) {
+// `root` is the session dir sessionDir() derived through ownSandboxDir: both reads are contained to it ITSELF (E2-4), so a
+// sidecar or blob planted as a link that resolves anywhere else is unverifiable (null).
+function verifyOrigPath(snap, phys, root) {
   try {
-    const raw = readRepoFileBounded(origPathSidecar(snap), null, MAX_DOC_BYTES); // CWK-137: bounded
+    const raw = readRepoFileBounded(origPathSidecar(snap), root, MAX_DOC_BYTES); // CWK-137: bounded
     if (raw === null) return null;
     const nl = raw.indexOf('\n');
     if (nl === -1) return null; // legacy path-only sidecar, or malformed — unverifiable
     if (raw.slice(0, nl) !== phys) return false;
     const recordedHash = raw.slice(nl + 1).trim();
-    let blobBuf;
-    blobBuf = readRepoBytesBounded(snap, null, MAX_DOC_BYTES); // CWK-137: bounded
+    const blobBuf = readRepoBytesBounded(snap, root, MAX_DOC_BYTES); // CWK-137: bounded
     if (!blobBuf) return null; // blob unreadable — can't verify content
-    return contentDigest(blobBuf) === recordedHash;
+    return contentDigest(blobBuf) === recordedHash ? blobBuf : false;
   } catch { return null; }
 }
 // Walk the disambiguation chain for `phys` inside `dir`: the FIRST candidate
@@ -268,7 +271,8 @@ function resolveSnapPath(dir, phys) {
   for (let n = 0; ; n++) {
     const candidate = path.join(dir, n === 0 ? base : `${base}-${n}`);
     if (!fs.existsSync(candidate)) return { path: candidate, existing: false };
-    if (verifyOrigPath(candidate, phys) === true) return { path: candidate, existing: true };
+    const bytes = verifyOrigPath(candidate, phys, dir);
+    if (Buffer.isBuffer(bytes)) return { path: candidate, existing: true, bytes };
     // occupied by something else (collision or legacy, unverifiable) — try the next slot
   }
 }
@@ -293,6 +297,7 @@ export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home
     // hangs the agent's Edit, a device copies without end) and wrote THROUGH a link at
     // the destination. Over MAX_DOC_BYTES, or not a regular file, there is no snapshot
     // (the airbag was always best-effort, never a gate on the write).
+    // E2-4: root null kept: `phys` is the governed file itself, the realpath isGuardedTarget contained to the class-B trees.
     const bytes = readRepoBytesBounded(phys, null, MAX_DOC_BYTES);
     if (!bytes) return null;
     replaceFile(snap, bytes);
@@ -302,7 +307,8 @@ export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home
     // CWK-137: bounded re-read of the copy just written. A refusal here means there is
     // nothing to attest -- never record the digest of an EMPTY buffer for a blob that
     // holds real bytes (a false sidecar that no later verification could ever satisfy).
-    const written = readRepoBytesBounded(snap, null, MAX_DOC_BYTES);
+    // E2-4: contained to the session dir ITSELF, like every read of a snapshot.
+    const written = readRepoBytesBounded(snap, dir, MAX_DOC_BYTES);
     if (!written) return null;
     recordOrigPath(snap, phys, written);
     return snap;
@@ -323,11 +329,10 @@ export function readSnapshot(projectRoot, sessionId, touchedPath, { home } = {})
   try {
     const phys = isGuardedTarget(touchedPath, { projectRoot, home });
     if (!phys) return null;
-    const { path: snap, existing } = resolveSnapPath(sessionDir(projectRoot, sessionId), phys);
+    const { path: snap, existing, bytes } = resolveSnapPath(sessionDir(projectRoot, sessionId), phys);
     if (!existing) return null;
-    const orig = readRepoFileBounded(snap, null, MAX_DOC_BYTES); // CWK-137: bounded
-    if (orig === null) return null;
-    return { phys, snapshotPath: snap, orig };
+    // E2-4: the very bytes resolveSnapPath read (contained, bounded) and verified -- never a second read of the path.
+    return { phys, snapshotPath: snap, orig: bytes.toString('utf8') };
   } catch { return null; }
 }
 
@@ -343,7 +348,7 @@ export function seatbeltCheck(projectRoot, sessionId, touchedPath, { home } = {}
   if (!b) return null;
   // CWK-137: bounded. Over MAX_DOC_BYTES is the oversize note (it always was, one
   // step later); any other refusal stays silent, as a failed read always did.
-  const r = repoReadOutcome(b.phys, null, MAX_DOC_BYTES);
+  const r = repoReadOutcome(b.phys, null, MAX_DOC_BYTES); // E2-4: root null kept: the governed file, isGuardedTarget's contained realpath
   if (r.why === 'over-bound') return { file: b.phys, snapshotPath: b.snapshotPath, oversize: true, classes: [] };
   if (!r.buf) return null; // gone/unreadable/not regular -> silent
   const cur = r.buf.toString('utf8');
@@ -366,6 +371,8 @@ function isBareId(id) {
 // reference law): the agent POINTS at a snapshot by this metadata (name /
 // session / bytes / mtime / original path), it never reproduces the bytes.
 // Every writeguard snapshot currently on disk. Fail-silent -> [].
+// E2-4: lstat at both levels -- CoalWash never makes a link here, so a session dir or an entry that is one (a cloned repo
+// can commit either) is skipped: its target's names and sizes are never listed.
 export function listWriteguard(projectRoot, { home: _home } = {}) {
   const out = [];
   try {
@@ -373,13 +380,13 @@ export function listWriteguard(projectRoot, { home: _home } = {}) {
     if (!fs.existsSync(root)) return out;
     for (const session of fs.readdirSync(root)) {
       const sdir = path.join(root, session);
-      let st; try { st = fs.statSync(sdir); } catch { continue; }
+      let st; try { st = fs.lstatSync(sdir); } catch { continue; }
       if (!st.isDirectory()) continue;
       for (const name of fs.readdirSync(sdir)) {
         if (name === '.gitignore' || name.endsWith('.origpath')) continue; // sidecars are identity metadata, never a listable/restorable snapshot
         try {
           const p = path.join(sdir, name);
-          const fst = fs.statSync(p);
+          const fst = fs.lstatSync(p);
           if (fst.isFile()) out.push({ session, name, snapshotPath: p, bytes: fst.size, mtimeMs: fst.mtimeMs });
         } catch { /* skip unreadable */ }
       }
@@ -420,17 +427,20 @@ export function listWriteguard(projectRoot, { home: _home } = {}) {
 // took pre-fix, via this door specifically (the write-path's own legacy-
 // sidecar cost, documented above, was scoped to a NEW baseline never being
 // taken; this is the restore-side twin of that same trade).
-function verifyBlobIntegrity(snapPath) {
+// Returns the verified BYTES or null (E2-4: the restore door hands back the very bytes it hashed, never a second read of the
+// path). `root` is writeguardRoot's ownSandboxDir answer: both reads are contained to it ITSELF, so a session dir, a sidecar
+// or a blob planted as a link that resolves anywhere else is unverifiable.
+function verifyBlobIntegrity(snapPath, root) {
   try {
-    const raw = readRepoFileBounded(origPathSidecar(snapPath), null, MAX_DOC_BYTES); // CWK-137: bounded
-    if (raw === null) return false;
+    const raw = readRepoFileBounded(origPathSidecar(snapPath), root, MAX_DOC_BYTES); // CWK-137: bounded
+    if (raw === null) return null;
     const nl = raw.indexOf('\n');
-    if (nl === -1) return false; // legacy path-only sidecar — unverifiable, never trusted
+    if (nl === -1) return null; // legacy path-only sidecar — unverifiable, never trusted
     const recordedHash = raw.slice(nl + 1).trim();
-    const blobBuf = readRepoBytesBounded(snapPath, null, MAX_DOC_BYTES);
-    if (!blobBuf) return false;
-    return contentDigest(blobBuf) === recordedHash;
-  } catch { return false; }
+    const blobBuf = readRepoBytesBounded(snapPath, root, MAX_DOC_BYTES); // CWK-137: bounded bytes
+    if (!blobBuf) return null;
+    return contentDigest(blobBuf) === recordedHash ? blobBuf : null;
+  } catch { return null; }
 }
 
 // Read ONE snapshot's ORIGINAL bytes by its bare snapName. THE RECOVERY DOOR
@@ -452,17 +462,21 @@ export function readWriteguardSnapshot(projectRoot, snapName, { home } = {}) {
   const rows = listWriteguard(projectRoot, { home }).filter((r) => r.name === snapName);
   if (!rows.length) return null;
   rows.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  const pick = rows.find((r) => verifyBlobIntegrity(r.snapshotPath));
-  if (!pick) return null;
-  // BYTES (G3-3's twin, same commit — the bins and this door are one concept
-  // with two implementations, and when one learns the other changes or the
-  // "same law" comment is a lie). The snapshot on disk is byte-exact (a
-  // copyFileSync), but reading it back through 'utf8' re-encoded every
-  // non-UTF-8 byte as U+FFFD — so the CLI's own words, "byte-exact original on
-  // stdout", were FALSE for exactly the files this net exists to save. `bytes`
-  // already comes from a stat, so it was right while the content was wrong.
-  const content = readRepoBytesBounded(pick.snapshotPath, null, MAX_DOC_BYTES); // CWK-137: bounded bytes
-  return content ? { ...pick, content } : null;
+  let root;
+  try { root = writeguardRoot(projectRoot); } catch { return null; } // CWK-137: a linked sandbox restores nothing
+  for (const r of rows) {
+    // BYTES (G3-3's twin, same commit — the bins and this door are one concept
+    // with two implementations, and when one learns the other changes or the
+    // "same law" comment is a lie). The snapshot on disk is byte-exact (a
+    // copyFileSync), but reading it back through 'utf8' re-encoded every
+    // non-UTF-8 byte as U+FFFD — so the CLI's own words, "byte-exact original on
+    // stdout", were FALSE for exactly the files this net exists to save. `bytes`
+    // already comes from a stat, so it was right while the content was wrong.
+    // E2-4: the content is the very bytes verifyBlobIntegrity hashed, contained to the write-guard root ITSELF.
+    const content = verifyBlobIntegrity(r.snapshotPath, root);
+    if (content) return { ...r, content };
+  }
+  return null;
 }
 
 // Run-gated cleanup (SessionStart, event-driven — NEVER a clock; 0h-GUARD

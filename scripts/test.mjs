@@ -51,6 +51,7 @@ const TESTS = [
   'scripts/lib/fixture-canonical.test.mjs',
   'scripts/lib/root-provenance.test.mjs',
   'scripts/lib/repo-fs.test.mjs',
+  'scripts/lib/read-containment.test.mjs',
   'scripts/build-plugin.test.mjs',
   'scripts/verify.test.mjs',
   'scripts/config-keys.test.mjs',

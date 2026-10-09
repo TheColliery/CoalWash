@@ -45,10 +45,12 @@ export function globalKeepsPath(home = os.homedir()) {
   return path.join(claudeBaseDir(home), GLOBAL_KEEPS_NAME);
 }
 
-function rawKeepsOrNull(file) {
+// `root`: the project tx dir its caller derived through ownSandboxDir, or null for the user's own global store.
+function rawKeepsOrNull(file, root) {
   // CWK-137: bounded and kind-gated -- a project keeps.json sits in the repo-plantable
-  // .claude/coalwash/ (a link to /dev/zero there hung the reader).
-  try { return JSON.parse(readRepoFileBounded(file, null, MAX_DOC_BYTES)); } catch { return null; }
+  // .claude/coalwash/ (a link to /dev/zero there hung the reader). E2-4: contained to that
+  // folder ITSELF; a keeps.json that resolves anywhere else is refused and protects nothing.
+  try { return JSON.parse(readRepoFileBounded(file, root, MAX_DOC_BYTES)); } catch { return null; }
 }
 
 // Every prior keep-adjudication at `file`: [{ target, reason, date, anchor?,
@@ -56,8 +58,9 @@ function rawKeepsOrNull(file) {
 // malformed elements (never throws). Exported (as loadKeepsAt) so apply.mjs's
 // KEEPS-GATE can read a keeps store at the exact tx-dir path a transaction is
 // actually using (opts.txDir in hermetic tests) — one loader, one schema.
-export function loadKeepsAt(file) {
-  const parsed = rawKeepsOrNull(file);
+// `root` = null: a caller-trusted path (the global store, a test fixture); a project store goes through loadProjectKeepsAt.
+export function loadKeepsAt(file, root = null) {
+  const parsed = rawKeepsOrNull(file, root);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
   if (Number(parsed.v) > KEEPS_SCHEMA_V) return []; // newer schema: unreadable to us
   return Array.isArray(parsed.keeps) ? parsed.keeps.filter((k) => k && typeof k.target === 'string') : [];
@@ -98,13 +101,13 @@ const loadKeepsFrom = loadKeepsAt;
 // `false` — passed EXPLICITLY, never inferred — is the ONLY way to clear it:
 // the deliberate signal that the user's decision was actually recorded, not
 // merely that this call happened to omit the field.
-function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anchorFile, pendingUser, pendingSince } = {}) {
+function recordKeepAt(file, root, ensureDir, { target, reason = '', date, anchor, anchorFile, pendingUser, pendingSince } = {}) {
   if (typeof target !== 'string' || !target) return { ok: false, anchorDropped: false, anchorStored: false };
   try {
-    const raw = rawKeepsOrNull(file);
+    const raw = rawKeepsOrNull(file, root);
     if (raw && typeof raw === 'object' && !Array.isArray(raw) && Number(raw.v) > KEEPS_SCHEMA_V) return { ok: false, anchorDropped: false, anchorStored: false }; // read-only to us
     ensureDir();
-    const existing = loadKeepsFrom(file);
+    const existing = loadKeepsFrom(file, root);
     const prior = existing.find((k) => k.target === target);
     const keeps = existing.filter((k) => k.target !== target);
     // grad6 W3-K2 (CoalBoard verdict): this used to REBUILD the entry from
@@ -285,13 +288,22 @@ function recordKeepAt(file, ensureDir, { target, reason = '', date, anchor, anch
   }
 }
 
+// A project store, read contained to the tx dir ITSELF (E2-4). `txDir` is ownSandboxDir's answer (or a caller-trusted
+// override), so no link sits between the project root and it; the containment refuses one planted below it.
+export function loadProjectKeepsAt(txDir) {
+  return loadKeepsFrom(path.join(txDir, KEEPS_NAME), txDir);
+}
 export function loadKeeps(projectRoot) {
-  return loadKeepsFrom(keepsPath(projectRoot));
+  let dir;
+  try { dir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); } catch { return []; } // CWK-137: a linked sandbox holds no keeps of ours
+  return loadProjectKeepsAt(dir);
 }
 export function recordKeep(projectRoot, opts = {}) {
-  // CWK-137: the directory is proven link-free (ownSandboxDir) INSIDE ensureDir, which
-  // recordKeepAt calls inside its own try -- a planted link returns { ok: false }.
-  return recordKeepAt(keepsPath(projectRoot), () => { const dir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); fs.mkdirSync(dir, { recursive: true }); ensureSelfIgnore(dir); }, opts);
+  // CWK-137: the directory is proven link-free (ownSandboxDir) BEFORE the first read, and both
+  // reads of the existing store are contained to it (E2-4) -- a planted link returns { ok: false }.
+  let dir;
+  try { dir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); } catch { return { ok: false, anchorDropped: false, anchorStored: false }; }
+  return recordKeepAt(path.join(dir, KEEPS_NAME), dir, () => { fs.mkdirSync(dir, { recursive: true }); ensureSelfIgnore(dir); }, opts);
 }
 
 // Global-scope variants — identical shape/schema/upsert-by-target semantics,
@@ -308,5 +320,5 @@ export function loadGlobalKeeps(home = os.homedir()) {
 }
 export function recordGlobalKeep(home = os.homedir(), opts = {}) {
   const dir = claudeBaseDir(home);
-  return recordKeepAt(globalKeepsPath(home), () => { fs.mkdirSync(dir, { recursive: true }); }, opts);
+  return recordKeepAt(globalKeepsPath(home), null, () => { fs.mkdirSync(dir, { recursive: true }); }, opts); // root null: the user's own store
 }

@@ -73,7 +73,7 @@ import { isCloudPlaceholder, ccMemoryDir, physicalForCreate, containedIn } from 
 // forms the SAME shape of cycle (it imports txDirFor/ensureSelfIgnore from
 // here; this file imports sweepFatBin/sweepStoreOld from there) — identical
 // reasoning, identical safety.
-import { loadKeepsAt, KEEPS_NAME, globalKeepsPath } from './keeps.mjs';
+import { loadKeepsAt, loadProjectKeepsAt, globalKeepsPath } from './keeps.mjs';
 // beta.12 item 4: the two bins' retention sweep (fat-bin 30d / store.old 60d,
 // retention.mjs's pure policy; 0i adds the store-proportional size cap)
 // piggybacks on this SAME preflight touchpoint — a sibling housekeeping call
@@ -420,6 +420,7 @@ function deadLinkScan(actionable, physRoots, txDir) {
   if (!files.length) return [];
   // CWK-137: bounded + kind-gated. A surviving .md over MAX_DOC_BYTES (or one that turned out not to be a regular
   // file) contributes nothing: the advisory then UNDER-reports, which is its safe direction, and no file is read whole.
+  // E2-4: root null kept: collectMdFiles keeps only Dirents that are plain files, under the realpath'd declared roots.
   const surviving = files
     .map((p) => readRepoFileBounded(p, null, MAX_DOC_BYTES) ?? '')
     .join('\n');
@@ -710,8 +711,9 @@ function ownerToken(sessionId) {
 }
 function readLockToken(lockPath) {
   // CWK-137: bounded + kind-gated -- the lock lives in the project's .claude/coalwash/,
-  // which a cloned repo can pre-populate (a lock that is a link to /dev/zero hung this).
-  try { return JSON.parse(readRepoFileBounded(lockPath, null, MAX_CONFIG_BYTES)).token ?? null; } catch { return null; }
+  // which a cloned repo can pre-populate (a lock that is a link to /dev/zero hung this). E2-4: contained to the lock's own
+  // directory, the one its caller derived (ownSandboxDir for the tx and bin locks, ~/.claude for the global one).
+  try { return JSON.parse(readRepoFileBounded(lockPath, path.dirname(lockPath), MAX_CONFIG_BYTES)).token ?? null; } catch { return null; }
 }
 export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs = LOCK_STALE_MS, now = Date.now() } = {}) {
   const token = ownerToken(sessionId);
@@ -1042,6 +1044,7 @@ export function applyPlan(plan, opts = {}) {
       }
       // CWK-137: bounded + kind-gated, and the ONE read that admits a plan target (the re-reads below see a file this
       // one admitted). Over MAX_DOC_BYTES is refused by name, exactly as discovery already refuses to measure it.
+      // E2-4: root null kept here and at the two re-reads below: a.phys is the realpath checked inside physRoots above.
       const staged = repoReadOutcome(a.phys, null, MAX_DOC_BYTES);
       if (!staged.buf) return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed${staged.why ? `: ${staged.why}` : ''})` };
       const origBuf = staged.buf;
@@ -1184,7 +1187,7 @@ export function applyPlan(plan, opts = {}) {
       };
       let keeps = [];
       try {
-        keeps = [...loadKeepsAt(path.join(txDir, KEEPS_NAME)), ...loadKeepsAt(globalKeepsPath(home))]
+        keeps = [...loadProjectKeepsAt(txDir), ...loadKeepsAt(globalKeepsPath(home))] // E2-4: the project store contained to txDir
           .filter((k) => typeof k.anchor === 'string' && k.anchor && typeof k.anchorFile === 'string' && k.anchorFile);
       } catch { keeps = []; } // an unreadable keeps ledger must never block an apply (it is the shield, not the gate's subject)
       // Fixpoint: excluding one violating action can remove the very text that
@@ -1674,11 +1677,13 @@ export function applyPlan(plan, opts = {}) {
 // Returns [] when every copy restores faithfully, else the failures.
 export function verifySnapshot(snapDir, manifest) {
   const bad = [];
+  const txDir = path.dirname(snapDir); // snap-<n> sits directly in the tx dir its caller derived through ownSandboxDir
   for (const m of manifest) {
     try {
       // CWK-137 RESIDUAL_REREAD: both sides through the bounded, kind-gated read. Over the bound is UNVERIFIABLE by name (the
       // staging read never admits such a target, so this is only reachable if one grew since), never read whole.
-      const snap = repoReadOutcome(path.join(snapDir, m.snap), null, MAX_DOC_BYTES);
+      // E2-4: the copy is contained to the tx dir ITSELF; the source keeps root null (the run's own a.phys, a checked realpath).
+      const snap = repoReadOutcome(path.join(snapDir, m.snap), txDir, MAX_DOC_BYTES);
       const src = repoReadOutcome(m.original, null, MAX_DOC_BYTES);
       if (!snap.buf || !src.buf) {
         bad.push(`${m.original} (unverifiable: ${!snap.buf ? `copy ${snap.why || 'unreadable'}` : `source ${src.why || 'unreadable'}`})`);
@@ -1704,7 +1709,8 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
     const jp = path.join(txDir, JOURNAL_NAME);
     // CWK-137: the journal lives in the directory a cloned repo can commit, so it is read bounded + kind-gated. Absent
     // means no journal; ANY other refusal (a link, a special file, over the bound) is "cannot know" and freezes the sweep.
-    const jo = repoReadOutcome(jp, null, MAX_DOC_BYTES);
+    // E2-4: contained to txDir ITSELF -- a journal that resolves anywhere else is that refusal.
+    const jo = repoReadOutcome(jp, txDir, MAX_DOC_BYTES);
     if (jo.why && jo.why !== 'absent') return;
     if (jo.buf) {
       let j = null;
@@ -1768,7 +1774,9 @@ export function recoverDangling(projectRoot, opts = {}) {
     const journalPath = path.join(txDir, JOURNAL_NAME);
     if (!fs.existsSync(journalPath)) return { recovered: 'none' };
     let journal;
-    try { journal = JSON.parse(readRepoFileBounded(journalPath, null, MAX_DOC_BYTES)); } catch { // CWK-137: bounded
+    // CWK-137: bounded. E2-4: contained to txDir ITSELF, and a refused read is unreadable (`?? ''` makes JSON.parse throw;
+    // JSON.parse(null) would have answered null and slipped past this catch).
+    try { journal = JSON.parse(readRepoFileBounded(journalPath, txDir, MAX_DOC_BYTES) ?? ''); } catch {
       // an unreadable journal with NO readable snapDir cannot be replayed —
       // fail-closed: leave it for a human (never guess at memory state).
       return { recovered: 'none', error: 'journal unreadable — left in place for inspection' };
@@ -1839,7 +1847,9 @@ export function recoverDangling(projectRoot, opts = {}) {
     // canonicalization of the raw journal string. Every read below goes through it,
     // so the manifest is loaded from the bound location, never the raw one.
     const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
-    const manifest = JSON.parse(readRepoFileBounded(path.join(snapPhys, 'manifest.json'), null, MAX_DOC_BYTES)); // CWK-137: bounded
+    // CWK-137: bounded. E2-4: contained to txDir ITSELF; a refused or non-list manifest replays nothing and keeps the journal.
+    const manifest = JSON.parse(readRepoFileBounded(path.join(snapPhys, 'manifest.json'), txDir, MAX_DOC_BYTES) ?? 'null');
+    if (!Array.isArray(manifest)) return { recovered: 'none', error: 'snapshot manifest unreadable — refusing to replay (left for inspection)' };
     let restored = 0, failed = 0, refused = 0, refusedPinned = 0, refusedGit = 0;
     const replayed = new Set(); // CWK-162 B8: each distinct target is replayed once, however many manifest rows name it
     for (const m of manifest) {

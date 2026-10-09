@@ -330,7 +330,7 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
           // taken at discovery; the read itself trusted the path, so a file swapped or
           // grown in between -- or scanEverything's lifted budget -- read without limit.
           // A refusal takes the catch below: the stat estimate stands, 0 certain fat.
-          const text = readRepoFileBounded(e.path, null, MAX_DOC_BYTES);
+          const text = readRepoFileBounded(e.path, null, MAX_DOC_BYTES); // E2-4: root null kept: a class-B entry discovery already realpath-checked inside the home/project trees
           if (text === null) throw new Error('refused or unreadable');
           readSoFar += e.bytes;
           tok = tokensEst(text);
@@ -374,7 +374,7 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
         m.index.bytes = e.bytes;
         if (e.bytes <= CC_INDEX_CAP_BYTES) {
           try {
-            const t = readRepoFileBounded(e.path, null, MAX_DOC_BYTES); // CWK-137: bounded
+            const t = readRepoFileBounded(e.path, null, MAX_DOC_BYTES); // CWK-137: bounded. E2-4: root null kept: a class-B entry discovery already realpath-checked inside the home/project trees
             if (t !== null) m.index.lines = t.split('\n').length;
           } catch { /* unreadable: lines stays 0, same safe direction as the read-error path above */ }
         }

@@ -160,10 +160,11 @@ export function assertTreatmentAllowed(type, treatment) {
 // store collection (main memory store + agent-memory stores)
 // ---------------------------------------------------------------------------
 
-function readOrNull(p) {
+function readOrNull(p, storeDir) {
   // CWK-137: bounded and kind-gated -- a store under <project>/.claude/agent-memory is
-  // repo-derived. The path is contained by the caller; a refusal reads as unreadable.
-  return readRepoFileBounded(p, null, MAX_DOC_BYTES);
+  // repo-derived. E2-4: contained to the store's own physical directory ITSELF, so an index
+  // or topic planted as a link that resolves anywhere else reads as unreadable.
+  return readRepoFileBounded(p, storeDir, MAX_DOC_BYTES);
 }
 
 // A STORE = a directory holding a MEMORY.md index: the CC main memory dir
@@ -180,7 +181,7 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
     const phys = physicalOrNull(dir);
     if (!phys || !containedIn(phys, roots)) return; // fail-closed
     const indexPath = path.join(phys, 'MEMORY.md');
-    const indexText = readOrNull(indexPath);
+    const indexText = readOrNull(indexPath, phys);
     if (indexText === null) return; // no index = not a store
     const topics = [];
     const others = [];
@@ -209,7 +210,7 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
       // than only in the census-fix rationale above.
       if (d.name.toLowerCase() === 'memory.md') continue;
       if (path.extname(d.name).toLowerCase() === '.md') {
-        const text = readOrNull(p);
+        const text = readOrNull(p, phys);
         if (text === null) continue;
         let st = null;
         try { st = fs.statSync(p); } catch { continue; }
