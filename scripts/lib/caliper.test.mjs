@@ -24,6 +24,7 @@ import {
 import { discoverClassB, ccProjectSlug } from './class-b.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR; // hermetic: sandbox home only
+delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW; // hermetic: discoverCapacity reads it by default (fire 32, P0)
 
 // Thai fixture built from char codes (never raw invisibles/composables in source):
 // "ทำงาน" = 0E17 0E33 0E07 0E32 0E19 — 5 non-ASCII chars.
@@ -2339,6 +2340,101 @@ test('CWK-081 L1: a modelUsage ARRAY is refused by the shape guard (typeof [] ==
     const c = discoverCapacity({ home });
     assert.strictEqual(c.discovered, false, 'an array is doubt, and this function fails closed on doubt');
     assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// 08c/08d unit 2 (fire 32) -- P0, THE AUTO-COMPACT WINDOW. A session that compacts at N tokens has N as its denominator, whatever
+// window the model has; the gauge read 167,000 (or 967,000 with a 1M cache) for a 100K session (scratchpad/08b/cap100k.mjs). Every
+// leg passes env and projectRoot, so nothing ambient reaches it.
+// ---------------------------------------------------------------------------
+function writeJson(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value), 'utf8'); }
+const userSettings = (home) => path.join(home, '.claude', 'settings.json');
+const oneMillionCache = (home) => writeJson(path.join(home, '.claude', 'stats-cache.json'), { modelUsage: { 'claude-opus-5-5': { contextWindow: 1000000 } } });
+
+test('fire 32 P0: CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 reads a 100,000-token capacity, not the 167,000 default', () => {
+  const { home, proj } = sandbox();
+  try {
+    const c = discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '100000' } });
+    assert.deepStrictEqual([c.capacityTokens, c.source, c.discovered], [100000, 'auto-compact-window', true]);
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: a 1M stats-cache plus autoCompactWindow 100000 in the user settings reads the 100,000, and a per-model modelSettings window counts too (the MIN)', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 100000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 100000);
+    writeJson(userSettings(home), { autoCompactWindow: 600000, modelSettings: { 'claude-sonnet-5-5': { effortLevel: 'medium', autoCompactWindow: 300000 }, 'claude-opus-5-5': { autoCompactWindow: 'auto' } } });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 300000, 'the smallest window any model may run at');
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: a larger window never RAISES the discovered capacity (a window above the default reads the default)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const c = discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000' } });
+    assert.deepStrictEqual([c.capacityTokens, c.source], [CAPACITY_TOKENS, 'conservative-default']);
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: a cloned PROJECT window that RAISES above the user window is refused; one that lowers it wins', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 200000 });
+    writeJson(path.join(proj, '.claude', 'settings.json'), { autoCompactWindow: 900000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 200000, 'a project file never raises the wall');
+    writeJson(path.join(proj, '.claude', 'settings.local.json'), { modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 120000 } } });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 120000, 'a project file may lower it');
+    writeJson(path.join(proj, '.claude', 'settings.local.json'), String.fromCharCode(0xfeff) + JSON.stringify({ autoCompactWindow: 110000 }));
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 110000, 'a BOM-prefixed file (a PowerShell 5.1 writer) is read');
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: with no user window the default stands in, so a project window raises nothing and a lower one wins', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeJson(path.join(proj, '.claude', 'settings.json'), { autoCompactWindow: 900000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, CAPACITY_TOKENS);
+    writeJson(path.join(proj, '.claude', 'settings.json'), { autoCompactWindow: 150000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 150000);
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: an unparseable window is ignored, never read as a window: the capacity falls through to the cache', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 'auto', modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 'lots' }, broken: [1, 2] } });
+    writeJson(path.join(proj, '.claude', 'settings.json'), '{ "autoCompactWindow": 100000, ');
+    writeJson(path.join(proj, '.claude', 'settings.local.json'), { autoCompactWindow: { value: 100000 } });
+    const c = discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'abc' } });
+    assert.deepStrictEqual([c.capacityTokens, c.source], [967000, 'stats-cache']);
+    writeJson(userSettings(home), { autoCompactWindow: 200000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 200000, 'one corrupt file never voids the windows the others hold');
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: a project .claude that links OUTSIDE the project root is not read (the bounded read refuses it, CWK-137)', (t) => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));
+  try {
+    oneMillionCache(home);
+    writeJson(path.join(outside, 'settings.json'), { autoCompactWindow: 100000 });
+    try { fs.symlinkSync(outside, path.join(proj, '.claude'), 'junction'); } catch (e) { t.skip(`this volume cannot link a directory here (${e.code})`); return; }
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 967000, 'a window behind a link out of the root is never read');
+  } finally { clean(home, proj, outside); }
+});
+
+test('fire 32 P0: the env value is read the way Claude Code reads it (its leading digits, clamped to 100K..1M), so 500k is 100,000', () => {
+  // env-vars.md: "a value like 500k reads as 500 and clamps to the 100K minimum"
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500k' } }).capacityTokens, 100000);
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '50000' } }).capacityTokens, 100000);
   } finally { clean(home, proj); }
 });
 

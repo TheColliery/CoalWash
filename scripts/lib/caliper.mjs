@@ -83,7 +83,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 // findProjectRoot/physicalDir: the room's ONE root resolver — the stray-state
 // detector re-uses it rather than hand-rolling a second walk.
-import { claudeBaseDir, findProjectRoot, physicalDir, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, physicalDir, readRepoFileBounded, MAX_DOC_BYTES, MAX_CONFIG_BYTES } from './config-load.mjs';
 import { parseJsonc } from './jsonc.mjs';
 // task #13 (OS-citizen state): the per-project state path RIDES the CC memory
 // dir, so we reuse the SAME adapter discovery computes (ccMemoryDir/ccProjectSlug)
@@ -789,6 +789,8 @@ export function oldStatePath(home = os.homedir()) {
 //
 // THE PROBE ORDER IS WRITTEN DOWN so a platform that starts exposing a window
 // is picked up BY CONSTRUCTION rather than by someone remembering to look:
+//   P0  the session's AUTO-COMPACT WINDOW (fire 32, at probeCompactWindow below):
+//       read beside P1/P2 and the default, and taken whenever it is smaller.
 //   P1  <claudeBase>/stats-cache.json -> modelUsage[<model>].contextWindow.
 //       Real, structured, in-sandbox (Phoenix #10: ~/.claude/), zero-dep, no
 //       network, one small JSON. MEASURED ON THIS BOX 2026-09-10: the field
@@ -920,8 +922,58 @@ function probeCapacityFile(home) {
 function conservativeCapacity() {
   return { capacityTokens: CAPACITY_TOKENS, source: 'conservative-default', discovered: false };
 }
-export function discoverCapacity({ home = os.homedir() } = {}) {
-  return probeStatsCache(home) || probeCapacityFile(home) || conservativeCapacity();
+// P0 (08c/08d unit 2, fire 32): THE SESSION'S AUTO-COMPACT WINDOW. Claude Code compacts when the conversation reaches it ("how full
+// the context window can get before Claude Code compacts", cc-model-config), so it IS the denominator, with no reserve to take off: a
+// session compacting at 100K read a 167,000 wall here, or 967,000 with a 1M cache, before this probe (scratchpad/08b/cap100k.mjs).
+// Read from:
+//   - CLAUDE_CODE_AUTO_COMPACT_WINDOW in the hook's environment (measured 2026-10-09, Claude Code 2.1.295: a session launched with it
+//     hands it to a hook, and the settings value never reaches a hook's env), as Claude Code reads it: its leading digits (`500k` is
+//     500, env-vars.md), clamped to 100K..1M;
+//   - the top-level `autoCompactWindow` and every `modelSettings.<model>.autoCompactWindow` (v2.1.288+; tokens, or "auto") in the user
+//     settings (<claudeBase>/settings.json) and the project's .claude/settings.json and .claude/settings.local.json, the project files
+//     read bounded inside the root findProjectRoot resolves (the gauge's own anchor).
+// The MIN across all of them and the window the other probes found: a readable smaller window wins, a larger one never raises it
+// (Claude Code also caps the window at the model's). A hook has no model identity, so the MIN, as P1 takes it. The MIN IS the direction
+// clamp hooks-safety section 9 asks of a cloned project: a project window above the user's, or above the default an absent user window
+// leaves, changes nothing; a lower one wins. Unparseable, absent or unreadable = no window, never a guess.
+// THE RESIDUAL, named: a launch's --autocompact flag (Claude Code's own argv, which a hook cannot read), a managed-settings scope, and
+// a window given only in a launch's --settings file are unread; on such a session the wall stays where the other probes put it.
+export const AUTO_COMPACT_WINDOW_MIN_TOKENS = 100000;
+export const AUTO_COMPACT_WINDOW_MAX_TOKENS = 1000000;
+function compactWindowFrom(v) {
+  const n = typeof v === 'number' ? Math.floor(v) : typeof v === 'string' ? Number.parseInt(v, 10) : Number.NaN;
+  return Number.isFinite(n) ? Math.min(AUTO_COMPACT_WINDOW_MAX_TOKENS, Math.max(AUTO_COMPACT_WINDOW_MIN_TOKENS, n)) : null;
+}
+function settingsWindows(j) {
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return [];
+  const raw = [j.autoCompactWindow];
+  const ms = j.modelSettings;
+  if (ms && typeof ms === 'object' && !Array.isArray(ms)) {
+    for (const m of Object.values(ms)) if (m && typeof m === 'object' && !Array.isArray(m)) raw.push(m.autoCompactWindow);
+  }
+  return raw.map(compactWindowFrom).filter((w) => w !== null);
+}
+function probeCompactWindow(home, projectRoot, env) {
+  try {
+    const found = settingsWindows(readStateFile(path.join(claudeBaseDir(home), 'settings.json')));
+    const fromEnv = compactWindowFrom(env ? env.CLAUDE_CODE_AUTO_COMPACT_WINDOW : undefined);
+    if (fromEnv !== null) found.push(fromEnv);
+    const root = projectRoot ?? findProjectRoot(process.cwd(), home);
+    for (const name of ['settings.json', 'settings.local.json']) {
+      const text = readRepoFileBounded(path.join(root, '.claude', name), root, MAX_CONFIG_BYTES);
+      let j = null;
+      try { j = text === null ? null : parseJsonc(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text); } catch { j = null; } // unparseable = no window
+      found.push(...settingsWindows(j));
+    }
+    return found.length ? Math.min(...found) : null;
+  } catch {
+    return null; // any doubt -> no window, the other probes answer (Phoenix #4)
+  }
+}
+export function discoverCapacity({ home = os.homedir(), projectRoot, env = process.env } = {}) {
+  const found = probeStatsCache(home) || probeCapacityFile(home) || conservativeCapacity();
+  const window = probeCompactWindow(home, projectRoot, env);
+  return window !== null && window < found.capacityTokens ? { capacityTokens: window, source: 'auto-compact-window', discovered: true } : found;
 }
 
 function projKey(projectRoot) {
