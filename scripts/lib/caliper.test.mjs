@@ -2386,7 +2386,8 @@ test('fire 32 P0: a cloned PROJECT window that RAISES above the user window is r
     writeJson(userSettings(home), { autoCompactWindow: 200000 });
     writeJson(path.join(proj, '.claude', 'settings.json'), { autoCompactWindow: 900000 });
     assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 200000, 'a project file never raises the wall');
-    writeJson(path.join(proj, '.claude', 'settings.local.json'), { modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 120000 } } });
+    // fire 34, P1 (B): this leg planted a PROJECT per-model window; a project's modelSettings is no longer read, so it lowers by its top-level key
+    writeJson(path.join(proj, '.claude', 'settings.local.json'), { autoCompactWindow: 120000 });
     assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 120000, 'a project file may lower it');
     writeJson(path.join(proj, '.claude', 'settings.local.json'), String.fromCharCode(0xfeff) + JSON.stringify({ autoCompactWindow: 110000 }));
     assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 110000, 'a BOM-prefixed file (a PowerShell 5.1 writer) is read');
@@ -2496,6 +2497,42 @@ test('fire 33 NAMED RESIDUAL (C2, C3): with no readable env a per-model window i
     assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 200000, 'C2: an opus session reads the top-level 200000, not its own 800000');
     writeJson(userSettings(home), { modelSettings: { 'claude-haiku-4-5': { autoCompactWindow: 100000 } } });
     assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 100000, 'C3: a window saved for another model only is read for every session');
+  } finally { clean(home, proj); }
+});
+
+// 09a fire 34 (the head's rulings on INSPECT P3 and P1). AS1 (a): the USER settings.json is read through the same bounded reader the
+// project files use (MAX_CONFIG_BYTES, 1 MiB), never whole. P1 (B): a per-model window is read from the USER settings only; a project
+// file (which a cloned repo writes) keeps only its top-level autoCompactWindow.
+test('fire 34 AS1 (a): a user settings.json over the 1 MiB config bound is no window; the same file under the bound is read', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 100000, pad: 'x'.repeat(1024 * 1024) });
+    assert.deepStrictEqual(Object.values(discoverCapacity({ home, projectRoot: proj, env: {} })).slice(0, 2), [967000, 'stats-cache'], 'an over-bound user file is never read whole');
+    writeJson(userSettings(home), JSON.stringify({ autoCompactWindow: 100000 }) + ' '.repeat(1024 * 1024));
+    assert.deepStrictEqual(Object.values(discoverCapacity({ home, projectRoot: proj, env: {} })).slice(0, 2), [967000, 'stats-cache'], 'over the bound is no window even when its first MiB would parse (never read as a prefix)');
+    writeJson(userSettings(home), { autoCompactWindow: 100000, pad: 'x'.repeat(1024) });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 100000, 'control: the bound, not the key, is what refused it');
+  } finally { clean(home, proj); }
+});
+
+test('fire 34 P1 (B): a PROJECT modelSettings window is not read (967,000 beside a 1M cache); the same entry in the USER settings still reads 100,000', () => {
+  const entry = { modelSettings: { 'claude-haiku-4-5': { autoCompactWindow: 100000 } } };
+  for (const name of ['settings.json', 'settings.local.json']) {
+    const { home, proj } = sandbox();
+    try {
+      oneMillionCache(home);
+      writeJson(path.join(proj, '.claude', name), entry);
+      assert.deepStrictEqual(Object.values(discoverCapacity({ home, projectRoot: proj, env: {} })).slice(0, 2), [967000, 'stats-cache'], `a per-model window in the project's ${name} is not read`);
+      writeJson(path.join(proj, '.claude', name), { ...entry, autoCompactWindow: 150000 });
+      assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 150000, `the top-level key of the project's ${name} is still read`);
+    } finally { clean(home, proj); }
+  }
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), entry);
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 100000, 'the user file keeps its per-model window');
   } finally { clean(home, proj); }
 });
 

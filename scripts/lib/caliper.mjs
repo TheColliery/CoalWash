@@ -930,9 +930,11 @@ function conservativeCapacity() {
 //     hands it to a hook, and the settings value never reaches a hook's env), as Claude Code reads it: its leading digits (`500k` is
 //     500, env-vars.md), clamped to 100K..1M. When it is readable it is the session's window ALONE: it "takes precedence over the
 //     command, the flag, and the setting" (cc-model-config), so the settings are not read (fire 33, R27-2);
-//   - otherwise the top-level `autoCompactWindow` and every `modelSettings.<model>.autoCompactWindow` (v2.1.288+) in the user settings
-//     (<claudeBase>/settings.json) and the project's .claude/settings.json and .claude/settings.local.json, the project files read
-//     bounded inside the root findProjectRoot resolves (the gauge's own anchor). A settings value counts only as the vendor's settings
+//   - otherwise the top-level `autoCompactWindow` of the user settings (<claudeBase>/settings.json) and of the project's
+//     .claude/settings.json and .claude/settings.local.json, and every `modelSettings.<model>.autoCompactWindow` (v2.1.288+) of the
+//     USER settings only: a project file, which a cloned repo writes, keeps only its top-level key (fire 34, P1 (B)). Every file is
+//     read bounded (MAX_CONFIG_BYTES; the user file too, fire 34, AS1 (a)), the project files inside the root findProjectRoot
+//     resolves (the gauge's own anchor). A settings value counts only as the vendor's settings
 //     type, an integer from 100,000 to 1,000,000; "auto", any string, a non-integer or an out-of-range number is no window (R27-1).
 // The window is taken against the one the other probes found: a readable smaller window wins, a larger one never raises it (Claude
 // Code also caps the window at the model's). Across the settings, the MIN, as P1 takes it. That MIN IS the direction clamp
@@ -940,8 +942,9 @@ function conservativeCapacity() {
 // leaves, changes nothing; a lower one wins. Unparseable, absent or unreadable = no window, never a guess.
 // THE RESIDUAL, named: a launch's --autocompact flag (Claude Code's own argv, which a hook cannot read), a managed-settings scope, and
 // a window given only in a launch's --settings file are unread; on such a session the wall stays where the other probes put it.
-// And a hook has no reliable model identity, so a per-model value is taken as a MIN across models: a session on a model with a larger
-// per-model window, or with none, reads the smallest window saved for any model.
+// And a hook has no reliable model identity, so a per-model value, read from the USER settings only, is taken as a MIN across models:
+// a session on a model with a larger per-model window, or with none, reads the smallest window the user saved for any model; a
+// project's modelSettings is not read at all, so a per-model window saved only in a project file is unread too.
 export const AUTO_COMPACT_WINDOW_MIN_TOKENS = 100000;
 export const AUTO_COMPACT_WINDOW_MAX_TOKENS = 1000000;
 function envCompactWindow(v) {
@@ -951,27 +954,28 @@ function envCompactWindow(v) {
 function settingsCompactWindow(v) {
   return Number.isInteger(v) && v >= AUTO_COMPACT_WINDOW_MIN_TOKENS && v <= AUTO_COMPACT_WINDOW_MAX_TOKENS ? v : null;
 }
-function settingsWindows(j) {
+function settingsWindows(j, perModel) {
   if (!j || typeof j !== 'object' || Array.isArray(j)) return [];
   const raw = [j.autoCompactWindow];
   const ms = j.modelSettings;
-  if (ms && typeof ms === 'object' && !Array.isArray(ms)) {
+  if (perModel && ms && typeof ms === 'object' && !Array.isArray(ms)) {
     for (const m of Object.values(ms)) if (m && typeof m === 'object' && !Array.isArray(m)) raw.push(m.autoCompactWindow);
   }
   return raw.map(settingsCompactWindow).filter((w) => w !== null);
+}
+// A settings file, read bounded (MAX_CONFIG_BYTES) and parsed; null when absent, refused, over the bound or unparseable. `root` null = the
+// user's own file, which no project root contains (a project file is read inside its root).
+function readSettings(file, root) {
+  const text = readRepoFileBounded(file, root, MAX_CONFIG_BYTES);
+  try { return text === null ? null : parseJsonc(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text); } catch { return null; } // unparseable = no window
 }
 function probeCompactWindow(home, projectRoot, env) {
   try {
     const fromEnv = envCompactWindow(env ? env.CLAUDE_CODE_AUTO_COMPACT_WINDOW : undefined);
     if (fromEnv !== null) return fromEnv; // the env takes precedence over every setting
-    const found = settingsWindows(readStateFile(path.join(claudeBaseDir(home), 'settings.json')));
+    const found = settingsWindows(readSettings(path.join(claudeBaseDir(home), 'settings.json'), null), true);
     const root = projectRoot ?? findProjectRoot(process.cwd(), home);
-    for (const name of ['settings.json', 'settings.local.json']) {
-      const text = readRepoFileBounded(path.join(root, '.claude', name), root, MAX_CONFIG_BYTES);
-      let j = null;
-      try { j = text === null ? null : parseJsonc(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text); } catch { j = null; } // unparseable = no window
-      found.push(...settingsWindows(j));
-    }
+    for (const name of ['settings.json', 'settings.local.json']) found.push(...settingsWindows(readSettings(path.join(root, '.claude', name), root), false));
     return found.length ? Math.min(...found) : null;
   } catch {
     return null; // any doubt -> no window, the other probes answer (Phoenix #4)
