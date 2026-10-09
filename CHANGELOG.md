@@ -2,6 +2,23 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.12.1] - 2026-10-09
+
+The capacity read bounds user settings, ignores project windows
+
+Two fixes to the 1.12.0 capacity read. The user's `settings.json` is now read with the same size bound as a project's settings files, and a project's per-model `autoCompactWindow` no longer counts: only the top-level key of a project file and the per-model windows of the user's own settings do. Nothing else in the installed plugin moved. The contributor tooling changed and is listed under Changed.
+
+### Fixed
+
+- **The user `settings.json` read is size-bounded.** `probeCompactWindow` in `scripts/lib/caliper.mjs` (and its dist twin) read the user's `settings.json` whole while the project files went through the bounded reader. Every settings file now goes through one bounded read (1 MiB, the BOM stripped); a user file over the bound is no window, even when its first MiB would parse. `readStateFile` is unchanged. — test: `scripts/lib/caliper.test.mjs` (`9749046`)
+- **A cloned project's per-model window no longer lowers the wall.** `modelSettings.<model>.autoCompactWindow` is read from the user's settings only; the project's `.claude/settings.json` and `.claude/settings.local.json`, which a cloned repo writes, keep only their top-level `autoCompactWindow`. A project entry for a model the session does not run used to lower the wall to 100,000 while Claude Code never compacts there. The named residual now says the per-model minimum is taken over the user's windows only. — test: `scripts/lib/caliper.test.mjs` (`9749046`)
+
+### Changed
+
+- **SkillSpector v1.12.0 dispositions (two findings, both on the capacity read).** `OH3` (Output Handling, `AUTO_COMPACT_WINDOW_MAX_TOKENS`) is REJECTED as a false positive: the constant is the upper bound of an input read from the environment or a settings file, and no model call, output length or generated text reads it; it is not renamed, because renaming to quiet a scanner would be a filter. `AS1` (Agent Snooping, reads of the agent config directory) is CONSIDERED as a true behaviour note: the probe really reads the user settings and the project's two settings files and keeps only the window keys, as `platform-cc.md` states; its two points are answered by the two fixes above. `SECURITY.md` line 71 is not edited in this entry: it records the last real scan (v1.11.2) and moves only by the SkillSpector deputy's courier for the scan of the version this entry ships.
+- **Contributor-facing: the canon census, the wave runner and the overlay re-copies (dev tooling; none of it is in the installed plugin).** `6d1d8ff` replaced the room's git-spawn census (`scripts/git-env-census.mjs` and its test, deleted) with the org canon's census trio (`scripts/lib/git-env-census.mjs`, its test and its vectors), pinned by `scripts/lib/git-env-pins.mjs`; the reviewer's t31-1 and R26-1 findings closed with the deleted files. `scripts/test.mjs` now runs the enumerated roster through the canon wave runner (`scripts/lib/wave-run.mjs`): one TAP child per file, waves admitted by the live machine reading, the heap cap, a clock per test and per file, a whole-run deadline, and the VACUOUS status; `scripts/lib/test-plan.mjs` holds the room's numbers and a floor that turns a file reporting fewer tests than it declares at top level into a FAIL. `COALWASH_TEST_CONCURRENCY=1` now means serial. The same commit re-copied `.github/workflows/create-release.yml` (the launch-form re-point) and `scripts/secret-gate.test.mjs` by blob id, and deleted the `scripts/git-env.mjs` re-export shim. `CONTRIBUTING.md` states the new runner. — test: `scripts/lib/wave-run.test.mjs`, `scripts/lib/test-plan.test.mjs`, `scripts/lib/git-env-census.test.mjs`, `scripts/lib/git-env-pins.test.mjs`
+- **A forward note on the released 1.12.0 entry.** It did not cite `d4ba9d6`, its release commit (the CHANGELOG, the version spots and the SECURITY.md line 71 record of the v1.11.2 scan), nor `6355efb`, the bounce commit that moved the capacity read to Added. The released entry is not edited. (R28-1)
+
 ## [1.12.0] - 2026-10-09
 
 The capacity read follows a smaller auto-compact window
