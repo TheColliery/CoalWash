@@ -155,12 +155,15 @@ const KINDS = [
   {
     name: 'hook-manifest',
     matches: (rel) => /(^|\/)hooks\.json$/.test(rel),
-    roots(text) { // every `command` string, e.g. node "${CLAUDE_PLUGIN_ROOT}/hooks/x.js"
+    // every `command` string (shell form: node "${CLAUDE_PLUGIN_ROOT}/hooks/x.js") AND every `args` string (exec form, CWK2-020:
+    // command "node", args ["${CLAUDE_PLUGIN_ROOT}/hooks/x.js"]); reading `command` alone missed every exec-form root.
+    roots(text) {
       const out = [];
       const walk = (n) => {
         if (Array.isArray(n)) return n.forEach(walk);
         if (n && typeof n === 'object') {
           if (typeof n.command === 'string') out.push(...scriptsIn(n.command, /([\w./-]+\.(?:mjs|cjs|js))/g));
+          if (Array.isArray(n.args)) for (const a of n.args) if (typeof a === 'string') out.push(...scriptsIn(a, /([\w./-]+\.(?:mjs|cjs|js))/g));
           return Object.values(n).forEach(walk);
         }
       };

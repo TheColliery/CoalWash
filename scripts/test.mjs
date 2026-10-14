@@ -54,6 +54,7 @@ const TESTS = [
   'scripts/lib/read-containment.test.mjs',
   'scripts/build-plugin.test.mjs',
   'scripts/verify.test.mjs',
+  'scripts/hooks-exec-form.test.mjs',
   'scripts/config-keys.test.mjs',
   'scripts/configure.test.mjs',
   'scripts/pointer-check.test.mjs',
