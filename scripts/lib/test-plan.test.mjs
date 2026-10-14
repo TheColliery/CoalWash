@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as plan from './test-plan.mjs';
-import { declaredTopLevelTests, shortfallResults, HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS } from './test-plan.mjs';
+import { declaredTopLevelTests, shortfallResults, HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS, SLOWEST_FILE_MS } from './test-plan.mjs';
 
 const ROOM = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -36,6 +36,14 @@ test('shortfallResults turns a PASS that reported fewer tests than it declares i
   assert.match(out[0].reason, /^declares 3 top-level test\(s\) but the run reported 1 /);
   assert.equal(out[3].reason, 'not ok: x', 'a red file keeps its own reason');
   assert.equal(results[0].status, 'PASS', 'the input array is not mutated');
+});
+
+// 14a fire 53: on Node 22 `--test-timeout` bounds a whole FILE (per test only since Node 24, nodejs/node #57672), so the per-test number is
+// also the Node 22 file clock. At 120 s it sat 1.53x above the slowest file measured on this box and cut apply.test.mjs on CI's Windows Node 22
+// leg (78f24f2, check-run 115828019366: test timed out after 120000ms).
+test('the per-test bound clears the slowest measured file at least 3x, because on Node 22 it is the clock of that whole file', () => {
+  assert.ok(Number.isInteger(SLOWEST_FILE_MS) && SLOWEST_FILE_MS > 0, 'the basis is declared');
+  assert.ok(TEST_TIMEOUT_MS >= 3 * SLOWEST_FILE_MS, `TEST_TIMEOUT_MS ${TEST_TIMEOUT_MS} must be at least 3x the slowest file ${SLOWEST_FILE_MS}`);
 });
 
 test('the room numbers are finite and nest (test < file < run), and every roster file runs under the wave runner (no direct run, 09b)', () => {

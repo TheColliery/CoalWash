@@ -10,7 +10,11 @@
 // BASIS, measured on this box, Node 24.19, 2026-10-09, 48 files through runWaves (scratchpad/09a/measure-waves.out; re-derive: that script, or the wave
 // events of a run): the slowest file 78.3 s (apply.test.mjs) with up to three files running on a box already 73.6% busy; the whole run 333 s wall.
 export const HEAP_MB = 2048; // dispatch-transport.md ninth amendment: every test child runs under a heap cap of 2048 MB or lower (the cap rides NODE_OPTIONS, so a test's own spawns inherit it)
-export const TEST_TIMEOUT_MS = 120000; // per TEST (--test-timeout), the room's figure since CWK-154 (2): the slowest single test measured 2.2 s
+export const SLOWEST_FILE_MS = 78300; // the BASIS above: apply.test.mjs under load, 2026-10-09 (re-measured 2026-10-14 alone, Node 24: 45.8-73.6 s, n=4)
+// per TEST on Node 24 (--test-timeout), but per FILE on Node 22 (per test only since Node 24, nodejs/node #57672), so it is sized as a file clock:
+// 3.07x SLOWEST_FILE_MS. At 120000 (1.53x) it cut apply.test.mjs on CI's Windows Node 22 leg (78f24f2). The slowest single test is now 20-39 s
+// (apply.test.mjs's 8,000-name git fixture, 2026-10-14).
+export const TEST_TIMEOUT_MS = 240000;
 export const FILE_CLOCK_MS = 300000; // per FILE wall clock: 3.8x the slowest file measured under load; it ends a hang before the first test, which --test-timeout never reaches
 export const RUN_TIMEOUT_MS = 600000; // the whole run, unchanged from CWK-154 (2): 1.8x the measured wave run, inside the gate job's 15-minute timeout-minutes in ci.yml
 
