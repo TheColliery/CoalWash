@@ -438,6 +438,7 @@ function main() {
         // E2-4: an item that resolves outside the bin is a link CoalWash never made (a cloned repo can plant one): it is
         // refused, and the line never suggests copying it, since that would copy whatever file the link names.
         if (r.refused && r.refused.why === 'outside-root') console.error(`restore: '${id}' in ${r.refused.bin} is a link that resolves outside the bin -- NOT read, nothing was written; CoalWash never makes such a link, so do not copy it`);
+        else if (r.refused && r.refused.why === 'refused-folder') console.error(`restore: .claude/coalwash/${r.refused.bin} is a link or not a plain directory -- NOT read, nothing was written; CoalWash never makes such a folder, so do not copy anything from it`);
         else if (r.refused) console.error(`restore: '${id}' is in ${r.refused.bin} but was NOT read (${r.refused.why}${r.refused.why === 'over-bound' ? ': larger than the read bound' : ''}) -- nothing was written; copy it by hand from .claude/coalwash/${r.refused.bin}/${id}`);
         else console.error(`restore: id '${id}' not found in ${FAT_BIN_NAME} or ${STORE_OLD_NAME}`);
         process.exitCode = 1;

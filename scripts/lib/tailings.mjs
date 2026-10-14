@@ -310,7 +310,9 @@ export function binItemOutcome(projectRoot, name, id) {
   if (!isBareId(id)) return { why: 'absent' };
   // E2-4: contained to the bin dir ITSELF -- an item planted as a link that resolves anywhere else is `outside-root`.
   try { const dir = binDir(projectRoot, name); return repoReadOutcome(path.join(dir, id), dir, MAX_DOC_BYTES); }
-  catch { return { why: 'unreadable' }; } // binDir refused a linked sandbox dir
+  // R46-1: binDir refused the bin folder itself (a link, or not a plain directory): `refused-folder`, so the CLI never says
+  // the id is there or tells the user to copy a path that goes through that folder.
+  catch (e) { return { why: e && e.code === 'COALWASH_WRITE_REFUSED' ? 'refused-folder' : 'unreadable' }; }
 }
 
 // Apply retention.mjs's pure policy to one bin: partition (keep/destroy),

@@ -21,12 +21,12 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { MAX_DOC_BYTES, repoReadOutcome } from './config-load.mjs';
 import { anchorDiff } from './anchor-diff.mjs';
-import { recoverDangling, sweepSnapshots, verifySnapshot } from './apply.mjs';
+import { recoverDangling, sweepSnapshots, verifySnapshot, applyPlan } from './apply.mjs';
 import { loadKeeps, recordKeep, loadGlobalKeeps, globalKeepsPath } from './keeps.mjs';
-import { restoreFromBin, listBin, readDeathLog, FAT_BIN_NAME } from './tailings.mjs';
+import { restoreFromBin, binItemOutcome, listBin, readDeathLog, FAT_BIN_NAME } from './tailings.mjs';
 import { restore } from './cli.mjs';
 import { snapshotOnFirstWrite, readSnapshot, listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
-import { collectStores } from './retier.mjs';
+import { collectStores, rollbackFromSnapshot } from './retier.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR; // hermetic: the sandbox home only
 
@@ -408,4 +408,138 @@ test('E2-4 the root is the folder ITSELF: a `..` spelling that starts inside .cl
   const spelled = [s.own, 'snap-1', '..', '..', '..', 'MEMORY.md'].join(path.sep);
   assert.equal(repoReadOutcome(spelled, s.own, MAX_DOC_BYTES).why, 'outside-root');
   assert.equal(String(repoReadOutcome(spelled, s.project, MAX_DOC_BYTES).buf), MEMORY, 'the same spelling under the project root is an ordinary read');
+});
+
+// ---- 09b fire 47: R46-1 (a linked bin FOLDER) and R46-2 (the two rollback reads of the run's own snapshot) ----------------
+
+// R46-1: the CLI restore line for a refused bin folder. Spawned so the test reads the exact words a user sees.
+function cliRestore(s, id) {
+  const env = { ...process.env, HOME: s.home, USERPROFILE: s.home, NODE_OPTIONS: '--max-old-space-size=2048' };
+  delete env.NODE_TEST_CONTEXT;
+  return spawnSync(process.execPath, [path.join(HERE, 'cli.mjs'), 'restore', id],
+    { cwd: s.project, env, encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL', windowsHide: true });
+}
+function assertFolderRefusal(s, label) {
+  for (const id of ['abc123', 'nosuchid']) {
+    const r = restore({ id, cwd: s.project, home: s.home });
+    assert.equal(r.found, false, `${label} ${id}`);
+    assert.equal(r.refused && r.refused.why, 'refused-folder', `${label} ${id}: ${JSON.stringify({ ...r, content: undefined })}`);
+    const c = cliRestore(s, id);
+    assert.equal(c.status, 1, `stderr: ${c.stderr}`);
+    assert.doesNotMatch(`${c.stdout}${c.stderr}`, LEAK_RE);
+    assert.match(c.stderr, /is a link or not a plain directory/, c.stderr);
+    assert.doesNotMatch(c.stderr, /copy it by hand/, 'never tell the user to copy a path through a planted folder');
+    assert.doesNotMatch(c.stderr, / is in /, `never claim '${id}' is in the bin`);
+  }
+}
+
+test('R46-1 bin folder: a fat-bin planted as a directory link out of the project is refused as a folder, never "copy it by hand"', (t) => {
+  const s = sandbox(t, 'binlinkdir');
+  const out = path.join(s.outside, 'bin');
+  fs.mkdirSync(out);
+  fs.writeFileSync(path.join(out, 'abc123'), SECRET);
+  if (!dirLink(out, path.join(s.own, FAT_BIN_NAME))) { t.skip('this volume cannot make a directory link'); return; }
+  assert.equal(binItemOutcome(s.project, FAT_BIN_NAME, 'abc123').why, 'refused-folder');
+  assertFolderRefusal(s, 'fat-bin linked');
+});
+
+test('R46-1 bin folder: .claude/coalwash itself planted as a directory link is refused as a folder for both bins', (t) => {
+  const s = sandbox(t, 'ownlinkdir');
+  const out = path.join(s.outside, 'cw');
+  fs.mkdirSync(path.join(out, FAT_BIN_NAME), { recursive: true });
+  fs.writeFileSync(path.join(out, FAT_BIN_NAME, 'abc123'), SECRET);
+  fs.rmSync(s.own, { recursive: true, force: true });
+  if (!dirLink(out, s.own)) { t.skip('this volume cannot make a directory link'); return; }
+  assertFolderRefusal(s, '.claude/coalwash linked');
+});
+
+// R46-2, retier: rollbackFromSnapshot's manifest read is contained to the folder the snapshot sits in.
+function plantRetierSnap(s) {
+  const snap = path.join(s.own, 'snap-1');
+  writeJson(path.join(snap, 'manifest.json'), [{ snap: 'f0', original: s.mem }]);
+  fs.writeFileSync(path.join(snap, 'f0'), 'PRISTINE\n');
+  fs.writeFileSync(s.mem, 'CHANGED\n');
+  return snap;
+}
+
+test('R46-2 retier rollback manifest (simulated file link): a manifest whose realpath is outside reads as none (-1), nothing restored', (t) => {
+  const s = sandbox(t, 'rtman');
+  const snap = plantRetierSnap(s);
+  fakeRealpath(t, path.join(snap, 'manifest.json'), s.secret);
+  assert.equal(rollbackFromSnapshot(snap, [], [s.project]), -1);
+  assert.equal(fs.readFileSync(s.mem, 'utf8'), 'CHANGED\n');
+});
+
+test('R46-2 retier rollback manifest: a manifest that is a FILE symlink out of the project reads as none (-1)', (t) => {
+  const s = sandbox(t, 'rtmanfile');
+  const snap = plantRetierSnap(s);
+  const evil = path.join(s.outside, 'manifest.json');
+  writeJson(evil, [{ snap: 'f0', original: s.mem }]);
+  fs.rmSync(path.join(snap, 'manifest.json'));
+  if (!fileLink(evil, path.join(snap, 'manifest.json'))) { t.skip('this volume cannot make a file symlink (CI ubuntu/macOS legs run it; the simulated leg runs everywhere)'); return; }
+  assert.equal(rollbackFromSnapshot(snap, [], [s.project]), -1);
+  assert.equal(fs.readFileSync(s.mem, 'utf8'), 'CHANGED\n');
+});
+
+test('R46-2 retier rollback control: a real in-folder manifest still restores byte-exact', (t) => {
+  const s = sandbox(t, 'rtctl');
+  const snap = plantRetierSnap(s);
+  assert.equal(rollbackFromSnapshot(snap, [], [s.project]), 0);
+  assert.equal(fs.readFileSync(s.mem, 'utf8'), 'PRISTINE\n');
+});
+
+// R46-2, apply: the in-run rollback reads each snapshot copy contained to the tx dir. A delete step is made to fail AFTER
+// verifySnapshot has passed, and at that moment the rewritten file's copy is swapped (`swap`) -- the window a concurrent
+// local writer has.
+function applyWithSwappedCopy(t, s, swap) {
+  const store = path.join(s.project, 'memory');
+  const f1 = path.join(store, 'f1.md');
+  const f2 = path.join(store, 'f2.md');
+  fs.mkdirSync(store);
+  fs.writeFileSync(f1, 'original one\n');
+  fs.writeFileSync(f2, 'original two\n');
+  const real = fs.rmSync;
+  fs.rmSync = (p, ...rest) => {
+    if (String(p) === f2) {
+      const snapDir = fs.readdirSync(s.own).filter((n) => n.startsWith('snap-')).map((n) => path.join(s.own, n))[0];
+      const m = JSON.parse(fs.readFileSync(path.join(snapDir, 'manifest.json'), 'utf8')).find((e) => e.original === f1);
+      swap(path.join(snapDir, m.snap));
+      const e = new Error(`ENOENT: no such file or directory, rm '${f2}'`); e.code = 'ENOENT'; throw e;
+    }
+    return real.call(fs, p, ...rest);
+  };
+  t.after(() => { fs.rmSync = real; });
+  let r;
+  try {
+    r = applyPlan({ projectRoot: s.project, roots: [store], sessionId: 't-session', actions: [
+      { type: 'rewrite', path: f1, content: 'rewritten one\n' },
+      { type: 'delete', path: f2 },
+    ] }, { projectRoot: s.project, home: s.home });
+  } finally { fs.rmSync = real; }
+  return { r, f1, f2 };
+}
+
+test('R46-2 apply rollback copy (simulated file link): a copy whose realpath is outside is one failed restore, never copied', (t) => {
+  const s = sandbox(t, 'aprb');
+  const { r, f1 } = applyWithSwappedCopy(t, s, (copy) => fakeRealpath(t, copy, s.secret));
+  assert.equal(r.ok, false);
+  assert.equal(r.rolledBack, 'partial', JSON.stringify(r));
+  assert.equal(fs.readFileSync(f1, 'utf8'), 'rewritten one\n', 'the refused copy is not written over the original');
+});
+
+test('R46-2 apply rollback copy: a copy swapped for a FILE symlink out of the project is never copied into the original', (t) => {
+  const s = sandbox(t, 'aprbfile');
+  let linked = true;
+  const { r, f1 } = applyWithSwappedCopy(t, s, (copy) => { fs.rmSync(copy); linked = fileLink(s.secret, copy); if (!linked) fs.writeFileSync(copy, 'original one\n'); });
+  if (!linked) { t.skip('this volume cannot make a file symlink (CI ubuntu/macOS legs run it; the simulated leg runs everywhere)'); return; }
+  assert.equal(r.rolledBack, 'partial', JSON.stringify(r));
+  assert.doesNotMatch(fs.readFileSync(f1, 'utf8'), LEAK_RE);
+});
+
+test('R46-2 apply rollback control: an untouched snapshot still restores the original byte-exact', (t) => {
+  const s = sandbox(t, 'aprbctl');
+  const { r, f1, f2 } = applyWithSwappedCopy(t, s, () => {});
+  assert.equal(r.rolledBack, true, JSON.stringify(r));
+  assert.equal(fs.readFileSync(f1, 'utf8'), 'original one\n');
+  assert.equal(fs.readFileSync(f2, 'utf8'), 'original two\n');
 });

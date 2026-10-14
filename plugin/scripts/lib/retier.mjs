@@ -764,7 +764,8 @@ export function moveVerify({ origIndex, indexNew, overflowText, movedLines }) {
 // safe direction: a failed rollback beats a write outside the stores).
 export function rollbackFromSnapshot(snapshotDir, createdPaths = [], trustedRoots = []) {
   let manifest;
-  try { manifest = JSON.parse(fs.readFileSync(path.join(snapshotDir, 'manifest.json'), 'utf8')); } catch { return -1; }
+  // R46-2: bounded and contained to the folder the snapshot sits in, like recoverDangling's twin read (a link out reads as none).
+  try { manifest = JSON.parse(readRepoFileBounded(path.join(snapshotDir, 'manifest.json'), path.dirname(snapshotDir), MAX_DOC_BYTES) ?? ''); } catch { return -1; }
   // CWK-120 row 2: `JSON.parse` enforces no shape, and this is the LAST resort of a failed post-commit probe -- an
   // exception escaping here means the rollback never completes. Reject a non-array at the read boundary (the same -1
   // sentinel as an unreadable manifest; anchor-diff's manifest reader already does), and treat an entry that is not

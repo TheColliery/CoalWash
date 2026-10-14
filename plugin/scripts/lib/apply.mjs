@@ -1399,7 +1399,13 @@ export function applyPlan(plan, opts = {}) {
       const rollback = () => {
         let failed = 0;
         for (const m of manifest) {
-          try { fs.copyFileSync(path.join(snapDir, m.snap), m.original); } catch { failed++; /* keep restoring the rest */ }
+          // R46-2: the copy is read contained to the tx dir and bounded, like verifySnapshot's read of the same file a moment
+          // earlier (so a legitimate run's copy always fits); a copy swapped for a link out is one failed restore, never copied.
+          try {
+            const o = repoReadOutcome(path.join(snapDir, m.snap), txDir, MAX_DOC_BYTES);
+            if (!o.buf) { failed++; continue; }
+            fs.writeFileSync(m.original, o.buf);
+          } catch { failed++; /* keep restoring the rest */ }
         }
         // A created file the rollback CANNOT remove LINGERS in the store = a mixed
         // state, exactly like a failed snapshot restore — count it (EPERM/EBUSY: AV
