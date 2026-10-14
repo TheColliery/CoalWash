@@ -50,7 +50,7 @@ Cross-agent by design — the engine is plain Node scripts and class-B discovery
 | `scripts/lib/` | The engine (ESM, shipped, zero-dep): `class-b` discovery · `caliper` measurement/ceiling-hysteresis/break-even · `broom` mechanical ops · `ask` program-side templates · `tailings`/`retention` cut-content retention + pull-only restore · `keeps` adjudicated-keep store · `fidelity-gate` · `apply` transaction · `wizard` neutral-scan + bill · `cli` the one-shot gauge front door · `receipt` · config modules. |
 | `skills/coalwash/` | `SKILL.md` (the lean orchestration contract) + `references/` (method + platform adapter facts). |
 | `commands/` | `/coalwash:stats` (measurement) · `/coalwash:update` (self-update procedure). |
-| `hooks/hooks.json` | Hook wiring: SessionStart + Stop → `${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js`. |
+| `hooks/hooks.json` | Hook wiring: five entries on four events (SessionStart; Stop; PreToolUse and PostToolUse on Edit/Write/MultiEdit; PostToolUse on Agent/Task/Workflow), each in exec form: `command: "node"` with `${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js` in `args` and no shell, so Windows without Git for Windows still finds the conductor. |
 | `scripts/` | Tool scripts: `build-plugin.mjs`, `verify.mjs`, `test.mjs`, plus the unit/hermetic tests. |
 | `plugin/` | Generated Claude Code plugin distribution — never hand-edit. |
 | `platform-configs/.coalwash.json` | Commented factory default configuration. |
