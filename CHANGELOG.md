@@ -6,7 +6,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 Reads in CoalWash's working folders refuse links that leave them
 
-A security fix. A repository that carries a link under `.claude/coalwash/`, or in a role store RE-TIER reads, could make a CoalWash read return content from a file outside the project. Every read in those folders now has to resolve inside the folder it starts in, and a read that does not is refused. The installed plugin moved: ten `scripts/lib` files, `hooks/hooks.json` and their `plugin/` twins.
+A security fix. A repository that carries a link under `.claude/coalwash/`, or in a role store RE-TIER reads, could make a CoalWash read return content from a file outside the project. Every read in those folders now has to resolve inside the folder it starts in, and a read that does not is refused. The installed plugin moved: ten `scripts/lib` files, `hooks/hooks.json`, `skills/coalwash/references/platform-cc.md` and their `plugin/` twins.
 
 ### Security
 
@@ -18,7 +18,7 @@ A security fix. A repository that carries a link under `.claude/coalwash/`, or i
 
 ### Fixed
 
-- **On Windows without Git for Windows, every hook now runs `node` in exec form.** This answers Claude Code 2.1.299, whose changelog reads "Windows: Fixed PreToolUse and PermissionRequest hooks that set no shell failing open when Git for Windows isn't installed; a guard that fails now blocks the call". On Windows without Git for Windows the old shell-form hook ran under PowerShell, where `${CLAUDE_PLUGIN_ROOT}` expands to nothing, so the edit guard failed and, from 2.1.299, blocked every Edit, Write and MultiEdit. All five entries in `hooks/hooks.json` are now `command: "node"` with the conductor path in `args`, no shell and no `onFailure`. Limit: verified by a probe that hands PowerShell the old string with Git removed from PATH; Claude Code's own no-Git fallback was not run on this box. — test: `scripts/hooks-exec-form.test.mjs`
+- **Every hook now runs `node` in exec form, on every platform; the Windows case is why.** It needs Claude Code 2.1.139 or later. This answers Claude Code 2.1.299, whose changelog reads "Windows: Fixed PreToolUse and PermissionRequest hooks that set no shell failing open when Git for Windows isn't installed; a guard that fails now blocks the call". On Windows without Git for Windows the old shell-form hook ran under PowerShell, where `${CLAUDE_PLUGIN_ROOT}` expands to nothing, so the edit guard failed and, from 2.1.299, blocked every Edit, Write and MultiEdit. All five entries in `hooks/hooks.json` are now `command: "node"` with the conductor path in `args`, no shell and no `onFailure`. Limit: verified by a probe that hands PowerShell the old string with Git removed from PATH; Claude Code's own no-Git fallback was not run on this box. — test: `scripts/hooks-exec-form.test.mjs`
 
 ## [1.12.1] - 2026-10-09
 

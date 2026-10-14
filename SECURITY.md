@@ -24,6 +24,7 @@ Report a security issue in this repo through GitHub's private vulnerability repo
 - The write-guard listing and snapshot blob read: from `v0.1.0-beta.19`; the sidecar read (`origPathSidecar`): from `v1.7.0`.
 - `anchor-diff`'s snapshot manifest and copy reads, and RE-TIER's role-store reads (`collectStores`): from `v0.2.0-rc.1`.
 - The lock-token read (`readLockToken`): from `v0.1.0-beta.2`, but no planted entry reaches it, so it is contained for uniformity and is not counted as exposed.
+- The two rollback reads: the in-run rollback copy of `applyPlan`: from `v0.1.0-beta.1`; RE-TIER's rollback manifest read (`rollbackFromSnapshot`): from `v0.2.0-rc.1`. Both read the run's own fresh `snap-<now>` folder, so they are reachable only by a concurrent local writer; they are contained for uniformity and are not counted as exposed.
 
 These dates are where each function first appears, not a per-tag re-run. Before `v1.9.0` the reads of repo-derived files were unbounded and link-following (the 2026-09-25 record below states it); `v1.9.0` is the first tag with the bounded reader (`readRepoFileBounded`), so from `v1.9.0` through `v1.12.1` they were bounded and kind-gated but not contained. Which older tag let a planted link reach which surface was not re-run per tag.
 
