@@ -132,7 +132,7 @@ function loadIndex(dir) {
 function saveIndex(dir, index) {
   try {
     fs.mkdirSync(dir, { recursive: true });
-    ensureSelfIgnore(dir);
+    if (ensureSelfIgnore(dir)) return false; // fire 55: the index names memory-content copies; no catch-all, no write
     // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
     // carries (read its comment for the full reasoning; this module cannot import
     // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
@@ -252,7 +252,7 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
   try {
     dir = binDir(projectRoot, name); // CWK-137: may throw on a planted link -> null, like any failure
     fs.mkdirSync(dir, { recursive: true });
-    ensureSelfIgnore(dir);
+    if (ensureSelfIgnore(dir)) return null; // fire 55: a bin item IS a copy of memory content; no catch-all, no copy
     lock = acquireBinLock(dir);
     if (!lock.acquired) return null;
     // U7 (7th site — found by apply.test.mjs's own FINAL-path guard, not by the

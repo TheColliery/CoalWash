@@ -52,6 +52,7 @@ const TESTS = [
   'scripts/lib/root-provenance.test.mjs',
   'scripts/lib/repo-fs.test.mjs',
   'scripts/lib/read-containment.test.mjs',
+  'scripts/lib/self-ignore.test.mjs',
   'scripts/build-plugin.test.mjs',
   'scripts/verify.test.mjs',
   'scripts/hooks-exec-form.test.mjs',

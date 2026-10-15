@@ -33,7 +33,8 @@
 // never a clock), keeping only the current session's.
 //
 // NAMED divergence (one-flock: name it where it lives): this module re-inlines
-// txDir + the self-ignore drop rather than importing them from apply.mjs, to
+// txDir rather than importing it from apply.mjs (the self-ignore comes from
+// repo-fs.mjs, the module apply.mjs takes it from since fire 55), to
 // stay OFF apply.mjs's heavy WAL/bins/keeps import graph on the PreToolUse
 // CHANNEL LIMIT (CWK-082 L3), stated here because this module is where a reader
 // comes to learn what the net covers: the airbag rides PreToolUse on the
@@ -56,7 +57,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { physicalOrNull, containedIn } from './class-b.mjs';
 import { claudeBaseDir, repoReadOutcome, readRepoBytesBounded, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir, replaceFile } from './repo-fs.mjs';
+import { ownSandboxDir, replaceFile, ensureCatchAllIgnore } from './repo-fs.mjs';
 import { gateFiles } from './fidelity-gate.mjs';
 
 // The root governance basenames, guarded anywhere in the trees. Memory-store
@@ -112,12 +113,12 @@ function snapName(phys) {
   const base = path.basename(phys).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 80);
   return `${base}--${hash(phys)}`;
 }
-// Self-ignore (re-inlined, see the named divergence above): keep the snapshots
-// out of VCS even when the project tracks .claude/. Best-effort, fail-silent.
-function selfIgnore(dir) {
-  try { fs.writeFileSync(path.join(dir, '.gitignore'), '*\n', { flag: 'wx' }); }
-  catch (e) { if (e && e.code !== 'EEXIST') { /* read-only fs etc — ignore */ } }
-}
+// Self-ignore: keep the snapshots out of VCS even when the project tracks .claude/.
+// Fire 55: the catch-all is REPLACED when a cloned repo shipped it permissive
+// (ensureCatchAllIgnore, repo-fs.mjs), and the airbag takes NO snapshot when the
+// tx dir's catch-all cannot be put in place (the snapshot is a copy of memory
+// content). The two deeper folders sit under that catch-all; theirs is a belt.
+function selfIgnore(dir) { return ensureCatchAllIgnore(dir); }
 
 // The cheap class-B shape prefilter + realpath-and-contain, fail-closed.
 // Returns the guarded file's PHYSICAL path, or null (skip free). Honest
@@ -289,7 +290,7 @@ export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home
     const { path: snap, existing } = resolveSnapPath(dir, phys);
     if (existing) return snap; // FIRST-write only, VERIFIED as this file's own baseline — already snapshotted this session
     fs.mkdirSync(dir, { recursive: true });
-    selfIgnore(txDir(projectRoot));
+    if (selfIgnore(txDir(projectRoot))) return null;
     selfIgnore(writeguardRoot(projectRoot));
     selfIgnore(dir);
     // CWK-137: a BOUNDED read of the file about to be edited, then a temp + rename

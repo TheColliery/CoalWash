@@ -303,7 +303,8 @@ export function recordKeep(projectRoot, opts = {}) {
   // reads of the existing store are contained to it (E2-4) -- a planted link returns { ok: false }.
   let dir;
   try { dir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); } catch { return { ok: false, anchorDropped: false, anchorStored: false }; }
-  return recordKeepAt(path.join(dir, KEEPS_NAME), dir, () => { fs.mkdirSync(dir, { recursive: true }); ensureSelfIgnore(dir); }, opts);
+  // fire 55: an anchor quotes memory content, so no catch-all means no record ({ ok: false })
+  return recordKeepAt(path.join(dir, KEEPS_NAME), dir, () => { fs.mkdirSync(dir, { recursive: true }); const why = ensureSelfIgnore(dir); if (why) throw new Error(why); }, opts);
 }
 
 // Global-scope variants — identical shape/schema/upsert-by-target semantics,

@@ -61,7 +61,7 @@ import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockPars
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
 import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
+import { ownSandboxDir, openPlainFile, ensureCatchAllIgnore } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -723,7 +723,7 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
   const releaseIfOwner = () => { try { if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { force: true }); } catch {} };
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    ensureSelfIgnore(path.dirname(lockPath));
+    createSelfIgnoreIfAbsent(path.dirname(lockPath));
     const fd = fs.openSync(lockPath, 'wx'); // atomic create: exactly one fresh acquirer wins
     try { fs.writeSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     // compare-after-write (the header's named-assumption belt): a foreign
@@ -776,16 +776,27 @@ export function txDirFor(projectRoot) {
   return path.join(projectRoot, '.claude', 'coalwash');
 }
 
-// The tx dir self-ignores: a `.gitignore` containing `*` INSIDE it keeps the
+// The tx dir self-ignores: a `.gitignore` that is exactly `*\n` INSIDE it keeps the
 // journal/snapshots (memory-content copies) out of version control even when
 // the user's project tracks `.claude/` — code-enforced, not a doc promise.
-// Best-effort (fail-silent): a read-only fs must never block the transaction.
+// 14a fire 55 (PR #18, `apply.mjs:786`): this used to create the file `wx` and take
+// EEXIST as success, so a cloned repo that shipped the file empty, as `!*` or as a
+// comment left every copy committable. The folder is ours, so a file that is not the
+// catch-all is now REPLACED (ensureCatchAllIgnore, repo-fs.mjs), and the return is
+// the reason it could not be put in place (null = in place): applyPlan refuses the
+// transaction on it before the first journal or snapshot byte, a bin refuses the
+// item, a keep refuses the record.
 export function ensureSelfIgnore(dir) {
-  // Exclusive create (no exists-then-write TOCTOU): two racing writers both try
-  // 'wx'; one wins, the other gets EEXIST — both harmless (the content is
-  // identical). Any other error is swallowed (best-effort, must never block a tx).
+  return ensureCatchAllIgnore(dir);
+}
+// The lock's own folder: the tx dir and a bin dir already went through
+// ensureSelfIgnore above it, and the global lock's folder is the user's ~/.claude,
+// which is not ours to rewrite, so here the catch-all is only CREATED where nothing
+// is (the pre-fire-55 behaviour, kept for that folder alone); the lock body holds a
+// token, never memory content.
+function createSelfIgnoreIfAbsent(dir) {
   try { fs.writeFileSync(path.join(dir, '.gitignore'), '*\n', { flag: 'wx' }); }
-  catch (e) { if (e && e.code !== 'EEXIST') { /* read-only fs etc — ignore */ } }
+  catch { /* EEXIST, or a read-only fs: the lock is not memory content */ }
 }
 
 // plan = {
@@ -1294,7 +1305,11 @@ export function applyPlan(plan, opts = {}) {
       if (!globalLock.acquired) return { ok: false, deferred: true, error: `global scope: ${globalLock.reason}` };
     }
     fs.mkdirSync(txDir, { recursive: true }); // txDir resolved once, above the KEEPS-GATE
-    ensureSelfIgnore(txDir);
+    const ignoreWhy = ensureSelfIgnore(txDir); // fire 55: no catch-all, no journal and no snapshot (copies of memory content)
+    if (ignoreWhy) {
+      if (globalLock) globalLock.release();
+      return { ok: false, error: `self-ignore: ${ignoreWhy} — refusing before any journal or snapshot is written, so no copy of memory content lands where git can track it` };
+    }
     const lock = acquireLock(path.join(txDir, LOCK_NAME), { sessionId: plan.sessionId, now });
     if (!lock.acquired) {
       if (globalLock) globalLock.release();

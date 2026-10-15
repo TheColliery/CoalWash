@@ -25,7 +25,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { canonicalOrNull, pathWithin } from './config-load.mjs';
+import { canonicalOrNull, pathWithin, repoReadOutcome } from './config-load.mjs';
 
 // A refused write. `code` lets a caller tell a refusal from an ordinary I/O error.
 export class RepoWriteRefused extends Error {
@@ -113,6 +113,34 @@ export function replaceFile(target, content) {
     try { fs.unlinkSync(tmp); } catch { /* best effort */ }
     throw e;
   }
+}
+
+// The self-ignore a CoalWash folder keeps so git never tracks the copies of memory content written there (the journal, the
+// snapshots, the bins, the write-guard airbag). The folder is ours (ownSandboxDir), so its `.gitignore` is ours too, and the only
+// content that counts is the catch-all `*\n`, byte for byte: a cloned repository can ship that file EMPTY, as `!*`, as a comment,
+// or as a link (PR #18, CodeRabbit r4231606757), and under git a `*\r\n` line is the pattern `*\r` (the lone-CR trap), not a
+// catch-all. Anything else at that name is replaced through replaceFile, whose rename swaps the directory entry (a planted link
+// included) and never writes through it; a name that cannot be replaced (a directory, a junction) or that does not read back as
+// the catch-all is the refusal. Two writers racing rename the same bytes in, so either result is the catch-all.
+// Returns null when the catch-all is in place, else the reason: a caller about to write a copy of memory content refuses on it.
+export const SELF_IGNORE_BODY = '*\n';
+function isCatchAllIgnore(file, dir) {
+  let st;
+  try { st = fs.lstatSync(file); } catch { return false; }
+  if (st.isSymbolicLink() || !st.isFile() || st.nlink > 1 || st.size !== SELF_IGNORE_BODY.length) return false;
+  const o = repoReadOutcome(file, dir, SELF_IGNORE_BODY.length);
+  return !!o.buf && o.buf.toString('latin1') === SELF_IGNORE_BODY;
+}
+export function ensureCatchAllIgnore(dir) {
+  const file = path.join(dir, '.gitignore');
+  if (isCatchAllIgnore(file, dir)) return null;
+  // Nothing at the name (the ordinary first run): an O_EXCL create, which fails on ANY entry there (a link included,
+  // never followed). Something there: the replace.
+  try { fs.writeFileSync(file, SELF_IGNORE_BODY, { flag: 'wx' }); } catch (e) {
+    if (!e || e.code !== 'EEXIST') return `cannot put the catch-all ${file} in place (${(e && e.code) || (e && e.message)})`;
+    try { replaceFile(file, SELF_IGNORE_BODY); } catch (e2) { return `cannot put the catch-all ${file} in place (${(e2 && e2.code) || (e2 && e2.message)})`; }
+  }
+  return isCatchAllIgnore(file, dir) ? null : `${file} does not read back as the catch-all after the replace`;
 }
 
 // Open an EXISTING file (or, with O_CREAT in `flags`, create it) that the caller means to write IN PLACE, and prove the handle IS
