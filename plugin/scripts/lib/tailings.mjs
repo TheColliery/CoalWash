@@ -50,7 +50,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
-import { ensureSelfIgnore, acquireLock } from './apply.mjs';
+import { ensureSelfIgnore, acquireLock, trackedInOwnFolder } from './apply.mjs';
 import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
@@ -246,11 +246,14 @@ function acquireBinLock(dir) {
   }
   return lock;
 }
-export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now() } = {}) {
+export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now(), trackedChecked = false } = {}) {
   let dir;
   let lock;
   try {
     dir = binDir(projectRoot, name); // CWK-137: may throw on a planted link -> null, like any failure
+    // fire 59 (L58-1): nothing is written into CoalWash's folder while git tracks a file there (applyPlan asks once per
+    // transaction and passes trackedChecked; every other caller asks here, before the first byte).
+    if (!trackedChecked && trackedInOwnFolder(path.dirname(dir))) return null;
     fs.mkdirSync(dir, { recursive: true });
     if (ensureSelfIgnore(dir)) return null; // fire 55: a bin item IS a copy of memory content; no catch-all, no copy
     lock = acquireBinLock(dir);

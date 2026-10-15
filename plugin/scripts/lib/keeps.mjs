@@ -30,7 +30,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
-import { txDirFor, ensureSelfIgnore } from './apply.mjs';
+import { txDirFor, ensureSelfIgnore, trackedInOwnFolder } from './apply.mjs';
 import { claudeBaseDir, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir } from './repo-fs.mjs';
 
@@ -304,7 +304,7 @@ export function recordKeep(projectRoot, opts = {}) {
   let dir;
   try { dir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); } catch { return { ok: false, anchorDropped: false, anchorStored: false }; }
   // fire 55: an anchor quotes memory content, so no catch-all means no record ({ ok: false })
-  return recordKeepAt(path.join(dir, KEEPS_NAME), dir, () => { fs.mkdirSync(dir, { recursive: true }); const why = ensureSelfIgnore(dir); if (why) throw new Error(why); }, opts);
+  return recordKeepAt(path.join(dir, KEEPS_NAME), dir, () => { const tracked = trackedInOwnFolder(dir); if (tracked) throw new Error(tracked); fs.mkdirSync(dir, { recursive: true }); const why = ensureSelfIgnore(dir); if (why) throw new Error(why); }, opts); // fire 59: a tracked file in the folder, no write
 }
 
 // Global-scope variants — identical shape/schema/upsert-by-target semantics,

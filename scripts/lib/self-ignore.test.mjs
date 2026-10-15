@@ -246,3 +246,82 @@ for (const kind of ['junction', 'directory']) {
     assert.ok(!fs.existsSync(path.join(s.txDir, 'journal.json')), 'no journal');
   });
 }
+
+// 15b fire 59 (INSPECT L58-1): git ignore rules never apply to a TRACKED path, so a repository that commits a file inside
+// CoalWash's own folder (keeps.json, a bin index, the journal, the .gitignore itself) would get CoalWash's writes staged by the
+// next `git commit -a`. Every writer of that folder now refuses while git tracks anything there.
+function gitc(s, ...args) {
+  const r = spawnSync('git', ['-c', 'user.name=cw', '-c', 'user.email=cw@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...args],
+    { cwd: s.proj, env: gitEnv(s.root), encoding: 'utf8', timeout: 30000, windowsHide: true });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  return r.stdout;
+}
+function plantTracked(s, rel, body) {
+  const p = path.join(s.txDir, rel);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, body);
+  gitc(s, 'add', '-f', path.relative(s.proj, p));
+  gitc(s, 'commit', '-q', '-m', 'plant');
+}
+const ANCHOR = 'PRIVATE-MEMORY-ANCHOR quoted text 42';
+
+test('L58-1: a TRACKED keeps.json is never written over: recordKeep refuses and git status stays clean', { skip: !HAS_GIT && 'git is not on PATH' }, async (t) => {
+  const { recordKeep } = await import('./keeps.mjs');
+  const s = sandbox(t);
+  plantTracked(s, 'keeps.json', '[]\n');
+  const r = recordKeep(s.proj, { target: path.join(s.store, 'MEMORY.md'), reason: 'x', anchor: ANCHOR });
+  assert.equal(gitc(s, 'status', '--porcelain', '--', '.claude/coalwash'), '', 'no tracked file under .claude/coalwash changed');
+  assert.ok(!fs.readFileSync(path.join(s.txDir, 'keeps.json'), 'utf8').includes(ANCHOR), 'the anchor reaches no tracked file');
+  assert.equal(r.ok, false);
+});
+
+test('L58-1 (A2): a TRACKED fat-bin/index.json is never written over: recordBinItem refuses and git status stays clean', { skip: !HAS_GIT && 'git is not on PATH' }, async (t) => {
+  const { recordBinItem, FAT_BIN_NAME } = await import('./tailings.mjs');
+  const s = sandbox(t);
+  plantTracked(s, `${FAT_BIN_NAME}/index.json`, '[]\n');
+  const id = recordBinItem(s.proj, FAT_BIN_NAME, { content: 'PRIVATE-BIN-CONTENT\n', original: path.join(s.store, 'MEMORY.md') });
+  assert.equal(gitc(s, 'status', '--porcelain', '--', '.claude/coalwash'), '', 'no tracked file under .claude/coalwash changed');
+  assert.equal(id, null);
+});
+
+for (const [label, rel, body] of [['journal.json', 'journal.json', '{}\n'], ['a permissive .gitignore', '.gitignore', '!*\n']]) {
+  test(`L58-1: a TRACKED ${label} in CoalWash's folder refuses the transaction before any write; git status stays clean`, { skip: !HAS_GIT && 'git is not on PATH' }, (t) => {
+    const s = sandbox(t);
+    plantTracked(s, rel, body);
+    const res = wash(s);
+    assert.equal(gitc(s, 'status', '--porcelain', '--', '.claude/coalwash'), '', 'nothing tracked changed, the .gitignore included');
+    assert.equal(res.ok, false, JSON.stringify(res));
+    assert.match(res.error, /^tracked: /, res.error);
+    assert.equal(fs.readFileSync(path.join(s.store, 'MEMORY.md'), 'utf8'), MEMORY);
+  });
+}
+
+test('L58-1: a git query that ERRORS inside a repository (a corrupt index) refuses; it is never read as "nothing tracked"', { skip: !HAS_GIT && 'git is not on PATH' }, async (t) => {
+  const { recordKeep } = await import('./keeps.mjs');
+  const s = sandbox(t);
+  plantTracked(s, 'keeps.json', '[]\n');
+  fs.writeFileSync(path.join(s.proj, '.git', 'index'), 'not an index');
+  const r = recordKeep(s.proj, { target: path.join(s.store, 'MEMORY.md'), reason: 'x', anchor: ANCHOR });
+  assert.equal(r.ok, false);
+  assert.ok(!fs.readFileSync(path.join(s.txDir, 'keeps.json'), 'utf8').includes(ANCHOR));
+});
+
+test('L58-1: outside any repository nothing is tracked, so the writers work as before (no-external-assumption)', async (t) => {
+  const { recordKeep } = await import('./keeps.mjs');
+  const tmp = fs.realpathSync.native(os.tmpdir());
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-norepo-')));
+  t.after(() => { assert.ok(proj.startsWith(tmp + path.sep)); fs.rmSync(proj, { recursive: true, force: true }); });
+  assert.equal(recordKeep(proj, { target: path.join(proj, 'MEMORY.md'), reason: 'x', anchor: ANCHOR }).ok, true);
+});
+
+test('a project lock that opts in refuses when its folder\'s catch-all cannot be put in place (a .gitignore directory)', async (t) => {
+  const { acquireLock } = await import('./apply.mjs');
+  const tmp = fs.realpathSync.native(os.tmpdir());
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-lockign-')));
+  t.after(() => { assert.ok(dir.startsWith(tmp + path.sep)); fs.rmSync(dir, { recursive: true, force: true }); });
+  fs.mkdirSync(path.join(dir, '.gitignore'));
+  const l = acquireLock(path.join(dir, '.coalwash.lock'), { sessionId: 't', selfIgnore: true });
+  assert.equal(l.acquired, false);
+  assert.match(l.reason, /^self-ignore: /);
+  assert.ok(!fs.existsSync(path.join(dir, '.coalwash.lock')), 'no lock written');
+});

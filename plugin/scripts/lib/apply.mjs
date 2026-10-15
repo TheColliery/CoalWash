@@ -55,7 +55,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zero-dep builtin)
-import { spawnSync } from 'node:child_process'; // R14 D3 only: the one optional `git ls-files` in gitTrackedRecoveryInputs (recoverDangling; never a hook path)
+import { spawnSync } from 'node:child_process'; // the one optional `git ls-files` (gitLsFiles): R14 D3's recovery check and fire 59's tracked-folder check; never a hook path
 import { gitEnv } from './git-env.mjs'; // the room's one GIT_*-stripping helper (CWK-133), shipped since R14 D3
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
@@ -201,12 +201,16 @@ function repoMarkerAbove(dir) {
 // INSIDE the repository this must find, which may be an ancestor of the project root.
 // Returns { tracked, failed }: `tracked` = how many tracked paths are the journal or lie under its snapshot directory; `failed` = why the
 // query could not answer in a repository (null when it answered, or when it could not have: the cannot-tell residual).
-function gitTrackedRecoveryInputs(txDir, journalPath, snapDir) {
-  let r;
+// The ONE git spawn in this lib, shared by both questions below (R14 D3's rail, pinned by apply.test.mjs: an explicit timeout, the
+// stripped environment, no shell, a bounded listing). `pre` are git's own options, `post` the ls-files pathspec part.
+function gitLsFiles(cwd, pre = [], post = []) {
   try {
-    r = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', 'ls-files', '-z'],
-      { cwd: txDir, env: gitEnv(), encoding: 'utf8', timeout: GIT_TRACKED_TIMEOUT_MS, windowsHide: true, maxBuffer: __testHooks.gitMaxBuffer });
-  } catch (e) { r = { error: e }; }
+    return spawnSync('git', ['--no-optional-locks', ...pre, '-c', 'core.fsmonitor=false', 'ls-files', '-z', ...post],
+      { cwd, env: gitEnv(), encoding: 'utf8', timeout: GIT_TRACKED_TIMEOUT_MS, windowsHide: true, maxBuffer: __testHooks.gitMaxBuffer });
+  } catch (e) { return { error: e }; }
+}
+function gitTrackedRecoveryInputs(txDir, journalPath, snapDir) {
+  const r = gitLsFiles(txDir);
   if (r.error && r.error.code === 'ENOENT') return { tracked: 0, failed: null }; // git is absent: the named cannot-tell residual
   if (r.error || r.status !== 0) {
     if (!repoMarkerAbove(txDir)) return { tracked: 0, failed: null }; // no repository at all (git said so): the same residual
@@ -225,6 +229,29 @@ function gitTrackedRecoveryInputs(txDir, journalPath, snapDir) {
     if (phys && (phys === physJournal || (physSnap && containedIn(phys, [txPhys]) && containedIn(phys, [physSnap])))) tracked++; // physSnap is journal-derived: it only NARROWS the trusted tx dir
   }
   return { tracked, failed: null };
+}
+// 15b fire 59 (INSPECT L58-1): does git TRACK anything in CoalWash's own folder `dir` (the tx dir)? Git ignore rules never apply to a
+// tracked path, so the catch-all `.gitignore` cannot keep a write there out of the next `git commit -a`: a repository that commits
+// `.claude/coalwash/keeps.json`, a bin index, the journal or the `.gitignore` itself would get CoalWash's write (a keep's anchor quotes
+// memory content) staged. Every writer of the folder asks this FIRST, before it creates or rewrites anything there, and refuses on a
+// reason. ONE query covers the whole folder (a repo has no business tracking any file in it). Returns null (nothing tracked, or no
+// repository / no git: the no-external-assumption fallback) or the reason. A query that errors where a repository IS present refuses:
+// the room's rule, an erroring check on a subject already on disk means refuse. Never on a hook path (Phoenix #5: hooks spawn
+// nothing); the airbag's writes sit under a session-id folder a repository cannot name in advance.
+export function trackedInOwnFolder(dir) {
+  let cwd = path.resolve(dir);
+  while (!fs.existsSync(cwd) && path.dirname(cwd) !== cwd) cwd = path.dirname(cwd);
+  if (!repoMarkerAbove(cwd)) return null; // no repository above: nothing can be tracked (and no spawn on the common path)
+  const spec = path.relative(cwd, path.resolve(dir)) || '.';
+  const r = gitLsFiles(cwd, ['--literal-pathspecs'], ['--', spec]);
+  if (r.error && r.error.code === 'ENOENT') return null; // git is absent: the named cannot-tell residual, as in gitTrackedRecoveryInputs
+  if (r.error || r.status !== 0) {
+    const how = r.error ? String(r.error.code || r.error.name || 'error') : r.signal ? `signal ${r.signal}` : `exit ${r.status}`;
+    return `cannot tell whether git tracks files in ${dir} (git ls-files: ${how}) — refusing, since a write over a tracked file would reach the next commit`;
+  }
+  const n = String(r.stdout).split('\0').filter(Boolean).length;
+  if (!n) return null;
+  return `git tracks ${n} file(s) in ${dir} — CoalWash writes nothing into its own folder while the repository tracks files there, since a write over a tracked file would reach the next commit (see them with: git ls-files -- .claude/coalwash)`;
 }
 export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, isGitMarker, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
@@ -1301,6 +1328,11 @@ export function applyPlan(plan, opts = {}) {
       globalLock = acquireLock(globalLockPath(home), { sessionId: plan.sessionId, now });
       if (!globalLock.acquired) return { ok: false, deferred: true, error: `global scope: ${globalLock.reason}` };
     }
+    const trackedWhy = trackedInOwnFolder(txDir); // fire 59 (L58-1): before ANY write in the folder, the .gitignore included
+    if (trackedWhy) {
+      if (globalLock) globalLock.release();
+      return { ok: false, error: `tracked: ${trackedWhy}` };
+    }
     fs.mkdirSync(txDir, { recursive: true }); // txDir resolved once, above the KEEPS-GATE
     const ignoreWhy = ensureSelfIgnore(txDir); // fire 55: no catch-all, no journal and no snapshot (copies of memory content)
     if (ignoreWhy) {
@@ -1541,7 +1573,7 @@ export function applyPlan(plan, opts = {}) {
         if (!cut.length) continue;
         removedCount++; // CWK-081 H1: this action removed something
         removedFrom.add(a.phys); // CWK-081 (b): and THIS is the file it removed it from
-        const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
+        const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now, trackedChecked: true }); // the folder was checked once above (fire 59)
         if (binId === null) {
           flagged.push({
             path: a.phys,
