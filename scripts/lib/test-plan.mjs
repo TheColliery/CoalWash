@@ -11,12 +11,16 @@
 // events of a run): the slowest file 78.3 s (apply.test.mjs) with up to three files running on a box already 73.6% busy; the whole run 333 s wall.
 export const HEAP_MB = 2048; // dispatch-transport.md ninth amendment: every test child runs under a heap cap of 2048 MB or lower (the cap rides NODE_OPTIONS, so a test's own spawns inherit it)
 export const SLOWEST_FILE_MS = 78300; // the BASIS above: apply.test.mjs under load, 2026-10-09 (re-measured 2026-10-14 alone, Node 24: 45.8-73.6 s, n=4)
+// The CI basis (L54-1, 15b fire 56): CI's `gate (windows-latest · node 22)` cut apply.test.mjs at 120,006 ms on 78f24f2 (check-run 115828019366,
+// 2026-10-14: "test timed out after 120000ms"). The green run on a4ea8a6 prints no per-file time (only the wave-run summary line), so this is a
+// LOWER bound: the file takes at least this long on that leg. The clocks below are sized from the larger of the two bases.
+export const CI_SLOWEST_FILE_MIN_MS = 120006;
 // per TEST on Node 24 (--test-timeout), but per FILE on Node 22 (per test only since Node 24, nodejs/node #57672), so it is sized as a file clock:
-// 3.07x SLOWEST_FILE_MS. At 120000 (1.53x) it cut apply.test.mjs on CI's Windows Node 22 leg (78f24f2). The slowest single test is now 20-39 s
-// (apply.test.mjs's 8,000-name git fixture, 2026-10-14).
-export const TEST_TIMEOUT_MS = 240000;
-export const FILE_CLOCK_MS = 300000; // per FILE wall clock: 3.8x the slowest file measured under load; it ends a hang before the first test, which --test-timeout never reaches
-export const RUN_TIMEOUT_MS = 600000; // the whole run, unchanged from CWK-154 (2): 1.8x the measured wave run, inside the gate job's 15-minute timeout-minutes in ci.yml
+// 3.04x the larger basis (CI_SLOWEST_FILE_MIN_MS). At 120000 it cut apply.test.mjs on CI's Windows Node 22 leg (78f24f2); 240000 (a4ea8a6) cleared the
+// box's figure 3x but only the CI lower bound 2x (L54-1). The slowest single test is 20-39 s (apply.test.mjs's 8,000-name git fixture, 2026-10-14).
+export const TEST_TIMEOUT_MS = 365000;
+export const FILE_CLOCK_MS = 420000; // per FILE wall clock: 3.5x the larger basis, above the per-test bound; it ends a hang before the first test, which --test-timeout never reaches
+export const RUN_TIMEOUT_MS = 600000; // the whole run, unchanged from CWK-154 (2): 1.8x the measured wave run (333 s), above the file clock so one hung file is ended by its own clock first, and inside the gate job's 15-minute timeout-minutes in ci.yml
 
 // The expectation check (testing.md: a gate judges a run by the TAP test names it expects, never by the exit code and pass count alone). wave-run reads a
 // file whose only result line names the file itself as VACUOUS (process.exit(0) before the tests, or inside the first), and names one gap open: a file whose

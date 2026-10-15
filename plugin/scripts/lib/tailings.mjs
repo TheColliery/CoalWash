@@ -241,7 +241,7 @@ function acquireBinLock(dir) {
   let lock;
   for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
     if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
-    lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now: Date.now(), staleMs: BIN_LOCK_STALE_MS });
+    lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now: Date.now(), staleMs: BIN_LOCK_STALE_MS, selfIgnore: true });
     __testHooks.binLockAttempts++;
   }
   return lock;

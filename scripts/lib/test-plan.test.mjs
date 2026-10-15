@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as plan from './test-plan.mjs';
-import { declaredTopLevelTests, shortfallResults, HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS, SLOWEST_FILE_MS } from './test-plan.mjs';
+import { declaredTopLevelTests, shortfallResults, HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS, SLOWEST_FILE_MS, CI_SLOWEST_FILE_MIN_MS } from './test-plan.mjs';
 
 const ROOM = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -41,9 +41,14 @@ test('shortfallResults turns a PASS that reported fewer tests than it declares i
 // 14a fire 53: on Node 22 `--test-timeout` bounds a whole FILE (per test only since Node 24, nodejs/node #57672), so the per-test number is
 // also the Node 22 file clock. At 120 s it sat 1.53x above the slowest file measured on this box and cut apply.test.mjs on CI's Windows Node 22
 // leg (78f24f2, check-run 115828019366: test timed out after 120000ms).
-test('the per-test bound clears the slowest measured file at least 3x, because on Node 22 it is the clock of that whole file', () => {
-  assert.ok(Number.isInteger(SLOWEST_FILE_MS) && SLOWEST_FILE_MS > 0, 'the basis is declared');
-  assert.ok(TEST_TIMEOUT_MS >= 3 * SLOWEST_FILE_MS, `TEST_TIMEOUT_MS ${TEST_TIMEOUT_MS} must be at least 3x the slowest file ${SLOWEST_FILE_MS}`);
+// 15b fire 56 (L54-1): the box's figure is not the CI figure. CI's Windows Node 22 leg cut apply.test.mjs at 120,006 ms, and its
+// green run prints no per-file time, so that number is a LOWER bound; both bases are declared and the larger one sizes the clocks.
+test('the per-test bound and the file clock each clear the slower of the two declared bases (this box, CI lower bound) at least 3x, because on Node 22 the per-test bound is the clock of a whole file', () => {
+  for (const [name, n] of [['SLOWEST_FILE_MS', SLOWEST_FILE_MS], ['CI_SLOWEST_FILE_MIN_MS', CI_SLOWEST_FILE_MIN_MS]]) assert.ok(Number.isInteger(n) && n > 0, `${name} is declared`);
+  assert.ok(CI_SLOWEST_FILE_MIN_MS >= 120006, 'a measured lower bound only rises: CI cut the file at 120,006 ms on 78f24f2');
+  const basis = Math.max(SLOWEST_FILE_MS, CI_SLOWEST_FILE_MIN_MS);
+  assert.ok(TEST_TIMEOUT_MS >= 3 * basis, `TEST_TIMEOUT_MS ${TEST_TIMEOUT_MS} must be at least 3x the slower basis ${basis}`);
+  assert.ok(FILE_CLOCK_MS >= 3 * basis, `FILE_CLOCK_MS ${FILE_CLOCK_MS} must be at least 3x the slower basis ${basis}`);
 });
 
 test('the room numbers are finite and nest (test < file < run), and every roster file runs under the wave runner (no direct run, 09b)', () => {

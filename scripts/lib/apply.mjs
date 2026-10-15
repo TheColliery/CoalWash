@@ -715,7 +715,10 @@ function readLockToken(lockPath) {
   // directory, the one its caller derived (ownSandboxDir for the tx and bin locks, ~/.claude for the global one).
   try { return JSON.parse(readRepoFileBounded(lockPath, path.dirname(lockPath), MAX_CONFIG_BYTES)).token ?? null; } catch { return null; }
 }
-export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs = LOCK_STALE_MS, now = Date.now() } = {}) {
+// `selfIgnore` (15b fire 56, census row 5): a PROJECT lock (the tx lock, a bin lock) passes true and its folder gets the
+// catch-all through ensureSelfIgnore. The default is false because the GLOBAL lock's folder is the user's own ~/.claude,
+// which a user may version: that lock writes no .gitignore and never touches one that is there.
+export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs = LOCK_STALE_MS, now = Date.now(), selfIgnore = false } = {}) {
   const token = ownerToken(sessionId);
   const body = JSON.stringify({ sessionId, pid: process.pid, at: now, token });
   // release deletes the lock ONLY if it still carries OUR token (a slow/suspended
@@ -723,7 +726,10 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
   const releaseIfOwner = () => { try { if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { force: true }); } catch {} };
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    createSelfIgnoreIfAbsent(path.dirname(lockPath));
+    if (selfIgnore) {
+      const why = ensureSelfIgnore(path.dirname(lockPath));
+      if (why) return { acquired: false, reason: `self-ignore: ${why}` };
+    }
     const fd = fs.openSync(lockPath, 'wx'); // atomic create: exactly one fresh acquirer wins
     try { fs.writeSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     // compare-after-write (the header's named-assumption belt): a foreign
@@ -788,15 +794,6 @@ export function txDirFor(projectRoot) {
 // item, a keep refuses the record.
 export function ensureSelfIgnore(dir) {
   return ensureCatchAllIgnore(dir);
-}
-// The lock's own folder: the tx dir and a bin dir already went through
-// ensureSelfIgnore above it, and the global lock's folder is the user's ~/.claude,
-// which is not ours to rewrite, so here the catch-all is only CREATED where nothing
-// is (the pre-fire-55 behaviour, kept for that folder alone); the lock body holds a
-// token, never memory content.
-function createSelfIgnoreIfAbsent(dir) {
-  try { fs.writeFileSync(path.join(dir, '.gitignore'), '*\n', { flag: 'wx' }); }
-  catch { /* EEXIST, or a read-only fs: the lock is not memory content */ }
 }
 
 // plan = {
@@ -1310,7 +1307,7 @@ export function applyPlan(plan, opts = {}) {
       if (globalLock) globalLock.release();
       return { ok: false, error: `self-ignore: ${ignoreWhy} — refusing before any journal or snapshot is written, so no copy of memory content lands where git can track it` };
     }
-    const lock = acquireLock(path.join(txDir, LOCK_NAME), { sessionId: plan.sessionId, now });
+    const lock = acquireLock(path.join(txDir, LOCK_NAME), { sessionId: plan.sessionId, now, selfIgnore: true });
     if (!lock.acquired) {
       if (globalLock) globalLock.release();
       return { ok: false, deferred: true, error: lock.reason };
@@ -1356,7 +1353,12 @@ export function applyPlan(plan, opts = {}) {
         .map(([name, r]) => `retention: ${name} over budget (${r.capConflict.keptBytes}B kept > ${r.capConflict.budgetBytes}B budget) — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor holds and byte pressure may not break it; the bin exceeds its cap until items age past the floor`);
 
       // ---- snapshot BEFORE the first mutation, then the completion marker ----
-      fs.mkdirSync(snapDir, { recursive: true });
+      // 15b fire 56 (census row 3): `snap-<now>` is a FRESH name, so it is created NON-recursively under the tx dir (made
+      // and proven link-free above): any entry already there (a junction or a directory a cloned repo committed) is EEXIST
+      // and refuses the run. A recursive mkdir accepted it and the copies below went through it.
+      try { fs.mkdirSync(snapDir); } catch (e) {
+        return { ok: false, flagged, error: `snapshot folder: ${snapDir} already exists or cannot be created (${e && e.code}) — refusing before the first snapshot byte; CoalWash writes a snapshot only into a folder it has just created` };
+      }
       const manifest = [];
       let n = 0;
       for (const a of actionable) {

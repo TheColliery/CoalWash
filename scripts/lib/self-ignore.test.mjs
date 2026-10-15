@@ -192,7 +192,7 @@ test('a bin and a keep refuse to write when their folder\'s catch-all cannot be 
   assert.ok(!fs.existsSync(path.join(tx, 'keeps.json')), 'no keeps.json');
 });
 
-test('the lock only CREATES a missing catch-all in its folder and never rewrites an existing .gitignore (the global lock sits in the user\'s own ~/.claude)', async (t) => {
+test('a lock called without selfIgnore (the global lock, in the user\'s own ~/.claude) never rewrites an existing .gitignore in its folder', async (t) => {
   const { acquireLock } = await import('./apply.mjs');
   const tmp = fs.realpathSync.native(os.tmpdir());
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-lockdir-')));
@@ -203,3 +203,46 @@ test('the lock only CREATES a missing catch-all in its folder and never rewrites
   l.release();
   assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), 'node_modules/\n', 'the user\'s .gitignore is untouched');
 });
+
+// 15b fire 56, the head's ruling on census row 5: the GLOBAL lock lives in the user's own ~/.claude, which a user may
+// version in a dotfiles repo, so it creates NO .gitignore there. The project tx and bin locks opt in (selfIgnore: true).
+test('the global lock creates no .gitignore in an empty ~/.claude, and a project lock that opts in gets the catch-all', async (t) => {
+  const { acquireLock } = await import('./apply.mjs');
+  const tmp = fs.realpathSync.native(os.tmpdir());
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-globallock-')));
+  t.after(() => { assert.ok(root.startsWith(tmp + path.sep)); fs.rmSync(root, { recursive: true, force: true }); });
+  const claude = path.join(root, 'home', '.claude');
+  fs.mkdirSync(claude, { recursive: true });
+  const g = acquireLock(path.join(claude, '.coalwash-global.lock'), { sessionId: 't-global' });
+  assert.equal(g.acquired, true);
+  g.release();
+  assert.deepEqual(fs.readdirSync(claude), [], 'no .gitignore (and no lock left) in the user\'s ~/.claude');
+  const tx = path.join(root, 'proj', '.claude', 'coalwash');
+  fs.mkdirSync(tx, { recursive: true });
+  const p = acquireLock(path.join(tx, '.coalwash.lock'), { sessionId: 't-proj', selfIgnore: true });
+  assert.equal(p.acquired, true);
+  p.release();
+  assert.equal(fs.readFileSync(path.join(tx, '.gitignore'), 'latin1'), SELF_IGNORE_BODY, 'the project lock keeps the catch-all');
+});
+
+// 15b fire 56, census row 3: `snap-<now>` is a FRESH name. A planted entry at that name (a junction to elsewhere, or a
+// directory a cloned repo committed) must refuse the transaction before the first snapshot byte, never take the copies.
+const PLANT_NOW = 1760000000000;
+for (const kind of ['junction', 'directory']) {
+  test(`a planted snap-<now> ${kind} refuses the transaction before the first snapshot byte; no memory copy lands in it`, { skip: !HAS_GIT && 'git is not on PATH' }, (t) => {
+    const s = sandbox(t);
+    fs.mkdirSync(s.txDir, { recursive: true });
+    const planted = path.join(s.txDir, `snap-${PLANT_NOW}`);
+    if (kind === 'junction') fs.symlinkSync(s.outside, planted, 'junction');
+    else fs.mkdirSync(planted);
+    const plan = { projectRoot: s.proj, roots: [s.store], sessionId: 't-fresh',
+      actions: [{ type: 'rewrite', path: path.join(s.store, 'MEMORY.md'), content: MEMORY + '- a third fact\n' }] };
+    const res = applyPlan(plan, { projectRoot: s.proj, home: s.home, keepSnapshots: 5, now: PLANT_NOW });
+    assert.deepEqual(fs.readdirSync(s.outside), [], 'nothing written through a link');
+    assert.deepEqual(fs.readdirSync(planted), [], 'nothing written into the planted folder');
+    assert.equal(res.ok, false, JSON.stringify(res));
+    assert.match(res.error, /^snapshot folder: /, res.error);
+    assert.equal(fs.readFileSync(path.join(s.store, 'MEMORY.md'), 'utf8'), MEMORY, 'the memory file is untouched');
+    assert.ok(!fs.existsSync(path.join(s.txDir, 'journal.json')), 'no journal');
+  });
+}
