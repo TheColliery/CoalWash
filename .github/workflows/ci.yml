@@ -14,6 +14,7 @@ on:
       - 'PRIVACY.md'
       - 'SECURITY.md'
       - 'LICENSE'
+      - 'NOTICE'
   # NO paths-ignore here (CWK-120 finding #1, CONFIRMED against this repo's OWN live ruleset
   # `dependabot-auto-merge-gate`, active, targeting every PR into main, requiring the `all-green` and
   # `analyze (javascript)` contexts): GitHub's own docs are explicit -- "If a workflow is skipped due to path

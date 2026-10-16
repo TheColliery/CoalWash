@@ -7,6 +7,7 @@ on:
       # CodeQL analyzes js/ts AND the workflow files (the actions language) — markdown still needs no security scan, so skip ALL docs (a doc-only commit doesn't run CodeQL). Shipped SKILL.md/commands consistency is ci.yml's job (verify dist-sync), not CodeQL's.
       - '**.md'
       - 'LICENSE'
+      - 'NOTICE'
   # NO paths-ignore here (CWK-120 finding #1): the ruleset `dependabot-auto-merge-gate` requires BOTH `all-green`
   # (ci.yml) AND `analyze (javascript)` (this job) on every PR into main, so a filter on this trigger leaves the
   # same Pending-forever check on this half of the gate. `push` keeps its filter: no PR merge is gated on a

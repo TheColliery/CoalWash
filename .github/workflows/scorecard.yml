@@ -9,6 +9,7 @@ on:
     paths-ignore:
       - '**.md'
       - 'LICENSE'
+      - 'NOTICE'
 
 permissions:
   contents: read
