@@ -559,6 +559,24 @@ test('CWK-137: a project config write whose directory links OUTSIDE the project 
   assert.strictEqual(sha(path.join(outside, 'keep.txt')), before);
 });
 
+// CWK2-048: the project write refuses a link on the way WHEREVER it points. `.claude` is a junction to a folder INSIDE the
+// project (fire 77 leg E: the old write landed at proj/inner/coal/coalwash.json); now the run is refused and nothing is made there.
+test('CWK2-048: a project config write whose `.claude` links to a folder INSIDE the project is REFUSED, and nothing is made in that folder', (t) => {
+  const sb = sandbox(t);
+  const inner = path.join(sb.proj, 'inner');
+  fs.mkdirSync(inner);
+  try {
+    fs.symlinkSync(inner, path.join(sb.proj, '.claude'), process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (e) {
+    return t.skip(`cannot create a directory link on this host (${e.code || e.message})`);
+  }
+  const r = run(sb, ['--language', 'en']);
+  assert.strictEqual(r.status, 1, `exit ${r.status}: ${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /\[refused\]/, 'the refusal is loud');
+  assert.match(r.stderr, /nothing was written/);
+  assert.deepStrictEqual(fs.readdirSync(inner), [], 'no `coal` folder and no config appear in the folder the link names');
+});
+
 // CWK-120 ride-along (a), UMB-174: a parsed body that is not a plain object is never accepted as the config.
 // The old `parseJsonc(raw) || {}` turned a FALSY body (null, 0, false, "") into an EMPTY config, so a write landed
 // on {} over a file that held something the tool did not understand; the truthy shapes ([], "x", 42) were already

@@ -46,15 +46,52 @@ export function ownSandboxDir(projectRoot, ...segs) {
   let cur = path.resolve(projectRoot);
   for (let i = 0; i < segs.length; i++) {
     cur = path.join(cur, segs[i]);
-    let st;
-    try { st = fs.lstatSync(cur); } catch (e) {
-      if (e && e.code === 'ENOENT') return path.join(cur, ...segs.slice(i + 1));
-      throw new RepoWriteRefused(`cannot inspect ${cur} (${e && e.code})`);
-    }
-    if (st.isSymbolicLink()) throw new RepoWriteRefused(`${cur} is a link -- CoalWash never writes or deletes through a link inside the project (a cloned repo can plant one)`);
-    if (!st.isDirectory()) throw new RepoWriteRefused(`${cur} exists and is not a directory`);
+    if (!plainDirOrMissing(cur)) return path.join(cur, ...segs.slice(i + 1));
   }
   return cur;
+}
+
+// One folder on a chain below the project root: true when it is a real directory, false when it does not exist; a link
+// (a junction included -- Node's lstat reports one as a symbolic link), a non-directory or an lstat error is the refusal.
+function plainDirOrMissing(cur) {
+  let st;
+  try { st = fs.lstatSync(cur); } catch (e) {
+    if (e && e.code === 'ENOENT') return false;
+    throw new RepoWriteRefused(`cannot inspect ${cur} (${e && e.code})`);
+  }
+  if (st.isSymbolicLink()) throw new RepoWriteRefused(`${cur} is a link -- CoalWash never writes or deletes through a link inside the project (a cloned repo can plant one)`);
+  if (!st.isDirectory()) throw new RepoWriteRefused(`${cur} exists and is not a directory`);
+  return true;
+}
+
+// Is a path.relative(root, x) result outside the root? A test on the FIRST path segment (`..` alone, `..` plus the separator,
+// or an absolute path on another drive), never a lexical prefix: a real child folder named `..cfg` is inside.
+function escapesRoot(rel) {
+  return rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel);
+}
+
+// CWK2-048, ported from CoalLedger's exemplar (31a1c3f + ed36168): make `dir` and every missing folder above it, walking
+// from `root` down. Each folder is checked with plainDirOrMissing (the ownSandboxDir rule: a link or junction is refused
+// WHEREVER it points, a link that stays inside the project included); a missing one is made with a plain, NON-recursive
+// mkdirSync and checked again after it is made, so nothing is ever made past a folder that was not checked. The root itself
+// is not walked. `root` null (the user's own file) keeps the plain recursive make. NOT closed: the walk and the write are
+// separate steps, so a hostile local writer that swaps a checked folder for a link before the write still redirects it
+// (fire 77 leg F; SECURITY.md names it).
+export function mkdirRepoParents(dir, root) {
+  if (root == null) { fs.mkdirSync(dir, { recursive: true }); return; }
+  const base = path.resolve(root);
+  const rel = path.relative(base, path.resolve(dir));
+  if (rel === '') return;
+  if (escapesRoot(rel)) throw new RepoWriteRefused(`${dir} is outside the project root ${base}`);
+  let cur = base;
+  for (const part of rel.split(path.sep)) {
+    cur = path.join(cur, part);
+    if (plainDirOrMissing(cur)) continue;
+    try { fs.mkdirSync(cur); } catch (e) {
+      if (!e || e.code !== 'EEXIST') throw new RepoWriteRefused(`cannot make ${cur} (${e && e.code})`);
+    }
+    if (!plainDirOrMissing(cur)) throw new RepoWriteRefused(`${cur} is missing after it was made`);
+  }
 }
 
 function nearestExistingAncestor(p) {
@@ -200,7 +237,9 @@ export function openPlainFile(file, flags, expect = null) {
 export function writeRepoFile(target, content, root) {
   const why = checkRepoWriteTarget(target, root);
   if (why) throw new RepoWriteRefused(why);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
+  mkdirRepoParents(path.dirname(path.resolve(target)), root); // CWK2-048: no link on the way, wherever it points
+  // The folder chain was checked just above; the target name itself is handled by replaceFile's rename, which replaces a
+  // planted link instead of writing through it.
   try {
     replaceFile(target, content);
   } catch (e) {

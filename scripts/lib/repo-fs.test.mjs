@@ -720,3 +720,91 @@ test('CodeQL #43/#44 sibling: writeRepoFile\'s in-place fallback does not write 
   assert.equal(fs.readFileSync(keep, 'utf8'), KEEP, 'the file the open landed on is byte-identical');
   assert.equal(fs.readFileSync(target, 'utf8'), 'OLD', 'and the target was not rewritten either');
 });
+
+// CWK2-048 (the chief's ruling (a), CoalLedger's exemplar 31a1c3f + ed36168): a project config write refuses a link or
+// junction at ANY folder between the project root and the target's folder, WHEREVER it points, a link that stays inside the
+// project included, and makes nothing at the place the link names. Fire 77 measured the gap (leg E): `.claude` a junction to
+// `project/inner`, and the write landed at `project/inner/coal/coalwash.json`. The root itself is not walked.
+const insideLinkTarget = (project) => path.join(project, '.claude', 'coal', 'coalwash.json');
+function insideLinkLeg(t, label, at) {
+  const sb = sandbox(t, label);
+  const inner = path.join(sb.project, 'inner');
+  fs.mkdirSync(inner);
+  if (at.length > 1) fs.mkdirSync(path.join(sb.project, ...at.slice(0, -1)), { recursive: true });
+  if (!dirLink(inner, path.join(sb.project, ...at))) { t.skip('this volume cannot make a directory link'); return null; }
+  return { ...sb, inner };
+}
+
+test('CWK2-048: a project write through a `.claude` link that points INSIDE the project is refused, and nothing is made at the link target', (t) => {
+  const sb = insideLinkLeg(t, 'in-claude', ['.claude']);
+  if (!sb) return;
+  assert.throws(() => writeRepoFile(insideLinkTarget(sb.project), '{}\n', sb.project), { code: 'COALWASH_WRITE_REFUSED', message: /is a link/ }, 'a link on the way is refused wherever it points, and the reason names the link');
+  assert.deepEqual(fs.readdirSync(sb.inner), [], 'no `coal` folder and no config appear in the folder the link names');
+});
+
+test('CWK2-048: a project write through a `.claude/coal` link that points INSIDE the project is refused, and nothing is written at the link target', (t) => {
+  const sb = insideLinkLeg(t, 'in-coal', ['.claude', 'coal']);
+  if (!sb) return;
+  assert.throws(() => writeRepoFile(insideLinkTarget(sb.project), '{}\n', sb.project), { code: 'COALWASH_WRITE_REFUSED', message: /is a link/ }, 'the link at the target folder itself is refused, by name');
+  assert.deepEqual(fs.readdirSync(sb.inner), [], 'no config and no temp file land in the folder the link names');
+});
+
+test('CWK2-048: a `.claude` DIRECTORY SYMLINK (not a junction) that points inside the project is refused too', (t) => {
+  const sb = sandbox(t, 'in-dirsym');
+  const inner = path.join(sb.project, 'inner');
+  fs.mkdirSync(inner);
+  try { fs.symlinkSync(inner, path.join(sb.project, '.claude'), 'dir'); } catch (e) { t.skip(`no directory symlink here (${(e && e.code) || e})`); return; }
+  assert.throws(() => writeRepoFile(insideLinkTarget(sb.project), '{}\n', sb.project), RepoWriteRefused);
+  assert.deepEqual(fs.readdirSync(inner), []);
+});
+
+test('CWK2-048: a `.claude` link that points OUTSIDE the project is still refused, and the outside folder keeps only its own file', (t) => {
+  const sb = sandbox(t, 'out-claude');
+  if (!dirLink(sb.outside, path.join(sb.project, '.claude'))) { t.skip('this volume cannot make a directory link'); return; }
+  assert.throws(() => writeRepoFile(insideLinkTarget(sb.project), '{}\n', sb.project), RepoWriteRefused);
+  assert.deepEqual(fs.readdirSync(sb.outside), ['keep.txt']);
+  assert.equal(fs.readFileSync(sb.keep, 'utf8'), KEEP);
+});
+
+test('CWK2-048: the plain cases still write: missing parents are made as real folders, and an existing real chain is used as is', (t) => {
+  const { project } = sandbox(t, 'plain');
+  const target = insideLinkTarget(project);
+  writeRepoFile(target, 'ONE\n', project);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'ONE\n', 'missing `.claude/coal` made, the config written');
+  for (const p of [path.join(project, '.claude'), path.join(project, '.claude', 'coal')]) {
+    const st = fs.lstatSync(p);
+    assert.ok(st.isDirectory() && !st.isSymbolicLink(), `${p} is a real folder`);
+  }
+  writeRepoFile(target, 'TWO\n', project);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'TWO\n', 'the existing real chain is written again');
+  writeRepoFile(path.join(project, '.coalwash.json'), 'ROOT\n', project);
+  assert.equal(fs.readFileSync(path.join(project, '.coalwash.json'), 'utf8'), 'ROOT\n', 'a file directly in the root needs no walk');
+});
+
+test('CWK2-048: mkdirRepoParents tests the FIRST path segment for an escape, never a lexical prefix: a real `..cfg` folder passes, a sibling outside is refused and nothing is made', async (t) => {
+  const { mkdirRepoParents } = await import('./repo-fs.mjs');
+  assert.equal(typeof mkdirRepoParents, 'function', 'repo-fs.mjs exports mkdirRepoParents');
+  const { project, outside } = sandbox(t, 'escape');
+  mkdirRepoParents(path.join(project, '..cfg', 'coal'), project);
+  assert.ok(fs.lstatSync(path.join(project, '..cfg', 'coal')).isDirectory(), 'a child folder whose name starts with `..` is inside the project');
+  assert.throws(() => mkdirRepoParents(path.join(outside, 'made'), project), RepoWriteRefused, 'a folder beside the project is outside it');
+  assert.deepEqual(fs.readdirSync(outside), ['keep.txt'], 'and nothing is made there');
+  mkdirRepoParents(project, project);
+  const st = fs.lstatSync(path.join(project, '..cfg'));
+  assert.ok(st.isDirectory() && !st.isSymbolicLink());
+});
+
+test('CWK2-048: mkdirRepoParents refuses a FILE where a folder is needed, and makes nothing past it', async (t) => {
+  const { mkdirRepoParents } = await import('./repo-fs.mjs');
+  const { project } = sandbox(t, 'notdir');
+  fs.writeFileSync(path.join(project, '.claude'), 'a file\n');
+  assert.throws(() => mkdirRepoParents(path.join(project, '.claude', 'coal'), project), { code: 'COALWASH_WRITE_REFUSED', message: /exists and is not a directory/ }, 'the reason names the file in the way');
+  assert.equal(fs.readFileSync(path.join(project, '.claude'), 'utf8'), 'a file\n');
+});
+
+test('CWK2-048: mkdirRepoParents with no root (the user\'s own global file) makes the whole chain as before', async (t) => {
+  const { mkdirRepoParents } = await import('./repo-fs.mjs');
+  const { dir } = sandbox(t, 'nullroot');
+  mkdirRepoParents(path.join(dir, 'a', 'b', 'c'), null);
+  assert.ok(fs.lstatSync(path.join(dir, 'a', 'b', 'c')).isDirectory());
+});
