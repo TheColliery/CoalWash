@@ -2,6 +2,13 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Changed
+
+- **Contributor-facing: the org canon's front-door link check is adopted.** Four files copied by blob from the `.github` canon at `fd40327`: `.github/workflows/front-door-links.yml` `db4173d4`, `scripts/front-door-links.mjs` `3793a056`, `scripts/lib/front-door-links.mjs` `7df59db6` and `scripts/front-door-links.test.mjs` `3cff2b30`. The check fetches every outward http(s) link of the named front-door markdown files (fenced and inline code excluded) and fails on one that does not answer at the page it names; the workflow runs it on every change to a front door and on a weekly clock. Dev tooling; none of it is in the installed plugin (the engine joins `DEV_ONLY_LIBS`).
+- **Forward note on the `[1.12.2]` entry (a released entry is not edited).** Its exec-form bullet says that on Windows without Git for Windows the old shell-form hook ran under PowerShell, "where `${CLAUDE_PLUGIN_ROOT}` expands to nothing". That states a mechanism as fact. What was measured was a probe that handed PowerShell the old literal string with Git removed from PATH; Claude Code's own no-Git fallback was not run (that bullet's own Limit line says so). Claude Code's hooks reference (`code.claude.com/docs/en/hooks`, read 2026-10-16, first 100,000 of 270,831 characters) says "Both forms support the same path placeholders", and says the exec form substitutes them "into `command` and into each `args` element as plain strings"; it does not say how the shell form substitutes them, so this entry does not confirm or deny the empty expansion under Claude Code itself. The exec form stays: it needs no shell either way.
+
 ## [1.12.5] - 2026-10-16
 
 estate-restore --to refuses a link or a hard-linked file already at a restored file's path
