@@ -313,11 +313,11 @@ test('CWK-057 F1 (seam still works, both directions): a global true + the opt om
 // fixture-canonical.test.mjs records the same variant divergence as the CI-red class. Capability-probed, never platform-named:
 // the test skips VISIBLY where the volume generates no short alias.
 function shortNameOf(p) {
-  try { return execSync(`cmd /c for %I in ("${p}") do @echo %~sI`, { encoding: 'utf8' }).trim(); } catch { return p; }
+  // E2-6 (PR #18): no stderr pass-through (off Windows `cmd` is absent and would print a line per run) and an explicit timeout
+  try { return execSync(`cmd /c for %I in ("${p}") do @echo %~sI`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }).trim(); } catch { return p; }
 }
 
 test('CWK-120 row 14: a main-side root spelled as an 8.3 SHORT name derives the same contract the clone does, and the handshake proceeds', (t) => {
-  if (process.platform !== 'win32') { t.skip('8.3 short names are a win32 form'); return; }
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cww-home-')));
   const longRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-LONGDIRNAME-FOR-8DOT3-')));
   try {

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildDist, checkDist, DIST_ITEMS } from './build-plugin.mjs';
+import { buildDist, checkDist, DIST_ITEMS, DEV_ONLY_LIBS } from './build-plugin.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -46,20 +46,21 @@ test('the UNWIRED class-A engine never ships: absent from a fresh dist, checkDis
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
-test('CWK-174: the dev-only libs (the house secret scan, the release-shape deriver) never ship: absent from a fresh dist, checkDist still PASSES with them in source, and a hand-copied one fails loud', () => {
+test('CWK-174: every DEV_ONLY_LIBS entry never ships: absent from a fresh dist, checkDist still PASSES with them in source, and a hand-copied one fails loud', () => {
   const dist = scratchDist();
   try {
     buildDist(dist);
-    for (const name of ['secret-scan.mjs', 'release-shape.mjs']) {
-      assert.ok(fs.existsSync(path.join(repoRoot, 'scripts', 'lib', name)), `${name} IS in source (a byte-equal org carrier, gated by the suite)`);
-      assert.strictEqual(fs.existsSync(path.join(dist, 'scripts', 'lib', name)), false, `${name} is NOT in the dist (commit-gate and release tooling, not plugin payload)`);
+    assert.ok(DEV_ONLY_LIBS.length >= 9, `the list is read from build-plugin.mjs (${DEV_ONLY_LIBS.length} entries)`);
+    for (const rel of DEV_ONLY_LIBS) {
+      assert.ok(fs.existsSync(path.join(repoRoot, rel)), `${rel} IS in source (dev tooling, gated by the suite)`);
+      assert.strictEqual(fs.existsSync(path.join(dist, rel)), false, `${rel} is NOT in the dist (dev tooling, not plugin payload)`);
     }
     assert.deepStrictEqual(checkDist(dist), [], 'source-present + dist-absent is IN SYNC: the exclusion is what makes verify PASS');
     // ...and the exclusion is not a blind spot: a hand-copied dev-only lib in the dist is caught.
-    for (const name of ['secret-scan.mjs', 'release-shape.mjs']) {
-      fs.copyFileSync(path.join(repoRoot, 'scripts', 'lib', name), path.join(dist, 'scripts', 'lib', name));
-      assert.ok(checkDist(dist).some((d) => d.includes('dev-only lib present in plugin/') && d.includes(name)), `a leaked ${name} fails loud`);
-      fs.rmSync(path.join(dist, 'scripts', 'lib', name));
+    for (const rel of DEV_ONLY_LIBS) {
+      fs.copyFileSync(path.join(repoRoot, rel), path.join(dist, rel));
+      assert.ok(checkDist(dist).some((d) => d.includes('dev-only lib present in plugin/') && d.includes(rel)), `a leaked ${rel} fails loud`);
+      fs.rmSync(path.join(dist, rel));
     }
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });

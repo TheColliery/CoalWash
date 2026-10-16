@@ -17,7 +17,9 @@ test('removeTree removes a temp project while a child process still holds it as 
   const tmp = fs.realpathSync.native(os.tmpdir());
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-teardown-')));
   const HOLD_MS = 2000;
-  const child = spawn(process.execPath, ['-e', `require('fs').writeFileSync('ready', ''); setTimeout(() => {}, ${HOLD_MS})`], { cwd: dir, stdio: 'ignore', windowsHide: true });
+  // the child's HOME and temp point into the sandbox (CodeRabbit t120): it writes nothing, and if it ever did, nothing would reach the real home
+  const env = { ...process.env, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir };
+  const child = spawn(process.execPath, ['-e', `require('fs').writeFileSync('ready', ''); setTimeout(() => {}, ${HOLD_MS})`], { cwd: dir, env, stdio: 'ignore', windowsHide: true });
   const exited = new Promise((res) => child.once('exit', res));
   t.after(async () => {
     child.kill();
@@ -25,8 +27,9 @@ test('removeTree removes a temp project while a child process still holds it as 
     assert.ok(dir.startsWith(tmp + path.sep), `refusing to remove ${dir}: not under ${tmp}`);
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  for (const until = Date.now() + 10000; !fs.existsSync(path.join(dir, 'ready'));) {
-    assert.ok(Date.now() < until, 'the holding child never started');
+  const READY_POLLS = 1500; // bounded by a count of 20 ms polls, never a wall-clock assertion (CodeRabbit t120); the file clock is the outer bound
+  for (let polls = 0; !fs.existsSync(path.join(dir, 'ready')); polls++) {
+    assert.ok(polls < READY_POLLS, `the holding child never started (${READY_POLLS} polls)`);
     await new Promise((res) => setTimeout(res, 20));
   }
   removeTree(dir);

@@ -59,7 +59,7 @@ const isUnwiredEngine = (rel) => UNWIRED_ENGINE.includes(rel);
 // commit and push gate (scripts/secret-gate.mjs), not the installed skill: nothing shipped imports it. So it is excluded from the
 // build AND from both directions of the dist check, with its absence asserted, the same explicit-absence belt UNWIRED_ENGINE uses.
 // It stays in the suite and in source; verify.mjs's lib roster exempts it by name for the same reason.
-const DEV_ONLY_LIBS = [
+export const DEV_ONLY_LIBS = [ // exported (PR #18, build-plugin.test.mjs:65) so the test loops over every entry, never a hand-copied two
   path.join('scripts', 'lib', 'secret-scan.mjs'),
   path.join('scripts', 'lib', 'release-shape.mjs'), // the create-release workflow's CHANGELOG deriver (scripts/release-notes.mjs): CI tooling, never imported by shipped code
   // 09a: the canon git-spawn census (its witness vectors and this room's pins) and the canon test runner in waves (with the machine

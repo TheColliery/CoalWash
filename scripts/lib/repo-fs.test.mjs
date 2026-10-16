@@ -171,12 +171,16 @@ test('a project config reached through a link that leaves the project is NOT mer
   assert.notEqual(cfg.fileMaxSizeKb, 99, 'the outside file must not supply a setting');
 });
 
-// The FIFO leg exists only on POSIX: it probes mkfifo and SKIPS VISIBLY here (win32).
-// CI's ubuntu/macOS legs are its venue -- it is NOT proven on this box.
-test('a FIFO in the config position is refused as not-regular, without a read (POSIX)', (t) => {
+// The FIFO leg runs only where a FIFO can be made. The probe is the CAPABILITY, never the platform name (E2-5, PR #18): `mkfifo`
+// exits 0 AND the entry it leaves reads as a FIFO. An MSYS `mkfifo` on a Windows PATH exits 0 and leaves nothing Node can see, so
+// exit 0 alone is not the probe. It SKIPS VISIBLY on such a box; CI's ubuntu/macOS legs are its venue.
+test('a FIFO in the config position is refused as not-regular, without a read (where a FIFO can be made)', (t) => {
   const { project } = sandbox(t, 'fifo');
   const fifo = path.join(project, 'AGENTS.md');
-  if (process.platform === 'win32' || spawnSync('mkfifo', [fifo]).status !== 0) { t.skip('no mkfifo on this platform'); return; }
+  const made = spawnSync('mkfifo', [fifo], { stdio: 'ignore', timeout: 10000 });
+  let isFifo = false;
+  try { isFifo = made.status === 0 && fs.lstatSync(fifo).isFIFO(); } catch { isFifo = false; }
+  if (!isFifo) { t.skip(`no FIFO could be made here (mkfifo ${made.error ? made.error.code : `exit ${made.status}`}, and no FIFO at the path)`); return; }
   assert.equal(repoReadOutcome(fifo, project, MAX_DOC_BYTES).why, 'not-regular');
   assert.equal(readRepoFileBounded(fifo, null, MAX_DOC_BYTES), null, 'refused even with no containment');
 });

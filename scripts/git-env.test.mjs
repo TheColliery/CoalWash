@@ -58,6 +58,17 @@ test('gitEnv: mutating the returned object never touches process.env (a real cop
   assert.equal(process.env.GIT_DIR, before);
 });
 
+// E2-3 (PR #18, 09b): the test above cannot see a helper that DELETES the GIT_* keys from process.env in place and then returns a copy,
+// because GIT_DIR is usually absent before and after. The helper runs inside git hooks, where that deletion would strip the hook's own GIT_DIR.
+test('gitEnv: the strip happens on the copy only; an ambient GIT_* key is still in process.env afterwards', () => {
+  withEnv({ GIT_DIR: '/ambient/.git', GIT_INDEX_FILE: '/ambient/.git/index' }, () => {
+    const env = gitEnv('/c');
+    assert.equal('GIT_DIR' in env, false, 'stripped from the returned copy');
+    assert.equal(process.env.GIT_DIR, '/ambient/.git', 'still in process.env');
+    assert.equal(process.env.GIT_INDEX_FILE, '/ambient/.git/index', 'still in process.env');
+  });
+});
+
 // The incident itself, on the real git binary, inside a sandbox: an ABSOLUTE GIT_DIR pointing at another repository
 // must not redirect a fixture's `git init` onto it. The sandbox repository's config is compared byte for byte.
 test('an ABSOLUTE ambient GIT_DIR cannot redirect a fixture `git init` onto another repository (the r5 incident)', (t) => {
