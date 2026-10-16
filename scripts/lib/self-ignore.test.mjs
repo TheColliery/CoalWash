@@ -101,21 +101,54 @@ test('a planted file LINK named .gitignore is replaced, never written through: t
   for (const rel of ownCopies(s)) assert.ok(ignored(s.proj, rel), `${rel} is ignored by git`);
 });
 
-test('a planted DIRECTORY link named .gitignore: either the catch-all replaces it, or the transaction is refused before any journal or snapshot byte', { skip: !HAS_GIT && 'git is not on PATH' }, (t) => {
-  const s = sandbox(t);
+// fire 63 (CodeRabbit t114): a directory link is a capability of the VOLUME and the user, never of the platform name, and what a rename over one does
+// (replace the link entry, or refuse) is the volume's too. Both are probed here, in the test's own sandbox, and each outcome has its own gated test.
+function canLinkDir(dir) {
+  const target = path.join(dir, 'probe-dir-target');
+  const link = path.join(dir, 'probe-dir-link');
+  fs.mkdirSync(target);
+  try { fs.symlinkSync(target, link, 'junction'); return true; } catch { return false; } finally { fs.rmSync(link, { recursive: true, force: true }); fs.rmSync(target, { recursive: true, force: true }); }
+}
+function renameReplacesDirLink(dir) { // the shape replaceFile uses: a fresh temp file renamed over the existing entry
+  const target = path.join(dir, 'probe-rn-target');
+  const link = path.join(dir, 'probe-rn-link');
+  const temp = path.join(dir, 'probe-rn-temp');
+  fs.mkdirSync(target);
+  fs.symlinkSync(target, link, 'junction');
+  fs.writeFileSync(temp, 'x', { flag: 'wx' });
+  try { fs.renameSync(temp, link); return true; } catch { return false; } finally {
+    for (const p of [temp, link, target]) fs.rmSync(p, { recursive: true, force: true });
+  }
+}
+function plantDirLink(t, s) {
+  if (!canLinkDir(s.root)) { t.skip('this volume/user cannot create a directory link'); return false; }
   fs.writeFileSync(path.join(s.outside, 'keep.txt'), 'outside\n');
   fs.mkdirSync(s.txDir, { recursive: true });
   fs.symlinkSync(s.outside, path.join(s.txDir, '.gitignore'), 'junction'); // a junction on Windows, a directory symlink on POSIX
+  return true;
+}
+
+test('a planted DIRECTORY link named .gitignore, on a volume where a rename replaces a directory link: the catch-all replaces it and git ignores the copies', { skip: !HAS_GIT && 'git is not on PATH' }, (t) => {
+  const s = sandbox(t);
+  if (!plantDirLink(t, s)) return;
+  if (!renameReplacesDirLink(s.root)) { t.skip('on this volume a rename over a directory link is refused (the sibling test covers it)'); return; }
   const res = wash(s);
   assert.deepEqual(fs.readdirSync(s.outside), ['keep.txt'], 'nothing written into the link target');
-  if (res.ok) {
-    assert.equal(fs.readFileSync(path.join(s.txDir, '.gitignore'), 'latin1'), SELF_IGNORE_BODY);
-    for (const rel of ownCopies(s)) assert.ok(ignored(s.proj, rel), `${rel} is ignored by git`);
-  } else {
-    assert.match(res.error, /^self-ignore: /, res.error);
-    assert.deepEqual(ownCopies(s), [], 'no journal, snapshot or lock was written');
-    assert.equal(fs.readFileSync(path.join(s.store, 'MEMORY.md'), 'utf8'), MEMORY, 'the memory file is untouched');
-  }
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(fs.readFileSync(path.join(s.txDir, '.gitignore'), 'latin1'), SELF_IGNORE_BODY);
+  for (const rel of ownCopies(s)) assert.ok(ignored(s.proj, rel), `${rel} is ignored by git`);
+});
+
+test('a planted DIRECTORY link named .gitignore, on a volume where a rename over a directory link is refused: the transaction is refused before any journal or snapshot byte', { skip: !HAS_GIT && 'git is not on PATH' }, (t) => {
+  const s = sandbox(t);
+  if (!plantDirLink(t, s)) return;
+  if (renameReplacesDirLink(s.root)) { t.skip('on this volume a rename replaces a directory link (the sibling test covers it)'); return; }
+  const res = wash(s);
+  assert.deepEqual(fs.readdirSync(s.outside), ['keep.txt'], 'nothing written into the link target');
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.match(res.error, /^self-ignore: /, res.error);
+  assert.deepEqual(ownCopies(s), [], 'no journal, snapshot or lock was written');
+  assert.equal(fs.readFileSync(path.join(s.store, 'MEMORY.md'), 'utf8'), MEMORY, 'the memory file is untouched');
 });
 
 test('a .gitignore that is a real directory cannot be replaced: the transaction is refused with a named reason and writes no copy', { skip: !HAS_GIT && 'git is not on PATH' }, (t) => {
@@ -134,9 +167,11 @@ test('ensureCatchAllIgnore: the exact catch-all is left alone (null, same inode)
   t.after(() => { assert.ok(dir.startsWith(tmp + path.sep)); removeTree(dir); });
   const file = path.join(dir, '.gitignore');
   assert.equal(ensureCatchAllIgnore(dir), null, 'absent: created');
-  const ino = fs.statSync(file, { bigint: true }).ino;
+  // fire 63 (CodeQL #53-#56, js/file-system-race): the inode is read through an open fd, never by a path stat, so no check-then-act on `file` remains
+  const inoOf = (p) => { const fd = fs.openSync(p, 'r'); try { return fs.fstatSync(fd, { bigint: true }).ino; } finally { fs.closeSync(fd); } };
+  const ino = inoOf(file);
   assert.equal(ensureCatchAllIgnore(dir), null);
-  assert.equal(fs.statSync(file, { bigint: true }).ino, ino, 'the exact catch-all is not rewritten');
+  assert.equal(inoOf(file), ino, 'the exact catch-all is not rewritten');
   for (const body of ['*', '*\n\n', ' *\n', '!*\n*\n', '*\n!x\n']) {
     fs.writeFileSync(file, body);
     assert.equal(ensureCatchAllIgnore(dir), null, JSON.stringify(body));
@@ -234,6 +269,7 @@ for (const kind of ['junction', 'directory']) {
     const s = sandbox(t);
     fs.mkdirSync(s.txDir, { recursive: true });
     const planted = path.join(s.txDir, `snap-${PLANT_NOW}`);
+    if (kind === 'junction' && !canLinkDir(s.root)) { t.skip('this volume/user cannot create a directory link'); return; } // fire 63 (t114): probed, never assumed
     if (kind === 'junction') fs.symlinkSync(s.outside, planted, 'junction');
     else fs.mkdirSync(planted);
     const plan = { projectRoot: s.proj, roots: [s.store], sessionId: 't-fresh',
@@ -274,6 +310,7 @@ test('L58-1: a TRACKED keeps.json is never written over: recordKeep refuses and 
   assert.equal(gitc(s, 'status', '--porcelain', '--', '.claude/coalwash'), '', 'no tracked file under .claude/coalwash changed');
   assert.ok(!fs.readFileSync(path.join(s.txDir, 'keeps.json'), 'utf8').includes(ANCHOR), 'the anchor reaches no tracked file');
   assert.equal(r.ok, false);
+  assert.match(String(r.error), /^tracked: git tracks 1 file\(s\) in /, 'fire 63 (t114): the refusal names its reason');
 });
 
 test('L58-1 (A2): a TRACKED fat-bin/index.json is never written over: recordBinItem refuses and git status stays clean', { skip: !HAS_GIT && 'git is not on PATH' }, async (t) => {
@@ -305,6 +342,7 @@ test('L58-1: a git query that ERRORS inside a repository (a corrupt index) refus
   const r = recordKeep(s.proj, { target: path.join(s.store, 'MEMORY.md'), reason: 'x', anchor: ANCHOR });
   assert.equal(r.ok, false);
   assert.ok(!fs.readFileSync(path.join(s.txDir, 'keeps.json'), 'utf8').includes(ANCHOR));
+  assert.match(String(r.error), /^tracked: cannot tell whether git tracks files/, 'fire 63 (t114): the refusal names its reason');
 });
 
 test('L58-1: outside any repository nothing is tracked, so the writers work as before (no-external-assumption)', async (t) => {

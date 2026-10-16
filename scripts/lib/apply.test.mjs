@@ -1014,6 +1014,22 @@ test('grad6 F1: a bin-stash failure is a VISIBLE flag, never silent — the muta
   } finally { clean(proj); }
 });
 
+// fire 63 (CodeRabbit t114): recordBinItem returns null for more than the lock (the bin's catch-all .gitignore, a link at the bin path, the
+// item or index write), so the flag must not name the lock as the cause. Here the lock is free and the bin's .gitignore is a directory.
+test('fire 63: a bin-stash failure that is NOT the lock is flagged without blaming the lock', () => {
+  const { proj, store } = sandbox();
+  try {
+    const A = path.join(store, 'a.md');
+    write(A, 'plain content, no structured tokens');
+    fs.mkdirSync(path.join(txDirFor(proj), 'fat-bin', '.gitignore'), { recursive: true }); // the catch-all cannot be put in place
+    const r = apply(planFor(proj, store, [{ type: 'delete', path: A }]));
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    const f = (r.flagged || []).find((x) => /bin-stash failed/.test(x.reason));
+    assert.ok(f, `flagged: ${JSON.stringify(r.flagged)}`);
+    assert.doesNotMatch(f.reason, /could not acquire its per-bin lock/, 'the flag names no cause it did not see');
+  } finally { clean(proj); }
+});
+
 test('H3: a plain delete of a token-bearing file passes ONLY with an explicit approvedDrops (caller declares external safety)', () => {
   const { proj, store } = sandbox();
   try {
@@ -1154,6 +1170,29 @@ test('global-scope lock: a global-scope action takes a lock beside the global st
     assert.strictEqual(fs.readFileSync(g, 'utf8'), 'new global content');
     assert.strictEqual(fs.existsSync(globalLockPath(home)), false, 'the global lock is released after a successful apply');
   } finally { clean(proj, home); }
+});
+
+// fire 63 (CodeRabbit t114, apply.mjs:1336 at f0a57f0): the transaction folder's mkdir sat between the early returns that release the global
+// lock, outside any try/finally, so a throw there (EACCES, ENOTDIR) left the global lock held until its 30-minute stale window.
+test('global-scope lock: a transaction folder that cannot be created refuses the run AND releases the global lock', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-ghome-mk-')));
+  const txDir = txDirFor(proj);
+  const realMkdir = fs.mkdirSync;
+  try {
+    const g = path.join(store, 'global.md');
+    write(g, 'global content');
+    fs.mkdirSync = (p, ...rest) => {
+      if (path.resolve(String(p)) === path.resolve(txDir)) { const e = new Error(`EACCES: permission denied, mkdir '${p}'`); e.code = 'EACCES'; throw e; }
+      return realMkdir.call(fs, p, ...rest);
+    };
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: g, content: 'new global content', scope: 'global' }]), { home });
+    fs.mkdirSync = realMkdir;
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, /EACCES/, r.error);
+    assert.strictEqual(fs.readFileSync(g, 'utf8'), 'global content', 'nothing applied');
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), false, 'the global lock is released when the transaction folder cannot be created');
+  } finally { fs.mkdirSync = realMkdir; clean(proj, home); }
 });
 
 test('global-scope lock: a held global lock defers a DIFFERENT project\'s global-scope run even though its OWN project lock is free', () => {

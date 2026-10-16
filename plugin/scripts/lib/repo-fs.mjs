@@ -121,7 +121,9 @@ export function replaceFile(target, content) {
 // or as a link (PR #18, CodeRabbit r4231606757), and under git a `*\r\n` line is the pattern `*\r` (the lone-CR trap), not a
 // catch-all. Anything else at that name is replaced through replaceFile, whose rename swaps the directory entry (a planted link
 // included) and never writes through it; a name that cannot be replaced (a directory, a junction) or that does not read back as
-// the catch-all is the refusal. Two writers racing rename the same bytes in, so either result is the catch-all.
+// the catch-all is the refusal. Two CoalWash writers racing rename the same bytes in, so either result is the catch-all. NOT closed (fire 63,
+// CodeRabbit t114): a hostile LOCAL writer that can already write this folder can swap the entry after the final read-back; the read-back
+// narrows that window to the caller's next write, it does not close it.
 // Returns null when the catch-all is in place, else the reason: a caller about to write a copy of memory content refuses on it.
 export const SELF_IGNORE_BODY = '*\n';
 function isCatchAllIgnore(file, dir) {

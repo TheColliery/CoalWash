@@ -283,8 +283,9 @@ function recordKeepAt(file, root, ensureDir, { target, reason = '', date, anchor
     fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmp, file);
     return { ok: true, anchorDropped, anchorStored: !!mergedAnchor };
-  } catch {
-    return { ok: false, anchorDropped: false, anchorStored: false };
+  } catch (e) {
+    // fire 63 (CodeRabbit t114): the reason rides beside the status fields, so a refusal (tracked:, self-ignore:) reaches the caller
+    return { ok: false, anchorDropped: false, anchorStored: false, error: String((e && e.message) || e) };
   }
 }
 
@@ -302,9 +303,9 @@ export function recordKeep(projectRoot, opts = {}) {
   // CWK-137: the directory is proven link-free (ownSandboxDir) BEFORE the first read, and both
   // reads of the existing store are contained to it (E2-4) -- a planted link returns { ok: false }.
   let dir;
-  try { dir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); } catch { return { ok: false, anchorDropped: false, anchorStored: false }; }
+  try { dir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); } catch (e) { return { ok: false, anchorDropped: false, anchorStored: false, error: String((e && e.message) || e) }; }
   // fire 55: an anchor quotes memory content, so no catch-all means no record ({ ok: false })
-  return recordKeepAt(path.join(dir, KEEPS_NAME), dir, () => { const tracked = trackedInOwnFolder(dir); if (tracked) throw new Error(tracked); fs.mkdirSync(dir, { recursive: true }); const why = ensureSelfIgnore(dir); if (why) throw new Error(why); }, opts); // fire 59: a tracked file in the folder, no write
+  return recordKeepAt(path.join(dir, KEEPS_NAME), dir, () => { const tracked = trackedInOwnFolder(dir); if (tracked) throw new Error(`tracked: ${tracked}`); fs.mkdirSync(dir, { recursive: true }); const why = ensureSelfIgnore(dir); if (why) throw new Error(`self-ignore: ${why}`); }, opts); // fire 59: a tracked file in the folder, no write
 }
 
 // Global-scope variants — identical shape/schema/upsert-by-target semantics,

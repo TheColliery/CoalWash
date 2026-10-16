@@ -1333,7 +1333,10 @@ export function applyPlan(plan, opts = {}) {
       if (globalLock) globalLock.release();
       return { ok: false, error: `tracked: ${trackedWhy}` };
     }
-    fs.mkdirSync(txDir, { recursive: true }); // txDir resolved once, above the KEEPS-GATE
+    try { fs.mkdirSync(txDir, { recursive: true }); } catch (e) { // txDir resolved once, above the KEEPS-GATE
+      if (globalLock) globalLock.release(); // fire 63 (CodeRabbit t114): a throw here used to leave the global lock held until its stale window
+      return { ok: false, error: `apply: cannot create the transaction folder (${(e && e.code) || (e && e.message)})` };
+    }
     const ignoreWhy = ensureSelfIgnore(txDir); // fire 55: no catch-all, no journal and no snapshot (copies of memory content)
     if (ignoreWhy) {
       if (globalLock) globalLock.release();
@@ -1577,7 +1580,7 @@ export function applyPlan(plan, opts = {}) {
         if (binId === null) {
           flagged.push({
             path: a.phys,
-            reason: 'bin-stash failed (the file mutation already succeeded — only the RECOVERY COPY is missing): recordBinItem could not acquire its per-bin lock in time, so this cut has no entry in the bin and cannot be pulled back via cli.mjs restore',
+            reason: 'bin-stash failed (the file mutation already succeeded — only the RECOVERY COPY is missing): recordBinItem could not record it (its per-bin lock was busy, or the catch-all .gitignore of the bin, the bin folder, or the item or index write failed), so this cut has no entry in the bin and cannot be pulled back via cli.mjs restore',
           });
         }
       }
@@ -2015,7 +2018,7 @@ export function recoverDangling(projectRoot, opts = {}) {
     // Only clear the WAL when the recovery was CLEAN. A partial/refused replay keeps
     // the journal + snapshot for a human (never report a mixed state as done).
     if (failed || refused || refusedPinned || refusedGit) {
-      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, refusedPinned, refusedGit, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root, ${refusedPinned} refused as pinned, ${refusedGit} refused as inside a .git directory; journal + snapshot kept at ${snapDir}` };
+      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, refusedPinned, refusedGit, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root or as a create whose copy could not be binned, ${refusedPinned} refused as pinned, ${refusedGit} refused as inside a .git directory; journal + snapshot kept at ${snapDir}` };
     }
     fs.rmSync(journalPath, { force: true });
     return { recovered: 'rolled-back', restored };
