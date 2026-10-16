@@ -2,6 +2,22 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.12.5] - 2026-10-16
+
+`estate-restore --to` refuses a link or a hard-linked file already at a restored file's path
+
+A restore with `--to <dir>` already refused a link planted in a directory below the destination, but it did not look at the restored file's own path. Nothing a user could do before is taken away. The installed plugin moved: `scripts/lib/estate-archive.mjs` (six lines in `restoreSession`), `skills/coalwash/references/method.md` and its `plugin/` twin.
+
+### Fixed
+
+- **`estate-restore --to <dir>` checks the final file path too (CodeRabbit, PR #18, thread `r4231603560`).** `ownSandboxDir` checked every directory component under the destination, but not the file path itself. Before the write, `restoreSession` now reads the entry already at that path with `lstat`. A symlink (dangling or not) or a junction there is refused with "restore refused on <file>: the destination file is a link (a restore never writes through a link under its destination)". An entry that is not a regular file, or a file with a second hard link, is refused with "restore refused on <file>: the destination entry is not a single-link regular file (a restore never writes through a link under its destination)". The planted entry is left in place, and files already written stay. An absent path and an ordinary single-link file behave as before. Measured on Windows before the fix: a junction there failed with a bare `EPERM` on the rename and no stated reason, and a hard link there was replaced (`ok: true`), the outside file untouched; the file-symlink legs could not be made on that box. The destination root may still be a link, your own choice. — test: `scripts/lib/estate-archive.test.mjs`, `fire 67: a ${kind} already at <to>/<sid>.jsonl is refused, and what it points at is untouched` (one leg each for a file symlink, a dangling file symlink, a junction and a hard link; a leg whose link this volume cannot make skips visibly; the file-symlink legs ran on no box yet, they belong to the POSIX CI legs) and its control `fire 67 control: an ordinary single-link file already at <to>/<sid>.jsonl is still replaced by the restored bytes`
+
+### Changed
+
+- **Docs: the `estate-restore` row, the Write guard row and the Docs link in `README.md`, and `references/method.md` §3, now say what the code does.** The `estate-restore` row and `method.md` name the final-path check above. The Write guard row said "Off: `writeGuard: "snapshot-only"` or `"off"`"; in `config-schema.mjs` `snapshot-only` keeps the airbag and silences only the advisory, and only `"off"` turns the guard off. The list of remaining subcommands names `config-status`, which was missing from it. The Docs line points at `https://docs.thecolliery.org/tools/coalwash`, and "(publishing soon)" is gone.
+- **Contributor-facing: canon re-copies.** Six files re-copied by blob from the org canon at `.github` `9456288`: `scripts/lib/wave-run.test.mjs`, `scripts/lib/git-env-census.mjs`, `scripts/lib/git-env-census.vectors.mjs`, `scripts/lib/machine-reading.mjs`, `scripts/verify-release-shape.mjs` and `scripts/verify-release-shape.test.mjs`. Dev tooling; none of it is in the installed plugin.
+- **Contributor-facing: test fixes (CodeRabbit `t120`, PR #18, `E2-3`, `E2-5`, `E2-6`).** The held-cwd child in `test-plan.test.mjs` runs with HOME, USERPROFILE, TEMP, TMP and TMPDIR pointed at its sandbox, and its readiness wait is bounded by a poll count, not `Date.now()`. A new `git-env.test.mjs` test proves `gitEnv` removes `GIT_DIR` and `GIT_INDEX_FILE` from its copy and leaves `process.env` alone. The FIFO test in `repo-fs.test.mjs` probes whether a FIFO can be made (`mkfifo` exits 0 and the path is a FIFO) in place of a platform check; the platform gate on the `wizard.test.mjs` short-name test is dropped and its child gets `stdio` and a timeout. `build-plugin.mjs` exports `DEV_ONLY_LIBS`, `build-plugin.test.mjs` loops its never-ships check over every entry, and the failure text and comments name what the list holds.
+
 ## [1.12.4] - 2026-10-16
 
 A failed folder create frees the global lock, and a tracked-file keep refusal says why
