@@ -580,6 +580,53 @@ test('CWK2-048: a project config write whose `.claude` links to a folder INSIDE 
   assert.deepStrictEqual(fs.readdirSync(inner), [], 'no `coal` folder and no config appear in the folder the link names');
 });
 
+// R86-1 (RE-INSPECT 86): EVERY refusal whose cause is a FOLDER on the way names that folder, with advice true for its cause.
+// C1: `.claude` a link that resolves OUTSIDE the project (refused by the containment check, before the walk). C7: `.claude` a
+// dangling link. MK: `.claude` a real folder that an ACL forbids adding a subfolder to (Windows icacls, probed, visible skip).
+function cfgFolderLeg(t, plant) {
+  const sb = sandbox(t);
+  const outside = path.join(sb.root, 'outside');
+  fs.mkdirSync(outside);
+  try { plant(sb, outside); } catch (e) { return t.skip(`cannot create a directory link on this host (${e.code || e.message})`); }
+  return { sb, outside };
+}
+test('R86-1: a project config write whose `.claude` links OUTSIDE the project names that link in the advice, and nothing lands outside', (t) => {
+  const leg = cfgFolderLeg(t, (sb, outside) => fs.symlinkSync(outside, path.join(sb.proj, '.claude'), process.platform === 'win32' ? 'junction' : 'dir'));
+  if (!leg) return;
+  const r = run(leg.sb, ['--language', 'en']);
+  assert.strictEqual(r.status, 1, `exit ${r.status}: ${r.stdout}${r.stderr}`);
+  assert.ok(r.stderr.includes(`Replace the link or file at ${path.join(leg.sb.proj, '.claude')} with a real folder`), `the advice names the link: ${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /Replace it with a regular file/);
+  assert.deepStrictEqual(fs.readdirSync(leg.outside), [], 'nothing lands in the folder the link names');
+});
+test('R86-1: a project config write whose `.claude` is a DANGLING link names that link in the advice', (t) => {
+  const leg = cfgFolderLeg(t, (sb) => { const g = path.join(sb.root, 'gone'); fs.mkdirSync(g); fs.symlinkSync(g, path.join(sb.proj, '.claude'), process.platform === 'win32' ? 'junction' : 'dir'); fs.rmdirSync(g); });
+  if (!leg) return;
+  const r = run(leg.sb, ['--language', 'en']);
+  assert.strictEqual(r.status, 1, `exit ${r.status}: ${r.stdout}${r.stderr}`);
+  assert.ok(r.stderr.includes(`Replace the link or file at ${path.join(leg.sb.proj, '.claude')} with a real folder`), `the advice names the link: ${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /Replace it with a regular file/);
+});
+test('R86-1: a folder CoalWash cannot make on the way (an ACL denies adding a subfolder) is named with permission advice, never link advice', (t) => {
+  const sb = sandbox(t);
+  const claude = path.join(sb.proj, '.claude');
+  fs.mkdirSync(claude);
+  const user = process.env.USERNAME || 'nobody';
+  const deny = spawnSync('icacls', [claude, '/deny', `${user}:(AD)`], { encoding: 'utf8', timeout: 20000 });
+  if (deny.status !== 0) return t.skip(`icacls cannot set a deny here (${deny.error ? deny.error.code : deny.status})`);
+  try {
+    let effective = false;
+    try { fs.mkdirSync(path.join(claude, 'probe')); fs.rmdirSync(path.join(claude, 'probe')); } catch (e) { effective = e.code === 'EPERM' || e.code === 'EACCES'; }
+    if (!effective) return t.skip('the deny does not stop this account making a subfolder (an administrator token)');
+    const r = run(sb, ['--language', 'en']);
+    assert.strictEqual(r.status, 1, `exit ${r.status}: ${r.stdout}${r.stderr}`);
+    assert.ok(r.stderr.includes(`Check that ${path.join(claude, 'coal')} can be made`), `the advice names the folder and the permission cause: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /Replace it with a regular file|Replace the link/);
+  } finally {
+    spawnSync('icacls', [claude, '/remove:d', user], { timeout: 20000 });
+  }
+});
+
 // CWK-120 ride-along (a), UMB-174: a parsed body that is not a plain object is never accepted as the config.
 // The old `parseJsonc(raw) || {}` turned a FALSY body (null, 0, false, "") into an EMPTY config, so a write landed
 // on {} over a file that held something the tool did not understand; the truthy shapes ([], "x", 42) were already

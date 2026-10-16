@@ -829,3 +829,40 @@ test('CWK2-048 L83-2: a project root REACHED THROUGH A LINK still takes a write 
   writeRepoFile(path.join(viaLink, '.coalwash.json'), 'AT ROOT\n', viaLink);
   assert.equal(fs.readFileSync(path.join(real, '.coalwash.json'), 'utf8'), 'AT ROOT\n', 'the write lands in the folder the root link names');
 });
+
+// R86-1 (RE-INSPECT 86): a folder refused by the CONTAINMENT check (before the walk) carries the folder and its cause too,
+// and checkRepoWriteTarget's string reason stays byte-identical for its callers.
+test('R86-1: a `.claude` link that resolves OUTSIDE the project is refused carrying that link as the folder (kind link); the string reason is unchanged', async (t) => {
+  const { checkRepoWriteTarget } = await import('./repo-fs.mjs');
+  const sb = sandbox(t, 'r86-out');
+  const at = path.join(sb.project, '.claude');
+  if (!dirLink(sb.outside, at)) { t.skip('this volume cannot make a directory link'); return; }
+  const target = insideLinkTarget(sb.project);
+  assert.equal(checkRepoWriteTarget(target, sb.project), `${at} resolves to ${sb.outside}, outside ${sb.project}`);
+  assert.throws(() => writeRepoFile(target, '{}\n', sb.project), { code: 'COALWASH_WRITE_REFUSED', message: `${at} resolves to ${sb.outside}, outside ${sb.project}`, folder: at, kind: 'link' });
+  assert.deepEqual(fs.readdirSync(sb.outside), ['keep.txt']);
+});
+
+test('R86-1: a DANGLING `.claude` link is refused carrying that link as the folder (kind link); the string reason is unchanged', async (t) => {
+  const { checkRepoWriteTarget } = await import('./repo-fs.mjs');
+  const sb = sandbox(t, 'r86-dang');
+  const gone = path.join(sb.dir, 'gone');
+  fs.mkdirSync(gone);
+  const at = path.join(sb.project, '.claude');
+  if (!dirLink(gone, at)) { t.skip('this volume cannot make a directory link'); return; }
+  fs.rmdirSync(gone);
+  const target = insideLinkTarget(sb.project);
+  assert.equal(checkRepoWriteTarget(target, sb.project), `${at} does not resolve`);
+  assert.throws(() => writeRepoFile(target, '{}\n', sb.project), { code: 'COALWASH_WRITE_REFUSED', message: `${at} does not resolve`, folder: at, kind: 'link' });
+});
+
+test('R86-1: the walk\'s refusals carry their kind: a link and a file in the way, and a sibling outside the root', async (t) => {
+  const { mkdirRepoParents } = await import('./repo-fs.mjs');
+  const sb = insideLinkLeg(t, 'r86-walk', ['.claude']);
+  if (!sb) return;
+  assert.throws(() => mkdirRepoParents(path.join(sb.project, '.claude', 'coal'), sb.project), { folder: path.join(sb.project, '.claude'), kind: 'link' });
+  const { project, outside } = sandbox(t, 'r86-walk2');
+  fs.writeFileSync(path.join(project, '.claude'), 'x');
+  assert.throws(() => mkdirRepoParents(path.join(project, '.claude', 'coal'), project), { folder: path.join(project, '.claude'), kind: 'not-dir' });
+  assert.throws(() => mkdirRepoParents(path.join(outside, 'x'), project), { folder: path.join(outside, 'x'), kind: 'escape' });
+});

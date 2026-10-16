@@ -531,8 +531,16 @@ function main() {
     }
   } catch (e) {
     if (e instanceof RepoWriteRefused && e.folder) {
-      // A folder on the way was refused (CWK2-048 walk), not the config file: name the folder to fix (INSPECT 83 L83-1).
-      console.error(`[refused] ${writePath}: ${e.message} -- nothing was written. Replace the link or file at ${e.folder} with a real folder (or remove it) and re-run.`);
+      // A folder on the way was refused, not the config file: name the folder, with advice true for its kind (INSPECT 83
+      // L83-1, RE-INSPECT 86 R86-1). The kind comes from the refusal itself, never from the message text.
+      const f = e.folder;
+      const advice = {
+        io: `Check that ${f} can be made and read (the permissions on it and on the folder above it, or another program holding it) and re-run.`,
+        vanished: `${f} was gone right after it was made; re-run, and if it happens again, check what else is writing in that folder.`,
+        outside: `${f} leads outside the project: make it a real folder inside the project (or remove it) and re-run.`,
+        escape: `${f} is outside the project; run configure.mjs from inside the project whose config it should change.`,
+      }[e.kind] || `Replace the link or file at ${f} with a real folder (or remove it) and re-run.`;
+      console.error(`[refused] ${writePath}: ${e.message} -- nothing was written. ${advice}`);
     } else if (e instanceof RepoWriteRefused) {
       console.error(`[refused] ${writePath}: ${e.message} -- nothing was written. Replace it with a regular file inside the project (or remove it) and re-run.`);
     } else {

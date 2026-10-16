@@ -28,10 +28,14 @@ import crypto from 'node:crypto';
 import { canonicalOrNull, pathWithin, repoReadOutcome } from './config-load.mjs';
 
 // A refused write. `code` lets a caller tell a refusal from an ordinary I/O error. `folder` is set when the refusal is a
-// FOLDER on the way (a link, or something that is not a directory) rather than the target file, so a caller can tell the
-// user which folder to fix without parsing the message (INSPECT 83 L83-1).
+// FOLDER on the way rather than the target file, and `kind` says why (not `cause`, which Error already defines), so a
+// caller can tell the user which folder to fix and how without parsing the message (INSPECT 83 L83-1, RE-INSPECT 86
+// R86-1). The kinds: 'link' (a link or junction on the
+// way, wherever it points, dangling included) · 'not-dir' (something that is not a folder) · 'outside' (a folder that
+// resolves outside the project with no link found on the way) · 'io' (it could not be inspected or made) · 'vanished' (it
+// was gone right after it was made) · 'escape' (the folder itself is outside the project root).
 export class RepoWriteRefused extends Error {
-  constructor(message, folder = null) { super(message); this.code = 'COALWASH_WRITE_REFUSED'; this.folder = folder; }
+  constructor(message, folder = null, kind = null) { super(message); this.code = 'COALWASH_WRITE_REFUSED'; this.folder = folder; this.kind = kind; }
 }
 
 // `projectRoot` joined with `segs`, after proving every EXISTING component below the
@@ -59,10 +63,10 @@ function plainDirOrMissing(cur) {
   let st;
   try { st = fs.lstatSync(cur); } catch (e) {
     if (e && e.code === 'ENOENT') return false;
-    throw new RepoWriteRefused(`cannot inspect ${cur} (${e && e.code})`);
+    throw new RepoWriteRefused(`cannot inspect ${cur} (${e && e.code})`, cur, 'io');
   }
-  if (st.isSymbolicLink()) throw new RepoWriteRefused(`${cur} is a link -- CoalWash never writes or deletes through a link inside the project (a cloned repo can plant one)`, cur);
-  if (!st.isDirectory()) throw new RepoWriteRefused(`${cur} exists and is not a directory`, cur);
+  if (st.isSymbolicLink()) throw new RepoWriteRefused(`${cur} is a link -- CoalWash never writes or deletes through a link inside the project (a cloned repo can plant one)`, cur, 'link');
+  if (!st.isDirectory()) throw new RepoWriteRefused(`${cur} exists and is not a directory`, cur, 'not-dir');
   return true;
 }
 
@@ -84,15 +88,15 @@ export function mkdirRepoParents(dir, root) {
   const base = path.resolve(root);
   const rel = path.relative(base, path.resolve(dir));
   if (rel === '') return;
-  if (escapesRoot(rel)) throw new RepoWriteRefused(`${dir} is outside the project root ${base}`);
+  if (escapesRoot(rel)) throw new RepoWriteRefused(`${dir} is outside the project root ${base}`, path.resolve(dir), 'escape');
   let cur = base;
   for (const part of rel.split(path.sep)) {
     cur = path.join(cur, part);
     if (plainDirOrMissing(cur)) continue;
     try { fs.mkdirSync(cur); } catch (e) {
-      if (!e || e.code !== 'EEXIST') throw new RepoWriteRefused(`cannot make ${cur} (${e && e.code})`);
+      if (!e || e.code !== 'EEXIST') throw new RepoWriteRefused(`cannot make ${cur} (${e && e.code})`, cur, 'io');
     }
-    if (!plainDirOrMissing(cur)) throw new RepoWriteRefused(`${cur} is missing after it was made`);
+    if (!plainDirOrMissing(cur)) throw new RepoWriteRefused(`${cur} is missing after it was made`, cur, 'vanished');
   }
 }
 
@@ -109,20 +113,49 @@ function nearestExistingAncestor(p) {
 // Is `dir` (existing or not) a directory whose writes stay inside `root`? null = yes,
 // else the reason, phrased for a human.
 export function checkRepoDirTarget(dir, root) {
+  const r = repoDirRefusal(dir, root);
+  return r ? r.why : null;
+}
+
+// checkRepoDirTarget's verdict with the folder to fix and its kind (R86-1): null, or { why, folder, kind }, `why` being the
+// exact string checkRepoDirTarget returns. When the nearest existing folder does not resolve or resolves outside, the folder
+// named is the first link on the way from the root down to it (the one to replace); with no link there, that folder itself.
+function repoDirRefusal(dir, root) {
   const rootPhys = canonicalOrNull(root);
-  if (!rootPhys) return `the root ${root} does not resolve`;
+  if (!rootPhys) return { why: `the root ${root} does not resolve`, folder: null, kind: null };
   const anc = nearestExistingAncestor(path.resolve(dir));
-  if (anc === null) return `no existing directory above ${dir}`;
+  if (anc === null) return { why: `no existing directory above ${dir}`, folder: null, kind: null };
   const ancPhys = canonicalOrNull(anc);
-  if (!ancPhys) return `${anc} does not resolve`;
-  if (!pathWithin(ancPhys, rootPhys)) return `${anc} resolves to ${ancPhys}, outside ${rootPhys}`;
+  if (!ancPhys) return { why: `${anc} does not resolve`, ...folderToFix(anc, root) };
+  if (!pathWithin(ancPhys, rootPhys)) return { why: `${anc} resolves to ${ancPhys}, outside ${rootPhys}`, ...folderToFix(anc, root) };
   return null;
+}
+function folderToFix(anc, root) {
+  const base = path.resolve(root);
+  const rel = path.relative(base, anc);
+  if (escapesRoot(rel)) return { folder: anc, kind: 'escape' };
+  let cur = base;
+  for (const part of rel === '' ? [] : rel.split(path.sep)) {
+    cur = path.join(cur, part);
+    try { if (fs.lstatSync(cur).isSymbolicLink()) return { folder: cur, kind: 'link' }; } catch { break; }
+  }
+  return { folder: anc, kind: 'outside' };
 }
 
 // Is `target` a file CoalWash may (re)write inside `root`? null = yes, else the reason.
 export function checkRepoWriteTarget(target, root) {
-  const dirWhy = checkRepoDirTarget(path.dirname(path.resolve(target)), root);
-  if (dirWhy) return dirWhy;
+  const r = repoWriteRefusal(target, root);
+  return r ? r.why : null;
+}
+
+// checkRepoWriteTarget's verdict as { why, folder, kind } (R86-1); a refusal of the target file itself carries no folder.
+function repoWriteRefusal(target, root) {
+  const dirR = repoDirRefusal(path.dirname(path.resolve(target)), root);
+  if (dirR) return dirR;
+  const fileWhy = targetFileWhy(target);
+  return fileWhy ? { why: fileWhy, folder: null, kind: null } : null;
+}
+function targetFileWhy(target) {
   let st;
   try { st = fs.lstatSync(target); } catch (e) {
     if (e && e.code === 'ENOENT') return null;
@@ -237,8 +270,8 @@ export function openPlainFile(file, flags, expect = null) {
 // another file after the check-time lstat would be written THROUGH, so those still fail
 // with the original error.
 export function writeRepoFile(target, content, root) {
-  const why = checkRepoWriteTarget(target, root);
-  if (why) throw new RepoWriteRefused(why);
+  const r = repoWriteRefusal(target, root);
+  if (r) throw new RepoWriteRefused(r.why, r.folder, r.kind);
   mkdirRepoParents(path.dirname(path.resolve(target)), root); // CWK2-048: no link on the way, wherever it points
   // The folder chain was checked just above; the target name itself is handled by replaceFile's rename, which replaces a
   // planted link instead of writing through it.
