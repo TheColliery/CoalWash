@@ -27,9 +27,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { canonicalOrNull, pathWithin, repoReadOutcome } from './config-load.mjs';
 
-// A refused write. `code` lets a caller tell a refusal from an ordinary I/O error.
+// A refused write. `code` lets a caller tell a refusal from an ordinary I/O error. `folder` is set when the refusal is a
+// FOLDER on the way (a link, or something that is not a directory) rather than the target file, so a caller can tell the
+// user which folder to fix without parsing the message (INSPECT 83 L83-1).
 export class RepoWriteRefused extends Error {
-  constructor(message) { super(message); this.code = 'COALWASH_WRITE_REFUSED'; }
+  constructor(message, folder = null) { super(message); this.code = 'COALWASH_WRITE_REFUSED'; this.folder = folder; }
 }
 
 // `projectRoot` joined with `segs`, after proving every EXISTING component below the
@@ -59,8 +61,8 @@ function plainDirOrMissing(cur) {
     if (e && e.code === 'ENOENT') return false;
     throw new RepoWriteRefused(`cannot inspect ${cur} (${e && e.code})`);
   }
-  if (st.isSymbolicLink()) throw new RepoWriteRefused(`${cur} is a link -- CoalWash never writes or deletes through a link inside the project (a cloned repo can plant one)`);
-  if (!st.isDirectory()) throw new RepoWriteRefused(`${cur} exists and is not a directory`);
+  if (st.isSymbolicLink()) throw new RepoWriteRefused(`${cur} is a link -- CoalWash never writes or deletes through a link inside the project (a cloned repo can plant one)`, cur);
+  if (!st.isDirectory()) throw new RepoWriteRefused(`${cur} exists and is not a directory`, cur);
   return true;
 }
 

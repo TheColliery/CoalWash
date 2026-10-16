@@ -530,7 +530,10 @@ function main() {
       writeRepoFile(writePath, JSON.stringify(next, null, 2) + '\n', projectRoot);
     }
   } catch (e) {
-    if (e instanceof RepoWriteRefused) {
+    if (e instanceof RepoWriteRefused && e.folder) {
+      // A folder on the way was refused (CWK2-048 walk), not the config file: name the folder to fix (INSPECT 83 L83-1).
+      console.error(`[refused] ${writePath}: ${e.message} -- nothing was written. Replace the link or file at ${e.folder} with a real folder (or remove it) and re-run.`);
+    } else if (e instanceof RepoWriteRefused) {
       console.error(`[refused] ${writePath}: ${e.message} -- nothing was written. Replace it with a regular file inside the project (or remove it) and re-run.`);
     } else {
       console.error(`Error: Failed to write to config file: ${e.message}`);

@@ -738,7 +738,7 @@ function insideLinkLeg(t, label, at) {
 test('CWK2-048: a project write through a `.claude` link that points INSIDE the project is refused, and nothing is made at the link target', (t) => {
   const sb = insideLinkLeg(t, 'in-claude', ['.claude']);
   if (!sb) return;
-  assert.throws(() => writeRepoFile(insideLinkTarget(sb.project), '{}\n', sb.project), { code: 'COALWASH_WRITE_REFUSED', message: /is a link/ }, 'a link on the way is refused wherever it points, and the reason names the link');
+  assert.throws(() => writeRepoFile(insideLinkTarget(sb.project), '{}\n', sb.project), { code: 'COALWASH_WRITE_REFUSED', message: /is a link/, folder: path.join(sb.project, '.claude') }, 'a link on the way is refused wherever it points, and the error carries the folder');
   assert.deepEqual(fs.readdirSync(sb.inner), [], 'no `coal` folder and no config appear in the folder the link names');
 });
 
@@ -798,7 +798,7 @@ test('CWK2-048: mkdirRepoParents refuses a FILE where a folder is needed, and ma
   const { mkdirRepoParents } = await import('./repo-fs.mjs');
   const { project } = sandbox(t, 'notdir');
   fs.writeFileSync(path.join(project, '.claude'), 'a file\n');
-  assert.throws(() => mkdirRepoParents(path.join(project, '.claude', 'coal'), project), { code: 'COALWASH_WRITE_REFUSED', message: /exists and is not a directory/ }, 'the reason names the file in the way');
+  assert.throws(() => mkdirRepoParents(path.join(project, '.claude', 'coal'), project), { code: 'COALWASH_WRITE_REFUSED', message: /exists and is not a directory/, folder: path.join(project, '.claude') }, 'the reason names the file in the way, and the error carries it');
   assert.equal(fs.readFileSync(path.join(project, '.claude'), 'utf8'), 'a file\n');
 });
 
@@ -807,4 +807,25 @@ test('CWK2-048: mkdirRepoParents with no root (the user\'s own global file) make
   const { dir } = sandbox(t, 'nullroot');
   mkdirRepoParents(path.join(dir, 'a', 'b', 'c'), null);
   assert.ok(fs.lstatSync(path.join(dir, 'a', 'b', 'c')).isDirectory());
+});
+
+// L83-2 (INSPECT 83): the two survivors of the fire-80 table that a test can reach.
+test('CWK2-048 L83-2: a folder on ANOTHER DRIVE is outside the project root, refused by name, and nothing is made (probed: path.relative yields an absolute path)', async (t) => {
+  const { mkdirRepoParents } = await import('./repo-fs.mjs');
+  const { project } = sandbox(t, 'xdrive');
+  const other = 'Z:' + path.sep + 'cw-x';
+  if (!path.isAbsolute(path.relative(project, other))) { t.skip('path.relative never yields an absolute path here (no drive letters)'); return; }
+  assert.throws(() => mkdirRepoParents(other, project), { code: 'COALWASH_WRITE_REFUSED', message: /is outside the project root/ });
+  assert.deepEqual(fs.readdirSync(project), [], 'nothing is made inside the project either');
+  assert.equal(fs.existsSync(other), false);
+});
+
+test('CWK2-048 L83-2: a project root REACHED THROUGH A LINK still takes a write at the root itself (the root is never walked)', (t) => {
+  const { dir } = sandbox(t, 'linkroot');
+  const real = path.join(dir, 'real-project');
+  fs.mkdirSync(real);
+  const viaLink = path.join(dir, 'project-link');
+  if (!dirLink(real, viaLink)) { t.skip('this volume cannot make a directory link'); return; }
+  writeRepoFile(path.join(viaLink, '.coalwash.json'), 'AT ROOT\n', viaLink);
+  assert.equal(fs.readFileSync(path.join(real, '.coalwash.json'), 'utf8'), 'AT ROOT\n', 'the write lands in the folder the root link names');
 });

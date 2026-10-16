@@ -574,6 +574,9 @@ test('CWK2-048: a project config write whose `.claude` links to a folder INSIDE 
   assert.strictEqual(r.status, 1, `exit ${r.status}: ${r.stdout}${r.stderr}`);
   assert.match(r.stderr, /\[refused\]/, 'the refusal is loud');
   assert.match(r.stderr, /nothing was written/);
+  // L83-1: the advice names the FOLDER the walk refused, never the config file (an honest dotfile-layout user must be told what to fix)
+  assert.ok(r.stderr.includes(`Replace the link or file at ${path.join(sb.proj, '.claude')} with a real folder`), `the advice names the folder: ${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /Replace it with a regular file/, 'and does not send the user to the config file');
   assert.deepStrictEqual(fs.readdirSync(inner), [], 'no `coal` folder and no config appear in the folder the link names');
 });
 
