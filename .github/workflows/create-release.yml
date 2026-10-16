@@ -150,6 +150,7 @@ jobs:
         if: steps.gate.outputs.post == 'true'
         with:
           node-version: 24
+          package-manager-cache: false # a restored cache is a poisoning path into a job that can write contents (zizmor cache-poisoning)
 
       # UMB-182: the previous stable tag feeds the CHANGELOG heading-continuity check (courier C-2);
       # the current Latest decides make_latest, so a Release for an older tag never takes Latest.
@@ -199,7 +200,7 @@ jobs:
       # The gate found the old tag and proved the new one ahead of it. Order: back to a DRAFT, its assets deleted (a room
       # with assets attaches the new tag's as on a first run, and an old checksum file would make the upload decision
       # refuse), THEN the tag moved. Each call is safe to repeat, so a run that died part-way converges
-      # when it is run again. It sits after every build and check above, so a failed build leaves the old Release as it
+      # when it is run again. It sits after every check above (the derive step and its file check), so a failed derive leaves the old Release as it
       # was, and it never publishes: the publish step stays last. This edits a PUBLISHED Release, a path that Immutable Releases
       # closes once the owner switches it on (AR-71 (a1), unsigned today): the launch form is re-decided before that switch.
       - name: Re-point the launch-form Release to this tag (draft it, empty its assets, move its tag), while no stable Release exists
