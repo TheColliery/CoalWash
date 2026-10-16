@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { removeTree } from './lib/test-plan.mjs';
 
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'release-notes.mjs');
 const LIB_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib');
@@ -39,7 +40,7 @@ const childEnv = (dir, extra = {}, allow = []) => {
 // The one place every spawn of these tests goes through, so the sandbox is applied by construction.
 const spawnIn = (cwd, script, args = [], { env, allow, input } = {}) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: 30000, input, env: childEnv(cwd, env, allow) });
 const made = [];
-test.after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
+test.after(() => { for (const d of made) removeTree(d); });
 
 function scratchWithLib() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'release-notes-test-'));

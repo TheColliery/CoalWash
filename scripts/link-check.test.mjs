@@ -23,6 +23,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { slugifyHeading, HeadingAnchors, headingAnchors, extractLinks, fragmentMatches, checkLinks } from './link-check.mjs';
 import { gitEnv } from './lib/git-env.mjs';
+import { removeTree } from './lib/test-plan.mjs';
 
 const ENGINE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'link-check.mjs');
 
@@ -175,7 +176,7 @@ test('fragmentMatches follows the HTML Standard: raw, then percent-decoded, then
 // A plain directory for the in-process checks — the tracked set is passed in, so no git.
 function docsTree(t) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-')));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeTree(root));
   const put = (rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
   put('docs/guide.md', '# Guide\n\n## Install\n\n## Install\n\n## ÉCOLE — note\n');
   put('src/tool.mjs', 'export {};\n');
@@ -226,7 +227,7 @@ function cliRepo(t) {
   const init = spawnSync('git', ['--version'], { encoding: 'utf8', env: gitEnv(os.tmpdir()) });
   if (init.error || init.status !== 0) return null;
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-git-')));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeTree(root));
   const fixtureEnv = gitEnv(path.dirname(root));
   const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnv(path.dirname(root)) }); // 08d: the census reads gitEnv() at the spawn
   assert.strictEqual(git('init', '-q', '-b', 'main').status, 0, 'git init in the fixture');
@@ -267,7 +268,7 @@ test('CLI: an ambient absolute GIT_DIR cannot make the engine answer tracked-nes
   if (!fx) return t.skip('git unavailable');
   const { root, git } = fx;
   const decoy = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-decoy-')));
-  t.after(() => fs.rmSync(decoy, { recursive: true, force: true }));
+  t.after(() => removeTree(decoy));
   const made = spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: gitEnv(path.dirname(decoy)) });
   assert.strictEqual(made.status, 0, 'git init in the decoy');
   fs.writeFileSync(path.join(root, 'A.md'), '# Alpha\n\nsee [b](B.md)\n');
@@ -285,7 +286,7 @@ test('CLI: an ambient absolute GIT_DIR cannot make the engine answer tracked-nes
 // A directory junction needs no admin rights on Windows; a host that cannot make one skips.
 test('CLI: invoked through a directory junction, the engine still runs (no files: refuses, exit 1)', (t) => {
   const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-junction-'));
-  t.after(() => fs.rmSync(holder, { recursive: true, force: true })); // rmSync does not follow a junction (probed)
+  t.after(() => removeTree(holder)); // rmSync does not follow a junction (probed)
   const link = path.join(holder, 'scripts-link');
   try {
     fs.symlinkSync(path.dirname(ENGINE), link, 'junction');

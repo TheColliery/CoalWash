@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { gitEnv } from './lib/git-env.mjs';
+import { removeTree } from './lib/test-plan.mjs';
 
 // FIXTURES ARE INPUT, NOT CLAIMS. Every backticked path below is DATA this test feeds
 // the gate, never a statement this repo makes about its own tree. They keep their
@@ -321,7 +322,7 @@ function gitFixture(gitignoreText) {
     // null, so its own finally{} holds no handle to remove. Leaving it re-opens board
     // #107's litter class on the one path nobody here runs (git is present on this box).
     // Cleaned HERE because this is the only scope that still has the name.
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
     return null; // git unavailable — caller SKIPs visibly
   }
   fs.writeFileSync(path.join(dir, '.gitignore'), gitignoreText);
@@ -347,7 +348,7 @@ test('DERIVE-079: the ignore set is EXISTENCE-INDEPENDENT — an absent gitignor
     });
     assert.deepStrictEqual([...ign.ignored], ['throwaway-build'],
       'a disk-derived probe reads ZERO here, which is the defect CWK-079 removes');
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTree(dir); }
 });
 
 test('DERIVE-079: a CRLF .gitignore\'s blank line must not ignore EVERYTHING (the exemplar\'s shape does)', (t) => {
@@ -361,7 +362,7 @@ test('DERIVE-079: a CRLF .gitignore\'s blank line must not ignore EVERYTHING (th
     assert.ok(ign.ignored.has('docs'), 'the REAL pattern must still match');
     assert.ok(!ign.ignored.has('zzz'), 'an unrelated root must NOT be ignored by a blank CRLF line');
     assert.strictEqual(ign.artefacts.length, 1, "the dropped row is REPORTED, never silently swallowed");
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTree(dir); }
 });
 
 test('DERIVE-079: agent homes are held out BEFORE the probe, and counted separately', () => {
@@ -416,5 +417,5 @@ test('NON-LOCAL-079: an extensionless citation under a gitignored root is checke
       'plant A was never exempt from the CHECK — only from discovering its own root');
     assert.ok(both.some((m) => m.includes('throwaway-build/readme.md') && /gitignored/.test(m)),
       'plant B, the citation that armed the root, must FAIL too');
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTree(dir); }
 });

@@ -28,6 +28,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitEnv } from './lib/git-env.mjs';
+import { removeTree } from './lib/test-plan.mjs';
 
 const VERIFY = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify.mjs');
 
@@ -55,7 +56,7 @@ test('verify.mjs REPORTS missing scripts/lib files instead of dying on them', ()
         `every missing lib gets its own enumerated FAIL line (${lib})\n${stdout}`);
     }
     assert.match(stdout, /\nVERIFY: FAIL \(\d+\)/, `the run must reach its own summary line\n${stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });
 
 // board #64: DESC_CAP walked skill/command frontmatter only; plugin.json's own
@@ -117,7 +118,7 @@ function copyGateTree(prefix) {
       if (!fs.existsSync(src)) continue;
       fs.cpSync(src, path.join(root, rel), { recursive: true, filter: notScratch });
     }
-  } catch (e) { fs.rmSync(root, { recursive: true, force: true }); throw e; }
+  } catch (e) { removeTree(root); throw e; }
   return root;
 }
 
@@ -141,7 +142,7 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
     assert.strictEqual(over.status, 1, 'an over-cap plugin.json description must FAIL with exit 1');
     assert.match(over.stdout, /FAIL\s+\.claude-plugin\/plugin\.json: description 1100 chars exceeds the 1024-char cap/,
       `the FAIL line must name the file, the exact length, and the cap\n${over.stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });
 
 test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never silently reads as 0 chars', () => {
@@ -156,7 +157,7 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
     assert.strictEqual(r.status, 1, 'a non-string description must FAIL, not silently pass as 0 chars');
     assert.match(r.stdout, /FAIL\s+\.claude-plugin\/plugin\.json: description is not a string \(number\)/,
       `must name the actual type, not silently report 0 chars\n${r.stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });
 
 // CWK-120 row 16: two messages named a place the gate never checks. The SessionStart FAIL said `${CLAUDE_PLUGIN_ROOT}/bin` while the
@@ -182,7 +183,7 @@ test('CWK-120 row 16: the hooks FAIL names the path the gate checks, and the dis
     assert.strictEqual(bad.status, 1, 'a hooks.json that does not wire the conductor must FAIL the gate');
     assert.match(bad.stdout, /FAIL\s+hooks\.json does not wire \$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/coalwash-conductor\.js/, `the FAIL must name the path the check reads\n${bad.stdout}`);
     assert.ok(!bad.stdout.includes('CLAUDE_PLUGIN_ROOT}/bin'), `the FAIL must not name the never-checked bin path\n${bad.stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });
 
 // CW-015 (b), r34: EVERY verify.mjs spawn above runs OUTSIDE a git repository, so
@@ -246,7 +247,7 @@ function trackedTreeRepo() {
     assert.ok(tracked.stdout.includes('scripts/verify.mjs'), `the fixture index must hold the tree\n${tracked.stderr}`);
     const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: gitEnv(path.dirname(root)) });
     return { root, git, run };
-  } catch (e) { fs.rmSync(root, { recursive: true, force: true }); throw e; }
+  } catch (e) { removeTree(root); throw e; }
 }
 
 test('verify.mjs inside a REAL git repo: the pointer-drift block RUNS, and a missing, an untracked and a gitignored citation each FAIL', (t) => {
@@ -288,7 +289,7 @@ test('verify.mjs inside a REAL git repo: the pointer-drift block RUNS, and a mis
       `the UNTRACKED citation must be named\n${planted.stdout}`);
     assert.match(planted.stdout, /FAIL\s+README\.md cites `scratchpad\/r34-probe-notes\.md`, which lives under the gitignored `scratchpad`/,
       `the GITIGNORED citation must be named\n${planted.stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });
 
 // r34 F1: `git check-ignore` exits 0 (something fed is ignored), 1 (nothing is), or
@@ -322,7 +323,7 @@ test('verify.mjs in a BARE repo: a check-ignore that cannot answer FAILs the gat
       `the resolution ok line rests on the ignore set, so it must not print either\n${r.stdout}`);
     assert.match(r.stdout, /\nVERIFY: FAIL \(1\)/,
       `exactly one failure, this one — any other count means the exit code is not this probe's\n${r.stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });
 
 // CWK-133: an ABSOLUTE GIT_DIR in the caller's environment (a linked worktree's hook exports one) must not decide which
@@ -344,8 +345,8 @@ test('verify.mjs inside a REAL git repo: an ambient absolute GIT_DIR cannot make
     assert.strictEqual(r.status, 0, `the tracked tree must still PASS with a hostile GIT_DIR in the environment\n${r.stdout}${r.stderr}`);
     assert.match(r.stdout, /ok\s+every path this repo points at/, `the pointer block must have run and resolved\n${r.stdout}`);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(decoy, { recursive: true, force: true });
+    removeTree(root);
+    removeTree(decoy);
   }
 });
 
@@ -373,5 +374,5 @@ test('verify.mjs inside a REAL git repo: a planted git spawn with env: process.e
     const bare = run();
     assert.strictEqual(bare.status, 1, `a spawn with no env: must FAIL the gate\n${bare.stdout}${bare.stderr}`);
     assert.match(bare.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) carries no 'env:'/, `the FAIL must name the missing env\n${bare.stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });

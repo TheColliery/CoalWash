@@ -5,9 +5,56 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as plan from './test-plan.mjs';
-import { declaredTopLevelTests, shortfallResults, HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS, SLOWEST_FILE_MS, CI_SLOWEST_FILE_MIN_MS } from './test-plan.mjs';
+import { declaredTopLevelTests, shortfallResults, HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS, SLOWEST_FILE_MS, CI_SLOWEST_FILE_MIN_MS, removeTree, TEARDOWN_BUDGET_MS, TEARDOWN_POLL_MS, GIT_LINGER_MAX_MS } from './test-plan.mjs';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
 
 const ROOM = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+// fire 63: the shape PR #22's red had, without git: a child that outlives its caller's call with its cwd inside the temp project. On Windows a plain
+// rmSync of that project throws EBUSY or EPERM until the child exits; on a POSIX host the removal succeeds either way (the platform deletes a cwd).
+test('removeTree removes a temp project while a child process still holds it as its cwd (fire 63, PR #22: EBUSY in a teardown)', async (t) => {
+  const tmp = fs.realpathSync.native(os.tmpdir());
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-teardown-')));
+  const HOLD_MS = 2000;
+  const child = spawn(process.execPath, ['-e', `require('fs').writeFileSync('ready', ''); setTimeout(() => {}, ${HOLD_MS})`], { cwd: dir, stdio: 'ignore', windowsHide: true });
+  const exited = new Promise((res) => child.once('exit', res));
+  t.after(async () => {
+    child.kill();
+    await exited;
+    assert.ok(dir.startsWith(tmp + path.sep), `refusing to remove ${dir}: not under ${tmp}`);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  for (const until = Date.now() + 10000; !fs.existsSync(path.join(dir, 'ready'));) {
+    assert.ok(Date.now() < until, 'the holding child never started');
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  removeTree(dir);
+  assert.ok(!fs.existsSync(dir), 'the held project is gone');
+});
+
+test('removeTree gives up loudly: a directory still held when the budget runs out throws its own error, and a non-hold error throws at once', (t) => {
+  const tmp = fs.realpathSync.native(os.tmpdir());
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-teardown-')));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const real = fs.rmSync;
+  let calls = 0;
+  try {
+    fs.rmSync = () => { calls++; throw Object.assign(new Error('held'), { code: 'EBUSY' }); };
+    assert.throws(() => removeTree(dir, { budgetMs: 250, pollMs: 50 }), { code: 'EBUSY' });
+    assert.ok(calls >= 3, `it polled before giving up (${calls} calls)`);
+    calls = 0;
+    fs.rmSync = () => { calls++; throw Object.assign(new Error('bad'), { code: 'EINVAL' }); };
+    assert.throws(() => removeTree(dir, { budgetMs: 5000, pollMs: 50 }), { code: 'EINVAL' });
+    assert.equal(calls, 1, 'a non-hold error is never retried');
+  } finally { fs.rmSync = real; }
+});
+
+test('the teardown budget clears the longest measured git linger at least 3x and stays inside the per-test clock', () => {
+  assert.ok(TEARDOWN_BUDGET_MS >= 3 * GIT_LINGER_MAX_MS, `budget ${TEARDOWN_BUDGET_MS} ms against a linger of ${GIT_LINGER_MAX_MS} ms`);
+  assert.ok(TEARDOWN_BUDGET_MS * 4 < TEST_TIMEOUT_MS, 'a test with a few held teardowns still ends inside its own clock');
+  assert.ok(TEARDOWN_POLL_MS > 0 && TEARDOWN_POLL_MS < TEARDOWN_BUDGET_MS);
+});
 
 test('declaredTopLevelTests counts the test( calls that start a line in column 0, the skip/todo/only forms included, in LF and in CRLF', () => {
   const lf = ["import { test } from 'node:test';", "test('a', () => {});", "test.skip('b', () => {});", "test.todo('c');", "test.only('d', () => {});", ''].join('\n');

@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { gitEnv } from './lib/git-env.mjs';
+import { removeTree } from './lib/test-plan.mjs';
 
 const TMP_ROOT = fs.realpathSync.native(os.tmpdir());
 const GIT = 'git';
@@ -65,7 +66,7 @@ test('an ABSOLUTE ambient GIT_DIR cannot redirect a fixture `git init` onto anot
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'cw-gitenv-')));
   t.after(() => {
     assert.ok(base.startsWith(TMP_ROOT + path.sep), `refusing to remove ${base}: not under ${TMP_ROOT}`);
-    fs.rmSync(base, { recursive: true, force: true });
+    removeTree(base);
   });
   const sandbox = path.join(base, 'sandbox-repo');
   const empty1 = path.join(base, 'fixture-control');

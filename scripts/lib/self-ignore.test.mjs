@@ -12,6 +12,7 @@ import { gitEnv } from './git-env.mjs';
 import { applyPlan } from './apply.mjs';
 import { ensureCatchAllIgnore, SELF_IGNORE_BODY } from './repo-fs.mjs';
 import { snapshotOnFirstWrite } from './writeguard.mjs';
+import { removeTree } from './test-plan.mjs';
 
 const HAS_GIT = spawnSync('git', ['--version'], { encoding: 'utf8', timeout: 20000, windowsHide: true, env: gitEnv() }).status === 0;
 const MEMORY = '# Memory\n\n- the user\'s own fact one\n- the user\'s own fact two\n';
@@ -21,7 +22,7 @@ function sandbox(t) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-selfignore-')));
   t.after(() => {
     assert.ok(root.startsWith(tmp + path.sep), `refusing to remove ${root}`);
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   });
   const proj = path.join(root, 'proj');
   const home = path.join(root, 'home');
@@ -130,7 +131,7 @@ test('a .gitignore that is a real directory cannot be replaced: the transaction 
 test('ensureCatchAllIgnore: the exact catch-all is left alone (null, same inode), anything else is replaced, two racing callers both end on the catch-all', (t) => {
   const tmp = fs.realpathSync.native(os.tmpdir());
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-catchall-')));
-  t.after(() => { assert.ok(dir.startsWith(tmp + path.sep)); fs.rmSync(dir, { recursive: true, force: true }); });
+  t.after(() => { assert.ok(dir.startsWith(tmp + path.sep)); removeTree(dir); });
   const file = path.join(dir, '.gitignore');
   assert.equal(ensureCatchAllIgnore(dir), null, 'absent: created');
   const ino = fs.statSync(file, { bigint: true }).ino;
@@ -166,7 +167,7 @@ test('the write-guard airbag replaces a permissive tx-dir .gitignore before it s
 test('the write-guard airbag takes NO snapshot when the tx-dir catch-all cannot be put in place', (t) => {
   const tmp = fs.realpathSync.native(os.tmpdir());
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-wgrefuse-')));
-  t.after(() => { assert.ok(root.startsWith(tmp + path.sep)); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(() => { assert.ok(root.startsWith(tmp + path.sep)); removeTree(root); });
   const proj = path.join(root, 'proj');
   fs.mkdirSync(path.join(proj, '.claude', 'coalwash', '.gitignore'), { recursive: true });
   fs.mkdirSync(path.join(proj, '.git'));
@@ -182,7 +183,7 @@ test('a bin and a keep refuse to write when their folder\'s catch-all cannot be 
   const { recordKeep } = await import('./keeps.mjs');
   const tmp = fs.realpathSync.native(os.tmpdir());
   const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-binkeep-')));
-  t.after(() => { assert.ok(proj.startsWith(tmp + path.sep)); fs.rmSync(proj, { recursive: true, force: true }); });
+  t.after(() => { assert.ok(proj.startsWith(tmp + path.sep)); removeTree(proj); });
   const tx = path.join(proj, '.claude', 'coalwash');
   fs.mkdirSync(path.join(tx, FAT_BIN_NAME, '.gitignore'), { recursive: true });
   assert.equal(recordBinItem(proj, FAT_BIN_NAME, { content: 'memory body\n', original: path.join(proj, 'MEMORY.md') }), null);
@@ -196,7 +197,7 @@ test('a lock called without selfIgnore (the global lock, in the user\'s own ~/.c
   const { acquireLock } = await import('./apply.mjs');
   const tmp = fs.realpathSync.native(os.tmpdir());
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-lockdir-')));
-  t.after(() => { assert.ok(dir.startsWith(tmp + path.sep)); fs.rmSync(dir, { recursive: true, force: true }); });
+  t.after(() => { assert.ok(dir.startsWith(tmp + path.sep)); removeTree(dir); });
   fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\n');
   const l = acquireLock(path.join(dir, '.coalwash-global.lock'), { sessionId: 't-lock' });
   assert.equal(l.acquired, true);
@@ -210,7 +211,7 @@ test('the global lock creates no .gitignore in an empty ~/.claude, and a project
   const { acquireLock } = await import('./apply.mjs');
   const tmp = fs.realpathSync.native(os.tmpdir());
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-globallock-')));
-  t.after(() => { assert.ok(root.startsWith(tmp + path.sep)); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(() => { assert.ok(root.startsWith(tmp + path.sep)); removeTree(root); });
   const claude = path.join(root, 'home', '.claude');
   fs.mkdirSync(claude, { recursive: true });
   const g = acquireLock(path.join(claude, '.coalwash-global.lock'), { sessionId: 't-global' });
@@ -310,7 +311,7 @@ test('L58-1: outside any repository nothing is tracked, so the writers work as b
   const { recordKeep } = await import('./keeps.mjs');
   const tmp = fs.realpathSync.native(os.tmpdir());
   const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-norepo-')));
-  t.after(() => { assert.ok(proj.startsWith(tmp + path.sep)); fs.rmSync(proj, { recursive: true, force: true }); });
+  t.after(() => { assert.ok(proj.startsWith(tmp + path.sep)); removeTree(proj); });
   assert.equal(recordKeep(proj, { target: path.join(proj, 'MEMORY.md'), reason: 'x', anchor: ANCHOR }).ok, true);
 });
 
@@ -318,7 +319,7 @@ test('a project lock that opts in refuses when its folder\'s catch-all cannot be
   const { acquireLock } = await import('./apply.mjs');
   const tmp = fs.realpathSync.native(os.tmpdir());
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-lockign-')));
-  t.after(() => { assert.ok(dir.startsWith(tmp + path.sep)); fs.rmSync(dir, { recursive: true, force: true }); });
+  t.after(() => { assert.ok(dir.startsWith(tmp + path.sep)); removeTree(dir); });
   fs.mkdirSync(path.join(dir, '.gitignore'));
   const l = acquireLock(path.join(dir, '.coalwash.lock'), { sessionId: 't', selfIgnore: true });
   assert.equal(l.acquired, false);

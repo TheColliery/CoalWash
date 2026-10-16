@@ -12,6 +12,7 @@ import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } 
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
 import { recordVerdict, loadState } from './caliper.mjs';
 import { ccMemoryDir } from './class-b.mjs';
+import { removeTree } from './test-plan.mjs';
 
 function sandbox() {
   const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-proj-')));
@@ -20,7 +21,7 @@ function sandbox() {
   return { proj, store };
 }
 function clean(...dirs) {
-  for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+  for (const d of dirs) removeTree(d);
 }
 function write(p, content) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -50,7 +51,7 @@ function planFor(proj, store, actions, extra = {}) {
 // a file's tests serially, and every state record inside it is keyed by that
 // test's own unique project dir.
 const SANDBOX_HOME = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-shared-')));
-after(() => fs.rmSync(SANDBOX_HOME, { recursive: true, force: true }));
+after(() => removeTree(SANDBOX_HOME));
 const apply = (plan, opts = {}) => applyPlan(plan, { projectRoot: plan && plan.projectRoot, home: SANDBOX_HOME, ...opts });
 // CWK-162 B12: a plan that names one target twice is refused at plan time, so the old way to make a mutation throw mid-transaction
 // (delete the same file twice: the second rmSync hits ENOENT) no longer reaches the mutation. The same failure is injected: rmSync
@@ -3285,7 +3286,7 @@ function hardlinkCapable() {
     return true;
   } catch {
     return false;
-  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  } finally { removeTree(d); }
 }
 
 test('U7 HIGH: an alias pre-placed at the write temp NEVER receives the content -- the file outside every approved root is untouched and the run fails closed', (t) => {
