@@ -4,7 +4,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [1.12.5] - 2026-10-16
 
-`estate-restore --to` refuses a link or a hard-linked file already at a restored file's path
+estate-restore --to refuses a link or a hard-linked file already at a restored file's path
 
 A restore with `--to <dir>` already refused a link planted in a directory below the destination, but it did not look at the restored file's own path. Nothing a user could do before is taken away. The installed plugin moved: `scripts/lib/estate-archive.mjs` (six lines in `restoreSession`), `skills/coalwash/references/method.md` and its `plugin/` twin.
 
