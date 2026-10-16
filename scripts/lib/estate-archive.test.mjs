@@ -951,6 +951,52 @@ test('CWK-162 B3: a link planted deeper (<to>/<sid>/subagents) is refused the sa
   assert.deepStrictEqual(fs.readdirSync(outside), []);
 });
 
+// fire 67 (PR #18, thread r4231603560): the directory components were checked, the FINAL file path was not. A link already sitting at
+// <to>/<sid>.jsonl was replaced by the rename rather than written through, but the contract says a restore refuses links under its
+// destination. Each link kind is its own leg, decided by probing what this volume and user can create, skipped visibly otherwise.
+function c7Plant(t, to, kind) {
+  const outside = c7Dir('out');
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const dest = path.join(to, `${SID_C7}.jsonl`);
+  const target = path.join(outside, 'victim.txt');
+  fs.writeFileSync(target, 'OUTSIDE\n');
+  try {
+    if (kind === 'file symlink') fs.symlinkSync(target, dest, 'file');
+    else if (kind === 'dangling file symlink') fs.symlinkSync(path.join(outside, 'gone.txt'), dest, 'file');
+    else if (kind === 'junction') fs.symlinkSync(outside, dest, 'junction');
+    else fs.linkSync(target, dest); // a hard link
+  } catch (e) { t.skip(`a ${kind} cannot be made here (${e.code})`); return null; }
+  return { outside, dest, target };
+}
+for (const kind of ['file symlink', 'dangling file symlink', 'junction', 'hard link']) {
+  test(`fire 67: a ${kind} already at <to>/<sid>.jsonl is refused, and what it points at is untouched`, (t) => {
+    const arch = c7Archive({ [`${SID_C7}.jsonl`]: Buffer.from('RESTORED-BYTES\n') });
+    const to = c7Dir('to');
+    t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+    const p = c7Plant(t, to, kind);
+    if (!p) return;
+    const before = fs.lstatSync(p.dest);
+    const r = restoreSession(SID_C7, { archiveDir: arch, to });
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, kind === 'hard link' ? /restore refused on .*\.jsonl: the destination entry is not a single-link regular file/ : /restore refused on .*\.jsonl: the destination file is a link/, r.error);
+    assert.strictEqual(fs.readFileSync(p.target, 'utf8'), 'OUTSIDE\n', 'the link target keeps its bytes');
+    assert.deepStrictEqual(fs.readdirSync(p.outside).sort(), ['victim.txt'], 'nothing new lands outside the destination');
+    const after = fs.lstatSync(p.dest);
+    assert.strictEqual(after.ino, before.ino, 'the planted entry is left in place for a human to look at');
+  });
+}
+
+test('fire 67 control: an ordinary single-link file already at <to>/<sid>.jsonl is still replaced by the restored bytes', (t) => {
+  const bytes = Buffer.from('RESTORED-BYTES\n');
+  const arch = c7Archive({ [`${SID_C7}.jsonl`]: bytes });
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  fs.writeFileSync(path.join(to, `${SID_C7}.jsonl`), 'an older restore\n');
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.ok(fs.readFileSync(path.join(to, `${SID_C7}.jsonl`)).equals(bytes));
+});
+
 test('CWK-162 B3 control: a plain destination restores byte-exactly, and a destination ROOT that is itself a link (the user\'s own choice) still works -- only components BELOW it are checked', (t) => {
   const bytes = Buffer.from('line one\nline two\n');
   const arch = c7Archive({ [`${SID_C7}/sub.jsonl`]: bytes, [`${SID_C7}/subagents/a.jsonl`]: bytes });

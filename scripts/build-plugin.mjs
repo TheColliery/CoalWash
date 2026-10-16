@@ -54,11 +54,12 @@ const UNWIRED_ENGINE = [
 ];
 const isUnwiredEngine = (rel) => UNWIRED_ENGINE.includes(rel);
 
-// DEV TOOLING IN scripts/lib/, DELIBERATELY NOT SHIPPED (CWK-174) -- the house secret scan's library, and the release deriver's. The org canon puts it at
-// scripts/lib/secret-scan.mjs (byte-equal in every room, scripts/scanner-parity.mjs keeps the copies equal), but it serves the
-// commit and push gate (scripts/secret-gate.mjs), not the installed skill: nothing shipped imports it. So it is excluded from the
-// build AND from both directions of the dist check, with its absence asserted, the same explicit-absence belt UNWIRED_ENGINE uses.
-// It stays in the suite and in source; verify.mjs's lib roster exempts it by name for the same reason.
+// DEV TOOLING IN scripts/lib/, DELIBERATELY NOT SHIPPED (CWK-174, widened at 09a): the house secret scan (byte-equal in every room,
+// U/scripts/scanner-parity.mjs keeps the copies equal; it serves the commit and push gate, scripts/secret-gate.mjs), the release-notes
+// deriver, the canon git-spawn census with its witness vectors and this room's pins, the canon wave runner with its machine reading and
+// stdout preload, and this room's test numbers. Nothing the installed skill runs imports any of them. So each is excluded from the build
+// AND from both directions of the dist check, with its absence asserted, the same explicit-absence belt UNWIRED_ENGINE uses. They stay
+// in the suite and in source; verify.mjs's lib roster exempts them by name for the same reason.
 export const DEV_ONLY_LIBS = [ // exported (PR #18, build-plugin.test.mjs:65) so the test loops over every entry, never a hand-copied two
   path.join('scripts', 'lib', 'secret-scan.mjs'),
   path.join('scripts', 'lib', 'release-shape.mjs'), // the create-release workflow's CHANGELOG deriver (scripts/release-notes.mjs): CI tooling, never imported by shipped code
@@ -105,7 +106,7 @@ export function buildDist(distRoot = dist) {
     const src = path.join(repo, rel);
     const dst = path.join(distRoot, rel);
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isNotShipped(path.relative(repo, s)) && !hasStrayDotDir(path.relative(src, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine + any stray dot-dir BELOW the item
+    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isNotShipped(path.relative(repo, s)) && !hasStrayDotDir(path.relative(src, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine + every DEV_ONLY_LIBS entry + any stray dot-dir BELOW the item
   }
 }
 
@@ -161,7 +162,7 @@ export function checkDist(distRoot = dist) {
     if (fs.existsSync(path.join(distRoot, rel))) out.push(`unwired class-A engine present in plugin/ (must not ship until the SKILL surface wires it): ${rel}`);
   }
   for (const rel of DEV_ONLY_LIBS) {
-    if (fs.existsSync(path.join(distRoot, rel))) out.push(`dev-only lib present in plugin/ (a commit-gate scanner, never plugin payload): ${rel}`);
+    if (fs.existsSync(path.join(distRoot, rel))) out.push(`dev-only lib present in plugin/ (dev tooling in DEV_ONLY_LIBS, which the installed skill never imports: never plugin payload): ${rel}`);
   }
   // ASSERT ABSENCE OVER EXACTLY THE SET THE EXCLUSION REMOVES — no wider, no
   // NARROWER. The exclusion drops any dot-named SEGMENT, files included; the first

@@ -987,6 +987,12 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones } 
       }
       const dest = path.join(dir, s.rel);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
+      // fire 67 (PR #18, r4231603560): the FINAL path is checked too. A link already there (a symlink, dangling or not, or a junction) or
+      // a file with a second hard link is refused and left in place; nothing absent or an ordinary single-link file behaves as before.
+      let st = null;
+      try { st = fs.lstatSync(dest); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+      if (st && st.isSymbolicLink()) return { ok: false, error: `restore refused on ${s.rel}: the destination file is a link (a restore never writes through a link under its destination)`, dir, files };
+      if (st && (!st.isFile() || st.nlink > 1)) return { ok: false, error: `restore refused on ${s.rel}: the destination entry is not a single-link regular file (a restore never writes through a link under its destination)`, dir, files };
       writeDurable(dest, buf); // MED: recovery write matches the forward path's durability (this tier keeps no snapshot)
       fsyncDirBestEffort(path.dirname(dest));
       files.push({ rel: s.rel, bytes: buf.length });
