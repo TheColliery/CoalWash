@@ -35,7 +35,7 @@ const LIBS = [
 // on-disk-but-unlisted. Tests + the deliberately-unshipped class-A engine are
 // gated by the suite and build-plugin respectively, not here.
 const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs', 'secret-scan.mjs', 'release-shape.mjs', // + the dev-only libs (build-plugin DEV_ONLY_LIBS: the house secret scan, the release deriver; CWK-174)
-  'git-env-census.mjs', 'git-env-census.vectors.mjs', 'git-env-pins.mjs', 'wave-run.mjs', 'machine-reading.mjs', 'stdout-sync.mjs', 'test-plan.mjs']); // + the canon census and wave-run trios, and the room's wave-run numbers (09a)
+  'git-env-census.mjs', 'git-env-census.vectors.mjs', 'git-env-pins.mjs', 'wave-run.mjs', 'machine-reading.mjs', 'stdout-sync.mjs', 'test-plan.mjs', 'front-door-links.mjs']); // + the canon census and wave-run trios, and the room's wave-run numbers (09a)
 console.log('lib roster drift:');
 try {
   const onDisk = fs.readdirSync(path.join(repo, 'scripts', 'lib'))

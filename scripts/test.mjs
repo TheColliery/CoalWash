@@ -60,6 +60,7 @@ const TESTS = [
   'scripts/configure.test.mjs',
   'scripts/pointer-check.test.mjs',
   'scripts/link-check.test.mjs',
+  'scripts/front-door-links.test.mjs', // 16f: the canon front-door link check, adopted by blob
   'scripts/git-env.test.mjs',
   'scripts/lib/git-env-census.test.mjs',
   'scripts/lib/git-env-pins.test.mjs',

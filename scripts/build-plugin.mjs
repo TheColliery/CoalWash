@@ -72,6 +72,7 @@ export const DEV_ONLY_LIBS = [ // exported (PR #18, build-plugin.test.mjs:65) so
   path.join('scripts', 'lib', 'machine-reading.mjs'),
   path.join('scripts', 'lib', 'stdout-sync.mjs'),
   path.join('scripts', 'lib', 'test-plan.mjs'), // the room's numbers for the wave runner and its declared-test floor
+  path.join('scripts', 'lib', 'front-door-links.mjs'), // 16f: the canon front-door link check's engine (its CLI and workflow run it in CI, shipped code never does)
 ];
 const isDevOnlyLib = (rel) => DEV_ONLY_LIBS.includes(rel);
 const isNotShipped = (rel) => isUnwiredEngine(rel) || isDevOnlyLib(rel);
