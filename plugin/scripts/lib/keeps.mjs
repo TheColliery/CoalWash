@@ -50,12 +50,32 @@ const GLOBAL_KEEPS_NAME = '.coalwash-global-keeps.json';
 export const KEEPS_LOCK_STALE_MS = 5000;
 const KEEPS_LOCK_TRIES = 40;
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// THE RENAME RETRY (fire 129, INSPECT 128 M128-1). The lock serialises writers, never readers: on Windows a rename over a store
+// another handle holds open (loadKeeps, the KEEPS-GATE, another recorder's own read before it takes the lock, an indexer) fails
+// EPERM, EACCES or EBUSY for as long as that read lasts, milliseconds for a store this size. So the rename is retried
+// KEEPS_RENAME_RETRIES times KEEPS_RENAME_WAIT_MS apart, 0.45 s of waiting in all, about a tenth of the 5 s stale window (a
+// margin of ~4.5 s, so a live holder is never robbed while it waits), re-checking the lock before each retry.
+export const KEEPS_RENAME_RETRIES = 9;
+export const KEEPS_RENAME_WAIT_MS = 50;
+const RENAME_TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
+// N128-1: what a lock path that is not a plain file actually is (null for a plain single-link file or nothing at all). Such a
+// lock is permanent, CoalWash never takes one over, so the recorder refuses at once instead of spending its retries on it.
+function nonPlainLock(lockFile) {
+  let st;
+  try { st = fs.lstatSync(lockFile); } catch { return null; }
+  if (st.isSymbolicLink()) return 'a link (a symlink or a junction)';
+  if (st.isDirectory()) return 'a directory';
+  if (!st.isFile()) return 'a special file';
+  return st.nlink > 1 ? 'a file with more than one hard link' : null;
+}
 function acquireKeepsLock(file, selfIgnore) {
   let lock;
   for (let attempt = 0; attempt < KEEPS_LOCK_TRIES && !(lock && lock.acquired); attempt++) {
     if (attempt > 0) pause(2 + Math.floor(Math.random() * 4));
     // `now` is a live clock reading: acquireLock judges staleness as now - lockFile.mtimeMs (tailings.mjs row 18)
     lock = acquireLock(`${file}.lock`, { now: Date.now(), staleMs: KEEPS_LOCK_STALE_MS, selfIgnore });
+    const kind = lock.acquired ? null : nonPlainLock(`${file}.lock`);
+    if (kind) return { acquired: false, nonPlain: kind };
   }
   return lock;
 }
@@ -129,6 +149,8 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
   if (typeof target !== 'string' || !target) return { ok: false, anchorDropped: false, anchorStored: false };
   const lockFile = `${file}.lock`;
   let lock = null;
+  let tmp = null; // fire 129: set once the temp is written; removed after the body unless the rename landed it
+  let renamed = false;
   const newer = (raw) => raw && typeof raw === 'object' && !Array.isArray(raw) && Number(raw.v) > KEEPS_SCHEMA_V;
   // fire 126: the body's returns land in `out`, so the lock's release below is reported on every result
   const out = (() => { try {
@@ -136,6 +158,7 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
     if (newer(raw)) return { ok: false, anchorDropped: false, anchorStored: false }; // read-only to us
     ensureDir();
     lock = acquireKeepsLock(file, selfIgnore);
+    if (lock.nonPlain) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: ${lockFile} is not a plain file (it is ${lock.nonPlain}); CoalWash never takes over a lock it did not make, so nothing was written and no retry was spent — remove it by hand once no CoalWash run is active` };
     if (!lock.acquired) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: another recorder holds ${lockFile} (${lock.reason}); nothing was written — record the keep again` };
     // re-read INSIDE the lock: the read above may be stale by now, and the upsert must start from what is on disk
     if (newer(rawKeepsOrNull(file, root))) return { ok: false, anchorDropped: false, anchorStored: false };
@@ -311,26 +334,40 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
       ...(mergedAnchorFile ? { anchorFile: mergedAnchorFile } : {}),
       ...(mergedPendingUser ? { pendingUser: true, pendingSince: mergedPendingSince } : {}),
     });
-    const tmp = `${file}.${crypto.randomBytes(12).toString('hex')}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { encoding: 'utf8', flag: 'wx' });
+    const name = `${file}.${crypto.randomBytes(12).toString('hex')}.tmp`;
+    fs.writeFileSync(name, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { encoding: 'utf8', flag: 'wx' });
+    tmp = name;
     // fire 126: a recorder that stalled past KEEPS_LOCK_STALE_MS may have been robbed, and its new holder may have renamed its
     // own store since. This one REFUSES rather than re-merging: unlike a bin item (whose blob is already on disk and needs its
     // row), nothing else of this record exists, so dropping it loses nothing a caller is not told about, while a re-merge and
     // rename made without the lock could still overwrite the new holder's write.
-    const s = lock.state();
-    if (s.state !== 'own') {
-      try { fs.rmSync(tmp, { force: true }); } catch { /* the temp is this call's own */ }
-      const why = s.state === 'unreadable'
-        ? `keeps lock unreadable: ${lockFile} could not be read for about one second (${s.code}; another program may be holding it open), so this recorder can no longer prove it holds the store`
-        : `keeps lock stolen: another recorder took over ${lockFile} after it went stale (${KEEPS_LOCK_STALE_MS / 1000} s)`;
-      return { ok: false, anchorDropped: false, anchorStored: false, error: `${why}; this keep was not written and the store on disk stands — record it again` };
+    // fire 129: the same check runs again before every rename retry, so a lock lost while a reader held the store still refuses
+    let code = null;
+    for (let attempt = 0; attempt <= KEEPS_RENAME_RETRIES; attempt++) {
+      if (attempt > 0) pause(KEEPS_RENAME_WAIT_MS);
+      const s = lock.state();
+      if (s.state !== 'own') {
+        const why = s.state === 'unreadable'
+          ? `keeps lock unreadable: ${lockFile} could not be read for about one second (${s.code}; another program may be holding it open), so this recorder can no longer prove it holds the store`
+          : `keeps lock stolen: another recorder took over ${lockFile} after it went stale (${KEEPS_LOCK_STALE_MS / 1000} s)`;
+        return { ok: false, anchorDropped: false, anchorStored: false, error: `${why}; this keep was not written and the store on disk stands — record the keep again` };
+      }
+      try {
+        fs.renameSync(tmp, file);
+        renamed = true;
+        return { ok: true, anchorDropped, anchorStored: !!mergedAnchor };
+      } catch (e) {
+        if (!RENAME_TRANSIENT.has(e && e.code)) throw e;
+        code = e.code;
+      }
     }
-    fs.renameSync(tmp, file);
-    return { ok: true, anchorDropped, anchorStored: !!mergedAnchor };
+    return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps write: the store ${file} could not be replaced (${code}, ${KEEPS_RENAME_RETRIES + 1} attempts ${KEEPS_RENAME_WAIT_MS} ms apart; another program may be holding it open); this keep was not written and the store on disk stands — record the keep again` };
   } catch (e) {
     // fire 63 (CodeRabbit t114): the reason rides beside the status fields, so a refusal (tracked:, self-ignore:) reaches the caller
     return { ok: false, anchorDropped: false, anchorStored: false, error: String((e && e.message) || e) };
   } })();
+  // fire 129 (M128-1): a temp the rename did not land is removed on every path, a refusal, a throw or a failed rename alike
+  if (tmp && !renamed) { try { fs.rmSync(tmp, { force: true }); } catch { /* this call's own temp; a later sweep is not ours to promise */ } }
   const lockLeft = lock && lock.acquired ? lockLeftNote(lockFile, lock.release()) : null;
   return lockLeft ? { ...out, lockLeft } : out;
 }

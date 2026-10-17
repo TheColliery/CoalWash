@@ -764,3 +764,154 @@ test('fire 126: a store a newer CoalWash wrote while this recorder waited for th
     assert.strictEqual(fs.existsSync(lockPath), false, 'and the lock was still released');
   } finally { Atomics.wait = realWait; clean(proj); }
 });
+
+// ---------------------------------------------------------------------------
+// fire 129 (INSPECT 128 M128-1, N128-1): on Windows a rename over a store another handle holds open fails EPERM (the lock
+// serialises writers, never readers). The rename is retried with the lock re-checked before each try, no temp is ever left,
+// and a lock path that is not a plain file refuses at once. The seam is fs.renameSync on the store (POSIX has no EPERM there);
+// one more leg holds a REAL read handle where the volume refuses that rename, skipping visibly by a probe elsewhere.
+// ---------------------------------------------------------------------------
+const KEEPS_RENAME_WAIT_MS = keepsModule.KEEPS_RENAME_WAIT_MS ?? 50; // through the namespace, as KEEPS_LOCK_STALE_MS above
+function failRenames(file, { n = Infinity, code = 'EPERM' } = {}) {
+  const real = fs.renameSync;
+  const f = { tries: 0, failed: 0 };
+  fs.renameSync = function patched(from, to, ...rest) {
+    if (path.resolve(String(to)) === path.resolve(file)) {
+      f.tries++;
+      if (f.failed < n) { f.failed++; throw Object.assign(new Error(`${code}: operation not permitted, rename '${from}' -> '${to}'`), { code }); }
+    }
+    return real.call(fs, from, to, ...rest);
+  };
+  f.restore = () => { fs.renameSync = real; };
+  return f;
+}
+const tempsBeside = (file) => fs.readdirSync(path.dirname(file)).filter((n) => n.startsWith(`${path.basename(file)}.`) && n.endsWith('.tmp'));
+
+test('fire 129: a keep record whose rename meets a reader holding the store open for a moment is retried and lands, leaving no temp', () => {
+  const proj = sandbox();
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const f = failRenames(keepsPath(proj), { n: 3 });
+    let r;
+    try { r = recordKeep(proj, { target: 'later' }); } finally { f.restore(); }
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(f.tries, 4, 'three failed renames, then the one that landed');
+    assert.deepStrictEqual(targetsIn(loadKeeps(proj)), ['base', 'later']);
+    assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
+  } finally { clean(proj); }
+});
+
+test('fire 129: a keep record whose rename keeps failing refuses with "record the keep again", leaves the store as it was and no temp', () => {
+  const proj = sandbox();
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const before = fs.readFileSync(keepsPath(proj));
+    const f = failRenames(keepsPath(proj));
+    let r;
+    try { r = recordKeep(proj, { target: 'never' }); } finally { f.restore(); }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps write: the store ${keepsPath(proj)} could not be replaced (EPERM, 10 attempts ${KEEPS_RENAME_WAIT_MS} ms apart`), r.error);
+    assert.ok(r.error.endsWith('record the keep again'), r.error);
+    assert.strictEqual(f.tries, 10);
+    assert.deepStrictEqual(fs.readFileSync(keepsPath(proj)), before, 'the store is unchanged');
+    assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
+    assert.strictEqual(fs.existsSync(`${keepsPath(proj)}.lock`), false, 'the lock is released');
+  } finally { clean(proj); }
+});
+
+test('fire 129: a lock stolen while the rename waits out a reader still refuses at the next retry, and its temp is removed', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  const realWait = Atomics.wait;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const f = failRenames(keepsPath(proj));
+    let thief = null;
+    // the seam: the rename retry's own pause; the recorder stalls there long enough to be robbed
+    Atomics.wait = function patched(arr, idx, val, ms) {
+      if (ms === KEEPS_RENAME_WAIT_MS && !thief) {
+        const old = new Date(Date.now() - KEEPS_LOCK_STALE_MS - 60000);
+        fs.utimesSync(lockPath, old, old);
+        thief = acquireLock(lockPath, { sessionId: 'thief', staleMs: KEEPS_LOCK_STALE_MS });
+      }
+      return realWait.call(Atomics, arr, idx, val, ms);
+    };
+    let r;
+    try { r = recordKeep(proj, { target: 'robbed' }); } finally { Atomics.wait = realWait; f.restore(); }
+    assert.ok(thief && thief.acquired, 'the thief took the lock during the wait');
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps lock stolen: another recorder took over ${lockPath}`) && r.error.endsWith('record the keep again'), r.error);
+    assert.strictEqual(f.tries, 1, 'no rename was tried after the theft');
+    assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
+    assert.strictEqual(thief.owns(), true);
+  } finally { Atomics.wait = realWait; clean(proj); }
+});
+
+test('fire 129: a keep record whose rename fails for another reason leaves no temp either', () => {
+  const proj = sandbox();
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const f = failRenames(keepsPath(proj), { code: 'ENOSPC' });
+    let r;
+    try { r = recordKeep(proj, { target: 'full' }); } finally { f.restore(); }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith('ENOSPC'), r.error);
+    assert.strictEqual(f.tries, 1, 'a non-transient code is not retried');
+    assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
+  } finally { clean(proj); }
+});
+
+// the capability: does this volume refuse a rename over a file another handle holds open? (Windows does; POSIX does not)
+function renameRefusedWhileOpen() {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-probe-')));
+  try {
+    fs.writeFileSync(path.join(dir, 'a'), 'a');
+    fs.writeFileSync(path.join(dir, 'b'), 'b');
+    const fd = fs.openSync(path.join(dir, 'a'), 'r');
+    try { fs.renameSync(path.join(dir, 'b'), path.join(dir, 'a')); return false; } catch (e) { return ['EPERM', 'EACCES', 'EBUSY'].includes(e && e.code); } finally { fs.closeSync(fd); }
+  } finally { clean(dir); }
+}
+
+test('fire 129: a REAL read handle held on keeps.json across the rename is outwaited: the record lands once it closes, no temp left', (t) => {
+  if (!renameRefusedWhileOpen()) { t.skip('this volume lets a rename replace a file another handle holds open (POSIX): the seam legs above cover the retry'); return; }
+  const proj = sandbox();
+  const realWait = Atomics.wait;
+  let fd = null;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    fd = fs.openSync(keepsPath(proj), 'r');
+    let closedAt = 0;
+    // the reader finishes during the recorder's first rename wait
+    Atomics.wait = function patched(arr, idx, val, ms) {
+      if (ms === KEEPS_RENAME_WAIT_MS && fd !== null) { fs.closeSync(fd); fd = null; closedAt++; }
+      return realWait.call(Atomics, arr, idx, val, ms);
+    };
+    let r;
+    try { r = recordKeep(proj, { target: 'later' }); } finally { Atomics.wait = realWait; }
+    assert.strictEqual(closedAt, 1, 'the first rename really failed on the open handle and waited');
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.deepStrictEqual(targetsIn(loadKeeps(proj)), ['base', 'later']);
+    assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
+  } finally { Atomics.wait = realWait; if (fd !== null) fs.closeSync(fd); clean(proj); }
+});
+
+test('N128-1: a keeps lock path that is a directory refuses at once, says what it found, and spends no retry', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  const realWait = Atomics.wait;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const before = fs.readFileSync(keepsPath(proj));
+    fs.mkdirSync(lockPath);
+    let pauses = 0;
+    Atomics.wait = function patched(...args) { pauses++; return realWait.apply(Atomics, args); };
+    let r;
+    try { r = recordKeep(proj, { target: 'blocked' }); } finally { Atomics.wait = realWait; }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps lock: ${lockPath} is not a plain file (it is a directory)`) && r.error.includes('no retry was spent'), r.error);
+    assert.ok(!r.error.includes('another recorder holds'), r.error);
+    assert.strictEqual(pauses, 0, 'not one retry pause');
+    assert.deepStrictEqual(fs.readFileSync(keepsPath(proj)), before);
+    assert.strictEqual(fs.statSync(lockPath).isDirectory(), true, 'the planted directory is left alone');
+  } finally { Atomics.wait = realWait; clean(proj); }
+});
