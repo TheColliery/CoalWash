@@ -778,9 +778,14 @@ export function lockLostHead(s, { run, file, where, after }) {
 export function withLockLeft(e, lockLeft) {
   if (lockLeft && e && typeof e === 'object') {
     e.lockLeft = lockLeft;
-    e.message = `${e.message} ${lockLeft}`;
+    e.message = withSentence(e.message, lockLeft);
   }
   return e;
+}
+// A note joins a message as its own sentence (N125-2): a full stop first unless the message already ends one.
+export function withSentence(msg, note) {
+  const m = String(msg).trimEnd();
+  return /[.!?]$/.test(m) ? `${m} ${note}` : `${m}. ${note}`;
 }
 // What a result says when a release could not remove this run's lock (fire 122): null when nothing was left behind.
 export function lockLeftNote(lockPath, rel) {
@@ -1056,6 +1061,7 @@ export function applyPlan(plan, opts = {}) {
   const now = opts.now || Date.now();
   const home = opts.home || os.homedir();
   let lockLeft = null; // fire 122: set by the release in the transaction's finally when a lock file had to be left behind
+  let leftLocks = []; // N125-1: [path, note] for each lock left, so each is named by its own path
   try {
     // ---- validate shape (fail loud, nothing touched) ----
     if (!plan || typeof plan !== 'object') return { ok: false, error: 'plan must be an object' };
@@ -1851,17 +1857,18 @@ export function applyPlan(plan, opts = {}) {
 
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };
     })(); } finally {
-      lockLeft = [lockLeftNote(txLockPath, lock.release()), globalLock ? lockLeftNote(globalLockPath(home), globalLock.release()) : null].filter(Boolean).join(' ') || null;
+      leftLocks = [[txLockPath, lockLeftNote(txLockPath, lock.release())], ...(globalLock ? [[globalLockPath(home), lockLeftNote(globalLockPath(home), globalLock.release())]] : [])].filter(([, note]) => note);
+      lockLeft = leftLocks.map(([, note]) => note).join(' ') || null;
     }
     if (!lockLeft) return out;
     // a lock that could not be released is named on the result: a later run defers on it (fire 122)
     return out.ok
-      ? { ...out, lockLeft, flagged: [...(out.flagged || []), { path: txLockPath, reason: lockLeft }] }
-      : { ...out, lockLeft, error: `${out.error} ${lockLeft}` };
+      ? { ...out, lockLeft, flagged: [...(out.flagged || []), ...leftLocks.map(([p, note]) => ({ path: p, reason: note }))] }
+      : { ...out, lockLeft, error: withSentence(out.error, lockLeft) };
   } catch (e) {
-    if (e && e.robbed) return { ok: false, robbed: e.robbed, committed: e.committed, lockLost: e.lockLost, ...(lockLeft ? { lockLeft } : {}), error: lockLeft ? `${e.message} ${lockLeft}` : e.message };
+    if (e && e.robbed) return { ok: false, robbed: e.robbed, committed: e.committed, lockLost: e.lockLost, ...(lockLeft ? { lockLeft } : {}), error: lockLeft ? withSentence(e.message, lockLeft) : e.message };
     // fire 123: an unexpected error inside the transaction names a lock the release had to leave, like every other result
-    return { ok: false, ...(lockLeft ? { lockLeft } : {}), error: lockLeft ? `apply: ${e.message} ${lockLeft}` : `apply: ${e.message}` };
+    return { ok: false, ...(lockLeft ? { lockLeft } : {}), error: lockLeft ? withSentence(`apply: ${e.message}`, lockLeft) : `apply: ${e.message}` };
   }
 }
 

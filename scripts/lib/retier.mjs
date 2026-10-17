@@ -1113,13 +1113,17 @@ export function runRetier({
   }
   const lockLeft = lockLeftNote(globalLockPath(home), rel);
   if (thrown) throw withLockLeft(thrown, lockLeft); // fire 123: an unexpected error still names a lock left behind
-  return lockLeft ? { ...out, lockLeft } : out;
+  // N125-3: a lock the transaction underneath left rides in out.lockLeft already; this run's own joins it, never replaces it
+  return lockLeft ? { ...out, lockLeft: out && out.lockLeft ? `${out.lockLeft} ${lockLeft}` : lockLeft } : out;
 }
 
 // fire 122: a lock the release had to leave behind is named under every report shape.
 export function runRetierReport(res) {
   const body = retierReportBody(res);
-  return res && res.lockLeft ? `${body}\n  LOCK LEFT: ${res.lockLeft}` : body;
+  // N125-3: print each note once. A failed result's error already carries the notes of the transaction underneath, so the
+  // LOCK LEFT line names only those it does not. Every note opens "The lock file " (lockLeftNote), the split point.
+  const notes = res && res.lockLeft ? String(res.lockLeft).split(/ (?=The lock file )/).filter((n) => !String(res.error || '').includes(n)) : [];
+  return notes.length ? `${body}\n  LOCK LEFT: ${notes.join(' ')}` : body;
 }
 
 function retierReportBody(res) {

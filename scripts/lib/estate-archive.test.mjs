@@ -1290,7 +1290,7 @@ test('fire 123: an unexpected error inside an ULTRA run still names a lock its r
     fault.restore();
     assert.ok(caught, 'the error still leaves the run as a throw');
     assert.ok(caught.lockLeft && caught.lockLeft.includes(`The lock file ${globalLockPath(home)} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), String(caught && caught.message));
-    assert.strictEqual(caught.message, `simulated failure ${caught.lockLeft}`);
+    assert.strictEqual(caught.message, `simulated failure. ${caught.lockLeft}`, 'the note is its own sentence (N125-2)');
     assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
   } finally { fault.restore(); clean(home, proj); }
 });

@@ -1571,7 +1571,42 @@ test('fire 123: an unexpected error inside a RE-TIER run still names a lock its 
     fault.restore();
     assert.ok(caught, 'the error still leaves the run as a throw');
     assert.ok(caught.lockLeft && caught.lockLeft.includes(`The lock file ${globalLockPath(home)} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), String(caught && caught.message));
-    assert.strictEqual(caught.message, `simulated failure ${caught.lockLeft}`);
+    assert.strictEqual(caught.message, `simulated failure. ${caught.lockLeft}`, 'the note is its own sentence (N125-2)');
     assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
   } finally { fault.restore(); clean(home, proj); }
+});
+
+test('N125-3: a failed RE-TIER run prints a lock its transaction left behind once, never again on a LOCK LEFT line', () => {
+  const { home, proj } = sandbox();
+  const txLock = path.join(txDirFor(proj), '.coalwash.lock');
+  const fault = faultLockReads(txLock);
+  try {
+    seedMainStore(home, proj);
+    applyHooks.onFence = (w) => { if (w === 'the commit record') fault.armed = true; };
+    let res;
+    try { res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) }); } finally { applyHooks.onFence = null; fault.restore(); }
+    assert.strictEqual(res.lockLost, 'unreadable', runRetierReport(res));
+    assert.ok(res.lockLeft && res.lockLeft.includes(txLock), JSON.stringify(res));
+    const report = runRetierReport(res);
+    assert.strictEqual(report.split(res.lockLeft).length - 1, 1, `the note is printed once (${report})`);
+    assert.ok(!report.includes('LOCK LEFT:'), report);
+  } finally { applyHooks.onFence = null; fault.restore(); clean(home, proj); }
+});
+
+test('N125-3: when the transaction underneath and the RE-TIER run both leave a lock, the result names both and the report prints each once', () => {
+  const { home, proj } = sandbox();
+  const txLock = path.join(txDirFor(proj), '.coalwash.lock');
+  const faultTx = faultLockReads(txLock);
+  const faultGlobal = faultLockReads(globalLockPath(home));
+  try {
+    seedMainStore(home, proj);
+    applyHooks.onFence = (w) => { if (w === 'the commit record') { faultTx.armed = true; faultGlobal.armed = true; } };
+    let res;
+    try { res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) }); } finally { applyHooks.onFence = null; faultGlobal.restore(); faultTx.restore(); }
+    assert.ok(res.lockLeft && res.lockLeft.includes(txLock) && res.lockLeft.includes(globalLockPath(home)), JSON.stringify(res));
+    const report = runRetierReport(res);
+    for (const lock of [txLock, globalLockPath(home)]) {
+      assert.strictEqual(report.split(`The lock file ${lock} `).length - 1, 1, `${lock} is named once (${report})`);
+    }
+  } finally { applyHooks.onFence = null; faultGlobal.restore(); faultTx.restore(); clean(home, proj); }
 });

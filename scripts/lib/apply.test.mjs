@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync, spawnSync } from 'node:child_process';
 import { gitEnv } from './git-env.mjs';
-import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks, writeDurable } from './apply.mjs';
+import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, LOCK_READ_WAIT_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks, writeDurable } from './apply.mjs';
 import { recordKeep, recordGlobalKeep, loadKeeps } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin, __testHooks as tailHooks } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
@@ -4819,24 +4819,25 @@ test('fire 122: a bin lock unreadable for a moment still records the cut and rel
   } finally { tailHooks.beforeIndexSave = null; fault.restore(); clean(proj); }
 });
 
-test('fire 122: a handle held for 300 ms (by time, not by count) is outwaited: the retries wait between reads, they never spin', () => {
+// E1 t181 #2: this leg used to arm the fault "until Date.now() + 300" and accept 2 to 4 failed reads, so what it proved
+// depended on how many reads a loaded box fits into 300 ms of wall time. It now counts the pauses themselves: three failed
+// reads, so three pauses of LOCK_READ_WAIT_MS, one before each retry, whatever the clock does.
+test('fire 122: failed lock reads are retried LOCK_READ_WAIT_MS apart, one pause before each retry (counted at the pause, no clock): they wait, never spin', () => {
   const fx = unreadableFixture('w');
-  const real = fs.openSync;
-  const want = path.resolve(fx.lockPath);
-  let until = 0;
-  let hits = 0;
-  fs.openSync = function patched(p, flags, ...rest) {
-    const isRead = typeof flags === 'number' && (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0;
-    if (until && isRead && Date.now() < until && path.resolve(String(p)) === want) { hits++; throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); }
-    return real.call(fs, p, flags, ...rest);
-  };
-  __testHooks.onFence = (w) => { if (w.startsWith('step 2 of 3') && !until) until = Date.now() + 300; };
+  const fault = faultLockReads(fx.lockPath, { n: 3 });
+  const realWait = Atomics.wait;
+  const waits = [];
+  // the seam: the pause itself (apply.mjs waits with Atomics.wait), counted while the failed reads are being retried
+  Atomics.wait = function patched(arr, idx, val, ms) { if (fault.hits > 0 && fault.hits <= 3) waits.push(ms); return realWait.call(Atomics, arr, idx, val, ms); };
+  __testHooks.onFence = (w) => { if (w.startsWith('step 2 of 3')) fault.armed = true; };
   try {
     const r = apply(fx.plan, { home: fx.home });
-    assert.ok(hits >= 2 && hits <= 4, `a few spaced reads failed, never a burst of them (${hits})`);
+    Atomics.wait = realWait;
+    assert.strictEqual(fault.hits, 3, 'three reads failed');
+    assert.deepStrictEqual(waits.filter((ms) => ms === LOCK_READ_WAIT_MS), [LOCK_READ_WAIT_MS, LOCK_READ_WAIT_MS, LOCK_READ_WAIT_MS], `one pause of ${LOCK_READ_WAIT_MS} ms before each retry (${JSON.stringify(waits)})`);
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.strictEqual(fs.existsSync(fx.lockPath), false, 'the lock was released');
-  } finally { __testHooks.onFence = null; fs.openSync = real; clean(fx.proj, fx.home); }
+  } finally { Atomics.wait = realWait; __testHooks.onFence = null; fault.restore(); clean(fx.proj, fx.home); }
 });
 
 test('fire 122: a release whose remove fails for a moment retries it; one that keeps failing leaves the lock and says it could not be removed', () => {
@@ -4912,7 +4913,38 @@ test('fire 123: an unexpected error inside the transaction still names a lock th
     assert.strictEqual(r.ok, false, JSON.stringify(r));
     assert.strictEqual(r.robbed, undefined, 'an ordinary error, not a lock refusal');
     assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${fx.lockPath} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), JSON.stringify(r));
-    assert.strictEqual(r.error, `apply: simulated failure ${r.lockLeft}`);
+    assert.strictEqual(r.error, `apply: simulated failure. ${r.lockLeft}`, 'the note is its own sentence (N125-2)');
     assert.strictEqual(fs.existsSync(fx.lockPath), true);
   } finally { __testHooks.onFence = null; fault.restore(); clean(fx.proj, fx.home); }
+});
+
+// ---------------------------------------------------------------------------
+// N125-1, N125-2 (INSPECT 125): a lock left behind is named by its own path, and its note is its own sentence.
+// ---------------------------------------------------------------------------
+test('N125-1: after a finished wash, each lock left behind is flagged under its own path (the global lock here, not the project one)', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-n125-')));
+  const g = path.join(store, 'global.md');
+  write(g, 'global content\nkeep\n');
+  // the last fence reads the project lock and then the global one (skip 1); from then on the global lock cannot be read
+  const fault = faultLockReads(globalLockPath(home), { skip: 1 });
+  __testHooks.onFence = (w) => { if (w === 'the bin recovery copies') fault.armed = true; };
+  try {
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: g, content: 'global content\n', scope: 'global' }]), { home });
+    fault.restore();
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    const left = r.flagged.filter((f) => String(f.reason).startsWith('The lock file '));
+    assert.deepStrictEqual(left.map((f) => f.path), [globalLockPath(home)], 'one entry, for the lock that was left, under its path');
+    assert.ok(left[0].reason.startsWith(`The lock file ${globalLockPath(home)} could not be read`), left[0].reason);
+    assert.strictEqual(fs.existsSync(txLockOf(proj)), false, 'the project lock was released');
+  } finally { __testHooks.onFence = null; fault.restore(); clean(proj, home); }
+});
+
+test('N125-2: a refusal that names a lock left behind gives the note its own sentence', () => {
+  const fx = unreadableFixture('s');
+  try {
+    const { r } = applyWithFault(fx, 'step 2 of 3', {});
+    assert.ok(r.lockLeft, JSON.stringify(r));
+    assert.ok(r.error.endsWith(`rolls the store back from that snapshot. ${r.lockLeft}`), r.error);
+  } finally { clean(fx.proj, fx.home); }
 });
