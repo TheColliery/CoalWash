@@ -8,15 +8,15 @@ Report a security issue in this repo through GitHub's private vulnerability repo
 
 ## Advisories
 
-### 2026-10-18 — a cloned repo could plant a future-dated bin item to push your real recovery copies out under the size cap, and a killed writer could leave a truncated copy that was listed as whole
+### 2026-10-18 — a repository, or a project unpacked from an archive, could plant a future-dated bin item to push your real recovery copies out under the size cap, and a killed writer could leave a truncated copy that was listed as whole
 
-**What.** Each recovery bin (the fat bin, `store.old`) has a byte budget. A bin item whose date is in the future or unreadable is never evicted (CoalWash keeps what it cannot date), but its size still counted toward that budget, so a cloned repo that planted one such row, or one such file in the bin-id shape (v1.12.9 lists a file with no row), could make the size cap evict genuine, older recovery copies to make room for it. Separately, a copy was written straight under its final name, so a CoalWash process killed mid-write left a truncated file under that name, which v1.12.9 listed and `restore` printed as complete.
+**What.** Each recovery bin (the fat bin, `store.old`) has a byte budget. A bin item whose date is in the future or unreadable is never evicted (CoalWash keeps what it cannot date), but its size still counted toward that budget, so a repository, or a project unpacked from an archive, that planted one such row, or one such file in the bin-id shape (v1.12.9 lists a file with no row), could make the size cap evict genuine, older recovery copies to make room for it. Separately, a copy was written straight under its final name, so a CoalWash process killed mid-write left a truncated file under that name, which v1.12.9 listed and `restore` printed as complete.
 
 **Fixed** in `v1.12.10` (its `CHANGELOG.md` `### Fixed` entry carries the mechanism): a future-dated or unreadable-dated item now weighs nothing toward the size cap, so it can no longer cause an eviction; and a copy is written to a temporary name, synced, and named only once whole (a hard link), with a temporary file a killed writer left removed by the next wash.
 
 **Not closed, by name.** (1) On a filesystem without hard links (FAT or exFAT, some network and cloud mounts) the copy is still written directly under its final name, so a writer killed mid-write there can still leave a truncated copy that is listed. (2) A doubt item's bytes are not reported in the cap-conflict line; a bin can sit over its byte budget by such an item alone with no conflict line. (3) The provenance limit under item (1) of the 2026-10-15 record is unchanged: a repo can still plant a bin item that the bin list shows as a CoalWash cut.
 
-**Affected versions:** the eviction through `v1.12.9`; the earliest affected version was not derived for this record. The truncated copy listed as whole, `v1.12.9` only (earlier versions did not list a copy with no row).
+**Affected versions:** the eviction through `v1.12.9` for a project unpacked from an archive or any untracked plant; for a cloned repo whose bin files are tracked it ends at `v1.12.2`, because since `v1.12.3` CoalWash refuses the whole run before the sweep while git tracks files in its own folder (`trackedInOwnFolder`, `apply.mjs`). The earliest affected version was not derived for this record. The truncated copy listed as whole, `v1.12.9` only (earlier versions did not list a copy with no row).
 
 **Until you update to `v1.12.10`,** do not open an untrusted clone with CoalWash installed.
 
