@@ -1276,3 +1276,21 @@ test('fire 122: an ULTRA run whose global lock file turns unreadable after a ses
     assert.strictEqual(res.archived.length, 1);
   } finally { fs.rmdirSync = real; fault.restore(); clean(home, proj); }
 });
+
+test('fire 123: an unexpected error inside an ULTRA run still names a lock its release had to leave behind', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  try {
+    seedSession(home, proj, 'sess-f123', 40);
+    // the seam: the estate config throws on its first read, inside the locked run, and the lock then cannot be read
+    const estate = estateCfg();
+    Object.defineProperty(estate, 'compressAfterDays', { get() { fault.armed = true; throw new Error('simulated failure'); } });
+    let caught = null;
+    try { runEstate({ projectRoot: proj, home, estate }); } catch (e) { caught = e; }
+    fault.restore();
+    assert.ok(caught, 'the error still leaves the run as a throw');
+    assert.ok(caught.lockLeft && caught.lockLeft.includes(`The lock file ${globalLockPath(home)} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), String(caught && caught.message));
+    assert.strictEqual(caught.message, `simulated failure ${caught.lockLeft}`);
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
+  } finally { fault.restore(); clean(home, proj); }
+});

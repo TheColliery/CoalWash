@@ -51,7 +51,7 @@ import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCre
 import { tokensEst } from './caliper.mjs';
 import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
-import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote } from './apply.mjs';
+import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 
@@ -842,6 +842,7 @@ export function runRetier({
   };
   let out;
   let rel;
+  let thrown = null;
   try { out = (() => { // fire 122: the body's returns land in `out`, so the release below can be reported on every result
     const archiveDir = resolveArchiveDir(estate, home);
     const untouched = () => `nothing in the memory store was touched; the ${gzWritten.length} archive copy(ies) already written stay in ${archiveDir}`;
@@ -1107,10 +1108,11 @@ export function runRetier({
         shortfall: p.hop1.shortfall,
       })),
     };
-  })(); } finally {
+  })(); } catch (e) { thrown = e; } finally {
     rel = lock.release();
   }
   const lockLeft = lockLeftNote(globalLockPath(home), rel);
+  if (thrown) throw withLockLeft(thrown, lockLeft); // fire 123: an unexpected error still names a lock left behind
   return lockLeft ? { ...out, lockLeft } : out;
 }
 

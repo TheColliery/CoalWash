@@ -4899,3 +4899,20 @@ test('fire 122: a bin recorder that cannot read its bin lock after a theft re-me
     assert.strictEqual(fs.existsSync(binLock), true, 'the lock it cannot prove is its own is left');
   } finally { tailHooks.beforeIndexSave = null; fault.restore(); clean(proj); }
 });
+
+test('fire 123: an unexpected error inside the transaction still names a lock the release had to leave behind', () => {
+  const fx = unreadableFixture('g');
+  const fault = faultLockReads(fx.lockPath);
+  // the seam throws an ordinary error at the commit record (outside the per-step catch) and, from then on, the lock
+  // file cannot be read, so the finally's release has to leave it
+  __testHooks.onFence = (w) => { if (w === 'the commit record') { fault.armed = true; throw new Error('simulated failure'); } };
+  try {
+    const r = apply(fx.plan, { home: fx.home });
+    fault.restore();
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(r.robbed, undefined, 'an ordinary error, not a lock refusal');
+    assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${fx.lockPath} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), JSON.stringify(r));
+    assert.strictEqual(r.error, `apply: simulated failure ${r.lockLeft}`);
+    assert.strictEqual(fs.existsSync(fx.lockPath), true);
+  } finally { __testHooks.onFence = null; fault.restore(); clean(fx.proj, fx.home); }
+});

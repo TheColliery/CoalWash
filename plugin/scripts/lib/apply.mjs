@@ -773,6 +773,15 @@ export function lockLostHead(s, { run, file, where, after }) {
     ? `lock unreadable: this ${run} could not read its own lock file ${file} for about ${(LOCK_READ_RETRIES * LOCK_READ_WAIT_MS) / 1000} second(s) (${s.code}); another program may be holding it open (an indexer, antivirus or sync client), and no other CoalWash run is known to hold it. It can no longer prove it holds the lock, so it stopped before ${where}, ${after}.`
     : `lock stolen: another CoalWash run took over the global lock this ${run} held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where}, ${after}.`;
 }
+// An unexpected error that leaves a run (RE-TIER, ULTRA) as a throw rather than a result still names a lock its release had to
+// leave behind (fire 123): the note joins the message and rides as `lockLeft`, exactly as on a result. Returns the error.
+export function withLockLeft(e, lockLeft) {
+  if (lockLeft && e && typeof e === 'object') {
+    e.lockLeft = lockLeft;
+    e.message = `${e.message} ${lockLeft}`;
+  }
+  return e;
+}
 // What a result says when a release could not remove this run's lock (fire 122): null when nothing was left behind.
 export function lockLeftNote(lockPath, rel) {
   if (!rel || rel.released || rel.why === 'foreign') return null;
@@ -1851,7 +1860,8 @@ export function applyPlan(plan, opts = {}) {
       : { ...out, lockLeft, error: `${out.error} ${lockLeft}` };
   } catch (e) {
     if (e && e.robbed) return { ok: false, robbed: e.robbed, committed: e.committed, lockLost: e.lockLost, ...(lockLeft ? { lockLeft } : {}), error: lockLeft ? `${e.message} ${lockLeft}` : e.message };
-    return { ok: false, error: `apply: ${e.message}` };
+    // fire 123: an unexpected error inside the transaction names a lock the release had to leave, like every other result
+    return { ok: false, ...(lockLeft ? { lockLeft } : {}), error: lockLeft ? `apply: ${e.message} ${lockLeft}` : `apply: ${e.message}` };
   }
 }
 

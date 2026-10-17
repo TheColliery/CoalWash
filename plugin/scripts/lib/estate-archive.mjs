@@ -63,7 +63,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
-import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote } from './apply.mjs';
+import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote, withLockLeft } from './apply.mjs';
 import { ownSandboxDir } from './repo-fs.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
 // death-log (destroyed cuts). Function-declaration imports used only at CALL
@@ -731,6 +731,8 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
   const lock = acquireLock(globalLockPath(home), { sessionId: currentSessionId || String(process.pid), now });
   if (!lock.acquired) return { ok: false, deferred: true, error: lock.reason };
   let res = null; // fire 122: the one result object; the finally adds lockLeft to it when the release had to leave the lock
+  let thrown = null;
+  let lockLeft = null;
   try {
     const c = classifySessions({ projectRoot, home, now, estate, currentSessionId });
     const archiveDir = resolveArchiveDir(estate, home);
@@ -777,10 +779,11 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
     }
     res.budgetReached = res.budgetDeferred > 0;
     return res;
-  } finally {
-    const lockLeft = lockLeftNote(globalLockPath(home), lock.release());
+  } catch (e) { thrown = e; } finally {
+    lockLeft = lockLeftNote(globalLockPath(home), lock.release());
     if (lockLeft && res) res.lockLeft = lockLeft; // the object the try already returned: the caller sees this field
   }
+  throw withLockLeft(thrown, lockLeft); // reached only when the body threw (fire 123): the error still names a lock left behind
 }
 
 // Plain-text run report (program-built; the receipt-style deliverable).

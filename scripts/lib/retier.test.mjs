@@ -1556,3 +1556,22 @@ test('fire 122: a RE-TIER run whose global lock file stays unreadable stops with
     assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
   } finally { fault.restore(); clean(home, proj); }
 });
+
+test('fire 123: an unexpected error inside a RE-TIER run still names a lock its release had to leave behind', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  try {
+    seedMainStore(home, proj);
+    // the seam: the estate config throws on its first read, which happens inside the locked run, and from then on the
+    // global lock file cannot be read, so the release has to leave it
+    const estate = estateCfg(home);
+    Object.defineProperty(estate, 'compressAfterDays', { get() { fault.armed = true; throw new Error('simulated failure'); } });
+    let caught = null;
+    try { runRetier({ projectRoot: proj, home, retier: R, estate }); } catch (e) { caught = e; }
+    fault.restore();
+    assert.ok(caught, 'the error still leaves the run as a throw');
+    assert.ok(caught.lockLeft && caught.lockLeft.includes(`The lock file ${globalLockPath(home)} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), String(caught && caught.message));
+    assert.strictEqual(caught.message, `simulated failure ${caught.lockLeft}`);
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
+  } finally { fault.restore(); clean(home, proj); }
+});
