@@ -20,7 +20,7 @@ import {
   readEstateKeyResolvedState, writeEstateKeyResolvedState,
 } from './estate-archive.mjs';
 import { ccProjectSlug } from './class-b.mjs';
-import { acquireLock, globalLockPath } from './apply.mjs';
+import { acquireLock, globalLockPath, LOCK_STALE_MS } from './apply.mjs';
 import { recordKeep } from './keeps.mjs';
 import { CONFIG_SCHEMA, clampedRead, validateConfig } from './config-schema.mjs';
 
@@ -1093,4 +1093,136 @@ test('CWK-162 B6: a compressed file over RESTORE_MAX_GZ_BYTES is refused by its 
   assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
   assert.match(r.error, /compressed/);
   assert.strictEqual(readIt, false, 'its bytes were never read, by path or through the handle');
+});
+
+// ---------------------------------------------------------------------------
+// fire 119 (18a): THE LOCK FENCE on the ULTRA run. Its global lock can be taken over once it is LOCK_STALE_MS old; before each
+// write the run re-reads it and a robbed run stops, removing nothing. Each leg steals the lock the way a second run would
+// (mtime backdated past the stale window, then a real acquireLock) at one point of the session's archive, and proves what
+// the robbed run left.
+// ---------------------------------------------------------------------------
+function treeOf(roots) {
+  const out = {};
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { out[p] = 'dir'; walk(p); } else out[p] = fs.readFileSync(p).toString('base64');
+    }
+  };
+  for (const r of roots) if (fs.existsSync(r)) walk(r);
+  return out;
+}
+function stealGlobal(home) {
+  const old = new Date(Date.now() - LOCK_STALE_MS - 60000);
+  fs.utimesSync(globalLockPath(home), old, old);
+  const thief = acquireLock(globalLockPath(home), { sessionId: 'thief' });
+  assert.ok(thief.acquired && thief.stale, `the thief took the stale lock over (${JSON.stringify(thief)})`);
+  return thief;
+}
+// Runs one warm session's ULTRA pass with fs[fn] patched so `after(nth call on a matching path)` fires once.
+function robbedEstate(fn, match, nth, { age = 40, estate = estateCfg() } = {}) {
+  const { home, proj } = sandbox();
+  const files = seedSession(home, proj, 'sess-f119', age);
+  const originals = [files.jsonl, files.meta, files.tool].map((p) => path.resolve(p));
+  const real = fs[fn];
+  let calls = 0;
+  let shot = null;
+  let thief = null;
+  fs[fn] = function patched(p, ...rest) {
+    const out = real.call(fs, p, ...rest);
+    if (!shot && match(path.resolve(String(p)), originals) && ++calls === nth) { thief = stealGlobal(home); shot = treeOf([home, proj]); }
+    return out;
+  };
+  let res;
+  try { res = runEstate({ projectRoot: proj, home, estate }); } finally { fs[fn] = real; }
+  return { home, proj, files, originals, res, shot, thief };
+}
+
+test('fire 119: an ULTRA run robbed of its global lock stops before its next archive copy: nothing more is written, every original kept, and the thief\'s write survives', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-f119', 40);
+    let shot = null;
+    let thief = null;
+    const thiefFile = path.join(home, 'thief.txt');
+    const gzip = (buf) => {
+      if (!shot) { thief = stealGlobal(home); write(thiefFile, 'THIEF'); shot = treeOf([home, proj]); }
+      return zlib.gzipSync(buf);
+    };
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg(), gzip });
+    assert.ok(shot, 'the theft happened inside the run');
+    assert.strictEqual(res.ok, false, JSON.stringify(res));
+    assert.strictEqual(res.robbed, 'global');
+    assert.ok(res.error.includes('lock stolen') && res.error.includes('stopped before the archive copy of') && res.error.includes('every original of this session is kept'), res.error);
+    assert.deepStrictEqual(treeOf([home, proj]), shot, 'the robbed run wrote and removed nothing after the theft');
+    for (const p of [files.jsonl, files.meta, files.tool]) assert.strictEqual(fs.existsSync(p), true, `${path.basename(p)} kept`);
+    assert.strictEqual(fs.readFileSync(thiefFile, 'utf8'), 'THIEF');
+    assert.strictEqual(thief.owns(), true, 'the robbed run\'s release left the thief\'s lock in place');
+    assert.ok(runEstateReport(res).includes('STOPPED: lock stolen'), runEstateReport(res));
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: an ULTRA run robbed between two deletes stops before the next one: the other originals stay beside their archive copies', () => {
+  const r = robbedEstate('rmSync', (p, o) => o.includes(p), 1);
+  try {
+    assert.ok(r.shot, 'the theft happened after the first delete');
+    assert.strictEqual(r.res.robbed, 'global', JSON.stringify(r.res));
+    assert.ok(r.res.error.includes('stopped before deleting') && r.res.error.includes('1 original(s) had been deleted (or tried) and the other 2 stay'), r.res.error);
+    assert.deepStrictEqual(treeOf([r.home, r.proj]), r.shot, 'nothing written or removed after the theft');
+    assert.strictEqual(r.originals.filter((p) => fs.existsSync(p)).length, 2, 'two originals kept');
+  } finally { clean(r.home, r.proj); }
+});
+
+test('fire 119: an ULTRA run robbed after its last delete stops before removing the emptied session folder', () => {
+  const r = robbedEstate('rmSync', (p, o) => o.includes(p), 3);
+  try {
+    assert.ok(r.shot, 'the theft happened after the last delete');
+    assert.strictEqual(r.res.robbed, 'global', JSON.stringify(r.res));
+    assert.ok(r.res.error.includes('stopped before removing the emptied session folder'), r.res.error);
+    assert.deepStrictEqual(treeOf([r.home, r.proj]), r.shot, 'nothing written or removed after the theft');
+    assert.strictEqual(fs.existsSync(path.join(slugDirFor(r.home, r.proj), 'sess-f119')), true, 'the emptied session folder stays');
+  } finally { clean(r.home, r.proj); }
+});
+
+test('fire 119: an ULTRA run robbed after a session is archived stops before its index row (the session stays restorable from the archive)', () => {
+  const r = robbedEstate('rmdirSync', () => true, 1);
+  try {
+    assert.ok(r.shot, 'the theft happened while the emptied folder was being removed');
+    assert.strictEqual(r.res.robbed, 'global', JSON.stringify(r.res));
+    assert.ok(r.res.error.includes('stopped before the index row of session sess-f119'), r.res.error);
+    assert.strictEqual(r.res.archived.length, 1, 'the archived session is still reported');
+    const idx = path.join(resolveArchiveDir(estateCfg(), r.home), ESTATE_INDEX_NAME);
+    assert.strictEqual(fs.existsSync(idx) && fs.readFileSync(idx, 'utf8').includes('sess-f119'), false, 'no index row was appended');
+    assert.ok(restoreSession('sess-f119', { archiveDir: resolveArchiveDir(estateCfg(), r.home), to: path.join(r.proj, 'restored') }).ok, 'the archive alone restores it');
+  } finally { clean(r.home, r.proj); }
+});
+
+test('fire 119: an archive failure after a theft removes nothing: the partial copies stay (the new holder may own copies at those paths)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-f119', 40);
+    let calls = 0;
+    let shot = null;
+    const gzip = (buf) => {
+      if (++calls === 2) { stealGlobal(home); shot = treeOf([home, proj]); throw new Error('simulated gzip failure'); }
+      return zlib.gzipSync(buf);
+    };
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg(), gzip });
+    assert.ok(shot, 'the theft happened between two archive copies');
+    assert.strictEqual(res.robbed, 'global', JSON.stringify(res));
+    assert.ok(res.error.includes('stopped before removing the partial archive (after: archive failed') && res.error.includes('1 archive copy(ies) of this session already written stay in place'), res.error);
+    assert.deepStrictEqual(treeOf([home, proj]), shot, 'the partial copy was not removed, and nothing else changed');
+    for (const p of [files.jsonl, files.meta, files.tool]) assert.strictEqual(fs.existsSync(p), true, `${path.basename(p)} kept`);
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: a cold-session ULTRA run robbed after its deletes stops before the death-log record', () => {
+  const r = robbedEstate('rmdirSync', () => true, 1, { age: 200, estate: estateCfg({ deleteCold: true }) });
+  try {
+    assert.ok(r.shot, 'the theft happened while the emptied folder was being removed');
+    assert.strictEqual(r.res.robbed, 'global', JSON.stringify(r.res));
+    assert.ok(r.res.error.includes('stopped before the death-log record of session sess-f119'), r.res.error);
+    const log = path.join(resolveArchiveDir(estateCfg(), r.home), ccProjectSlug(r.proj), 'death.log');
+    assert.strictEqual(fs.existsSync(log), false, 'no death-log record was written');
+  } finally { clean(r.home, r.proj); }
 });

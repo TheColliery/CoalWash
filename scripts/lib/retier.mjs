@@ -51,7 +51,7 @@ import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCre
 import { tokensEst } from './caliper.mjs';
 import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
-import { applyPlan, acquireLock, globalLockPath, isPinned } from './apply.mjs';
+import { applyPlan, acquireLock, globalLockPath, isPinned, LOCK_STALE_MS } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 
@@ -827,8 +827,15 @@ export function runRetier({
   if (!lock.acquired) return { ok: false, deferred: true, error: lock.reason };
   const gzWritten = [];
   const rmGz = () => { for (const g of gzWritten) { try { fs.rmSync(g, { force: true }); } catch {} } };
+  // THE FENCE (fire 119, 18a): this run's global lock can be taken over once it is LOCK_STALE_MS old. Before each write the
+  // run re-reads it, and a robbed run stops with no clean-up and no rollback (either could undo or overwrite what the new
+  // holder wrote since). The archive copies it already wrote stay, so a topic it deleted is never left without its copy.
+  // The writes INSIDE applyPlan are fenced by applyPlan's own project lock, which guards those files.
+  const kept = [];
+  const stolen = (where, state) => (lock.owns() ? null : { ok: false, robbed: 'global', env, kept, error: `lock stolen: another CoalWash run took over the global lock this RE-TIER run held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where}, with no clean-up and no rollback. ${state}` });
   try {
     const archiveDir = resolveArchiveDir(estate, home);
+    const untouched = () => `nothing in the memory store was touched; the ${gzWritten.length} archive copy(ies) already written stay in ${archiveDir}`;
     // Write-side containment root (the SAME guard as archiveSession — loss
     // class #57 / GHSA-2hvf-7c8p-28fx): resolve the archive root physically
     // ONCE; every hop-2 dest below must land inside it. Unresolvable root =
@@ -846,7 +853,6 @@ export function runRetier({
     const roots = [];
     const digRows = [];
     const createdPaths = [];
-    const kept = [];
     let seq = 0;
 
     // #3 STRANDING GUARD: the archived-topic dig rows persist ONLY when
@@ -913,8 +919,11 @@ export function runRetier({
         // copy-verify (the estate protocol): write .gz -> gunzip back -> byte-compare.
         // A failed verify keeps the original in place (that topic is skipped).
         try {
+          const gz = gzip(buf);
+          const robbedGz = stolen(`the archive copy of ${t.path}`, untouched());
+          if (robbedGz) return robbedGz;
           fs.mkdirSync(path.dirname(dest), { recursive: true });
-          fs.writeFileSync(dest, gzip(buf));
+          fs.writeFileSync(dest, gz);
           gzWritten.push(dest);
           const back = zlib.gunzipSync(fs.readFileSync(dest));
           if (!back.equals(buf)) throw new Error('verify mismatch');
@@ -976,8 +985,16 @@ export function runRetier({
     // projectRoot rides opts (the CALLER-TRUSTED anchor applyPlan uses for
     // containment) — runRetier's projectRoot is itself cwd-derived (cli.mjs passes
     // findProjectRoot(cwd)); the plan field is ignored by applyPlan.
+    const robbedTx = stolen('the transaction', untouched());
+    if (robbedTx) return robbedTx;
     const r = applyPlan({ projectRoot, roots, actions, sessionId, origin: 'wizard-cut', approvedDrops }, { home, now, projectRoot });
-    if (!r.ok) { rmGz(); return { ...r, env, kept }; }
+    // A robbed transaction may already have deleted topics, so their archive copies stay (removing them would leave no copy).
+    if (!r.ok) {
+      if (r.robbed) return { ...r, env, kept, error: `${r.error} RE-TIER kept its ${gzWritten.length} archive copy(ies) in ${archiveDir}.` };
+      rmGz();
+      return { ...r, env, kept };
+    }
+    const afterCommit = (what) => `the transaction had committed and ${what}; the snapshot ${r.snapshotDir} holds every original and the ${gzWritten.length} archive copy(ies) stay in ${archiveDir} (no rollback ran: compare the store against the snapshot by hand)`;
 
     // THE CLOSING CHECK — top-anchor survival: the N most-referenced pre-pass
     // anchors must still resolve somewhere in the post-pass tree (hot index,
@@ -1004,6 +1021,8 @@ export function runRetier({
     try {
       misses = probeAnchors(anchors, postTexts);
     } catch (e) {
+      const robbedThrow = stolen('the rollback', afterCommit(`the top-anchor survival probe threw (${e.message})`));
+      if (robbedThrow) return robbedThrow;
       const failed = rollbackFromSnapshot(r.snapshotDir, createdPaths, roots);
       rmGz();
       return {
@@ -1021,6 +1040,8 @@ export function runRetier({
       // `roots` = the resolved over-store dirs (already realpath-contained); the
       // snapshot's originals + this run's created overflow files all live inside
       // them, so they pass the H1 containment while a tampered manifest can't.
+      const robbedMiss = stolen('the rollback', afterCommit(`the top-anchor survival probe missed ${misses.length} of ${anchors.length} anchor(s)`));
+      if (robbedMiss) return { ...robbedMiss, anchorMisses: misses };
       const failed = rollbackFromSnapshot(r.snapshotDir, createdPaths, roots);
       rmGz();
       return {
@@ -1035,6 +1056,10 @@ export function runRetier({
     // dig rows AFTER deletes + probe (row-follows-bytes: a crash here only
     // under-indexes; restore scans the archive itself, never the index).
     let rows = 0;
+    if (indexEnabled && digRows.length) {
+      const robbedRows = stolen('the dig-index rows', `the transaction committed and the top-anchor survival probe passed; the ${gzWritten.length} archive copy(ies) stay in ${archiveDir}, but their ${digRows.length} dig-index row(s) were not appended (estate-restore reads the archive itself, so every demoted topic stays restorable)`);
+      if (robbedRows) return robbedRows;
+    }
     if (indexEnabled) for (const row of digRows) { if (appendIndexRow(archiveDir, row)) rows++; }
 
     return {

@@ -253,7 +253,8 @@ export function trackedInOwnFolder(dir) {
   if (!n) return null;
   return `git tracks ${n} file(s) in ${dir} — CoalWash writes nothing into its own folder while the repository tracks files there, since a write over a tracked file would reach the next commit (see them with: git ls-files -- .claude/coalwash)`;
 }
-export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, isGitMarker, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS };
+// onFence (fire 119): called with the fence's label just before applyPlan re-reads its locks, so a test can steal one there.
+export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, isGitMarker, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS, onFence: null };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -1353,6 +1354,25 @@ export function applyPlan(plan, opts = {}) {
     const journalPath = path.join(txDir, JOURNAL_NAME);
     const snapDir = path.join(txDir, `snap-${now}`);
     const writeJournal = (j) => { writeDurable(journalPath, JSON.stringify(j, null, 2)); };
+    // THE FENCE (fire 119, 18a). acquireLock lets a run that finds a lock older than LOCK_STALE_MS take it over, so a holder
+    // that stalled that long can be robbed and both then write. Before each write step this run re-reads both locks (one
+    // read of each lock file, never per byte or per line); a robbed run stops there and returns a refusal naming the theft.
+    // It does NOT roll back: the snapshot restore would overwrite whatever the new holder has written since. `landed` is the
+    // journal's steps once the journal exists, `committed` turns true once the commit record is written; the refusal uses
+    // both to say exactly what this run leaves on disk.
+    let landed = null;
+    let committed = false;
+    const fence = (where, stateOverride = null) => {
+      if (__testHooks.onFence) __testHooks.onFence(where);
+      const who = !lock.owns() ? 'project' : globalLock && !globalLock.owns() ? 'global' : null;
+      if (!who) return;
+      const done = landed ? landed.filter((s) => s.status === 'done').length : 0;
+      const state = stateOverride
+        || (committed ? `every step landed and was committed; only the post-commit housekeeping that had not run yet (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped, and the snapshot ${snapDir} still holds every original`
+        : landed ? `${done} of ${landed.length} step(s) had landed and the rest never ran; the snapshot ${snapDir} holds every original, and the journal on disk is this run's until the new holder writes its own over it (while it is still this run's, the next recoverDangling rolls the store back from that snapshot; once it is replaced, compare the store against the snapshot by hand)`
+        : 'nothing of this plan had been written to the store');
+      throw Object.assign(new Error(`lock stolen: another CoalWash run took over the ${who} lock this transaction held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where}, with no rollback (a rollback would overwrite what the new holder may have written since). ${state}`), { robbed: who, committed });
+    };
 
     try {
       // ---- own-artifact retention at preflight (ports the ReFS thin-pool
@@ -1360,6 +1380,7 @@ export function applyPlan(plan, opts = {}) {
       // runs leave snapshot dirs the commit-time sweep never reaches; reap
       // them here, inside the lock. Fail-silent housekeeping; sweepSnapshots
       // itself protects a dangling txn's snapshot (recovery owns it).
+      fence('the preflight snapshot retention');
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
       // ---- bin retention (beta.12 item 4; 0i adds the size cap; P5/P8 fix
       // rebases the budget) — the SAME piggyback touchpoint: every real wash
@@ -1377,6 +1398,7 @@ export function applyPlan(plan, opts = {}) {
       // internally fail-silent (never throw) — no extra guard needed here.
       let storeBytes = 0;
       try { storeBytes = Number(loadState(projectRoot, home)?.lastVerdict?.storeTotalBytes) || 0; } catch { /* horizon-only */ }
+      fence('the preflight bin retention');
       const binSweeps = [
         [FAT_BIN_NAME, sweepFatBin(projectRoot, { storeBytes })],
         [STORE_OLD_NAME, sweepStoreOld(projectRoot, { storeBytes })],
@@ -1393,6 +1415,7 @@ export function applyPlan(plan, opts = {}) {
       // 15b fire 56 (census row 3): `snap-<now>` is a FRESH name, so it is created NON-recursively under the tx dir (made
       // and proven link-free above): any entry already there (a junction or a directory a cloned repo committed) is EEXIST
       // and refuses the run. A recursive mkdir accepted it and the copies below went through it.
+      fence('the snapshot');
       try { fs.mkdirSync(snapDir); } catch (e) {
         return { ok: false, flagged, error: `snapshot folder: ${snapDir} already exists or cannot be created (${e && e.code}) — refusing before the first snapshot byte; CoalWash writes a snapshot only into a folder it has just created` };
       }
@@ -1443,16 +1466,23 @@ export function applyPlan(plan, opts = {}) {
         status: 'applying',
         steps: ordered.map((a, i) => ({ i, type: a.type, path: a.phys, status: 'pending' })),
       };
+      fence('the journal');
       writeJournal(journal);
+      landed = journal.steps;
 
       // ---- execute ----
       const createdPaths = [];
       // Returns the count of snapshot restores that FAILED — a non-zero count
       // means the rollback was PARTIAL (some originals could not be restored),
       // which the caller must surface honestly instead of claiming "wholesale".
-      const rollback = () => {
+      const rollback = (cause) => {
         let failed = 0;
+        let tried = 0;
+        // fire 119: a rollback that finds its lock stolen stops too; past the first restore the refusal says how far it got.
+        const midway = () => (tried ? `the rollback had tried ${tried} of ${manifest.length} restore(s) from ${snapDir} when it stopped; the journal on disk is this run's until the new holder writes its own over it` : null);
         for (const m of manifest) {
+          fence(`restoring ${m.original} (the rollback after: ${cause})`, midway());
+          tried++;
           // R46-2: the copy is read contained to the tx dir and bounded, like verifySnapshot's read of the same file a moment
           // earlier (so a legitimate run's copy always fits); a copy swapped for a link out is one failed restore, never copied.
           try {
@@ -1479,10 +1509,12 @@ export function applyPlan(plan, opts = {}) {
         // (a restore that failed, a plan-created file still present). A leftover
         // temp is cosmetic litter beside an UNTOUCHED target, and a process crash
         // skipped the old sweep just as completely.
+        if (createdPaths.length) fence(`removing the created file(s) (the rollback after: ${cause})`, midway());
         for (const p of createdPaths) { try { fs.rmSync(p, { force: true }); } catch { if (fs.existsSync(p)) failed++; } }
         // A PARTIAL rollback must NOT be marked terminal-clean, or a cold-start
         // recoverDangling would clear the journal over a mixed on-disk state.
         journal.status = failed ? 'rollback-failed' : 'rolled-back';
+        fence(`the rollback's journal record (the rollback after: ${cause})`, `the rollback had tried every restore from ${snapDir} and every removal of a created file (${failed} failed), and its own journal record was not written; the journal on disk still says the run was applying until the new holder writes its own over it`);
         try { writeJournal(journal); } catch {}
         return failed;
       };
@@ -1511,6 +1543,8 @@ export function applyPlan(plan, opts = {}) {
             // create target appeared mid-txn: same foreign-writer class.
             throw new Error(`external writer detected: create target ${a.phys} appeared mid-transaction`);
           }
+          const stepLabel = `step ${step.i + 1} of ${journal.steps.length} (${a.type} ${a.phys})`;
+          fence(stepLabel); // after the external-writer guard's read, immediately before the write it guards
           if (a.type === 'rewrite' || a.type === 'create') {
             writeDurable(a.phys, a.content); // U7: temp is O_EXCL + unpredictable; the destination is never opened for write
             if (a.type === 'create') createdPaths.push(a.phys);
@@ -1526,18 +1560,24 @@ export function applyPlan(plan, opts = {}) {
             fsyncDirBestEffort(path.dirname(a.phys));
           }
           step.status = 'done';
+          fence(`the journal record of ${stepLabel}`);
           writeJournal(journal);
         }
       } catch (e) {
-        const failed = rollback();
+        if (e && e.robbed) throw e; // a robbed run never rolls back (the fence's comment says why)
+        const failed = rollback(e.message);
         if (failed) return { ok: false, rolledBack: 'partial', restoreFailures: failed, error: `apply failed AND rollback left ${failed} item(s) in a mixed state (an original that could not be restored, a created file that could not be removed, or a stranded tmp) — memory may be mixed; snapshot kept at ${snapDir}: ${e.message}` };
         return { ok: false, rolledBack: true, error: `apply failed at a step — snapshot restored: ${e.message}` };
       }
 
       // ---- commit: mark, clear the WAL, sweep old snapshots (keep the newest N) ----
+      fence('the commit record');
       journal.status = 'committed';
       writeJournal(journal);
+      committed = true;
+      fence('removing the committed journal', `every step landed and the commit record was written; the committed journal stays on disk until the new holder writes its own over it (the next recoverDangling clears a committed one), and the post-commit housekeeping (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped; the snapshot ${snapDir} still holds every original`);
       try { fs.rmSync(journalPath, { force: true }); } catch {}
+      fence('the post-commit snapshot retention');
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
 
       // ---- bin population (0h "BIN POPULATION WIRING") — AFTER the commit,
@@ -1564,6 +1604,7 @@ export function applyPlan(plan, opts = {}) {
       // CWK-081 (b): the FILES those removals landed on — a Set, because one file
       // can carry several actions and the record is about coverage, not volume.
       const removedFrom = new Set();
+      fence('the bin recovery copies'); // once for the loop: each recordBinItem holds its own bin lock (fire 107)
       for (const a of actionable) {
         if (a.type === 'create') continue; // an addition cut nothing
         // A DELETE banks the BUFFER, never a decode of it (G3-3). `baseBuf` is
@@ -1717,6 +1758,7 @@ export function applyPlan(plan, opts = {}) {
       // advisory above): a state-write failure must never un-commit a run that
       // already succeeded — it only costs the next crossing one ask.
       if (plan.origin === 'wizard-cut' && removedCount > 0) {
+        fence('the Full-clean record');
         try { markFullClean(home, projectRoot, now, plan.sessionId, [...removedFrom]); } catch { /* never un-commits */ }
       }
 
@@ -1726,6 +1768,7 @@ export function applyPlan(plan, opts = {}) {
       if (globalLock) globalLock.release();
     }
   } catch (e) {
+    if (e && e.robbed) return { ok: false, robbed: e.robbed, committed: e.committed, error: e.message };
     return { ok: false, error: `apply: ${e.message}` };
   }
 }

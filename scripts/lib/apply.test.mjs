@@ -8,7 +8,7 @@ import { execSync, spawnSync } from 'node:child_process';
 import { gitEnv } from './git-env.mjs';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks, writeDurable } from './apply.mjs';
 import { recordKeep, recordGlobalKeep, loadKeeps } from './keeps.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin } from './tailings.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin, __testHooks as tailHooks } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
 import { recordVerdict, loadState } from './caliper.mjs';
 import { ccMemoryDir } from './class-b.mjs';
@@ -4499,4 +4499,195 @@ test('CWK-162 B12: a plan whose staged bytes exceed STAGED_BYTES_MAX is refused 
     assert.match(r.error, /staged/i);
     for (const f of files) assert.strictEqual(fs.existsSync(f), true, `${path.basename(f)} untouched`);
   } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// fire 119 (18a): THE LOCK FENCE. A lock older than LOCK_STALE_MS can be taken over, so a transaction that stalled that long
+// may have been robbed. Before each write it re-reads its locks and a robbed run stops: no further write, no rollback. Every
+// leg steals the lock the way a second CoalWash run would (the held lock's mtime backdated past the stale window, then a real
+// acquireLock), snapshots the whole sandbox at the moment of the theft, and proves the robbed run wrote nothing after it.
+// ---------------------------------------------------------------------------
+function treeOf(roots, skip = () => false) {
+  const out = {};
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (skip(p)) continue;
+      if (e.isDirectory()) { out[p] = 'dir'; walk(p); } else out[p] = fs.readFileSync(p).toString('base64');
+    }
+  };
+  for (const r of roots) if (fs.existsSync(r)) walk(r);
+  return out;
+}
+function stealLock(lockPath) {
+  const old = new Date(Date.now() - LOCK_STALE_MS - 60000);
+  fs.utimesSync(lockPath, old, old);
+  const thief = acquireLock(lockPath, { sessionId: 'thief' });
+  assert.ok(thief.acquired && thief.stale, `the thief took the stale lock over (${JSON.stringify(thief)})`);
+  return thief;
+}
+const txLockOf = (proj) => path.join(txDirFor(proj), '.coalwash.lock');
+
+test('fire 119: a transaction robbed of its PROJECT lock stops before its next write: nothing more is written, no rollback, and the thief\'s writes survive', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f119-')));
+  const a = path.join(store, 'a.md');
+  const b = path.join(store, 'b.md');
+  const fatBin = path.join(txDirFor(proj), FAT_BIN_NAME);
+  try {
+    write(a, 'alpha\nkeep\n');
+    write(b, 'beta\n');
+    assert.ok(recordBinItem(proj, FAT_BIN_NAME, { content: 'an older cut', original: a }), 'a bin item, so the preflight sweep reaches its seam');
+    let thief = null;
+    let shot = null;
+    tailHooks.beforeIndexSave = () => {
+      tailHooks.beforeIndexSave = null;
+      thief = stealLock(txLockOf(proj));
+      write(a, 'THIEF'); // the new holder's own write
+      shot = treeOf([proj, home], (p) => p.startsWith(fatBin)); // the sweep in progress holds its own bin lock (fire 107)
+    };
+    let r;
+    try { r = apply(planFor(proj, store, [{ type: 'rewrite', path: a, content: 'alpha\n' }, { type: 'delete', path: b }]), { home }); } finally { tailHooks.beforeIndexSave = null; }
+    assert.ok(shot, 'the theft happened inside the transaction');
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(r.robbed, 'project');
+    assert.ok(r.error.includes('lock stolen') && r.error.includes('stopped before the snapshot') && r.error.includes('nothing of this plan had been written'), r.error);
+    assert.deepStrictEqual(treeOf([proj, home], (p) => p.startsWith(fatBin)), shot, 'the robbed run wrote nothing after the theft (no snapshot, no journal, no target)');
+    assert.strictEqual(fs.readFileSync(a, 'utf8'), 'THIEF', 'the thief\'s write survives: no rollback ran over it');
+    assert.strictEqual(fs.readFileSync(b, 'utf8'), 'beta\n', 'the delete never ran');
+    assert.strictEqual(thief.owns(), true, 'the robbed run\'s release left the thief\'s lock in place');
+  } finally { clean(proj, home); }
+});
+
+test('fire 119: a transaction robbed of its GLOBAL lock stops before its next write the same way, and names the global lock', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f119g-')));
+  const g = path.join(store, 'global.md');
+  const fatBin = path.join(txDirFor(proj), FAT_BIN_NAME);
+  // the run still owns its PROJECT lock, so releasing that one on the way out is its own business, not a write over the thief
+  const skip = (p) => p.startsWith(fatBin) || p === txLockOf(proj);
+  try {
+    write(g, 'global content');
+    assert.ok(recordBinItem(proj, FAT_BIN_NAME, { content: 'an older cut', original: g }));
+    let thief = null;
+    let shot = null;
+    tailHooks.beforeIndexSave = () => {
+      tailHooks.beforeIndexSave = null;
+      thief = stealLock(globalLockPath(home));
+      write(g, 'THIEF');
+      shot = treeOf([proj, home], skip);
+    };
+    let r;
+    try { r = apply(planFor(proj, store, [{ type: 'rewrite', path: g, content: 'new global content', scope: 'global' }]), { home }); } finally { tailHooks.beforeIndexSave = null; }
+    assert.ok(shot, 'the theft happened inside the transaction');
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(r.robbed, 'global');
+    assert.ok(r.error.includes('took over the global lock') && r.error.includes('stopped before the snapshot'), r.error);
+    assert.deepStrictEqual(treeOf([proj, home], skip), shot, 'the robbed run wrote nothing after the theft');
+    assert.strictEqual(fs.existsSync(txLockOf(proj)), false, 'its own project lock was released');
+    assert.strictEqual(fs.readFileSync(g, 'utf8'), 'THIEF', 'the thief\'s write survives');
+    assert.strictEqual(thief.owns(), true, 'the global lock is still the thief\'s');
+  } finally { clean(proj, home); }
+});
+
+// Every fence on the success path, one fresh run each: the theft lands exactly at that fence and nothing is written after it.
+test('fire 119: every fence of a committing transaction stops a robbed run on the spot (15 fences, one theft each)', () => {
+  const expected = (a, c, b) => [
+    'the preflight snapshot retention', 'the preflight bin retention', 'the snapshot', 'the journal',
+    `step 1 of 3 (rewrite ${a})`, `the journal record of step 1 of 3 (rewrite ${a})`,
+    `step 2 of 3 (create ${c})`, `the journal record of step 2 of 3 (create ${c})`,
+    `step 3 of 3 (delete ${b})`, `the journal record of step 3 of 3 (delete ${b})`,
+    'the commit record', 'removing the committed journal', 'the post-commit snapshot retention', 'the bin recovery copies', 'the Full-clean record',
+  ];
+  const fixture = () => {
+    const { proj, store } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f119s-')));
+    const a = path.join(store, 'a.md');
+    const b = path.join(store, 'b.md');
+    const c = path.join(store, 'c.md');
+    write(a, 'alpha\nkeep\n');
+    write(b, 'beta\n');
+    return { proj, store, home, a, b, c, plan: planFor(proj, store, [
+      { type: 'rewrite', path: a, content: 'alpha\n' }, { type: 'create', path: c, content: 'gamma\n' }, { type: 'delete', path: b },
+    ], { origin: 'wizard-cut' }) };
+  };
+  // the control: an unrobbed run passes exactly these fences, in this order
+  const ctl = fixture();
+  const seen = [];
+  __testHooks.onFence = (w) => seen.push(w);
+  try {
+    const r = apply(ctl.plan, { home: ctl.home });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.deepStrictEqual(seen, expected(ctl.a, ctl.c, ctl.b), 'the fence list moved: a write step lost (or gained) its fence');
+  } finally { __testHooks.onFence = null; clean(ctl.proj, ctl.home); }
+  for (let label = 0; label < 15; label++) {
+    const fx = fixture();
+    const where = expected(fx.a, fx.c, fx.b)[label];
+    let shot = null;
+    __testHooks.onFence = (w) => {
+      if (w !== where || shot) return;
+      stealLock(txLockOf(fx.proj));
+      write(fx.a, 'THIEF');
+      shot = treeOf([fx.proj, fx.home]);
+    };
+    try {
+      const r = apply(fx.plan, { home: fx.home });
+      assert.ok(shot, `the theft at ${where} happened`);
+      assert.strictEqual(r.robbed, 'project', `${where}: ${JSON.stringify(r)}`);
+      assert.ok(r.error.includes(`stopped before ${where}`), r.error);
+      assert.ok(!r.error.includes('the rollback after'), `${where}: a robbed step never enters the rollback (${r.error})`);
+      if (label < 4) assert.ok(r.error.includes('nothing of this plan had been written'), r.error);
+      else if (label < 11) assert.ok(r.error.includes(`${[0, 1, 1, 2, 2, 3, 3][label - 4]} of 3 step(s) had landed`), `${where}: the refusal counts the landed steps (${r.error})`);
+      assert.strictEqual(r.committed, label >= 11, `${where}: committed is true only once the commit record was written`);
+      assert.deepStrictEqual(treeOf([fx.proj, fx.home]), shot, `${where}: the robbed run wrote nothing after the theft`);
+    } finally { __testHooks.onFence = null; clean(fx.proj, fx.home); }
+  }
+});
+
+// The rollback path: step 3 meets an external writer, the rollback starts, and the theft lands at each of its fences.
+test('fire 119: a rollback robbed of its lock stops too, before its next restore, removal or journal record (4 fences)', () => {
+  const fixture = () => {
+    const { proj, store } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f119r-')));
+    const a = path.join(store, 'a.md');
+    const c = path.join(store, 'c.md');
+    const d = path.join(store, 'd.md');
+    write(a, 'alpha\nkeep\n');
+    write(d, 'delta\nkeep\n');
+    return { proj, home, a, c, d, plan: planFor(proj, store, [
+      { type: 'rewrite', path: a, content: 'alpha\n' }, { type: 'create', path: c, content: 'gamma\n' }, { type: 'rewrite', path: d, content: 'delta\n' },
+    ]) };
+  };
+  const prefixes = (fx) => [`restoring ${fx.a} (the rollback after: external writer`, `restoring ${fx.d} (the rollback after: external writer`, 'removing the created file(s) (the rollback after: external writer', "the rollback's journal record (the rollback after: external writer"];
+  const tamper = (fx) => (w) => { if (w === `the journal record of step 2 of 3 (create ${fx.c})`) write(fx.d, 'FOREIGN'); };
+  const ctl = fixture();
+  const seen = [];
+  const tCtl = tamper(ctl);
+  __testHooks.onFence = (w) => { tCtl(w); seen.push(w); };
+  try {
+    const r = apply(ctl.plan, { home: ctl.home });
+    assert.strictEqual(r.rolledBack, true, JSON.stringify(r));
+    const tail = seen.slice(seen.indexOf(`the journal record of step 2 of 3 (create ${ctl.c})`) + 1);
+    assert.strictEqual(tail.length, 4, `the rollback passed 4 fences (${JSON.stringify(tail)})`);
+    prefixes(ctl).forEach((p, i) => assert.ok(tail[i].startsWith(p), `${tail[i]} starts with ${p}`));
+  } finally { __testHooks.onFence = null; clean(ctl.proj, ctl.home); }
+  for (let i = 0; i < 4; i++) {
+    const fx = fixture();
+    const t = tamper(fx);
+    let shot = null;
+    __testHooks.onFence = (w) => {
+      t(w);
+      if (shot || !w.startsWith(prefixes(fx)[i])) return;
+      stealLock(txLockOf(fx.proj));
+      shot = treeOf([fx.proj, fx.home]);
+    };
+    try {
+      const r = apply(fx.plan, { home: fx.home });
+      assert.ok(shot, `the theft at rollback fence ${i + 1} happened`);
+      assert.strictEqual(r.robbed, 'project', JSON.stringify(r));
+      assert.ok(r.error.includes(`stopped before ${prefixes(fx)[i]}`), r.error);
+      assert.strictEqual(r.rolledBack, undefined, 'a robbed rollback never reports itself rolled back');
+      assert.deepStrictEqual(treeOf([fx.proj, fx.home]), shot, `rollback fence ${i + 1}: the robbed run wrote nothing after the theft`);
+    } finally { __testHooks.onFence = null; clean(fx.proj, fx.home); }
+  }
 });

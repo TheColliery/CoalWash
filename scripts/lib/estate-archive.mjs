@@ -63,7 +63,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
-import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort } from './apply.mjs';
+import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, LOCK_STALE_MS } from './apply.mjs';
 import { ownSandboxDir } from './repo-fs.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
 // death-log (destroyed cuts). Function-declaration imports used only at CALL
@@ -500,8 +500,8 @@ function appendDeathCert(archiveDir, slug, line) {
 // appends it AFTER this returns ok (row-follows-bytes, so a crash between
 // delete and append can only under-index — estate-restore scans the archive
 // dir itself, not the index, so recovery never depends on the row).
-// opts.gzip is injectable for tests (default zlib.gzipSync).
-export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder } = {}) {
+// opts.gzip is injectable for tests (default zlib.gzipSync). opts.owns is the caller's lock check (fire 119, the fence below).
+export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder, owns = () => true } = {}) {
   const destBase = path.join(archiveDir, slug);
   // Write-side containment (loss class #57's git sibling, GHSA-2hvf-7c8p-28fx:
   // the SOURCE enumeration is realpath-contained, but the DESTINATION
@@ -516,6 +516,12 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   if (!rootPhys) return { ok: false, reason: 'archive root unresolvable — session skipped (fail-closed)' };
   const written = [];
   const cleanupPartial = () => { for (const w of written) { try { fs.rmSync(w, { force: true }); } catch {} } };
+  // THE FENCE (fire 119, 18a): the caller's global lock can be taken over once it is LOCK_STALE_MS old. Before each write
+  // this re-reads it (owns); a robbed run stops there and removes nothing, since the new holder may be archiving this same
+  // session to these same paths and removing a partial copy could remove its verified one.
+  const stolen = (where, state) => (owns() ? null : { ok: false, robbed: 'global', reason: `lock stolen: another CoalWash run took over the global lock this ULTRA run held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where} of session ${sess.id}, with no clean-up. ${state}` });
+  const notDeleted = () => `${written.length} archive copy(ies) of this session already written stay in place (removing one could remove the new holder's copy of the same session); every original of this session is kept`;
+  const fail = (reason) => stolen(`removing the partial archive (after: ${reason})`, notDeleted()) || (cleanupPartial(), { ok: false, reason });
   let transcriptBuf = null;
   const originals = [];
 
@@ -527,26 +533,27 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     // Fail-closed: skip the whole session, keep every original (never delete a
     // file we cannot truly read).
     if (isPlaceholder(f.path)) {
-      cleanupPartial();
-      return { ok: false, reason: `cloud placeholder (dehydrated — 0 blocks, size>0): ${f.rel} — a plain read returns a stub, archive+delete refused (fail-closed), originals kept (#57d)` };
+      return fail(`cloud placeholder (dehydrated — 0 blocks, size>0): ${f.rel} — a plain read returns a stub, archive+delete refused (fail-closed), originals kept (#57d)`);
     }
     let buf;
     try {
       buf = fs.readFileSync(f.path);
-    } catch (e) { cleanupPartial(); return { ok: false, reason: `read failed: ${f.rel}: ${e.message}` }; }
+    } catch (e) { return fail(`read failed: ${f.rel}: ${e.message}`); }
     if (f.rel === `${sess.id}.jsonl`) transcriptBuf = buf;
     const dest = path.join(destBase, `${f.rel}.gz`);
     if (!containedIn(physicalForCreate(dest), [rootPhys])) {
-      cleanupPartial();
-      return { ok: false, reason: `archive destination escapes the archive root: ${f.rel} — session skipped (fail-closed), originals kept` };
+      return fail(`archive destination escapes the archive root: ${f.rel} — session skipped (fail-closed), originals kept`);
     }
     try {
+      const gz = gzip(buf);
+      const robbedGz = stolen(`the archive copy of ${f.rel}`, notDeleted());
+      if (robbedGz) return robbedGz;
       fs.mkdirSync(path.dirname(dest), { recursive: true });
-      writeDurable(dest, gzip(buf)); // H4: fsync the .gz CONTENT (this tier keeps no snapshot)
+      writeDurable(dest, gz); // H4: fsync the .gz CONTENT (this tier keeps no snapshot)
       written.push(dest);
       const back = zlib.gunzipSync(fs.readFileSync(dest));
-      if (!back.equals(buf)) { cleanupPartial(); return { ok: false, reason: `verify mismatch: ${f.rel} — original kept` }; }
-    } catch (e) { cleanupPartial(); return { ok: false, reason: `archive failed: ${f.rel}: ${e.message} — original kept` }; }
+      if (!back.equals(buf)) { return fail(`verify mismatch: ${f.rel} — original kept`); }
+    } catch (e) { return fail(`archive failed: ${f.rel}: ${e.message} — original kept`); }
     originals.push({ path: f.path, rel: f.rel, gz: dest });
   }
 
@@ -564,8 +571,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     let st;
     try { st = fs.statSync(f.path); } catch { st = null; }
     if (!st || st.size !== f.bytes || st.mtimeMs !== f.mtimeMs) {
-      cleanupPartial();
-      return { ok: false, reason: `changed during run: ${f.rel} — session skipped, originals kept` };
+      return fail(`changed during run: ${f.rel} — session skipped, originals kept`);
     }
   }
 
@@ -586,8 +592,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     let ok = false;
     try { ok = zlib.gunzipSync(fs.readFileSync(o.gz)).equals(fs.readFileSync(o.path)); } catch { ok = false; }
     if (!ok) {
-      cleanupPartial();
-      return { ok: false, reason: `archive no longer verifies before delete: ${o.rel} (removed/corrupted since it was written — a co-writer on the archive volume?) — session skipped, originals kept` };
+      return fail(`archive no longer verifies before delete: ${o.rel} (removed/corrupted since it was written — a co-writer on the archive volume?) — session skipped, originals kept`);
     }
   }
 
@@ -601,7 +606,9 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // Deletes LAST. Every byte is now verified recoverable from the durable archive.
   let deleted = 0;
   const deleteFailed = [];
-  for (const o of originals) {
+  for (const [i, o] of originals.entries()) {
+    const robbedRm = stolen(`deleting ${o.rel}`, `every file of this session was archived and verified; ${i} original(s) had been deleted (or tried) and the other ${originals.length - i} stay beside their archive copies`);
+    if (robbedRm) return robbedRm;
     try { fs.rmSync(o.path, { force: true }); } catch {}
     if (fs.existsSync(o.path)) deleteFailed.push(o.rel); else deleted++;
   }
@@ -612,13 +619,18 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // intact + surfaced in `unpruned`. Fail toward keeping unknown bytes — never
   // the whole-tree rm -rf this used to do.
   const unpruned = [];
+  const afterDeletes = `every original of this session was deleted (${deleteFailed.length} could not be) after its archive copy was verified`;
   if (!deleteFailed.length && originals.length) {
+    const robbedPrune = stolen('removing the emptied session folder', `${afterDeletes}; the emptied folder${cold ? ', the death-log record' : ''} and the index row were not written`);
+    if (robbedPrune) return robbedPrune;
     const projDir = path.dirname(originals[0].path);
     pruneEmptyDirs(path.join(projDir, sess.id), projDir, unpruned);
   }
 
   const row = buildIndexRow({ sessionId: sess.id, projectSlug: slug, transcriptBuf, totalBytes: sess.bytes, now, cold });
   if (cold) {
+    const robbedCert = stolen('the death-log record', `${afterDeletes}; the death-log record and the index row were not written`);
+    if (robbedCert) return robbedCert;
     const ageDays = Math.round((now - sess.newestMtimeMs) / DAY_MS);
     appendDeathCert(archiveDir, slug, `${new Date(now).toISOString()} destroyed-cold ${sess.id} (age ${ageDays}d, ${sess.files.length} file(s), ${sess.bytes} bytes — archived+verified first)`);
   }
@@ -738,8 +750,17 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
         continue;
       }
       const cold = sess.band === 'cold';
-      const r = archiveSession(sess, { slug: c.slug, archiveDir, now, cold, gzip });
+      const r = archiveSession(sess, { slug: c.slug, archiveDir, now, cold, gzip, owns: lock.owns });
+      // fire 119: a robbed session stops the whole run, so no later session starts under a lock this run no longer holds.
+      if (r.robbed) { res.ok = false; res.robbed = r.robbed; res.error = r.reason; break; }
       if (!r.ok) { res.failed.push({ id: sess.id, reason: r.reason }); continue; }
+      if (c.cfg.indexEnabled && !lock.owns()) {
+        res.ok = false; res.robbed = 'global';
+        res.error = `lock stolen: another CoalWash run took over the global lock this ULTRA run held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before the index row of session ${sess.id}, with no clean-up. The session was archived and verified and its originals deleted; its index row was not appended (estate-restore reads the archive itself, so it stays restorable)`;
+        res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned });
+        res.bytesFreed += r.bytes;
+        break;
+      }
       if (c.cfg.indexEnabled && !appendIndexRow(archiveDir, r.row)) res.failed.push({ id: sess.id, reason: 'index append failed (bytes archived + originals deleted — restore unaffected)' });
       else if (c.cfg.indexEnabled) res.indexRows++;
       res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned });
@@ -755,6 +776,7 @@ export function runEstateReport(res) {
   if (!res || res.deferred) return `[CoalWash] ULTRA estate deferred: ${res && res.error ? res.error : 'lock held'}`;
   const lines = [];
   lines.push(`[CoalWash] ULTRA estate — ${res.archived.length} session(s) archived (${mb(res.bytesFreed)} freed from the live tree), ${res.activeSkipped} active skipped`);
+  if (res.robbed) lines.push(`  STOPPED: ${res.error}`);
   lines.push(`  archive: ${res.archiveDir} (${res.indexRows} index row(s) appended · restore: cli.mjs estate-restore <sessionId>)`);
   if (res.budgetReached) {
     const total = res.archived.length + res.budgetDeferred;

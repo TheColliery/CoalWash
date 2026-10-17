@@ -20,7 +20,7 @@ import {
 } from './retier.mjs';
 import { tokensEst } from './caliper.mjs';
 import { restoreSession, ESTATE_INDEX_NAME } from './estate-archive.mjs';
-import { acquireLock, globalLockPath, txDirFor } from './apply.mjs';
+import { acquireLock, globalLockPath, txDirFor, LOCK_STALE_MS, __testHooks as applyHooks } from './apply.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 import { CONFIG_SCHEMA, clampedRead } from './config-schema.mjs';
 import { STORE_OLD_NAME } from './tailings.mjs';
@@ -1395,5 +1395,129 @@ test('CWK-120 row 2: a malformed ENTRY is one failed restore and the REST of the
     const failed = rollbackFromSnapshot(snapDir, [], [proj]);
     assert.strictEqual(failed, manifest.length - 1, 'every malformed entry is counted as a failed restore');
     assert.strictEqual(fs.readFileSync(good, 'utf8'), 'PRISTINE-A', 'the well-formed entry after the malformed ones was still restored');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// fire 119 (18a): THE LOCK FENCE on RE-TIER. Its global lock can be taken over once it is LOCK_STALE_MS old; before each
+// write the run re-reads it and a robbed run stops with no clean-up and no rollback, keeping every archive copy it wrote.
+// The thefts below are what a second CoalWash run does: the held lock's mtime backdated past the stale window, then a real
+// acquireLock. The applyPlan legs use apply.mjs's onFence seam (RE-TIER itself ships none) and the blessed gzip injectable.
+// ---------------------------------------------------------------------------
+function treeOf(roots) {
+  const out = {};
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { out[p] = 'dir'; walk(p); } else out[p] = fs.readFileSync(p).toString('base64');
+    }
+  };
+  for (const r of roots) if (fs.existsSync(r)) walk(r);
+  return out;
+}
+function stealAt(lockPath) {
+  const old = new Date(Date.now() - LOCK_STALE_MS - 60000);
+  fs.utimesSync(lockPath, old, old);
+  const thief = acquireLock(lockPath, { sessionId: 'thief' });
+  assert.ok(thief.acquired && thief.stale, `the thief took the stale lock over (${JSON.stringify(thief)})`);
+  return thief;
+}
+const gzOf = (home) => { const d = path.join(estateCfg(home).archiveDir); const out = []; const walk = (x) => { if (!fs.existsSync(x)) return; for (const e of fs.readdirSync(x, { withFileTypes: true })) { const p = path.join(x, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith('.gz')) out.push(p); } }; walk(d); return out; };
+// Runs a RE-TIER pass with apply.mjs's onFence seam stealing `which` lock at the fence named `where`.
+function retierRobbedInApply(home, proj, where, lockPath) {
+  let thief = null;
+  applyHooks.onFence = (w) => { if (w === where && !thief) thief = stealAt(lockPath); };
+  try { return { res: runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), now: Date.now() }), thief }; } finally { applyHooks.onFence = null; }
+}
+
+test('fire 119: a RE-TIER run robbed of its global lock before an archive copy stops there: nothing more is written, the memory store is untouched', () => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = seedMainStore(home, proj);
+    let shot = null;
+    let thief = null;
+    const gzip = (buf) => {
+      if (!shot) { thief = stealAt(globalLockPath(home)); write(path.join(home, 'thief.txt'), 'THIEF'); shot = treeOf([home, proj]); }
+      return zlib.gzipSync(buf);
+    };
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), gzip });
+    assert.ok(shot, 'the theft happened inside the run');
+    assert.strictEqual(res.ok, false, runRetierReport(res));
+    assert.strictEqual(res.robbed, 'global');
+    assert.ok(res.error.includes('lock stolen') && res.error.includes('stopped before the archive copy of') && res.error.includes('nothing in the memory store was touched'), res.error);
+    assert.deepStrictEqual(treeOf([home, proj]), shot, 'the robbed run wrote nothing after the theft');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), true, 'the topic stays');
+    assert.strictEqual(thief.owns(), true, 'the robbed run\'s release left the thief\'s lock in place');
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: a RE-TIER run robbed after its archive copies stops before the transaction, keeping the copies', () => {
+  const { home, proj } = sandbox();
+  const real = fs.writeFileSync;
+  try {
+    const dir = seedMainStore(home, proj);
+    let shot = null;
+    fs.writeFileSync = function patched(p, ...rest) {
+      const out = real.call(fs, p, ...rest);
+      if (!shot && String(p).endsWith('.gz')) { stealAt(globalLockPath(home)); shot = treeOf([home, proj]); }
+      return out;
+    };
+    let res;
+    try { res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) }); } finally { fs.writeFileSync = real; }
+    assert.ok(shot, 'the theft happened after an archive copy was written');
+    assert.strictEqual(res.robbed, 'global', runRetierReport(res));
+    assert.ok(res.error.includes('stopped before the transaction'), res.error);
+    assert.deepStrictEqual(treeOf([home, proj]), shot, 'nothing written or removed after the theft');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), true, 'the topic stays');
+    assert.strictEqual(gzOf(home).length, 1, 'its archive copy stays');
+  } finally { fs.writeFileSync = real; clean(home, proj); }
+});
+
+test('fire 119: when the transaction under RE-TIER is robbed after its deletes, RE-TIER keeps the archive copies (a deleted topic is never left without its copy)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = seedMainStore(home, proj);
+    const { res } = retierRobbedInApply(home, proj, 'the commit record', path.join(txDirFor(proj), '.coalwash.lock'));
+    assert.strictEqual(res.robbed, 'project', runRetierReport(res));
+    assert.ok(res.error.includes('stopped before the commit record') && res.error.includes('RE-TIER kept its 1 archive copy(ies)'), res.error);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), false, 'the delete had landed');
+    const gz = gzOf(home);
+    assert.strictEqual(gz.length, 1, 'its archive copy stays');
+    assert.ok(zlib.gunzipSync(fs.readFileSync(gz[0])).toString('utf8').startsWith('ZETA-ORIGINAL-BYTES'), 'and holds the deleted topic');
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: a RE-TIER run robbed of its global lock during the transaction stops before the dig-index rows (the topic stays restorable from the archive)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = seedMainStore(home, proj);
+    const { res } = retierRobbedInApply(home, proj, 'the Full-clean record', globalLockPath(home));
+    assert.strictEqual(res.robbed, 'global', runRetierReport(res));
+    assert.ok(res.error.includes('stopped before the dig-index rows'), res.error);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), false, 'the transaction committed');
+    assert.strictEqual(fs.existsSync(path.join(estateCfg(home).archiveDir, ESTATE_INDEX_NAME)), false, 'no dig-index row was appended');
+    assert.strictEqual(gzOf(home).length, 1, 'the archive copy stays');
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: a RE-TIER run robbed of its global lock before a probe-miss rollback stops without rolling back', () => {
+  const { home, proj } = sandbox();
+  try {
+    // the BREAK-3h fixture: an anchor split across two demoted topics is a genuine probe miss
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex());
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index.\n');
+    let a = '# topicA\n\n';
+    for (let i = 0; i < 20; i++) a += `- [[a${i}]] co-anchor\n- [[a${i}]] again\n`;
+    write(path.join(dir, 'topic-a.md'), a + '- [[split anchor]] here\n- [[split anchor]] again\n');
+    let b = '# topicB\n\n';
+    for (let i = 0; i < 20; i++) b += `- [[b${i}]] co-anchor\n- [[b${i}]] again\n`;
+    write(path.join(dir, 'topic-b.md'), b + '- [[split anchor]] once\n');
+    const { res } = retierRobbedInApply(home, proj, 'the Full-clean record', globalLockPath(home));
+    assert.strictEqual(res.robbed, 'global', runRetierReport(res));
+    assert.ok(res.error.includes('stopped before the rollback') && res.error.includes('probe missed'), res.error);
+    assert.ok(Array.isArray(res.anchorMisses) && res.anchorMisses.length > 0, 'the misses are still reported');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'topic-a.md')), false, 'no rollback ran');
+    assert.strictEqual(gzOf(home).length, 2, 'both archive copies stay');
   } finally { clean(home, proj); }
 });
