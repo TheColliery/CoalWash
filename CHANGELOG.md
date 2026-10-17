@@ -2,6 +2,16 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.12.11] - 2026-10-18
+
+A run whose lock was taken over stops before its next write
+
+A wash, RE-TIER or ULTRA run whose lock went stale and was taken over by another run now stops before its next write instead of writing on beside the new holder. Nothing is removed from the plugin and no command or config key changes; a refusal gains two additive fields, `robbed` and `committed`. The installed plugin moved in four files (`git diff --stat 904e783 HEAD -- plugin/`: 4 files, 115 insertions, 25 deletions): the `plugin/` twins of `scripts/lib/apply.mjs`, `scripts/lib/retier.mjs` and `scripts/lib/estate-archive.mjs` (`git diff --stat 904e783 HEAD -- plugin/scripts/lib/`: 3 files, 114 insertions, 24 deletions), and the version in `plugin.json`.
+
+### Fixed
+
+- **A run whose lock was taken over after it went stale no longer writes beside the new holder.** A lock older than `LOCK_STALE_MS` (30 minutes) is presumed dead and another run may take it over; a run that had only stalled (a suspended machine, a long pause) then woke and kept writing, and its rollback could overwrite what the new holder had written since. Now the wash transaction (`applyPlan`'s `fence`), RE-TIER (`runRetier`'s `stolen`) and the ULTRA estate run (`archiveSession`'s new `owns` option) each re-read their lock immediately before every write step: one bounded read per step, none inside a byte, line or content loop. A robbed run returns a refusal that starts `lock stolen: another CoalWash run took over the <project|global> lock` and says what it left on disk. It does not roll back, because a restore would overwrite the new holder's work. RE-TIER keeps every archive copy it wrote, and an ULTRA failure after a theft removes no partial copy, since the new holder may be archiving to the same paths. Residuals: a theft landing between the lock read and the write it guards still goes through (a filesystem cannot check a token); the new holder overwrites the robbed run's single journal, after which that run's record lives in its refusal and its snapshot (kept for the newest 3); a lock file that cannot be read stops the run as robbed, the safe direction. — test: `scripts/lib/apply.test.mjs`, `scripts/lib/retier.test.mjs` and `scripts/lib/estate-archive.test.mjs`, the tests named `fire 119: ...` (for example `fire 119: every fence of a committing transaction stops a robbed run on the spot (15 fences, one theft each)` and `fire 119: an archive failure after a theft removes nothing: the partial copies stay (the new holder may own copies at those paths)`)
+
 ## [1.12.10] - 2026-10-18
 
 A bin copy is named once whole; a future-dated item stops evicting
