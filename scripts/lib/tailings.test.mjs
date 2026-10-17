@@ -854,6 +854,19 @@ test('E1 t173: on a filesystem without hard links the copy is written at its id 
   } finally { __testHooks.linkSync = prev; clean(proj); }
 });
 
+test('INSPECT 114 R114-1: a Windows FAT or exFAT volume answers EISDIR for a hard link, and the copy is still written at its id directly', () => {
+  // libuv maps Windows ERROR_INVALID_FUNCTION (CreateHardLinkW on a volume without hard links) to UV_EISDIR.
+  const proj = sandbox();
+  const prev = __testHooks.linkSync;
+  try {
+    __testHooks.linkSync = () => { const e = new Error('EISDIR: illegal operation on a directory, link'); e.code = 'EISDIR'; throw e; };
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' });
+    assert.ok(id, 'the copy is still recorded: EISDIR from this link can only mean the volume has no hard links');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'whole copy');
+    assert.ok(!fs.readdirSync(binDirOf(proj)).some((f) => TEMP_SHAPE.test(f)), 'no temp is left');
+  } finally { __testHooks.linkSync = prev; clean(proj); }
+});
+
 test('E1 t173: a link refused because the id name already exists records nothing (no write through or over that entry) and leaves no temp', () => {
   const proj = sandbox();
   const prev = __testHooks.linkSync;

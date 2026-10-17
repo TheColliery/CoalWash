@@ -136,7 +136,9 @@ const BLOB_ID = /^\d+-[0-9a-f]{12}$/;
 // next sweep (removeStaleTemps below).
 const BLOB_TEMP = /^\d+-[0-9a-f]{12}\.[0-9a-f]{12}\.part$/;
 // The codes a filesystem without hard links answers linkSync with (FAT/exFAT, some network and cloud mounts).
-const NO_HARD_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS']);
+// EISDIR (INSPECT 114 R114-1): libuv maps Windows ERROR_INVALID_FUNCTION, CreateHardLinkW's answer on a FAT or exFAT
+// volume, to EISDIR. Safe here: the link source is a temp this call just made as a plain file, so it is never a directory.
+const NO_HARD_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EISDIR']);
 function writeBlobWhole(dir, id, body) {
   const final = path.join(dir, id);
   const tmp = path.join(dir, `${id}.${crypto.randomBytes(6).toString('hex')}.part`);
