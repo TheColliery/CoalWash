@@ -329,12 +329,14 @@ test('0i size-cap fail direction: weightless (no/zero bytes) and doubt (future a
   const r = retentionPlan([legacy, zero, heavy, newest, future], now, { budgetBytes: 100 });
   // Only `heavy` is evictable (newest is protected, legacy/zero weightless,
   // future doubt) — the layer evicts what it MAY, then reports what it cannot.
+  // INSPECT 109 (fire 112): the doubt item weighs NOTHING in the total, so keptBytes is `newest` alone (400); this
+  // assertion read 900 (newest + the future item) before the ruling, which let a doubt item evict a real copy.
   assert.strictEqual(r.destroy.length, 1, 'exactly one eviction is possible');
   assert.strictEqual(r.destroy[0].id, 'heavy');
   assert.ok(r.keep.some((s) => s.id === 'legacy') && r.keep.some((s) => s.id === 'zero') && r.keep.some((s) => s.id === 'future'), 'doubt/weightless all survive');
-  // Prometheus lesson inverted: bytes the layer cannot delete (newest + doubt)
+  // Prometheus lesson inverted: bytes the layer cannot delete (newest)
   // keep the bin over an unreachable cap — that is never silent.
-  assert.deepStrictEqual(r.capConflict, { budgetBytes: 100, keptBytes: 900 }, 'an unreachable cap is named, not silently missed');
+  assert.deepStrictEqual(r.capConflict, { budgetBytes: 100, keptBytes: 400 }, 'an unreachable cap is named, not silently missed');
 });
 
 test('0i: BIN_BUDGET_STORE_MULTIPLE is a positive, sane placeholder constant', () => {

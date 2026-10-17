@@ -778,3 +778,109 @@ test('P95-1: a sweep stalled past the stale window while a writer steals the bin
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// E1 t173: a copy's id names it only once its bytes are whole. INSPECT 109: a doubt item weighs nothing in the size cap.
+const BLOB_ID_SHAPE = /^\d+-[0-9a-f]{12}$/;
+const TEMP_SHAPE = /^\d+-[0-9a-f]{12}\.[0-9a-f]{12}\.part$/;
+const binDirOf = (proj) => path.join(txDirFor(proj), FAT_BIN_NAME);
+
+test('E1 t173: a writer killed after writing its copy but before naming it leaves nothing in the catalogue; its unfinished temp is never listed', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-t173-')));
+  try {
+    const proj = path.join(dir, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const engineUrl = new URL('./tailings.mjs', import.meta.url).href;
+    const worker = path.join(dir, 'worker-t173.mjs');
+    fs.writeFileSync(worker,
+      `import fs from 'node:fs';\n` +
+      `import { recordBinItem, __testHooks } from ${JSON.stringify(engineUrl)};\n` +
+      // the kill: the temp is torn (truncated) and the process ends with no finally, the way a crash ends it
+      `__testHooks.beforeBlobLink = (tmp) => { fs.truncateSync(tmp, 3); process.exit(7); };\n` +
+      `recordBinItem(process.argv[2], ${JSON.stringify(FAT_BIN_NAME)}, { content: 'the whole copy', original: '/torn.md' });\n`);
+    const r = spawnSync(process.execPath, [worker, proj], { encoding: 'utf8', timeout: 60000 });
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [], 'a copy its writer never finished must never be listed (restore would print it as whole)');
+    assert.strictEqual(r.status, 7, `the worker died at the seam (status ${r.status}, stderr ${String(r.stderr).slice(0, 200)})`);
+    const names = fs.readdirSync(binDirOf(proj));
+    assert.ok(!names.some((f) => BLOB_ID_SHAPE.test(f)), `no id-named entry exists: ${names.join(', ')}`);
+    assert.strictEqual(names.filter((f) => TEMP_SHAPE.test(f)).length, 1, `the dead writer's temp is left in the temp shape: ${names.join(', ')}`);
+  } finally { clean(dir); }
+});
+
+test('E1 t173: the next sweep removes a dead writer\'s temp older than the stale window, and only that: a fresh temp, a folder in the temp shape and other names stay', () => {
+  const proj = sandbox();
+  try {
+    const bin = binDirOf(proj);
+    fs.mkdirSync(bin, { recursive: true });
+    const old = '1700000000000-aaaaaaaaaaaa.bbbbbbbbbbbb.part';
+    const fresh = '1700000000001-aaaaaaaaaaaa.cccccccccccc.part';
+    const folder = '1700000000002-aaaaaaaaaaaa.dddddddddddd.part';
+    const other = 'notes.part';
+    for (const f of [old, fresh, other]) fs.writeFileSync(path.join(bin, f), 'memory content');
+    fs.mkdirSync(path.join(bin, folder));
+    const past = (Date.now() - 60000) / 1000; // a minute old: past the 5 s bin-lock stale window
+    for (const f of [old, other, folder]) fs.utimesSync(path.join(bin, f), past, past);
+    sweepFatBin(proj, { storeBytes: 1000 });
+    const names = fs.readdirSync(bin);
+    assert.ok(!names.includes(old), `the stale temp is removed: ${names.join(', ')}`);
+    assert.ok(names.includes(fresh), 'a fresh temp (a writer that may still be alive) stays');
+    assert.ok(names.includes(folder), 'a folder in the temp shape is never removed');
+    assert.ok(names.includes(other), 'a name outside the temp shape is never removed');
+    assert.match(readDeathLog(proj, FAT_BIN_NAME), /removed unfinished temp 1700000000000-aaaaaaaaaaaa\.bbbbbbbbbbbb\.part/);
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [], 'a temp is never listed as a copy');
+  } finally { clean(proj); }
+});
+
+test('E1 t173: a recorded copy is named by its id alone: no temp is left and the copy has one link', () => {
+  const proj = sandbox();
+  try {
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' });
+    assert.ok(id);
+    const names = fs.readdirSync(binDirOf(proj));
+    assert.ok(!names.some((f) => TEMP_SHAPE.test(f)), `no temp is left: ${names.join(', ')}`);
+    assert.strictEqual(fs.statSync(path.join(binDirOf(proj), id)).nlink, 1, 'the temp name is gone, so the copy has one link');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'whole copy');
+  } finally { clean(proj); }
+});
+
+test('E1 t173: on a filesystem without hard links the copy is written at its id directly, whole, and no temp is left', () => {
+  const proj = sandbox();
+  const prev = __testHooks.linkSync;
+  try {
+    __testHooks.linkSync = () => { const e = new Error('no hard links here'); e.code = 'EPERM'; throw e; };
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' });
+    assert.ok(id, 'the copy is still recorded');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'whole copy');
+    assert.ok(!fs.readdirSync(binDirOf(proj)).some((f) => TEMP_SHAPE.test(f)), 'no temp is left');
+  } finally { __testHooks.linkSync = prev; clean(proj); }
+});
+
+test('E1 t173: a link refused because the id name already exists records nothing (no write through or over that entry) and leaves no temp', () => {
+  const proj = sandbox();
+  const prev = __testHooks.linkSync;
+  try {
+    __testHooks.linkSync = () => { const e = new Error('exists'); e.code = 'EEXIST'; throw e; };
+    assert.strictEqual(recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' }), null);
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), []);
+    assert.ok(!fs.readdirSync(binDirOf(proj)).some((f) => TEMP_SHAPE.test(f) || BLOB_ID_SHAPE.test(f)), 'no temp and no copy are left');
+  } finally { __testHooks.linkSync = prev; clean(proj); }
+});
+
+test('INSPECT 109: a doubt item (a future or unreadable time) weighs nothing in the size cap, so a real past-floor copy is never evicted to make room for it', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const DAY = 86400000;
+    const r1 = recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(10), original: '/r1.md', now: now - 3 * DAY });
+    const r2 = recordBinItem(proj, FAT_BIN_NAME, { content: 'y'.repeat(10), original: '/r2.md', now: now - 2.5 * DAY });
+    const ip = path.join(binDirOf(proj), 'index.json');
+    const rows = JSON.parse(fs.readFileSync(ip, 'utf8'));
+    rows.push({ id: '99999999999999-ffffffffffff', at: 99999999999999, bytes: 5000, original: '/future.md', origin: 'program-cut' });
+    rows.push({ id: '99999999999998-eeeeeeeeeeee', at: 'soon', bytes: 5000, original: '/unreadable.md', origin: 'program-cut' });
+    fs.writeFileSync(ip, JSON.stringify(rows));
+    const s = sweepFatBin(proj, { now, storeBytes: 100 }); // a 200-byte budget
+    const ids = listBin(proj, FAT_BIN_NAME).map((r) => r.id);
+    assert.ok(ids.includes(r1), `the real 3-day-old copy survives the doubt items: ${JSON.stringify(s)}`);
+    assert.ok(ids.includes(r2), 'the newest real copy survives');
+    assert.strictEqual(s.destroyed, 0, 'nothing is destroyed: the real copies are within the budget');
+  } finally { clean(proj); }
+});

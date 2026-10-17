@@ -120,7 +120,8 @@ const WEEK_MS = 7 * DAY_MS;
 //               per kill so "rules say 48h but it died at 25h" is auditable).
 //   capConflict null, or { budgetBytes, keptBytes } when the kept mass still
 //               exceeds the cap after every PERMITTED eviction (the floor +
-//               retrievability/doubt protections outweigh the budget) — the
+//               retrievability protections outweigh the budget; a doubt item
+//               weighs nothing, so keptBytes never counts one) — the
 //               unsatisfiable-config signal the caller must surface loudly.
 // Slotting is by fixed epoch buckets (floor(at / DAY_MS) days, epoch weeks),
 // deterministic and timezone-free: an item's slot identity never changes as
@@ -192,8 +193,11 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
   // land here) are NEVER size-evicted: keep on doubt, the broom asymmetry.
   if (Number.isFinite(budgetBytes)) {
     const weight = (i) => { const b = Number(i && i.bytes); return Number.isFinite(b) && b > 0 ? b : 0; };
+    // INSPECT 109: a doubt item weighs NOTHING in the total, the same asymmetry the eviction side uses. It is never
+    // evictable, so counting it could only evict a real copy to make room for it (a planted future-dated row or blob).
+    const doubt = (i) => { const at = Number(i && i.at); return !Number.isFinite(at) || at > now; };
     let total = 0;
-    for (const i of keep) total += weight(i);
+    for (const i of keep) if (!doubt(i)) total += weight(i);
     if (total > budgetBytes) {
       // Weighted, non-doubt survivors, oldest first (stable: same-ms keeps
       // append order). The NEWEST of these — whatever its age — anchors
@@ -201,7 +205,7 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
       // self-empties. (When it is young it is floor-protected anyway; the
       // anchor only bites on an all-old bin.)
       const weighted = keep
-        .filter((i) => Number.isFinite(Number(i && i.at)) && Number(i.at) <= now && weight(i) > 0)
+        .filter((i) => !doubt(i) && weight(i) > 0)
         .sort((a, b) => Number(a.at) - Number(b.at));
       const newest = weighted[weighted.length - 1];
       // THE TIME FLOOR (snapper's min the space pass may not cross, made an
@@ -237,7 +241,7 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
         }
       }
       // Every PERMITTED eviction done and still over: the cap and the floor
-      // (plus newest/doubt protections) contradict each other. Prometheus
+      // (plus the newest-copy anchor) contradict each other. Prometheus
       // counts bytes it cannot delete and lets a low cap become quietly
       // unsatisfiable; here the same arithmetic is REPORTED instead — the
       // bin runs over budget and the caller must say so.

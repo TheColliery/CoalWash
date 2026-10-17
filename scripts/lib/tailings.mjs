@@ -93,7 +93,10 @@ const BIN_LOCK_STALE_MS = 5000;
 // by nothing outside a test.
 // `beforeIndexSave(dir)` (P95-1): called inside recordBinItem's critical section, after the index is loaded and the new row
 // pushed, right before it is saved, so a test can stall a holder past the stale window deterministically. null in production.
-export const __testHooks = { binLockAttempts: 0, beforeIndexSave: null };
+// `beforeBlobLink(tmp)` (E1 t173): called after a copy's bytes are written and synced to its temp, right before the temp is
+// linked to the copy's id, so a test can kill a writer at that point. `linkSync` replaces fs.linkSync so a test can stand
+// in for a filesystem without hard links. Both null in production.
+export const __testHooks = { binLockAttempts: 0, beforeIndexSave: null, beforeBlobLink: null, linkSync: null };
 
 // CWK-137: a bin is `<project>/.claude/coalwash/<name>` -- repo-plantable. ownSandboxDir
 // THROWS when any directory between the project root and the bin is a link, and
@@ -128,6 +131,53 @@ export function isBareId(id) {
 // what it holds; this only adds what it is missing. Only names in recordBinItem's own id shape count, and only plain
 // files, so index.json, its temps, .gitignore and the lock are never listed.
 const BLOB_ID = /^\d+-[0-9a-f]{12}$/;
+// E1 t173: a copy's bytes go to a temp in this shape first (BLOB_ID never matches it, so loadIndex never lists one); the id
+// name is a hard link made only after the temp is whole and synced. A temp a killed writer left behind is removed by the
+// next sweep (removeStaleTemps below).
+const BLOB_TEMP = /^\d+-[0-9a-f]{12}\.[0-9a-f]{12}\.part$/;
+// The codes a filesystem without hard links answers linkSync with (FAT/exFAT, some network and cloud mounts).
+const NO_HARD_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS']);
+function writeBlobWhole(dir, id, body) {
+  const final = path.join(dir, id);
+  const tmp = path.join(dir, `${id}.${crypto.randomBytes(6).toString('hex')}.part`);
+  let made = false;
+  try {
+    const fd = fs.openSync(tmp, 'wx'); // a fresh inode or EEXIST, never a write through an entry planted at the name
+    made = true;
+    try { fs.writeFileSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    if (typeof __testHooks.beforeBlobLink === 'function') __testHooks.beforeBlobLink(tmp);
+    try {
+      (__testHooks.linkSync || fs.linkSync)(tmp, final); // EEXIST stays a failure: the id never names an entry already there
+    } catch (e) {
+      if (!(e && NO_HARD_LINKS.has(e.code))) throw e;
+      // shortcut: no hard links here, so the copy is written at its id directly (the pre-t173 path); a writer killed
+      // mid-write on such a filesystem still leaves a torn copy that loadIndex lists. Upgrade if such a mount is ever measured.
+      fs.writeFileSync(final, body, { flag: 'wx' });
+    }
+  } finally {
+    if (made) { try { fs.unlinkSync(tmp); } catch { /* a leftover temp is removed by the next sweep */ } }
+  }
+}
+// Called with the bin lock held: every temp in BLOB_TEMP's shape older than the lock's stale window belongs to a writer
+// that died (a live writer holds the lock while its temp exists). Narrow: names in that shape, plain files only (a link
+// or a folder in that shape is left alone), unlinked one by one. The age is read on the live clock, never the caller's
+// `now`, the same rule acquireLock judges staleness by.
+function removeStaleTemps(dir, { dryRun = false } = {}) {
+  const gone = [];
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return gone; }
+  for (const f of names) {
+    if (!BLOB_TEMP.test(f)) continue;
+    const p = path.join(dir, f);
+    try {
+      const st = fs.lstatSync(p);
+      if (!st.isFile() || Date.now() - st.mtimeMs <= BIN_LOCK_STALE_MS) continue;
+      if (!dryRun) fs.unlinkSync(p);
+      gone.push(f);
+    } catch { /* left for the next pass */ }
+  }
+  return gone;
+}
 function loadIndex(dir) {
   let index = [];
   try {
@@ -282,10 +332,10 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     // (security.md: never Math.random for anything security-relevant).
     const id = `${now}-${crypto.randomBytes(6).toString('hex')}`;
     const body = Buffer.isBuffer(content) ? content : Buffer.from(typeof content === 'string' ? content : '', 'utf8');
-    // 'wx' = a fresh inode, or EEXIST-fail-closed — never write THROUGH an alias
-    // planted at the blob path. A pre-existing entry at a brand-new id IS an error,
-    // so O_EXCL here costs no legitimate operation (the U7 temp/destination split).
-    fs.writeFileSync(path.join(dir, id), body, { flag: 'wx' }); // NO encoding argument: raw bytes
+    // A fresh inode, or EEXIST-fail-closed — never write THROUGH an alias planted at the blob path. A pre-existing
+    // entry at a brand-new id IS an error, so the exclusive create/link costs no legitimate operation (the U7
+    // temp/destination split). E1 t173: the id appears only once the bytes are whole (writeBlobWhole). Raw bytes.
+    writeBlobWhole(dir, id, body);
     // bytes (0i): the size-cap layer's weight — recorded at birth so the
     // sweep never has to re-stat the common case.
     const row = { id, at: now, bytes: body.length, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' };
@@ -378,12 +428,17 @@ function appendOwnLog(file, text) {
 // is destroyed and the items are all still there.
 function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
   const peek = loadIndex(dir);
-  if (!peek.length) return { destroyed: 0, kept: 0 };
+  // E1 t173: a bin holding only a dead writer's temp is still swept, or that temp (a copy of memory content) would stay.
+  if (!peek.length && !removeStaleTemps(dir, { dryRun: true }).length) return { destroyed: 0, kept: 0 };
   const lock = acquireBinLock(dir);
   if (!lock.acquired) return { destroyed: 0, kept: peek.length };
   try { return sweepBinLocked(dir, horizonMs, now, budgetBytes, lock); } finally { lock.release(); }
 }
 function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
+  const temps = removeStaleTemps(dir); // E1 t173: inside the lock, which a live writer holds while its temp exists
+  if (temps.length) {
+    try { appendOwnLog(path.join(dir, DEATH_LOG_NAME), temps.map((f) => `${new Date(now).toISOString()} removed unfinished temp ${f} (a writer died before the copy was named)`).join('\n') + '\n'); } catch { /* a record, not a gate */ }
+  }
   const index = loadIndex(dir); // re-read INSIDE the lock: the peek above may be stale by now
   if (!index.length) return { destroyed: 0, kept: 0 };
   // Legacy index entries (pre-0i) carry no bytes — weigh them by a one-time
@@ -423,12 +478,12 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
     }
   }
   // The unsatisfiable-cap audit line (retention.mjs capConflict): the floor +
-  // retrievability/doubt protections outweigh the byte budget, so the bin is
+  // retrievability protections outweigh the byte budget (doubt items weigh nothing), so the bin is
   // deliberately over cap this run. Logged here (the bin's own audit trail)
   // AND surfaced on the sweep's return for the caller's receipt — a config
   // conflict resolved by silence is the senior-domain failure not to port.
   if (capConflict) {
-    cert.push(`${new Date(now).toISOString()} cap-conflict kept ${capConflict.keptBytes}B > budget ${capConflict.budgetBytes}B — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor (+ newest/doubt protections) exceeds the cap; bin over budget this run, nothing young destroyed`);
+    cert.push(`${new Date(now).toISOString()} cap-conflict kept ${capConflict.keptBytes}B > budget ${capConflict.budgetBytes}B — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor (+ the newest-copy anchor) exceeds the cap; bin over budget this run, nothing young destroyed`);
   }
   if (cert.length) {
     try { fs.mkdirSync(dir, { recursive: true }); appendOwnLog(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n'); } catch { /* the certificate is a record, not a gate */ }
