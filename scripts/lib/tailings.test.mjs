@@ -817,8 +817,12 @@ test('E1 t173: the next sweep removes a dead writer\'s temp older than the stale
     const other = 'notes.part';
     for (const f of [old, fresh, other]) fs.writeFileSync(path.join(bin, f), 'memory content');
     fs.mkdirSync(path.join(bin, folder));
-    const past = (Date.now() - 60000) / 1000; // a minute old: past the 5 s bin-lock stale window
-    for (const f of [old, other, folder]) fs.utimesSync(path.join(bin, f), past, past);
+    // E1 t180: every mtime is fixed from one reference, an hour either side of it. removeStaleTemps reads the live clock
+    // by design, so `fresh` is set an hour AHEAD: it stays fresh unless the test pauses an hour, past the suite's own
+    // per-test clock (TEST_TIMEOUT_MS, scripts/lib/test-plan.mjs); the others sit an hour behind the 5 s stale window.
+    const ref = Date.now() / 1000;
+    for (const f of [old, other, folder]) fs.utimesSync(path.join(bin, f), ref - 3600, ref - 3600);
+    fs.utimesSync(path.join(bin, fresh), ref + 3600, ref + 3600);
     sweepFatBin(proj, { storeBytes: 1000 });
     const names = fs.readdirSync(bin);
     assert.ok(!names.includes(old), `the stale temp is removed: ${names.join(', ')}`);
@@ -869,13 +873,23 @@ test('INSPECT 114 R114-1: a Windows FAT or exFAT volume answers EISDIR for a har
 
 test('E1 t173: a link refused because the id name already exists records nothing (no write through or over that entry) and leaves no temp', () => {
   const proj = sandbox();
-  const prev = __testHooks.linkSync;
+  const prev = __testHooks.beforeBlobLink;
   try {
-    __testHooks.linkSync = () => { const e = new Error('exists'); e.code = 'EEXIST'; throw e; };
-    assert.strictEqual(recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' }), null);
-    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), []);
-    assert.ok(!fs.readdirSync(binDirOf(proj)).some((f) => TEMP_SHAPE.test(f) || BLOB_ID_SHAPE.test(f)), 'no temp and no copy are left');
-  } finally { __testHooks.linkSync = prev; clean(proj); }
+    // E1 t180: a real entry is planted at the id the writer is about to link, so the REAL linkSync fails with EEXIST and
+    // the planted bytes are there to be overwritten if anything wrote through or over them.
+    let planted = null;
+    __testHooks.beforeBlobLink = (tmp) => {
+      planted = path.join(path.dirname(tmp), path.basename(tmp).split('.')[0]);
+      fs.writeFileSync(planted, 'planted bytes');
+    };
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' });
+    assert.ok(planted, 'the hook planted an entry at the id');
+    assert.strictEqual(fs.readFileSync(planted, 'utf8'), 'planted bytes', 'the entry already at the id is never written through or over');
+    assert.strictEqual(id, null, 'the copy is not recorded');
+    // loadIndex lists the planted id-shaped file itself (its reconcile, original unknown); no row carries this copy's original.
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME).map((r) => [r.id, r.original]), [[path.basename(planted), null]]);
+    assert.ok(!fs.readdirSync(binDirOf(proj)).some((f) => TEMP_SHAPE.test(f)), 'no temp is left');
+  } finally { __testHooks.beforeBlobLink = prev; clean(proj); }
 });
 
 test('INSPECT 109: a doubt item (a future or unreadable time) weighs nothing in the size cap, so a real past-floor copy is never evicted to make room for it', () => {
