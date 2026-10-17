@@ -189,7 +189,7 @@ console.log(JSON.stringify(listBin('[PROJECT_ROOT]', FAT_BIN_NAME), null, 1));
 "
 ```
 
-Each entry is `{id, at, bytes, original, origin}` — render one line per item (id · date · original path · origin) for the human/agent to pick from. Then restore exactly ONE id with the dedicated CLI (searches both bins, fat first, and reports which held it):
+Each entry is `{id, at, bytes, original, origin}` — render one line per item (id · date · original path · origin) for the human/agent to pick from; an entry reconciled from a copy whose row was lost has `original` and `origin` `null`, so show its original path as unknown. Then restore exactly ONE id with the dedicated CLI (searches both bins, fat first, and reports which held it):
 
 ```bash
 node [LIB]/cli.mjs restore [ITEM_ID] > recovered.md

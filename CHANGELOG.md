@@ -2,6 +2,16 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.12.9] - 2026-10-17
+
+A recovery copy in a bin is never left out of the bin catalogue
+
+A writer robbed of a bin lock no longer drops another writer's catalogue row, and a copy that still lacks a row is listed again. Nothing is removed from the plugin and no command or config key changes. The installed plugin moved: `scripts/lib/tailings.mjs` and `scripts/lib/apply.mjs` with their `plugin/` twins (`git diff --stat 10dc076 HEAD -- plugin/`: 2 files, 51 insertions, 13 deletions), and the version in `plugin.json`.
+
+### Fixed
+
+- **A recovery copy in a bin is never left out of the bin's catalogue (P95-1).** A writer that stalled past the bin lock's 5-second stale window (`BIN_LOCK_STALE_MS`, unchanged) could be robbed of the lock; the second writer saved its catalogue row, and the stalled writer then saved the catalogue it had read before, so that row vanished while its copy stayed on disk, unlisted and invisible to `restore` (seen as 76 rows for 84 copies at full CPU load). Now `acquireLock` (`scripts/lib/apply.mjs`) returns `owns()`, true while the lock file still holds the holder's token, and a robbed writer re-reads the catalogue on disk and adds to it instead: `recordBinItem` for its own row, `sweepBinLocked` (the second writer of `index.json`) for the rows left after what it destroyed. A copy that still ends up without a row (a theft landing between the ownership check and the save, or a writer that died between its copy and its save) is listed again by `loadIndex` from the copy itself: its id, the time the id carries and its size by stat; its original path and origin, which only the row held, read as unknown (`null`). Only names in `recordBinItem`'s id shape and plain files count, so `index.json`, its temps, `.gitignore` and the lock are never listed. Tests in `scripts/lib/tailings.test.mjs`: `P95-1: a writer stalled past the stale window while a second writer steals the bin lock leaves both rows in the catalogue, with their originals`; `P95-1: a blob on disk whose row a lost save dropped is still listed (reconciled from the blob, sized by stat), and nothing else in the bin folder is`; `P95-1: a sweep stalled past the stale window while a writer steals the bin lock keeps the writer's row with its original, and still destroys what it destroyed`.
+
 ## [1.12.8] - 2026-10-17
 
 Discovery no longer reads a file a project reaches outside its own tree
