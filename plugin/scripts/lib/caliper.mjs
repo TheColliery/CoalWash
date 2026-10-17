@@ -324,7 +324,9 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
     if (e.alwaysLoaded) {
       m.alwaysLoaded.files++;
       m.alwaysLoaded.bytes += e.bytes;
-      if (readSoFar + e.bytes <= readBudgetBytes) {
+      // CWK2-029 (b): a statOnly entry (a class-B file OUTSIDE the project, ~/.claude and its ancestor governance) is
+      // sized from stat and never read, whatever the budget or scanEverything says.
+      if (!e.statOnly && readSoFar + e.bytes <= readBudgetBytes) {
         try {
           // CWK-137: bounded and kind-gated. The budget above is judged on a STAT size
           // taken at discovery; the read itself trusted the path, so a file swapped or

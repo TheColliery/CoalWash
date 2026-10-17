@@ -1380,3 +1380,126 @@ test('CWK-162 A3: the same import written on 600 lines is ONE edge -- duplicates
     assert.strictEqual(d.flags.some((f) => /@import closure capped/.test(f)), false, 'no cap flag: 600 identical lines are one edge');
   } finally { clean(home, proj); }
 });
+
+// ---------------------------------------------------------------------------
+// CWK2-029 (b) REACH, the read half (INSPECT 69 witness scratchpad/16e/insp69-reach.mjs): a project-scope class-B
+// candidate whose realpath leaves the project, and is neither inside ~/.claude nor an ancestor governance file, is
+// OUTSIDE: never read for content (no @import recursion through it), never scope 'project', never in `entries`,
+// sized from stat only, and named by one flag (its path, never its content).
+// ---------------------------------------------------------------------------
+function reachSandbox() {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwreach-home-')));
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  const room = path.join(home, 'work', 'room');
+  fs.mkdirSync(path.join(room, '.git'), { recursive: true });
+  // the nested target an OUTSIDE file names: listing it anywhere proves the OUTSIDE file's content was read
+  write(path.join(home, '.ssh', 'next'), 'nested target\n');
+  return { home, room };
+}
+const allListed = (d) => [...d.entries, ...d.inherited];
+
+test('CWK2-029 (b): a plain project CLAUDE.md @import of a HOME file outside ~/.claude is OUTSIDE: never read, never scope project, sized by stat, flagged', () => {
+  const { home, room } = reachSandbox();
+  try {
+    const secret = path.join(home, '.aws', 'credentials');
+    write(secret, '[default]\naws_secret_access_key = FAKE-SECRET\n@~/.ssh/next\n' + 'a line long enough to count as a duplicate\n'.repeat(3));
+    write(path.join(home, 'loose.md'), 'loose\n@~/.ssh/next\n');
+    write(path.join(room, 'CLAUDE.md'), '# room\n@~/.aws/credentials\n@../../loose.md\n');
+    write(path.join(home, 'CLAUDE.md'), '# home\n'); // a ~/CLAUDE.md is an ancestor FILE, never a folder that admits all of HOME
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    for (const p of [secret, path.join(home, 'loose.md')]) {
+      const hit = allListed(d).filter((e) => e.path === p);
+      assert.strictEqual(hit.length, 1, `${path.basename(p)} is measured once (Claude Code may load it)`);
+      assert.notStrictEqual(hit[0].scope, 'project', `${path.basename(p)} is never tagged scope project`);
+      assert.strictEqual(hit[0].bytes, fs.statSync(p).size, `${path.basename(p)} is sized from stat`);
+      assert.ok(!d.entries.some((e) => e.path === p), `${path.basename(p)} is never in entries (knife-reachable)`);
+    }
+    assert.ok(!allListed(d).some((e) => e.path === path.join(home, '.ssh', 'next')), 'the OUTSIDE file was never read: its own @import is not followed');
+    assert.ok(d.flags.some((f) => f.includes('~/.aws/credentials')), `one flag names the OUTSIDE file: ${JSON.stringify(d.flags)}`);
+    assert.ok(d.flags.some((f) => f.includes('~/loose.md')), 'the relative ../ escape is flagged the same way');
+    assert.ok(!d.flags.some((f) => f.includes('FAKE-SECRET')), 'no flag carries the OUTSIDE file\'s content');
+    const m = measureEntries(d.inherited, { withGzip: false });
+    assert.strictEqual(m.mechFat.dupTokens, 0, 'the inherited gauge never reads the OUTSIDE file for its content (its dup lines are not counted)');
+    const read = measureEntries(d.inherited.filter((e) => e.path === secret).map((e) => ({ ...e, statOnly: false })), { withGzip: false });
+    assert.ok(read.mechFat.dupTokens > 0, 'non-vacuity: the same entry, read, does count its dup lines');
+    assert.ok(d.entries.some((e) => e.path === path.join(room, 'CLAUDE.md') && e.scope === 'project'), 'control: the room\'s own CLAUDE.md stays room-owned');
+  } finally { clean(home); }
+});
+
+test('CWK2-029 (b): a project CLAUDE.md that is a SYMLINK to a HOME file is OUTSIDE, never read (skips visibly where a file symlink cannot be made)', (t) => {
+  const { home, room } = reachSandbox();
+  try {
+    const target = path.join(home, 'notes.md');
+    write(target, '# notes\n@~/.ssh/next\n');
+    try { fs.symlinkSync(target, path.join(room, 'CLAUDE.md'), 'file'); } catch (e) {
+      t.skip(`file symlink creation unavailable on this host: ${e.code || e.message}`);
+      return;
+    }
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    const hit = allListed(d).filter((e) => e.path === target);
+    assert.strictEqual(hit.length, 1, 'the link target is measured once');
+    assert.notStrictEqual(hit[0].scope, 'project', 'the link target is never tagged scope project');
+    assert.ok(!d.entries.some((e) => e.path === target), 'the link target is never in entries');
+    assert.ok(!allListed(d).some((e) => e.path === path.join(home, '.ssh', 'next')), 'the link target was never read for @imports');
+    assert.ok(d.flags.some((f) => f.includes('~/notes.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+  } finally { clean(home); }
+});
+
+test('CWK2-029 (b): a memory store that is a directory JUNCTION to a HOME folder outside ~/.claude puts nothing in entries and reads nothing (skips visibly where a junction cannot be made)', (t) => {
+  const { home, room } = reachSandbox();
+  try {
+    const outDir = path.join(home, 'notes-dir');
+    write(path.join(outDir, 'MEMORY.md'), 'index\n@~/.ssh/next\n');
+    const mem = ccMemoryDir(room, home);
+    fs.mkdirSync(path.dirname(mem), { recursive: true });
+    try { fs.symlinkSync(outDir, mem, 'junction'); } catch (e) {
+      t.skip(`junction creation unavailable on this host: ${e.code || e.message}`);
+      return;
+    }
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    const p = path.join(outDir, 'MEMORY.md');
+    assert.ok(!d.entries.some((e) => e.path === p), 'the junctioned memory index is never in entries (knife-reachable)');
+    const hit = d.inherited.filter((e) => e.path === p);
+    assert.strictEqual(hit.length, 1, 'it is still measured, by stat');
+    assert.notStrictEqual(hit[0].scope, 'project', 'it is never tagged scope project');
+    assert.ok(d.flags.some((f) => f.includes('~/notes-dir/MEMORY.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+  } finally { clean(home); }
+});
+
+test('CWK2-029 (b) control: an ANCESTOR governance file and its own-folder @import stay the inherited tier and ARE read; a ~/.claude import from the room is not OUTSIDE', () => {
+  const { home, room } = reachSandbox();
+  try {
+    const umb = path.join(home, 'work');
+    write(path.join(umb, 'CLAUDE.md'), '# umbrella\n@AGENTS.md\n');
+    write(path.join(umb, 'AGENTS.md'), 'rules\n@~/.claude/shared.md\n');
+    write(path.join(home, '.claude', 'shared.md'), 'shared\n');
+    write(path.join(room, 'CLAUDE.md'), '# room\n');
+    write(path.join(home, '.claude', 'CLAUDE.md'), '# global\n@~/user-notes.md\n');
+    write(path.join(home, 'user-notes.md'), 'the user\'s own global chain\n');
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    assert.ok(d.entries.some((e) => e.path === path.join(home, 'user-notes.md') && e.scope === 'global'), 'the user\'s own GLOBAL chain keeps its reach: a ~/.claude/CLAUDE.md import into HOME stays a global entry');
+    const inh = d.inherited.map((e) => e.path);
+    assert.ok(inh.includes(path.join(umb, 'CLAUDE.md')) && inh.includes(path.join(umb, 'AGENTS.md')), 'the ancestor tier is unchanged');
+    assert.ok(inh.includes(path.join(home, '.claude', 'shared.md')), 'the ancestor file WAS read: its ~/.claude import is followed');
+    assert.ok(!d.flags.some((f) => /outside the project/.test(f)), `no OUTSIDE flag on the ancestor tier: ${JSON.stringify(d.flags)}`);
+  } finally { clean(home); }
+});
+
+test('CWK2-029 (b): an ANCESTOR CLAUDE.md that is a SYMLINK out of its folder is not ancestor governance: its target is OUTSIDE (skips visibly where a file symlink cannot be made)', (t) => {
+  const { home, room } = reachSandbox();
+  try {
+    const target = path.join(home, 'secret.md');
+    write(target, '# secret\n@~/.ssh/next\n');
+    try { fs.symlinkSync(target, path.join(home, 'work', 'CLAUDE.md'), 'file'); } catch (e) {
+      t.skip(`file symlink creation unavailable on this host: ${e.code || e.message}`);
+      return;
+    }
+    write(path.join(room, 'CLAUDE.md'), '# room\n');
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    const hit = allListed(d).filter((e) => e.path === target);
+    assert.strictEqual(hit.length, 1, 'the link target is measured once');
+    assert.notStrictEqual(hit[0].scope, 'project', 'the link target is never tagged scope project');
+    assert.ok(!allListed(d).some((e) => e.path === path.join(home, '.ssh', 'next')), 'the link target was never read for @imports');
+    assert.ok(d.flags.some((f) => f.includes('~/secret.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+  } finally { clean(home); }
+});

@@ -480,6 +480,38 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // room ⇒ inherited" test would silently drop the one global store CoalWash
   // actually washes out of the cap. Outside-the-room and not-the-room's are
   // different questions; only the ancestor walk asks the second one.
+  // CWK2-029 (b) REACH, the read half (INSPECT 69: a plain project CLAUDE.md holding `@~/.aws/credentials` had
+  // that HOME file listed scope 'project' and its CONTENT parsed for further @imports). A project-scope candidate
+  // whose realpath is OUTSIDE -- not inside the project, not inside ~/.claude (the global tier), not an ancestor
+  // governance file -- is never read for content (no @import recursion through it), never scope 'project', never in
+  // `entries`, sized from stat only (Claude Code may still load it, so the footprint counts it), and named by one flag
+  // (its path, never its content). LOCATION decides, never which walk queued it: a plain `@~/` import, a `@../`
+  // escape and a link out of the project are one class. Global-scope candidates are the user's own ~/.claude chain
+  // (a cloned repo cannot write it) and keep their reach.
+  // ANCESTOR GOVERNANCE (NESTED-HABITAT): each CLAUDE.md the up-tree walk finds between the room and HOME whose
+  // realpath stays in its own folder, plus everything inside such a folder strictly below HOME. HOME itself never
+  // counts as a governance folder, or one ~/CLAUDE.md would admit every file under HOME.
+  const basePhys = homePhys ? physicalOrNull(claudeBaseDir(home)) : null;
+  const ancestorFiles = new Set();
+  const ancestorDirs = [];
+  if (projPhys && homePhys && projPhys !== homePhys && containedIn(projPhys, [homePhys])) {
+    for (let dir = path.dirname(projPhys); ; dir = path.dirname(dir)) {
+      const cl = physicalOrNull(path.join(dir, 'CLAUDE.md'));
+      if (cl && path.dirname(cl) === dir) {
+        ancestorFiles.add(cl);
+        if (dir !== homePhys) ancestorDirs.push(dir);
+      }
+      if (dir === homePhys || path.dirname(dir) === dir) break;
+    }
+  }
+  const isOutside = (phys) => !(projPhys && containedIn(phys, [projPhys]))
+    && !(basePhys && containedIn(phys, [basePhys]))
+    && !ancestorFiles.has(phys)
+    && !containedIn(phys, ancestorDirs);
+  const outsideLabel = (phys) => (homePhys && containedIn(phys, [homePhys])
+    ? `~/${path.relative(homePhys, phys).split(path.sep).join('/')}`
+    : phys);
+
   const add = (candidate, { scope, kind, alwaysLoaded, upTree = false }) => {
     const phys = physicalOrNull(candidate);
     if (!phys) {
@@ -501,6 +533,19 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       // same disambiguation lesson as the residue/coverage lines, pointing the
       // other way here). RULED, not a residue: do not "fix" this into a basename.
       flags.push(`skipped (outside home/project trees): ${candidate}`);
+      return null;
+    }
+    if (scope !== 'global' && isOutside(phys)) {
+      // CWK2-029 (b): null, never phys, so addWithImports never reads it and no walk treats it as an entry.
+      if (isSeen(phys)) return null;
+      const bytes = statBytes(phys);
+      if (bytes == null) {
+        flags.push(`unstattable file: ${outsideLabel(phys)} — its bytes are NOT counted`);
+        return null;
+      }
+      markSeen(phys);
+      inherited.push({ path: phys, bytes, scope: 'outside', kind, alwaysLoaded, managed: false, statOnly: true });
+      flags.push(`outside the project, ~/.claude and its ancestor governance (${kind}): ${outsideLabel(phys)} — sized by stat only, never read, never washed`);
       return null;
     }
     if (isSeen(phys)) return phys;
