@@ -266,6 +266,7 @@ try {
   } else {
     const { checkPointers, deriveIgnoredRoots } = await import(pathToFileURL(path.join(repo, 'scripts', 'pointer-check.mjs')).href);
     const { projectConfigCandidates } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'config-load.mjs')).href);
+    const { escapesRoot } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'repo-fs.mjs')).href); // the one first-segment rule, never a lexical startsWith
     const tracked = new Set(lsAll.stdout.split('\n').filter(Boolean));
     const trackedDirs = new Set();
     for (const f of tracked) {
@@ -277,8 +278,10 @@ try {
     // enumerated, so the set cannot rot the day that order changes.
     const agentHomes = new Set();
     for (const c of projectConfigCandidates(repo, os.homedir())) {
-      const r = path.relative(repo, c).split(path.sep).join('/');
-      if (!r || r.startsWith('..') || path.isAbsolute(r) || !r.includes('/')) continue;
+      const raw = path.relative(repo, c); // escapesRoot reads the native separator, so it runs before the '/' rewrite
+      if (!raw || escapesRoot(raw)) continue;
+      const r = raw.split(path.sep).join('/');
+      if (!r.includes('/')) continue;
       const first = r.split('/')[0];
       if (first.startsWith('.') && first.length > 1) agentHomes.add(first);
     }

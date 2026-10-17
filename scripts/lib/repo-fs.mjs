@@ -72,7 +72,7 @@ function plainDirOrMissing(cur) {
 
 // Is a path.relative(root, x) result outside the root? A test on the FIRST path segment (`..` alone, `..` plus the separator,
 // or an absolute path on another drive), never a lexical prefix: a real child folder named `..cfg` is inside.
-function escapesRoot(rel) {
+export function escapesRoot(rel) {
   return rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel);
 }
 

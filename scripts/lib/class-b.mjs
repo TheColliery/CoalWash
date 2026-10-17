@@ -45,6 +45,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape, repoEntryKind, repoReadOutcome, readRepoBytesBounded, volumeCaseFolds, MAX_DOC_BYTES } from './config-load.mjs';
+import { escapesRoot } from './repo-fs.mjs';
 
 const IMPORT_DEPTH_MAX = 5; // CC @import recursion cap (docs: max 5 hops)
 // CWK-162 (AI Deep Scan A3): the closure had a DEPTH cap and no visited set, so one CLAUDE.md of 8 self-imports was read
@@ -198,11 +199,11 @@ function refusalFlag(what, label, code) {
 // sandbox-invariant, so a flag can never carry a tmpdir or a drive letter into
 // a surface an equivalence test compares across two roots. Purely lexical, so
 // it works on the unresolved path that just refused to canonicalize.
-function relLabel(candidate, roots) {
+export function relLabel(candidate, roots) {
   for (const r of roots) {
     if (!r) continue;
     const rel = path.relative(r, candidate);
-    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
+    if (rel && !escapesRoot(rel)) return rel.split(path.sep).join('/');
   }
   return path.basename(candidate) || String(candidate);
 }
@@ -240,7 +241,7 @@ export function containedIn(p, roots) {
     // admit anything, and an all-non-canonical root set therefore returns false.
     if (!root || !isCanonicalShape(root)) continue;
     const rel = path.relative(root, p);
-    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return true;
+    if (rel === '' || !escapesRoot(rel)) return true;
   }
   return false;
 }

@@ -21,7 +21,7 @@ import { spawnSync } from 'node:child_process';
 import {
   MAX_CONFIG_BYTES, MAX_DOC_BYTES, repoEntryKind, repoReadOutcome, readRepoFileBounded, readRepoBytesBounded, loadMergedConfig,
 } from './config-load.mjs';
-import { ownSandboxDir, RepoWriteRefused, writeRepoFile } from './repo-fs.mjs';
+import { ownSandboxDir, RepoWriteRefused, writeRepoFile, escapesRoot } from './repo-fs.mjs';
 import { sweepWriteguard, snapshotOnFirstWrite } from './writeguard.mjs';
 import { recordBinItem, restoreFromBin, sweepFatBin, readDeathLog, FAT_BIN_NAME } from './tailings.mjs';
 import { acquireLock, applyPlan, sweepSnapshots, verifySnapshot, LOCK_STALE_MS } from './apply.mjs';
@@ -865,4 +865,12 @@ test('R86-1: the walk\'s refusals carry their kind: a link and a file in the way
   fs.writeFileSync(path.join(project, '.claude'), 'x');
   assert.throws(() => mkdirRepoParents(path.join(project, '.claude', 'coal'), project), { folder: path.join(project, '.claude'), kind: 'not-dir' });
   assert.throws(() => mkdirRepoParents(path.join(outside, 'x'), project), { folder: path.join(outside, 'x'), kind: 'escape' });
+});
+
+test('CWK2-051: escapesRoot tests the FIRST path segment: ..x and ..cfg are inside, .. and ../a and an absolute path are outside', () => {
+  assert.strictEqual(escapesRoot('..x'), false);
+  assert.strictEqual(escapesRoot(path.join('..cfg', 'a')), false);
+  assert.strictEqual(escapesRoot('..'), true);
+  assert.strictEqual(escapesRoot(path.join('..', 'a')), true);
+  assert.strictEqual(escapesRoot(path.resolve('/abs')), true);
 });

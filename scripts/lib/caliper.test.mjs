@@ -568,6 +568,22 @@ test('(c) containment: containedNewPath accepts an in-sandbox path, rejects an o
   } finally { clean(home, proj); }
 });
 
+test('CWK2-051: containedNewPath reads a real child folder named ..x / ..cfg as INSIDE, and a real ../sibling as outside', () => {
+  const { home, proj } = sandbox();
+  const base = path.join(home, '.claude');
+  fs.mkdirSync(path.join(base, '..x'), { recursive: true });
+  fs.mkdirSync(path.join(base, '..cfg'), { recursive: true });
+  try {
+    assert.strictEqual(containedNewPath(path.join(base, '..x', 'state.json'), base), true, 'a folder named ..x under base is inside');
+    assert.strictEqual(containedNewPath(path.join(base, '..cfg', 'deep', 'state.json'), base), true, 'a folder named ..cfg under base is inside');
+    assert.strictEqual(containedNewPath(path.join(base, '..', 'sibling', 'state.json'), base), false, 'a real ../sibling still escapes');
+    // base absent (a fresh install's ~/.claude): no existing sub-tree to escape through, so the lexical gate alone governs
+    const fresh = path.join(home, 'fresh-claude');
+    assert.strictEqual(containedNewPath(path.join(fresh, '..x', 'state.json'), fresh), true, 'absent base: ..x under it is inside');
+    assert.strictEqual(containedNewPath(path.join(fresh, '..', 'sibling', 'state.json'), fresh), false, 'absent base: a real ../sibling is refused by the lexical gate alone');
+  } finally { clean(home, proj); }
+});
+
 test('(c2) containment fail-closed: a projects/<slug> dir symlinked OUT of ~/.claude → statePath falls back to coal/, never writes outside', (t) => {
   const { home, proj } = sandbox();
   const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));

@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ccProjectSlug, ccMemoryDir, parseImports, discoverClassB, discoverRoleMemories, detectPlatform, containedIn, physicalOrNull, physicalForCreate, isCloudPlaceholder } from './class-b.mjs';
+import { ccProjectSlug, ccMemoryDir, parseImports, discoverClassB, discoverRoleMemories, detectPlatform, containedIn, relLabel, physicalOrNull, physicalForCreate, isCloudPlaceholder } from './class-b.mjs';
 import { measureEntries } from './caliper.mjs';
 import { spawnSync } from 'node:child_process';
 
@@ -344,6 +344,20 @@ test('containedIn / physicalOrNull primitives behave (equal counts as inside; ab
     assert.strictEqual(containedIn(path.resolve(home, '..'), [home]), false);
     assert.strictEqual(containedIn(null, [home]), false);
     assert.strictEqual(physicalOrNull(path.join(home, 'nope', 'nope.md')), null);
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-051: containedIn and relLabel read a real child folder named ..x / ..cfg as INSIDE the root, and ../sibling as outside', () => {
+  const { home, proj } = sandbox();
+  fs.mkdirSync(path.join(home, '..x'), { recursive: true });
+  fs.mkdirSync(path.join(home, '..cfg'), { recursive: true });
+  try {
+    assert.strictEqual(containedIn(path.join(home, '..x', 'f.md'), [home]), true, 'containedIn: ..x under the root is inside');
+    assert.strictEqual(containedIn(path.join(home, '..cfg'), [home]), true, 'containedIn: ..cfg under the root is inside');
+    assert.strictEqual(containedIn(path.join(home, '..', 'sibling'), [home]), false, 'containedIn: a real ../sibling is outside');
+    assert.strictEqual(relLabel(path.join(home, '..x', 'f.md'), [home]), '..x/f.md', 'relLabel: ..x keeps its root-relative label');
+    assert.strictEqual(relLabel(path.join(home, '..cfg', 'a', 'b.md'), [home]), '..cfg/a/b.md', 'relLabel: ..cfg keeps its root-relative label');
+    assert.strictEqual(relLabel(path.join(home, '..', 'sibling', 'z.md'), [home]), 'z.md', 'relLabel: a real ../sibling falls to the basename, never a ../ label');
   } finally { clean(home, proj); }
 });
 

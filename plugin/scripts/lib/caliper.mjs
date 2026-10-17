@@ -90,7 +90,7 @@ import { parseJsonc } from './jsonc.mjs';
 // + the SAME realpath containment primitives (physicalOrNull/containedIn) the
 // write path uses — never a re-hardcoded path or a hand-rolled containment.
 import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
-import { openPlainFile } from './repo-fs.mjs';
+import { openPlainFile, escapesRoot } from './repo-fs.mjs';
 
 // ---------------------------------------------------------------------------
 // constants — PLACEHOLDERS, calibrate at the fidelity benchmark (2026-07-08
@@ -732,7 +732,7 @@ export function externalizableResidue(entries, { top = 3 } = {}) {
 // #10 — a derived path never writes outside ~/.claude).
 export function containedNewPath(target, base) {
   const relLex = path.relative(base, target);
-  if (relLex !== '' && (relLex.startsWith('..') || path.isAbsolute(relLex))) return false; // lexical escape
+  if (relLex !== '' && escapesRoot(relLex)) return false; // lexical escape
   const basePhys = physicalOrNull(base);
   if (!basePhys) return true; // base not created yet: no existing sub-tree to escape; lexical suffices
   let anc = path.resolve(target);
