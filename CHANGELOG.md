@@ -6,7 +6,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 A recovery copy in a bin is never left out of the bin catalogue
 
-A writer robbed of a bin lock no longer drops another writer's catalogue row, and a copy that still lacks a row is listed again. Nothing is removed from the plugin and no command or config key changes. The installed plugin moved: `scripts/lib/tailings.mjs` and `scripts/lib/apply.mjs` with their `plugin/` twins (`git diff --stat 10dc076 HEAD -- plugin/`: 2 files, 51 insertions, 13 deletions), and the version in `plugin.json`.
+A writer robbed of a bin lock no longer drops another writer's catalogue row, and a copy that still lacks a row is listed again. Nothing is removed from the plugin and no command or config key changes. The installed plugin moved in four files (`git diff --stat 10dc076 HEAD -- plugin/`: 4 files, 53 insertions, 15 deletions): the `plugin/` twins of `scripts/lib/tailings.mjs` and `scripts/lib/apply.mjs` (`git diff --stat 10dc076 HEAD -- plugin/scripts/lib/`: 2 files, 51 insertions, 13 deletions), the bin-list line of `skills/coalwash/references/method.md` and its twin, and the version in `plugin.json`.
 
 ### Fixed
 
