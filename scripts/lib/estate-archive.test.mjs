@@ -1153,6 +1153,7 @@ test('fire 119: an ULTRA run robbed of its global lock stops before its next arc
     assert.ok(shot, 'the theft happened inside the run');
     assert.strictEqual(res.ok, false, JSON.stringify(res));
     assert.strictEqual(res.robbed, 'global');
+    assert.strictEqual(res.lockLost, 'stolen', 'a foreign token is a theft (fire 122)');
     assert.ok(res.error.includes('lock stolen') && res.error.includes('stopped before the archive copy of') && res.error.includes('every original of this session is kept'), res.error);
     assert.deepStrictEqual(treeOf([home, proj]), shot, 'the robbed run wrote and removed nothing after the theft');
     for (const p of [files.jsonl, files.meta, files.tool]) assert.strictEqual(fs.existsSync(p), true, `${path.basename(p)} kept`);
@@ -1225,4 +1226,53 @@ test('fire 119: a cold-session ULTRA run robbed after its deletes stops before t
     const log = path.join(resolveArchiveDir(estateCfg(), r.home), ccProjectSlug(r.proj), 'death.log');
     assert.strictEqual(fs.existsSync(log), false, 'no death-log record was written');
   } finally { clean(r.home, r.proj); }
+});
+
+// fire 122: another program holding the lock file open with a share mode that refuses reads makes its READ opens fail with
+// EBUSY; this does exactly that, n times once armed (the house's fs-patch seam, as the fire-119 legs use).
+function faultLockReads(lockPath, { n = Infinity } = {}) {
+  const real = fs.openSync;
+  const want = path.resolve(lockPath);
+  const f = { armed: false, n, hits: 0 };
+  fs.openSync = function patched(p, flags, ...rest) {
+    const isRead = typeof flags === 'number' && (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0;
+    if (f.armed && isRead && f.n > 0 && path.resolve(String(p)) === want) { f.n--; f.hits++; throw Object.assign(new Error(`EBUSY: resource busy or locked, open '${p}'`), { code: 'EBUSY' }); }
+    return real.call(fs, p, flags, ...rest);
+  };
+  f.restore = () => { fs.openSync = real; };
+  return f;
+}
+
+test('fire 122: an ULTRA run whose global lock file stays unreadable stops with an honest refusal (no theft claimed), keeps every original, and names the lock it left', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  try {
+    const files = seedSession(home, proj, 'sess-f122', 40);
+    const gzip = (buf) => { fault.armed = true; return zlib.gzipSync(buf); };
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg(), gzip });
+    fault.restore();
+    assert.strictEqual(res.robbed, 'global', JSON.stringify(res));
+    assert.strictEqual(res.lockLost, 'unreadable');
+    assert.ok(res.error.startsWith(`lock unreadable: this ULTRA run could not read its own lock file ${globalLockPath(home)} for about 1 second(s) (EBUSY)`), res.error);
+    assert.ok(!res.error.includes('took over'), res.error);
+    for (const p of [files.jsonl, files.meta, files.tool]) assert.strictEqual(fs.existsSync(p), true, `${path.basename(p)} kept`);
+    assert.ok(res.lockLeft && res.lockLeft.includes('so it was left in place'), JSON.stringify(res));
+    assert.ok(runEstateReport(res).includes(`LOCK LEFT: ${res.lockLeft}`), runEstateReport(res));
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), true, 'a lock it cannot prove is its own is never deleted');
+  } finally { fault.restore(); clean(home, proj); }
+});
+
+test('fire 122: an ULTRA run whose global lock file turns unreadable after a session is archived stops before its index row with the honest refusal', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  const real = fs.rmdirSync;
+  try {
+    seedSession(home, proj, 'sess-f122i', 40);
+    fs.rmdirSync = function patched(p, ...rest) { fault.armed = true; return real.call(fs, p, ...rest); };
+    let res;
+    try { res = runEstate({ projectRoot: proj, home, estate: estateCfg() }); } finally { fs.rmdirSync = real; fault.restore(); }
+    assert.strictEqual(res.lockLost, 'unreadable', JSON.stringify(res));
+    assert.ok(res.error.startsWith('lock unreadable: this ULTRA run') && res.error.includes('stopped before the index row of session sess-f122i'), res.error);
+    assert.strictEqual(res.archived.length, 1);
+  } finally { fs.rmdirSync = real; fault.restore(); clean(home, proj); }
 });

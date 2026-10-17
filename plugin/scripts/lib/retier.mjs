@@ -51,7 +51,7 @@ import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCre
 import { tokensEst } from './caliper.mjs';
 import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
-import { applyPlan, acquireLock, globalLockPath, isPinned, LOCK_STALE_MS } from './apply.mjs';
+import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 
@@ -832,8 +832,17 @@ export function runRetier({
   // holder wrote since). The archive copies it already wrote stay, so a topic it deleted is never left without its copy.
   // The writes INSIDE applyPlan are fenced by applyPlan's own project lock, which guards those files.
   const kept = [];
-  const stolen = (where, state) => (lock.owns() ? null : { ok: false, robbed: 'global', env, kept, error: `lock stolen: another CoalWash run took over the global lock this RE-TIER run held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where}, with no clean-up and no rollback. ${state}` });
-  try {
+  // fire 122: only a foreign token is a theft; a lock file that stays unreadable through the retries stops the run with its
+  // own message (lockLostHead). Both keep `robbed`; `lockLost` says which.
+  const stolen = (where, state) => {
+    const s = lock.state();
+    if (s.state === 'own') return null;
+    const head = lockLostHead(s, { run: 'RE-TIER run', file: globalLockPath(home), where, after: 'with no clean-up and no rollback' });
+    return { ok: false, robbed: 'global', lockLost: s.state === 'unreadable' ? 'unreadable' : 'stolen', env, kept, error: `${head} ${state}` };
+  };
+  let out;
+  let rel;
+  try { out = (() => { // fire 122: the body's returns land in `out`, so the release below can be reported on every result
     const archiveDir = resolveArchiveDir(estate, home);
     const untouched = () => `nothing in the memory store was touched; the ${gzWritten.length} archive copy(ies) already written stay in ${archiveDir}`;
     // Write-side containment root (the SAME guard as archiveSession — loss
@@ -1098,12 +1107,20 @@ export function runRetier({
         shortfall: p.hop1.shortfall,
       })),
     };
-  } finally {
-    lock.release();
+  })(); } finally {
+    rel = lock.release();
   }
+  const lockLeft = lockLeftNote(globalLockPath(home), rel);
+  return lockLeft ? { ...out, lockLeft } : out;
 }
 
+// fire 122: a lock the release had to leave behind is named under every report shape.
 export function runRetierReport(res) {
+  const body = retierReportBody(res);
+  return res && res.lockLeft ? `${body}\n  LOCK LEFT: ${res.lockLeft}` : body;
+}
+
+function retierReportBody(res) {
   if (!res) return '[CoalWash] RE-TIER: no result';
   if (res.refused) return `[CoalWash] RE-TIER refused: ${res.reason}`;
   if (res.deferred) return `[CoalWash] RE-TIER deferred: ${res.error || 'lock held'} — nothing touched`;

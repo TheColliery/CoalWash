@@ -1444,6 +1444,7 @@ test('fire 119: a RE-TIER run robbed of its global lock before an archive copy s
     assert.ok(shot, 'the theft happened inside the run');
     assert.strictEqual(res.ok, false, runRetierReport(res));
     assert.strictEqual(res.robbed, 'global');
+    assert.strictEqual(res.lockLost, 'stolen', 'a foreign token is a theft (fire 122)');
     assert.ok(res.error.includes('lock stolen') && res.error.includes('stopped before the archive copy of') && res.error.includes('nothing in the memory store was touched'), res.error);
     assert.deepStrictEqual(treeOf([home, proj]), shot, 'the robbed run wrote nothing after the theft');
     assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), true, 'the topic stays');
@@ -1520,4 +1521,38 @@ test('fire 119: a RE-TIER run robbed of its global lock before a probe-miss roll
     assert.strictEqual(fs.existsSync(path.join(dir, 'topic-a.md')), false, 'no rollback ran');
     assert.strictEqual(gzOf(home).length, 2, 'both archive copies stay');
   } finally { clean(home, proj); }
+});
+
+// fire 122: another program holding the lock file open with a share mode that refuses reads makes its READ opens fail with
+// EBUSY; this does exactly that, n times once armed (the house's fs-patch seam, as the fire-119 legs use).
+function faultLockReads(lockPath, { n = Infinity } = {}) {
+  const real = fs.openSync;
+  const want = path.resolve(lockPath);
+  const f = { armed: false, n, hits: 0 };
+  fs.openSync = function patched(p, flags, ...rest) {
+    const isRead = typeof flags === 'number' && (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0;
+    if (f.armed && isRead && f.n > 0 && path.resolve(String(p)) === want) { f.n--; f.hits++; throw Object.assign(new Error(`EBUSY: resource busy or locked, open '${p}'`), { code: 'EBUSY' }); }
+    return real.call(fs, p, flags, ...rest);
+  };
+  f.restore = () => { fs.openSync = real; };
+  return f;
+}
+
+test('fire 122: a RE-TIER run whose global lock file stays unreadable stops with an honest refusal (no theft claimed) and names the lock it left', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  try {
+    const dir = seedMainStore(home, proj);
+    const gzip = (buf) => { fault.armed = true; return zlib.gzipSync(buf); };
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), gzip });
+    fault.restore();
+    assert.strictEqual(res.robbed, 'global', runRetierReport(res));
+    assert.strictEqual(res.lockLost, 'unreadable');
+    assert.ok(res.error.startsWith(`lock unreadable: this RE-TIER run could not read its own lock file ${globalLockPath(home)} for about 1 second(s) (EBUSY)`), res.error);
+    assert.ok(!res.error.includes('took over'), res.error);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), true, 'the topic stays');
+    assert.ok(res.lockLeft && res.lockLeft.includes('so it was left in place'), JSON.stringify(res));
+    assert.ok(runRetierReport(res).includes(`LOCK LEFT: ${res.lockLeft}`), runRetierReport(res));
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
+  } finally { fault.restore(); clean(home, proj); }
 });

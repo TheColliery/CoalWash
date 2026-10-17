@@ -737,11 +737,47 @@ export function isPinned(file) {
 function ownerToken(sessionId) {
   return `${sessionId}:${process.pid}:${process.hrtime.bigint()}`;
 }
+// THE THREE-VALUED LOCK READ (fire 122, INSPECT 121 M121-1). A lock file another program holds open (an indexer, an antivirus
+// scanner or a sync client opening it with a share mode that refuses reads, the Windows case) fails to read for a moment;
+// that is not a theft, and the old read, which returned null for it, made owns() call it one. A read that FAILS is retried
+// LOCK_READ_RETRIES times LOCK_READ_WAIT_MS apart: about one second in all, which outlasts the milliseconds such a program
+// holds a file this small, and costs a lock that stays unreadable that second once, since every caller then stops. A read
+// that succeeds is final: no token, or another run's, is a foreign lock. The wait blocks the thread (Atomics.wait); it
+// never spins.
+export const LOCK_READ_RETRIES = 8;
+export const LOCK_READ_WAIT_MS = 125;
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// { state: 'token', token } (token null when the file is absent, refused or carries none) | { state: 'unreadable', code }
+function readLockState(lockPath) {
+  let code = null;
+  for (let i = 0; i <= LOCK_READ_RETRIES; i++) {
+    if (i) pause(LOCK_READ_WAIT_MS);
+    // CWK-137: bounded + kind-gated -- the lock lives in the project's .claude/coalwash/,
+    // which a cloned repo can pre-populate (a lock that is a link to /dev/zero hung this). E2-4: contained to the lock's own
+    // directory, the one its caller derived (ownSandboxDir for the tx and bin locks, ~/.claude for the global one).
+    const o = repoReadOutcome(lockPath, path.dirname(lockPath), MAX_CONFIG_BYTES);
+    if (o.why === 'unreadable') { code = o.code || 'unknown'; continue; }
+    if (!o.buf) return { state: 'token', token: null };
+    try { return { state: 'token', token: JSON.parse(o.buf.toString('utf8')).token ?? null }; } catch { return { state: 'token', token: null }; }
+  }
+  return { state: 'unreadable', code };
+}
 function readLockToken(lockPath) {
-  // CWK-137: bounded + kind-gated -- the lock lives in the project's .claude/coalwash/,
-  // which a cloned repo can pre-populate (a lock that is a link to /dev/zero hung this). E2-4: contained to the lock's own
-  // directory, the one its caller derived (ownSandboxDir for the tx and bin locks, ~/.claude for the global one).
-  try { return JSON.parse(readRepoFileBounded(lockPath, path.dirname(lockPath), MAX_CONFIG_BYTES)).token ?? null; } catch { return null; }
+  const s = readLockState(lockPath);
+  return s.state === 'token' ? s.token : null;
+}
+// The opening of a refusal for a lock this run cannot prove it still holds (fire 122): a theft only for a foreign token.
+// `s` is a lock's state(); `run` names the run ("RE-TIER run"); `after` ends the stop clause ("with no clean-up").
+export function lockLostHead(s, { run, file, where, after }) {
+  return s.state === 'unreadable'
+    ? `lock unreadable: this ${run} could not read its own lock file ${file} for about ${(LOCK_READ_RETRIES * LOCK_READ_WAIT_MS) / 1000} second(s) (${s.code}); another program may be holding it open (an indexer, antivirus or sync client), and no other CoalWash run is known to hold it. It can no longer prove it holds the lock, so it stopped before ${where}, ${after}.`
+    : `lock stolen: another CoalWash run took over the global lock this ${run} held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where}, ${after}.`;
+}
+// What a result says when a release could not remove this run's lock (fire 122): null when nothing was left behind.
+export function lockLeftNote(lockPath, rel) {
+  if (!rel || rel.released || rel.why === 'foreign') return null;
+  const how = rel.why === 'unreadable' ? `could not be read to confirm it is this run's own (${rel.code})` : `could not be removed (${rel.code})`;
+  return `The lock file ${lockPath} ${how}, so it was left in place: a later run defers until it goes stale (${LOCK_STALE_MS / 60000} minutes), or remove it by hand once no CoalWash run is active.`;
 }
 // `selfIgnore` (15b fire 56, census row 5): a PROJECT lock (the tx lock, a bin lock) passes true and its folder gets the
 // catch-all through ensureSelfIgnore. The default is false because the GLOBAL lock's folder is the user's own ~/.claude,
@@ -751,9 +787,28 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
   const body = JSON.stringify({ sessionId, pid: process.pid, at: now, token });
   // release deletes the lock ONLY if it still carries OUR token (a slow/suspended
   // holder whose lock was stolen must not delete the new holder's lock — HIGH #4).
-  const releaseIfOwner = () => { try { if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { force: true }); } catch {} };
-  // P95-1: does this holder still own the lock, or did a stale takeover hand it to someone else? Doubt = not owned.
-  const owns = () => { try { return readLockToken(lockPath) === token; } catch { return false; } };
+  // fire 122: 'own' | 'foreign' (a stale takeover handed it to another run, or it is gone) | 'unreadable' (after the retries).
+  const state = () => {
+    const s = readLockState(lockPath);
+    return s.state === 'unreadable' ? s : { state: s.token === token ? 'own' : 'foreign' };
+  };
+  // Returns { released: true } or { released: false, why: 'foreign' | 'unreadable' | 'remove-failed', code }. A lock it cannot
+  // read is left in place: it never deletes a lock it cannot prove is its own. A removal that fails is retried like a read.
+  const releaseIfOwner = () => {
+    try {
+      const s = state();
+      if (s.state !== 'own') return { released: false, why: s.state, code: s.code };
+      let code = null;
+      for (let i = 0; i <= LOCK_READ_RETRIES; i++) {
+        if (i) pause(LOCK_READ_WAIT_MS);
+        try { fs.rmSync(lockPath, { force: true }); return { released: true }; } catch (e) { code = (e && e.code) || 'unknown'; }
+      }
+      return { released: false, why: 'remove-failed', code };
+    } catch (e) { return { released: false, why: 'remove-failed', code: (e && e.code) || 'unknown' }; }
+  };
+  // P95-1: does this holder still own the lock, or did a stale takeover hand it to someone else? Doubt (still unreadable after
+  // the retries) = not owned, which is the conservative answer for the bin lock's re-merge; the fences ask state() instead.
+  const owns = () => state().state === 'own';
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     if (selfIgnore) {
@@ -764,8 +819,10 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
     try { fs.writeSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     // compare-after-write (the header's named-assumption belt): a foreign
     // token on re-read = O_EXCL did not actually exclude us -> defer.
-    if (readLockToken(lockPath) !== token) return { acquired: false, reason: 'exclusive-create acquire lost a race (non-local filesystem?) — deferring' };
-    return { acquired: true, release: releaseIfOwner, owns };
+    const back = state();
+    if (back.state === 'unreadable') return { acquired: false, reason: `the lock file ${lockPath} it had just created could not be read back (${back.code}; another program may be holding it open) — deferring, and the file is left in place since this run cannot prove it is its own` };
+    if (back.state !== 'own') return { acquired: false, reason: 'exclusive-create acquire lost a race (non-local filesystem?) — deferring' };
+    return { acquired: true, release: releaseIfOwner, owns, state };
   } catch (e) {
     if (e && e.code !== 'EEXIST') return { acquired: false, reason: `lock error: ${e.message}` };
   }
@@ -797,7 +854,7 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
       if (o.why === 'unverifiable') return { acquired: false, reason: `the lock ${lockPath} is stale, but this filesystem reports no file identity number, so CoalWash cannot prove the file it opens is the one it checked — refusing to take it over; remove the lock by hand if it is yours` };
       if (o.fd !== undefined) {
         try { fs.ftruncateSync(o.fd, 0); fs.writeSync(o.fd, body, 0); fs.fsyncSync(o.fd); } finally { fs.closeSync(o.fd); }
-        if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner, owns };
+        if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner, owns, state };
         return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
       }
     }
@@ -989,6 +1046,7 @@ function trustedRootsForAnchor(projectRoot, home, { trustedAnchor = false } = {}
 export function applyPlan(plan, opts = {}) {
   const now = opts.now || Date.now();
   const home = opts.home || os.homedir();
+  let lockLeft = null; // fire 122: set by the release in the transaction's finally when a lock file had to be left behind
   try {
     // ---- validate shape (fail loud, nothing touched) ----
     if (!plan || typeof plan !== 'object') return { ok: false, error: 'plan must be an object' };
@@ -1360,21 +1418,41 @@ export function applyPlan(plan, opts = {}) {
     // It does NOT roll back: the snapshot restore would overwrite whatever the new holder has written since. `landed` is the
     // journal's steps once the journal exists, `committed` turns true once the commit record is written; the refusal uses
     // both to say exactly what this run leaves on disk.
+    //
+    // fire 122 (INSPECT 121 M121-1): the fence reads THREE states. Only a FOREIGN token is a theft. A lock file that stays
+    // unreadable through the retries (readLockState) stops the run too, since this run can no longer prove it holds the
+    // store, but its refusal says what happened: no other run is known to hold the lock, the journal is still this run's,
+    // and the next gauge rolls the store back from the snapshot. Both refusals keep `robbed` (callers keep every copy on
+    // it) and add `lockLost: 'stolen' | 'unreadable'`.
     let landed = null;
     let committed = false;
+    const txLockPath = path.join(txDir, LOCK_NAME);
+    const trouble = () => {
+      const p = lock.state();
+      if (p.state !== 'own') return { who: 'project', file: txLockPath, ...p };
+      const g = globalLock ? globalLock.state() : { state: 'own' };
+      return g.state !== 'own' ? { who: 'global', file: globalLockPath(home), ...g } : null;
+    };
     const fence = (where, stateOverride = null) => {
       if (__testHooks.onFence) __testHooks.onFence(where);
-      const who = !lock.owns() ? 'project' : globalLock && !globalLock.owns() ? 'global' : null;
-      if (!who) return;
+      const lost = trouble();
+      if (!lost) return;
       const done = landed ? landed.filter((s) => s.status === 'done').length : 0;
+      const journalFate = lost.state === 'unreadable'
+        ? `the journal on disk is still this run's, so the next gauge (recoverDangling) rolls the store back from that snapshot${done === landed?.length ? ', undoing steps that had all landed' : ''}`
+        : "the journal on disk is this run's until the new holder writes its own over it (while it is still this run's, the next recoverDangling rolls the store back from that snapshot; once it is replaced, compare the store against the snapshot by hand)";
       const state = stateOverride
         || (committed ? `every step landed and was committed; only the post-commit housekeeping that had not run yet (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped, and the snapshot ${snapDir} still holds every original`
-        : landed ? `${done} of ${landed.length} step(s) had landed and the rest never ran; the snapshot ${snapDir} holds every original, and the journal on disk is this run's until the new holder writes its own over it (while it is still this run's, the next recoverDangling rolls the store back from that snapshot; once it is replaced, compare the store against the snapshot by hand)`
+        : landed ? `${done} of ${landed.length} step(s) had landed and the rest never ran; the snapshot ${snapDir} holds every original, and ${journalFate}`
         : 'nothing of this plan had been written to the store');
-      throw Object.assign(new Error(`lock stolen: another CoalWash run took over the ${who} lock this transaction held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where}, with no rollback (a rollback would overwrite what the new holder may have written since). ${state}`), { robbed: who, committed });
+      const head = lost.state === 'unreadable'
+        ? `lock unreadable: this transaction could not read its own ${lost.who} lock file ${lost.file} for about ${(LOCK_READ_RETRIES * LOCK_READ_WAIT_MS) / 1000} second(s) (${lost.code}); another program may be holding it open (an indexer, antivirus or sync client), and no other CoalWash run is known to hold it. It can no longer prove it holds the store, so it stopped before ${where}, with no rollback.`
+        : `lock stolen: another CoalWash run took over the ${lost.who} lock this transaction held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where}, with no rollback (a rollback would overwrite what the new holder may have written since).`;
+      throw Object.assign(new Error(`${head} ${state}`), { robbed: lost.who, committed, lockLost: lost.state === 'unreadable' ? 'unreadable' : 'stolen' });
     };
 
-    try {
+    let out;
+    try { out = (() => { // fire 122: the body's returns land in `out`, so the release below can be reported on every result
       // ---- own-artifact retention at preflight (ports the ReFS thin-pool
       // leak: maintenance that allocates but never releases). Aborted/deferred
       // runs leave snapshot dirs the commit-time sweep never reaches; reap
@@ -1479,7 +1557,7 @@ export function applyPlan(plan, opts = {}) {
         let failed = 0;
         let tried = 0;
         // fire 119: a rollback that finds its lock stolen stops too; past the first restore the refusal says how far it got.
-        const midway = () => (tried ? `the rollback had tried ${tried} of ${manifest.length} restore(s) from ${snapDir} when it stopped; the journal on disk is this run's until the new holder writes its own over it` : null);
+        const midway = () => (tried ? `the rollback had tried ${tried} of ${manifest.length} restore(s) from ${snapDir} when it stopped; the journal on disk is this run's unless another run has since written its own over it` : null);
         for (const m of manifest) {
           fence(`restoring ${m.original} (the rollback after: ${cause})`, midway());
           tried++;
@@ -1514,7 +1592,7 @@ export function applyPlan(plan, opts = {}) {
         // A PARTIAL rollback must NOT be marked terminal-clean, or a cold-start
         // recoverDangling would clear the journal over a mixed on-disk state.
         journal.status = failed ? 'rollback-failed' : 'rolled-back';
-        fence(`the rollback's journal record (the rollback after: ${cause})`, `the rollback had tried every restore from ${snapDir} and every removal of a created file (${failed} failed), and its own journal record was not written; the journal on disk still says the run was applying until the new holder writes its own over it`);
+        fence(`the rollback's journal record (the rollback after: ${cause})`, `the rollback had tried every restore from ${snapDir} and every removal of a created file (${failed} failed), and its own journal record was not written; the journal on disk still says the run was applying unless another run has since written its own over it`);
         try { writeJournal(journal); } catch {}
         return failed;
       };
@@ -1575,7 +1653,7 @@ export function applyPlan(plan, opts = {}) {
       journal.status = 'committed';
       writeJournal(journal);
       committed = true;
-      fence('removing the committed journal', `every step landed and the commit record was written; the committed journal stays on disk until the new holder writes its own over it (the next recoverDangling clears a committed one), and the post-commit housekeeping (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped; the snapshot ${snapDir} still holds every original`);
+      fence('removing the committed journal', `every step landed and the commit record was written; the committed journal stays on disk unless another run has since written its own over it (the next recoverDangling clears a committed one), and the post-commit housekeeping (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped; the snapshot ${snapDir} still holds every original`);
       try { fs.rmSync(journalPath, { force: true }); } catch {}
       fence('the post-commit snapshot retention');
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
@@ -1763,12 +1841,16 @@ export function applyPlan(plan, opts = {}) {
       }
 
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };
-    } finally {
-      lock.release();
-      if (globalLock) globalLock.release();
+    })(); } finally {
+      lockLeft = [lockLeftNote(txLockPath, lock.release()), globalLock ? lockLeftNote(globalLockPath(home), globalLock.release()) : null].filter(Boolean).join(' ') || null;
     }
+    if (!lockLeft) return out;
+    // a lock that could not be released is named on the result: a later run defers on it (fire 122)
+    return out.ok
+      ? { ...out, lockLeft, flagged: [...(out.flagged || []), { path: txLockPath, reason: lockLeft }] }
+      : { ...out, lockLeft, error: `${out.error} ${lockLeft}` };
   } catch (e) {
-    if (e && e.robbed) return { ok: false, robbed: e.robbed, committed: e.committed, error: e.message };
+    if (e && e.robbed) return { ok: false, robbed: e.robbed, committed: e.committed, lockLost: e.lockLost, ...(lockLeft ? { lockLeft } : {}), error: lockLeft ? `${e.message} ${lockLeft}` : e.message };
     return { ok: false, error: `apply: ${e.message}` };
   }
 }

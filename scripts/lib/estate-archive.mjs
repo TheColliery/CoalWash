@@ -63,7 +63,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
-import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, LOCK_STALE_MS } from './apply.mjs';
+import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote } from './apply.mjs';
 import { ownSandboxDir } from './repo-fs.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
 // death-log (destroyed cuts). Function-declaration imports used only at CALL
@@ -500,8 +500,9 @@ function appendDeathCert(archiveDir, slug, line) {
 // appends it AFTER this returns ok (row-follows-bytes, so a crash between
 // delete and append can only under-index — estate-restore scans the archive
 // dir itself, not the index, so recovery never depends on the row).
-// opts.gzip is injectable for tests (default zlib.gzipSync). opts.owns is the caller's lock check (fire 119, the fence below).
-export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder, owns = () => true } = {}) {
+// opts.gzip is injectable for tests (default zlib.gzipSync). opts.lockState is the caller's lock state() (fires 119 and 122,
+// the fence below); its `lockFile` names the lock in a refusal.
+export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder, lockState = () => ({ state: 'own' }), lockFile = 'the global lock' } = {}) {
   const destBase = path.join(archiveDir, slug);
   // Write-side containment (loss class #57's git sibling, GHSA-2hvf-7c8p-28fx:
   // the SOURCE enumeration is realpath-contained, but the DESTINATION
@@ -517,9 +518,15 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   const written = [];
   const cleanupPartial = () => { for (const w of written) { try { fs.rmSync(w, { force: true }); } catch {} } };
   // THE FENCE (fire 119, 18a): the caller's global lock can be taken over once it is LOCK_STALE_MS old. Before each write
-  // this re-reads it (owns); a robbed run stops there and removes nothing, since the new holder may be archiving this same
-  // session to these same paths and removing a partial copy could remove its verified one.
-  const stolen = (where, state) => (owns() ? null : { ok: false, robbed: 'global', reason: `lock stolen: another CoalWash run took over the global lock this ULTRA run held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where} of session ${sess.id}, with no clean-up. ${state}` });
+  // this re-reads it (lockState); a robbed run stops there and removes nothing, since the new holder may be archiving this same
+  // session to these same paths and removing a partial copy could remove its verified one. Fire 122: only a foreign token is a
+  // theft; a lock file still unreadable after the retries stops the run with its own message, and removes nothing either.
+  const stolen = (where, state) => {
+    const s = lockState();
+    if (s.state === 'own') return null;
+    const head = lockLostHead(s, { run: 'ULTRA run', file: lockFile, where: `${where} of session ${sess.id}`, after: 'with no clean-up' });
+    return { ok: false, robbed: 'global', lockLost: s.state === 'unreadable' ? 'unreadable' : 'stolen', reason: `${head} ${state}` };
+  };
   const notDeleted = () => `${written.length} archive copy(ies) of this session already written stay in place (removing one could remove the new holder's copy of the same session); every original of this session is kept`;
   const fail = (reason) => stolen(`removing the partial archive (after: ${reason})`, notDeleted()) || (cleanupPartial(), { ok: false, reason });
   let transcriptBuf = null;
@@ -723,10 +730,11 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
   }
   const lock = acquireLock(globalLockPath(home), { sessionId: currentSessionId || String(process.pid), now });
   if (!lock.acquired) return { ok: false, deferred: true, error: lock.reason };
+  let res = null; // fire 122: the one result object; the finally adds lockLeft to it when the release had to leave the lock
   try {
     const c = classifySessions({ projectRoot, home, now, estate, currentSessionId });
     const archiveDir = resolveArchiveDir(estate, home);
-    const res = {
+    res = {
       ok: true, slug: c.slug, archiveDir, cfg: c.cfg,
       archived: [], failed: [], coldListed: [], activeSkipped: 0,
       bytesFreed: 0, indexRows: 0, budgetDeferred: 0, budgetReached: false,
@@ -750,13 +758,14 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
         continue;
       }
       const cold = sess.band === 'cold';
-      const r = archiveSession(sess, { slug: c.slug, archiveDir, now, cold, gzip, owns: lock.owns });
+      const r = archiveSession(sess, { slug: c.slug, archiveDir, now, cold, gzip, lockState: lock.state, lockFile: globalLockPath(home) });
       // fire 119: a robbed session stops the whole run, so no later session starts under a lock this run no longer holds.
-      if (r.robbed) { res.ok = false; res.robbed = r.robbed; res.error = r.reason; break; }
+      if (r.robbed) { res.ok = false; res.robbed = r.robbed; res.lockLost = r.lockLost; res.error = r.reason; break; }
       if (!r.ok) { res.failed.push({ id: sess.id, reason: r.reason }); continue; }
-      if (c.cfg.indexEnabled && !lock.owns()) {
-        res.ok = false; res.robbed = 'global';
-        res.error = `lock stolen: another CoalWash run took over the global lock this ULTRA run held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before the index row of session ${sess.id}, with no clean-up. The session was archived and verified and its originals deleted; its index row was not appended (estate-restore reads the archive itself, so it stays restorable)`;
+      const s = c.cfg.indexEnabled ? lock.state() : { state: 'own' };
+      if (s.state !== 'own') {
+        res.ok = false; res.robbed = 'global'; res.lockLost = s.state === 'unreadable' ? 'unreadable' : 'stolen';
+        res.error = `${lockLostHead(s, { run: 'ULTRA run', file: globalLockPath(home), where: `the index row of session ${sess.id}`, after: 'with no clean-up' })} The session was archived and verified and its originals deleted; its index row was not appended (estate-restore reads the archive itself, so it stays restorable)`;
         res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned });
         res.bytesFreed += r.bytes;
         break;
@@ -768,7 +777,10 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
     }
     res.budgetReached = res.budgetDeferred > 0;
     return res;
-  } finally { lock.release(); }
+  } finally {
+    const lockLeft = lockLeftNote(globalLockPath(home), lock.release());
+    if (lockLeft && res) res.lockLeft = lockLeft; // the object the try already returned: the caller sees this field
+  }
 }
 
 // Plain-text run report (program-built; the receipt-style deliverable).
@@ -777,6 +789,7 @@ export function runEstateReport(res) {
   const lines = [];
   lines.push(`[CoalWash] ULTRA estate — ${res.archived.length} session(s) archived (${mb(res.bytesFreed)} freed from the live tree), ${res.activeSkipped} active skipped`);
   if (res.robbed) lines.push(`  STOPPED: ${res.error}`);
+  if (res.lockLeft) lines.push(`  LOCK LEFT: ${res.lockLeft}`);
   lines.push(`  archive: ${res.archiveDir} (${res.indexRows} index row(s) appended · restore: cli.mjs estate-restore <sessionId>)`);
   if (res.budgetReached) {
     const total = res.archived.length + res.budgetDeferred;

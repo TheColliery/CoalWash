@@ -4551,6 +4551,7 @@ test('fire 119: a transaction robbed of its PROJECT lock stops before its next w
     assert.ok(shot, 'the theft happened inside the transaction');
     assert.strictEqual(r.ok, false, JSON.stringify(r));
     assert.strictEqual(r.robbed, 'project');
+    assert.strictEqual(r.lockLost, 'stolen', 'a foreign token is a theft (fire 122)');
     assert.ok(r.error.includes('lock stolen') && r.error.includes('stopped before the snapshot') && r.error.includes('nothing of this plan had been written'), r.error);
     assert.deepStrictEqual(treeOf([proj, home], (p) => p.startsWith(fatBin)), shot, 'the robbed run wrote nothing after the theft (no snapshot, no journal, no target)');
     assert.strictEqual(fs.readFileSync(a, 'utf8'), 'THIEF', 'the thief\'s write survives: no rollback ran over it');
@@ -4611,14 +4612,15 @@ test('fire 119: every fence of a committing transaction stops a robbed run on th
       { type: 'rewrite', path: a, content: 'alpha\n' }, { type: 'create', path: c, content: 'gamma\n' }, { type: 'delete', path: b },
     ], { origin: 'wizard-cut' }) };
   };
-  // the control: an unrobbed run passes exactly these fences, in this order
+  // the control: an unrobbed run passes exactly these fences, in this order. The limit (INSPECT 121 L121-1): this pin
+  // catches a fence removed, moved or added, never a NEW write step added with no fence, which leaves the list unchanged.
   const ctl = fixture();
   const seen = [];
   __testHooks.onFence = (w) => seen.push(w);
   try {
     const r = apply(ctl.plan, { home: ctl.home });
     assert.strictEqual(r.ok, true, r.error);
-    assert.deepStrictEqual(seen, expected(ctl.a, ctl.c, ctl.b), 'the fence list moved: a write step lost (or gained) its fence');
+    assert.deepStrictEqual(seen, expected(ctl.a, ctl.c, ctl.b), 'the fence list moved: a fence was removed, moved or added (a new write step with no fence would not show here)');
   } finally { __testHooks.onFence = null; clean(ctl.proj, ctl.home); }
   for (let label = 0; label < 15; label++) {
     const fx = fixture();
@@ -4690,4 +4692,210 @@ test('fire 119: a rollback robbed of its lock stops too, before its next restore
       assert.deepStrictEqual(treeOf([fx.proj, fx.home]), shot, `rollback fence ${i + 1}: the robbed run wrote nothing after the theft`);
     } finally { __testHooks.onFence = null; clean(fx.proj, fx.home); }
   }
+});
+
+// ---------------------------------------------------------------------------
+// fire 122 (INSPECT 121 M121-1): a lock file that cannot be READ is not a stolen one. Another program holding the file open
+// with a share mode that refuses reads (an indexer, antivirus or sync client on Windows) makes the open fail with EBUSY.
+// These legs make exactly that happen through fs.openSync, for the lock path's READ opens only, `n` times after `skip`
+// successful reads: a short burst is retried and the run finishes and releases; a burst that outlasts the retries stops
+// the run with the honest message and leaves the lock it cannot prove is its own.
+// ---------------------------------------------------------------------------
+function faultLockReads(lockPath, { skip = 0, n = Infinity } = {}) {
+  const real = fs.openSync;
+  const want = path.resolve(lockPath);
+  const f = { armed: false, skip, n, hits: 0 };
+  fs.openSync = function patched(p, flags, ...rest) {
+    const isRead = typeof flags === 'number' && (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0;
+    if (f.armed && isRead && path.resolve(String(p)) === want) {
+      if (f.skip > 0) f.skip--;
+      else if (f.n > 0) { f.n--; f.hits++; throw Object.assign(new Error(`EBUSY: resource busy or locked, open '${p}'`), { code: 'EBUSY' }); }
+    }
+    return real.call(fs, p, flags, ...rest);
+  };
+  f.restore = () => { fs.openSync = real; };
+  return f;
+}
+function unreadableFixture(tag) {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `cwa-f122${tag}-`)));
+  const a = path.join(store, 'a.md');
+  const b = path.join(store, 'b.md');
+  const c = path.join(store, 'c.md');
+  write(a, 'alpha\nkeep\n');
+  write(b, 'beta\n');
+  write(c, 'gamma\nold\n');
+  const plan = planFor(proj, store, [{ type: 'rewrite', path: a, content: 'alpha\n' }, { type: 'rewrite', path: c, content: 'gamma\n' }, { type: 'delete', path: b }]);
+  return { proj, store, home, a, b, c, plan, lockPath: txLockOf(proj) };
+}
+// Runs fx.plan with the fault armed when the fence labelled `at` (a prefix) is reached.
+function applyWithFault(fx, at, spec) {
+  const fault = faultLockReads(fx.lockPath, spec);
+  __testHooks.onFence = (w) => { if (w.startsWith(at)) fault.armed = true; };
+  try { return { r: apply(fx.plan, { home: fx.home }), fault }; } finally { __testHooks.onFence = null; fault.restore(); }
+}
+
+test('fire 122: a lock file unreadable for a moment mid-run (EBUSY for 3 reads) is retried: the run finishes, releases its lock and reports no theft', () => {
+  const fx = unreadableFixture('t');
+  try {
+    const { r, fault } = applyWithFault(fx, 'step 2 of 3', { n: 3 });
+    assert.strictEqual(fault.hits, 3, 'the three failed reads happened');
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(r.robbed, undefined);
+    assert.strictEqual(r.lockLeft, undefined);
+    assert.strictEqual(fs.existsSync(fx.lockPath), false, 'the lock was released');
+    assert.strictEqual(fs.readFileSync(fx.c, 'utf8'), 'gamma\n', 'every step landed');
+    assert.strictEqual(fs.existsSync(fx.b), false);
+  } finally { clean(fx.proj, fx.home); }
+});
+
+test('fire 122: a lock file that stays unreadable stops the run with an honest refusal, never "another CoalWash run took over", and leaves the lock; the next gauge rolls the store back', () => {
+  const fx = unreadableFixture('p');
+  try {
+    const { r } = applyWithFault(fx, 'step 2 of 3', {});
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(r.robbed, 'project', 'callers keep their copies on it, as for a theft');
+    assert.strictEqual(r.lockLost, 'unreadable');
+    assert.ok(!r.error.includes('took over'), `no theft is claimed (${r.error})`);
+    assert.ok(r.error.includes(`lock unreadable: this transaction could not read its own project lock file ${fx.lockPath} for about 1 second(s) (EBUSY)`), r.error);
+    assert.ok(r.error.includes('another program may be holding it open (an indexer, antivirus or sync client)'), r.error);
+    assert.ok(r.error.includes('stopped before step 2 of 3') && r.error.includes('1 of 3 step(s) had landed'), r.error);
+    assert.ok(r.error.includes("the journal on disk is still this run's, so the next gauge (recoverDangling) rolls the store back from that snapshot"), r.error);
+    assert.ok(!r.error.includes('undoing steps that had all landed'), 'only 1 of 3 had landed');
+    assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${fx.lockPath} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), JSON.stringify(r));
+    assert.ok(r.error.endsWith(r.lockLeft), 'the refusal says the lock was left');
+    assert.strictEqual(fs.existsSync(fx.lockPath), true, 'a lock it cannot prove is its own is never deleted');
+    const rec = recoverDangling(fx.proj, { home: fx.home });
+    assert.strictEqual(rec.recovered, 'rolled-back', JSON.stringify(rec));
+    assert.strictEqual(fs.readFileSync(fx.a, 'utf8'), 'alpha\nkeep\n', 'as the refusal said, the store is rolled back from the snapshot');
+  } finally { clean(fx.proj, fx.home); }
+});
+
+test('fire 122: a lock unreadable at the commit record says the next gauge will undo steps that had all landed', () => {
+  const fx = unreadableFixture('c');
+  try {
+    const { r } = applyWithFault(fx, 'the commit record', {});
+    assert.strictEqual(r.lockLost, 'unreadable', JSON.stringify(r));
+    assert.ok(r.error.includes('3 of 3 step(s) had landed') && r.error.includes('undoing steps that had all landed'), r.error);
+  } finally { clean(fx.proj, fx.home); }
+});
+
+test('fire 122: the release retries a lock file unreadable for a moment, so a transient handle does not leave the lock behind', () => {
+  const fx = unreadableFixture('r');
+  try {
+    // armed at the last fence: its own read passes (skip 1), then the release meets 3 failed reads
+    const { r, fault } = applyWithFault(fx, 'the bin recovery copies', { skip: 1, n: 3 });
+    assert.strictEqual(fault.hits, 3, 'the release met the failed reads');
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(r.lockLeft, undefined);
+    assert.strictEqual(fs.existsSync(fx.lockPath), false, 'the lock was released');
+  } finally { clean(fx.proj, fx.home); }
+});
+
+test('fire 122: a release that still cannot read the lock leaves it in place and the finished run says so', () => {
+  const fx = unreadableFixture('l');
+  try {
+    const { r } = applyWithFault(fx, 'the bin recovery copies', { skip: 1 });
+    assert.strictEqual(r.ok, true, 'the wash itself landed and committed');
+    assert.ok(r.lockLeft && r.lockLeft.includes('so it was left in place: a later run defers until it goes stale (30 minutes)'), JSON.stringify(r));
+    assert.ok(r.flagged.some((f) => f.path === fx.lockPath && f.reason === r.lockLeft), 'and flags it on the receipt');
+    assert.strictEqual(fs.existsSync(fx.lockPath), true, 'never deleted unproven');
+  } finally { clean(fx.proj, fx.home); }
+});
+
+test('fire 122: a bin lock unreadable for a moment still records the cut and releases (the fire-107 re-merge stays correct)', () => {
+  const { proj } = sandbox();
+  const binLock = path.join(txDirFor(proj), FAT_BIN_NAME, '.bin.lock');
+  const fault = faultLockReads(binLock, { n: 3 });
+  try {
+    tailHooks.beforeIndexSave = () => { fault.armed = true; };
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'a cut', original: path.join(proj, 'memory', 'a.md') });
+    tailHooks.beforeIndexSave = null;
+    fault.restore();
+    assert.strictEqual(fault.hits, 3);
+    assert.ok(id, 'the cut was recorded');
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME).map((i) => i.id), [id], 'and listed once');
+    assert.strictEqual(fs.existsSync(binLock), false, 'the bin lock was released');
+  } finally { tailHooks.beforeIndexSave = null; fault.restore(); clean(proj); }
+});
+
+test('fire 122: a handle held for 300 ms (by time, not by count) is outwaited: the retries wait between reads, they never spin', () => {
+  const fx = unreadableFixture('w');
+  const real = fs.openSync;
+  const want = path.resolve(fx.lockPath);
+  let until = 0;
+  let hits = 0;
+  fs.openSync = function patched(p, flags, ...rest) {
+    const isRead = typeof flags === 'number' && (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0;
+    if (until && isRead && Date.now() < until && path.resolve(String(p)) === want) { hits++; throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); }
+    return real.call(fs, p, flags, ...rest);
+  };
+  __testHooks.onFence = (w) => { if (w.startsWith('step 2 of 3') && !until) until = Date.now() + 300; };
+  try {
+    const r = apply(fx.plan, { home: fx.home });
+    assert.ok(hits >= 2 && hits <= 4, `a few spaced reads failed, never a burst of them (${hits})`);
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(fs.existsSync(fx.lockPath), false, 'the lock was released');
+  } finally { __testHooks.onFence = null; fs.openSync = real; clean(fx.proj, fx.home); }
+});
+
+test('fire 122: a release whose remove fails for a moment retries it; one that keeps failing leaves the lock and says it could not be removed', () => {
+  for (const [n, left] of [[3, false], [Infinity, true]]) {
+    const fx = unreadableFixture(left ? 'x' : 'y');
+    const real = fs.rmSync;
+    const want = path.resolve(fx.lockPath);
+    let armed = false;
+    let budget = n;
+    fs.rmSync = function patched(p, ...rest) {
+      if (armed && budget > 0 && path.resolve(String(p)) === want) { budget--; throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); }
+      return real.call(fs, p, ...rest);
+    };
+    __testHooks.onFence = (w) => { if (w === 'the bin recovery copies') armed = true; };
+    try {
+      const r = apply(fx.plan, { home: fx.home });
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      assert.strictEqual(fs.existsSync(fx.lockPath), left, `n=${n}: the lock is ${left ? 'left' : 'released'}`);
+      if (left) assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${fx.lockPath} could not be removed (EBUSY), so it was left in place`), JSON.stringify(r));
+      else assert.strictEqual(r.lockLeft, undefined);
+    } finally { __testHooks.onFence = null; fs.rmSync = real; clean(fx.proj, fx.home); }
+  }
+});
+
+test('fire 122: a lock that cannot be read back right after it is created defers with that reason and is left in place', () => {
+  const { proj } = sandbox();
+  const lockPath = txLockOf(proj);
+  const fault = faultLockReads(lockPath);
+  try {
+    fault.armed = true;
+    const r = acquireLock(lockPath, { sessionId: 'f122' });
+    fault.restore();
+    assert.strictEqual(r.acquired, false);
+    assert.ok(r.reason.includes('it had just created could not be read back (EBUSY; another program may be holding it open)'), r.reason);
+    assert.strictEqual(fs.existsSync(lockPath), true, 'never deleted unproven');
+  } finally { fault.restore(); clean(proj); }
+});
+
+test('fire 122: a bin recorder that cannot read its bin lock after a theft re-merges from disk (doubt is not ownership), so the new holder\'s row survives in full', () => {
+  const { proj } = sandbox();
+  const binLock = path.join(txDirFor(proj), FAT_BIN_NAME, '.bin.lock');
+  const fault = faultLockReads(binLock);
+  let thiefId = null;
+  try {
+    tailHooks.beforeIndexSave = () => {
+      tailHooks.beforeIndexSave = null;
+      const old = new Date(Date.now() - 60000); // past BIN_LOCK_STALE_MS (5 s): the stall the fire-107 legs model
+      fs.utimesSync(binLock, old, old);
+      thiefId = recordBinItem(proj, FAT_BIN_NAME, { content: 'the thief\'s cut', original: path.join(proj, 'memory', 'thief.md') });
+      fs.writeFileSync(binLock, JSON.stringify({ sessionId: 'third', token: 'third:1:1' })); // a lock the stalled recorder never held
+      fault.armed = true; // ...and it cannot be read either
+    };
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'my cut', original: path.join(proj, 'memory', 'mine.md') });
+    tailHooks.beforeIndexSave = null;
+    fault.restore();
+    assert.ok(id && thiefId, 'both cuts were recorded');
+    const rows = Object.fromEntries(listBin(proj, FAT_BIN_NAME).map((i) => [i.id, i.original]));
+    assert.strictEqual(rows[thiefId], path.join(proj, 'memory', 'thief.md'), 'the thief\'s row kept its original (not only a reconciled bare row)');
+    assert.strictEqual(rows[id], path.join(proj, 'memory', 'mine.md'));
+    assert.strictEqual(fs.existsSync(binLock), true, 'the lock it cannot prove is its own is left');
+  } finally { tailHooks.beforeIndexSave = null; fault.restore(); clean(proj); }
 });
