@@ -485,9 +485,14 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // whose realpath is OUTSIDE -- not inside the project, not inside ~/.claude (the global tier), not an ancestor
   // governance file -- is never read for content (no @import recursion through it), never scope 'project', never in
   // `entries`, sized from stat only (Claude Code may still load it, so the footprint counts it), and named by one flag
-  // (its path, never its content). LOCATION decides, never which walk queued it: a plain `@~/` import, a `@../`
-  // escape and a link out of the project are one class. Global-scope candidates are the user's own ~/.claude chain
-  // (a cloned repo cannot write it) and keep their reach.
+  // (its path, never its content). Location decides for a ROOM-queued candidate (the room's own CLAUDE.md chain, its
+  // rules tree, its memory store): a plain `@~/` import, a `@../` escape and a link out of the project are one class.
+  // INSPECT 99: a room-queued candidate is admitted only inside the project, inside the project's own memory store
+  // (L99-1: never any other file under ~/.claude, such as .credentials.json or settings.json), or when it IS an
+  // ancestor CLAUDE.md (L99-3: never a sibling file inside an ancestor folder). An ANCESTOR-queued candidate (an
+  // ancestor CLAUDE.md's own @import closure, which sits above any clone) keeps the wider rule: the project, ~/.claude,
+  // the ancestor files and the ancestor folders. Global-scope candidates are the user's own ~/.claude chain (a cloned
+  // repo cannot write it) and keep their reach.
   // ANCESTOR GOVERNANCE (NESTED-HABITAT): each CLAUDE.md the up-tree walk finds between the room and HOME whose
   // realpath stays in its own folder, plus everything inside such a folder strictly below HOME. HOME itself never
   // counts as a governance folder, or one ~/CLAUDE.md would admit every file under HOME.
@@ -504,15 +509,21 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       if (dir === homePhys || path.dirname(dir) === dir) break;
     }
   }
-  const isOutside = (phys) => !(projPhys && containedIn(phys, [projPhys]))
-    && !(basePhys && containedIn(phys, [basePhys]))
-    && !ancestorFiles.has(phys)
-    && !containedIn(phys, ancestorDirs);
+  // L99-1: the project's own memory store, and only while its realpath stays inside ~/.claude (a store junctioned out
+  // of ~/.claude is OUTSIDE).
+  const memRoot = basePhys ? physicalOrNull(ccMemoryDir(projectRoot, home)) : null;
+  const memPhys = memRoot && containedIn(memRoot, [basePhys]) ? memRoot : null;
+  const isOutside = (phys, origin) => {
+    if (projPhys && containedIn(phys, [projPhys])) return false;
+    if (ancestorFiles.has(phys)) return false;
+    if (origin === 'ancestor') return !(basePhys && containedIn(phys, [basePhys])) && !containedIn(phys, ancestorDirs);
+    return !(memPhys && containedIn(phys, [memPhys]));
+  };
   const outsideLabel = (phys) => (homePhys && containedIn(phys, [homePhys])
     ? `~/${path.relative(homePhys, phys).split(path.sep).join('/')}`
     : phys);
 
-  const add = (candidate, { scope, kind, alwaysLoaded, upTree = false }) => {
+  const add = (candidate, { scope, kind, alwaysLoaded, upTree = false, origin = 'room' }) => {
     const phys = physicalOrNull(candidate);
     if (!phys) {
       // F2-R2: the skip is unchanged and still fail-closed. What is new is that
@@ -535,7 +546,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       flags.push(`skipped (outside home/project trees): ${candidate}`);
       return null;
     }
-    if (scope !== 'global' && isOutside(phys)) {
+    if (scope !== 'global' && isOutside(phys, origin)) {
       // CWK2-029 (b): null, never phys, so addWithImports never reads it and no walk treats it as an entry.
       if (isSeen(phys)) return null;
       const bytes = statBytes(phys);
@@ -545,7 +556,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       }
       markSeen(phys);
       inherited.push({ path: phys, bytes, scope: 'outside', kind, alwaysLoaded, managed: false, statOnly: true });
-      flags.push(`outside the project, ~/.claude and its ancestor governance (${kind}): ${outsideLabel(phys)} — sized by stat only, never read, never washed`);
+      flags.push(`outside the project, its own memory store and its ancestor governance (${kind}): ${outsideLabel(phys)} — sized by stat only, never read, never washed`);
       return null;
     }
     if (isSeen(phys)) return phys;
@@ -571,11 +582,13 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   const expandedAt = new Map();
   let edgesFollowed = 0;
   let edgeCapFlagged = false;
-  const addWithImports = (file, scope, upTree = false) => {
-    const queue = [{ file, depth: 0 }];
+  // `origin` is the provenance channel (INSPECT 99 L99-3): 'room' for the room's own chain, 'ancestor' for an ancestor
+  // CLAUDE.md's own closure. A room chain that reaches an ancestor CLAUDE.md hands that file's imports the ancestor rule.
+  const addWithImports = (file, scope, upTree = false, origin = 'room') => {
+    const queue = [{ file, depth: 0, origin }];
     while (queue.length) {
-      const { file: f, depth } = queue.shift();
-      const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true, upTree });
+      const { file: f, depth, origin: o } = queue.shift();
+      const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true, upTree, origin: o });
       if (!phys || depth >= IMPORT_DEPTH_MAX) continue;
       const prior = expandedAt.get(phys);
       if (prior !== undefined && prior <= depth) continue; // its imports were already followed from here or shallower
@@ -638,7 +651,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
           break;
         }
         edgesFollowed++;
-        queue.push({ file: imp, depth: depth + 1 });
+        queue.push({ file: imp, depth: depth + 1, origin: o === 'room' && ancestorFiles.has(phys) ? 'ancestor' : o });
       }
     }
   };

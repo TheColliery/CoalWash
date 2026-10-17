@@ -1463,6 +1463,12 @@ test('CWK2-029 (b): a memory store that is a directory JUNCTION to a HOME folder
     assert.strictEqual(hit.length, 1, 'it is still measured, by stat');
     assert.notStrictEqual(hit[0].scope, 'project', 'it is never tagged scope project');
     assert.ok(d.flags.some((f) => f.includes('~/notes-dir/MEMORY.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+    // INSPECT 99 L99-2: the gauge never reads the statOnly index, not even for its line count
+    const m = measureEntries(d.inherited, { withGzip: false });
+    assert.strictEqual(m.index.lines, 0, 'measureEntries never reads a statOnly memory index for its lines');
+    assert.strictEqual(m.index.bytes, fs.statSync(p).size, 'its index bytes still come from stat');
+    const read = measureEntries(hit.map((e) => ({ ...e, statOnly: false })), { withGzip: false });
+    assert.ok(read.index.lines > 0, 'non-vacuity: the same index, not statOnly, does read its lines');
   } finally { clean(home); }
 });
 
@@ -1501,5 +1507,62 @@ test('CWK2-029 (b): an ANCESTOR CLAUDE.md that is a SYMLINK out of its folder is
     assert.notStrictEqual(hit[0].scope, 'project', 'the link target is never tagged scope project');
     assert.ok(!allListed(d).some((e) => e.path === path.join(home, '.ssh', 'next')), 'the link target was never read for @imports');
     assert.ok(d.flags.some((f) => f.includes('~/secret.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+  } finally { clean(home); }
+});
+
+test('INSPECT 99 L99-1: a project @import of a file in ~/.claude that is not the project\'s own memory store is OUTSIDE: never read, never scope project, flagged', () => {
+  const { home, room } = reachSandbox();
+  try {
+    write(path.join(home, '.claude', '.credentials.json'), '{"token":"FAKE-TOKEN"}\n@~/marker-cred.md\n');
+    write(path.join(home, '.claude', 'settings.json'), '{}\n@~/marker-sett.md\n');
+    for (const m of ['marker-cred.md', 'marker-sett.md', 'marker-mem.md']) write(path.join(home, m), 'marker\n');
+    const mem = ccMemoryDir(room, home);
+    write(path.join(mem, 'MEMORY.md'), 'index\n');
+    write(path.join(mem, 'topic.md'), 'topic\n@~/marker-mem.md\n');
+    const memRel = path.relative(home, path.join(mem, 'topic.md')).split(path.sep).join('/');
+    write(path.join(room, 'CLAUDE.md'), `# room\n@~/.claude/.credentials.json\n@~/.claude/settings.json\n@~/${memRel}\n`);
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    for (const f of ['.credentials.json', 'settings.json']) {
+      const p = path.join(home, '.claude', f);
+      const hit = allListed(d).filter((e) => e.path === p);
+      assert.strictEqual(hit.length, 1, `${f} is measured once`);
+      assert.notStrictEqual(hit[0].scope, 'project', `${f} is never tagged scope project`);
+      assert.ok(!d.entries.some((e) => e.path === p), `${f} is never in entries`);
+      assert.ok(d.flags.some((x) => x.includes(`~/.claude/${f}`)), `one flag names ~/.claude/${f}: ${JSON.stringify(d.flags)}`);
+    }
+    for (const m of ['marker-cred.md', 'marker-sett.md']) {
+      assert.ok(!allListed(d).some((e) => e.path === path.join(home, m)), `${m} unlisted: the ~/.claude file naming it was never read`);
+    }
+    assert.ok(!d.flags.some((x) => x.includes('FAKE-TOKEN')), 'no flag carries file content');
+    assert.ok(allListed(d).some((e) => e.path === path.join(home, 'marker-mem.md')), 'control: the project\'s own memory store, reached by import, IS read (its own import is followed)');
+    assert.ok(!d.flags.some((x) => x.includes('memory/topic.md') && /outside the project/.test(x)), 'control: the project\'s own memory store is not OUTSIDE');
+    assert.ok(d.entries.some((e) => e.path === path.join(mem, 'MEMORY.md') && e.scope === 'project'), 'control: the memory index stays a project entry');
+  } finally { clean(home); }
+});
+
+test('INSPECT 99 L99-3: a file the PROJECT reaches inside an ancestor folder is OUTSIDE unless it is the ancestor CLAUDE.md itself; the ancestor\'s own @import closure stays read', () => {
+  const { home, room } = reachSandbox();
+  try {
+    const ws = path.join(home, 'work');
+    write(path.join(ws, 'CLAUDE.md'), '# umbrella\n@AGENTS.md\n@MEMORY.md\n');
+    write(path.join(ws, 'AGENTS.md'), 'rules\n@deep-a.md\n');
+    write(path.join(ws, 'MEMORY.md'), 'umbrella memory\n');
+    write(path.join(ws, 'deep-a.md'), 'deep\n');
+    write(path.join(ws, 'sib', 'secret.md'), 'SIB-SECRET\n@deeper.md\n');
+    write(path.join(ws, 'sib', 'deeper.md'), 'deeper\n');
+    write(path.join(room, 'CLAUDE.md'), '# room\n@../sib/secret.md\n@../CLAUDE.md\n');
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    const secret = path.join(ws, 'sib', 'secret.md');
+    const hit = allListed(d).filter((e) => e.path === secret);
+    assert.strictEqual(hit.length, 1, 'the sibling file is measured once');
+    assert.notStrictEqual(hit[0].scope, 'project', 'the sibling file is never tagged scope project');
+    assert.ok(!allListed(d).some((e) => e.path === path.join(ws, 'sib', 'deeper.md')), 'the sibling file was never read: its own import is not followed');
+    assert.ok(d.flags.some((x) => x.includes('~/work/sib/secret.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+    assert.ok(!d.flags.some((x) => x.includes('SIB-SECRET')), 'no flag carries file content');
+    for (const f of ['CLAUDE.md', 'AGENTS.md', 'MEMORY.md', 'deep-a.md']) {
+      const e = d.inherited.find((x) => x.path === path.join(ws, f));
+      assert.ok(e && e.scope === 'project' && !e.statOnly, `pin: the ancestor ${f} stays the read inherited tier`);
+      assert.ok(!d.flags.some((x) => x.includes(`~/work/${f}`)), `pin: no flag on the ancestor ${f}`);
+    }
   } finally { clean(home); }
 });

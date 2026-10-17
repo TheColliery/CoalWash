@@ -374,7 +374,8 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
         // The text is used for newlines ONLY and never reaches
         // mechFatFromText — the fat definition is untouched.
         m.index.bytes = e.bytes;
-        if (e.bytes <= CC_INDEX_CAP_BYTES) {
+        // INSPECT 99 L99-2: a statOnly index keeps its stat bytes and is never read, not even for its line count.
+        if (!e.statOnly && e.bytes <= CC_INDEX_CAP_BYTES) {
           try {
             const t = readRepoFileBounded(e.path, null, MAX_DOC_BYTES); // CWK-137: bounded. E2-4: root null kept: a class-B entry discovery already realpath-checked inside the home/project trees
             if (t !== null) m.index.lines = t.split('\n').length;
