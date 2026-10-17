@@ -2,6 +2,12 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Changed
+
+- **Contributor-facing: the front-door link check's workflow is re-copied from the org canon.** `.github/workflows/front-door-links.yml` is now blob `f0cc9ec0`, copied by blob from the `templates/published-code` copy at `.github` commit `7794678`. Its job is now named `front-door-links` (it was `check`). Dev and CI only; nothing in the installed plugin.
+
 ## [1.12.6] - 2026-10-17
 
 A project config write refuses a link at any folder on its way
