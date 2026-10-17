@@ -91,7 +91,9 @@ const BIN_LOCK_STALE_MS = 5000;
 // test can assert an orphan was reclaimed on the FIRST attempt instead of
 // timing the call against the retry budget. One increment per attempt; read
 // by nothing outside a test.
-export const __testHooks = { binLockAttempts: 0 };
+// `beforeIndexSave(dir)` (P95-1): called inside recordBinItem's critical section, after the index is loaded and the new row
+// pushed, right before it is saved, so a test can stall a holder past the stale window deterministically. null in production.
+export const __testHooks = { binLockAttempts: 0, beforeIndexSave: null };
 
 // CWK-137: a bin is `<project>/.claude/coalwash/<name>` -- repo-plantable. ownSandboxDir
 // THROWS when any directory between the project root and the bin is a link, and
@@ -120,14 +122,30 @@ export function isBareId(id) {
   return typeof id === 'string' && !!id && id !== '.' && id !== '..' && path.basename(id) === id;
 }
 
+// P95-1: the catalogue never loses a blob. A blob whose row a lost save dropped (a holder robbed of the bin lock after
+// a stall, or any writer that died between its blob and its save) is listed again from the blob itself: its id, the
+// time its id carries, its size by stat, and no original (that was only in the row). The index file stays the record of
+// what it holds; this only adds what it is missing. Only names in recordBinItem's own id shape count, and only plain
+// files, so index.json, its temps, .gitignore and the lock are never listed.
+const BLOB_ID = /^\d+-[0-9a-f]{12}$/;
 function loadIndex(dir) {
+  let index = [];
   try {
     // CWK-137: bounded. E2-4: contained to the bin dir ITSELF (`dir` is binDir's ownSandboxDir answer).
     const parsed = JSON.parse(readRepoFileBounded(path.join(dir, INDEX_NAME), dir, MAX_DOC_BYTES));
-    return Array.isArray(parsed) ? parsed.filter((i) => i && isBareId(i.id)) : [];
-  } catch {
-    return [];
-  }
+    if (Array.isArray(parsed)) index = parsed.filter((i) => i && isBareId(i.id));
+  } catch { /* no index (or an unreadable one): the blobs below are still listed */ }
+  try {
+    const named = new Set(index.map((i) => i.id));
+    for (const f of fs.readdirSync(dir)) {
+      if (!BLOB_ID.test(f) || named.has(f)) continue;
+      let st;
+      try { st = fs.lstatSync(path.join(dir, f)); } catch { continue; }
+      if (!st.isFile()) continue;
+      index.push({ id: f, at: Number(f.slice(0, f.indexOf('-'))), bytes: st.size, original: null, origin: null });
+    }
+  } catch { /* no bin folder: nothing to list */ }
+  return index;
 }
 function saveIndex(dir, index) {
   try {
@@ -268,10 +286,21 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     // planted at the blob path. A pre-existing entry at a brand-new id IS an error,
     // so O_EXCL here costs no legitimate operation (the U7 temp/destination split).
     fs.writeFileSync(path.join(dir, id), body, { flag: 'wx' }); // NO encoding argument: raw bytes
-    const index = loadIndex(dir);
     // bytes (0i): the size-cap layer's weight — recorded at birth so the
     // sweep never has to re-stat the common case.
-    index.push({ id, at: now, bytes: body.length, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' });
+    const row = { id, at: now, bytes: body.length, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' };
+    // loadIndex lists this item's own blob (written above) as a bare reconciled row; the full row replaces it.
+    let index = loadIndex(dir).filter((i) => i.id !== id);
+    index.push(row);
+    if (typeof __testHooks.beforeIndexSave === 'function') __testHooks.beforeIndexSave(dir);
+    // P95-1: a holder stalled past BIN_LOCK_STALE_MS is stolen from, and the thief may already have saved its row. Saving
+    // the index loaded before the theft would drop that row (its blob stays, unlisted). So a holder that no longer owns
+    // the lock re-loads what is on disk now and adds its row to that. The loss that remains (a theft between this check
+    // and the save) leaves a blob without a row, which loadIndex lists again.
+    if (lock.owns && !lock.owns()) {
+      index = loadIndex(dir).filter((i) => i.id !== id);
+      index.push(row);
+    }
     if (!saveIndex(dir, index)) { try { fs.rmSync(path.join(dir, id), { force: true }); } catch {} return null; }
     return id;
   } catch {
@@ -352,9 +381,9 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
   if (!peek.length) return { destroyed: 0, kept: 0 };
   const lock = acquireBinLock(dir);
   if (!lock.acquired) return { destroyed: 0, kept: peek.length };
-  try { return sweepBinLocked(dir, horizonMs, now, budgetBytes); } finally { lock.release(); }
+  try { return sweepBinLocked(dir, horizonMs, now, budgetBytes, lock); } finally { lock.release(); }
 }
-function sweepBinLocked(dir, horizonMs, now, budgetBytes) {
+function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   const index = loadIndex(dir); // re-read INSIDE the lock: the peek above may be stale by now
   if (!index.length) return { destroyed: 0, kept: 0 };
   // Legacy index entries (pre-0i) carry no bytes — weigh them by a one-time
@@ -369,6 +398,7 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes) {
   const { keep, destroy, reasons, capConflict } = retentionPlan(index, now, { horizonMs, budgetBytes });
   const survivors = [...keep];
   const cert = [];
+  const gone = new Set(); // ids whose blob this pass verified destroyed
   for (const item of destroy) {
     const p = path.join(dir, item.id);
     try { fs.rmSync(p, { force: true }); } catch { /* leftover dust waits for the next pass */ }
@@ -387,6 +417,7 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes) {
       // log -- one certificate is one line, never a forged second one.
       const oneLine = (v) => String(v).replace(/[\r\n]/g, ' ');
       cert.push(`${new Date(now).toISOString()} destroyed ${oneLine(item.id)} (age ${ageDays}d, rule ${rule}) original ${oneLine(orig)}`);
+      gone.add(item.id);
     } else {
       survivors.push(item); // unverifiable death -> never claimed, kept for the next pass
     }
@@ -402,11 +433,16 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes) {
   if (cert.length) {
     try { fs.mkdirSync(dir, { recursive: true }); appendOwnLog(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n'); } catch { /* the certificate is a record, not a gate */ }
   }
-  saveIndex(dir, survivors);
+  if (typeof __testHooks.beforeIndexSave === 'function') __testHooks.beforeIndexSave(dir);
+  // P95-1: a sweep stalled past BIN_LOCK_STALE_MS may have been robbed, and the thief may have saved a new row. Saving
+  // `survivors`, built from the index loaded before the theft, would drop that row, so a sweep that no longer owns the
+  // lock saves what is on disk now, minus what it destroyed.
+  const saved = lock && lock.owns && !lock.owns() ? loadIndex(dir).filter((i) => !gone.has(i.id)) : survivors;
+  saveIndex(dir, saved);
   // capConflict only present when live: existing callers/tests deepStrictEqual
   // the two-field shape, and an always-null third field would churn every one
   // for no information (ponytail: additive-when-present).
-  const out = { destroyed: index.length - survivors.length, kept: survivors.length };
+  const out = { destroyed: gone.size, kept: saved.length };
   if (capConflict) out.capConflict = capConflict;
   return out;
 }

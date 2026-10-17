@@ -751,6 +751,8 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
   // release deletes the lock ONLY if it still carries OUR token (a slow/suspended
   // holder whose lock was stolen must not delete the new holder's lock — HIGH #4).
   const releaseIfOwner = () => { try { if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { force: true }); } catch {} };
+  // P95-1: does this holder still own the lock, or did a stale takeover hand it to someone else? Doubt = not owned.
+  const owns = () => { try { return readLockToken(lockPath) === token; } catch { return false; } };
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     if (selfIgnore) {
@@ -762,7 +764,7 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
     // compare-after-write (the header's named-assumption belt): a foreign
     // token on re-read = O_EXCL did not actually exclude us -> defer.
     if (readLockToken(lockPath) !== token) return { acquired: false, reason: 'exclusive-create acquire lost a race (non-local filesystem?) — deferring' };
-    return { acquired: true, release: releaseIfOwner };
+    return { acquired: true, release: releaseIfOwner, owns };
   } catch (e) {
     if (e && e.code !== 'EEXIST') return { acquired: false, reason: `lock error: ${e.message}` };
   }
@@ -794,7 +796,7 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
       if (o.why === 'unverifiable') return { acquired: false, reason: `the lock ${lockPath} is stale, but this filesystem reports no file identity number, so CoalWash cannot prove the file it opens is the one it checked — refusing to take it over; remove the lock by hand if it is yours` };
       if (o.fd !== undefined) {
         try { fs.ftruncateSync(o.fd, 0); fs.writeSync(o.fd, body, 0); fs.fsyncSync(o.fd); } finally { fs.closeSync(o.fd); }
-        if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner };
+        if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner, owns };
         return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
       }
     }

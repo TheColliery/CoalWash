@@ -679,3 +679,92 @@ test('CWK-120 row 18: an orphaned lock is reclaimed on the FIRST attempt even wh
     assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 1);
   } finally { clean(proj); }
 });
+
+// P95-1 (INSPECT 95, the 17c unit: `:181` read 76 entries for 84 blobs at CPU 100%): a holder stalled past
+// BIN_LOCK_STALE_MS between loading the index and saving it is stolen from; the thief saves its row, then the stalled
+// holder's save, built from the index it loaded BEFORE the theft, drops the thief's row while the thief's blob stays.
+// Reproduced deterministically, never by load: the seam backdates the held lock and runs the thief inside the window.
+test('P95-1: a writer stalled past the stale window while a second writer steals the bin lock leaves both rows in the catalogue, with their originals', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-p951-')));
+  const proj = path.join(dir, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  let inner = null;
+  let fired = 0;
+  __testHooks.beforeIndexSave = (binDirPath) => {
+    __testHooks.beforeIndexSave = null; // the thief's own critical section runs unhooked
+    fired++;
+    const old = new Date(Date.now() - 60000);
+    fs.utimesSync(path.join(binDirPath, '.bin.lock'), old, old); // the holder now looks stalled far past BIN_LOCK_STALE_MS
+    inner = recordBinItem(proj, FAT_BIN_NAME, { content: 'thief', original: '/thief.md' });
+  };
+  try {
+    const outer = recordBinItem(proj, FAT_BIN_NAME, { content: 'stalled', original: '/stalled.md' });
+    assert.strictEqual(fired, 1, 'the seam ran once, inside the stalled holder');
+    assert.ok(outer && inner, `both writers report success (outer ${outer}, inner ${inner})`);
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    const blobs = fs.readdirSync(binPath).filter((f) => /^\d+-[0-9a-f]{12}$/.test(f)).sort();
+    const rows = listBin(proj, FAT_BIN_NAME);
+    assert.deepStrictEqual(rows.map((r) => r.id).sort(), blobs, 'the catalogue names exactly the blobs on disk, each once');
+    assert.deepStrictEqual(blobs, [outer, inner].sort(), 'the blobs are the two reported ids');
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    assert.strictEqual(byId[outer].original, '/stalled.md', 'the stalled writer keeps its original');
+    assert.strictEqual(byId[inner].original, '/thief.md', 'the thief keeps its original: the stalled save never drops its row');
+  } finally {
+    __testHooks.beforeIndexSave = null;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('P95-1: a blob on disk whose row a lost save dropped is still listed (reconciled from the blob, sized by stat), and nothing else in the bin folder is', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-p951r-')));
+  const proj = path.join(dir, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  try {
+    const a = recordBinItem(proj, FAT_BIN_NAME, { content: 'kept row', original: '/a.md' });
+    const b = recordBinItem(proj, FAT_BIN_NAME, { content: 'row lost by a save', original: '/b.md' });
+    assert.ok(a && b);
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    const indexPath = path.join(binPath, 'index.json');
+    fs.writeFileSync(indexPath, JSON.stringify(JSON.parse(fs.readFileSync(indexPath, 'utf8')).filter((r) => r.id !== b)));
+    fs.mkdirSync(path.join(binPath, '1700000000000-aaaaaaaaaaaa')); // a FOLDER in the blob-id shape is not a blob
+    const rows = listBin(proj, FAT_BIN_NAME);
+    assert.deepStrictEqual(rows.map((r) => r.id).sort(), [a, b].sort(), 'the dropped row is back; no other entry in the bin folder (index.json, .gitignore, a folder named like a blob) is listed');
+    const rb = rows.find((r) => r.id === b);
+    assert.strictEqual(rb.bytes, fs.statSync(path.join(binPath, b)).size, 'its bytes come from stat');
+    assert.strictEqual(rb.at, Number(b.slice(0, b.indexOf('-'))), 'its time comes from the id it was named with');
+    assert.strictEqual(rows.find((r) => r.id === a).original, '/a.md', 'a row the index still holds keeps its original');
+    assert.ok(restoreFromBin(proj, FAT_BIN_NAME, b), 'the reconciled row restores');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('P95-1: a sweep stalled past the stale window while a writer steals the bin lock keeps the writer\'s row with its original, and still destroys what it destroyed', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-p951s-')));
+  const proj = path.join(dir, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  const now = Date.now();
+  const expired = recordBinItem(proj, FAT_BIN_NAME, { content: 'expired', original: '/expired.md', now: now - (HORIZON_MS.fat + 86400000) });
+  let fresh = null;
+  let fired = 0;
+  __testHooks.beforeIndexSave = (binDirPath) => {
+    __testHooks.beforeIndexSave = null;
+    fired++;
+    const old = new Date(Date.now() - 60000);
+    fs.utimesSync(path.join(binDirPath, '.bin.lock'), old, old); // the sweep now looks stalled far past BIN_LOCK_STALE_MS
+    fresh = recordBinItem(proj, FAT_BIN_NAME, { content: 'fresh', original: '/fresh.md' });
+  };
+  try {
+    assert.ok(expired);
+    const r = sweepFatBin(proj, { now });
+    assert.strictEqual(fired, 1, 'the seam ran once, inside the stalled sweep');
+    assert.ok(fresh, 'the thief recorded its item');
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    assert.ok(!fs.existsSync(path.join(binPath, expired)), 'the expired blob is gone');
+    assert.strictEqual(r.destroyed, 1, 'the sweep reports the one item it destroyed');
+    const rows = listBin(proj, FAT_BIN_NAME);
+    assert.deepStrictEqual(rows.map((x) => x.id), [fresh], 'the catalogue holds the thief\'s row and not the destroyed one');
+    assert.strictEqual(rows[0].original, '/fresh.md', 'the thief keeps its original: the stalled sweep never drops its row');
+  } finally {
+    __testHooks.beforeIndexSave = null;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
