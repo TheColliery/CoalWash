@@ -2,10 +2,19 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.12.7] - 2026-10-17
+
+A real folder named with two leading dots is read as inside its root
+
+A real child folder whose name begins with two dots (`..x`, `..cfg`) is no longer read as outside its root. Nothing is removed from the plugin and nothing that worked before is refused. The installed plugin moved: `scripts/lib/repo-fs.mjs`, `scripts/lib/caliper.mjs` and `scripts/lib/class-b.mjs` with their `plugin/` twins, and the version in `plugin.json` (`git diff --stat 3aeab30 HEAD -- plugin/` lists the three libraries before the bump).
+
+### Fixed
+
+- **A real child folder whose name begins with two dots (`..x`, `..cfg`) is no longer read as outside its root; a real `../sibling` is still refused (CWK2-051).** Four places tested a relative path with a lexical `startsWith('..')` and now share the one first-segment rule, `escapesRoot` in `scripts/lib/repo-fs.mjs` (now exported): `containedNewPath` in `caliper.mjs` (the state-path containment check), `relLabel` and `containedIn` in `class-b.mjs` (the class-B label and containment helpers), and the agent-home scan in `scripts/verify.mjs`. Three of the four ship in the installed plugin; `verify.mjs` is a dev gate and is not in `plugin/`. Before, a folder named `..x` under the root was judged outside it, so a path through it was refused or lost its root-relative label. — test: `scripts/lib/caliper.test.mjs`, `` CWK2-051: containedNewPath reads a real child folder named ..x / ..cfg as INSIDE, and a real ../sibling as outside ``; `scripts/lib/class-b.test.mjs`, `` CWK2-051: containedIn and relLabel read a real child folder named ..x / ..cfg as INSIDE the root, and ../sibling as outside ``; `scripts/lib/repo-fs.test.mjs`, `` CWK2-051: escapesRoot tests the FIRST path segment: ..x and ..cfg are inside, .. and ../a and an absolute path are outside `` (the `verify.mjs` site has no test of its own; the gate runs it on every commit).
 
 ### Changed
 
+- **Forward note on [1.12.6] (a released entry is never edited).** Its Fixed bullet says "Before, every one of these told the user to replace the config file". That was true only for a refusal `writeRepoFile` raised itself (a link on the target path). Measured at `daeb04f`, the parent of the 1.12.6 work, by running its `scripts/configure.mjs --updateMode auto` in a throwaway git project: with `.claude` a FILE it printed `Error: Failed to write to config file: ENOTDIR: not a directory, mkdir '<project>\.claude\coal'`, and with `.claude/coal` a FILE it printed `Error: Failed to write to config file: EEXIST: file already exists, mkdir '<project>\.claude\coal'`: a raw write error, no config-file advice. A folder that could not be made takes the same unwrapped `mkdirSync` in `writeRepoFile` at `daeb04f` (read from the code; the permission case was not run there). What 1.12.6 ships is unchanged: those causes now name the folder with advice that fits.
 - **Contributor-facing: the front-door link check's workflow is re-copied from the org canon.** `.github/workflows/front-door-links.yml` is now blob `f0cc9ec0`, copied by blob from the `templates/published-code` copy at `.github` commit `7794678`. Its job is now named `front-door-links` (it was `check`). Dev and CI only; nothing in the installed plugin.
 
 ## [1.12.6] - 2026-10-17
