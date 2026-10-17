@@ -7,7 +7,7 @@
 | Surface | Where | Load behavior |
 |---|---|---|
 | Global governance | `~/.claude/CLAUDE.md` + its `@import` closure (depth cap 5) | always-loaded, every session |
-| Project governance | the `CLAUDE.md` up-tree walk (cwd → home, never above) + each file's imports (an import whose real path is outside the project, `~/.claude` and the ancestor governance is sized by stat only and never read) | always-loaded |
+| Project governance | the `CLAUDE.md` up-tree walk (cwd → home, never above) + each file's imports (an import whose real path is outside the project, its own memory store and the ancestor governance is sized by stat only and never read) | always-loaded |
 | Rules tree | `[project]/.claude/rules/**/*.md` | on-demand (recall cost) unless pulled in via an `@import` |
 | Memory index | `~/.claude/projects/[slug]/memory/MEMORY.md` — slug = the absolute project path, every non-alphanumeric char → `-` | always-loaded; platform cap class ~25KB / ~200 lines (the caliper's absolute-cap tripwires) |
 | Memory files | sibling `*.md` in the same dir | on recall only — count toward total-store, not the per-session cost |
