@@ -493,14 +493,38 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // ancestor CLAUDE.md's own @import closure, which sits above any clone) keeps the wider rule: the project, ~/.claude,
   // the ancestor files and the ancestor folders. Global-scope candidates are the user's own ~/.claude chain (a cloned
   // repo cannot write it) and keep their reach.
-  // ANCESTOR GOVERNANCE (NESTED-HABITAT): each CLAUDE.md the up-tree walk finds between the room and HOME whose
-  // realpath stays in its own folder, plus everything inside such a folder strictly below HOME. HOME itself never
+  // ANCESTOR GOVERNANCE (NESTED-HABITAT): each CLAUDE.md the up-tree walk finds ABOVE the project's repository top
+  // (R102-1, below) and up to HOME whose realpath stays in its own folder, plus everything inside such a folder strictly
+  // below HOME. HOME itself never
   // counts as a governance folder, or one ~/CLAUDE.md would admit every file under HOME.
   const basePhys = homePhys ? physicalOrNull(claudeBaseDir(home)) : null;
+  // RE-INSPECT 102 R102-1: ancestor governance begins strictly ABOVE the project's repository top, the nearest folder
+  // at or above the project root (up to HOME or the filesystem root) holding a `.git` entry, file or folder, read by
+  // lstat and never followed. A clone cannot commit a `.git` entry, so it cannot move its own top. A CLAUDE.md between
+  // the room and that top is the clone's own (`ownFiles`): it stays in the inherited tier and keeps the room rule, so a
+  // nested session root no longer turns the clone's top CLAUDE.md into an ancestor. With no `.git` found the walk
+  // starts above the room as before: a named residual (a tree with no git history, a session in a nested folder).
+  const hasGitEntry = (dir) => { try { fs.lstatSync(path.join(dir, '.git')); return true; } catch { return false; } };
+  let topPhys = null;
+  if (projPhys) {
+    for (let dir = projPhys; ; dir = path.dirname(dir)) {
+      if (hasGitEntry(dir)) { topPhys = dir; break; }
+      if (dir === homePhys || path.dirname(dir) === dir) break;
+    }
+  }
+  const ownFiles = new Set();
+  if (projPhys && topPhys && topPhys !== projPhys) {
+    for (let dir = path.dirname(projPhys); ; dir = path.dirname(dir)) {
+      const cl = physicalOrNull(path.join(dir, 'CLAUDE.md'));
+      if (cl && path.dirname(cl) === dir) ownFiles.add(cl);
+      if (dir === topPhys || path.dirname(dir) === dir) break;
+    }
+  }
+  const anchorPhys = topPhys || projPhys;
   const ancestorFiles = new Set();
   const ancestorDirs = [];
-  if (projPhys && homePhys && projPhys !== homePhys && containedIn(projPhys, [homePhys])) {
-    for (let dir = path.dirname(projPhys); ; dir = path.dirname(dir)) {
+  if (projPhys && homePhys && anchorPhys !== homePhys && containedIn(anchorPhys, [homePhys])) {
+    for (let dir = path.dirname(anchorPhys); ; dir = path.dirname(dir)) {
       const cl = physicalOrNull(path.join(dir, 'CLAUDE.md'));
       if (cl && path.dirname(cl) === dir) {
         ancestorFiles.add(cl);
@@ -516,6 +540,7 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   const isOutside = (phys, origin) => {
     if (projPhys && containedIn(phys, [projPhys])) return false;
     if (ancestorFiles.has(phys)) return false;
+    if (ownFiles.has(phys)) return false; // R102-1: the clone's own CLAUDE.md above a nested room; its imports keep the room rule
     if (origin === 'ancestor') return !(basePhys && containedIn(phys, [basePhys])) && !containedIn(phys, ancestorDirs);
     return !(memPhys && containedIn(phys, [memPhys]));
   };

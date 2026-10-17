@@ -1472,7 +1472,7 @@ test('CWK2-029 (b): a memory store that is a directory JUNCTION to a HOME folder
   } finally { clean(home); }
 });
 
-test('CWK2-029 (b) control: an ANCESTOR governance file and its own-folder @import stay the inherited tier and ARE read; a ~/.claude import from the room is not OUTSIDE', () => {
+test('CWK2-029 (b) control: an ANCESTOR governance file and its own-folder @import stay the inherited tier and ARE read; a ~/.claude import from an ANCESTOR\'s closure is not OUTSIDE', () => {
   const { home, room } = reachSandbox();
   try {
     const umb = path.join(home, 'work');
@@ -1564,5 +1564,91 @@ test('INSPECT 99 L99-3: a file the PROJECT reaches inside an ancestor folder is 
       assert.ok(e && e.scope === 'project' && !e.statOnly, `pin: the ancestor ${f} stays the read inherited tier`);
       assert.ok(!d.flags.some((x) => x.includes(`~/work/${f}`)), `pin: no flag on the ancestor ${f}`);
     }
+  } finally { clean(home); }
+});
+
+// RE-INSPECT 102 R102-1 (witness scratchpad/17e/insp102-nested.mjs B1/B1b/B2): ancestor governance begins strictly
+// ABOVE the project's repository top, the nearest folder at or above the project root holding a `.git` entry.
+function nestedCloneSandbox({ git = true } = {}) {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwr102-home-')));
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  const clone = path.join(home, 'src', 'clone');
+  const sub = path.join(clone, 'sub');
+  fs.mkdirSync(sub, { recursive: true });
+  if (git) fs.mkdirSync(path.join(clone, '.git'));
+  const cred = path.join(home, '.claude', '.credentials.json');
+  write(cred, '{"token":"FAKE-TOKEN"}\n@~/marker-b1.md\n');
+  write(path.join(home, 'marker-b1.md'), 'marker\n');
+  write(path.join(clone, 'CLAUDE.md'), '# clone top\n@~/.claude/.credentials.json\n');
+  write(path.join(sub, 'CLAUDE.md'), '# package\n');
+  return { home, clone, sub, cred };
+}
+
+test('RE-INSPECT 102 R102-1: a clone\'s own top CLAUDE.md above a nested session root keeps the room rule: its ~/.claude/.credentials.json import is OUTSIDE, never read', () => {
+  const { home, clone, sub, cred } = nestedCloneSandbox();
+  try {
+    for (const projectRoot of [sub, clone]) { // B1 (nested session root), B1b (the clone top itself)
+      const d = discoverClassB({ projectRoot, home, platform: 'claude-code' });
+      const label = path.basename(projectRoot);
+      const hit = allListed(d).filter((e) => e.path === cred);
+      assert.strictEqual(hit.length, 1, `${label}: .credentials.json is measured once`);
+      assert.strictEqual(hit[0].scope, 'outside', `${label}: .credentials.json is OUTSIDE`);
+      assert.strictEqual(hit[0].statOnly, true, `${label}: .credentials.json is statOnly`);
+      assert.ok(!allListed(d).some((e) => e.path === path.join(home, 'marker-b1.md')), `${label}: .credentials.json was never read: its import is unlisted`);
+      assert.ok(d.flags.some((x) => x.includes('~/.claude/.credentials.json')), `${label}: one flag names it: ${JSON.stringify(d.flags)}`);
+      const top = allListed(d).find((e) => e.path === path.join(clone, 'CLAUDE.md'));
+      assert.ok(top && top.scope === 'project' && !top.statOnly, `${label}: the clone's own top CLAUDE.md is still measured and read`);
+    }
+  } finally { clean(home); }
+});
+
+test('RE-INSPECT 102 R102-1 pin: the house shape, a room with its own .git under an ancestor folder with its own .git and a CLAUDE.md importing @AGENTS.md, keeps the ancestor closure read', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwr102-house-')));
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const umb = path.join(home, 'repos', 'umbrella');
+    const room = path.join(umb, 'room');
+    fs.mkdirSync(path.join(umb, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(room, '.git'), { recursive: true });
+    write(path.join(umb, 'CLAUDE.md'), '# umbrella\n@AGENTS.md\n@MEMORY.md\n');
+    write(path.join(umb, 'AGENTS.md'), 'rules\n@deep.md\n@~/.claude/g.md\n');
+    write(path.join(umb, 'MEMORY.md'), 'umbrella memory\n');
+    write(path.join(umb, 'deep.md'), 'deep\n');
+    write(path.join(home, '.claude', 'g.md'), 'global\n');
+    write(path.join(room, 'CLAUDE.md'), '# room\n');
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    for (const p of ['CLAUDE.md', 'AGENTS.md', 'MEMORY.md', 'deep.md'].map((f) => path.join(umb, f)).concat(path.join(home, '.claude', 'g.md'))) {
+      const e = d.inherited.find((x) => x.path === p);
+      assert.ok(e && e.scope === 'project' && !e.statOnly, `pin: ${path.relative(home, p)} stays the read inherited tier`);
+    }
+    assert.ok(!d.flags.some((x) => /outside the project/.test(x)), `pin: no OUTSIDE flag in the house shape: ${JSON.stringify(d.flags)}`);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('RE-INSPECT 102 R102-1 residual (named, not closed): with no .git up to HOME, a CLAUDE.md above a nested session root is still an ancestor and its ~/.claude import is read', () => {
+  const { home, sub, cred } = nestedCloneSandbox({ git: false });
+  try {
+    const d = discoverClassB({ projectRoot: sub, home, platform: 'claude-code' });
+    const hit = allListed(d).find((e) => e.path === cred);
+    assert.ok(hit && hit.scope === 'project' && !hit.statOnly, 'the residual: with no repository top, .credentials.json is read through the ancestor rule');
+    assert.ok(allListed(d).some((e) => e.path === path.join(home, 'marker-b1.md')), 'the residual: its import is followed');
+  } finally { clean(home); }
+});
+
+test('RE-INSPECT 102 R102-1: the .git entry that marks the repository top is read by lstat, never followed: a dangling .git link still marks the top (skips visibly where a dangling junction cannot be made)', (t) => {
+  const { home, clone, sub, cred } = nestedCloneSandbox({ git: false });
+  try {
+    const gone = path.join(home, 'gone-git-dir');
+    try { fs.symlinkSync(gone, path.join(clone, '.git'), 'junction'); } catch (e) {
+      t.skip(`dangling junction creation unavailable on this host: ${e.code || e.message}`);
+      return;
+    }
+    let dangling = false;
+    try { fs.statSync(path.join(clone, '.git')); } catch { dangling = true; }
+    if (!dangling) { t.skip('this host follows the planted .git link to a live target, so the dangling case cannot be shown'); return; }
+    const d = discoverClassB({ projectRoot: sub, home, platform: 'claude-code' });
+    const hit = allListed(d).find((e) => e.path === cred);
+    assert.ok(hit && hit.scope === 'outside' && hit.statOnly, 'a dangling .git link still marks the top, so .credentials.json is OUTSIDE');
+    assert.ok(!allListed(d).some((e) => e.path === path.join(home, 'marker-b1.md')), 'its import is unlisted');
   } finally { clean(home); }
 });
