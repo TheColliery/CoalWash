@@ -179,6 +179,16 @@ test('grad6 F2: at heavier load (16x10=160) the catalogue/blobs never diverge fr
     assert.ok(successfulAttempts > 0 && successfulAttempts <= WORKERS * PER_WORKER, `sanity: ${successfulAttempts} successes out of ${WORKERS * PER_WORKER} attempted`);
     assert.strictEqual(onDisk.length, successfulAttempts, 'every successful attempt must have exactly one blob — a refusal must leave nothing behind');
     assert.strictEqual(index.length, onDisk.length, 'the catalogue must never diverge from the blobs, even when some attempts refuse');
+    // INSPECT 109 L109-2: listBin lists a blob that lost its row again (P95-1's reconcile), so it alone can no longer see a
+    // lost save. index.json is read RAW as well: its rows are the blobs on disk, each once, each with the original the
+    // worker recorded.
+    const indexFile = path.join(binPath, 'index.json');
+    const raw = fs.existsSync(indexFile) ? JSON.parse(fs.readFileSync(indexFile, 'utf8')) : [];
+    const lostSave = 'index.json itself must hold every blob on disk, each once, with its original: a missing row is a lost save. '
+      + 'The one window that can legitimately redden this is a bin-lock theft landing between owns() and saveIndex in recordBinItem '
+      + '(P95-1, a holder stalled past BIN_LOCK_STALE_MS): read the rows and the box load before any re-run';
+    assert.deepStrictEqual(raw.map((r) => r.id).sort(), [...onDisk].sort(), lostSave);
+    assert.ok(raw.every((r) => typeof r.original === 'string' && r.original), lostSave);
   } finally { clean(dir); }
 });
 
