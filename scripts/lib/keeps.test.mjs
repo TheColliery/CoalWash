@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { keepsPath, loadKeeps, recordKeep, globalKeepsPath, loadGlobalKeeps, recordGlobalKeep, pendingUserKeeps } from './keeps.mjs';
-import { txDirFor } from './apply.mjs';
+import * as keepsModule from './keeps.mjs';
+import { txDirFor, acquireLock } from './apply.mjs';
 
 function sandbox() {
   return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-proj-')));
@@ -602,4 +603,164 @@ test('U7: recordKeep never writes THROUGH an alias planted at its temp -- the fi
     assert.strictEqual(ok.ok, false, 'the record fails closed on EEXIST at the O_EXCL temp, never silently through the alias');
     assert.deepStrictEqual(loadKeeps(proj), [], 'and nothing was recorded');
   } finally { clean(proj); }
+});
+
+// ---------------------------------------------------------------------------
+// fire 126 (18a item 3): keeps.json's read-modify-write runs under its own lock. The seam is the store's temp write
+// (fs.writeFileSync on `<store>.<hex>.tmp`): a second recorder, a thief or an unreadable lock is put there, inside the
+// first recorder's read-modify-write, the moment between its read and its rename.
+// ---------------------------------------------------------------------------
+function atKeepsTemp(file, fn, { after = false } = {}) {
+  const real = fs.writeFileSync;
+  let fired = false;
+  fs.writeFileSync = function patched(p, ...rest) {
+    const hit = !fired && String(p).startsWith(`${file}.`) && String(p).endsWith('.tmp');
+    if (hit) fired = true;
+    if (hit && !after) fn();
+    const out = real.call(fs, p, ...rest);
+    if (hit && after) fn();
+    return out;
+  };
+  return () => { fs.writeFileSync = real; return fired; };
+}
+function faultReads(lockPath) {
+  const real = fs.openSync;
+  const want = path.resolve(lockPath);
+  const f = { armed: false };
+  fs.openSync = function patched(p, flags, ...rest) {
+    const isRead = typeof flags === 'number' && (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0;
+    if (f.armed && isRead && path.resolve(String(p)) === want) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+    return real.call(fs, p, flags, ...rest);
+  };
+  f.restore = () => { fs.openSync = real; };
+  return f;
+}
+const targetsIn = (keeps) => keeps.map((k) => k.target).sort();
+// read through the namespace so this file still loads against a keeps.mjs that predates the lock (the red-first run)
+const KEEPS_LOCK_STALE_MS = keepsModule.KEEPS_LOCK_STALE_MS ?? 5000;
+
+for (const [scope, mk] of [
+  ['project', () => { const proj = sandbox(); return { dirs: [proj], file: keepsPath(proj), rec: (o) => recordKeep(proj, o), load: () => loadKeeps(proj) }; }],
+  ['global', () => { const home = sandbox(); return { dirs: [home], file: globalKeepsPath(home), rec: (o) => recordGlobalKeep(home, o), load: () => loadGlobalKeeps(home) }; }],
+]) {
+  test(`fire 126: two ${scope} keep recorders interleaved inside the read-modify-write never drop one another: the second is refused while the first holds the lock, and on retry both entries stand`, () => {
+    const s = mk();
+    try {
+      assert.strictEqual(s.rec({ target: 'base', reason: 'already there' }).ok, true);
+      let second = null;
+      const done = atKeepsTemp(s.file, () => { second = s.rec({ target: 'second', reason: 'recorded meanwhile' }); });
+      const first = s.rec({ target: 'first', reason: 'recorded first' });
+      assert.strictEqual(done(), true, 'the seam fired inside the first recorder');
+      assert.strictEqual(first.ok, true, JSON.stringify(first));
+      assert.ok(second, 'the second recorder ran inside the first one');
+      // the invariant: no call that answered ok has lost its entry
+      for (const [name, r] of [['first', first], ['second', second]]) {
+        if (r.ok) assert.ok(targetsIn(s.load()).includes(name), `${name} answered ok, so its entry must be on disk`);
+      }
+      assert.strictEqual(second.ok, false, 'the second recorder could not take the lock the first held');
+      assert.ok(second.error.includes(`keeps lock: another recorder holds ${s.file}.lock`) && second.error.includes('nothing was written'), second.error);
+      assert.strictEqual(s.rec({ target: 'second', reason: 'recorded meanwhile' }).ok, true, 'the caller records it again');
+      assert.deepStrictEqual(targetsIn(s.load()), ['base', 'first', 'second']);
+      assert.strictEqual(fs.existsSync(`${s.file}.lock`), false, 'the lock is released');
+    } finally { clean(...s.dirs); }
+  });
+}
+
+test('fire 126: a keeps lock held by another recorder refuses the record and writes nothing', () => {
+  const proj = sandbox();
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const before = fs.readFileSync(keepsPath(proj));
+    const held = JSON.stringify({ sessionId: 'other', pid: 1, at: Date.now(), token: 'other:1:1' });
+    fs.writeFileSync(`${keepsPath(proj)}.lock`, held);
+    const r = recordKeep(proj, { target: 'blocked' });
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.includes(`keeps lock: another recorder holds ${keepsPath(proj)}.lock`), r.error);
+    assert.deepStrictEqual(fs.readFileSync(keepsPath(proj)), before, 'the store is unchanged');
+    assert.strictEqual(fs.readFileSync(`${keepsPath(proj)}.lock`, 'utf8'), held, 'the other recorder\'s lock is untouched');
+  } finally { clean(proj); }
+});
+
+test('fire 126: a keep recorder robbed of its lock before the rename refuses and leaves the new holder\'s store standing', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const thiefStore = JSON.stringify({ v: 1, keeps: [{ target: 'base', reason: '', date: '2026-10-18' }, { target: 'thief', reason: 'the new holder', date: '2026-10-18' }] });
+    let thief = null;
+    const done = atKeepsTemp(keepsPath(proj), () => {
+      const old = new Date(Date.now() - KEEPS_LOCK_STALE_MS - 60000);
+      fs.utimesSync(lockPath, old, old);
+      thief = acquireLock(lockPath, { sessionId: 'thief', staleMs: KEEPS_LOCK_STALE_MS });
+      assert.ok(thief.acquired && thief.stale, JSON.stringify(thief));
+      fs.writeFileSync(keepsPath(proj), thiefStore); // the new holder's own write
+    }, { after: true });
+    const r = recordKeep(proj, { target: 'robbed' });
+    done();
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps lock stolen: another recorder took over ${lockPath} after it went stale (5 s)`) && r.error.includes('the store on disk stands'), r.error);
+    assert.strictEqual(fs.readFileSync(keepsPath(proj), 'utf8'), thiefStore, 'the new holder\'s store was not overwritten');
+    assert.deepStrictEqual(fs.readdirSync(path.dirname(keepsPath(proj))).filter((n) => n.endsWith('.tmp')), [], 'no temp left');
+    assert.strictEqual(thief.owns(), true, 'the release left the thief\'s lock alone');
+  } finally { clean(proj); }
+});
+
+test('fire 126: a keep recorder whose lock turns unreadable before the rename refuses honestly and names the lock it left', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  const fault = faultReads(lockPath);
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const before = fs.readFileSync(keepsPath(proj));
+    const done = atKeepsTemp(keepsPath(proj), () => { fault.armed = true; }, { after: true });
+    const r = recordKeep(proj, { target: 'unread' });
+    done();
+    fault.restore();
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps lock unreadable: ${lockPath} could not be read for about one second (EBUSY`), r.error);
+    assert.ok(!r.error.includes('took over'), r.error);
+    assert.deepStrictEqual(fs.readFileSync(keepsPath(proj)), before, 'nothing written');
+    assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${lockPath} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), JSON.stringify(r));
+    assert.strictEqual(fs.existsSync(lockPath), true);
+  } finally { fault.restore(); clean(proj); }
+});
+
+test('fire 126: a keeps lock whose holder lets go during the retries is taken on a later attempt, and the record lands', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  const realWait = Atomics.wait;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'other', pid: 1, at: Date.now(), token: 'other:1:1' }));
+    let pauses = 0;
+    // the seam: the retry's pause; the other recorder finishes (removes its lock) during the first one
+    Atomics.wait = function patched(...args) { if (++pauses === 1) fs.rmSync(lockPath, { force: true }); return realWait.apply(Atomics, args); };
+    let r;
+    try { r = recordKeep(proj, { target: 'later' }); } finally { Atomics.wait = realWait; }
+    assert.ok(pauses >= 1, 'the recorder retried');
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.deepStrictEqual(targetsIn(loadKeeps(proj)), ['base', 'later']);
+  } finally { Atomics.wait = realWait; clean(proj); }
+});
+
+test('fire 126: a store a newer CoalWash wrote while this recorder waited for the lock is re-checked inside the lock and left untouched', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  const realWait = Atomics.wait;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'newer', pid: 1, at: Date.now(), token: 'newer:1:1' }));
+    const newerStore = JSON.stringify({ v: 2, keeps: [{ target: 'base' }], extra: 'a newer schema' });
+    let pauses = 0;
+    // the seam: during the first retry pause, a newer CoalWash finishes its own record (a v2 store) and lets go of the lock
+    Atomics.wait = function patched(...args) {
+      if (++pauses === 1) { fs.writeFileSync(keepsPath(proj), newerStore); fs.rmSync(lockPath, { force: true }); }
+      return realWait.apply(Atomics, args);
+    };
+    let r;
+    try { r = recordKeep(proj, { target: 'mine' }); } finally { Atomics.wait = realWait; }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(keepsPath(proj), 'utf8'), newerStore, 'the newer store is read-only to us');
+    assert.strictEqual(fs.existsSync(lockPath), false, 'and the lock was still released');
+  } finally { Atomics.wait = realWait; clean(proj); }
 });

@@ -30,13 +30,35 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
-import { txDirFor, ensureSelfIgnore, trackedInOwnFolder } from './apply.mjs';
+import { txDirFor, ensureSelfIgnore, trackedInOwnFolder, acquireLock, lockLeftNote } from './apply.mjs';
 import { claudeBaseDir, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir } from './repo-fs.mjs';
 
 export const KEEPS_NAME = 'keeps.json'; // exported for apply.mjs's KEEPS-GATE (opts.txDir-aware path build)
 const KEEPS_SCHEMA_V = 1;
 const GLOBAL_KEEPS_NAME = '.coalwash-global-keeps.json';
+
+// THE KEEPS LOCK (fire 126, 18a item 3). recordKeepAt reads the store, upserts one entry and renames a temp over it; two
+// recorders at once (two sessions, or a wizard and a second agent) each read the old store and the later rename dropped the
+// other's entry while both answered ok. So the read-modify-write runs under a lock of its own beside the store
+// (`<store>.lock`), the bin catalogue's shape (tailings.mjs acquireBinLock, P95-1), never the transaction lock: a keep
+// recorded while a wash holds that one must not wait 30 minutes for it.
+// KEEPS_LOCK_STALE_MS: the section reads at most MAX_DOC_BYTES, writes one temp and renames it, milliseconds even for a large
+// store, so 5 s is far past any live hold and a crashed recorder's lock blocks keeps for 5 s at most (the transaction
+// default, 30 minutes, would block them for half an hour). KEEPS_LOCK_TRIES retries 2-5 ms apart (jittered, about 0.1-0.2 s
+// in all) ride out another recorder's hold; past them the call refuses and writes nothing.
+export const KEEPS_LOCK_STALE_MS = 5000;
+const KEEPS_LOCK_TRIES = 40;
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function acquireKeepsLock(file, selfIgnore) {
+  let lock;
+  for (let attempt = 0; attempt < KEEPS_LOCK_TRIES && !(lock && lock.acquired); attempt++) {
+    if (attempt > 0) pause(2 + Math.floor(Math.random() * 4));
+    // `now` is a live clock reading: acquireLock judges staleness as now - lockFile.mtimeMs (tailings.mjs row 18)
+    lock = acquireLock(`${file}.lock`, { now: Date.now(), staleMs: KEEPS_LOCK_STALE_MS, selfIgnore });
+  }
+  return lock;
+}
 
 export function keepsPath(projectRoot) {
   return path.join(txDirFor(projectRoot), KEEPS_NAME);
@@ -101,12 +123,22 @@ const loadKeepsFrom = loadKeepsAt;
 // `false` — passed EXPLICITLY, never inferred — is the ONLY way to clear it:
 // the deliberate signal that the user's decision was actually recorded, not
 // merely that this call happened to omit the field.
-function recordKeepAt(file, root, ensureDir, { target, reason = '', date, anchor, anchorFile, pendingUser, pendingSince } = {}) {
+// `selfIgnore`: the keeps lock's acquireLock option (true for a project store, whose folder carries the catch-all; false for the
+// global one in the user's own ~/.claude, as the global transaction lock does).
+function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', date, anchor, anchorFile, pendingUser, pendingSince } = {}) {
   if (typeof target !== 'string' || !target) return { ok: false, anchorDropped: false, anchorStored: false };
-  try {
+  const lockFile = `${file}.lock`;
+  let lock = null;
+  const newer = (raw) => raw && typeof raw === 'object' && !Array.isArray(raw) && Number(raw.v) > KEEPS_SCHEMA_V;
+  // fire 126: the body's returns land in `out`, so the lock's release below is reported on every result
+  const out = (() => { try {
     const raw = rawKeepsOrNull(file, root);
-    if (raw && typeof raw === 'object' && !Array.isArray(raw) && Number(raw.v) > KEEPS_SCHEMA_V) return { ok: false, anchorDropped: false, anchorStored: false }; // read-only to us
+    if (newer(raw)) return { ok: false, anchorDropped: false, anchorStored: false }; // read-only to us
     ensureDir();
+    lock = acquireKeepsLock(file, selfIgnore);
+    if (!lock.acquired) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: another recorder holds ${lockFile} (${lock.reason}); nothing was written — record the keep again` };
+    // re-read INSIDE the lock: the read above may be stale by now, and the upsert must start from what is on disk
+    if (newer(rawKeepsOrNull(file, root))) return { ok: false, anchorDropped: false, anchorStored: false };
     const existing = loadKeepsFrom(file, root);
     const prior = existing.find((k) => k.target === target);
     const keeps = existing.filter((k) => k.target !== target);
@@ -281,12 +313,26 @@ function recordKeepAt(file, root, ensureDir, { target, reason = '', date, anchor
     });
     const tmp = `${file}.${crypto.randomBytes(12).toString('hex')}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { encoding: 'utf8', flag: 'wx' });
+    // fire 126: a recorder that stalled past KEEPS_LOCK_STALE_MS may have been robbed, and its new holder may have renamed its
+    // own store since. This one REFUSES rather than re-merging: unlike a bin item (whose blob is already on disk and needs its
+    // row), nothing else of this record exists, so dropping it loses nothing a caller is not told about, while a re-merge and
+    // rename made without the lock could still overwrite the new holder's write.
+    const s = lock.state();
+    if (s.state !== 'own') {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* the temp is this call's own */ }
+      const why = s.state === 'unreadable'
+        ? `keeps lock unreadable: ${lockFile} could not be read for about one second (${s.code}; another program may be holding it open), so this recorder can no longer prove it holds the store`
+        : `keeps lock stolen: another recorder took over ${lockFile} after it went stale (${KEEPS_LOCK_STALE_MS / 1000} s)`;
+      return { ok: false, anchorDropped: false, anchorStored: false, error: `${why}; this keep was not written and the store on disk stands — record it again` };
+    }
     fs.renameSync(tmp, file);
     return { ok: true, anchorDropped, anchorStored: !!mergedAnchor };
   } catch (e) {
     // fire 63 (CodeRabbit t114): the reason rides beside the status fields, so a refusal (tracked:, self-ignore:) reaches the caller
     return { ok: false, anchorDropped: false, anchorStored: false, error: String((e && e.message) || e) };
-  }
+  } })();
+  const lockLeft = lock && lock.acquired ? lockLeftNote(lockFile, lock.release()) : null;
+  return lockLeft ? { ...out, lockLeft } : out;
 }
 
 // A project store, read contained to the tx dir ITSELF (E2-4). `txDir` is ownSandboxDir's answer (or a caller-trusted
@@ -305,7 +351,7 @@ export function recordKeep(projectRoot, opts = {}) {
   let dir;
   try { dir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); } catch (e) { return { ok: false, anchorDropped: false, anchorStored: false, error: String((e && e.message) || e) }; }
   // fire 55: an anchor quotes memory content, so no catch-all means no record ({ ok: false })
-  return recordKeepAt(path.join(dir, KEEPS_NAME), dir, () => { const tracked = trackedInOwnFolder(dir); if (tracked) throw new Error(`tracked: ${tracked}`); fs.mkdirSync(dir, { recursive: true }); const why = ensureSelfIgnore(dir); if (why) throw new Error(`self-ignore: ${why}`); }, opts); // fire 59: a tracked file in the folder, no write
+  return recordKeepAt(path.join(dir, KEEPS_NAME), dir, () => { const tracked = trackedInOwnFolder(dir); if (tracked) throw new Error(`tracked: ${tracked}`); fs.mkdirSync(dir, { recursive: true }); const why = ensureSelfIgnore(dir); if (why) throw new Error(`self-ignore: ${why}`); }, true, opts); // fire 59: a tracked file in the folder, no write
 }
 
 // Global-scope variants — identical shape/schema/upsert-by-target semantics,
@@ -322,5 +368,5 @@ export function loadGlobalKeeps(home = os.homedir()) {
 }
 export function recordGlobalKeep(home = os.homedir(), opts = {}) {
   const dir = claudeBaseDir(home);
-  return recordKeepAt(globalKeepsPath(home), null, () => { fs.mkdirSync(dir, { recursive: true }); }, opts); // root null: the user's own store
+  return recordKeepAt(globalKeepsPath(home), null, () => { fs.mkdirSync(dir, { recursive: true }); }, false, opts); // root null: the user's own store
 }
