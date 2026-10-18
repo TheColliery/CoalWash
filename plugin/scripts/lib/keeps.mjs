@@ -45,8 +45,8 @@ const GLOBAL_KEEPS_NAME = '.coalwash-global-keeps.json';
 // recorded while a wash holds that one must not wait 30 minutes for it.
 // KEEPS_LOCK_STALE_MS: the section reads at most MAX_DOC_BYTES, writes one temp and renames it, milliseconds even for a large
 // store, so 5 s is far past any live hold and a crashed recorder's lock blocks keeps for 5 s at most (the transaction
-// default, 30 minutes, would block them for half an hour). KEEPS_LOCK_TRIES retries 2-5 ms apart (jittered, about 0.1-0.2 s
-// in all) ride out another recorder's hold; past them the call refuses and writes nothing.
+// default, 30 minutes, would block them for half an hour). KEEPS_LOCK_TRIES retries 2-5 ms apart (jittered, nominally 0.1-0.2 s; measured
+// on this Windows box a full budget takes about 0.6 s, each short wait rounding up to about 15 ms) ride out another recorder's hold; past them the call refuses and writes nothing.
 export const KEEPS_LOCK_STALE_MS = 5000;
 const KEEPS_LOCK_TRIES = 40;
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
