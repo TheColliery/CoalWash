@@ -921,11 +921,12 @@ test('N128-1: a keeps lock path that is a directory refuses at once, says what i
 // and never tells the caller to record the keep again. Seams: the lock's `wx` open (fs.openSync) and the store's rename
 // (fs.renameSync); one leg uses a REAL read-only store where a probe shows the volume refuses that rename.
 // ---------------------------------------------------------------------------
-function failLockCreate(lockPath, code) {
+// `times`: how many creates fail before the real open is let through (fire 136); default, every one.
+function failLockCreate(lockPath, code, times = Infinity) {
   const real = fs.openSync;
   const f = { tries: 0 };
   fs.openSync = function patched(p, flags, ...rest) {
-    if (flags === 'wx' && path.resolve(String(p)) === path.resolve(lockPath)) { f.tries++; throw Object.assign(new Error(`${code}: permission denied, open '${p}'`), { code }); }
+    if (flags === 'wx' && path.resolve(String(p)) === path.resolve(lockPath) && f.tries < times) { f.tries++; throw Object.assign(new Error(`${code}: permission denied, open '${p}'`), { code }); }
     return real.call(fs, p, flags, ...rest);
   };
   f.restore = () => { fs.openSync = real; };
@@ -939,7 +940,9 @@ function countPauses() {
   return c;
 }
 
-test('fire 133: a global keeps lock that cannot be created (an unwritable ~/.claude) refuses at once, says so, and spends no retry', () => {
+// fire 136 (RE-INSPECT 135 M135-1) amends this leg: EACCES on the create is also what contention looks like on Windows, so an
+// unwritable ~/.claude now spends the 40-attempt budget before it refuses, and the refusal says how many attempts it made.
+test('fire 133: a global keeps lock that cannot be created (an unwritable ~/.claude) refuses after the retry budget and says how many attempts it made', () => {
   const home = sandbox();
   const lockPath = `${globalKeepsPath(home)}.lock`;
   try {
@@ -950,12 +953,88 @@ test('fire 133: a global keeps lock that cannot be created (an unwritable ~/.cla
     let r;
     try { r = recordGlobalKeep(home, { target: 'blocked' }); } finally { pauses.restore(); f.restore(); }
     assert.strictEqual(r.ok, false, JSON.stringify(r));
-    assert.ok(r.error.startsWith(`keeps lock: ${lockPath} could not be taken (lock error: EACCES`) && r.error.includes('that is not another recorder'), r.error);
-    assert.ok(!r.error.includes('another recorder holds') && !r.error.includes('record the keep again'), r.error);
-    assert.strictEqual(f.tries, 1, 'one attempt');
-    assert.strictEqual(pauses.n, 0, 'not one retry pause');
+    assert.ok(r.error.startsWith(`keeps lock: ${lockPath} could not be created after 40 attempts (EACCES)`), r.error);
+    assert.ok(!r.error.includes('waiting will not change it') && !r.error.includes('another recorder holds'), r.error);
+    assert.strictEqual(f.tries, 40, 'the whole budget');
+    assert.strictEqual(pauses.n, 39, 'one pause between attempts');
     assert.deepStrictEqual(fs.readFileSync(globalKeepsPath(home)), before);
   } finally { clean(home); }
+});
+
+// ---------------------------------------------------------------------------
+// fire 136 (RE-INSPECT 135 M135-1 and its LOW): a create or read-back error that can pass under contention is retried inside the
+// budget, and called final only once the budget is spent.
+// ---------------------------------------------------------------------------
+test('fire 136: a keeps lock create refused with EPERM for a moment is retried and the keep lands', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const f = failLockCreate(lockPath, 'EPERM', 3);
+    let r;
+    try { r = recordKeep(proj, { target: 'landed' }); } finally { f.restore(); }
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(f.tries, 3, 'three refused creates, then the real one');
+    assert.deepStrictEqual(loadKeeps(proj).map((k) => k.target).sort(), ['base', 'landed']);
+    assert.strictEqual(fs.existsSync(lockPath), false, 'the lock is released');
+  } finally { clean(proj); }
+});
+
+test('fire 136: a keeps lock create that EPERM refuses every time is called final only after 40 attempts, and says so', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const before = fs.readFileSync(keepsPath(proj));
+    const f = failLockCreate(lockPath, 'EPERM');
+    let r;
+    try { r = recordKeep(proj, { target: 'blocked' }); } finally { f.restore(); }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(r.error, `keeps lock: ${lockPath} could not be created after 40 attempts (EPERM); nothing was written — record the keep again, and if it fails the same way again, check that the folder can be written`);
+    assert.strictEqual(f.tries, 40);
+    assert.deepStrictEqual(fs.readFileSync(keepsPath(proj)), before);
+  } finally { clean(proj); }
+});
+
+test('fire 136: a keeps lock create error that cannot pass by waiting (EROFS) still refuses at once', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const f = failLockCreate(lockPath, 'EROFS');
+    const pauses = countPauses();
+    let r;
+    try { r = recordKeep(proj, { target: 'blocked' }); } finally { pauses.restore(); f.restore(); }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps lock: ${lockPath} could not be taken (lock error: EROFS`) && r.error.includes('waiting will not change it'), r.error);
+    assert.strictEqual(f.tries, 1, 'one attempt');
+    assert.strictEqual(pauses.n, 0, 'not one retry pause');
+  } finally { clean(proj); }
+});
+
+// The LOW: the read-back of a lock this recorder has just created fails (a passing indexer handle). The seam refuses the first
+// LOCK_READ_RETRIES + 1 reads of the lock with EBUSY, the whole read-back of the first attempt, then lets reads through.
+test('fire 136: a keeps lock whose read-back a passing handle refuses is retried, never refused as permanent', () => {
+  const proj = sandbox();
+  const lockPath = `${keepsPath(proj)}.lock`;
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const real = fs.openSync;
+    let refused = 0;
+    fs.openSync = function patched(p, flags, ...rest) {
+      if (typeof flags === 'number' && (flags & fs.constants.O_RDWR) === 0 && (flags & fs.constants.O_WRONLY) === 0 && path.resolve(String(p)) === path.resolve(lockPath) && refused < 9) {
+        refused++;
+        throw Object.assign(new Error(`EBUSY: resource busy or locked, open '${p}'`), { code: 'EBUSY' });
+      }
+      return real.call(fs, p, flags, ...rest);
+    };
+    let r;
+    try { r = recordKeep(proj, { target: 'raced' }); } finally { fs.openSync = real; }
+    assert.strictEqual(refused, 9, 'the whole first read-back was refused');
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(!r.error.includes('could not be taken') && !r.error.includes('waiting will not change it'), r.error);
+    assert.ok(r.error.includes(`another recorder holds ${lockPath}`) && r.error.endsWith('record the keep again'), r.error);
+  } finally { clean(proj); }
 });
 
 test('fire 133: a read-only keeps store refuses at once with what it is, spends no retry and leaves no temp', () => {

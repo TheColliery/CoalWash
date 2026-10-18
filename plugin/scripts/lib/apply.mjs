@@ -747,6 +747,7 @@ function ownerToken(sessionId) {
 export const LOCK_READ_RETRIES = 8;
 export const LOCK_READ_WAIT_MS = 125;
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const LOCK_CREATE_TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
 // { state: 'token', token } (token null when the file is absent, refused or carries none) | { state: 'unreadable', code }
 function readLockState(lockPath) {
   let code = null;
@@ -837,11 +838,13 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
     // compare-after-write (the header's named-assumption belt): a foreign
     // token on re-read = O_EXCL did not actually exclude us -> defer.
     const back = state();
-    if (back.state === 'unreadable') return { acquired: false, reason: `the lock file ${lockPath} it had just created could not be read back (${back.code}; another program may be holding it open) — deferring, and the file is left in place since this run cannot prove it is its own` };
+    if (back.state === 'unreadable') return { acquired: false, transient: true, code: back.code, reason: `the lock file ${lockPath} it had just created could not be read back (${back.code}; another program may be holding it open) — deferring, and the file is left in place since this run cannot prove it is its own` };
     if (back.state !== 'own') return { acquired: false, held: true, reason: 'exclusive-create acquire lost a race (non-local filesystem?) — deferring' };
     return { acquired: true, release: releaseIfOwner, owns, state };
   } catch (e) {
-    if (e && e.code !== 'EEXIST') return { acquired: false, reason: `lock error: ${e.message}` };
+    // M135-1: on Windows these codes also mean another process is creating or removing the same name at that moment (measured:
+    // 4 in 900 contended keep records, each landing on the next try), so the refusal is marked `transient`, worth a retry
+    if (e && e.code !== 'EEXIST') return { acquired: false, ...(LOCK_CREATE_TRANSIENT.has(e.code) ? { transient: true, code: e.code } : {}), reason: `lock error: ${e.message}` };
   }
   // Lock exists — stale takeover ONLY when demonstrably old; any doubt = defer.
   // CWK-137: lstat, never stat, and only a plain single-link regular file is ever
@@ -876,8 +879,9 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
       }
     }
   } catch { /* unreadable lock = doubt = defer */ }
-  // `held` (E1 t182 #2) marks the refusals that mean another holder has the lock, the only ones worth a caller's retry; a
-  // refusal without it (a lock error, self-ignore, a lock that is not a plain file, no file identity) will not pass by waiting.
+  // `held` (E1 t182 #2) marks the refusals that mean another holder has the lock, and `transient` (M135-1) the create or read-back
+  // errors that can pass under contention; both are worth a caller's retry. A refusal with neither (another lock error code,
+  // self-ignore, a lock that is not a plain file, no file identity) will not pass by waiting.
   return { acquired: false, held: true, reason: 'another CoalWash run (or a live session) holds the store — deferring' };
 }
 

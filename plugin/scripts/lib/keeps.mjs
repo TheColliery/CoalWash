@@ -83,9 +83,11 @@ function acquireKeepsLock(file, selfIgnore) {
     lock = acquireLock(`${file}.lock`, { now: Date.now(), staleMs: KEEPS_LOCK_STALE_MS, selfIgnore });
     const kind = lock.acquired ? null : nonPlainLock(`${file}.lock`);
     if (kind) return { acquired: false, nonPlain: kind };
-    // E1 t182 #2: only a lock another holder has is worth waiting for; any other refusal returns at once, said as it is
-    if (!lock.acquired && !lock.held) return { acquired: false, permanent: true, reason: lock.reason };
+    // E1 t182 #2 + M135-1: a lock another holder has, or a create or read-back error that can pass under contention, is worth
+    // the budget; any other refusal (another error code, self-ignore, no file identity) returns at once, said as it is
+    if (!lock.acquired && !lock.held && !lock.transient) return { acquired: false, permanent: true, reason: lock.reason };
   }
+  if (!lock.acquired && lock.transient) return { acquired: false, exhausted: KEEPS_LOCK_TRIES, code: lock.code, reason: lock.reason };
   return lock;
 }
 
@@ -169,6 +171,7 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
     lock = acquireKeepsLock(file, selfIgnore);
     if (lock.nonPlain) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: ${lockFile} is not a plain file (it is ${lock.nonPlain}); CoalWash never takes over a lock it did not make, so nothing was written and no retry was spent — remove it by hand once no CoalWash run is active` };
     if (lock.permanent) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: ${lockFile} could not be taken (${lock.reason}); that is not another recorder and waiting will not change it, so nothing was written and no retry was spent — fix the folder or the lock file, then record the keep` };
+    if (lock.exhausted) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: ${lockFile} could not be created after ${lock.exhausted} attempts (${lock.code}); nothing was written — record the keep again, and if it fails the same way again, check that the folder can be written` };
     if (!lock.acquired) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: another recorder holds ${lockFile} (${lock.reason}); nothing was written — record the keep again` };
     // re-read INSIDE the lock: the read above may be stale by now, and the upsert must start from what is on disk
     if (newer(rawKeepsOrNull(file, root))) return { ok: false, anchorDropped: false, anchorStored: false };
