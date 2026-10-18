@@ -2,11 +2,17 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.12.13] - 2026-10-18
 
-Forward notes on `[1.12.12]`. They ride the next version's entry; this unit moved no `plugin/` byte, and the released `[1.12.12]` below is not edited.
+SKILL.md now says what to do with a keeps refusal's error
+
+The keeps row of `skills/coalwash/SKILL.md` now tells the agent what a refused keep record means and what to do with it. Nothing is removed from the plugin and no command or config key changes; no engine code moved. The installed plugin moved in two files (`git diff --stat v1.12.12 v1.12.13 -- plugin/`: 2 files, 2 insertions, 2 deletions): the `plugin/` twin of `skills/coalwash/SKILL.md` and the version in `plugin.json`. Two notes on the released `[1.12.12]` entry ride this one; that entry is not edited.
 
 ### Changed
+
+- **The write row of `SKILL.md` (Grants & denials, shape 2, the `keeps.json` appends) says what an `ok: false` return carries.** It named only the shape `{ ok: false, anchorDropped: false, anchorStored: false }` and a lost stand. It now says: with an `error` string, report it to the user as given and do what it says (most say to record the keep again; a few say to fix the folder or the lock file first); without `error`, the keep was not recorded and the item re-flags on the next run; the wash is not stopped either way. The check on `.ok`, never on truthiness, is unchanged, and so is the pointer to `method.md` section 13, which has carried the error shapes since `[1.12.12]`. The body edit passed the SKILL.md variance walk (3 tiers, 9 of 9, zero variance).
+
+Notes on the released `[1.12.12]` entry, which is not edited:
 
 - **A refused fresh read-back of a keeps lock ends as a busy refusal, not as `could not be created after 40 attempts`.** `[1.12.12]` says a recorder whose fresh read-back is refused is retried and, once the 40 attempts are spent, refuses with `could not be created after 40 attempts (<code>)`. In the code (`scripts/lib/apply.mjs` `acquireLock`, the read-back branch; `scripts/lib/keeps.mjs` `acquireKeepsLock`) the lock file the recorder just created stays in place, so each later attempt finds a fresh lock of its own and defers as held; the spent budget then ends as `another recorder holds <lock> (...); nothing was written — record the keep again`. The `could not be created after N attempts (<code>)` refusal is what a lock create that keeps failing with `EPERM`, `EACCES` or `EBUSY` ends as. Both refusals say `record the keep again`, and nothing is written in either. `[1.12.12]`'s own residual paragraph already gives the right outcome for the read-back case (`another recorder holds`); this note corrects only the sentence quoted above.
 - **The `self-ignore:` check in the keeps write is immediate and is not retried: its first `.gitignore` create, or a later replace of an unreadable catch-all.** `recordKeep` runs the check on every call (`scripts/lib/keeps.mjs`, `ensureSelfIgnore`, which calls `ensureCatchAllIgnore` in `scripts/lib/repo-fs.mjs`). It is not one of the retried lock errors, so an `EPERM` on the first create, or on the rename that replaces a catch-all that cannot be read, refuses at once with `self-ignore: ...` and nothing written. Never seen in the race runs (3,960 keep records, each store making its `.gitignore` once); no rate is claimed.
