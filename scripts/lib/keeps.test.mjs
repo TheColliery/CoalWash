@@ -720,7 +720,7 @@ test('fire 126: a keep recorder whose lock turns unreadable before the rename re
     assert.ok(r.error.startsWith(`keeps lock unreadable: ${lockPath} could not be read for about one second (EBUSY`), r.error);
     assert.ok(!r.error.includes('took over'), r.error);
     assert.deepStrictEqual(fs.readFileSync(keepsPath(proj)), before, 'nothing written');
-    assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${lockPath} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), JSON.stringify(r));
+    assert.strictEqual(r.lockLeft, `The lock file ${lockPath} could not be read to confirm it is this run's own (EBUSY), so it was left in place: a later run defers until it goes stale (5 s), or remove it by hand once no CoalWash run is active.`, 'the keeps lock names its own 5 s window, never the 30-minute one (E1 t182 #1)');
     assert.strictEqual(fs.existsSync(lockPath), true);
   } finally { fault.restore(); clean(proj); }
 });
@@ -915,3 +915,151 @@ test('N128-1: a keeps lock path that is a directory refuses at once, says what i
     assert.strictEqual(fs.statSync(lockPath).isDirectory(), true, 'the planted directory is left alone');
   } finally { Atomics.wait = realWait; clean(proj); }
 });
+
+// ---------------------------------------------------------------------------
+// fire 133 (E1 t182 #2, RE-INSPECT 131 L131-1): a lock or store that can never be written says so at once, spends no retry,
+// and never tells the caller to record the keep again. Seams: the lock's `wx` open (fs.openSync) and the store's rename
+// (fs.renameSync); one leg uses a REAL read-only store where a probe shows the volume refuses that rename.
+// ---------------------------------------------------------------------------
+function failLockCreate(lockPath, code) {
+  const real = fs.openSync;
+  const f = { tries: 0 };
+  fs.openSync = function patched(p, flags, ...rest) {
+    if (flags === 'wx' && path.resolve(String(p)) === path.resolve(lockPath)) { f.tries++; throw Object.assign(new Error(`${code}: permission denied, open '${p}'`), { code }); }
+    return real.call(fs, p, flags, ...rest);
+  };
+  f.restore = () => { fs.openSync = real; };
+  return f;
+}
+function countPauses() {
+  const real = Atomics.wait;
+  const c = { n: 0 };
+  Atomics.wait = function patched(...args) { c.n++; return real.apply(Atomics, args); };
+  c.restore = () => { Atomics.wait = real; };
+  return c;
+}
+
+test('fire 133: a global keeps lock that cannot be created (an unwritable ~/.claude) refuses at once, says so, and spends no retry', () => {
+  const home = sandbox();
+  const lockPath = `${globalKeepsPath(home)}.lock`;
+  try {
+    assert.strictEqual(recordGlobalKeep(home, { target: 'base' }).ok, true);
+    const before = fs.readFileSync(globalKeepsPath(home));
+    const f = failLockCreate(lockPath, 'EACCES');
+    const pauses = countPauses();
+    let r;
+    try { r = recordGlobalKeep(home, { target: 'blocked' }); } finally { pauses.restore(); f.restore(); }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps lock: ${lockPath} could not be taken (lock error: EACCES`) && r.error.includes('that is not another recorder'), r.error);
+    assert.ok(!r.error.includes('another recorder holds') && !r.error.includes('record the keep again'), r.error);
+    assert.strictEqual(f.tries, 1, 'one attempt');
+    assert.strictEqual(pauses.n, 0, 'not one retry pause');
+    assert.deepStrictEqual(fs.readFileSync(globalKeepsPath(home)), before);
+  } finally { clean(home); }
+});
+
+test('fire 133: a read-only keeps store refuses at once with what it is, spends no retry and leaves no temp', () => {
+  const proj = sandbox();
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    const before = fs.readFileSync(keepsPath(proj));
+    fs.chmodSync(keepsPath(proj), 0o444);
+    const f = failRenames(keepsPath(proj)); // the rename Windows refuses over a read-only file (EPERM), on every OS
+    let r;
+    try { r = recordKeep(proj, { target: 'blocked' }); } finally { f.restore(); fs.chmodSync(keepsPath(proj), 0o644); }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps write: the store ${keepsPath(proj)} is read-only`) && r.error.includes('clear the read-only attribute'), r.error);
+    assert.ok(!r.error.includes('another program may be holding it open') && !r.error.includes('record the keep again'), r.error);
+    assert.strictEqual(f.tries, 1, 'no rename retry');
+    assert.deepStrictEqual(fs.readFileSync(keepsPath(proj)), before);
+    assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
+  } finally { try { fs.chmodSync(keepsPath(proj), 0o644); } catch { /* absent */ } clean(proj); }
+});
+
+test('fire 133: a keeps store that is a directory refuses at once with what it is, spends no retry and leaves no temp', () => {
+  const proj = sandbox();
+  try {
+    fs.mkdirSync(keepsPath(proj), { recursive: true });
+    const f = failRenames(keepsPath(proj)); // Windows refuses a rename onto a directory with EPERM; the seam makes it so on every OS
+    let r;
+    try { r = recordKeep(proj, { target: 'blocked' }); } finally { f.restore(); }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps write: the store ${keepsPath(proj)} is a directory`) && r.error.includes('move the directory away'), r.error);
+    assert.ok(!r.error.includes('record the keep again'), r.error);
+    assert.strictEqual(f.tries, 1, 'no rename retry');
+    assert.strictEqual(fs.statSync(keepsPath(proj)).isDirectory(), true, 'the directory is left alone');
+    assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
+  } finally { clean(proj); }
+});
+
+// the capability: does this volume refuse a rename over a read-only file? (Windows does; POSIX renames over it)
+function renameRefusedOverReadOnly() {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-probe-ro-')));
+  try {
+    fs.writeFileSync(path.join(dir, 'a'), 'a');
+    fs.writeFileSync(path.join(dir, 'b'), 'b');
+    fs.chmodSync(path.join(dir, 'a'), 0o444);
+    try { fs.renameSync(path.join(dir, 'b'), path.join(dir, 'a')); return false; } catch (e) { return ['EPERM', 'EACCES', 'EBUSY'].includes(e && e.code); }
+  } finally { try { fs.chmodSync(path.join(dir, 'a'), 0o644); } catch { /* gone */ } clean(dir); }
+}
+
+test('fire 133: a REAL read-only keeps.json refuses at once with what it is and leaves no temp', (t) => {
+  if (!renameRefusedOverReadOnly()) { t.skip('this volume renames over a read-only file (POSIX): the seam leg above covers the wording'); return; }
+  const proj = sandbox();
+  try {
+    assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+    fs.chmodSync(keepsPath(proj), 0o444);
+    const pauses = countPauses();
+    let r;
+    try { r = recordKeep(proj, { target: 'blocked' }); } finally { pauses.restore(); fs.chmodSync(keepsPath(proj), 0o644); }
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.ok(r.error.startsWith(`keeps write: the store ${keepsPath(proj)} is read-only`), r.error);
+    assert.strictEqual(pauses.n, 0, 'no rename retry pause');
+    assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
+  } finally { try { fs.chmodSync(keepsPath(proj), 0o644); } catch { /* absent */ } clean(proj); }
+});
+
+// fire 133: the lost-race refusals mean another holder exists, so they are retried like any held lock (never refused as
+// permanent). The seam lands another holder's write on the lock right after this recorder's own (its fsyncSync on the lock fd),
+// which is what a racing creator or a second stale-lock stealer does.
+function anotherHolderWritesAfterUs(lockPath, wantFlags) {
+  const realOpen = fs.openSync;
+  const realFsync = fs.fsyncSync;
+  const f = { fd: null, fired: 0 };
+  fs.openSync = function patched(p, flags, ...rest) {
+    const fd = realOpen.call(fs, p, flags, ...rest);
+    if (f.fd === null && !f.fired && path.resolve(String(p)) === path.resolve(lockPath) && wantFlags(flags)) f.fd = fd;
+    return fd;
+  };
+  fs.fsyncSync = function patched(fd, ...rest) {
+    const out = realFsync.call(fs, fd, ...rest);
+    if (fd === f.fd && !f.fired) { f.fired++; f.fd = null; fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'racer', pid: 1, at: Date.now(), token: 'racer:1:1' })); }
+    return out;
+  };
+  f.restore = () => { fs.openSync = realOpen; fs.fsyncSync = realFsync; };
+  return f;
+}
+for (const [name, plant, wantFlags] of [
+  ['an exclusive create that loses the race', () => {}, (flags) => flags === 'wx'],
+  ['a stale-lock takeover that loses the race', (lockPath) => {
+    fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'dead', pid: 1, at: 0, token: 'dead:1:1' }));
+    const old = new Date(Date.now() - KEEPS_LOCK_STALE_MS - 60000);
+    fs.utimesSync(lockPath, old, old);
+  }, (flags) => typeof flags === 'number' && (flags & fs.constants.O_RDWR) !== 0],
+]) {
+  test(`fire 133: ${name} is another holder, so the recorder waits for it and never calls it permanent`, () => {
+    const proj = sandbox();
+    const lockPath = `${keepsPath(proj)}.lock`;
+    try {
+      assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
+      plant(lockPath);
+      const f = anotherHolderWritesAfterUs(lockPath, wantFlags);
+      let r;
+      try { r = recordKeep(proj, { target: 'raced' }); } finally { f.restore(); }
+      assert.strictEqual(f.fired, 1, 'the other holder wrote right after this recorder');
+      assert.strictEqual(r.ok, false, JSON.stringify(r));
+      assert.ok(r.error.includes(`another recorder holds ${lockPath}`) && r.error.endsWith('record the keep again'), r.error);
+      assert.ok(!r.error.includes('could not be taken'), 'never refused as permanent');
+    } finally { clean(proj); }
+  });
+}

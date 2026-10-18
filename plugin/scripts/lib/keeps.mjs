@@ -68,6 +68,13 @@ function nonPlainLock(lockFile) {
   if (!st.isFile()) return 'a special file';
   return st.nlink > 1 ? 'a file with more than one hard link' : null;
 }
+// L131-1: what the store is when it can never be replaced (null when it is an ordinary writable file or absent).
+function unwritableStore(file) {
+  let st;
+  try { st = fs.lstatSync(file); } catch { return null; }
+  if (st.isDirectory()) return 'a directory';
+  return st.isFile() && (st.mode & 0o200) === 0 ? 'read-only (its read-only attribute or write permission is off)' : null;
+}
 function acquireKeepsLock(file, selfIgnore) {
   let lock;
   for (let attempt = 0; attempt < KEEPS_LOCK_TRIES && !(lock && lock.acquired); attempt++) {
@@ -76,6 +83,8 @@ function acquireKeepsLock(file, selfIgnore) {
     lock = acquireLock(`${file}.lock`, { now: Date.now(), staleMs: KEEPS_LOCK_STALE_MS, selfIgnore });
     const kind = lock.acquired ? null : nonPlainLock(`${file}.lock`);
     if (kind) return { acquired: false, nonPlain: kind };
+    // E1 t182 #2: only a lock another holder has is worth waiting for; any other refusal returns at once, said as it is
+    if (!lock.acquired && !lock.held) return { acquired: false, permanent: true, reason: lock.reason };
   }
   return lock;
 }
@@ -159,6 +168,7 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
     ensureDir();
     lock = acquireKeepsLock(file, selfIgnore);
     if (lock.nonPlain) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: ${lockFile} is not a plain file (it is ${lock.nonPlain}); CoalWash never takes over a lock it did not make, so nothing was written and no retry was spent — remove it by hand once no CoalWash run is active` };
+    if (lock.permanent) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: ${lockFile} could not be taken (${lock.reason}); that is not another recorder and waiting will not change it, so nothing was written and no retry was spent — fix the folder or the lock file, then record the keep` };
     if (!lock.acquired) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: another recorder holds ${lockFile} (${lock.reason}); nothing was written — record the keep again` };
     // re-read INSIDE the lock: the read above may be stale by now, and the upsert must start from what is on disk
     if (newer(rawKeepsOrNull(file, root))) return { ok: false, anchorDropped: false, anchorStored: false };
@@ -359,6 +369,10 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
       } catch (e) {
         if (!RENAME_TRANSIENT.has(e && e.code)) throw e;
         code = e.code;
+        // L131-1: a store that is a directory, or a file whose read-only attribute is set, fails the same codes on Windows every
+        // time; one lstat says which, so that refuses at once instead of retrying and blaming a passing handle
+        const found = unwritableStore(file);
+        if (found) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps write: the store ${file} is ${found} (${code}); that is not a passing handle and waiting will not change it, so this keep was not written and no retry was spent — ${found === 'a directory' ? 'move the directory away' : 'clear the read-only attribute'}, then record the keep` };
       }
     }
     return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps write: the store ${file} could not be replaced (${code}, ${KEEPS_RENAME_RETRIES + 1} attempts ${KEEPS_RENAME_WAIT_MS} ms apart; another program may be holding it open); this keep was not written and the store on disk stands — record the keep again` };
@@ -368,7 +382,7 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
   } })();
   // fire 129 (M128-1): a temp the rename did not land is removed on every path, a refusal, a throw or a failed rename alike
   if (tmp && !renamed) { try { fs.rmSync(tmp, { force: true }); } catch { /* this call's own temp; a later sweep is not ours to promise */ } }
-  const lockLeft = lock && lock.acquired ? lockLeftNote(lockFile, lock.release()) : null;
+  const lockLeft = lock && lock.acquired ? lockLeftNote(lockFile, lock.release(), KEEPS_LOCK_STALE_MS) : null;
   return lockLeft ? { ...out, lockLeft } : out;
 }
 

@@ -51,7 +51,7 @@ import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCre
 import { tokensEst } from './caliper.mjs';
 import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
-import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft } from './apply.mjs';
+import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 
@@ -1111,7 +1111,7 @@ export function runRetier({
   })(); } catch (e) { thrown = e; } finally {
     rel = lock.release();
   }
-  const lockLeft = lockLeftNote(globalLockPath(home), rel);
+  const lockLeft = lockLeftNote(globalLockPath(home), rel, LOCK_STALE_MS);
   if (thrown) throw withLockLeft(thrown, lockLeft); // fire 123: an unexpected error still names a lock left behind
   // N125-3: a lock the transaction underneath left rides in out.lockLeft already; this run's own joins it, never replaces it
   return lockLeft ? { ...out, lockLeft: out && out.lockLeft ? `${out.lockLeft} ${lockLeft}` : lockLeft } : out;

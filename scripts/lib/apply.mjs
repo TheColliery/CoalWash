@@ -788,10 +788,13 @@ export function withSentence(msg, note) {
   return /[.!?]$/.test(m) ? `${m} ${note}` : `${m}. ${note}`;
 }
 // What a result says when a release could not remove this run's lock (fire 122): null when nothing was left behind.
-export function lockLeftNote(lockPath, rel) {
+// `staleMs` (E1 t182 #1): the lock's OWN stale window, so the wait it names is the wait that lock has (the keeps lock's 5 s,
+// never the transaction's 30 minutes); it defaults to the transaction value.
+export function lockLeftNote(lockPath, rel, staleMs = LOCK_STALE_MS) {
   if (!rel || rel.released || rel.why === 'foreign') return null;
   const how = rel.why === 'unreadable' ? `could not be read to confirm it is this run's own (${rel.code})` : `could not be removed (${rel.code})`;
-  return `The lock file ${lockPath} ${how}, so it was left in place: a later run defers until it goes stale (${LOCK_STALE_MS / 60000} minutes), or remove it by hand once no CoalWash run is active.`;
+  const wait = staleMs >= 60000 ? `${staleMs / 60000} minutes` : `${staleMs / 1000} s`;
+  return `The lock file ${lockPath} ${how}, so it was left in place: a later run defers until it goes stale (${wait}), or remove it by hand once no CoalWash run is active.`;
 }
 // `selfIgnore` (15b fire 56, census row 5): a PROJECT lock (the tx lock, a bin lock) passes true and its folder gets the
 // catch-all through ensureSelfIgnore. The default is false because the GLOBAL lock's folder is the user's own ~/.claude,
@@ -835,7 +838,7 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
     // token on re-read = O_EXCL did not actually exclude us -> defer.
     const back = state();
     if (back.state === 'unreadable') return { acquired: false, reason: `the lock file ${lockPath} it had just created could not be read back (${back.code}; another program may be holding it open) — deferring, and the file is left in place since this run cannot prove it is its own` };
-    if (back.state !== 'own') return { acquired: false, reason: 'exclusive-create acquire lost a race (non-local filesystem?) — deferring' };
+    if (back.state !== 'own') return { acquired: false, held: true, reason: 'exclusive-create acquire lost a race (non-local filesystem?) — deferring' };
     return { acquired: true, release: releaseIfOwner, owns, state };
   } catch (e) {
     if (e && e.code !== 'EEXIST') return { acquired: false, reason: `lock error: ${e.message}` };
@@ -864,16 +867,18 @@ export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs
       // double-hold). Fixed width via truncate so a shorter write leaves no tail.
       const o = openPlainFile(lockPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), st);
       if (o.why === 'not-plain') return notPlain;
-      if (o.why === 'changed') return { acquired: false, reason: 'the lock changed under the takeover — deferring' };
+      if (o.why === 'changed') return { acquired: false, held: true, reason: 'the lock changed under the takeover — deferring' };
       if (o.why === 'unverifiable') return { acquired: false, reason: `the lock ${lockPath} is stale, but this filesystem reports no file identity number, so CoalWash cannot prove the file it opens is the one it checked — refusing to take it over; remove the lock by hand if it is yours` };
       if (o.fd !== undefined) {
         try { fs.ftruncateSync(o.fd, 0); fs.writeSync(o.fd, body, 0); fs.fsyncSync(o.fd); } finally { fs.closeSync(o.fd); }
         if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner, owns, state };
-        return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
+        return { acquired: false, held: true, reason: 'stale-lock takeover lost a race — deferring' };
       }
     }
   } catch { /* unreadable lock = doubt = defer */ }
-  return { acquired: false, reason: 'another CoalWash run (or a live session) holds the store — deferring' };
+  // `held` (E1 t182 #2) marks the refusals that mean another holder has the lock, the only ones worth a caller's retry; a
+  // refusal without it (a lock error, self-ignore, a lock that is not a plain file, no file identity) will not pass by waiting.
+  return { acquired: false, held: true, reason: 'another CoalWash run (or a live session) holds the store — deferring' };
 }
 
 // ---------------------------------------------------------------------------
@@ -1857,7 +1862,7 @@ export function applyPlan(plan, opts = {}) {
 
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };
     })(); } finally {
-      leftLocks = [[txLockPath, lockLeftNote(txLockPath, lock.release())], ...(globalLock ? [[globalLockPath(home), lockLeftNote(globalLockPath(home), globalLock.release())]] : [])].filter(([, note]) => note);
+      leftLocks = [[txLockPath, lockLeftNote(txLockPath, lock.release(), LOCK_STALE_MS)], ...(globalLock ? [[globalLockPath(home), lockLeftNote(globalLockPath(home), globalLock.release(), LOCK_STALE_MS)]] : [])].filter(([, note]) => note);
       lockLeft = leftLocks.map(([, note]) => note).join(' ') || null;
     }
     if (!lockLeft) return out;

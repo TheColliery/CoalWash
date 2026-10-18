@@ -897,8 +897,12 @@ test('INSPECT 109: a doubt item (a future or unreadable time) weighs nothing in 
   try {
     const now = Date.now();
     const DAY = 86400000;
-    const r1 = recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(10), original: '/r1.md', now: now - 3 * DAY });
-    const r2 = recordBinItem(proj, FAT_BIN_NAME, { content: 'y'.repeat(10), original: '/r2.md', now: now - 2.5 * DAY });
+    // fire 133: retention thins by UTC epoch day (retention.mjs, floor(at / DAY_MS)), and now - 3 d and now - 2.5 d share one
+    // such day whenever the run starts before 12:00 UTC, so last-per-day destroyed r1 for half of every day. Each copy is
+    // anchored to its own epoch day instead: r1 past the 48 h floor, r2 one day later.
+    const dayStart = Math.floor(now / DAY) * DAY;
+    const r1 = recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(10), original: '/r1.md', now: dayStart - 3 * DAY + 3600000 });
+    const r2 = recordBinItem(proj, FAT_BIN_NAME, { content: 'y'.repeat(10), original: '/r2.md', now: dayStart - 2 * DAY + 3600000 });
     const ip = path.join(binDirOf(proj), 'index.json');
     const rows = JSON.parse(fs.readFileSync(ip, 'utf8'));
     rows.push({ id: '99999999999999-ffffffffffff', at: 99999999999999, bytes: 5000, original: '/future.md', origin: 'program-cut' });

@@ -63,7 +63,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
-import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote, withLockLeft } from './apply.mjs';
+import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS } from './apply.mjs';
 import { ownSandboxDir } from './repo-fs.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
 // death-log (destroyed cuts). Function-declaration imports used only at CALL
@@ -780,7 +780,7 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
     res.budgetReached = res.budgetDeferred > 0;
     return res;
   } catch (e) { thrown = e; } finally {
-    lockLeft = lockLeftNote(globalLockPath(home), lock.release());
+    lockLeft = lockLeftNote(globalLockPath(home), lock.release(), LOCK_STALE_MS);
     if (lockLeft && res) res.lockLeft = lockLeft; // the object the try already returned: the caller sees this field
   }
   throw withLockLeft(thrown, lockLeft); // reached only when the body threw (fire 123): the error still names a lock left behind
