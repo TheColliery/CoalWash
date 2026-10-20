@@ -2,6 +2,12 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Changed
+
+- `scripts/front-door-links.test.mjs` re-copied from the org canon at `061076d` by blob (`c051b28f` → `ed9fbae9`): the probe test's abort-waiting stub no longer unrefs its ceiling timer, so a fetch no abort reaches fails at its own line instead of ending the process with the case unsettled. Test-only; no `plugin/` byte moves.
+
 ## [1.12.13] - 2026-10-18
 
 SKILL.md now says what to do with a keeps refusal's error
