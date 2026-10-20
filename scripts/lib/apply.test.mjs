@@ -3968,9 +3968,13 @@ test('CWK-162 B9: inGitDir tells a git control directory BELOW a root from a pat
 // a tarball) still replays; the provenance unit (a MAC the journal carries) is the answer to that and stays out of scope here.
 // ---------------------------------------------------------------------------
 const HAS_GIT = spawnSync('git', ['--version'], { encoding: 'utf8', timeout: 20000, windowsHide: true, env: gitEnv() }).status === 0;
+// P95-2: the 8,000-name leg below took 36 s whole at BREATHE (fire 154) and its `git add` passed the old 30 s clock under load, reading
+// as `null !== 0`. 120 s sits inside the suite's per-test clock (test-plan.mjs), and a killed git now fails by name.
+const GIT_FX_TIMEOUT_MS = 120000;
 function gitFx(cwd, args) {
   const r = spawnSync('git', ['-c', 'user.name=cw', '-c', 'user.email=cw@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...args],
-    { cwd, env: gitEnv(path.dirname(cwd)), encoding: 'utf8', timeout: 30000, windowsHide: true });
+    { cwd, env: gitEnv(path.dirname(cwd)), encoding: 'utf8', timeout: GIT_FX_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true });
+  if (r.error && r.error.code === 'ETIMEDOUT') assert.fail(`git ${args.join(' ')} did not finish within ${GIT_FX_TIMEOUT_MS} ms and was killed`);
   assert.strictEqual(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
   return r.stdout;
 }

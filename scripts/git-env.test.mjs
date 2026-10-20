@@ -64,6 +64,7 @@ test('gitEnv: the strip happens on the copy only; an ambient GIT_* key is still 
   withEnv({ GIT_DIR: '/ambient/.git', GIT_INDEX_FILE: '/ambient/.git/index' }, () => {
     const env = gitEnv('/c');
     assert.equal('GIT_DIR' in env, false, 'stripped from the returned copy');
+    assert.equal('GIT_INDEX_FILE' in env, false, 'stripped from the returned copy too: the whole GIT_* family goes, not GIT_DIR alone');
     assert.equal(process.env.GIT_DIR, '/ambient/.git', 'still in process.env');
     assert.equal(process.env.GIT_INDEX_FILE, '/ambient/.git/index', 'still in process.env');
   });

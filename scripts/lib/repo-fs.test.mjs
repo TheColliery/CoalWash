@@ -867,6 +867,20 @@ test('R86-1: the walk\'s refusals carry their kind: a link and a file in the way
   assert.throws(() => mkdirRepoParents(path.join(outside, 'x'), project), { folder: path.join(outside, 'x'), kind: 'escape' });
 });
 
+// R89-1 (RE-INSPECT 89): in every leg above the link IS the nearest existing ancestor. Here `.claude` links to an outside folder that
+// already holds `coal/`, so the nearest existing ancestor of the target folder is `.claude/coal`, a real folder inside the link's
+// target, and the folder to fix must still be the FIRST link, `.claude`.
+test('R89-1: when the first link differs from the nearest existing ancestor, the refusal names the first link (kind link), never the ancestor', async (t) => {
+  const sb = sandbox(t, 'r89-anc');
+  fs.mkdirSync(path.join(sb.outside, 'coal'));
+  const at = path.join(sb.project, '.claude');
+  if (!dirLink(sb.outside, at)) { t.skip('this volume cannot make a directory link'); return; }
+  assert.ok(fs.existsSync(path.join(at, 'coal')), 'the premise: the nearest existing ancestor is .claude/coal, past the link');
+  assert.throws(() => writeRepoFile(insideLinkTarget(sb.project), '{}\n', sb.project), { code: 'COALWASH_WRITE_REFUSED', folder: at, kind: 'link' });
+  assert.deepEqual(fs.readdirSync(sb.outside).sort(), ['coal', 'keep.txt']);
+  assert.deepEqual(fs.readdirSync(path.join(sb.outside, 'coal')), [], 'nothing is written through the link');
+});
+
 test('CWK2-051: escapesRoot tests the FIRST path segment: ..x and ..cfg are inside, .. and ../a and an absolute path are outside', () => {
   assert.strictEqual(escapesRoot('..x'), false);
   assert.strictEqual(escapesRoot(path.join('..cfg', 'a')), false);

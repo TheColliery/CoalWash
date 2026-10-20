@@ -31,6 +31,14 @@ import { gitEnv } from './lib/git-env.mjs';
 import { removeTree } from './lib/test-plan.mjs';
 
 const VERIFY = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify.mjs');
+// Every spawn in this file carries a clock (testing.md). verify.mjs measured 2.9-3.6 s a run on this box (fire 154, three runs)
+// and the git calls under a second, so 60 s is far past a live run and inside the suite's per-test clock (test-plan.mjs).
+// `finished` turns a killed run into a failure that names the clock, never an unrelated red on the next assertion.
+const SPAWN_TIMEOUT_MS = 60000;
+function finished(r, what) {
+  if (r.error && r.error.code === 'ETIMEDOUT') assert.fail(`${what} did not finish within ${SPAWN_TIMEOUT_MS} ms and was killed`);
+  return r;
+}
 
 test('verify.mjs REPORTS missing scripts/lib files instead of dying on them', () => {
   // verify.mjs derives `repo` from its OWN location, so a lone copy in an empty
@@ -42,7 +50,7 @@ test('verify.mjs REPORTS missing scripts/lib files instead of dying on them', ()
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(VERIFY, dest);
 
-    const r = spawnSync(process.execPath, [dest], { encoding: 'utf8' });
+    const r = finished(spawnSync(process.execPath, [dest], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
     const stdout = r.stdout ?? '';
     const stderr = r.stderr ?? '';
 
@@ -126,7 +134,7 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
   const root = copyGateTree('cw-desccap-');
   try {
     const dest = path.join(root, 'scripts', 'verify.mjs');
-    const run = () => spawnSync(process.execPath, [dest], { encoding: 'utf8' });
+    const run = () => finished(spawnSync(process.execPath, [dest], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
 
     const clean = run();
     assert.strictEqual(clean.status, 0, `pristine copy must PASS\n${clean.stdout}${clean.stderr}`);
@@ -153,7 +161,7 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
     pj.description = 123; // truthy non-string — must never read as 0 chars and pass
     fs.writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n', 'utf8');
 
-    const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8' });
+    const r = finished(spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
     assert.strictEqual(r.status, 1, 'a non-string description must FAIL, not silently pass as 0 chars');
     assert.match(r.stdout, /FAIL\s+\.claude-plugin\/plugin\.json: description is not a string \(number\)/,
       `must name the actual type, not silently report 0 chars\n${r.stdout}`);
@@ -168,7 +176,7 @@ test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never 
 test('CWK-120 row 16: the hooks FAIL names the path the gate checks, and the dist ok line names exactly what DIST_ITEMS ships', async () => {
   const root = copyGateTree('cw-verify-text-');
   try {
-    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8' });
+    const run = () => finished(spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
     const clean = run();
     assert.strictEqual(clean.status, 0, `pristine copy must PASS\n${clean.stdout}${clean.stderr}`);
     const { DIST_ITEMS } = await import(pathToFileURL(path.join(REPO, 'scripts', 'build-plugin.mjs')).href);
@@ -224,11 +232,11 @@ test('CWK-120 row 16: the hooks FAIL names the path the gate checks, and the dis
 // unavailable (the caller skips visibly). The dir is cleaned HERE if building it throws,
 // and by the caller's finally once this returns.
 function trackedTreeRepo() {
-  const listed = spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: gitEnv(path.dirname(REPO)) });
+  const listed = finished(spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: gitEnv(path.dirname(REPO)), timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'git ls-files');
   if (listed.error || listed.status !== 0) return null;
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-git-')));
   try {
-    const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnv(path.dirname(root)) });
+    const git = (...args) => finished(spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnv(path.dirname(root)), timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), `git ${args.join(' ')}`);
     const init = git('init', '-q', '-b', 'main');
     assert.strictEqual(init.status, 0, `git init in the fixture failed\n${init.stderr}`);
     assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(),
@@ -245,7 +253,7 @@ function trackedTreeRepo() {
     assert.strictEqual(added.status, 0, `git add in the fixture failed\n${added.stderr}`);
     const tracked = git('ls-files');
     assert.ok(tracked.stdout.includes('scripts/verify.mjs'), `the fixture index must hold the tree\n${tracked.stderr}`);
-    const run = () => spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: gitEnv(path.dirname(root)) });
+    const run = () => finished(spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: gitEnv(path.dirname(root)), timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
     return { root, git, run };
   } catch (e) { removeTree(root); throw e; }
 }
@@ -335,13 +343,13 @@ test('verify.mjs inside a REAL git repo: an ambient absolute GIT_DIR cannot make
   const { root } = fx;
   const decoy = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-decoy-')));
   try {
-    const made = spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: gitEnv(path.dirname(decoy)) });
+    const made = finished(spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: gitEnv(path.dirname(decoy)), timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'git init (decoy)');
     assert.strictEqual(made.status, 0, `git init in the decoy failed\n${made.stderr}`);
     // Observable on the check-ignore call too: were it to run against the DECOY's git dir, this exclude file (which
     // `check-ignore` reads from the git dir, not from the work tree) would mark every root the ship-text cites as ignored.
     fs.writeFileSync(path.join(decoy, '.git', 'info', 'exclude'), ['skills/', 'commands/', 'hooks/', 'scripts/', 'plugin/', 'references/', ''].join('\n'));
     const hostile = { ...gitEnv(path.dirname(root)), GIT_DIR: path.join(decoy, '.git') };
-    const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hostile });
+    const r = finished(spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hostile, timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
     assert.strictEqual(r.status, 0, `the tracked tree must still PASS with a hostile GIT_DIR in the environment\n${r.stdout}${r.stderr}`);
     assert.match(r.stdout, /ok\s+every path this repo points at/, `the pointer block must have run and resolved\n${r.stdout}`);
   } finally {
