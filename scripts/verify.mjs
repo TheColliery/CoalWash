@@ -264,7 +264,7 @@ try {
     // A VISIBLE skip, never a silent carve-out: no git means no durability answer.
     console.log('  --   pointer check: git unavailable — cannot tell a tracked path from an untracked one; skipped');
   } else {
-    const { checkPointers, deriveIgnoredRoots } = await import(pathToFileURL(path.join(repo, 'scripts', 'pointer-check.mjs')).href);
+    const { checkPointers, deriveIgnoredRoots, classifyCheckIgnoreResult } = await import(pathToFileURL(path.join(repo, 'scripts', 'pointer-check.mjs')).href);
     const { projectConfigCandidates } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'config-load.mjs')).href);
     const { escapesRoot } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'repo-fs.mjs')).href); // the one first-segment rule, never a lexical startsWith
     const tracked = new Set(lsAll.stdout.split('\n').filter(Boolean));
@@ -366,13 +366,10 @@ try {
       runCheckIgnore: (names) => {
         const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
           { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)), input: names.map((n) => n + '/').join('\n') + '\n' });
-        if (ci.error) { checkIgnoreFailure = `failed to spawn: ${ci.error.message}`; return ''; }
-        if (ci.status !== 0 && ci.status !== 1) {
-          const why = String(ci.stderr || '').split('\n')[0].trim();
-          checkIgnoreFailure = `exited ${ci.status}${why ? ` — ${why}` : ''}`;
-          return '';
-        }
-        return ci.stdout;
+        // The verdict's classification lives in scripts/pointer-check.mjs (CWK2-060: a pipe error beside git's own exit is that exit).
+        const verdict = classifyCheckIgnoreResult(ci);
+        if (!verdict.ok) { checkIgnoreFailure = verdict.failure; return ''; }
+        return verdict.stdout;
       },
     });
     const ignoredRoots = ign.ignored;

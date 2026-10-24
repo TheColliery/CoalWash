@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'node:path';
-import { pointerCandidates, checkPointers, looksPathShaped, deriveIgnoredRoots, PENDING_POINTERS } from './pointer-check.mjs';
+import { pointerCandidates, checkPointers, looksPathShaped, deriveIgnoredRoots, PENDING_POINTERS, classifyCheckIgnoreResult } from './pointer-check.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -418,4 +418,75 @@ test('NON-LOCAL-079: an extensionless citation under a gitignored root is checke
     assert.ok(both.some((m) => m.includes('throwaway-build/readme.md') && /gitignored/.test(m)),
       'plant B, the citation that armed the root, must FAIL too');
   } finally { removeTree(dir); }
+});
+
+// ---------------------------------------------------------------- CHECK-IGNORE CLASSIFIER (CWK2-060)
+// A pipe error is keyed on error.code (EPIPE on POSIX, EOF on Windows), never on error.message.
+// The pair that matters: a pipe code beside git's own integer exit other than 0 or 1 is git answering,
+// so the exit is the verdict. Every other pairing stays "failed to spawn" (fail-closed).
+const spawnError = (code, message) => Object.assign(new Error(message), { code });
+const PIPE_MESSAGE = 'write EPIPE';
+
+test('CWK2-060: a pipe error beside git exit 128 names the EXIT, not a spawn failure (EPIPE)', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('EPIPE', PIPE_MESSAGE), status: 128,
+    stderr: 'fatal: this operation must be run in a work tree\n', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'exited 128 — fatal: this operation must be run in a work tree' });
+});
+
+test('CWK2-060: a pipe error beside git exit 128 names the EXIT, not a spawn failure (EOF, Windows)', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('EOF', 'spawnSync git EOF'), status: 128,
+    stderr: 'fatal: this operation must be run in a work tree\n', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'exited 128 — fatal: this operation must be run in a work tree' });
+});
+
+test('CWK2-060: a pipe error with no stderr names the status with no dangling separator', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('EOF', 'spawnSync git EOF'), status: 128, stderr: '', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'exited 128' });
+});
+
+test('CWK2-060 FAIL-CLOSED: a pipe error beside exit 0 or 1 stays "failed to spawn" (git may not have read all its input)', () => {
+  for (const status of [0, 1]) {
+    const r = classifyCheckIgnoreResult({ error: spawnError('EPIPE', PIPE_MESSAGE), status, stderr: '', stdout: '' });
+    assert.deepStrictEqual(r, { ok: false, failure: `failed to spawn: ${PIPE_MESSAGE}` }, `status ${status}`);
+  }
+});
+
+test('CWK2-060 FAIL-CLOSED: a pipe error beside no integer status stays "failed to spawn"', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('EPIPE', PIPE_MESSAGE), status: null, stderr: '', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: `failed to spawn: ${PIPE_MESSAGE}` });
+});
+
+test('CWK2-060 FAIL-CLOSED: a non-pipe spawn error (ENOENT) beside exit 128 stays "failed to spawn"', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('ENOENT', 'spawnSync git ENOENT'), status: 128,
+    stderr: 'fatal: stale', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'failed to spawn: spawnSync git ENOENT' });
+});
+
+test('CWK2-060: an exit 128 with no spawn error names the exit and its first stderr line (unchanged)', () => {
+  const r = classifyCheckIgnoreResult({ status: 128, stderr: 'fatal: boom\nmore\n', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'exited 128 — fatal: boom' });
+});
+
+test('CWK2-060: exit 0 and exit 1 are answers, and the stdout comes back (unchanged)', () => {
+  assert.deepStrictEqual(classifyCheckIgnoreResult({ status: 0, stdout: 'x\n', stderr: '' }), { ok: true, stdout: 'x\n' });
+  assert.deepStrictEqual(classifyCheckIgnoreResult({ status: 1, stdout: '', stderr: '' }), { ok: true, stdout: '' });
+});
+
+test('CWK2-060 REAL GIT: a core.bare repository fed input past the pipe buffer names git\'s exit, with no fake error', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-check-ignore-bare-'));
+  t.after(() => removeTree(dir));
+  const env = gitEnv(path.dirname(dir));
+  const init = spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8', env, timeout: 30000 });
+  if (init.error || init.status !== 0) return t.skip('git unavailable');
+  const bare = spawnSync('git', ['config', 'core.bare', 'true'], { cwd: dir, encoding: 'utf8', env, timeout: 30000 });
+  assert.strictEqual(bare.status, 0, 'precondition: the fixture repository is made bare');
+  // ~114 KB of names: far past the pipe buffer, so git refuses (128) before it reads stdin and the write fails.
+  const names = Array.from({ length: 2000 }, (_, i) => `throwaway-build-${i}-padding-padding-x`);
+  const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
+    { cwd: dir, encoding: 'utf8', env, timeout: 30000, input: names.map((n) => n + '/').join('\n') + '\n' });
+  assert.strictEqual(ci.status, 128, 'precondition: git refuses a core.bare repository with exit 128');
+  const r = classifyCheckIgnoreResult(ci);
+  assert.strictEqual(r.ok, false);
+  assert.match(r.failure, /^exited 128 — /, `the exit must be named, got: ${r.failure}`);
+  assert.ok(!/failed to spawn/.test(r.failure), `a git refusal is not a spawn failure, got: ${r.failure}`);
 });

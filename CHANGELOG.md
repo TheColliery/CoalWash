@@ -8,6 +8,10 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 - `scripts/front-door-links.test.mjs` re-copied from the org canon at `061076d` by blob (`c051b28f` → `ed9fbae9`): the probe test's abort-waiting stub no longer unrefs its ceiling timer, so a fetch no abort reaches fails at its own line instead of ending the process with the case unsettled. Test-only; no `plugin/` byte moves.
 
+### Fixed
+
+- The gate's `git check-ignore --stdin` probe (`scripts/verify.mjs`) reads git's own exit when a pipe error (EPIPE on POSIX, EOF on Windows) arrives beside it, so a bare-repository refusal reads `exited 128 — …` instead of `failed to spawn`; the classifier is `classifyCheckIgnoreResult` in `scripts/pointer-check.mjs`, the class fix from CoalHearth `6f39694`. Gate-only, no `plugin/` byte moves. — test: `scripts/pointer-check.test.mjs`
+
 ## [1.12.13] - 2026-10-18
 
 SKILL.md now says what to do with a keeps refusal's error
