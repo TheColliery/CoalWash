@@ -316,7 +316,7 @@ test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never
 
 function gitFixture(gitignoreText) {
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-079-')));
-  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8', env: gitEnv(path.dirname(dir)) });
+  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8', env: gitEnv(path.dirname(dir)), timeout: 30000 });
   if (r.error || r.status !== 0) {
     // INSPECT F3 — the dir exists BEFORE git is probed, and on this path the caller gets
     // null, so its own finally{} holds no handle to remove. Leaving it re-opens board
@@ -332,8 +332,10 @@ const runner = (dir) => (names) => {
   // Same scrub as gitFixture above, same reason: an inherited GIT_DIR makes this
   // answer for the caller's repository rather than the fixture's.
   const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-    { cwd: dir, encoding: 'utf8', env: gitEnv(path.dirname(dir)), input: names.map((n) => n + "/").join('\n') + '\n' });
-  return ci.error ? '' : ci.stdout;
+    { cwd: dir, encoding: 'utf8', env: gitEnv(path.dirname(dir)), timeout: 30000, input: names.map((n) => n + "/").join('\n') + '\n' });
+  // A spawn error (a timeout included) is a FAILURE of the fixture, never an empty ignore set: '' would read as "nothing ignored".
+  if (ci.error) throw new Error(`git check-ignore did not answer: ${ci.error.code}`);
+  return ci.stdout;
 };
 
 test('DERIVE-079: the ignore set is EXISTENCE-INDEPENDENT — an absent gitignored root is still found', (t) => {
@@ -462,6 +464,11 @@ test('CWK2-060 FAIL-CLOSED: a non-pipe spawn error (ENOENT) beside exit 128 stay
   assert.deepStrictEqual(r, { ok: false, failure: 'failed to spawn: spawnSync git ENOENT' });
 });
 
+test('CWK2-061: the classifier keys on error.code, never error.message (a non-pipe code with a pipe message stays fail-closed)', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('ENOENT', 'write EPIPE'), status: 128, stderr: 'fatal: x', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'failed to spawn: write EPIPE' });
+});
+
 test('CWK2-060: an exit 128 with no spawn error names the exit and its first stderr line (unchanged)', () => {
   const r = classifyCheckIgnoreResult({ status: 128, stderr: 'fatal: boom\nmore\n', stdout: '' });
   assert.deepStrictEqual(r, { ok: false, failure: 'exited 128 — fatal: boom' });
@@ -485,6 +492,8 @@ test('CWK2-060 REAL GIT: a core.bare repository fed input past the pipe buffer n
   const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
     { cwd: dir, encoding: 'utf8', env, timeout: 30000, input: names.map((n) => n + '/').join('\n') + '\n' });
   assert.strictEqual(ci.status, 128, 'precondition: git refuses a core.bare repository with exit 128');
+  if (!ci.error) return t.skip('the pipe race did not reproduce on this host (no spawn error beside 128)');
+  assert.ok(['EPIPE', 'EOF'].includes(ci.error.code), `the spawn error must be the pipe race, got code ${ci.error.code}`);
   const r = classifyCheckIgnoreResult(ci);
   assert.strictEqual(r.ok, false);
   assert.match(r.failure, /^exited 128 — /, `the exit must be named, got: ${r.failure}`);

@@ -21,6 +21,8 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let fails = 0;
 const ok = (m) => console.log(`  ok   ${m}`);
 const fail = (m) => { console.log(`  FAIL ${m}`); fails++; };
+// Every git spawn in this gate carries a deadline (CWK2-061 / N165-1): an unbounded wait is a hung gate, never a verdict.
+const GIT_SPAWN_TIMEOUT_MS = 60000;
 
 const LIBS = [
   'class-b.mjs', 'caliper.mjs', 'fidelity-gate.mjs', 'apply.mjs', 'keeps.mjs', 'receipt.mjs',
@@ -259,8 +261,11 @@ try {
   // check that uses it: a missing helper is one FAIL line here, never a link-time crash (node/runtime.md §1).
   const { gitEnv } = await import('./lib/git-env.mjs'); // a literal specifier, so the git-spawn census reads where gitEnv comes from
   // The env is built INLINE at each spawn (not held in a variable) so the git-spawn census below can see it is the helper's.
-  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)) });
-  if (lsAll.error || lsAll.status !== 0) {
+  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)), timeout: GIT_SPAWN_TIMEOUT_MS });
+  if (lsAll.error?.code === 'ETIMEDOUT') {
+    // A TIMED-OUT listing is a failure, never the "no git" skip below: git answered nothing, so nothing is proven either way.
+    fail(`git ls-files timed out after ${GIT_SPAWN_TIMEOUT_MS} ms — cannot tell a tracked path from an untracked one`);
+  } else if (lsAll.error || lsAll.status !== 0) {
     // A VISIBLE skip, never a silent carve-out: no git means no durability answer.
     console.log('  --   pointer check: git unavailable — cannot tell a tracked path from an untracked one; skipped');
   } else {
@@ -365,7 +370,7 @@ try {
       agentHomes,
       runCheckIgnore: (names) => {
         const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-          { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)), input: names.map((n) => n + '/').join('\n') + '\n' });
+          { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)), timeout: GIT_SPAWN_TIMEOUT_MS, input: names.map((n) => n + '/').join('\n') + '\n' });
         // The verdict's classification lives in scripts/pointer-check.mjs (CWK2-060: a pipe error beside git's own exit is that exit).
         const verdict = classifyCheckIgnoreResult(ci);
         if (!verdict.ok) { checkIgnoreFailure = verdict.failure; return ''; }
