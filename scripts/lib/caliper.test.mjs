@@ -18,11 +18,13 @@ import {
   readBudgetFor, READ_BUDGET_DEFAULT,
   discoverCapacity, markFullClean, armExternalize, externalizableResidue,
   CAPACITY_STANDARD_WINDOW_TOKENS, CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, CAPACITY_DISCOVERY_MIN_TOKENS,
-  __testHooks,
+  CAPACITY_FILE_SCHEMA, capacityFilePath,
+  __testHooks, deadProjectStateFiles, rootIsGone, rootState,
 } from './caliper.mjs';
-import { discoverClassB } from './class-b.mjs';
+import { discoverClassB, ccProjectSlug } from './class-b.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR; // hermetic: sandbox home only
+delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW; // hermetic: discoverCapacity reads it by default (fire 32, P0)
 
 // Thai fixture built from char codes (never raw invisibles/composables in source):
 // "ทำงาน" = 0E17 0E33 0E07 0E32 0E19 — 5 non-ASCII chars.
@@ -566,6 +568,22 @@ test('(c) containment: containedNewPath accepts an in-sandbox path, rejects an o
   } finally { clean(home, proj); }
 });
 
+test('CWK2-051: containedNewPath reads a real child folder named ..x / ..cfg as INSIDE, and a real ../sibling as outside', () => {
+  const { home, proj } = sandbox();
+  const base = path.join(home, '.claude');
+  fs.mkdirSync(path.join(base, '..x'), { recursive: true });
+  fs.mkdirSync(path.join(base, '..cfg'), { recursive: true });
+  try {
+    assert.strictEqual(containedNewPath(path.join(base, '..x', 'state.json'), base), true, 'a folder named ..x under base is inside');
+    assert.strictEqual(containedNewPath(path.join(base, '..cfg', 'deep', 'state.json'), base), true, 'a folder named ..cfg under base is inside');
+    assert.strictEqual(containedNewPath(path.join(base, '..', 'sibling', 'state.json'), base), false, 'a real ../sibling still escapes');
+    // base absent (a fresh install's ~/.claude): no existing sub-tree to escape through, so the lexical gate alone governs
+    const fresh = path.join(home, 'fresh-claude');
+    assert.strictEqual(containedNewPath(path.join(fresh, '..x', 'state.json'), fresh), true, 'absent base: ..x under it is inside');
+    assert.strictEqual(containedNewPath(path.join(fresh, '..', 'sibling', 'state.json'), fresh), false, 'absent base: a real ../sibling is refused by the lexical gate alone');
+  } finally { clean(home, proj); }
+});
+
 test('(c2) containment fail-closed: a projects/<slug> dir symlinked OUT of ~/.claude → statePath falls back to coal/, never writes outside', (t) => {
   const { home, proj } = sandbox();
   const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));
@@ -841,6 +859,7 @@ test('statOnlyFootprintBytes: sums current byte sizes for existing paths; a miss
 test('WARP-HOLE STRUCTURAL GATE: statOnlyFootprintBytes opens ZERO file content (stat only) while the full discoverClassB+measureEntries re-gauge DOES read content — the machine-independent reason the full pass is delta-gated', () => {
   const { home, proj } = sandbox();
   const realReadFileSync = fs.readFileSync;
+  const realReadSync = fs.readSync;
   try {
     // Hermetic fixture store — never the live repo (its class-B files are
     // gitignored and absent on CI). A project-level CLAUDE.md is an
@@ -859,6 +878,10 @@ test('WARP-HOLE STRUCTURAL GATE: statOnlyFootprintBytes opens ZERO file content 
     // own calls. The wrapper still delegates — nothing can break under it.
     let contentReads = 0;
     fs.readFileSync = (...args) => { contentReads++; return realReadFileSync(...args); };
+    // CWK-137: content is now read through the bounded open/fstat/readSync reader, so
+    // readSync is a content read too. Counting BOTH primitives widens what the gate
+    // observes; the stat-only half must still see zero of either.
+    fs.readSync = (...args) => { contentReads++; return realReadSync(...args); };
 
     // The CHEAP half: the stat-only gate must produce the correct byte total
     // WITHOUT a single content read — that absence is the structural core of
@@ -878,6 +901,7 @@ test('WARP-HOLE STRUCTURAL GATE: statOnlyFootprintBytes opens ZERO file content 
     assert.ok(contentReads > 0, `the full discoverClassB+measureEntries pass DOES read content (observed ${contentReads} reads) — structurally heavier than the stat gate on the same store`);
   } finally {
     fs.readFileSync = realReadFileSync;
+    fs.readSync = realReadSync;
     clean(home, proj);
   }
 });
@@ -2042,6 +2066,10 @@ test('CWK-081 adapter: a POPULATED contextWindow is discovered, takes the MIN ac
     fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({
       modelUsage: {
         'claude-opus-5': { contextWindow: 1000000 },
+        // Dated 2026-10-08: claude-haiku-4-5 is a previous-generation id. Since Claude Code 2.1.293 the `haiku` alias on the
+        // Anthropic API is Haiku 5.5 (claude-haiku-5-5, 1M); it stays Haiku 4.5 on the Claude Platform on AWS, Amazon Bedrock,
+        // Google Cloud's Agent Platform and Microsoft Foundry. The MIN branch this pins does not depend on which id carries the
+        // small window.
         'claude-haiku-4-5': { contextWindow: 200000 }, // the smallest = the conservative reading
         'claude-fable-5-1': { contextWindow: 0 },      // unpopulated, ignored
       },
@@ -2068,6 +2096,123 @@ test('CWK-081 adapter: an out-of-range or corrupt figure falls back to the conse
     write('{ not json at all');                                          // corrupt
     assert.doesNotThrow(() => discoverCapacity({ home }));
     assert.strictEqual(discoverCapacity({ home }).capacityTokens, CAPACITY_TOKENS);
+  } finally { clean(home, proj); }
+});
+
+// CWK-099 — P2, the gauge file. The live shape it exists for: a stats-cache whose
+// every contextWindow is 0 (P1 finds nothing) on a box whose real window is 1M.
+const CWK099_MEASURE = { alwaysLoaded: { tokensEst: 300000, bytes: 1200000 }, index: { bytes: 0, lines: 0 }, totalTokensEst: 300000, totalBytes: 1200000, mechFat: { tokensEst: 0 } };
+function cwk099Home(capacityFile) {
+  const { home, proj } = sandbox();
+  // The caller's try/finally only exists once this returns, so a throw while
+  // seeding must clean the two dirs HERE or they leak (scripts-quality.md §2).
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: { 'claude-opus-5': { contextWindow: 0 } } }), 'utf8');
+    if (capacityFile !== undefined) {
+      fs.mkdirSync(path.dirname(capacityFilePath(home)), { recursive: true });
+      fs.writeFileSync(capacityFilePath(home), typeof capacityFile === 'string' ? capacityFile : JSON.stringify(capacityFile), 'utf8');
+    }
+  } catch (e) { clean(home, proj); throw e; }
+  return { home, proj };
+}
+
+test('CWK-099 adapter P2: a valid capacity file is DISCOVERED after an empty stats-cache, and the store gauges against 967,000', () => {
+  const { home, proj } = cwk099Home({ capacityTokens: 967000, rawWindowTokens: 1000000, source: 'claude -p receipt', at: '2026-09-17T00:00:00Z', stateSchema: CAPACITY_FILE_SCHEMA });
+  try {
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.source, 'capacity-file');
+    assert.strictEqual(c.discovered, true);
+    assert.strictEqual(c.rawWindowTokens, 1000000);
+    assert.strictEqual(c.capacityTokens, 1000000 - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS, 'the usable window is re-derived from the raw one — the same derivation P1 uses');
+    const gv = gaugeVerdict({ measure: CWK099_MEASURE, capacity: c });
+    assert.strictEqual(gv.capacityTokens, 967000);
+    assert.strictEqual(gv.capacitySource, 'capacity-file');
+    assert.strictEqual(gv.verdict.band, 'LEAN', 'a 300k store is nowhere near a 967k wall');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-099 adapter P2: WITHOUT the file, the same box still reads the conservative default with the default\'s provenance', () => {
+  const { home, proj } = cwk099Home(undefined);
+  try {
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.source, 'conservative-default');
+    assert.strictEqual(c.discovered, false);
+    assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
+    const gv = gaugeVerdict({ measure: CWK099_MEASURE, capacity: c });
+    assert.strictEqual(gv.capacitySource, 'conservative-default');
+    assert.strictEqual(gv.verdict.band, 'FULL', 'the same 300k store is over the conservative wall');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-099 adapter P2: a file the adapter does not recognise is IGNORED — the default answers, never a guess', () => {
+  const good = { capacityTokens: 967000, rawWindowTokens: 1000000, source: 'x', at: 0, stateSchema: CAPACITY_FILE_SCHEMA };
+  for (const [label, file] of [
+    ['a stale stateSchema', { ...good, stateSchema: CAPACITY_FILE_SCHEMA - 1 }],
+    ['a newer stateSchema', { ...good, stateSchema: CAPACITY_FILE_SCHEMA + 1 }],
+    ['no stateSchema', { capacityTokens: 967000, rawWindowTokens: 1000000 }],
+    ['a string stateSchema', { ...good, stateSchema: String(CAPACITY_FILE_SCHEMA) }],
+    ['no capacityTokens', { rawWindowTokens: 1000000, stateSchema: CAPACITY_FILE_SCHEMA }],
+    ['no rawWindowTokens', { capacityTokens: 967000, stateSchema: CAPACITY_FILE_SCHEMA }],
+    ['a non-numeric rawWindowTokens', { ...good, rawWindowTokens: '1000000' }],
+    ['a non-positive rawWindowTokens', { ...good, rawWindowTokens: -1000000, capacityTokens: -1033000 }],
+    ['a non-positive capacityTokens', { ...good, capacityTokens: 0 }],
+    ['an out-of-range rawWindowTokens', { ...good, rawWindowTokens: 99000000, capacityTokens: 98967000 }],
+    ['a capacityTokens that skipped the reserve', { ...good, capacityTokens: 1000000 }],
+    ['an array', [good]],
+    ['corrupt JSON', '{ "capacityTokens": 967000,'],
+  ]) {
+    const { home, proj } = cwk099Home(file);
+    try {
+      const c = discoverCapacity({ home });
+      assert.strictEqual(c.source, 'conservative-default', `${label}: must fall through to the default, got ${JSON.stringify(c)}`);
+      assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS, label);
+    } finally { clean(home, proj); }
+  }
+});
+
+// F-R34-2 (C21): PowerShell 5.1's `Set-Content -Encoding utf8` / `Out-File` write a
+// UTF-8 BOM. A correct writer's file must not be dead because of it.
+test('CWK-099 adapter P2: a BOM-prefixed valid capacity file is READ, the way every other state file here is', () => {
+  const { home, proj } = cwk099Home(String.fromCharCode(0xFEFF) + JSON.stringify({ capacityTokens: 967000, rawWindowTokens: 1000000, stateSchema: CAPACITY_FILE_SCHEMA }));
+  try {
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.source, 'capacity-file', `a leading U+FEFF must not make a valid file doubt, got ${JSON.stringify(c)}`);
+    assert.strictEqual(c.capacityTokens, 967000);
+  } finally { clean(home, proj); }
+});
+
+// F-R34-1 (C25): P1 FOUND a window — a non-zero contextWindow — and cannot use it.
+// That is positive evidence of the box's window, so the default answers and the
+// file is NOT consulted: a larger file must never override it. Every shape of
+// "found but unusable" is pinned, so the rule is not only the one reported row.
+test('CWK-099 adapter P2: a stats-cache that FOUND a window it cannot use answers with the DEFAULT — a larger capacity file never overrides it', () => {
+  for (const [label, window] of [
+    ['a real small window (usable below the discovery floor)', 120000],
+    ['a window below the discovery range', 64000],
+    ['a window above the discovery range', 6000000],
+  ]) {
+    const { home, proj } = cwk099Home({ capacityTokens: 967000, rawWindowTokens: 1000000, stateSchema: CAPACITY_FILE_SCHEMA });
+    try {
+      fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: { m: { contextWindow: window } } }), 'utf8');
+      const c = discoverCapacity({ home });
+      assert.strictEqual(c.source, 'conservative-default', `${label}: the file must not be consulted, got ${JSON.stringify(c)}`);
+      assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS, label);
+      assert.strictEqual(c.discovered, false, label);
+    } finally { clean(home, proj); }
+  }
+});
+
+test('CWK-099 adapter P2: a POPULATED usable stats-cache still wins over the file — the file answers only when P1 reads no populated window (every contextWindow 0, negative, non-numeric or absent)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'stats-cache.json'), JSON.stringify({ modelUsage: { m: { contextWindow: 200000 } } }), 'utf8');
+    fs.mkdirSync(path.dirname(capacityFilePath(home)), { recursive: true });
+    fs.writeFileSync(capacityFilePath(home), JSON.stringify({ capacityTokens: 967000, rawWindowTokens: 1000000, stateSchema: CAPACITY_FILE_SCHEMA }), 'utf8');
+    const c = discoverCapacity({ home });
+    assert.strictEqual(c.source, 'stats-cache');
+    assert.strictEqual(c.rawWindowTokens, 200000);
   } finally { clean(home, proj); }
 });
 
@@ -2212,4 +2357,408 @@ test('CWK-081 L1: a modelUsage ARRAY is refused by the shape guard (typeof [] ==
     assert.strictEqual(c.discovered, false, 'an array is doubt, and this function fails closed on doubt');
     assert.strictEqual(c.capacityTokens, CAPACITY_TOKENS);
   } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// 08c/08d unit 2 (fire 32) -- P0, THE AUTO-COMPACT WINDOW. A session that compacts at N tokens has N as its denominator, whatever
+// window the model has; the gauge read 167,000 (or 967,000 with a 1M cache) for a 100K session (scratchpad/08b/cap100k.mjs). Every
+// leg passes env and projectRoot, so nothing ambient reaches it.
+// ---------------------------------------------------------------------------
+function writeJson(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value), 'utf8'); }
+const userSettings = (home) => path.join(home, '.claude', 'settings.json');
+const oneMillionCache = (home) => writeJson(path.join(home, '.claude', 'stats-cache.json'), { modelUsage: { 'claude-opus-5-5': { contextWindow: 1000000 } } });
+
+test('fire 32 P0: CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 reads a 100,000-token capacity, not the 167,000 default', () => {
+  const { home, proj } = sandbox();
+  try {
+    const c = discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '100000' } });
+    assert.deepStrictEqual([c.capacityTokens, c.source, c.discovered], [100000, 'auto-compact-window', true]);
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: a 1M stats-cache plus autoCompactWindow 100000 in the user settings reads the 100,000, and a per-model modelSettings window counts too (the MIN)', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 100000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 100000);
+    writeJson(userSettings(home), { autoCompactWindow: 600000, modelSettings: { 'claude-sonnet-5-5': { effortLevel: 'medium', autoCompactWindow: 300000 }, 'claude-opus-5-5': { autoCompactWindow: 'auto' } } });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 300000, 'the smallest window any model may run at');
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: a larger window never RAISES the discovered capacity (a window above the default reads the default)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const c = discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000' } });
+    assert.deepStrictEqual([c.capacityTokens, c.source], [CAPACITY_TOKENS, 'conservative-default']);
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: a cloned PROJECT window that RAISES above the user window is refused; one that lowers it wins', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 200000 });
+    writeJson(path.join(proj, '.claude', 'settings.json'), { autoCompactWindow: 900000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 200000, 'a project file never raises the wall');
+    // fire 34, P1 (B): this leg planted a PROJECT per-model window; a project's modelSettings is no longer read, so it lowers by its top-level key
+    writeJson(path.join(proj, '.claude', 'settings.local.json'), { autoCompactWindow: 120000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 120000, 'a project file may lower it');
+    writeJson(path.join(proj, '.claude', 'settings.local.json'), String.fromCharCode(0xfeff) + JSON.stringify({ autoCompactWindow: 110000 }));
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 110000, 'a BOM-prefixed file (a PowerShell 5.1 writer) is read');
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: with no user window the default stands in, so a project window raises nothing and a lower one wins', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeJson(path.join(proj, '.claude', 'settings.json'), { autoCompactWindow: 900000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, CAPACITY_TOKENS);
+    writeJson(path.join(proj, '.claude', 'settings.json'), { autoCompactWindow: 150000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 150000);
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: an unparseable window is ignored, never read as a window: the capacity falls through to the cache', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 'auto', modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 'lots' }, broken: [1, 2] } });
+    writeJson(path.join(proj, '.claude', 'settings.json'), '{ "autoCompactWindow": 100000, ');
+    writeJson(path.join(proj, '.claude', 'settings.local.json'), { autoCompactWindow: { value: 100000 } });
+    const c = discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'abc' } });
+    assert.deepStrictEqual([c.capacityTokens, c.source], [967000, 'stats-cache']);
+    writeJson(userSettings(home), { autoCompactWindow: 200000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 200000, 'one corrupt file never voids the windows the others hold');
+  } finally { clean(home, proj); }
+});
+
+test('fire 32 P0: a project .claude that links OUTSIDE the project root is not read (the bounded read refuses it, CWK-137)', (t) => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-outside-')));
+  try {
+    oneMillionCache(home);
+    writeJson(path.join(outside, 'settings.json'), { autoCompactWindow: 100000 });
+    try { fs.symlinkSync(outside, path.join(proj, '.claude'), 'junction'); } catch (e) { t.skip(`this volume cannot link a directory here (${e.code})`); return; }
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 967000, 'a window behind a link out of the root is never read');
+  } finally { clean(home, proj, outside); }
+});
+
+test('fire 32 P0: the env value is read the way Claude Code reads it (its leading digits, clamped to 100K..1M), so 500k is 100,000', () => {
+  // env-vars.md: "a value like 500k reads as 500 and clamps to the 100K minimum"
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500k' } }).capacityTokens, 100000);
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '50000' } }).capacityTokens, 100000);
+  } finally { clean(home, proj); }
+});
+
+// 08d fire 33 (INSPECT R27-1, R27-2). A SETTINGS window is the vendor's settings type: an integer from 100,000 to 1,000,000 (or
+// "auto", which is no window); the env's leading-digits reading belongs to the env alone. And a readable env is the window ALONE.
+test('fire 33 R27-1: an invalid SETTINGS value is no window (B1-B7: a string, out of range, a non-integer), never clamped to 100,000', () => {
+  const legs = [
+    ['B1 user "500k"', (h, p) => writeJson(userSettings(h), { autoCompactWindow: '500k' })],
+    ['B2 user 200', (h, p) => writeJson(userSettings(h), { autoCompactWindow: 200 })],
+    ['B3 user 0', (h, p) => writeJson(userSettings(h), { autoCompactWindow: 0 })],
+    ['B4 user -5', (h, p) => writeJson(userSettings(h), { autoCompactWindow: -5 })],
+    ['B5 project 1', (h, p) => writeJson(path.join(p, '.claude', 'settings.json'), { autoCompactWindow: 1 })],
+    ['B6 user 150000.5', (h, p) => writeJson(userSettings(h), { autoCompactWindow: 150000.5 })],
+    ['B7 per-model "200000"', (h, p) => writeJson(userSettings(h), { modelSettings: { 'claude-opus-5-5': { autoCompactWindow: '200000' } } })],
+  ];
+  const wrong = [];
+  for (const [name, plant] of legs) {
+    const { home, proj } = sandbox();
+    try {
+      oneMillionCache(home);
+      plant(home, proj);
+      const c = discoverCapacity({ home, projectRoot: proj, env: {} });
+      if (c.capacityTokens !== 967000 || c.source !== 'stats-cache') wrong.push(`${name}: ${c.capacityTokens} ${c.source}`);
+    } finally { clean(home, proj); }
+  }
+  assert.deepStrictEqual(wrong, [], 'each listed value was read as a window');
+  const { home, proj } = sandbox();
+  try { // control: the same file with a valid integer IS a window, so the zeros above are the rule and not a dead reader
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 150000 });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 150000);
+    // B8: above the range is no window either, seen where it would lower: beside a 3M cache (P1 reads windows up to 5M)
+    writeJson(path.join(home, '.claude', 'stats-cache.json'), { modelUsage: { 'claude-opus-5-5': { contextWindow: 3000000 } } });
+    writeJson(userSettings(home), { autoCompactWindow: 2000000 });
+    assert.deepStrictEqual(Object.values(discoverCapacity({ home, projectRoot: proj, env: {} })).slice(0, 2), [2967000, 'stats-cache'], 'B8 user 2000000');
+  } finally { clean(home, proj); }
+});
+
+test('fire 33 R27-2: a readable env window is the session window ALONE (it takes precedence over the setting), still capped by the discovered capacity', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 200000 });
+    writeJson(path.join(proj, '.claude', 'settings.json'), { autoCompactWindow: 100000 });
+    const c = discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '800000' } });
+    assert.deepStrictEqual([c.capacityTokens, c.source], [800000, 'auto-compact-window'], 'C1: the settings are not read when the env is');
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'abc' } }).capacityTokens, 100000, 'an unreadable env leaves the settings MIN');
+    fs.rmSync(path.join(home, '.claude', 'stats-cache.json'));
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '800000' } }).capacityTokens, CAPACITY_TOKENS, 'an env window never raises the discovered capacity');
+  } finally { clean(home, proj); }
+});
+
+test('fire 33 NAMED RESIDUAL (C2, C3): with no readable env a per-model window is taken as a MIN across models, so a session on a model with a larger window reads the smallest', () => {
+  // A hook has no reliable model identity, so per-model precedence cannot be applied: this pins the conservative reading as the residual.
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 200000, modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 800000 } } });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 200000, 'C2: an opus session reads the top-level 200000, not its own 800000');
+    writeJson(userSettings(home), { modelSettings: { 'claude-haiku-4-5': { autoCompactWindow: 100000 } } });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 100000, 'C3: a window saved for another model only is read for every session');
+  } finally { clean(home, proj); }
+});
+
+// 09a fire 34 (the head's rulings on INSPECT P3 and P1). AS1 (a): the USER settings.json is read through the same bounded reader the
+// project files use (MAX_CONFIG_BYTES, 1 MiB), never whole. P1 (B): a per-model window is read from the USER settings only; a project
+// file (which a cloned repo writes) keeps only its top-level autoCompactWindow.
+test('fire 34 AS1 (a): a user settings.json over the 1 MiB config bound is no window; the same file under the bound is read', () => {
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), { autoCompactWindow: 100000, pad: 'x'.repeat(1024 * 1024) });
+    assert.deepStrictEqual(Object.values(discoverCapacity({ home, projectRoot: proj, env: {} })).slice(0, 2), [967000, 'stats-cache'], 'an over-bound user file is never read whole');
+    writeJson(userSettings(home), JSON.stringify({ autoCompactWindow: 100000 }) + ' '.repeat(1024 * 1024));
+    assert.deepStrictEqual(Object.values(discoverCapacity({ home, projectRoot: proj, env: {} })).slice(0, 2), [967000, 'stats-cache'], 'over the bound is no window even when its first MiB would parse (never read as a prefix)');
+    writeJson(userSettings(home), { autoCompactWindow: 100000, pad: 'x'.repeat(1024) });
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 100000, 'control: the bound, not the key, is what refused it');
+  } finally { clean(home, proj); }
+});
+
+test('fire 34 P1 (B): a PROJECT modelSettings window is not read (967,000 beside a 1M cache); the same entry in the USER settings still reads 100,000', () => {
+  const entry = { modelSettings: { 'claude-haiku-4-5': { autoCompactWindow: 100000 } } };
+  for (const name of ['settings.json', 'settings.local.json']) {
+    const { home, proj } = sandbox();
+    try {
+      oneMillionCache(home);
+      writeJson(path.join(proj, '.claude', name), entry);
+      assert.deepStrictEqual(Object.values(discoverCapacity({ home, projectRoot: proj, env: {} })).slice(0, 2), [967000, 'stats-cache'], `a per-model window in the project's ${name} is not read`);
+      writeJson(path.join(proj, '.claude', name), { ...entry, autoCompactWindow: 150000 });
+      assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 150000, `the top-level key of the project's ${name} is still read`);
+    } finally { clean(home, proj); }
+  }
+  const { home, proj } = sandbox();
+  try {
+    oneMillionCache(home);
+    writeJson(userSettings(home), entry);
+    assert.strictEqual(discoverCapacity({ home, projectRoot: proj, env: {} }).capacityTokens, 100000, 'the user file keeps its per-model window');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-157 -- the writer's self-clean for a state file whose recorded project root no longer exists (hooks-safety.md
+// section 8). Fixture HOME under os.tmpdir() only: the real ~/.claude/coal/coalwash/ is never read or written here.
+// ---------------------------------------------------------------------------
+function coalDir(home) { return path.join(home, '.claude', 'coal', 'coalwash'); }
+function plantState(home, root, extra = {}, nameOverride = null) {
+  const dir = coalDir(home);
+  fs.mkdirSync(dir, { recursive: true });
+  const name = nameOverride || `state-${ccProjectSlug(root)}.json`;
+  fs.writeFileSync(path.join(dir, name), JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: root, stamps: [], strayPruneDone: true, ...extra }), 'utf8');
+  return path.join(dir, name);
+}
+// A root that never existed, whose parent (the temp dir) is a reachable directory: provably GONE.
+function goneRoot(tag) { return path.join(fs.realpathSync.native(os.tmpdir()), `cwk157-gone-${tag}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`); }
+
+test('CWK-157: a state file whose recorded project root no longer exists is removed on the next state write; a live root, a foreign file and a bad shape are left alone', () => {
+  const { home, proj } = sandbox();
+  const live = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk157-live-')));
+  try {
+    const dead = plantState(home, goneRoot('a'));
+    const alive = plantState(home, live);
+    // everything below must SURVIVE
+    const dir = coalDir(home);
+    const foreignJson = path.join(dir, 'state-notours.json');
+    fs.writeFileSync(foreignJson, JSON.stringify({ hello: 'world', projectRoot: goneRoot('b') }), 'utf8');        // no stateSchema: not our shape
+    const unparseable = path.join(dir, 'state-unparseable.json');
+    fs.writeFileSync(unparseable, '{ this is not json', 'utf8');
+    const otherName = path.join(dir, 'update-check');
+    fs.writeFileSync(otherName, '12345', 'utf8');
+    const wrongName = plantState(home, goneRoot('c'), {}, 'state-someone-elses-slug.json');                       // name != its recorded root's slug: a planted nomination
+    const relRoot = plantState(home, 'relative/path', {}, 'state-relative-path.json');                          // not an absolute root
+    const eRoot = goneRoot('e');
+    const shapeless = path.join(dir, `state-${ccProjectSlug(eRoot)}.json`);                                    // right NAME for its root, but no stateSchema: not our shape
+    fs.writeFileSync(shapeless, JSON.stringify({ projectRoot: eRoot, note: 'someone else wrote this' }), 'utf8');
+    const bakName = path.join(dir, `state-${ccProjectSlug(goneRoot('d'))}.json.bak`);
+    fs.writeFileSync(bakName, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: goneRoot('d') }), 'utf8'); // not our name pattern
+
+    setLeanFloor(home, proj, 1000); // a state write: the self-clean rides it
+
+    assert.strictEqual(fs.existsSync(dead), false, 'the dead-root state file is gone');
+    for (const [label, p] of [['live root', alive], ['foreign shape', foreignJson], ['unparseable', unparseable], ['other file', otherName], ['wrong slug name', wrongName], ['relative root', relRoot], ['.bak name', bakName], ['right name, no stateSchema', shapeless]]) {
+      assert.strictEqual(fs.existsSync(p), true, `${label} must be left untouched`);
+    }
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 1000, 'the write itself landed');
+  } finally { clean(home, proj, live); }
+});
+
+// R15 (CodeQL #46/#49 js/file-system-race): the sweep lstat-ed a state file and then read it by path. It now opens the file first through
+// openPlainFile and judges the HANDLE and the path together, so a file that cannot be proved a plain single-name file is kept, never read.
+test('R15 CodeQL #46/#49: a state file that has a SECOND NAME (a hard link) is not provably plain and is kept even though its root is gone; the same file with one name is swept', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const oneName = plantState(home, goneRoot('hl1'));
+    const twoNames = plantState(home, goneRoot('hl2'));
+    try { fs.linkSync(twoNames, path.join(home, 'second-name.json')); } catch (e) { return t.skip(`cannot create a hard link on this host (${e.code || e.message})`); }
+    setLeanFloor(home, proj, 1000); // a state write: the self-clean rides it
+    assert.strictEqual(fs.existsSync(oneName), false, 'control: the single-name dead-root state file is swept');
+    assert.strictEqual(fs.existsSync(twoNames), true, 'the file with a second name is kept');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-157 cannot-check means ALIVE: an absent root outside home/temp (a missing drive, an unmounted volume) keeps its file, and any stat error other than ENOENT/ENOTDIR keeps it', () => {
+  const { home, proj } = sandbox();
+  try {
+    // A root whose nearest live ancestor is the FILESYSTEM ROOT (outside the home and temp anchors): the shape a missing
+    // drive letter or an unmounted /Volumes entry leaves behind. Absent root, reachable ancestor, wrong place: keep.
+    const detached = path.join(path.parse(fs.realpathSync.native(os.tmpdir())).root, `cwk157-detached-${process.pid}`, 'proj');
+    assert.strictEqual(rootState(detached), 'absent', 'precondition: the fixture root really is absent');
+    const keptDetached = plantState(home, detached);
+    setLeanFloor(home, proj, 1000);
+    assert.strictEqual(fs.existsSync(keptDetached), true, 'absent but not provably DELETED (no live ancestor inside home/temp): cannot check, so alive');
+    assert.strictEqual(rootIsGone(detached, [home, os.tmpdir()]), false);
+
+    // CONTROL: the same shape INSIDE the temp anchor is dead (the helper is not a constant false).
+    assert.strictEqual(rootIsGone(goneRoot('ctl'), [home, os.tmpdir()]), true, 'absent root, live ancestor inside the temp anchor: dead');
+    assert.strictEqual(rootIsGone(path.join(goneRoot('ctl2'), 'deep', 'er'), [home, os.tmpdir()]), true, 'a whole deleted SUBTREE (parent gone too) is dead as soon as a live ancestor sits inside an anchor');
+    assert.strictEqual(rootIsGone(goneRoot('ctl3'), []), false, 'no anchors, nothing is ever dead');
+
+    // the stat error classes, by injection (an EACCES cannot be built portably)
+    const err = (code) => () => { const e = new Error(code); e.code = code; throw e; };
+    const fsRoot = path.parse(fs.realpathSync.native(os.tmpdir())).root; // an anchor that WOULD admit any ancestor: only the stat answer can keep the file
+    // The fixture root is built UNDER that anchor's own filesystem root, never as '/x/y': on Windows a drive-relative path resolves to the
+    // CURRENT drive (a CI workspace on D:\ with the temp dir on C:\), whose root is outside the anchor, and the rule's third clause then
+    // rightly answers "not provably deleted", so the CONTROL below read false for a reason that is not the stat class (R14 CI red, fire 15).
+    const injected = path.join(fsRoot, `cwk157-injected-${process.pid}`, 'y');
+    for (const code of ['EACCES', 'EPERM', 'EIO', 'ETIMEDOUT']) {
+      assert.strictEqual(rootState(injected, err(code)), 'unknown', `${code}: cannot check`);
+      assert.strictEqual(rootIsGone(injected, [fsRoot], err(code)), false, `${code} on the root: alive`);
+    }
+    assert.strictEqual(rootIsGone(injected, [fsRoot], err('ENOENT')), true, 'CONTROL: the same call with ENOENT is dead, so the four false answers above come from the stat class and nothing else');
+    assert.strictEqual(rootState(injected, err('ENOENT')), 'absent');
+    assert.strictEqual(rootState(injected, err('ENOTDIR')), 'absent');
+    assert.strictEqual(rootState(os.tmpdir()), 'present');
+  } finally { clean(home, proj); }
+});
+
+// R14 INSPECT F-R14-4: stat FOLLOWS a link, so a project root that is a link (a junction or a mount-point folder inside the home, to a
+// drive that is detached) whose target is gone read ENOENT, "absent", and its state file was swept. lstat finds the link itself: the
+// root is THERE, and cannot-check-means-alive keeps the file.
+test('R14 F-R14-4: a project root that is a LINK whose target is gone reads PRESENT, never dead; a truly absent path still reads absent (CWK-157)', (t) => {
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwr14-link-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const target = path.join(base, 'target');
+  const link = path.join(base, 'proj-link');
+  fs.mkdirSync(target);
+  try { fs.symlinkSync(target, link, 'junction'); } catch (e) { return t.skip(`cannot create a junction or directory symlink on this host (${e.code || e.message})`); }
+  assert.strictEqual(rootState(link), 'present', 'control: a live link reads present');
+  fs.rmSync(target, { recursive: true });
+  assert.throws(() => fs.statSync(link), (e) => e.code === 'ENOENT', 'precondition: stat through the link now says ENOENT (the old reading of "absent")');
+  assert.strictEqual(rootState(link), 'present', 'lstat finds the link itself');
+  assert.strictEqual(rootIsGone(link, [base, os.tmpdir()]), false, 'a root behind a link with a missing target is detached, not deleted: keep');
+  const nothing = path.join(base, 'nothing');
+  assert.strictEqual(rootState(nothing), 'absent', 'control: a path with no link and no target is still absent');
+  assert.strictEqual(rootIsGone(nothing, [base]), true, 'and still dead, so the answer above comes from the link and nothing else');
+});
+
+test('CWK-157 oversize: a state-named file over 1 MiB is not parsed and not touched', () => {
+  const { home, proj } = sandbox();
+  try {
+    const big = plantState(home, goneRoot('big'), { pad: 'x'.repeat(1048576 + 10) });
+    assert.ok(fs.statSync(big).size > 1048576, 'precondition: the fixture really is over the cap');
+    setLeanFloor(home, proj, 1000);
+    assert.strictEqual(fs.existsSync(big), true, 'over the size cap: left alone');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-157 bound (Phoenix #3): the sweep runs at most once per 24 h per project -- the stamp rides the state record, and an aged stamp re-arms it', () => {
+  const { home, proj } = sandbox();
+  try {
+    __testHooks.reset();
+    setLeanFloor(home, proj, 1);                         // write #1: due (no stamp yet) -> sweeps
+    assert.strictEqual(__testHooks.deadStateSweepCalls, 1);
+    const stamp = loadState(proj, home).deadStateSweepAt;
+    assert.ok(Number.isFinite(stamp) && stamp > 0, 'the stamp is persisted in the project state');
+
+    const later = plantState(home, goneRoot('later'));
+    setLeanFloor(home, proj, 2);                         // write #2 inside the window: must NOT sweep
+    assert.strictEqual(__testHooks.deadStateSweepCalls, 1, 'second write inside 24 h does not sweep');
+    assert.strictEqual(fs.existsSync(later), true, 'a file that went dead after the sweep waits for the next window');
+
+    const p = statePath(proj, home);
+    const cur = JSON.parse(fs.readFileSync(p, 'utf8'));
+    cur.deadStateSweepAt = Date.now() - 25 * 3600 * 1000; // age the stamp past the window
+    fs.writeFileSync(p, JSON.stringify(cur), 'utf8');
+    setLeanFloor(home, proj, 3);                         // write #3: due again
+    assert.strictEqual(__testHooks.deadStateSweepCalls, 2, 'an aged stamp re-arms the sweep');
+    assert.strictEqual(fs.existsSync(later), false, 'and it collects the file that went dead meanwhile');
+
+    // a stamp from the FUTURE (clock skew) must not suppress the sweep forever
+    const cur2 = JSON.parse(fs.readFileSync(p, 'utf8'));
+    cur2.deadStateSweepAt = Date.now() + 10 * 24 * 3600 * 1000;
+    fs.writeFileSync(p, JSON.stringify(cur2), 'utf8');
+    setLeanFloor(home, proj, 4);
+    assert.strictEqual(__testHooks.deadStateSweepCalls, 3, 'a future stamp reads as due');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-157: the project being WRITTEN is never swept, even if its own recorded root is gone (the sweep must not eat the write it rides on)', () => {
+  const { home } = sandbox();
+  try {
+    const ghost = goneRoot('own');
+    setLeanFloor(home, ghost, 777);
+    assert.strictEqual(loadState(ghost, home).leanFloorTokens, 777, 'the state just written for a root that is gone is still there');
+  } finally { clean(home); }
+});
+
+test('CWK-157: a coal/coalwash directory that is a LINK out of the sandbox is not swept through (realpath-and-contain before any rm)', (t) => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk157-outside-')));
+  try {
+    const coalParent = path.join(home, '.claude', 'coal');
+    fs.mkdirSync(coalParent, { recursive: true });
+    try { fs.symlinkSync(outside, path.join(coalParent, 'coalwash'), 'junction'); } catch (e) { t.skip(`junction creation unavailable here: ${e.code}`); return; }
+    const victim = path.join(outside, `state-${ccProjectSlug(goneRoot('lnk'))}.json`);
+    const root = goneRoot('lnk2');
+    fs.writeFileSync(path.join(outside, `state-${ccProjectSlug(root)}.json`), JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: root }), 'utf8');
+    setLeanFloor(home, proj, 1000);
+    assert.strictEqual(fs.existsSync(path.join(outside, `state-${ccProjectSlug(root)}.json`)), true, 'a state-shaped file reached THROUGH a link out of the sandbox is not deleted');
+    assert.strictEqual(fs.existsSync(victim), false, 'precondition: the other name was never created');
+  } finally { clean(home, proj, outside); }
+});
+
+test('CWK-157: a state-named LINK is not swept (lstat: a link is never a regular file), even when it points at a state-shaped file for a root that is gone', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = coalDir(home);
+    fs.mkdirSync(dir, { recursive: true });
+    const root = goneRoot('lnk3');
+    const target = path.join(proj, 'elsewhere.json');
+    fs.writeFileSync(target, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: root }), 'utf8');
+    const link = path.join(dir, `state-${ccProjectSlug(root)}.json`);
+    try { fs.symlinkSync(target, link, 'file'); } catch (e) { t.skip(`file symlink creation unavailable here: ${e.code} (the leg runs on Linux and macOS CI)`); return; }
+    setLeanFloor(home, proj, 1000);
+    assert.strictEqual(fs.lstatSync(link).isSymbolicLink(), true, 'the link is still there');
+    assert.strictEqual(fs.existsSync(target), true, 'and so is its target');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-157 dry derivation: deadProjectStateFiles names what WOULD go and deletes nothing', () => {
+  const { home, proj } = sandbox();
+  const live = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk157-live-')));
+  try {
+    const dead = plantState(home, goneRoot('dry'));
+    plantState(home, live);
+    const found = deadProjectStateFiles(home);
+    assert.deepStrictEqual(found.map((c) => c.file), [dead]);
+    assert.strictEqual(fs.existsSync(dead), true, 'read-only: the file is still there');
+    assert.deepStrictEqual(deadProjectStateFiles(path.join(home, 'no-such-home')), [], 'an absent namespace is an empty answer, never a throw');
+  } finally { clean(home, proj, live); }
 });

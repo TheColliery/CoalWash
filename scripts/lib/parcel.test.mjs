@@ -5,6 +5,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { verifyParcelCandidates, compareParcelToAdapter, SAMPLE_MIN_CHARS, SAMPLE_COMPARE_CHARS } from './parcel.mjs';
 
 function sandbox() {
@@ -181,17 +182,66 @@ test('0l compare: matched / onlyInParcel (adapter miss = the drift flag) / onlyI
   assert.ok(!d.onlyInAdapter.includes(R), 'recall entries are expected-absent — excluded, never noise');
 });
 
-test('0l compare: case-fold on win32 semantics + malformed inputs degrade to empty partitions, never throw', () => {
-  const p = 'C:\\fake\\proj\\CLAUDE.md';
-  const d = compareParcelToAdapter(
-    [{ path: process.platform === 'win32' ? p.toUpperCase() : p, bytes: 1, tokensEst: 1 }],
-    [{ path: p, alwaysLoaded: true }],
-  );
-  assert.strictEqual(d.matched.length, 1, 'same physical file matches across case on Windows');
-  assert.deepStrictEqual(compareParcelToAdapter(null, null), { matched: [], onlyInParcel: [], onlyInAdapter: [] });
-  assert.deepStrictEqual(compareParcelToAdapter([{}, null], ['garbage']), { matched: [], onlyInParcel: [], onlyInAdapter: [] });
-});
-
 test('0l constants: the sample floor and compare window are sane, and the floor is below the window', () => {
   assert.ok(SAMPLE_MIN_CHARS > 0 && SAMPLE_COMPARE_CHARS > SAMPLE_MIN_CHARS);
+});
+
+// CWK-156 helper: make `dir` a directory whose own case policy is SENSITIVE and PROVE it by two distinct
+// inodes ({bigint:true} is load-bearing: NTFS file ids exceed 2**53). `fsutil file setCaseSensitiveInfo` is
+// per-directory on Windows 10 1803+ (no admin); ext4 is sensitive by itself; macOS APFS is not, so the
+// proof comes back false there and the caller skips VISIBLY -- capability-probed, never platform-gated.
+function caseSensitiveDirAt(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  spawnSync('fsutil', ['file', 'setCaseSensitiveInfo', dir, 'enable'], { stdio: 'ignore', timeout: 20000 });
+  try {
+    const lo = path.join(dir, 'pc-probe.md');
+    const up = path.join(dir, 'pc-Probe.md');
+    fs.writeFileSync(lo, 'a');
+    fs.writeFileSync(up, 'b'); // on a FOLDING volume this OVERWRITES lo instead of creating a sibling
+    const a = fs.statSync(lo, { bigint: true });
+    const b = fs.statSync(up, { bigint: true });
+    fs.rmSync(lo, { force: true });
+    fs.rmSync(up, { force: true });
+    return a.ino !== b.ino;
+  } catch { return false; }
+}
+
+// CWK-156 (parcel drift canary): MISS DIRECTION = false (loud). The old fold lowercased on `process.platform === 'win32'`.
+test('CWK-156: on a case-SENSITIVE directory the parcel entry Memory.md and the adapter entry memory.md are DIFFERENT files, each reported once (the old win32 fold said matched)', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = path.join(proj, 'cs-parcel');
+    if (!caseSensitiveDirAt(dir)) { t.skip('no case-sensitive directory can be built here (capability proven absent by a distinct-inode check, not assumed)'); return; }
+    const up = path.join(dir, 'Memory.md');
+    const lo = path.join(dir, 'memory.md');
+    fs.writeFileSync(up, 'u'); fs.writeFileSync(lo, 'l');
+    const d = compareParcelToAdapter([{ path: up, bytes: 1, tokensEst: 1 }], [{ path: lo, alwaysLoaded: true }]);
+    assert.deepStrictEqual(d, { matched: [], onlyInParcel: [up], onlyInAdapter: [lo] });
+  } finally { clean(home, proj); }
+});
+
+test('CWK-156 control: on a case-FOLDING volume two spellings of one file MATCH (probed on the volume, skipped visibly where it does not fold)', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const lo = path.join(proj, 'claude-fold.md');
+    fs.writeFileSync(lo, 'x');
+    const up = path.join(proj, 'CLAUDE-FOLD.MD');
+    let folds = false;
+    try { folds = fs.statSync(lo, { bigint: true }).ino === fs.statSync(up, { bigint: true }).ino; } catch { folds = false; }
+    if (!folds) { t.skip('this volume does not fold case (the upper-case spelling does not resolve to the same file)'); return; }
+    const d = compareParcelToAdapter([{ path: up, bytes: 1, tokensEst: 1 }], [{ path: lo, alwaysLoaded: true }]);
+    assert.strictEqual(d.matched.length, 1, 'the same physical file matches across case on a folding volume');
+    assert.deepStrictEqual([d.onlyInParcel, d.onlyInAdapter], [[], []]);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-156 miss leg: two spellings of a path that does not exist at all are DIFFERENT entries (the probe MISS answers false: a canary reports a drift, it never hides one)', () => {
+  const ghost = path.join(fs.realpathSync.native(os.tmpdir()), `cwk156-ghost-${process.pid}`); // never created
+  const d = compareParcelToAdapter([{ path: path.join(ghost, 'Memory.md'), bytes: 1, tokensEst: 1 }], [{ path: path.join(ghost, 'memory.md'), alwaysLoaded: true }]);
+  assert.deepStrictEqual([d.matched.length, d.onlyInParcel.length, d.onlyInAdapter.length], [0, 1, 1]);
+});
+
+test('CWK-156: malformed inputs degrade to empty partitions, never throw', () => {
+  assert.deepStrictEqual(compareParcelToAdapter(null, null), { matched: [], onlyInParcel: [], onlyInAdapter: [] });
+  assert.deepStrictEqual(compareParcelToAdapter([{}, null], ['garbage']), { matched: [], onlyInParcel: [], onlyInAdapter: [] });
 });

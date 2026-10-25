@@ -104,6 +104,181 @@ test('airbag: snapshots a guarded file ONCE per session; the 2nd write to the sa
   } finally { clean(home, proj); }
 });
 
+// grad7 ruling Root C (F3, worse than named): the OLD `snapName` keyed
+// purely on a 32-bit path hash, so `fs.existsSync(snap)` alone was trusted
+// as "already snapshotted this session" — a round-8 worker CONSTRUCTED a
+// real collision (two distinct governed files, same derived name) in 4.4M
+// brute-force tries. Fixed by (1) sha256 instead of djb2 (closes the
+// SPECIFIC brute-force attack) and (2) an identity sidecar verified before
+// ANY existing slot is trusted (closes the general "believe the name"
+// class, independent of hash strength). This test proves (2) directly —
+// simulating a collision by planting a foreign occupant at the real derived
+// slot, which is the state ANY successful hash collision would produce,
+// without needing to actually break sha256 to prove the verification fires.
+test('RED-FIRST/root-C: a foreign occupant at the derived snapshot slot (the state a hash collision produces) is NEVER trusted as this file\'s own baseline', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const trueOrig = GOV + '\nTHE TRUE ORIGINAL — this must survive, byte-exact.';
+    fs.writeFileSync(gov, trueOrig, 'utf8');
+    // Establish the REAL slot production code derives for `gov`, then wipe it
+    // to simulate "before any snapshot exists" — production computes the path,
+    // the test only ever reads it back, never precomputes the hash itself.
+    const realSnap = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.ok(realSnap, 'setup: production derived a slot');
+    assert.strictEqual(fs.readFileSync(realSnap, 'utf8'), trueOrig, 'setup: production wrote the real baseline into that slot');
+    fs.rmSync(realSnap, { force: true });
+    fs.rmSync(`${realSnap}.origpath`, { force: true });
+
+    // Plant a FOREIGN occupant at that exact slot — content that belongs to a
+    // DIFFERENT file, with a sidecar naming that different file's own path
+    // (the collision shape: this slot's name matches `gov`'s derived name,
+    // but the content and recorded identity are someone else's).
+    //
+    // CodeQL #41 (js/file-system-race): this used to assert
+    // `fs.existsSync(realSnap) === false` and THEN write — a check-then-use
+    // pair on one path. The exclusive create below states the same setup
+    // precondition ("the slot is genuinely empty before we plant") ATOMICALLY:
+    // `flag: 'wx'` refuses with EEXIST if anything occupies the slot, so the
+    // test fails AT THE PLANT instead of passing on a wrong premise. The same
+    // flag goes on the sidecar, whose slot the rmSync above also emptied.
+    const victimPath = path.join(proj, 'AGENTS.md');
+    fs.writeFileSync(realSnap, 'FOREIGN CONTENT — belongs to a different file entirely', { encoding: 'utf8', flag: 'wx' });
+    fs.writeFileSync(`${realSnap}.origpath`, victimPath, { encoding: 'utf8', flag: 'wx' });
+
+    // The real write we care about: gov's snapshot is requested again in the
+    // SAME session. Pre-fix code would see `fs.existsSync(snap)` true and
+    // return the foreign occupant's path as if it were gov's own baseline —
+    // the seatbelt would then diff gov's real edits against SOMEONE ELSE's
+    // original, comparing apples to oranges (or worse, silently "matching").
+    const snap2 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.ok(snap2, 'a fresh snapshot must still be taken for gov');
+    assert.notStrictEqual(snap2, realSnap, 'must NOT reuse the foreign-occupied slot — a disambiguated new slot is required');
+    assert.strictEqual(fs.readFileSync(snap2, 'utf8'), trueOrig, 'the NEW snapshot must hold GOV\'s own true original, never the foreign content');
+    // grad9 F1: the sidecar now carries a SECOND line (the content hash) —
+    // check the path line specifically, not the whole file verbatim.
+    assert.strictEqual(fs.readFileSync(`${snap2}.origpath`, 'utf8').split('\n')[0], gov, 'the new slot\'s sidecar correctly identifies gov as its owner');
+    // The foreign occupant is left completely untouched — never overwritten,
+    // never treated as reclaimable.
+    assert.strictEqual(fs.readFileSync(realSnap, 'utf8'), 'FOREIGN CONTENT — belongs to a different file entirely', 'the foreign occupant must survive untouched');
+  } finally { clean(home, proj); }
+});
+
+test('RED-FIRST/root-C control: a REAL same-session re-write of the SAME file still hits the fast path (no spurious disambiguation)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, GOV, 'utf8');
+    const snap1 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    fs.writeFileSync(gov, GOV + '\nedited', 'utf8'); // a real subsequent edit
+    const snap2 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.strictEqual(snap2, snap1, 'the identity-verified fast path still returns the SAME slot for the SAME file — no unnecessary disambiguation');
+    assert.strictEqual(fs.readFileSync(snap1, 'utf8'), GOV, 'baseline is still the untouched first-write orig');
+  } finally { clean(home, proj); }
+});
+
+// grad9 F1: round 8 named Root C as "no content-verify-before-trust"; the
+// sha256 upgrade closed the NAME-collision route but verifyOrigPath still
+// compared a PATH STRING only, never the blob's own bytes -- so a slot
+// tampered IN PLACE (content overwritten, sidecar path left matching) was
+// silently trusted as the file's own baseline. Coordinator's own fixture
+// reproduced this live: legit snapshot -> blob overwritten -> re-entry ->
+// "slot reused (no re-verify)? true". RED-FIRST: swap writeguard.mjs to HEAD
+// (pre-F1), this must fail (the tampered slot gets reused).
+test('RED-FIRST/F1: a blob tampered in place (sidecar path still matches, content does not) is NEVER trusted as this file\'s own baseline', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const trueOrig = GOV + '\nTHE TRUE ORIGINAL — this must survive, byte-exact.';
+    fs.writeFileSync(gov, trueOrig, 'utf8');
+    const snap1 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.ok(snap1 && fs.existsSync(snap1));
+    assert.strictEqual(fs.readFileSync(snap1, 'utf8'), trueOrig, 'setup: real baseline recorded');
+
+    // TAMPER: overwrite the blob's bytes directly, in place — exactly the
+    // coordinator's own reproduction. The sidecar (path + the ORIGINAL hash)
+    // is left untouched, so a path-only check would still say "match".
+    fs.writeFileSync(snap1, 'ATTACKER-CONTROLLED CONTENT', 'utf8');
+
+    // Same file, same session, requested again. Pre-fix: path match alone
+    // trusted the slot and reused the tampered blob as gov's baseline.
+    const snap2 = snapshotOnFirstWrite(proj, 'sess-A', gov, { home });
+    assert.ok(snap2, 'a fresh snapshot must still be taken');
+    assert.notStrictEqual(snap2, snap1, 'the tampered slot must NOT be reused — disambiguated to a new slot');
+    assert.strictEqual(fs.readFileSync(snap2, 'utf8'), trueOrig, 'the NEW snapshot must hold gov\'s own current true state, never the tampered blob');
+    assert.strictEqual(fs.readFileSync(snap1, 'utf8'), 'ATTACKER-CONTROLLED CONTENT', 'the tampered blob survives untouched, never silently "repaired"');
+  } finally { clean(home, proj); }
+});
+
+// grad10 F1 [CRITICAL]: the write-path digest (above) gates SLOT REUSE.
+// readWriteguardSnapshot — THE RESTORE DOOR, the one a human actually
+// presses — searched every session dir by NAME ONLY and returned the
+// NEWEST by mtime, no identity check at all. Coordinator's own
+// reproduction, mirrored exactly: plant a rogue blob under the SAME
+// canonical name in a DIFFERENT (unswept) session dir, with a newer mtime —
+// no access to the live session's own slot, none to the governed file
+// itself. The rogue even COPIES the legit sidecar verbatim (the lazy
+// attack: reuses the true content's hash without re-signing for its own
+// bytes) — exactly the shape `verifyBlobIntegrity` now catches.
+test('RED-FIRST/F1-restore: a rogue blob planted under the SAME snapName in a DIFFERENT session dir, with a newer mtime, does NOT win the restore', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, '.claude', 'agent-memory', 'coder', 'MEMORY.md');
+    const trueOrig = '# coder MEMORY\n\nload-bearing craft nobody can regenerate\n';
+    fs.mkdirSync(path.dirname(gov), { recursive: true });
+    fs.writeFileSync(gov, trueOrig, 'utf8');
+
+    // CLEAN CONTROL FIRST — nothing believed until this passes, same
+    // discipline the coordinator's own fixture used.
+    const snap = snapshotOnFirstWrite(proj, 'sess-live', gov, { home });
+    fs.writeFileSync(gov, '# coder MEMORY\n\nrewritten\n', 'utf8');
+    const clean = readWriteguardSnapshot(proj, path.basename(snap), { home });
+    assert.strictEqual(clean && clean.content.toString('utf8'), trueOrig, 'setup: a clean restore returns the true original');
+
+    // The legit snapshot is left ENTIRELY ALONE from here.
+    const legitBytes = fs.readFileSync(snap, 'utf8');
+
+    // Plant a rogue blob under the SAME name in a DIFFERENT session dir,
+    // copying the legit sidecar verbatim (no re-signing for the rogue bytes).
+    const slotName = path.basename(snap);
+    const rogueDir = path.join(proj, '.claude', 'coalwash', 'writeguard', 'sess-other');
+    fs.mkdirSync(rogueDir, { recursive: true });
+    const rogue = path.join(rogueDir, slotName);
+    fs.writeFileSync(rogue, '# coder MEMORY\n\n(rogue content)\n', 'utf8');
+    for (const f of fs.readdirSync(path.dirname(snap))) {
+      if (f.startsWith(slotName) && f !== slotName) fs.copyFileSync(path.join(path.dirname(snap), f), path.join(rogueDir, f));
+    }
+    const future = Date.now() / 1000 + 60;
+    fs.utimesSync(rogue, future, future); // newer mtime — wins the OLD mtime-only sort
+
+    const got = readWriteguardSnapshot(proj, path.basename(snap), { home });
+    assert.strictEqual(fs.readFileSync(snap, 'utf8'), legitBytes, 'the legit snapshot must survive untouched on disk');
+    assert.notStrictEqual(got && got.content.toString('utf8'), '# coder MEMORY\n\n(rogue content)\n', 'the rogue must NEVER be served');
+    assert.strictEqual(got && got.content.toString('utf8'), trueOrig, 'the TRUE original must still be served — the newest VERIFIED candidate, not the newest candidate outright');
+  } finally { clean(home, proj); }
+});
+
+test('RED-FIRST/F1-restore control: a rogue blob with NO copied sidecar at all is refused the same way (unverifiable, not merely mismatched)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const trueOrig = GOV + '\nTHE TRUE ORIGINAL for the no-sidecar rogue control.';
+    fs.writeFileSync(gov, trueOrig, 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess-live', gov, { home });
+
+    const slotName = path.basename(snap);
+    const rogueDir = path.join(proj, '.claude', 'coalwash', 'writeguard', 'sess-other');
+    fs.mkdirSync(rogueDir, { recursive: true });
+    const rogue = path.join(rogueDir, slotName);
+    fs.writeFileSync(rogue, 'bare rogue, no sidecar at all', 'utf8');
+    const future = Date.now() / 1000 + 60;
+    fs.utimesSync(rogue, future, future);
+
+    const got = readWriteguardSnapshot(proj, path.basename(snap), { home });
+    assert.strictEqual(got && got.content.toString('utf8'), trueOrig, 'the true original still wins — the sidecar-less rogue never verifies');
+  } finally { clean(home, proj); }
+});
+
 test('airbag: a source-code write / a not-yet-existing file / a non-guarded path all snapshot NOTHING', () => {
   const { home, proj } = sandbox();
   try {
@@ -201,11 +376,14 @@ test('seatbelt: an OVERSIZE guarded file skips the diff — snapshot stands, ove
 
 test('perf (structural): a non-guarded write triggers ZERO snapshot copies; a guarded first-write triggers exactly ONE — no discovery walk on either path', () => {
   const { home, proj } = sandbox();
-  const realCopy = fs.copyFileSync;
+  const realRename = fs.renameSync;
   let copies = 0;
   try {
-    fs.copyFileSync = (...a) => { copies++; return realCopy(...a); };
-    const src = path.join(proj, 'index.js'); realCopy && fs.writeFileSync(src, 'code', 'utf8');
+    // CWK-137: the snapshot is published by a temp + rename (replaceFile), so a
+    // "copy" is one rename onto a snapshot slot; the identity sidecar's own rename is
+    // not a copy of the file and is not counted.
+    fs.renameSync = (from, to, ...r) => { if (!String(to).endsWith('.origpath')) copies++; return realRename(from, to, ...r); };
+    const src = path.join(proj, 'index.js'); fs.writeFileSync(src, 'code', 'utf8');
     copies = 0;
     snapshotOnFirstWrite(proj, 's', src, { home });
     assert.strictEqual(copies, 0, 'source code: zero copy work (skips at the cheap prefilter)');
@@ -215,7 +393,7 @@ test('perf (structural): a non-guarded write triggers ZERO snapshot copies; a gu
     assert.strictEqual(copies, 1, 'guarded first write: exactly one ms-copy');
     snapshotOnFirstWrite(proj, 's', gov, { home });
     assert.strictEqual(copies, 1, 'guarded second write: no further copy (already snapshotted)');
-  } finally { fs.copyFileSync = realCopy; clean(home, proj); }
+  } finally { fs.renameSync = realRename; clean(home, proj); }
 });
 
 test('read-only-except-sandbox: the seatbelt writes NOTHING (the target file + tree are byte/mtime identical after a check); only the airbag writes, and only under .claude/coalwash', () => {
@@ -332,4 +510,22 @@ test('G3-3 twin: readWriteguardSnapshot returns the ORIGINAL BYTES — a non-UTF
     assert.deepStrictEqual(Buffer.from(got.content), bytes, 'the undo net hands back the bytes it caught — "byte-exact" must be true, not a claim');
     assert.strictEqual(got.bytes, bytes.length, 'the reported size is the real byte count');
   } finally { clean(home, proj); }
+});
+
+// CWK-137 F-9: the writeguard root sits inside the repo, so a cloned repo can commit an ENTRY of it (a session dir) as a
+// link out of the project. The sweep removes prior sessions with a recursive rm; the entry must go as a LINK (the target
+// keeps its files), never be followed. The entry being gone proves the sweep visited it, so "no damage" is not vacuous.
+test('sweep: a committed session-dir LINK is removed as a link -- the link target keeps its files (CWK-137 F-9)', (t) => {
+  const { home, proj } = sandbox();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwwg-swlink-')));
+  try {
+    const gov = path.join(proj, 'MEMORY.md'); fs.writeFileSync(gov, GOV, 'utf8');
+    snapshotOnFirstWrite(proj, 'current-session', gov, { home });
+    fs.writeFileSync(path.join(outside, 'keep.txt'), 'KEEP');
+    try { fs.symlinkSync(outside, path.join(wgRoot(proj), 'old-session'), process.platform === 'win32' ? 'junction' : 'dir'); } catch { t.skip('this volume cannot make a directory link'); return; }
+    sweepWriteguard(proj, 'current-session', { home });
+    assert.strictEqual(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'KEEP', 'the link target keeps its file: the sweep did not follow the link');
+    assert.throws(() => fs.lstatSync(path.join(wgRoot(proj), 'old-session')), { code: 'ENOENT' }, 'the sweep did visit the link entry and removed the link itself');
+    assert.ok(fs.existsSync(path.join(wgRoot(proj), 'current-session')), 'the current session survives');
+  } finally { clean(home, proj, outside); }
 });

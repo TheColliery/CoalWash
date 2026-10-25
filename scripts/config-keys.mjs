@@ -94,10 +94,16 @@ export const NOT_CONFIG = Object.freeze({
     "receipt.mjs's exported one-line receipt builder. ask.mjs's forceAuto names it inside the "
     + 'directive text so the agent knows which function produces the line it must push, which is '
     + 'why L5 reaches it: it is a function name deliberately printed in user-facing prose.',
-  projectConfigPath:
-    'a function in config-load.mjs that RESOLVES the per-project config path. It is named in '
-    + "references/platform-cc.md's config-location prose, which is precisely why L3's "
-    + 'config-context locator reaches it: the sentence is about where the config lives.',
+  projectConfigCandidates:
+    'a function in config-load.mjs that BUILDS the full per-project candidate list (canonical + '
+    + "both legacy shapes). Named in references/platform-cc.md's config-location prose (UMB-133), "
+    + 'which is precisely why L3\'s config-context locator reaches it.',
+  projectConfigResolution:
+    'a function in config-load.mjs that reports WHICH candidate the walk actually read from, and '
+    + 'whether it was a legacy one. Named in the same config-location prose for the same reason.',
+  discoverIgnoredConfigs:
+    'a function in config-load.mjs that reports a .coalwash.json planted somewhere the walk will '
+    + 'never read. Named in the same config-location prose for the same reason.',
 });
 
 /**
@@ -156,12 +162,24 @@ export function dottedKeys(text, containers) {
   return out;
 }
 
-/** L3: a config-context line -- names .coalwash.json, or sits under a "Configure" heading. */
+/**
+ * L3: a config-context line -- names .coalwash.json, or sits under a "Configure" heading.
+ * The section ends at the next heading of ANY ATX level (CWK-120 row 10: `#{2,4}` let an H1/H5/H6
+ * leave the section open to the end of the file), but a `# comment` inside a fenced code block is
+ * not a heading, so the fence state is tracked (CommonMark: the closer is the same character, at
+ * least as long as the opener). Matching all six levels WITHOUT that would end the section at the
+ * first shell comment in a Configure snippet and silently stop checking every claim after it.
+ */
 export function configProseKeys(text) {
   const out = new Set();
   let inCfg = false;
+  let fence = null; // { ch, len } while inside a fenced block
   for (const line of text.split(/\r?\n/)) {
-    if (/^#{2,4}\s/.test(line)) inCfg = /configure/i.test(line);
+    const f = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (f) {
+      if (!fence) fence = { ch: f[1][0], len: f[1].length };
+      else if (f[1][0] === fence.ch && f[1].length >= fence.len && f[2].trim() === '') fence = null;
+    } else if (!fence && /^ {0,3}#{1,6}(\s|$)/.test(line)) inCfg = /configure/i.test(line);
     if (!inCfg && !line.includes('.coalwash.json')) continue;
     for (const m of line.matchAll(new RegExp(BACKTICKED, 'g'))) addIdent(out, m[1]);
   }

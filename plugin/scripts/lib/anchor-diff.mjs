@@ -35,7 +35,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { inventory } from './fidelity-gate.mjs';
-import { txDirFor } from './apply.mjs';
+import { readRepoFileBounded, volumeCaseFolds, MAX_DOC_BYTES } from './config-load.mjs';
+import { ownSandboxDir } from './repo-fs.mjs';
 import { physicalOrNull, containedIn } from './class-b.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin, isBareId } from './tailings.mjs';
 
@@ -50,7 +51,18 @@ function samePath(a, b) {
   const pa = physicalOrNull(a) || (typeof a === 'string' && a ? path.resolve(a) : null);
   const pb = physicalOrNull(b) || (typeof b === 'string' && b ? path.resolve(b) : null);
   if (!pa || !pb) return false;
-  return process.platform === 'win32' ? pa.toLowerCase() === pb.toLowerCase() : pa === pb;
+  if (pa === pb) return true;
+  // CWK-156: a case-variant pair is the SAME file only where the VOLUME folds case
+  // (node/runtime.md section 4) -- the old `process.platform === 'win32'` fold was wrong in both
+  // directions (APFS folds and is not win32; an fsutil-enabled NTFS directory does not fold).
+  // The probe runs only on a lowercase collision, so an ordinary compare costs no stat.
+  // MISS DIRECTION = false (a probe that cannot decide says "different"): a match ATTACHES a
+  // snapshot's tokens to this file as restore candidates and a bin item's text to its
+  // approved-drop list, so a wrong match shows one file another file's content, against rail (c)
+  // above (no verified snapshot => null, never invented); a wrong non-match only yields null.
+  // Both spellings are usually canonical already (physicalOrNull), so this branch is reached
+  // for an unresolvable recorded spelling or a case-sensitive directory.
+  return pa.toLowerCase() === pb.toLowerCase() && (volumeCaseFolds(pa, false) || volumeCaseFolds(pb, false));
 }
 
 // The pure computation — no filesystem. Which of anchorText's structured
@@ -91,7 +103,9 @@ function oldestAnchor(txDir, physTarget) {
     const dir = path.join(txDir, d);
     if (!fs.existsSync(path.join(dir, SNAP_MARKER))) continue;
     let manifest;
-    try { manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch { continue; }
+    // E2-4: contained to txDir ITSELF -- a snap-<n> a cloned repo planted as a link (or a manifest that is one) resolves
+    // outside it and is refused, never read.
+    try { manifest = JSON.parse(readRepoFileBounded(path.join(dir, 'manifest.json'), txDir, MAX_DOC_BYTES)); } catch { continue; }
     if (!Array.isArray(manifest)) continue;
     const hit = manifest.find((m) => m && samePath(m.original, physTarget));
     if (!hit) continue;
@@ -138,13 +152,14 @@ export function anchorDiff(filePath, { projectRoot, home = os.homedir() } = {}) 
     const physRoot = physicalOrNull(projectRoot);
     const phys = physicalOrNull(filePath);
     if (!physRoot || !phys || !containedIn(phys, [physRoot])) return null; // fail-closed, out of tree
-    const anchor = oldestAnchor(txDirFor(projectRoot), phys);
+    const txDir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); // CWK-137: throws on a planted link -> the catch below -> null
+    const anchor = oldestAnchor(txDir, phys);
     if (!anchor) return null; // no ground truth on disk for this file — nothing to compare
-    let anchorText, currentText;
-    try {
-      anchorText = fs.readFileSync(anchor.snapFile, 'utf8');
-      currentText = fs.readFileSync(phys, 'utf8');
-    } catch { return null; } // unreadable — fail-silent, never guess
+    // CWK-137: both reads bounded and kind-gated; a refusal is `unreadable` (null). E2-4: the snapshot copy is contained to
+    // txDir ITSELF; `phys` keeps root null: it is the realpath containedIn checked against the project above.
+    const anchorText = readRepoFileBounded(anchor.snapFile, txDir, MAX_DOC_BYTES);
+    const currentText = readRepoFileBounded(phys, null, MAX_DOC_BYTES);
+    if (anchorText === null || currentText === null) return null; // unreadable — fail-silent, never guess
     const approvedTexts = approvedSince(projectRoot, phys, anchor.at);
     const { candidates, counts } = computeCandidates({ anchorText, currentText, approvedTexts });
     return { file: phys, snapshotPath: anchor.snapDir, snapshotAt: anchor.at, approvedCount: approvedTexts.length, candidates, counts };

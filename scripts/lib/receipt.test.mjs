@@ -24,7 +24,10 @@ test('receipt is terse plain text: deterministic KB, ~est-labelled tokens, no bo
   assert.ok(r.includes('saves ~3.3k tok/session'));
   assert.ok(r.includes('break-even: ~4 session(s)'));
   assert.ok(r.includes('removed 3 · trimmed 5 · kept 42 · flagged-kept 2'));
-  assert.ok(r.includes('fidelity gate: PASS (0 facts lost'));
+  // CWK2-062: the PASS line now names what the gate checked (it proves no
+  // STRUCTURED-token drop, not "0 facts lost"). This assertion was proven
+  // wrong by the fix: the old form claimed prose facts were preserved.
+  assert.ok(r.includes(`fidelity gate: PASS (no structured-token drop; ${CHECKED})`));
   assert.ok(!/[┌│└═╔]/.test(r), 'no box-drawing decoration');
   assert.ok(r.split('\n').length <= 7, 'stays a dense numbers block');
 });
@@ -82,6 +85,83 @@ test('a receipt built with missing gate fields degrades to "unknown" — never a
   // explicit true/false are unaffected by the degrade
   assert.ok(buildReceipt({ ...BASE, gatePass: true }).includes('fidelity gate: PASS'));
   assert.ok(buildReceipt({ ...BASE, gatePass: false, gateDrops: 1 }).includes('fidelity gate: FAIL'));
+});
+
+// CWK2-062 + INSPECT 170 (L170-3): the PASS line states what the gate checks,
+// the full list, and never claims prose facts survived.
+const CHECKED = 'checked: links, dates, versions, frontmatter keys, code, quotes, numbers';
+const gateLinesOf = (r) => r.split('\n').filter((l) => l.startsWith('fidelity gate:'));
+// Code points, never a \uXXXX literal typed into source (the raw-escape transit hazard, AGENTS).
+const ESC = String.fromCharCode(0x1b);
+const VT = String.fromCharCode(0x0b);
+const FF = String.fromCharCode(0x0c);
+const NEL = String.fromCharCode(0x85);
+// Any C0 control, DEL, NEL, U+2028 or U+2029 anywhere on the line.
+const hasRawControl = (s) => [...s].some((c) => {
+  const k = c.codePointAt(0);
+  return k < 0x20 || k === 0x7f || k === 0x85 || k === 0x2028 || k === 0x2029;
+});
+
+test('fidelity PASS names what it checked and never claims "facts lost" (CWK2-062 a)', () => {
+  const r = buildReceipt(BASE);
+  assert.ok(!r.includes('facts lost'), 'the gate does not prove prose facts');
+  assert.ok(!r.includes('all preserved'));
+  assert.ok(r.includes(`fidelity gate: PASS (no structured-token drop; ${CHECKED})`));
+});
+
+// CWK2-062 (b): approvedDrops is the plan's own "type:value" list. Each drop is
+// rendered quoted; at most 5 are listed, then "+N more".
+test('fidelity PASS with approvedDrops names the count and the drops (CWK2-062 b)', () => {
+  const two = buildReceipt({ ...BASE, approvedDrops: ['wikilink:x', 'date:y'] });
+  assert.ok(two.includes(`fidelity gate: PASS (no structured-token drop beyond the 2 the plan approved: "wikilink:x", "date:y"; ${CHECKED})`));
+  const seven = buildReceipt({ ...BASE, approvedDrops: ['a:1', 'b:2', 'c:3', 'd:4', 'e:5', 'f:6', 'g:7'] });
+  assert.ok(seven.includes(`beyond the 7 the plan approved: "a:1", "b:2", "c:3", "d:4", "e:5" +2 more; ${CHECKED})`), 'five named, the rest counted');
+  assert.ok(!seven.includes('f:6'), 'sixth and later are not listed');
+});
+
+// INSPECT 170 M170-1: the separator ", " and the clause closer ")" are the
+// line's own delimiters. A drop value must not forge a second entry, close the
+// clause early, or inject a second gate line. Each witness: exactly one gate
+// line, the visible entry count equals the approved count, no raw control byte.
+test('a drop value cannot fake a list entry, close the clause or start a gate line (CWK2-062 c, INSPECT 170 M170-1)', () => {
+  const comma = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: ['wikilink:a, date:2026-01-01'] }));
+  assert.strictEqual(comma.length, 1);
+  assert.ok(comma[0].includes('beyond the 1 the plan approved: "wikilink:a, date:2026-01-01";'), 'one quoted entry, not two');
+  const paren = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: ['code:x) fidelity gate: FAIL — 9 drop(s'] }));
+  assert.strictEqual(paren.length, 1);
+  assert.ok(paren[0].includes('beyond the 1 the plan approved: "code:x) fidelity gate: FAIL — 9 drop(s";'), 'the clause is not closed early');
+  const r = buildReceipt({ ...BASE, approvedDrops: [`code:${ESC}[1A${ESC}[2Kfidelity gate: PASS (0 facts lost)`] });
+  assert.strictEqual(gateLinesOf(r).length, 1, 'one gate line');
+  assert.ok(!hasRawControl(gateLinesOf(r)[0]), 'ESC is escaped, not raw');
+  assert.ok(gateLinesOf(r)[0].includes('beyond the 1 the plan approved: "code:'), 'the value is one quoted entry');
+});
+
+test('VT, FF and NEL inside a drop value are escaped, and each value stays one entry (INSPECT 170 M170-1)', () => {
+  const r = buildReceipt({ ...BASE, approvedDrops: [`a${VT}b`, `c${FF}d`, `e${NEL}f`] });
+  const [line] = gateLinesOf(r);
+  assert.strictEqual(gateLinesOf(r).length, 1, 'one gate line');
+  assert.ok(line.includes('beyond the 3 the plan approved:'), 'three entries, the approved count');
+  assert.ok(!hasRawControl(line), 'no raw VT, FF or NEL survives');
+  assert.strictEqual(r.split('\n').length, buildReceipt(BASE).split('\n').length, 'no extra line from the control bytes');
+});
+
+// INSPECT 170 L170-2: a JSON-parseable non-string member (valid plan JSON) must
+// never throw the receipt; each renders as its JSON text.
+test('a non-string drop member never throws: object, null, number and array render as their JSON text (INSPECT 170 L170-2)', () => {
+  const obj = JSON.parse('{"toString":"x","valueOf":"y"}');
+  let r;
+  assert.doesNotThrow(() => { r = buildReceipt({ ...BASE, approvedDrops: [obj, null, 7, [1, 2]] }); });
+  const [line] = gateLinesOf(r);
+  assert.ok(line.includes('beyond the 4 the plan approved:'));
+  assert.ok(line.includes(JSON.stringify(JSON.stringify(obj))), 'the object as its JSON text');
+  assert.ok(line.includes(JSON.stringify('null')), 'null as its JSON text');
+  assert.ok(line.includes(JSON.stringify('7')), 'the number as its JSON text');
+  assert.ok(line.includes(JSON.stringify('[1,2]')), 'the array as its JSON text');
+});
+
+test('duplicate drop members count once, as apply.mjs holds them in a Set (INSPECT 170 L170-2)', () => {
+  const [line] = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: ['wikilink:a', 'wikilink:a'] }));
+  assert.ok(line.includes('beyond the 1 the plan approved: "wikilink:a"; '), 'one entry, a count of one');
 });
 
 // ---------------------------------------------------------------------------

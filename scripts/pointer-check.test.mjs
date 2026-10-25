@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'node:path';
-import { pointerCandidates, checkPointers, looksPathShaped, deriveIgnoredRoots, PENDING_POINTERS } from './pointer-check.mjs';
+import { pointerCandidates, checkPointers, looksPathShaped, deriveIgnoredRoots, PENDING_POINTERS, classifyCheckIgnoreResult } from './pointer-check.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { gitEnv } from './lib/git-env.mjs';
+import { removeTree } from './lib/test-plan.mjs';
 
 // FIXTURES ARE INPUT, NOT CLAIMS. Every backticked path below is DATA this test feeds
 // the gate, never a statement this repo makes about its own tree. They keep their
@@ -303,41 +305,27 @@ test('SHAPE-079 residue: an extensionless real path is DISCOVERY-excluded, never
 // that expects 2 ignored roots read 0. A test that can reconfigure the
 // developer's own repo is not a hermetic test, whatever it asserts.
 // Scrubbed rather than overridden: an inherited value we do not know about is
-// exactly the class that produced this, so the list is DELETED, never re-set.
-// A DENY-LIST, against this room's own allowlist-over-denylist rule, and the
-// departure is stated rather than silent: git needs a real environment to run at
-// all on Windows (PATH, SystemRoot, USERPROFILE, TEMP, ...), so an allowlist here
-// would enumerate the OS rather than git and would break the moment a platform
-// wanted one more. So: scrub every git variable that can REDIRECT which
-// repository, object store, ref namespace or config a call resolves — the whole
-// set with that power — and NAME THE RESIDUE instead of implying completeness.
-// RESIDUE: a git environment variable outside this list that redirects
-// resolution. The list covers everything git exports to a hook (GIT_DIR,
-// GIT_INDEX_FILE, GIT_PREFIX) plus every documented redirect of the gitdir,
-// worktree, config, object store, ref namespace and discovery walk; a variable
-// that only changes formatting, paging or authorship cannot move which repo is
-// read and is deliberately left alone.
-const GIT_ENV_KEYS = [
-  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX',
-  'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
-  'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
-  'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
-];
-function hermeticGitEnv() {
-  const env = { ...process.env };
-  for (const k of GIT_ENV_KEYS) delete env[k];
-  return env;
-}
+// exactly the class that produced this, so the family is DELETED, never re-set.
+// CWK-133 CLOSED THE DENY-LIST'S OWN RESIDUE: this file used to carry a hand-listed set of
+// fourteen names and NAMED the residue ("a git variable outside this list that redirects
+// resolution"). A list is exactly what rots, so the scrub is now scripts/lib/git-env.mjs's
+// `gitEnv`: every GIT_-prefixed key out, whatever git adds under that prefix next, and the
+// fixture's own parent as the ceiling. The variables it now also drops (authorship,
+// paging, formatting) cannot matter to the two calls below, which only `init` and
+// `check-ignore`; none of them commits. Each call takes gitEnv() itself (08d: the git-spawn census reads no wrapper).
 
 function gitFixture(gitignoreText) {
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-079-')));
-  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8', env: hermeticGitEnv() });
+  const r = spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: dir, encoding: 'utf8', env: gitEnv(path.dirname(dir)), timeout: 30000 });
   if (r.error || r.status !== 0) {
     // INSPECT F3 — the dir exists BEFORE git is probed, and on this path the caller gets
     // null, so its own finally{} holds no handle to remove. Leaving it re-opens board
     // #107's litter class on the one path nobody here runs (git is present on this box).
     // Cleaned HERE because this is the only scope that still has the name.
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
+    // CWK2-062 B (L167-1): a git init killed by its 30 s clock is a FAILURE, not an absent
+    // git. Throw before the null/skip path so the caller cannot t.skip it as 'git unavailable'.
+    if (r.error?.code === 'ETIMEDOUT') throw new Error('git init hit its spawn clock (ETIMEDOUT) in the fixture; the fixture dir was removed');
     return null; // git unavailable — caller SKIPs visibly
   }
   fs.writeFileSync(path.join(dir, '.gitignore'), gitignoreText);
@@ -347,8 +335,10 @@ const runner = (dir) => (names) => {
   // Same scrub as gitFixture above, same reason: an inherited GIT_DIR makes this
   // answer for the caller's repository rather than the fixture's.
   const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-    { cwd: dir, encoding: 'utf8', env: hermeticGitEnv(), input: names.map((n) => n + "/").join('\n') + '\n' });
-  return ci.error ? '' : ci.stdout;
+    { cwd: dir, encoding: 'utf8', env: gitEnv(path.dirname(dir)), timeout: 30000, input: names.map((n) => n + "/").join('\n') + '\n' });
+  // A spawn error (a timeout included) is a FAILURE of the fixture, never an empty ignore set: '' would read as "nothing ignored".
+  if (ci.error) throw new Error(`git check-ignore did not answer: ${ci.error.code}`);
+  return ci.stdout;
 };
 
 test('DERIVE-079: the ignore set is EXISTENCE-INDEPENDENT — an absent gitignored root is still found', (t) => {
@@ -363,7 +353,7 @@ test('DERIVE-079: the ignore set is EXISTENCE-INDEPENDENT — an absent gitignor
     });
     assert.deepStrictEqual([...ign.ignored], ['throwaway-build'],
       'a disk-derived probe reads ZERO here, which is the defect CWK-079 removes');
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTree(dir); }
 });
 
 test('DERIVE-079: a CRLF .gitignore\'s blank line must not ignore EVERYTHING (the exemplar\'s shape does)', (t) => {
@@ -377,7 +367,7 @@ test('DERIVE-079: a CRLF .gitignore\'s blank line must not ignore EVERYTHING (th
     assert.ok(ign.ignored.has('docs'), 'the REAL pattern must still match');
     assert.ok(!ign.ignored.has('zzz'), 'an unrelated root must NOT be ignored by a blank CRLF line');
     assert.strictEqual(ign.artefacts.length, 1, "the dropped row is REPORTED, never silently swallowed");
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTree(dir); }
 });
 
 test('DERIVE-079: agent homes are held out BEFORE the probe, and counted separately', () => {
@@ -432,5 +422,85 @@ test('NON-LOCAL-079: an extensionless citation under a gitignored root is checke
       'plant A was never exempt from the CHECK — only from discovering its own root');
     assert.ok(both.some((m) => m.includes('throwaway-build/readme.md') && /gitignored/.test(m)),
       'plant B, the citation that armed the root, must FAIL too');
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTree(dir); }
+});
+
+// ---------------------------------------------------------------- CHECK-IGNORE CLASSIFIER (CWK2-060)
+// A pipe error is keyed on error.code (EPIPE on POSIX, EOF on Windows), never on error.message.
+// The pair that matters: a pipe code beside git's own integer exit other than 0 or 1 is git answering,
+// so the exit is the verdict. Every other pairing stays "failed to spawn" (fail-closed).
+const spawnError = (code, message) => Object.assign(new Error(message), { code });
+const PIPE_MESSAGE = 'write EPIPE';
+
+test('CWK2-060: a pipe error beside git exit 128 names the EXIT, not a spawn failure (EPIPE)', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('EPIPE', PIPE_MESSAGE), status: 128,
+    stderr: 'fatal: this operation must be run in a work tree\n', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'exited 128 — fatal: this operation must be run in a work tree' });
+});
+
+test('CWK2-060: a pipe error beside git exit 128 names the EXIT, not a spawn failure (EOF, Windows)', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('EOF', 'spawnSync git EOF'), status: 128,
+    stderr: 'fatal: this operation must be run in a work tree\n', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'exited 128 — fatal: this operation must be run in a work tree' });
+});
+
+test('CWK2-060: a pipe error with no stderr names the status with no dangling separator', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('EOF', 'spawnSync git EOF'), status: 128, stderr: '', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'exited 128' });
+});
+
+test('CWK2-060 FAIL-CLOSED: a pipe error beside exit 0 or 1 stays "failed to spawn" (git may not have read all its input)', () => {
+  for (const status of [0, 1]) {
+    const r = classifyCheckIgnoreResult({ error: spawnError('EPIPE', PIPE_MESSAGE), status, stderr: '', stdout: '' });
+    assert.deepStrictEqual(r, { ok: false, failure: `failed to spawn: ${PIPE_MESSAGE}` }, `status ${status}`);
+  }
+});
+
+test('CWK2-060 FAIL-CLOSED: a pipe error beside no integer status stays "failed to spawn"', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('EPIPE', PIPE_MESSAGE), status: null, stderr: '', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: `failed to spawn: ${PIPE_MESSAGE}` });
+});
+
+test('CWK2-060 FAIL-CLOSED: a non-pipe spawn error (ENOENT) beside exit 128 stays "failed to spawn"', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('ENOENT', 'spawnSync git ENOENT'), status: 128,
+    stderr: 'fatal: stale', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'failed to spawn: spawnSync git ENOENT' });
+});
+
+test('CWK2-061: the classifier keys on error.code, never error.message (a non-pipe code with a pipe message stays fail-closed)', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('ENOENT', 'write EPIPE'), status: 128, stderr: 'fatal: x', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'failed to spawn: write EPIPE' });
+});
+
+test('CWK2-060: an exit 128 with no spawn error names the exit and its first stderr line (unchanged)', () => {
+  const r = classifyCheckIgnoreResult({ status: 128, stderr: 'fatal: boom\nmore\n', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'exited 128 — fatal: boom' });
+});
+
+test('CWK2-060: exit 0 and exit 1 are answers, and the stdout comes back (unchanged)', () => {
+  assert.deepStrictEqual(classifyCheckIgnoreResult({ status: 0, stdout: 'x\n', stderr: '' }), { ok: true, stdout: 'x\n' });
+  assert.deepStrictEqual(classifyCheckIgnoreResult({ status: 1, stdout: '', stderr: '' }), { ok: true, stdout: '' });
+});
+
+test('CWK2-060 REAL GIT: a core.bare repository fed input past the pipe buffer names git\'s exit, with no fake error', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-check-ignore-bare-'));
+  t.after(() => removeTree(dir));
+  const env = gitEnv(path.dirname(dir));
+  const init = spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8', env, timeout: 30000 });
+  // CWK2-062 B (L167-1): a timed-out init is a failure, never the 'git unavailable' skip below.
+  if (init.error?.code === 'ETIMEDOUT') assert.fail('git init hit its spawn clock (ETIMEDOUT) — a killed clock is not an absent git');
+  if (init.error || init.status !== 0) return t.skip('git unavailable');
+  const bare = spawnSync('git', ['config', 'core.bare', 'true'], { cwd: dir, encoding: 'utf8', env, timeout: 30000 });
+  assert.strictEqual(bare.status, 0, 'precondition: the fixture repository is made bare');
+  // ~114 KB of names: far past the pipe buffer, so git refuses (128) before it reads stdin and the write fails.
+  const names = Array.from({ length: 2000 }, (_, i) => `throwaway-build-${i}-padding-padding-x`);
+  const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
+    { cwd: dir, encoding: 'utf8', env, timeout: 30000, input: names.map((n) => n + '/').join('\n') + '\n' });
+  assert.strictEqual(ci.status, 128, 'precondition: git refuses a core.bare repository with exit 128');
+  if (!ci.error) return t.skip('the pipe race did not reproduce on this host (no spawn error beside 128)');
+  assert.ok(['EPIPE', 'EOF'].includes(ci.error.code), `the spawn error must be the pipe race, got code ${ci.error.code}`);
+  const r = classifyCheckIgnoreResult(ci);
+  assert.strictEqual(r.ok, false);
+  assert.match(r.failure, /^exited 128 — /, `the exit must be named, got: ${r.failure}`);
+  assert.ok(!/failed to spawn/.test(r.failure), `a git refusal is not a spawn failure, got: ${r.failure}`);
 });

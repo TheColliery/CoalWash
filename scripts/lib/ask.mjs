@@ -175,9 +175,21 @@ export function wizardEscalation(opts) {
 // diff skipped).
 export function seatbeltAdvisory(opts) {
   const { file, classes, snapshotPath, oversize } = opts || {};
+  const PLAIN_SHELL_ARG = /^[\p{L}\p{M}\p{N} _.,@%+=:~\/\\-]+$/u; // CWK-162 A6: see the note below the snapshot name
   const f = typeof file === 'string' && file ? file : '(unknown file)';
   const snap = typeof snapshotPath === 'string' && snapshotPath ? snapshotPath : '';
-  const recover = snap ? ` A byte-exact pre-edit snapshot is at ${snap} — copy it back (or \`node scripts/lib/cli.mjs writeguard-restore ${snap.split(/[\\/]/).pop()} > "${f}"\`) if the drop was a slip; never re-type the lost content, restore the real bytes.` : '';
+  // CWK-162 (AI Deep Scan A6): the file name is repo-controlled, and the restore line is text an agent is told to ACT on. A name
+  // such as $(touch PWNED).md inside the double quotes of "${f}" is command substitution. The ready-made redirect line is
+  // therefore emitted only when BOTH the target and the snapshot name are plain (letters of any script, digits, marks, space and
+  // . _ , @ % + = : ~ / \ -) and the path does not end in a backslash (which would escape the closing quote); anything else
+  // gets the verb and a placeholder with NO path interpolated into any command. Unicode letters stay plain on purpose: a Thai or
+  // Japanese file name is inert inside double quotes and is a normal name in this house.
+  const snapName = snap ? snap.split(/[\\/]/).pop() : '';
+  const plainArg = (s) => PLAIN_SHELL_ARG.test(s) && !s.endsWith('\\');
+  const restoreCmd = plainArg(f) && plainArg(snapName)
+    ? ` (or \`node scripts/lib/cli.mjs writeguard-restore ${snapName} > "${f}"\`)`
+    : ' (this file\'s path holds characters a shell would interpret, so no ready-made redirect line is given: `node scripts/lib/cli.mjs writeguard-restore <the snapshot file name above>` prints the original to stdout)';
+  const recover = snap ? ` A byte-exact pre-edit snapshot is at ${snap} — copy it back${restoreCmd} if the drop was a slip; never re-type the lost content, restore the real bytes.` : '';
   if (oversize) {
     return `[CoalWash] write-guard (FYI, not an error, not a block): ${f} is a class-B governance/memory file over the diff-size cap — a pre-edit snapshot was taken but the fidelity diff was skipped (file oversize).${recover}`;
   }

@@ -20,7 +20,7 @@ import {
   readEstateKeyResolvedState, writeEstateKeyResolvedState,
 } from './estate-archive.mjs';
 import { ccProjectSlug } from './class-b.mjs';
-import { acquireLock, globalLockPath } from './apply.mjs';
+import { acquireLock, globalLockPath, LOCK_STALE_MS } from './apply.mjs';
 import { recordKeep } from './keeps.mjs';
 import { CONFIG_SCHEMA, clampedRead, validateConfig } from './config-schema.mjs';
 
@@ -125,6 +125,40 @@ test('config: resolveArchiveDir — "" and a RELATIVE dir both fall back to ~/.c
     assert.strictEqual(resolveArchiveDir(estateCfg({ archiveDir: 'rel/dir' }), home), def, 'relative -> default (fail-safe)');
     const abs = path.join(home, 'elsewhere');
     assert.strictEqual(resolveArchiveDir(estateCfg({ archiveDir: abs }), home), path.resolve(abs));
+  } finally { clean(home, proj); }
+});
+
+// grad9 R8-F7: resolveArchiveDir used a bare path.resolve() -- lexical only,
+// so a symlinked archiveDir (or symlinked ancestor) let the human-facing
+// consent bill name one location while archiveSession's own physical
+// write-containment resolved another. RED-FIRST at source: swap
+// estate-archive.mjs to HEAD (pre-fix), this test must fail (the lexical
+// link path returned, not the real target).
+test('RED-FIRST/R8-F7: resolveArchiveDir resolves a symlinked archiveDir to its REAL target, not the lexical link path', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const realTarget = path.join(home, 'real-archive-target');
+    fs.mkdirSync(realTarget, { recursive: true });
+    const link = path.join(home, 'archive-link');
+    try {
+      fs.symlinkSync(realTarget, link, 'junction');
+    } catch {
+      t.skip('this box cannot create a directory symlink/junction — capability absent');
+      return;
+    }
+    const resolved = resolveArchiveDir(estateCfg({ archiveDir: link }), home);
+    const trueReal = fs.realpathSync.native(realTarget);
+    assert.strictEqual(resolved, trueReal, 'must be the REAL target, not the symlink\'s own lexical path');
+    assert.notStrictEqual(resolved, path.resolve(link), 'the pre-fix lexical answer must NOT be what we return');
+  } finally { clean(home, proj); }
+});
+
+test('RED-FIRST/R8-F7 control: an ordinary (non-symlinked) absolute archiveDir with no existing ancestor still resolves exactly as before (no over-refusal)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const abs = path.join(home, 'brand-new', 'nested', 'archive');
+    const resolved = resolveArchiveDir(estateCfg({ archiveDir: abs }), home);
+    assert.strictEqual(resolved, path.resolve(abs), 'an ordinary path with no symlinks resolves identically to the old path.resolve() behavior');
   } finally { clean(home, proj); }
 });
 
@@ -747,12 +781,13 @@ test('estate-restore: round-trips every file byte-exact to a scratch dir OUTSIDE
     const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
 
     const r = restoreSession('sess-warm', { archiveDir: res.archiveDir });
-    assert.strictEqual(r.ok, true);
-    assert.strictEqual(r.files.length, 3);
-    assert.ok(!r.dir.startsWith(path.join(home, '.claude')), 'default target is a scratch dir, never the live tree');
-    assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm.jsonl')).equals(origJsonl), 'transcript byte-exact');
-    assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm', 'tool-results', 'r1.txt')).equals(origTool), 'overflow byte-exact');
-    clean(r.dir);
+    try {
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.files.length, 3);
+      assert.ok(!r.dir.startsWith(path.join(home, '.claude')), 'default target is a scratch dir, never the live tree');
+      assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm.jsonl')).equals(origJsonl), 'transcript byte-exact');
+      assert.ok(fs.readFileSync(path.join(r.dir, 'sess-warm', 'tool-results', 'r1.txt')).equals(origTool), 'overflow byte-exact');
+    } finally { clean(r.dir); }
 
     const to = path.join(home, 'chosen-restore');
     const r2 = restoreSession('sess-warm', { archiveDir: res.archiveDir, to });
@@ -822,14 +857,19 @@ test('#58 deletion-unaware restore (search): a dug-up row whose wording matches 
     const archiveDir = path.join(home, 'arch');
     appendIndexRow(archiveDir, { sessionId: 'hit', projectSlug: 'p', firstUserLine: 'Investigate the SECRETLEGACYTOKEN rollback behavior', topEntities: ['SECRETLEGACYTOKEN'], bytes: 10, msgCount: 2 });
     appendIndexRow(archiveDir, { sessionId: 'clean', projectSlug: 'p', firstUserLine: 'Unrelated session about the login flow', topEntities: ['LoginFlow'], bytes: 10, msgCount: 2 });
-    // the user later DELETED that fact — recorded as an adjudicated keep carrying the verbatim anchor
-    recordKeep(proj, { target: 'MEMORY.md#legacy', anchor: 'SECRETLEGACYTOKEN', reason: 'removed', date: '2026-07-16' });
+    // the user later DELETED that fact — recorded as an adjudicated keep carrying the verbatim anchor.
+    // grad10 F4 raised the meaningful-anchor floor (20 stripped chars, 2+ words) —
+    // the bare token alone no longer clears it, so the recorded anchor is a real
+    // substring of the row's own text (still a genuine literal match for
+    // matchTombstones' case-insensitive substring compare, never a token that
+    // merely CONTAINS the secret).
+    recordKeep(proj, { target: 'MEMORY.md#legacy', anchor: 'the SECRETLEGACYTOKEN rollback', reason: 'removed', date: '2026-07-16' });
     const tombstones = collectTombstones({ projectRoot: proj, home });
-    assert.ok(tombstones.anchors.some((a) => a.text === 'SECRETLEGACYTOKEN'), 'the keep anchor is in the registry');
+    assert.ok(tombstones.anchors.some((a) => a.text === 'the SECRETLEGACYTOKEN rollback'), 'the keep anchor is in the registry');
 
     const hits = searchIndex('SECRETLEGACYTOKEN', { archiveDir, tombstones });
     assert.strictEqual(hits.length, 1, 'the search RETURNS the row — recovery is never blocked');
-    assert.ok(Array.isArray(hits[0].laterRemoved) && hits[0].laterRemoved[0].anchor === 'SECRETLEGACYTOKEN', 'the row is annotated with the tombstone match');
+    assert.ok(Array.isArray(hits[0].laterRemoved) && hits[0].laterRemoved[0].anchor === 'the SECRETLEGACYTOKEN rollback', 'the row is annotated with the tombstone match');
     assert.match(searchLines(hits, { hasDeathLog: tombstones.hasDeathLog }), /later-removed\?.*SECRETLEGACYTOKEN/, 'the rendered line carries the advisory');
 
     const cleanRows = searchIndex('login', { archiveDir, tombstones });
@@ -848,15 +888,409 @@ test('#58 (restore): recovering a session whose FULL content holds pre-cut wordi
     seedSession(home, proj, 'sess-warm', 30, { content });
     const run = runEstate({ projectRoot: proj, home, estate: estateCfg() });
     assert.strictEqual(run.archived.length, 1);
-    recordKeep(proj, { target: 'MEMORY.md', anchor: 'SECRETLEGACYTOKEN', date: '2026-07-16' });
+    // grad10 F4: same floor-raise as the search test above — anchor lengthened to
+    // a real substring of the transcript's own text.
+    recordKeep(proj, { target: 'MEMORY.md', anchor: 'the SECRETLEGACYTOKEN was set', date: '2026-07-16' });
     const tombstones = collectTombstones({ projectRoot: proj, home });
 
     const r = restoreSession('sess-warm', { archiveDir: run.archiveDir, to: path.join(home, 'restore-out'), tombstones });
     assert.strictEqual(r.ok, true, 'recovery succeeds byte-exact');
-    assert.ok(Array.isArray(r.laterRemoved) && r.laterRemoved[0].anchor === 'SECRETLEGACYTOKEN', 'the restore is flagged laterRemoved');
+    assert.ok(Array.isArray(r.laterRemoved) && r.laterRemoved[0].anchor === 'the SECRETLEGACYTOKEN was set', 'the restore is flagged laterRemoved');
 
     const r2 = restoreSession('sess-warm', { archiveDir: run.archiveDir, to: path.join(home, 'restore-out2') });
     assert.strictEqual(r2.ok, true);
     assert.strictEqual(r2.laterRemoved, undefined, 'without a registry the restore is unannotated (unchanged behavior)');
   } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-162 unit C7 (AI Deep Scan B3 + B6): restoreSession wrote nested files through whatever sits under the destination, and it
+// inflated a gzip into one buffer with no output limit. Witnesses on the 0cde430 source (scratchpad/r14/witness-prefix.txt): a
+// junction planted at <to>/<sid> made the restored file land OUTSIDE the destination with ok:true; a 130,478-byte .gz expanded to
+// 134,217,728 bytes (1029:1) with ok:true. Real archives on this box (read-only probe, n=9): ratio min 2.1, median 2.3, max 3.1,
+// largest inflated 49,544,480 bytes.
+// ---------------------------------------------------------------------------
+import * as EA from './estate-archive.mjs'; // namespace import: a name the pre-fix tree never exported fails an ASSERTION, not the link
+
+const SID_C7 = 'cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee';
+const C7_FLOOR = EA.RESTORE_FLOOR_BYTES ?? 64 * 1024 * 1024; // fallbacks keep a pre-fix tree failing on an ASSERTION, not on a NaN size
+const C7_GZCAP = EA.RESTORE_MAX_GZ_BYTES ?? 256 * 1024 * 1024;
+function c7Archive(files) { // files: { 'rel/under/slug': Buffer } -> an archive dir holding each gzipped under slug/
+  const arch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc7-arch-')));
+  for (const [rel, buf] of Object.entries(files)) {
+    const p = path.join(arch, 'slug', `${rel}.gz`);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, zlib.gzipSync(buf));
+  }
+  return arch;
+}
+function c7Dir(tag) { return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `cwc7-${tag}-`))); }
+
+test('CWK-162 B3: a link planted at <to>/<sid> is refused, and nothing lands outside the destination (witness: ok:true, file written outside)', (t) => {
+  const arch = c7Archive({ [`${SID_C7}/sub.jsonl`]: Buffer.from('RESTORED-BYTES\n') });
+  const to = c7Dir('to');
+  const outside = c7Dir('out');
+  t.after(() => { for (const d of [arch, to, outside]) fs.rmSync(d, { recursive: true, force: true }); });
+  try { fs.symlinkSync(outside, path.join(to, SID_C7), 'junction'); } catch (e) { t.skip(`link creation unavailable here: ${e.code}`); return; }
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /is a link/);
+  assert.deepStrictEqual(fs.readdirSync(outside), [], 'the directory the link points at is untouched');
+});
+
+test('CWK-162 B3: a link planted deeper (<to>/<sid>/subagents) is refused the same way', (t) => {
+  const arch = c7Archive({ [`${SID_C7}/subagents/a.jsonl`]: Buffer.from('DEEP\n') });
+  const to = c7Dir('to');
+  const outside = c7Dir('out');
+  t.after(() => { for (const d of [arch, to, outside]) fs.rmSync(d, { recursive: true, force: true }); });
+  fs.mkdirSync(path.join(to, SID_C7));
+  try { fs.symlinkSync(outside, path.join(to, SID_C7, 'subagents'), 'junction'); } catch (e) { t.skip(`link creation unavailable here: ${e.code}`); return; }
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /is a link/);
+  assert.deepStrictEqual(fs.readdirSync(outside), []);
+});
+
+// fire 67 (PR #18, thread r4231603560): the directory components were checked, the FINAL file path was not. A link already sitting at
+// <to>/<sid>.jsonl was replaced by the rename rather than written through, but the contract says a restore refuses links under its
+// destination. Each link kind is its own leg, decided by probing what this volume and user can create, skipped visibly otherwise.
+function c7Plant(t, to, kind) {
+  const outside = c7Dir('out');
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const dest = path.join(to, `${SID_C7}.jsonl`);
+  const target = path.join(outside, 'victim.txt');
+  fs.writeFileSync(target, 'OUTSIDE\n');
+  try {
+    if (kind === 'file symlink') fs.symlinkSync(target, dest, 'file');
+    else if (kind === 'dangling file symlink') fs.symlinkSync(path.join(outside, 'gone.txt'), dest, 'file');
+    else if (kind === 'junction') fs.symlinkSync(outside, dest, 'junction');
+    else fs.linkSync(target, dest); // a hard link
+  } catch (e) { t.skip(`a ${kind} cannot be made here (${e.code})`); return null; }
+  return { outside, dest, target };
+}
+for (const kind of ['file symlink', 'dangling file symlink', 'junction', 'hard link']) {
+  test(`fire 67: a ${kind} already at <to>/<sid>.jsonl is refused, and what it points at is untouched`, (t) => {
+    const arch = c7Archive({ [`${SID_C7}.jsonl`]: Buffer.from('RESTORED-BYTES\n') });
+    const to = c7Dir('to');
+    t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+    const p = c7Plant(t, to, kind);
+    if (!p) return;
+    const before = fs.lstatSync(p.dest);
+    const r = restoreSession(SID_C7, { archiveDir: arch, to });
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, kind === 'hard link' ? /restore refused on .*\.jsonl: the destination entry is not a single-link regular file/ : /restore refused on .*\.jsonl: the destination file is a link/, r.error);
+    assert.strictEqual(fs.readFileSync(p.target, 'utf8'), 'OUTSIDE\n', 'the link target keeps its bytes');
+    assert.deepStrictEqual(fs.readdirSync(p.outside).sort(), ['victim.txt'], 'nothing new lands outside the destination');
+    const after = fs.lstatSync(p.dest);
+    assert.strictEqual(after.ino, before.ino, 'the planted entry is left in place for a human to look at');
+  });
+}
+
+test('fire 67 control: an ordinary single-link file already at <to>/<sid>.jsonl is still replaced by the restored bytes', (t) => {
+  const bytes = Buffer.from('RESTORED-BYTES\n');
+  const arch = c7Archive({ [`${SID_C7}.jsonl`]: bytes });
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  fs.writeFileSync(path.join(to, `${SID_C7}.jsonl`), 'an older restore\n');
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.ok(fs.readFileSync(path.join(to, `${SID_C7}.jsonl`)).equals(bytes));
+});
+
+test('CWK-162 B3 control: a plain destination restores byte-exactly, and a destination ROOT that is itself a link (the user\'s own choice) still works -- only components BELOW it are checked', (t) => {
+  const bytes = Buffer.from('line one\nline two\n');
+  const arch = c7Archive({ [`${SID_C7}/sub.jsonl`]: bytes, [`${SID_C7}/subagents/a.jsonl`]: bytes });
+  const real = c7Dir('real');
+  const holder = c7Dir('holder');
+  t.after(() => { for (const d of [arch, real, holder]) fs.rmSync(d, { recursive: true, force: true }); });
+  const plain = restoreSession(SID_C7, { archiveDir: arch, to: path.join(real, 'plain') });
+  assert.strictEqual(plain.ok, true, JSON.stringify(plain));
+  assert.ok(fs.readFileSync(path.join(real, 'plain', SID_C7, 'sub.jsonl')).equals(bytes));
+  assert.ok(fs.readFileSync(path.join(real, 'plain', SID_C7, 'subagents', 'a.jsonl')).equals(bytes));
+  const linkRoot = path.join(holder, 'rootlink');
+  try { fs.symlinkSync(real, linkRoot, 'junction'); } catch { return; /* the control's second half needs a link; the first half ran */ }
+  const viaLink = restoreSession(SID_C7, { archiveDir: arch, to: linkRoot });
+  assert.strictEqual(viaLink.ok, true, JSON.stringify(viaLink));
+  assert.ok(fs.readFileSync(path.join(real, SID_C7, 'sub.jsonl')).equals(bytes), 'it landed in the real directory the root pointed at');
+});
+
+test('CWK-162 B6: the restore bounds exist (floor, ratio, ceiling, compressed-size cap)', () => {
+  for (const n of ['RESTORE_FLOOR_BYTES', 'RESTORE_MAX_RATIO', 'RESTORE_CEIL_BYTES', 'RESTORE_MAX_GZ_BYTES']) assert.ok(Number.isInteger(EA[n]) && EA[n] > 0, `${n} = ${EA[n]}`);
+  assert.strictEqual(typeof EA.restoreInflateBound, 'function');
+  assert.strictEqual(EA.restoreInflateBound(1000), EA.RESTORE_FLOOR_BYTES, 'a tiny archive gets the floor');
+  assert.strictEqual(EA.restoreInflateBound(10 * 1024 * 1024), 10 * 1024 * 1024 * EA.RESTORE_MAX_RATIO, 'a mid-size archive gets the ratio');
+  assert.strictEqual(EA.restoreInflateBound(EA.RESTORE_MAX_GZ_BYTES), EA.RESTORE_CEIL_BYTES, 'and never more than the ceiling');
+  assert.ok(EA.RESTORE_MAX_RATIO >= 20 * 3.1, 'the ratio bound leaves at least 20x headroom over the largest ratio measured on real archives (3.1)');
+});
+
+test('CWK-162 B6: an archive that inflates past the bound is REFUSED, not expanded (witness: 130 KB -> 128 MiB, ok:true)', (t) => {
+  const over = C7_FLOOR + 16 * 1024 * 1024; // past the floor, and a ratio of ~1000:1
+  const arch = c7Archive({ [`${SID_C7}.jsonl`]: Buffer.alloc(over) });
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
+  assert.match(r.error, /inflate/);
+  assert.strictEqual(fs.existsSync(path.join(to, `${SID_C7}.jsonl`)), false, 'nothing was written');
+});
+
+test('CWK-162 B6 control: the FLOOR is a real term -- a high-ratio archive that inflates to less than the floor still restores', (t) => {
+  const under = 24 * 1024 * 1024; // ~1000:1, but well under the floor
+  const arch = c7Archive({ [`${SID_C7}.jsonl`]: Buffer.alloc(under) });
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const r = restoreSession(SID_C7, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, true, JSON.stringify(r).slice(0, 200));
+  assert.strictEqual(fs.statSync(path.join(to, `${SID_C7}.jsonl`)).size, under);
+});
+
+// R14 INSPECT NIT 3, reworked at R15 (CodeQL #47/#50): the size bound used to read the size with statSync and then read the file by path, so a
+// file that grew (or was swapped) between the two was read whole; NIT 3 added a length check AFTER the read. The archive is now opened first
+// and its size is judged on the HANDLE, and only that many bytes plus one probe byte are read through it. Witness: the handle reports 1 byte
+// and the file is one byte over the cap; a read of 1 byte plus the probe finds more, and the restore is refused without reading the file.
+test('R14 NIT 3 / R15 (B6): a compressed file that grew past the size its handle reported is refused, and only that many bytes plus one probe byte are read', (t) => {
+  const arch = c7Dir('arch');
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const gz = path.join(arch, 'slug', `${SID_C7}.jsonl.gz`);
+  fs.mkdirSync(path.dirname(gz), { recursive: true });
+  const fd = fs.openSync(gz, 'w');
+  try { fs.ftruncateSync(fd, C7_GZCAP + 1); } finally { fs.closeSync(fd); }
+  const realOpen = fs.openSync;
+  const realFstat = fs.fstatSync;
+  const realReadSync = fs.readSync;
+  let gzFd = null;
+  const asked = [];
+  fs.openSync = function spy(p, ...rest) { const h = realOpen.call(fs, p, ...rest); if (String(p) === gz) gzFd = h; return h; };
+  fs.fstatSync = function spy(h, ...rest) { return h === gzFd ? { size: 1, isFile: () => true } : realFstat.call(fs, h, ...rest); };
+  fs.readSync = function spy(h, buf, off, len, ...rest) { if (h === gzFd) asked.push(len); return realReadSync.call(fs, h, buf, off, len, ...rest); };
+  let r;
+  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.openSync = realOpen; fs.fstatSync = realFstat; fs.readSync = realReadSync; }
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
+  assert.match(r.error, /compressed/, 'refused as longer than the handle reported, not as a gzip parse error');
+  assert.match(r.error, /grew/);
+  assert.deepStrictEqual(asked, [1, 1], 'one byte for the 1 reported, one probe byte, never the whole file');
+});
+
+test('CWK-162 B6: a compressed file over RESTORE_MAX_GZ_BYTES is refused by its size, before it is read', (t) => {
+  const arch = c7Dir('arch');
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const gz = path.join(arch, 'slug', `${SID_C7}.jsonl.gz`);
+  fs.mkdirSync(path.dirname(gz), { recursive: true });
+  const fd = fs.openSync(gz, 'w');
+  try { fs.ftruncateSync(fd, C7_GZCAP + 1); } finally { fs.closeSync(fd); }
+  const real = fs.readFileSync;
+  const realReadSync = fs.readSync;
+  const realOpen = fs.openSync;
+  let readIt = false;
+  let gzFd = null;
+  fs.readFileSync = function spy(p, ...rest) { if (String(p) === gz) readIt = true; return real.call(fs, p, ...rest); };
+  fs.openSync = function spy(p, ...rest) { const h = realOpen.call(fs, p, ...rest); if (String(p) === gz) gzFd = h; return h; };
+  fs.readSync = function spy(h, ...rest) { if (h === gzFd) readIt = true; return realReadSync.call(fs, h, ...rest); };
+  let r;
+  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.readFileSync = real; fs.openSync = realOpen; fs.readSync = realReadSync; }
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
+  assert.match(r.error, /compressed/);
+  assert.strictEqual(readIt, false, 'its bytes were never read, by path or through the handle');
+});
+
+// ---------------------------------------------------------------------------
+// fire 119 (18a): THE LOCK FENCE on the ULTRA run. Its global lock can be taken over once it is LOCK_STALE_MS old; before each
+// write the run re-reads it and a robbed run stops, removing nothing. Each leg steals the lock the way a second run would
+// (mtime backdated past the stale window, then a real acquireLock) at one point of the session's archive, and proves what
+// the robbed run left.
+// ---------------------------------------------------------------------------
+function treeOf(roots) {
+  const out = {};
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { out[p] = 'dir'; walk(p); } else out[p] = fs.readFileSync(p).toString('base64');
+    }
+  };
+  for (const r of roots) if (fs.existsSync(r)) walk(r);
+  return out;
+}
+function stealGlobal(home) {
+  const old = new Date(Date.now() - LOCK_STALE_MS - 60000);
+  fs.utimesSync(globalLockPath(home), old, old);
+  const thief = acquireLock(globalLockPath(home), { sessionId: 'thief' });
+  assert.ok(thief.acquired && thief.stale, `the thief took the stale lock over (${JSON.stringify(thief)})`);
+  return thief;
+}
+// Runs one warm session's ULTRA pass with fs[fn] patched so `after(nth call on a matching path)` fires once.
+function robbedEstate(fn, match, nth, { age = 40, estate = estateCfg() } = {}) {
+  const { home, proj } = sandbox();
+  const files = seedSession(home, proj, 'sess-f119', age);
+  const originals = [files.jsonl, files.meta, files.tool].map((p) => path.resolve(p));
+  const real = fs[fn];
+  let calls = 0;
+  let shot = null;
+  let thief = null;
+  fs[fn] = function patched(p, ...rest) {
+    const out = real.call(fs, p, ...rest);
+    if (!shot && match(path.resolve(String(p)), originals) && ++calls === nth) { thief = stealGlobal(home); shot = treeOf([home, proj]); }
+    return out;
+  };
+  let res;
+  try { res = runEstate({ projectRoot: proj, home, estate }); } finally { fs[fn] = real; }
+  return { home, proj, files, originals, res, shot, thief };
+}
+
+test('fire 119: an ULTRA run robbed of its global lock stops before its next archive copy: nothing more is written, every original kept, and the thief\'s write survives', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-f119', 40);
+    let shot = null;
+    let thief = null;
+    const thiefFile = path.join(home, 'thief.txt');
+    const gzip = (buf) => {
+      if (!shot) { thief = stealGlobal(home); write(thiefFile, 'THIEF'); shot = treeOf([home, proj]); }
+      return zlib.gzipSync(buf);
+    };
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg(), gzip });
+    assert.ok(shot, 'the theft happened inside the run');
+    assert.strictEqual(res.ok, false, JSON.stringify(res));
+    assert.strictEqual(res.robbed, 'global');
+    assert.strictEqual(res.lockLost, 'stolen', 'a foreign token is a theft (fire 122)');
+    assert.ok(res.error.includes('lock stolen') && res.error.includes('stopped before the archive copy of') && res.error.includes('every original of this session is kept'), res.error);
+    assert.deepStrictEqual(treeOf([home, proj]), shot, 'the robbed run wrote and removed nothing after the theft');
+    for (const p of [files.jsonl, files.meta, files.tool]) assert.strictEqual(fs.existsSync(p), true, `${path.basename(p)} kept`);
+    assert.strictEqual(fs.readFileSync(thiefFile, 'utf8'), 'THIEF');
+    assert.strictEqual(thief.owns(), true, 'the robbed run\'s release left the thief\'s lock in place');
+    assert.ok(runEstateReport(res).includes('STOPPED: lock stolen'), runEstateReport(res));
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: an ULTRA run robbed between two deletes stops before the next one: the other originals stay beside their archive copies', () => {
+  const r = robbedEstate('rmSync', (p, o) => o.includes(p), 1);
+  try {
+    assert.ok(r.shot, 'the theft happened after the first delete');
+    assert.strictEqual(r.res.robbed, 'global', JSON.stringify(r.res));
+    assert.ok(r.res.error.includes('stopped before deleting') && r.res.error.includes('1 original(s) had been deleted (or tried) and the other 2 stay'), r.res.error);
+    assert.deepStrictEqual(treeOf([r.home, r.proj]), r.shot, 'nothing written or removed after the theft');
+    assert.strictEqual(r.originals.filter((p) => fs.existsSync(p)).length, 2, 'two originals kept');
+  } finally { clean(r.home, r.proj); }
+});
+
+test('fire 119: an ULTRA run robbed after its last delete stops before removing the emptied session folder', () => {
+  const r = robbedEstate('rmSync', (p, o) => o.includes(p), 3);
+  try {
+    assert.ok(r.shot, 'the theft happened after the last delete');
+    assert.strictEqual(r.res.robbed, 'global', JSON.stringify(r.res));
+    assert.ok(r.res.error.includes('stopped before removing the emptied session folder'), r.res.error);
+    assert.deepStrictEqual(treeOf([r.home, r.proj]), r.shot, 'nothing written or removed after the theft');
+    assert.strictEqual(fs.existsSync(path.join(slugDirFor(r.home, r.proj), 'sess-f119')), true, 'the emptied session folder stays');
+  } finally { clean(r.home, r.proj); }
+});
+
+test('fire 119: an ULTRA run robbed after a session is archived stops before its index row (the session stays restorable from the archive)', () => {
+  const r = robbedEstate('rmdirSync', () => true, 1);
+  try {
+    assert.ok(r.shot, 'the theft happened while the emptied folder was being removed');
+    assert.strictEqual(r.res.robbed, 'global', JSON.stringify(r.res));
+    assert.ok(r.res.error.includes('stopped before the index row of session sess-f119'), r.res.error);
+    assert.strictEqual(r.res.archived.length, 1, 'the archived session is still reported');
+    const idx = path.join(resolveArchiveDir(estateCfg(), r.home), ESTATE_INDEX_NAME);
+    assert.strictEqual(fs.existsSync(idx) && fs.readFileSync(idx, 'utf8').includes('sess-f119'), false, 'no index row was appended');
+    assert.ok(restoreSession('sess-f119', { archiveDir: resolveArchiveDir(estateCfg(), r.home), to: path.join(r.proj, 'restored') }).ok, 'the archive alone restores it');
+  } finally { clean(r.home, r.proj); }
+});
+
+test('fire 119: an archive failure after a theft removes nothing: the partial copies stay (the new holder may own copies at those paths)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const files = seedSession(home, proj, 'sess-f119', 40);
+    let calls = 0;
+    let shot = null;
+    const gzip = (buf) => {
+      if (++calls === 2) { stealGlobal(home); shot = treeOf([home, proj]); throw new Error('simulated gzip failure'); }
+      return zlib.gzipSync(buf);
+    };
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg(), gzip });
+    assert.ok(shot, 'the theft happened between two archive copies');
+    assert.strictEqual(res.robbed, 'global', JSON.stringify(res));
+    assert.ok(res.error.includes('stopped before removing the partial archive (after: archive failed') && res.error.includes('1 archive copy(ies) of this session already written stay in place'), res.error);
+    assert.deepStrictEqual(treeOf([home, proj]), shot, 'the partial copy was not removed, and nothing else changed');
+    for (const p of [files.jsonl, files.meta, files.tool]) assert.strictEqual(fs.existsSync(p), true, `${path.basename(p)} kept`);
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: a cold-session ULTRA run robbed after its deletes stops before the death-log record', () => {
+  const r = robbedEstate('rmdirSync', () => true, 1, { age: 200, estate: estateCfg({ deleteCold: true }) });
+  try {
+    assert.ok(r.shot, 'the theft happened while the emptied folder was being removed');
+    assert.strictEqual(r.res.robbed, 'global', JSON.stringify(r.res));
+    assert.ok(r.res.error.includes('stopped before the death-log record of session sess-f119'), r.res.error);
+    const log = path.join(resolveArchiveDir(estateCfg(), r.home), ccProjectSlug(r.proj), 'death.log');
+    assert.strictEqual(fs.existsSync(log), false, 'no death-log record was written');
+  } finally { clean(r.home, r.proj); }
+});
+
+// fire 122: another program holding the lock file open with a share mode that refuses reads makes its READ opens fail with
+// EBUSY; this does exactly that, n times once armed (the house's fs-patch seam, as the fire-119 legs use).
+function faultLockReads(lockPath, { n = Infinity } = {}) {
+  const real = fs.openSync;
+  const want = path.resolve(lockPath);
+  const f = { armed: false, n, hits: 0 };
+  fs.openSync = function patched(p, flags, ...rest) {
+    const isRead = typeof flags === 'number' && (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0;
+    if (f.armed && isRead && f.n > 0 && path.resolve(String(p)) === want) { f.n--; f.hits++; throw Object.assign(new Error(`EBUSY: resource busy or locked, open '${p}'`), { code: 'EBUSY' }); }
+    return real.call(fs, p, flags, ...rest);
+  };
+  f.restore = () => { fs.openSync = real; };
+  return f;
+}
+
+test('fire 122: an ULTRA run whose global lock file stays unreadable stops with an honest refusal (no theft claimed), keeps every original, and names the lock it left', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  try {
+    const files = seedSession(home, proj, 'sess-f122', 40);
+    const gzip = (buf) => { fault.armed = true; return zlib.gzipSync(buf); };
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg(), gzip });
+    fault.restore();
+    assert.strictEqual(res.robbed, 'global', JSON.stringify(res));
+    assert.strictEqual(res.lockLost, 'unreadable');
+    assert.ok(res.error.startsWith(`lock unreadable: this ULTRA run could not read its own lock file ${globalLockPath(home)} for about 1 second(s) (EBUSY)`), res.error);
+    assert.ok(!res.error.includes('took over'), res.error);
+    for (const p of [files.jsonl, files.meta, files.tool]) assert.strictEqual(fs.existsSync(p), true, `${path.basename(p)} kept`);
+    assert.ok(res.lockLeft && res.lockLeft.includes('so it was left in place'), JSON.stringify(res));
+    assert.ok(runEstateReport(res).includes(`LOCK LEFT: ${res.lockLeft}`), runEstateReport(res));
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), true, 'a lock it cannot prove is its own is never deleted');
+  } finally { fault.restore(); clean(home, proj); }
+});
+
+test('fire 122: an ULTRA run whose global lock file turns unreadable after a session is archived stops before its index row with the honest refusal', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  const real = fs.rmdirSync;
+  try {
+    seedSession(home, proj, 'sess-f122i', 40);
+    fs.rmdirSync = function patched(p, ...rest) { fault.armed = true; return real.call(fs, p, ...rest); };
+    let res;
+    try { res = runEstate({ projectRoot: proj, home, estate: estateCfg() }); } finally { fs.rmdirSync = real; fault.restore(); }
+    assert.strictEqual(res.lockLost, 'unreadable', JSON.stringify(res));
+    assert.ok(res.error.startsWith('lock unreadable: this ULTRA run') && res.error.includes('stopped before the index row of session sess-f122i'), res.error);
+    assert.strictEqual(res.archived.length, 1);
+  } finally { fs.rmdirSync = real; fault.restore(); clean(home, proj); }
+});
+
+test('fire 123: an unexpected error inside an ULTRA run still names a lock its release had to leave behind', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  try {
+    seedSession(home, proj, 'sess-f123', 40);
+    // the seam: the estate config throws on its first read, inside the locked run, and the lock then cannot be read
+    const estate = estateCfg();
+    Object.defineProperty(estate, 'compressAfterDays', { get() { fault.armed = true; throw new Error('simulated failure'); } });
+    let caught = null;
+    try { runEstate({ projectRoot: proj, home, estate }); } catch (e) { caught = e; }
+    fault.restore();
+    assert.ok(caught, 'the error still leaves the run as a throw');
+    assert.ok(caught.lockLeft && caught.lockLeft.includes(`The lock file ${globalLockPath(home)} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), String(caught && caught.message));
+    assert.strictEqual(caught.message, `simulated failure. ${caught.lockLeft}`, 'the note is its own sentence (N125-2)');
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
+  } finally { fault.restore(); clean(home, proj); }
 });

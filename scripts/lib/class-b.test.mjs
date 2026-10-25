@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ccProjectSlug, ccMemoryDir, parseImports, discoverClassB, discoverRoleMemories, detectPlatform, containedIn, physicalOrNull, physicalForCreate, isCloudPlaceholder } from './class-b.mjs';
+import { ccProjectSlug, ccMemoryDir, parseImports, discoverClassB, discoverRoleMemories, detectPlatform, containedIn, relLabel, physicalOrNull, physicalForCreate, isCloudPlaceholder } from './class-b.mjs';
 import { measureEntries } from './caliper.mjs';
 import { spawnSync } from 'node:child_process';
 
@@ -344,6 +344,20 @@ test('containedIn / physicalOrNull primitives behave (equal counts as inside; ab
     assert.strictEqual(containedIn(path.resolve(home, '..'), [home]), false);
     assert.strictEqual(containedIn(null, [home]), false);
     assert.strictEqual(physicalOrNull(path.join(home, 'nope', 'nope.md')), null);
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-051: containedIn and relLabel read a real child folder named ..x / ..cfg as INSIDE the root, and ../sibling as outside', () => {
+  const { home, proj } = sandbox();
+  fs.mkdirSync(path.join(home, '..x'), { recursive: true });
+  fs.mkdirSync(path.join(home, '..cfg'), { recursive: true });
+  try {
+    assert.strictEqual(containedIn(path.join(home, '..x', 'f.md'), [home]), true, 'containedIn: ..x under the root is inside');
+    assert.strictEqual(containedIn(path.join(home, '..cfg'), [home]), true, 'containedIn: ..cfg under the root is inside');
+    assert.strictEqual(containedIn(path.join(home, '..', 'sibling'), [home]), false, 'containedIn: a real ../sibling is outside');
+    assert.strictEqual(relLabel(path.join(home, '..x', 'f.md'), [home]), '..x/f.md', 'relLabel: ..x keeps its root-relative label');
+    assert.strictEqual(relLabel(path.join(home, '..cfg', 'a', 'b.md'), [home]), '..cfg/a/b.md', 'relLabel: ..cfg keeps its root-relative label');
+    assert.strictEqual(relLabel(path.join(home, '..', 'sibling', 'z.md'), [home]), 'z.md', 'relLabel: a real ../sibling falls to the basename, never a ../ label');
   } finally { clean(home, proj); }
 });
 
@@ -784,10 +798,36 @@ function makeUnresolvable(target) {
 }
 
 // The capability probe runs on a THROWAWAY target before anything is asserted,
-// so a box that cannot deny reads skips before any leg executes (ONE SKIPPABLE
+// so a box that cannot produce the state skips before any leg executes (ONE SKIPPABLE
 // LEG PER TEST — a skip decided after a real assertion reports as skipped a leg
 // that in fact ran).
-function canDenyRead(proj, name) {
+// ⚠️ WHAT THIS PROBE ESTABLISHES, AND THE PLATFORM SCOPE THAT FOLLOWS FROM IT
+// (F-T4, r31 INSPECT §7 — the words used to say something else).
+//
+// It returns true only when `makeUnresolvable` succeeded, and `makeUnresolvable`
+// accepts an attempt ONLY when `physicalOrNull(target) === null` — i.e. only when
+// the denial broke CANONICALIZATION. That is NOT the same property as "this box
+// can deny a read", and the old name and skip message said the second one.
+// Measured on POSIX the two come apart cleanly: `chmod 0o000` DOES deny the read
+// and does NOT break `realpath` (resolution needs SEARCH on the parent chain, not
+// READ on the target), so this probe returns false on a box that denies reads
+// perfectly well. The r32 (a)-fork cell below carries its own separate probe,
+// `makeUnreadableFile`, precisely because it needs the OPPOSITE state.
+//
+// THE SCOPE CLAIM, written here because this is where a reader meets the skip:
+// `.github/workflows/ci.yml` runs os: [ubuntu-latest, windows-latest,
+// macos-latest]. By the derivation above, every cell gated on THIS probe — the
+// three CWK-082 F2-R2 cells, R3-F1, and R3-F3 INVARIANT — is expected to SKIP on
+// the two POSIX legs, leaving windows-latest as the only platform on which the
+// permission-refusal family is exercised at all.
+//
+// ⚠️ REASONED, NOT EXECUTED: no seat in this room has a Linux or macOS box, so
+// the POSIX half of that derivation has never been run — it follows from what
+// `realpath` requires, not from a measurement taken here. What would settle it:
+// reading the SKIP COUNT off the ubuntu/macos CI legs of any run that includes
+// this file, or another room's box. Until then this is a stated expectation, and
+// a reader must not upgrade it to a measurement.
+function canMakeUnresolvable(proj, name) {
   const probe = path.join(proj, name);
   write(path.join(probe, 'x.md'), 'x');
   const undo = makeUnresolvable(probe);
@@ -799,7 +839,7 @@ test('CWK-082 F2-R2: a role STORE that refuses to canonicalize FLAGS — the ref
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     const roleDir = path.join(proj, '.claude', 'agent-memory', 'coder');
     write(path.join(roleDir, 'MEMORY.md'), 'index');
     write(path.join(roleDir, 'craft.md'), 'craft');
@@ -820,7 +860,7 @@ test('CWK-082 F2-R2: a governance FILE that refuses to canonicalize FLAGS — it
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true }); // platform must DETECT or the arm is vacuous
     write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@AGENTS.md\ngovernance');
     write(path.join(proj, 'MEMORY.md'), 'memory');
@@ -841,7 +881,7 @@ test('CWK-082 F2-R2: a single role FILE that refuses to canonicalize FLAGS — o
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     const roleDir = path.join(proj, '.claude', 'agent-memory', 'coder');
     write(path.join(roleDir, 'MEMORY.md'), 'index');
     write(path.join(roleDir, 'craft.md'), 'x'.repeat(1200));
@@ -883,7 +923,7 @@ test('R3-F1: a candidate whose PARENT refuses is REFUSED, not absent — lstat n
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
     write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@sub/NOTES.md\ngovernance');
     write(path.join(proj, 'MEMORY.md'), 'memory');
@@ -937,10 +977,22 @@ test('R3-F3 INVARIANT: no flag pairs the word `unresolvable` with an ERROR code,
   const { home, proj } = sandbox();
   let undo = null;
   try {
-    if (!canDenyRead(proj, 'probe-can-deny')) { t.skip('this volume/account cannot deny a read — the arm would be vacuous'); return; }
+    if (!canMakeUnresolvable(proj, 'probe-can-deny')) { t.skip('this volume/account cannot make a path UNRESOLVABLE — the arm would be vacuous'); return; }
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
-    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\ngovernance');
+    // F-T3: the fixture carries BOTH refusal classes, so one flag set holds a
+    // real permission refusal (EPERM, from the denied role dir below) AND an
+    // absence reaching the second call (ENOENT, from the dangling link). Without
+    // the link the new direction below can never fire on this cell's own data.
+    write(path.join(proj, 'CLAUDE.md'), '@MEMORY.md\n@DANGLING.md\ngovernance');
     write(path.join(proj, 'MEMORY.md'), 'memory');
+    const danglingTarget = path.join(proj, 'dangling-target');
+    fs.mkdirSync(danglingTarget, { recursive: true });
+    let dangled = false;
+    try {
+      fs.symlinkSync(danglingTarget, path.join(proj, 'DANGLING.md'), 'junction');
+      fs.rmSync(danglingTarget, { recursive: true, force: true });
+      dangled = true;
+    } catch { dangled = false; }
     write(path.join(proj, '.claude', 'agent-memory', 'coder', 'MEMORY.md'), 'index');
     undo = makeUnresolvable(path.join(proj, '.claude', 'agent-memory', 'coder'));
     assert.ok(undo, 'the probe said this volume CAN deny, so this must not fail');
@@ -952,5 +1004,651 @@ test('R3-F3 INVARIANT: no flag pairs the word `unresolvable` with an ERROR code,
     const wrong = all.filter((f) => /unresolvable path/.test(f) && !/\[UNCOMPARABLE\]/.test(f));
     assert.deepStrictEqual(wrong, [],
       `every error-code flag must say 'refused'; 'unresolvable' belongs to the non-throwing case alone`);
+    // F-T3: THE OTHER DIRECTION. The assertion above is half of the property this
+    // cell's own name claims — it never asserted that `refused` is paired only
+    // with a REFUSAL code, and it PASSED on the very fixture that produced
+    // `refused path (governance): DANGLING.md [ENOENT]`. ENOENT/ENOTDIR mean
+    // nothing is behind the path: absent, never denied.
+    assert.ok(dangled, 'the dangling link is what makes the second direction non-vacuous on this fixture');
+    const absentButNamed = all.filter((f) => /refused path/.test(f) && /\[(ENOENT|ENOTDIR)\]/.test(f));
+    assert.deepStrictEqual(absentButNamed, [],
+      `'refused' is a permission word; an absence code must never carry it`);
   } finally { if (undo) undo(); clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// r32, THE (a) FORK — the READ-CHANNEL silent drop. r31's release gate
+// FALSIFIED BY EXECUTION the headline "a file you don't have permission to read
+// could vanish with no warning": a narrow read-deny leaves lstat, stat and
+// realpathSync.native all OK, so physicalOrNull returns a path, refusalCode is
+// never reached, and add() counts the file's own bytes normally. The loss is one
+// frame further in and it is the @import CLOSURE, not the file.
+// ---------------------------------------------------------------------------
+
+// Deny a FILE's CONTENT while its PATH still resolves. This is a DIFFERENT
+// capability from makeUnresolvable above, and conflating the two is exactly the
+// F-T4 finding: that helper accepts an attempt only when physicalOrNull goes
+// null, i.e. only when the denial broke CANONICALIZATION. This one accepts the
+// opposite state, and asserts BOTH halves of it — readFileSync throws AND
+// physicalOrNull still returns a path — so a box that cannot express this exact
+// case skips instead of producing a vacuous green.
+//
+// The Windows attempt uses (RD) alone, NOT (RX): (RX) removes Read AND Execute
+// and takes realpath down with it, which is the state the OTHER helper wants.
+function makeUnreadableFile(target) {
+  const attempts = [
+    () => { const m = fs.statSync(target).mode; fs.chmodSync(target, 0o000); return () => { try { fs.chmodSync(target, m); } catch { /* best effort */ } }; },
+    () => {
+      const who = process.env.USERNAME || process.env.USER || '';
+      if (!who) return null;
+      spawnSync('icacls', [target, '/deny', `${who}:(RD)`], { stdio: 'ignore' });
+      return () => { try { spawnSync('icacls', [target, '/remove:d', who], { stdio: 'ignore' }); } catch { /* best effort */ } };
+    },
+  ];
+  for (const attempt of attempts) {
+    let restore = null;
+    try { restore = attempt(); } catch { restore = null; }
+    if (!restore) continue;
+    let threw = false;
+    try { fs.readFileSync(target, 'utf8'); } catch { threw = true; }
+    if (threw && physicalOrNull(target) !== null) return restore;
+    restore();
+  }
+  return null;
+}
+
+test('r32 (a): a governance file whose CONTENT is denied FLAGS — its own bytes are counted, its @import closure is NOT', (t) => {
+  const { home, proj } = sandbox();
+  let restore = null;
+  try {
+    // Capability probe FIRST, on a throwaway outside the fixture: the skip
+    // decision must precede every assertion (ONE SKIPPABLE LEG PER TEST).
+    const probe = path.join(proj, 'probe-deny-read.md');
+    write(probe, 'probe');
+    const probeUndo = makeUnreadableFile(probe);
+    if (!probeUndo) {
+      t.skip('this volume/account cannot deny a FILE READ while leaving its path resolvable — the arm would be vacuous');
+      return;
+    }
+    probeUndo();
+
+    write(path.join(home, '.claude', 'CLAUDE.md'), 'global');
+    const claude = path.join(proj, 'CLAUDE.md');
+    write(claude, '@sub/NOTES.md' + String.fromCharCode(10));
+    write(path.join(proj, 'sub', 'NOTES.md'), 'imported content the closure carries');
+
+    const names = (r) => r.entries.map((e) => path.basename(e.path)).sort();
+    const before = discoverClassB({ projectRoot: proj, home });
+    assert.ok(names(before).includes('NOTES.md'), 'PRECONDITION: the closure is reachable while the parent is readable');
+
+    restore = makeUnreadableFile(claude);
+    assert.ok(restore, 'the probe said this box CAN deny a file read, so this must not fail');
+
+    const denied = discoverClassB({ projectRoot: proj, home });
+    assert.ok(!names(denied).includes('NOTES.md'), 'PRECONDITION: the closure really did leave the measure');
+    assert.ok(names(denied).includes('CLAUDE.md'),
+      'the DENIED FILE ITSELF is still counted — add() succeeded, only the content read failed');
+    assert.ok(denied.flags.some((f) => /unreadable governance file/.test(f)),
+      'the dropped closure must be FLAGGED, never silent — flags: ' + JSON.stringify(denied.flags));
+
+    restore();
+    restore = null;
+    const after = discoverClassB({ projectRoot: proj, home });
+    assert.deepStrictEqual(names(after), names(before),
+      'RESTORE CONTROL: un-deny and the closure returns — a cell that reads the same on both arms measures the harness, not the engine');
+  } finally {
+    if (restore) restore();
+    clean(home, proj);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// r32, F-T3 — the noun was ONE-SIDED. refusalCode carved ENOENT/ENOTDIR on the
+// FIRST call (lstat) and passed the SECOND call's (realpath) code through
+// untouched, after which refusalFlag called anything that is not UNCOMPARABLE
+// "refused". So one code meant "absent, stay silent" from lstat and "REFUSED"
+// from realpath, five lines apart.
+//
+// MEASURED BEFORE CHOOSING THE FIX (scratchpad/r32/probe-ft3-codes.mjs, win32):
+//   dangling junction   lstat=OK       realpath=ENOENT   <- reaches the 2nd call
+//   junction loop       lstat=ENOENT   realpath=ELOOP    <- stopped by the 1st
+//   overlong name       lstat=ENOENT   realpath=ENOENT   <- stopped by the 1st
+//   denied parent       lstat=EPERM    realpath=EPERM    <- named, correctly
+// ENOENT is the ONLY code measured reaching the second call here, which is why
+// the fix carves the same pair there rather than building a code-to-noun map for
+// codes nothing could reach.
+// ---------------------------------------------------------------------------
+
+test('F-T3: a DANGLING link is SILENT, never called refused — an absence code is not a permission word', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    // Probe FIRST, on a throwaway: this box must be able to produce the state
+    // (lstat OK, realpath ENOENT) or the arm measures nothing.
+    const gone = path.join(proj, 'probe-target');
+    const link = path.join(proj, 'probe-link.md');
+    fs.mkdirSync(gone, { recursive: true });
+    let made = false;
+    try { fs.symlinkSync(gone, link, 'junction'); made = true; } catch { made = false; }
+    if (made) fs.rmSync(gone, { recursive: true, force: true });
+    let lstatOk = false;
+    let realpathCode = null;
+    if (made) {
+      try { fs.lstatSync(link); lstatOk = true; } catch { lstatOk = false; }
+      try { fs.realpathSync.native(link); } catch (e) { realpathCode = e.code || 'UNKNOWN'; }
+    }
+    if (!made || !lstatOk || realpathCode !== 'ENOENT') {
+      t.skip('this box cannot produce a link that lstats OK and fails realpath with ENOENT — the arm would be vacuous');
+      return;
+    }
+    try { fs.rmSync(link, { recursive: true, force: true }); } catch { /* best effort */ }
+
+    write(path.join(home, '.claude', 'CLAUDE.md'), 'global');
+    const dangling = path.join(proj, 'DANGLING.md');
+    const target = path.join(proj, 'target-dir');
+    fs.mkdirSync(target, { recursive: true });
+    write(path.join(proj, 'CLAUDE.md'), '@DANGLING.md' + String.fromCharCode(10));
+    fs.symlinkSync(target, dangling, 'junction');
+    fs.rmSync(target, { recursive: true, force: true });
+
+    const d = discoverClassB({ projectRoot: proj, home });
+    assert.ok(d.entries.some((e) => path.basename(e.path) === 'CLAUDE.md'),
+      'PRECONDITION: the walk still runs and still counts the importing file');
+    const named = d.flags.filter((f) => /refused path/.test(f) && /\[ENOENT\]/.test(f));
+    assert.deepStrictEqual(named, [],
+      'a dangling link lost NOTHING — there is nothing behind it to count — so it must produce no flag at all, '
+      + 'never a permission word: ' + JSON.stringify(d.flags));
+  } finally { clean(home, proj); }
+});
+
+// CWK-156 helper: make `dir` a directory whose own case policy is SENSITIVE and PROVE it by two distinct
+// inodes ({bigint:true} is load-bearing: NTFS file ids exceed 2**53). `fsutil file setCaseSensitiveInfo` is
+// per-directory on Windows 10 1803+ (no admin); ext4 is sensitive by itself; macOS APFS is not, so the
+// proof comes back false there and the caller skips VISIBLY -- capability-probed, never platform-gated.
+function caseSensitiveDirAt(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  spawnSync('fsutil', ['file', 'setCaseSensitiveInfo', dir, 'enable'], { stdio: 'ignore', timeout: 20000 });
+  try {
+    const lo = path.join(dir, 'cb-probe.md');
+    const up = path.join(dir, 'cb-Probe.md');
+    fs.writeFileSync(lo, 'a');
+    fs.writeFileSync(up, 'b'); // on a FOLDING volume this OVERWRITES lo instead of creating a sibling
+    const a = fs.statSync(lo, { bigint: true });
+    const b = fs.statSync(up, { bigint: true });
+    fs.rmSync(lo, { force: true });
+    fs.rmSync(up, { force: true });
+    return a.ino !== b.ino;
+  } catch { return false; }
+}
+
+// CWK-156 (class-b dedupe key): MISS DIRECTION = true (merge). Two spellings are ONE entry only where the volume folds
+// case. On a case-SENSITIVE rules directory Rule.md and rule.md are two real files and BOTH belong in the measurement;
+// the old dedupe key lowercased on `process.platform === 'win32'`, merged them and silently dropped one.
+test('CWK-156: two case-variant files in a case-SENSITIVE rules directory are BOTH discovered (the old win32 dedupe key merged them and dropped one)', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const rules = path.join(proj, '.claude', 'rules');
+    if (!caseSensitiveDirAt(rules)) { t.skip('no case-sensitive directory can be built here (capability proven absent by a distinct-inode check, not assumed)'); return; }
+    write(path.join(rules, 'Rule.md'), 'upper-case spelling');
+    write(path.join(rules, 'rule.md'), 'lower-case spelling');
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    const names = d.entries.map((e) => path.basename(e.path)).filter((n) => n.toLowerCase() === 'rule.md').sort();
+    assert.deepStrictEqual(names, ['Rule.md', 'rule.md'], 'both real files are measured, neither is dropped as a "duplicate"');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-156 control: ONE file reached by two routes (the rules walk and an @import) is still ONE entry -- the dedupe was narrowed, not removed', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, '.claude', 'rules', 'shared.md'), 'reached twice');
+    write(path.join(proj, 'CLAUDE.md'), '@.claude/rules/shared.md\n');
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.filter((e) => path.basename(e.path) === 'shared.md').length, 1);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-162 unit C3 (AI Deep Scan A3 + A2): the @import closure was DEPTH-capped with no visited set
+// (exponential in the fan-out), and the managedPaths signal scanned every prefix for every entry.
+// Witnesses were captured on the 0cde430 source (scratchpad/r14/witness-prefix.txt): 4,681 opens of ONE file for
+// 8 self-import lines; 80,000 prefixes (788,891 bytes of config, under the 1 MiB read cap) = ~340 ms for 300 entries.
+// ---------------------------------------------------------------------------
+import * as CBNS from './class-b.mjs'; // namespace import: a name the pre-fix tree never exported fails an ASSERTION, not the link
+
+// Count real file opens during `fn` (the closure's reads go through fs.openSync in repoReadOutcome). Restores in finally.
+function countOpens(fn) {
+  const real = fs.openSync;
+  let n = 0;
+  fs.openSync = (...a) => { n++; return real.apply(fs, a); };
+  try { fn(); } finally { fs.openSync = real; }
+  return n;
+}
+
+test('CWK-162 A3: the named total cap on followed @import edges exists', () => {
+  assert.ok(Number.isInteger(CBNS.IMPORT_EDGES_MAX) && CBNS.IMPORT_EDGES_MAX > 0, `IMPORT_EDGES_MAX = ${CBNS.IMPORT_EDGES_MAX}`);
+});
+
+test('CWK-162 A3: a CLAUDE.md that imports itself on 8 lines is read ONCE, not once per walk of the closure (witness: 4,681 opens)', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, 'CLAUDE.md'), '@CLAUDE.md\n'.repeat(8));
+    let d;
+    const opens = countOpens(() => { d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' }); });
+    assert.deepStrictEqual(d.entries.map((e) => path.basename(e.path)), ['CLAUDE.md'], 'still ONE entry');
+    assert.ok(opens <= d.entries.length + 4, `opens ${opens} for ${d.entries.length} entries: each file is read once (+ the memory-store probes)`);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-162 A3: an 8-wide, 4-deep @import lattice (33 distinct files, 4,096 walks to the last layer) opens each file once', () => {
+  const { home, proj } = sandbox();
+  try {
+    const layer = (k) => Array.from({ length: 8 }, (_, i) => `l${k}-${i}.md`);
+    write(path.join(proj, 'CLAUDE.md'), layer(1).map((n) => `@${n}`).join('\n'));
+    for (let k = 1; k <= 4; k++) for (const n of layer(k)) write(path.join(proj, n), k < 4 ? layer(k + 1).map((m) => `@${m}`).join('\n') : 'leaf');
+    let d;
+    const opens = countOpens(() => { d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' }); });
+    assert.strictEqual(d.entries.length, 33, 'the closure is the 33 distinct files');
+    assert.ok(opens <= 33 + 4, `opens ${opens}`);
+  } finally { clean(home, proj); }
+});
+
+// The exactness trap a PLAIN visited set falls into: the first route to a file can be a deep one (added at depth 5, never
+// expanded); a later root reaching it at depth 1 must still expand it. Global CLAUDE.md -> g1 -> g2 -> g3 -> g4 -> s (depth 5);
+// project CLAUDE.md -> s (depth 1) -> t1 -> t2 -> t3 -> t4 (depth 5). All of t1..t4 are in the closure.
+test('CWK-162 A3: a file first reached at the depth limit is still EXPANDED when a later root reaches it shallower (a plain visited set loses t1..t4)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const g = (n) => path.join(proj, `${n}.md`);
+    write(path.join(home, '.claude', 'CLAUDE.md'), `@${g('g1')}`);
+    write(g('g1'), `@${g('g2')}`); write(g('g2'), `@${g('g3')}`); write(g('g3'), `@${g('g4')}`); write(g('g4'), `@${g('s')}`);
+    write(g('s'), `@${g('t1')}`); write(g('t1'), `@${g('t2')}`); write(g('t2'), `@${g('t3')}`); write(g('t3'), `@${g('t4')}`); write(g('t4'), 'end');
+    write(path.join(proj, 'CLAUDE.md'), `@${g('s')}`);
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    const names = new Set(d.entries.map((e) => path.basename(e.path)));
+    for (const n of ['s.md', 't1.md', 't2.md', 't3.md', 't4.md']) assert.ok(names.has(n), `${n} is in the closure`);
+  } finally { clean(home, proj); }
+});
+
+function mulberry32(a) {
+  return () => { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+test('CWK-162 A3: on random import graphs (cycles, self-imports, two roots) the closure equals an independent breadth-first reference to the depth limit', () => {
+  const DEPTH = 5; // CC's documented @import hop limit; the engine's IMPORT_DEPTH_MAX
+  for (let seed = 1; seed <= 12; seed++) {
+    const rnd = mulberry32(seed);
+    const N = 30;
+    const pick = (k) => Array.from({ length: k }, () => Math.floor(rnd() * N));
+    const edges = Array.from({ length: N }, () => pick(Math.floor(rnd() * 5)));
+    const globalRoots = pick(1 + Math.floor(rnd() * 2));
+    const projectRoots = pick(1 + Math.floor(rnd() * 2));
+    const { home, proj } = sandbox();
+    try {
+      const p = (i) => path.join(proj, `n${i}.md`);
+      for (let i = 0; i < N; i++) write(p(i), edges[i].map((j) => `@${p(j)}`).join('\n') || 'x');
+      write(path.join(home, '.claude', 'CLAUDE.md'), globalRoots.map((j) => `@${p(j)}`).join('\n'));
+      write(path.join(proj, 'CLAUDE.md'), projectRoots.map((j) => `@${p(j)}`).join('\n'));
+      // reference: per root, a node at distance <= DEPTH hops (the root is distance 0) is in the closure; union of both roots
+      const want = new Set([path.join(home, '.claude', 'CLAUDE.md'), path.join(proj, 'CLAUDE.md')]);
+      for (const roots of [globalRoots, projectRoots]) {
+        const dist = new Map();
+        let frontier = [];
+        for (const j of roots) if (!dist.has(j)) { dist.set(j, 1); frontier.push(j); }
+        for (let depth = 1; depth < DEPTH && frontier.length; depth++) {
+          const next = [];
+          for (const i of frontier) for (const j of edges[i]) if (!dist.has(j)) { dist.set(j, depth + 1); next.push(j); }
+          frontier = next;
+        }
+        for (const j of dist.keys()) want.add(p(j));
+      }
+      const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+      const got = new Set(d.entries.map((e) => e.path));
+      assert.deepStrictEqual([...got].sort(), [...want].sort(), `seed ${seed}`);
+    } finally { clean(home, proj); }
+  }
+});
+
+test('CWK-162 A3: more than IMPORT_EDGES_MAX distinct imports are followed only up to the cap, and the cap SAYS so; under the cap there is no such flag', () => {
+  const cap = CBNS.IMPORT_EDGES_MAX;
+  const { home, proj } = sandbox();
+  try {
+    const n = cap + 50;
+    for (let i = 0; i < n; i++) write(path.join(proj, `m${i}.md`), 'x');
+    write(path.join(proj, 'CLAUDE.md'), Array.from({ length: n }, (_, i) => `@m${i}.md`).join('\n'));
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.length, 1 + cap, 'CLAUDE.md plus exactly the cap');
+    assert.strictEqual(d.flags.filter((f) => /@import closure capped/.test(f)).length, 1, `one flag: ${JSON.stringify(d.flags)}`);
+    assert.ok(d.flags.some((f) => f.includes(String(cap)) && /NOT measured/.test(f)), 'it names the cap and that the rest is unmeasured');
+  } finally { clean(home, proj); }
+  const small = sandbox();
+  try {
+    for (let i = 0; i < 10; i++) write(path.join(small.proj, `m${i}.md`), 'x');
+    write(path.join(small.proj, 'CLAUDE.md'), Array.from({ length: 10 }, (_, i) => `@m${i}.md`).join('\n'));
+    const d = discoverClassB({ projectRoot: small.proj, home: small.home, platform: 'claude-code' });
+    assert.strictEqual(d.entries.length, 11);
+    assert.strictEqual(d.flags.some((f) => /@import closure capped/.test(f)), false, 'no flag under the cap');
+  } finally { clean(small.home, small.proj); }
+});
+
+test('CWK-162 A2: the managedPaths matcher is the OLD predicate exactly, over every prefix and path built from a hostile segment set (trailing slashes, empty segments, spaces, dots)', () => {
+  assert.strictEqual(typeof CBNS.managedMatcher, 'function', 'managedMatcher exists');
+  const segs = ['a', 'b', '', 'a b', '.x'];
+  const all = new Set();
+  const build = (parts) => { for (const t of ['', '/']) all.add(parts.join('/') + t); };
+  const rec = (parts, left) => { if (parts.length) build(parts); if (!left) return; for (const sg of segs) rec([...parts, sg], left - 1); };
+  rec([], 4);
+  const strings = [...all].filter((x) => x !== '');
+  const oldPredicate = (rel, pfx) => rel === pfx || rel.startsWith(pfx.endsWith('/') ? pfx : pfx + '/');
+  let checked = 0;
+  for (const pfx of strings) {
+    const m = CBNS.managedMatcher([pfx]);
+    for (const rel of strings) { assert.strictEqual(m(rel), oldPredicate(rel, pfx), `pfx ${JSON.stringify(pfx)} rel ${JSON.stringify(rel)}`); checked++; }
+  }
+  const whole = CBNS.managedMatcher(strings);
+  for (const rel of strings) assert.strictEqual(whole(rel), strings.some((pfx) => oldPredicate(rel, pfx)), `whole list, rel ${JSON.stringify(rel)}`);
+  assert.ok(checked > 1000000, `the sweep really ran: ${checked} pairs`);
+});
+
+test('CWK-162 A2: 20,000 managedPaths prefixes cost no per-entry scan -- the startsWith calls do not grow with the prefix count (witness: 80,000 prefixes ~340 ms for 300 entries)', () => {
+  const { home, proj } = sandbox();
+  try {
+    for (let i = 0; i < 40; i++) write(path.join(proj, '.claude', 'rules', 'pack', `f${i}.md`), 'x');
+    write(path.join(proj, 'CLAUDE.md'), 'x');
+    const real = String.prototype.startsWith;
+    let calls = 0;
+    const run = (managedPaths) => {
+      calls = 0;
+      String.prototype.startsWith = function spy(...a) { calls++; return real.apply(this, a); };
+      try { return discoverClassB({ projectRoot: proj, home, platform: 'claude-code', managedPaths }); } finally { String.prototype.startsWith = real; }
+    };
+    const base = run(['.claude/rules/pack']);
+    const baseCalls = calls;
+    assert.ok(base.entries.filter((e) => e.path.includes('pack')).every((e) => e.managed), 'the matching prefix still tags its entries');
+    const many = Array.from({ length: 20000 }, (_, i) => `no/such/prefix-${i}`);
+    const big = run([...many, '.claude/rules/pack']);
+    assert.ok(big.entries.filter((e) => e.path.includes('pack')).every((e) => e.managed), 'and still does with 20,000 other prefixes');
+    assert.ok(calls - baseCalls < 100, `startsWith calls: ${baseCalls} with 1 prefix, ${calls} with 20,001 (the old scan made prefixes x entries)`);
+  } finally { clean(home, proj); }
+});
+
+test('CWK-162 A3: the same import written on 600 lines is ONE edge -- duplicates never spend the cap', () => {
+  const { home, proj } = sandbox();
+  try {
+    write(path.join(proj, 'a.md'), 'x');
+    write(path.join(proj, 'CLAUDE.md'), '@a.md\n'.repeat(600));
+    const d = discoverClassB({ projectRoot: proj, home, platform: 'claude-code' });
+    assert.deepStrictEqual(d.entries.map((e) => path.basename(e.path)).sort(), ['CLAUDE.md', 'a.md']);
+    assert.strictEqual(d.flags.some((f) => /@import closure capped/.test(f)), false, 'no cap flag: 600 identical lines are one edge');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK2-029 (b) REACH, the read half (INSPECT 69 witness scratchpad/16e/insp69-reach.mjs): a project-scope class-B
+// candidate whose realpath leaves the project, and is neither inside ~/.claude nor an ancestor governance file, is
+// OUTSIDE: never read for content (no @import recursion through it), never scope 'project', never in `entries`,
+// sized from stat only, and named by one flag (its path, never its content).
+// ---------------------------------------------------------------------------
+function reachSandbox() {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwreach-home-')));
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  const room = path.join(home, 'work', 'room');
+  fs.mkdirSync(path.join(room, '.git'), { recursive: true });
+  // the nested target an OUTSIDE file names: listing it anywhere proves the OUTSIDE file's content was read
+  write(path.join(home, '.ssh', 'next'), 'nested target\n');
+  return { home, room };
+}
+const allListed = (d) => [...d.entries, ...d.inherited];
+
+test('CWK2-029 (b): a plain project CLAUDE.md @import of a HOME file outside ~/.claude is OUTSIDE: never read, never scope project, sized by stat, flagged', () => {
+  const { home, room } = reachSandbox();
+  try {
+    const secret = path.join(home, '.aws', 'credentials');
+    write(secret, '[default]\naws_secret_access_key = FAKE-SECRET\n@~/.ssh/next\n' + 'a line long enough to count as a duplicate\n'.repeat(3));
+    write(path.join(home, 'loose.md'), 'loose\n@~/.ssh/next\n');
+    write(path.join(room, 'CLAUDE.md'), '# room\n@~/.aws/credentials\n@../../loose.md\n');
+    write(path.join(home, 'CLAUDE.md'), '# home\n'); // a ~/CLAUDE.md is an ancestor FILE, never a folder that admits all of HOME
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    for (const p of [secret, path.join(home, 'loose.md')]) {
+      const hit = allListed(d).filter((e) => e.path === p);
+      assert.strictEqual(hit.length, 1, `${path.basename(p)} is measured once (Claude Code may load it)`);
+      assert.notStrictEqual(hit[0].scope, 'project', `${path.basename(p)} is never tagged scope project`);
+      assert.strictEqual(hit[0].bytes, fs.statSync(p).size, `${path.basename(p)} is sized from stat`);
+      assert.ok(!d.entries.some((e) => e.path === p), `${path.basename(p)} is never in entries (knife-reachable)`);
+    }
+    assert.ok(!allListed(d).some((e) => e.path === path.join(home, '.ssh', 'next')), 'the OUTSIDE file was never read: its own @import is not followed');
+    assert.ok(d.flags.some((f) => f.includes('~/.aws/credentials')), `one flag names the OUTSIDE file: ${JSON.stringify(d.flags)}`);
+    assert.ok(d.flags.some((f) => f.includes('~/loose.md')), 'the relative ../ escape is flagged the same way');
+    assert.ok(!d.flags.some((f) => f.includes('FAKE-SECRET')), 'no flag carries the OUTSIDE file\'s content');
+    const m = measureEntries(d.inherited, { withGzip: false });
+    assert.strictEqual(m.mechFat.dupTokens, 0, 'the inherited gauge never reads the OUTSIDE file for its content (its dup lines are not counted)');
+    const read = measureEntries(d.inherited.filter((e) => e.path === secret).map((e) => ({ ...e, statOnly: false })), { withGzip: false });
+    assert.ok(read.mechFat.dupTokens > 0, 'non-vacuity: the same entry, read, does count its dup lines');
+    assert.ok(d.entries.some((e) => e.path === path.join(room, 'CLAUDE.md') && e.scope === 'project'), 'control: the room\'s own CLAUDE.md stays room-owned');
+  } finally { clean(home); }
+});
+
+test('CWK2-029 (b): a project CLAUDE.md that is a SYMLINK to a HOME file is OUTSIDE, never read (skips visibly where a file symlink cannot be made)', (t) => {
+  const { home, room } = reachSandbox();
+  try {
+    const target = path.join(home, 'notes.md');
+    write(target, '# notes\n@~/.ssh/next\n');
+    try { fs.symlinkSync(target, path.join(room, 'CLAUDE.md'), 'file'); } catch (e) {
+      t.skip(`file symlink creation unavailable on this host: ${e.code || e.message}`);
+      return;
+    }
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    const hit = allListed(d).filter((e) => e.path === target);
+    assert.strictEqual(hit.length, 1, 'the link target is measured once');
+    assert.notStrictEqual(hit[0].scope, 'project', 'the link target is never tagged scope project');
+    assert.ok(!d.entries.some((e) => e.path === target), 'the link target is never in entries');
+    assert.ok(!allListed(d).some((e) => e.path === path.join(home, '.ssh', 'next')), 'the link target was never read for @imports');
+    assert.ok(d.flags.some((f) => f.includes('~/notes.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+  } finally { clean(home); }
+});
+
+test('CWK2-029 (b): a memory store that is a directory JUNCTION to a HOME folder outside ~/.claude puts nothing in entries and reads nothing (skips visibly where a junction cannot be made)', (t) => {
+  const { home, room } = reachSandbox();
+  try {
+    const outDir = path.join(home, 'notes-dir');
+    write(path.join(outDir, 'MEMORY.md'), 'index\n@~/.ssh/next\n');
+    const mem = ccMemoryDir(room, home);
+    fs.mkdirSync(path.dirname(mem), { recursive: true });
+    try { fs.symlinkSync(outDir, mem, 'junction'); } catch (e) {
+      t.skip(`junction creation unavailable on this host: ${e.code || e.message}`);
+      return;
+    }
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    const p = path.join(outDir, 'MEMORY.md');
+    assert.ok(!d.entries.some((e) => e.path === p), 'the junctioned memory index is never in entries (knife-reachable)');
+    const hit = d.inherited.filter((e) => e.path === p);
+    assert.strictEqual(hit.length, 1, 'it is still measured, by stat');
+    assert.notStrictEqual(hit[0].scope, 'project', 'it is never tagged scope project');
+    assert.ok(d.flags.some((f) => f.includes('~/notes-dir/MEMORY.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+    // INSPECT 99 L99-2: the gauge never reads the statOnly index, not even for its line count
+    const m = measureEntries(d.inherited, { withGzip: false });
+    assert.strictEqual(m.index.lines, 0, 'measureEntries never reads a statOnly memory index for its lines');
+    assert.strictEqual(m.index.bytes, fs.statSync(p).size, 'its index bytes still come from stat');
+    const read = measureEntries(hit.map((e) => ({ ...e, statOnly: false })), { withGzip: false });
+    assert.ok(read.index.lines > 0, 'non-vacuity: the same index, not statOnly, does read its lines');
+  } finally { clean(home); }
+});
+
+test('CWK2-029 (b) control: an ANCESTOR governance file and its own-folder @import stay the inherited tier and ARE read; a ~/.claude import from an ANCESTOR\'s closure is not OUTSIDE', () => {
+  const { home, room } = reachSandbox();
+  try {
+    const umb = path.join(home, 'work');
+    write(path.join(umb, 'CLAUDE.md'), '# umbrella\n@AGENTS.md\n');
+    write(path.join(umb, 'AGENTS.md'), 'rules\n@~/.claude/shared.md\n');
+    write(path.join(home, '.claude', 'shared.md'), 'shared\n');
+    write(path.join(room, 'CLAUDE.md'), '# room\n');
+    write(path.join(home, '.claude', 'CLAUDE.md'), '# global\n@~/user-notes.md\n');
+    write(path.join(home, 'user-notes.md'), 'the user\'s own global chain\n');
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    assert.ok(d.entries.some((e) => e.path === path.join(home, 'user-notes.md') && e.scope === 'global'), 'the user\'s own GLOBAL chain keeps its reach: a ~/.claude/CLAUDE.md import into HOME stays a global entry');
+    const inh = d.inherited.map((e) => e.path);
+    assert.ok(inh.includes(path.join(umb, 'CLAUDE.md')) && inh.includes(path.join(umb, 'AGENTS.md')), 'the ancestor tier is unchanged');
+    assert.ok(inh.includes(path.join(home, '.claude', 'shared.md')), 'the ancestor file WAS read: its ~/.claude import is followed');
+    assert.ok(!d.flags.some((f) => /outside the project/.test(f)), `no OUTSIDE flag on the ancestor tier: ${JSON.stringify(d.flags)}`);
+  } finally { clean(home); }
+});
+
+test('CWK2-029 (b): an ANCESTOR CLAUDE.md that is a SYMLINK out of its folder is not ancestor governance: its target is OUTSIDE (skips visibly where a file symlink cannot be made)', (t) => {
+  const { home, room } = reachSandbox();
+  try {
+    const target = path.join(home, 'secret.md');
+    write(target, '# secret\n@~/.ssh/next\n');
+    try { fs.symlinkSync(target, path.join(home, 'work', 'CLAUDE.md'), 'file'); } catch (e) {
+      t.skip(`file symlink creation unavailable on this host: ${e.code || e.message}`);
+      return;
+    }
+    write(path.join(room, 'CLAUDE.md'), '# room\n');
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    const hit = allListed(d).filter((e) => e.path === target);
+    assert.strictEqual(hit.length, 1, 'the link target is measured once');
+    assert.notStrictEqual(hit[0].scope, 'project', 'the link target is never tagged scope project');
+    assert.ok(!allListed(d).some((e) => e.path === path.join(home, '.ssh', 'next')), 'the link target was never read for @imports');
+    assert.ok(d.flags.some((f) => f.includes('~/secret.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+  } finally { clean(home); }
+});
+
+test('INSPECT 99 L99-1: a project @import of a file in ~/.claude that is not the project\'s own memory store is OUTSIDE: never read, never scope project, flagged', () => {
+  const { home, room } = reachSandbox();
+  try {
+    write(path.join(home, '.claude', '.credentials.json'), '{"token":"FAKE-TOKEN"}\n@~/marker-cred.md\n');
+    write(path.join(home, '.claude', 'settings.json'), '{}\n@~/marker-sett.md\n');
+    for (const m of ['marker-cred.md', 'marker-sett.md', 'marker-mem.md']) write(path.join(home, m), 'marker\n');
+    const mem = ccMemoryDir(room, home);
+    write(path.join(mem, 'MEMORY.md'), 'index\n');
+    write(path.join(mem, 'topic.md'), 'topic\n@~/marker-mem.md\n');
+    const memRel = path.relative(home, path.join(mem, 'topic.md')).split(path.sep).join('/');
+    write(path.join(room, 'CLAUDE.md'), `# room\n@~/.claude/.credentials.json\n@~/.claude/settings.json\n@~/${memRel}\n`);
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    for (const f of ['.credentials.json', 'settings.json']) {
+      const p = path.join(home, '.claude', f);
+      const hit = allListed(d).filter((e) => e.path === p);
+      assert.strictEqual(hit.length, 1, `${f} is measured once`);
+      assert.notStrictEqual(hit[0].scope, 'project', `${f} is never tagged scope project`);
+      assert.ok(!d.entries.some((e) => e.path === p), `${f} is never in entries`);
+      assert.ok(d.flags.some((x) => x.includes(`~/.claude/${f}`)), `one flag names ~/.claude/${f}: ${JSON.stringify(d.flags)}`);
+    }
+    for (const m of ['marker-cred.md', 'marker-sett.md']) {
+      assert.ok(!allListed(d).some((e) => e.path === path.join(home, m)), `${m} unlisted: the ~/.claude file naming it was never read`);
+    }
+    assert.ok(!d.flags.some((x) => x.includes('FAKE-TOKEN')), 'no flag carries file content');
+    assert.ok(allListed(d).some((e) => e.path === path.join(home, 'marker-mem.md')), 'control: the project\'s own memory store, reached by import, IS read (its own import is followed)');
+    assert.ok(!d.flags.some((x) => x.includes('memory/topic.md') && /outside the project/.test(x)), 'control: the project\'s own memory store is not OUTSIDE');
+    assert.ok(d.entries.some((e) => e.path === path.join(mem, 'MEMORY.md') && e.scope === 'project'), 'control: the memory index stays a project entry');
+  } finally { clean(home); }
+});
+
+test('INSPECT 99 L99-3: a file the PROJECT reaches inside an ancestor folder is OUTSIDE unless it is the ancestor CLAUDE.md itself; the ancestor\'s own @import closure stays read', () => {
+  const { home, room } = reachSandbox();
+  try {
+    const ws = path.join(home, 'work');
+    write(path.join(ws, 'CLAUDE.md'), '# umbrella\n@AGENTS.md\n@MEMORY.md\n');
+    write(path.join(ws, 'AGENTS.md'), 'rules\n@deep-a.md\n');
+    write(path.join(ws, 'MEMORY.md'), 'umbrella memory\n');
+    write(path.join(ws, 'deep-a.md'), 'deep\n');
+    write(path.join(ws, 'sib', 'secret.md'), 'SIB-SECRET\n@deeper.md\n');
+    write(path.join(ws, 'sib', 'deeper.md'), 'deeper\n');
+    write(path.join(room, 'CLAUDE.md'), '# room\n@../sib/secret.md\n@../CLAUDE.md\n');
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    const secret = path.join(ws, 'sib', 'secret.md');
+    const hit = allListed(d).filter((e) => e.path === secret);
+    assert.strictEqual(hit.length, 1, 'the sibling file is measured once');
+    assert.notStrictEqual(hit[0].scope, 'project', 'the sibling file is never tagged scope project');
+    assert.ok(!allListed(d).some((e) => e.path === path.join(ws, 'sib', 'deeper.md')), 'the sibling file was never read: its own import is not followed');
+    assert.ok(d.flags.some((x) => x.includes('~/work/sib/secret.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
+    assert.ok(!d.flags.some((x) => x.includes('SIB-SECRET')), 'no flag carries file content');
+    for (const f of ['CLAUDE.md', 'AGENTS.md', 'MEMORY.md', 'deep-a.md']) {
+      const e = d.inherited.find((x) => x.path === path.join(ws, f));
+      assert.ok(e && e.scope === 'project' && !e.statOnly, `pin: the ancestor ${f} stays the read inherited tier`);
+      assert.ok(!d.flags.some((x) => x.includes(`~/work/${f}`)), `pin: no flag on the ancestor ${f}`);
+    }
+  } finally { clean(home); }
+});
+
+// RE-INSPECT 102 R102-1 (witness scratchpad/17e/insp102-nested.mjs B1/B1b/B2): ancestor governance begins strictly
+// ABOVE the project's repository top, the nearest folder at or above the project root holding a `.git` entry.
+function nestedCloneSandbox({ git = true } = {}) {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwr102-home-')));
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  const clone = path.join(home, 'src', 'clone');
+  const sub = path.join(clone, 'sub');
+  fs.mkdirSync(sub, { recursive: true });
+  if (git) fs.mkdirSync(path.join(clone, '.git'));
+  const cred = path.join(home, '.claude', '.credentials.json');
+  write(cred, '{"token":"FAKE-TOKEN"}\n@~/marker-b1.md\n');
+  write(path.join(home, 'marker-b1.md'), 'marker\n');
+  write(path.join(clone, 'CLAUDE.md'), '# clone top\n@~/.claude/.credentials.json\n');
+  write(path.join(sub, 'CLAUDE.md'), '# package\n');
+  return { home, clone, sub, cred };
+}
+
+test('RE-INSPECT 102 R102-1: a clone\'s own top CLAUDE.md above a nested session root keeps the room rule: its ~/.claude/.credentials.json import is OUTSIDE, never read', () => {
+  const { home, clone, sub, cred } = nestedCloneSandbox();
+  try {
+    for (const projectRoot of [sub, clone]) { // B1 (nested session root), B1b (the clone top itself)
+      const d = discoverClassB({ projectRoot, home, platform: 'claude-code' });
+      const label = path.basename(projectRoot);
+      const hit = allListed(d).filter((e) => e.path === cred);
+      assert.strictEqual(hit.length, 1, `${label}: .credentials.json is measured once`);
+      assert.strictEqual(hit[0].scope, 'outside', `${label}: .credentials.json is OUTSIDE`);
+      assert.strictEqual(hit[0].statOnly, true, `${label}: .credentials.json is statOnly`);
+      assert.ok(!allListed(d).some((e) => e.path === path.join(home, 'marker-b1.md')), `${label}: .credentials.json was never read: its import is unlisted`);
+      assert.ok(d.flags.some((x) => x.includes('~/.claude/.credentials.json')), `${label}: one flag names it: ${JSON.stringify(d.flags)}`);
+      const top = allListed(d).find((e) => e.path === path.join(clone, 'CLAUDE.md'));
+      assert.ok(top && top.scope === 'project' && !top.statOnly, `${label}: the clone's own top CLAUDE.md is still measured and read`);
+    }
+  } finally { clean(home); }
+});
+
+test('RE-INSPECT 102 R102-1 pin: the house shape, a room with its own .git under an ancestor folder with its own .git and a CLAUDE.md importing @AGENTS.md, keeps the ancestor closure read', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwr102-house-')));
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const umb = path.join(home, 'repos', 'umbrella');
+    const room = path.join(umb, 'room');
+    fs.mkdirSync(path.join(umb, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(room, '.git'), { recursive: true });
+    write(path.join(umb, 'CLAUDE.md'), '# umbrella\n@AGENTS.md\n@MEMORY.md\n');
+    write(path.join(umb, 'AGENTS.md'), 'rules\n@deep.md\n@~/.claude/g.md\n');
+    write(path.join(umb, 'MEMORY.md'), 'umbrella memory\n');
+    write(path.join(umb, 'deep.md'), 'deep\n');
+    write(path.join(home, '.claude', 'g.md'), 'global\n');
+    write(path.join(room, 'CLAUDE.md'), '# room\n');
+    const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
+    for (const p of ['CLAUDE.md', 'AGENTS.md', 'MEMORY.md', 'deep.md'].map((f) => path.join(umb, f)).concat(path.join(home, '.claude', 'g.md'))) {
+      const e = d.inherited.find((x) => x.path === p);
+      assert.ok(e && e.scope === 'project' && !e.statOnly, `pin: ${path.relative(home, p)} stays the read inherited tier`);
+    }
+    assert.ok(!d.flags.some((x) => /outside the project/.test(x)), `pin: no OUTSIDE flag in the house shape: ${JSON.stringify(d.flags)}`);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('RE-INSPECT 102 R102-1 residual (named, not closed): with no .git up to HOME, a CLAUDE.md above a nested session root is still an ancestor and its ~/.claude import is read', () => {
+  const { home, sub, cred } = nestedCloneSandbox({ git: false });
+  try {
+    const d = discoverClassB({ projectRoot: sub, home, platform: 'claude-code' });
+    const hit = allListed(d).find((e) => e.path === cred);
+    assert.ok(hit && hit.scope === 'project' && !hit.statOnly, 'the residual: with no repository top, .credentials.json is read through the ancestor rule');
+    assert.ok(allListed(d).some((e) => e.path === path.join(home, 'marker-b1.md')), 'the residual: its import is followed');
+  } finally { clean(home); }
+});
+
+test('RE-INSPECT 102 R102-1: the .git entry that marks the repository top is read by lstat, never followed: a dangling .git link still marks the top (skips visibly where a dangling junction cannot be made)', (t) => {
+  const { home, clone, sub, cred } = nestedCloneSandbox({ git: false });
+  try {
+    const gone = path.join(home, 'gone-git-dir');
+    try { fs.symlinkSync(gone, path.join(clone, '.git'), 'junction'); } catch (e) {
+      t.skip(`dangling junction creation unavailable on this host: ${e.code || e.message}`);
+      return;
+    }
+    let dangling = false;
+    try { fs.statSync(path.join(clone, '.git')); } catch { dangling = true; }
+    if (!dangling) { t.skip('this host follows the planted .git link to a live target, so the dangling case cannot be shown'); return; }
+    const d = discoverClassB({ projectRoot: sub, home, platform: 'claude-code' });
+    const hit = allListed(d).find((e) => e.path === cred);
+    assert.ok(hit && hit.scope === 'outside' && hit.statOnly, 'a dangling .git link still marks the top, so .credentials.json is OUTSIDE');
+    assert.ok(!allListed(d).some((e) => e.path === path.join(home, 'marker-b1.md')), 'its import is unlisted');
+  } finally { clean(home); }
 });

@@ -15,7 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dist = path.join(repo, 'plugin');
@@ -54,6 +54,29 @@ const UNWIRED_ENGINE = [
 ];
 const isUnwiredEngine = (rel) => UNWIRED_ENGINE.includes(rel);
 
+// DEV TOOLING IN scripts/lib/, DELIBERATELY NOT SHIPPED (CWK-174, widened at 09a): the house secret scan (byte-equal in every room,
+// U/scripts/scanner-parity.mjs keeps the copies equal; it serves the commit and push gate, scripts/secret-gate.mjs), the release-notes
+// deriver, the canon git-spawn census with its witness vectors and this room's pins, the canon wave runner with its machine reading and
+// stdout preload, and this room's test numbers. Nothing the installed skill runs imports any of them. So each is excluded from the build
+// AND from both directions of the dist check, with its absence asserted, the same explicit-absence belt UNWIRED_ENGINE uses. They stay
+// in the suite and in source; verify.mjs's lib roster exempts them by name for the same reason.
+export const DEV_ONLY_LIBS = [ // exported (PR #18, build-plugin.test.mjs:65) so the test loops over every entry, never a hand-copied two
+  path.join('scripts', 'lib', 'secret-scan.mjs'),
+  path.join('scripts', 'lib', 'release-shape.mjs'), // the create-release workflow's CHANGELOG deriver (scripts/release-notes.mjs): CI tooling, never imported by shipped code
+  // 09a: the canon git-spawn census (its witness vectors and this room's pins) and the canon test runner in waves (with the machine
+  // reading and the stdout preload it uses): verify.mjs and scripts/test.mjs import them, shipped code never does.
+  path.join('scripts', 'lib', 'git-env-census.mjs'),
+  path.join('scripts', 'lib', 'git-env-census.vectors.mjs'),
+  path.join('scripts', 'lib', 'git-env-pins.mjs'),
+  path.join('scripts', 'lib', 'wave-run.mjs'),
+  path.join('scripts', 'lib', 'machine-reading.mjs'),
+  path.join('scripts', 'lib', 'stdout-sync.mjs'),
+  path.join('scripts', 'lib', 'test-plan.mjs'), // the room's numbers for the wave runner and its declared-test floor
+  path.join('scripts', 'lib', 'front-door-links.mjs'), // 16f: the canon front-door link check's engine (its CLI and workflow run it in CI, shipped code never does)
+];
+const isDevOnlyLib = (rel) => DEV_ONLY_LIBS.includes(rel);
+const isNotShipped = (rel) => isUnwiredEngine(rel) || isDevOnlyLib(rel);
+
 // THE DIST WALK IS A DENYLIST, SO ANY STRAY UNDER A DIST_ITEM RIDES ALONG. A
 // CoalHearth journal written by a command whose cwd happened to be scripts/lib
 // left `scripts/lib/.claude/coalhearth/session_handoff.json` in the tree; the
@@ -84,7 +107,7 @@ export function buildDist(distRoot = dist) {
     const src = path.join(repo, rel);
     const dst = path.join(distRoot, rel);
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isUnwiredEngine(path.relative(repo, s)) && !hasStrayDotDir(path.relative(src, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine + any stray dot-dir BELOW the item
+    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isNotShipped(path.relative(repo, s)) && !hasStrayDotDir(path.relative(src, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine + every DEV_ONLY_LIBS entry + any stray dot-dir BELOW the item
   }
 }
 
@@ -117,7 +140,7 @@ function contentEquals(pathA, pathB) {
 export function checkDist(distRoot = dist) {
   const out = [];
   const filesUnder = (root, rel, item = rel) => {
-    if (isTest(rel) || isUnwiredEngine(rel) || hasStrayDotDir(path.relative(item, rel))) return []; // excluded from the dist -> excluded here too, both directions
+    if (isTest(rel) || isNotShipped(rel) || hasStrayDotDir(path.relative(item, rel))) return []; // excluded from the dist -> excluded here too, both directions
     const abs = path.join(root, rel);
     if (!fs.existsSync(abs)) return [];
     if (fs.statSync(abs).isDirectory()) return fs.readdirSync(abs).flatMap((n) => filesUnder(root, path.join(rel, n), item));
@@ -138,6 +161,9 @@ export function checkDist(distRoot = dist) {
   // orphan check clears it). Assert absence explicitly instead.
   for (const rel of UNWIRED_ENGINE) {
     if (fs.existsSync(path.join(distRoot, rel))) out.push(`unwired class-A engine present in plugin/ (must not ship until the SKILL surface wires it): ${rel}`);
+  }
+  for (const rel of DEV_ONLY_LIBS) {
+    if (fs.existsSync(path.join(distRoot, rel))) out.push(`dev-only lib present in plugin/ (dev tooling in DEV_ONLY_LIBS, which the installed skill never imports: never plugin payload): ${rel}`);
   }
   // ASSERT ABSENCE OVER EXACTLY THE SET THE EXCLUSION REMOVES — no wider, no
   // NARROWER. The exclusion drops any dot-named SEGMENT, files included; the first
@@ -203,7 +229,20 @@ export function checkDist(distRoot = dist) {
   return out;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run only as the entry point (verify.mjs and the tests import this file). Node resolves
+// import.meta.url to the entry file's REALPATH, but argv[1] keeps the path it was invoked by:
+// through a symlink or a junction a plain compare never matched, and neither the build nor
+// --check ran (exit 0, no output). node/runtime.md §4: both sides through realpathSync.native.
+// An argv[1] that cannot be resolved cannot be the file Node just loaded, so it is not this module.
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync.native(process.argv[1]) === fs.realpathSync.native(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (isEntryPoint()) {
   if (process.argv.includes('--check')) {
     const f = checkDist();
     // CWK-071 (node/runtime.md §7): exitCode + natural exit. The ELSE is

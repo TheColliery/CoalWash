@@ -21,12 +21,14 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let fails = 0;
 const ok = (m) => console.log(`  ok   ${m}`);
 const fail = (m) => { console.log(`  FAIL ${m}`); fails++; };
+// Every git spawn in this gate carries a deadline (CWK2-061 / N165-1): an unbounded wait is a hung gate, never a verdict.
+const GIT_SPAWN_TIMEOUT_MS = 60000;
 
 const LIBS = [
   'class-b.mjs', 'caliper.mjs', 'fidelity-gate.mjs', 'apply.mjs', 'keeps.mjs', 'receipt.mjs',
   'retention.mjs', 'cli.mjs', 'ask.mjs', 'tailings.mjs', 'broom.mjs', 'wizard.mjs', 'parcel.mjs', 'writeguard.mjs',
   'anchor-diff.mjs', 'estate.mjs', 'estate-archive.mjs', 'retier.mjs', 'dig-gauge.mjs',
-  'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs',
+  'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs', 'repo-fs.mjs', 'git-env.mjs',
 ];
 
 // LIBS is hand-listed, so it silently rots: a new lib nobody adds here is never
@@ -34,7 +36,8 @@ const LIBS = [
 // roster — listed-but-missing is caught by the file loop below, this catches
 // on-disk-but-unlisted. Tests + the deliberately-unshipped class-A engine are
 // gated by the suite and build-plugin respectively, not here.
-const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs']);
+const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs', 'secret-scan.mjs', 'release-shape.mjs', // + the dev-only libs (build-plugin DEV_ONLY_LIBS: the house secret scan, the release deriver; CWK-174)
+  'git-env-census.mjs', 'git-env-census.vectors.mjs', 'git-env-pins.mjs', 'wave-run.mjs', 'machine-reading.mjs', 'stdout-sync.mjs', 'test-plan.mjs', 'front-door-links.mjs']); // + the canon census and wave-run trios, and the room's wave-run numbers (09a)
 console.log('lib roster drift:');
 try {
   const onDisk = fs.readdirSync(path.join(repo, 'scripts', 'lib'))
@@ -169,7 +172,7 @@ try {
   if (pj.license === 'Apache-2.0') ok('plugin.json license = Apache-2.0'); else fail(`plugin.json license = '${pj.license}' (series license is Apache-2.0)`);
   const hj = fs.readFileSync(path.join(repo, 'hooks', 'hooks.json'), 'utf8');
   if (hj.includes('${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js')) ok('hooks.json wires SessionStart via ${CLAUDE_PLUGIN_ROOT}/hooks');
-  else fail('hooks.json does not wire SessionStart under ${CLAUDE_PLUGIN_ROOT}/bin');
+  else fail('hooks.json does not wire ${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js');
 } catch (e) { fail(`plugin manifest: ${e.message}`); }
 
 console.log('marketplace.json:');
@@ -253,13 +256,22 @@ try {
 // each with its measured reason in scripts/pointer-check.mjs.
 console.log('pointers (ship-text vs the tree):');
 try {
-  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8' });
-  if (lsAll.error || lsAll.status !== 0) {
+  // CWK-133: every git spawn in this gate gets its env from the ONE helper (an ambient GIT_DIR / GIT_INDEX_FILE from
+  // a linked worktree's hook would otherwise decide which repository these two calls answer for). Dynamic, inside the
+  // check that uses it: a missing helper is one FAIL line here, never a link-time crash (node/runtime.md §1).
+  const { gitEnv } = await import('./lib/git-env.mjs'); // a literal specifier, so the git-spawn census reads where gitEnv comes from
+  // The env is built INLINE at each spawn (not held in a variable) so the git-spawn census below can see it is the helper's.
+  const lsAll = spawnSync('git', ['ls-files'], { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)), timeout: GIT_SPAWN_TIMEOUT_MS });
+  if (lsAll.error?.code === 'ETIMEDOUT') {
+    // A TIMED-OUT listing is a failure, never the "no git" skip below: git answered nothing, so nothing is proven either way.
+    fail(`git ls-files timed out after ${GIT_SPAWN_TIMEOUT_MS} ms — cannot tell a tracked path from an untracked one`);
+  } else if (lsAll.error || lsAll.status !== 0) {
     // A VISIBLE skip, never a silent carve-out: no git means no durability answer.
     console.log('  --   pointer check: git unavailable — cannot tell a tracked path from an untracked one; skipped');
   } else {
-    const { checkPointers, deriveIgnoredRoots } = await import(pathToFileURL(path.join(repo, 'scripts', 'pointer-check.mjs')).href);
+    const { checkPointers, deriveIgnoredRoots, classifyCheckIgnoreResult } = await import(pathToFileURL(path.join(repo, 'scripts', 'pointer-check.mjs')).href);
     const { projectConfigCandidates } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'config-load.mjs')).href);
+    const { escapesRoot } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'repo-fs.mjs')).href); // the one first-segment rule, never a lexical startsWith
     const tracked = new Set(lsAll.stdout.split('\n').filter(Boolean));
     const trackedDirs = new Set();
     for (const f of tracked) {
@@ -271,8 +283,10 @@ try {
     // enumerated, so the set cannot rot the day that order changes.
     const agentHomes = new Set();
     for (const c of projectConfigCandidates(repo, os.homedir())) {
-      const r = path.relative(repo, c).split(path.sep).join('/');
-      if (!r || r.startsWith('..') || path.isAbsolute(r) || !r.includes('/')) continue;
+      const raw = path.relative(repo, c); // escapesRoot reads the native separator, so it runs before the '/' rewrite
+      if (!raw || escapesRoot(raw)) continue;
+      const r = raw.split(path.sep).join('/');
+      if (!r.includes('/')) continue;
       const first = r.split('/')[0];
       if (first.startsWith('.') && first.length > 1) agentHomes.add(first);
     }
@@ -340,15 +354,27 @@ try {
     // any existence- or ourRoots-based test would re-open the exact vacuity this ticket
     // removes — and the miss is LOUD by design: a wrong FAIL names the file and the
     // token, unlike a dead citation falling silently out of scope.
+    // CHECK-IGNORE'S OWN EXIT CONTRACT (r34 F1): 0 = something fed is ignored, 1 = nothing
+    // is, ANYTHING ELSE = git could not answer. The runner used to read only `ci.error`, so
+    // an unanswered probe returned '' — "0 gitignored" — and a citation under a gitignored
+    // root fell out of scope and PASSED. Measured on a bare repository: `ls-files` still
+    // answers from the index (so the no-git skip above never fires) while check-ignore exits
+    // 128, "this operation must be run in a work tree".
+    // A FAIL, not a named skip, and the difference from that no-git skip is the reason: with
+    // no git the block asks nothing, so nothing false can pass; here git answered half the
+    // question, and a skip would still end VERIFY: PASS with every gitignored citation
+    // unjudged — the defect itself, printed politely. (CoalHearth 0413924 chose FAIL too.)
+    let checkIgnoreFailure = null;
     const ign = deriveIgnoredRoots({
       surfaces,
       agentHomes,
       runCheckIgnore: (names) => {
         const ci = spawnSync('git', ['check-ignore', '-v', '--stdin'],
-          { cwd: repo, encoding: 'utf8', input: names.map((n) => n + '/').join('\n') + '\n' });
-        // Exit 1 means nothing fed was ignored — not an error. git was already proven
-        // reachable by the ls-files probe this whole block is gated on.
-        return ci.error ? '' : ci.stdout;
+          { cwd: repo, encoding: 'utf8', env: gitEnv(path.dirname(repo)), timeout: GIT_SPAWN_TIMEOUT_MS, input: names.map((n) => n + '/').join('\n') + '\n' });
+        // The verdict's classification lives in scripts/pointer-check.mjs (CWK2-060: a pipe error beside git's own exit is that exit).
+        const verdict = classifyCheckIgnoreResult(ci);
+        if (!verdict.ok) { checkIgnoreFailure = verdict.failure; return ''; }
+        return verdict.stdout;
       },
     });
     const ignoredRoots = ign.ignored;
@@ -376,9 +402,12 @@ try {
     // caller's directory listing. The artefact count is printed whenever it is non-zero
     // rather than hidden: a checkout whose `.gitignore` is CRLF is not an error, but a
     // reader is owed the fact that rows were dropped.
-    ok(`gitignored-root citations: ${ign.cited.size} distinct first segment(s) cited and shape-qualified, ${ign.probed.length} probed through one git check-ignore call (${ign.homesPresent} of ${agentHomes.size} agent home(s) held out: ${[...agentHomes].sort().join(' ')}) — ${ignoredRoots.size} gitignored${ign.artefacts.length ? `, ${ign.artefacts.length} empty-pattern row(s) dropped (CRLF .gitignore)` : ''}`);
+    // An unanswered probe gets a FAIL and NO ok line: its "0 gitignored" would be a count of
+    // nothing, and the resolution ok line below rests on the same set, so it is withheld too.
+    if (checkIgnoreFailure) fail(`git check-ignore --stdin ${checkIgnoreFailure} — cannot tell which cited roots are gitignored, so no citation under one can be judged`);
+    else ok(`gitignored-root citations: ${ign.cited.size} distinct first segment(s) cited and shape-qualified, ${ign.probed.length} probed through one git check-ignore call (${ign.homesPresent} of ${agentHomes.size} agent home(s) held out: ${[...agentHomes].sort().join(' ')}) — ${ignoredRoots.size} gitignored${ign.artefacts.length ? `, ${ign.artefacts.length} empty-pattern row(s) dropped (CRLF .gitignore)` : ''}`);
     const hard = findings.filter((f) => f.level !== 'SKIP');
-    if (!hard.length) {
+    if (!hard.length && !checkIgnoreFailure) {
       ok(`every path this repo points at from ${surfaces.length} ship-text surface(s) (${findings.checked} in-scope citations) resolves to a TRACKED file — sections and symbols are NOT checked, see scripts/pointer-check.mjs`);
     }
     for (const f of findings) {
@@ -388,6 +417,23 @@ try {
   }
 } catch (e) { fail(`pointer check: ${e.message}`); }
 
+// GIT SPAWNS (CWK-136). CWK-133 gave every fixture and gate one env helper (scripts/lib/git-env.mjs); this is the tripwire
+// that keeps the NEXT git spawn from inheriting an ambient GIT_DIR / GIT_INDEX_FILE. A spawn passes only with an env the
+// census reads as safe (the room's gitEnv(), or an allowlist built from named keys with GIT_CONFIG_NOSYSTEM: '1'); every
+// other env, and a spawn with none, is a finding. It PRINTS its coverage: a census that matched nothing would report clean.
+// Detection is the CANON census, scripts/lib/git-env-census.mjs (adopted by blob id from the .github canon, 09a; dynamic
+// import, node/runtime.md 1); its grammar and named limits are in its header, and this room's blob pins are
+// scripts/lib/git-env-pins.mjs, held by git-env-pins.test.mjs.
+console.log("git spawn census (every git spawn under scripts/ takes the room's gitEnv() or an allowlist env the census reads whole):");
+try {
+  const { scanGitSpawns, collectScriptsMjs } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'git-env-census.mjs')).href);
+  const { CENSUS_PINS } = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'git-env-pins.mjs')).href);
+  const census = scanGitSpawns(collectScriptsMjs(repo), CENSUS_PINS);
+  for (const f of census.findings) fail(f);
+  if (!census.calls) fail('git spawn census found NO git spawn under scripts/: the locator is dead, and a census that matches nothing reports clean');
+  else if (!census.findings.length) ok(`${census.calls} git spawn call(s) across ${census.files} script file(s), ${census.safe} read safe; ${census.exempted} blob-pinned file(s) EXEMPT: see scripts/lib/git-env-pins.mjs`);
+} catch (e) { fail(`git spawn census: ${e.message}`); }
+
 console.log('libs (import check):');
 for (const l of LIBS) {
   try { await import(pathToFileURL(path.join(repo, 'scripts', 'lib', l)).href); ok(`${l} imports`); }
@@ -396,9 +442,10 @@ for (const l of LIBS) {
 
 console.log('plugin/ dist (the clean CC plugin vs source SSoT):');
 try {
-  const { checkDist } = await import(pathToFileURL(path.join(repo, 'scripts', 'build-plugin.mjs')).href);
+  const { checkDist, DIST_ITEMS } = await import(pathToFileURL(path.join(repo, 'scripts', 'build-plugin.mjs')).href);
   const drift = checkDist();
-  if (!drift.length) ok('plugin/ matches source (manifest + bin + commands + hooks + skills + scripts/lib); nothing else leaked');
+  // Named FROM DIST_ITEMS, never retyped: the hand-written list said "bin" for a directory the dist has never shipped (CWK-120 row 16).
+  if (!drift.length) ok(`plugin/ matches source (${DIST_ITEMS.map((i) => i.split(path.sep).join('/')).join(' + ')}); nothing else leaked`);
   else for (const d of drift) fail(d);
 } catch (e) { fail(`plugin/ dist check: ${e.message}`); }
 

@@ -50,7 +50,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
-import { txDirFor, ensureSelfIgnore, acquireLock } from './apply.mjs';
+import { ensureSelfIgnore, acquireLock, trackedInOwnFolder } from './apply.mjs';
+import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
+import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
 
 export const FAT_BIN_NAME = 'fat-bin';
@@ -83,9 +85,24 @@ const BIN_LOCK_NAME = '.bin.lock'; // per-bin (not per-tx) exclusive lock — se
 // the happy-path hold time on the target filesystem, and treat an
 // unquantified network/cloud mount as the open question, not a solved one.
 const BIN_LOCK_STALE_MS = 5000;
+// Perf-regression counter for tests only (the apply.mjs / fidelity-gate.mjs
+// `__testHooks` precedent, GATE COST ruling 2026-08-04: a count, not a clock).
+// `binLockAttempts` counts every acquireLock call recordBinItem or the sweep makes, so a
+// test can assert an orphan was reclaimed on the FIRST attempt instead of
+// timing the call against the retry budget. One increment per attempt; read
+// by nothing outside a test.
+// `beforeIndexSave(dir)` (P95-1): called inside recordBinItem's critical section, after the index is loaded and the new row
+// pushed, right before it is saved, so a test can stall a holder past the stale window deterministically. null in production.
+// `beforeBlobLink(tmp)` (E1 t173): called after a copy's bytes are written and synced to its temp, right before the temp is
+// linked to the copy's id, so a test can kill a writer at that point. `linkSync` replaces fs.linkSync so a test can stand
+// in for a filesystem without hard links. Both null in production.
+export const __testHooks = { binLockAttempts: 0, beforeIndexSave: null, beforeBlobLink: null, linkSync: null };
 
+// CWK-137: a bin is `<project>/.claude/coalwash/<name>` -- repo-plantable. ownSandboxDir
+// THROWS when any directory between the project root and the bin is a link, and
+// every caller below catches it the way it already caught an I/O failure.
 function binDir(projectRoot, name) {
-  return path.join(txDirFor(projectRoot), name);
+  return ownSandboxDir(projectRoot, '.claude', 'coalwash', name);
 }
 
 // Bare-filename allowlist (F1 — the umbrella path-traversal lesson: allowlist
@@ -108,18 +125,84 @@ export function isBareId(id) {
   return typeof id === 'string' && !!id && id !== '.' && id !== '..' && path.basename(id) === id;
 }
 
-function loadIndex(dir) {
+// P95-1: the catalogue never loses a blob. A blob whose row a lost save dropped (a holder robbed of the bin lock after
+// a stall, or any writer that died between its blob and its save) is listed again from the blob itself: its id, the
+// time its id carries, its size by stat, and no original (that was only in the row). The index file stays the record of
+// what it holds; this only adds what it is missing. Only names in recordBinItem's own id shape count, and only plain
+// files, so index.json, its temps, .gitignore and the lock are never listed.
+const BLOB_ID = /^\d+-[0-9a-f]{12}$/;
+// E1 t173: a copy's bytes go to a temp in this shape first (BLOB_ID never matches it, so loadIndex never lists one); the id
+// name is a hard link made only after the temp is whole and synced. A temp a killed writer left behind is removed by the
+// next sweep (removeStaleTemps below).
+const BLOB_TEMP = /^\d+-[0-9a-f]{12}\.[0-9a-f]{12}\.part$/;
+// The codes a filesystem without hard links answers linkSync with (FAT/exFAT, some network and cloud mounts).
+// EISDIR (INSPECT 114 R114-1): libuv maps Windows ERROR_INVALID_FUNCTION, CreateHardLinkW's answer on a FAT or exFAT
+// volume, to EISDIR. Safe here: the link source is a temp this call just made as a plain file, so it is never a directory.
+const NO_HARD_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EISDIR']);
+function writeBlobWhole(dir, id, body) {
+  const final = path.join(dir, id);
+  const tmp = path.join(dir, `${id}.${crypto.randomBytes(6).toString('hex')}.part`);
+  let made = false;
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(dir, INDEX_NAME), 'utf8'));
-    return Array.isArray(parsed) ? parsed.filter((i) => i && isBareId(i.id)) : [];
-  } catch {
-    return [];
+    const fd = fs.openSync(tmp, 'wx'); // a fresh inode or EEXIST, never a write through an entry planted at the name
+    made = true;
+    try { fs.writeFileSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    if (typeof __testHooks.beforeBlobLink === 'function') __testHooks.beforeBlobLink(tmp);
+    try {
+      (__testHooks.linkSync || fs.linkSync)(tmp, final); // EEXIST stays a failure: the id never names an entry already there
+    } catch (e) {
+      if (!(e && NO_HARD_LINKS.has(e.code))) throw e;
+      // shortcut: no hard links here, so the copy is written at its id directly (the pre-t173 path); a writer killed
+      // mid-write on such a filesystem still leaves a torn copy that loadIndex lists. Upgrade if such a mount is ever measured.
+      fs.writeFileSync(final, body, { flag: 'wx' });
+    }
+  } finally {
+    if (made) { try { fs.unlinkSync(tmp); } catch { /* a leftover temp is removed by the next sweep */ } }
   }
+}
+// Called with the bin lock held: every temp in BLOB_TEMP's shape older than the lock's stale window belongs to a writer
+// that died (a live writer holds the lock while its temp exists). Narrow: names in that shape, plain files only (a link
+// or a folder in that shape is left alone), unlinked one by one. The age is read on the live clock, never the caller's
+// `now`, the same rule acquireLock judges staleness by.
+function removeStaleTemps(dir, { dryRun = false } = {}) {
+  const gone = [];
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return gone; }
+  for (const f of names) {
+    if (!BLOB_TEMP.test(f)) continue;
+    const p = path.join(dir, f);
+    try {
+      const st = fs.lstatSync(p);
+      if (!st.isFile() || Date.now() - st.mtimeMs <= BIN_LOCK_STALE_MS) continue;
+      if (!dryRun) fs.unlinkSync(p);
+      gone.push(f);
+    } catch { /* left for the next pass */ }
+  }
+  return gone;
+}
+function loadIndex(dir) {
+  let index = [];
+  try {
+    // CWK-137: bounded. E2-4: contained to the bin dir ITSELF (`dir` is binDir's ownSandboxDir answer).
+    const parsed = JSON.parse(readRepoFileBounded(path.join(dir, INDEX_NAME), dir, MAX_DOC_BYTES));
+    if (Array.isArray(parsed)) index = parsed.filter((i) => i && isBareId(i.id));
+  } catch { /* no index (or an unreadable one): the blobs below are still listed */ }
+  try {
+    const named = new Set(index.map((i) => i.id));
+    for (const f of fs.readdirSync(dir)) {
+      if (!BLOB_ID.test(f) || named.has(f)) continue;
+      let st;
+      try { st = fs.lstatSync(path.join(dir, f)); } catch { continue; }
+      if (!st.isFile()) continue;
+      index.push({ id: f, at: Number(f.slice(0, f.indexOf('-'))), bytes: st.size, original: null, origin: null });
+    }
+  } catch { /* no bin folder: nothing to list */ }
+  return index;
 }
 function saveIndex(dir, index) {
   try {
     fs.mkdirSync(dir, { recursive: true });
-    ensureSelfIgnore(dir);
+    if (ensureSelfIgnore(dir)) return false; // fire 55: the index names memory-content copies; no catch-all, no write
     // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
     // carries (read its comment for the full reasoning; this module cannot import
     // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
@@ -219,16 +302,31 @@ function sleepMs(ms) {
     while (process.hrtime.bigint() < untilNs) { /* bounded busy-wait — no sync sleep primitive available */ }
   }
 }
-export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now() } = {}) {
-  const dir = binDir(projectRoot, name);
+// The ONE way either writer of a bin's index.json takes its lock (CWK-120 rows 4 + 18): the same file, the same
+// staleMs, the same bounded jittered retry for recordBinItem and for the sweep, so the two can never disagree about
+// what "held" means. `acquireLock` judges staleness as `now - lockFile.mtimeMs > staleMs`, so `now` here is ALWAYS a live
+// clock reading, never an item's birth timestamp: callers legitimately backdate `now` (the tests bank items days in the
+// past), and a backdated value made every orphaned lock look fresh forever, burning the whole retry budget (row 18).
+function acquireBinLock(dir) {
+  let lock;
+  for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
+    if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
+    lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now: Date.now(), staleMs: BIN_LOCK_STALE_MS, selfIgnore: true });
+    __testHooks.binLockAttempts++;
+  }
+  return lock;
+}
+export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now(), trackedChecked = false } = {}) {
+  let dir;
   let lock;
   try {
+    dir = binDir(projectRoot, name); // CWK-137: may throw on a planted link -> null, like any failure
+    // fire 59 (L58-1): nothing is written into CoalWash's folder while git tracks a file there (applyPlan asks once per
+    // transaction and passes trackedChecked; every other caller asks here, before the first byte).
+    if (!trackedChecked && trackedInOwnFolder(path.dirname(dir))) return null;
     fs.mkdirSync(dir, { recursive: true });
-    ensureSelfIgnore(dir);
-    for (let attempt = 0; attempt < 40 && !(lock && lock.acquired); attempt++) {
-      if (attempt > 0) sleepMs(2 + Math.floor(Math.random() * 4)); // 2-5ms jitter, short and bounded
-      lock = acquireLock(path.join(dir, BIN_LOCK_NAME), { now, staleMs: BIN_LOCK_STALE_MS });
-    }
+    if (ensureSelfIgnore(dir)) return null; // fire 55: a bin item IS a copy of memory content; no catch-all, no copy
+    lock = acquireBinLock(dir);
     if (!lock.acquired) return null;
     // U7 (7th site — found by apply.test.mjs's own FINAL-path guard, not by the
     // board enumeration): this id doubles as a WRITE PATH, so its unpredictability
@@ -236,14 +334,25 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     // (security.md: never Math.random for anything security-relevant).
     const id = `${now}-${crypto.randomBytes(6).toString('hex')}`;
     const body = Buffer.isBuffer(content) ? content : Buffer.from(typeof content === 'string' ? content : '', 'utf8');
-    // 'wx' = a fresh inode, or EEXIST-fail-closed — never write THROUGH an alias
-    // planted at the blob path. A pre-existing entry at a brand-new id IS an error,
-    // so O_EXCL here costs no legitimate operation (the U7 temp/destination split).
-    fs.writeFileSync(path.join(dir, id), body, { flag: 'wx' }); // NO encoding argument: raw bytes
-    const index = loadIndex(dir);
+    // A fresh inode, or EEXIST-fail-closed — never write THROUGH an alias planted at the blob path. A pre-existing
+    // entry at a brand-new id IS an error, so the exclusive create/link costs no legitimate operation (the U7
+    // temp/destination split). E1 t173: the id appears only once the bytes are whole (writeBlobWhole). Raw bytes.
+    writeBlobWhole(dir, id, body);
     // bytes (0i): the size-cap layer's weight — recorded at birth so the
     // sweep never has to re-stat the common case.
-    index.push({ id, at: now, bytes: body.length, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' });
+    const row = { id, at: now, bytes: body.length, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' };
+    // loadIndex lists this item's own blob (written above) as a bare reconciled row; the full row replaces it.
+    let index = loadIndex(dir).filter((i) => i.id !== id);
+    index.push(row);
+    if (typeof __testHooks.beforeIndexSave === 'function') __testHooks.beforeIndexSave(dir);
+    // P95-1: a holder stalled past BIN_LOCK_STALE_MS is stolen from, and the thief may already have saved its row. Saving
+    // the index loaded before the theft would drop that row (its blob stays, unlisted). So a holder that no longer owns
+    // the lock re-loads what is on disk now and adds its row to that. The loss that remains (a theft between this check
+    // and the save) leaves a blob without a row, which loadIndex lists again.
+    if (lock.owns && !lock.owns()) {
+      index = loadIndex(dir).filter((i) => i.id !== id);
+      index.push(row);
+    }
     if (!saveIndex(dir, index)) { try { fs.rmSync(path.join(dir, id), { force: true }); } catch {} return null; }
     return id;
   } catch {
@@ -256,7 +365,7 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
 // The PULL-ONLY discovery surface: every item currently in the bin (id/at/
 // original/origin). Never called automatically by anything in this codebase.
 export function listBin(projectRoot, name) {
-  return loadIndex(binDir(projectRoot, name));
+  try { return loadIndex(binDir(projectRoot, name)); } catch { return []; } // CWK-137: a refused bin lists nothing
 }
 
 // The deliberate walk-in restore door — read one item's BYTES by id. Returns a
@@ -273,9 +382,21 @@ export function listBin(projectRoot, name) {
 // picks the wrong one. A caller that wants text decodes at its own call site
 // and thereby declares that choice (anchor-diff does; the CLI pipes bytes).
 export function restoreFromBin(projectRoot, name, id) {
-  if (!isBareId(id)) return null;
-  try { return fs.readFileSync(path.join(binDir(projectRoot, name), id)); }
-  catch { return null; }
+  return binItemOutcome(projectRoot, name, id).buf || null;
+}
+
+// The same door WITH its reason (CWK-137): { buf } or { why }, where `why` is
+// `absent` (no such item -- the ordinary miss), `over-bound` (the item is THERE but
+// larger than MAX_DOC_BYTES, so it was refused, never truncated), or another refusal
+// from repoReadOutcome. A caller that REPORTS to a human (the CLI restore) uses this so
+// a real item is never told it does not exist.
+export function binItemOutcome(projectRoot, name, id) {
+  if (!isBareId(id)) return { why: 'absent' };
+  // E2-4: contained to the bin dir ITSELF -- an item planted as a link that resolves anywhere else is `outside-root`.
+  try { const dir = binDir(projectRoot, name); return repoReadOutcome(path.join(dir, id), dir, MAX_DOC_BYTES); }
+  // R46-1: binDir refused the bin folder itself (a link, or not a plain directory): `refused-folder`, so the CLI never says
+  // the id is there or tells the user to copy a path that goes through that folder.
+  catch (e) { return { why: e && e.code === 'COALWASH_WRITE_REFUSED' ? 'refused-folder' : 'unreadable' }; }
 }
 
 // Apply retention.mjs's pure policy to one bin: partition (keep/destroy),
@@ -285,8 +406,42 @@ export function restoreFromBin(projectRoot, name, id) {
 // that cannot be verified gone is NOT reported destroyed and stays in the
 // index (never a false "destroyed" — the broom asymmetry: leftover dust
 // waits for the next pass, that is the safe direction).
+// CWK-137: append to a log we own, never THROUGH a link a cloned repo planted at its
+// name (appendFileSync follows one: the certificate line landed in the link's target,
+// e.g. ~/.bashrc, carrying index.json's attacker-chosen `original`). The entry must be
+// a plain single-link regular file, and the handle must BE that entry: openPlainFile
+// opens first and then checks the path and the handle together (CodeQL #43/#44's shape,
+// fire 10: an lstat before the open left a window for a name swapped in between).
+function appendOwnLog(file, text) {
+  const o = openPlainFile(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  if (o.fd === undefined) throw new Error(`${file} is not a plain file, or changed under the append (${o.why})`);
+  try { fs.writeSync(o.fd, text); } finally { fs.closeSync(o.fd); }
+}
+
+// CWK-120 row 4: the sweep is the SECOND writer of index.json, a read-modify-write (`loadIndex` ... `saveIndex(survivors)`)
+// exactly like recordBinItem's, so it takes the SAME bin lock. Without it a concurrent recordBinItem could commit its row
+// between the sweep's load and its save. The concurrent recorder is `recoverDangling` (run by the CLI gauge, cli.mjs), which
+// records into the fat bin and takes NO transaction lock at all, so it can run in another session while a wash sweeps the
+// same bin under the project tx lock; the estate archive is NOT a writer here (it only READS the death log), and two
+// applyPlan runs already serialize on the tx lock. Without the bin lock the sweep then wrote `survivors`, which never held
+// that row, leaving its blob on disk with no index entry -- the undercount this module's header forbids. A bin with nothing in it
+// is peeked WITHOUT the lock and never touched (taking the lock creates the directory: an absent bin must stay absent).
+// A lock that stays held past the retry budget means the sweep waits for the next run (fail-silent housekeeping): nothing
+// is destroyed and the items are all still there.
 function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
-  const index = loadIndex(dir);
+  const peek = loadIndex(dir);
+  // E1 t173: a bin holding only a dead writer's temp is still swept, or that temp (a copy of memory content) would stay.
+  if (!peek.length && !removeStaleTemps(dir, { dryRun: true }).length) return { destroyed: 0, kept: 0 };
+  const lock = acquireBinLock(dir);
+  if (!lock.acquired) return { destroyed: 0, kept: peek.length };
+  try { return sweepBinLocked(dir, horizonMs, now, budgetBytes, lock); } finally { lock.release(); }
+}
+function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
+  const temps = removeStaleTemps(dir); // E1 t173: inside the lock, which a live writer holds while its temp exists
+  if (temps.length) {
+    try { appendOwnLog(path.join(dir, DEATH_LOG_NAME), temps.map((f) => `${new Date(now).toISOString()} removed unfinished temp ${f} (a writer died before the copy was named)`).join('\n') + '\n'); } catch { /* a record, not a gate */ }
+  }
+  const index = loadIndex(dir); // re-read INSIDE the lock: the peek above may be stale by now
   if (!index.length) return { destroyed: 0, kept: 0 };
   // Legacy index entries (pre-0i) carry no bytes — weigh them by a one-time
   // stat so they participate in the size cap instead of escaping it forever;
@@ -300,6 +455,7 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
   const { keep, destroy, reasons, capConflict } = retentionPlan(index, now, { horizonMs, budgetBytes });
   const survivors = [...keep];
   const cert = [];
+  const gone = new Set(); // ids whose blob this pass verified destroyed
   for (const item of destroy) {
     const p = path.join(dir, item.id);
     try { fs.rmSync(p, { force: true }); } catch { /* leftover dust waits for the next pass */ }
@@ -313,27 +469,37 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
       // survive the index entry's deletion.
       const rule = reasons.get(item) || 'horizon';
       const orig = (typeof item.original === 'string' && item.original) ? item.original : '-';
-      cert.push(`${new Date(now).toISOString()} destroyed ${item.id} (age ${ageDays}d, rule ${rule}) original ${orig}`);
+      // CWK-137 / CWE-117: `id` and `original` come out of index.json, which a cloned
+      // repo can plant, so CR and LF are neutralized before they reach a line-oriented
+      // log -- one certificate is one line, never a forged second one.
+      const oneLine = (v) => String(v).replace(/[\r\n]/g, ' ');
+      cert.push(`${new Date(now).toISOString()} destroyed ${oneLine(item.id)} (age ${ageDays}d, rule ${rule}) original ${oneLine(orig)}`);
+      gone.add(item.id);
     } else {
       survivors.push(item); // unverifiable death -> never claimed, kept for the next pass
     }
   }
   // The unsatisfiable-cap audit line (retention.mjs capConflict): the floor +
-  // retrievability/doubt protections outweigh the byte budget, so the bin is
+  // retrievability protections outweigh the byte budget (doubt items weigh nothing), so the bin is
   // deliberately over cap this run. Logged here (the bin's own audit trail)
   // AND surfaced on the sweep's return for the caller's receipt — a config
   // conflict resolved by silence is the senior-domain failure not to port.
   if (capConflict) {
-    cert.push(`${new Date(now).toISOString()} cap-conflict kept ${capConflict.keptBytes}B > budget ${capConflict.budgetBytes}B — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor (+ newest/doubt protections) exceeds the cap; bin over budget this run, nothing young destroyed`);
+    cert.push(`${new Date(now).toISOString()} cap-conflict kept ${capConflict.keptBytes}B > budget ${capConflict.budgetBytes}B — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor (+ the newest-copy anchor) exceeds the cap; bin over budget this run, nothing young destroyed`);
   }
   if (cert.length) {
-    try { fs.mkdirSync(dir, { recursive: true }); fs.appendFileSync(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n', 'utf8'); } catch { /* the certificate is a record, not a gate */ }
+    try { fs.mkdirSync(dir, { recursive: true }); appendOwnLog(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n'); } catch { /* the certificate is a record, not a gate */ }
   }
-  saveIndex(dir, survivors);
+  if (typeof __testHooks.beforeIndexSave === 'function') __testHooks.beforeIndexSave(dir);
+  // P95-1: a sweep stalled past BIN_LOCK_STALE_MS may have been robbed, and the thief may have saved a new row. Saving
+  // `survivors`, built from the index loaded before the theft, would drop that row, so a sweep that no longer owns the
+  // lock saves what is on disk now, minus what it destroyed.
+  const saved = lock && lock.owns && !lock.owns() ? loadIndex(dir).filter((i) => !gone.has(i.id)) : survivors;
+  saveIndex(dir, saved);
   // capConflict only present when live: existing callers/tests deepStrictEqual
   // the two-field shape, and an always-null third field would churn every one
   // for no information (ponytail: additive-when-present).
-  const out = { destroyed: index.length - survivors.length, kept: survivors.length };
+  const out = { destroyed: gone.size, kept: saved.length };
   if (capConflict) out.capConflict = capConflict;
   return out;
 }
@@ -367,7 +533,8 @@ export function sweepStoreOld(projectRoot, { now = Date.now(), storeBytes } = {}
 // never pushed/narrated, per the headroom-quiet doctrine). Returns '' on a
 // missing/unreadable log, never throws.
 export function readDeathLog(projectRoot, name) {
-  try { return fs.readFileSync(path.join(binDir(projectRoot, name), DEATH_LOG_NAME), 'utf8'); }
+  // CWK-137: bounded (a prefix is enough -- callers ask 'is there one'). E2-4: contained to the bin dir ITSELF.
+  try { const dir = binDir(projectRoot, name); return readRepoFileBounded(path.join(dir, DEATH_LOG_NAME), dir, MAX_DOC_BYTES, true) ?? ''; }
   catch { return ''; }
 }
 

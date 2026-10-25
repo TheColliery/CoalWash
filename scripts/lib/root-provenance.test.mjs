@@ -21,6 +21,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -37,6 +38,9 @@ const TRUSTED_ROOTS = new Map([
   ['[txPhys]', 'caller-derived: opts.txDir or txDirFor(projectRoot)'],
   ['[projPhys]', 'caller-derived: physicalOrNull(discoverClassB\'s projectRoot parameter, itself findProjectRoot(cwd) at every call site) — class-b.mjs nested-habitat TIER classification (room-owned vs inherited-ancestor), not an authorization: both outcomes are measured and reported, neither grants a write. Listed anyway because the gate rightly does not care what a containment answer is USED for'],
   ['[basePhys]', 'home-anchored: the Claude base dir'],
+  ['[homePhys]', 'caller-derived: physicalOrNull(discoverClassB\'s home parameter) — class-b.mjs CWK2-029 (b): whether the room sits under HOME (bounds the ancestor walk) and the ~/ form of an OUTSIDE flag; neither answer grants a read or a write'],
+  ['ancestorDirs', 'caller-derived: the physical folders strictly above the room\'s repository top (the nearest folder at or above [projPhys], up to [homePhys], holding a .git entry read by lstat; [projPhys] itself when none is found) and strictly below [homePhys], whose own CLAUDE.md realpath stays inside them (class-b.mjs CWK2-029 (b), RE-INSPECT 102 R102-1); a folder above the repository top is outside any clone it holds, and a CLAUDE.md between the room and that top is the clone\'s own (ownFiles), never an ancestor. It grants a READ, only to an ancestor CLAUDE.md\'s own @import closure (INSPECT 99 L99-3: a room-queued file inside it is OUTSIDE); it never grants a write'],
+  ['[memPhys]', 'caller-derived: physicalOrNull(ccMemoryDir(projectRoot, home)), kept only while it is inside [basePhys] (class-b.mjs INSPECT 99 L99-1): the one place under ~/.claude a room-queued candidate may be read; it never grants a write'],
   ['claudeRoots', 'home-anchored: the Claude base dir'],
   ['[claudeRoot]', 'home-anchored: the Claude base dir'],
   ['[snapPhys]', 'caller-derived in retier (the snapshotDir parameter); in apply.mjs recoverDangling it is journal-derived but BOUND to the caller-derived tx dir before use — see the REVIEWED_EXEMPTIONS note'],
@@ -50,6 +54,7 @@ const TRUSTED_ROOTS = new Map([
 // never appear in a root position"; refusing these would break a real control.
 const LEGAL_NARROWINGS = new Map([
   ['jroots', 'journal.roots — only ever ANDed with trustedRoots on the same call (apply.mjs recoverDangling)'],
+  ['[physSnap]', 'the journal\'s snapDir (journal-derived) — only ever ANDed with [txPhys], the caller-derived tx dir, on the same line (apply.mjs gitTrackedRecoveryInputs, R14 D3): it narrows which tracked paths count as the snapshot, and the snapDir binding in recoverDangling still refuses one outside the tx dir'],
 ]);
 
 // The THIRD legal pattern, which the first cut of this gate wrongly folded into
@@ -70,7 +75,7 @@ const VALIDATED_BEFORE_USE = new Map([
 // REVIEWED EXEMPTIONS — data-derived outer gates that are ACCEPTED, each with the
 // reason it is a different trust class. Adding to this list is the visible diff.
 const REVIEWED_EXEMPTIONS = new Map([
-  ['[rootPhys]', 'estate-archive.mjs: estate.archiveDir from project config — documented, wizard-only, named on the consent bill before the press'],
+  ['[rootPhys]', 'estate-archive.mjs: estate.archiveDir from the user\'s GLOBAL config only (a project value is dropped at the merge, CWK-137 D3) — documented, wizard-only, named on the consent bill before the press'],
   ['[archiveRootPhys]', 'retier.mjs: the same estate.archiveDir config value, same trust class'],
 ]);
 
@@ -106,16 +111,29 @@ function splitArgs(s) {
 // the class this walk must survive even if a future fixture breaks the
 // naming convention) is skipped, never a crash — a file that disappeared
 // mid-scan was never a stable product source to begin with.
-function collectCallSites() {
-  const sites = [];
-  for (const f of fs.readdirSync(LIB).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs') && !n.startsWith('.'))) {
+// CWK-120 row 3: the ONE guarded walk of the class-B lib's product sources, shared by EVERY walk in this file. It used to be
+// inlined in collectCallSites alone, so the "ONE definition" walk further down read the same live directory with neither guard
+// and could abort the whole file on the race above (a concurrent config-load.test.mjs cleanup makes `readFileSync` throw
+// ENOENT outside any handler, and every cell in the file stops counting). `dir` and `read` are parameters so the guards can be
+// pinned directly, on a fixture directory and an injected reader, without racing a real process.
+function libProductSources(dir = LIB, read = fs.readFileSync) {
+  const out = [];
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs') && !n.startsWith('.'))) {
     let src;
     try {
-      src = fs.readFileSync(path.join(LIB, f), 'utf8');
+      src = read(path.join(dir, f), 'utf8');
     } catch (e) {
       if (e && e.code === 'ENOENT') continue; // vanished between readdir and read — not a stable source, skip it
       throw e;
     }
+    out.push({ f, src });
+  }
+  return out;
+}
+
+function collectCallSites() {
+  const sites = [];
+  for (const { f, src } of libProductSources()) {
     const lines = src.split(/\r?\n/);
     lines.forEach((line, i) => {
       if (/function\s+(is)?[cC]ontainedIn\s*\(/.test(line)) return; // the definition itself
@@ -182,12 +200,34 @@ test('CONFORMANCE: both archiveDir exemptions are still exactly two, and still w
 
 test('CONFORMANCE: containedIn has ONE definition in the class-B engine (the apply.mjs duplicate stays deleted)', () => {
   const defs = [];
-  for (const f of fs.readdirSync(LIB).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs'))) {
-    const src = fs.readFileSync(path.join(LIB, f), 'utf8');
+  for (const { f, src } of libProductSources()) {
     if (/^\s*(export\s+)?function\s+containedIn\s*\(/m.test(src)) defs.push(f);
   }
   // explode.mjs's `isContainedIn` is the class-A twin — a NAMED divergence (it may
   // not import this chain) pinned BEHAVIOURALLY by twin-pin.test.mjs, so it is
   // deliberately not counted here and needs no shared primitive.
   assert.deepStrictEqual(defs, ['class-b.mjs'], `containedIn must have exactly one definition; found in: ${defs.join(', ')}`);
+});
+
+// CWK-120 row 3: the shared walk's two guards, pinned on a fixture directory and an injected reader (no real race needed).
+test('CWK-120 row 3: libProductSources skips test files and dot-prefixed per-pid fixtures, and reads only the product sources', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-rootprov-'));
+  try {
+    for (const n of ['a.mjs', 'b.mjs', 'b.test.mjs', '.cw-reexport-hop-123.mjs', 'notes.md']) fs.writeFileSync(path.join(dir, n), `// ${n}`);
+    assert.deepStrictEqual(libProductSources(dir).map((s) => s.f).sort(), ['a.mjs', 'b.mjs']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CWK-120 row 3: a source that VANISHES between readdir and read is skipped, never a crash -- any other read error still propagates', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-rootprov-'));
+  try {
+    for (const n of ['a.mjs', 'gone.mjs', 'z.mjs']) fs.writeFileSync(path.join(dir, n), `// ${n}`);
+    const vanishing = (p, enc) => {
+      if (path.basename(p) === 'gone.mjs') { const e = new Error('ENOENT: vanished'); e.code = 'ENOENT'; throw e; }
+      return fs.readFileSync(p, enc);
+    };
+    assert.deepStrictEqual(libProductSources(dir, vanishing).map((s) => s.f).sort(), ['a.mjs', 'z.mjs'], 'the vanished entry is skipped, its neighbours are still read');
+    const denied = () => { const e = new Error('EACCES: denied'); e.code = 'EACCES'; throw e; };
+    assert.throws(() => libProductSources(dir, denied), (e) => e.code === 'EACCES', 'only ENOENT is forgiven: a real read failure is a real failure');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

@@ -75,6 +75,84 @@ test('0p writeguard-list via CLI: metadata only (name/bytes/session/path), never
   } finally { clean(home, proj); }
 });
 
+// grad10-round-2 MED-5: readWriteguardSnapshot returns null both for "no row
+// of this name exists" AND "a row exists but failed F1's integrity check" --
+// the CLI used to say "not found" for both, so a genuine tamper read as a
+// missing file, the wrong message at the worst moment. This test snapshots a
+// REAL file (so the name IS listed by writeguard-list), then tampers the
+// on-disk blob bytes directly (breaking the sidecar's recorded hash) --
+// distinct from the "no-such-snap" case above, which never had a row at all.
+test('0p writeguard-restore via CLI: a snapshot that IS listed but fails integrity verification gets its OWN message, never "not found"', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n', 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const name = path.basename(snap);
+    fs.writeFileSync(snap, 'TAMPERED — no longer what the sidecar attests', 'utf8'); // in-place tamper, sidecar unchanged
+    const list = run(proj, home, ['writeguard-list']);
+    assert.ok(list.stdout.includes(name), 'the tampered snapshot is still LISTED (metadata only, no integrity check there)');
+    const r = run(proj, home, ['writeguard-restore', name]);
+    assert.strictEqual(r.status, 1);
+    assert.strictEqual(r.stdout, '', 'no content -- unverified bytes are never served');
+    assert.ok(r.stderr.includes('FAILED integrity verification'), r.stderr);
+    assert.ok(!r.stderr.includes('not found'), `must NOT say "not found" for a snapshot that IS listed: ${r.stderr}`);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// UMB-133 — config-status: the user-pulled report for both holes. hole (2)'s
+// migration notice lives HERE, deliberately never on SessionStart (see
+// hooks/coalwash-conductor.js's own comment on why); hole (1)'s ignored-path
+// report is exposed here too, alongside its own ambient conductor test.
+// ---------------------------------------------------------------------------
+
+test('config-status: this file\'s own sandbox default (a ROOT legacy .coalwash.json) IS reported as a legacy read', () => {
+  const { home, proj } = sandbox(); // sandbox() writes proj/.coalwash.json
+  try {
+    const r = run(proj, home, ['config-status']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`Config read from a LEGACY path (${path.join(proj, '.coalwash.json')})`), r.stdout);
+    assert.ok(r.stdout.includes('canonical = .claude/coal/coalwash.json'), r.stdout);
+  } finally { clean(home, proj); }
+});
+
+test('config-status: a canonical config (.claude/coal/coalwash.json) reports NOTHING -- the honest-empty-state line', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.rmSync(path.join(proj, '.coalwash.json')); // remove the sandbox's own root legacy first
+    fs.mkdirSync(path.join(proj, '.claude', 'coal'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.claude', 'coal', 'coalwash.json'), '{}\n', 'utf8');
+    const r = run(proj, home, ['config-status']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout.trim(), '[CoalWash] config: canonical, nothing to report.');
+  } finally { clean(home, proj); }
+});
+
+test('config-status: a stray .coalwash.json under .gemini (bare) is reported as IGNORED, alongside the legacy notice', () => {
+  const { home, proj } = sandbox(); // still carries the sandbox's own root legacy
+  try {
+    fs.mkdirSync(path.join(proj, '.gemini'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.gemini', '.coalwash.json'), '{}\n', 'utf8');
+    const r = run(proj, home, ['config-status']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`IGNORED: ${path.join(proj, '.gemini', '.coalwash.json')} is not a config path`), r.stdout);
+    assert.ok(r.stdout.includes('Config read from a LEGACY path'), 'both holes fire independently in one call');
+  } finally { clean(home, proj); }
+});
+
+test('config-status --json: the raw resolution + ignored shape, machine-readable', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = run(proj, home, ['config-status', '--json']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const j = JSON.parse(r.stdout);
+    assert.strictEqual(j.resolution.legacy, true);
+    assert.strictEqual(j.resolution.path, path.join(proj, '.coalwash.json'));
+    assert.deepStrictEqual(j.ignored, []);
+  } finally { clean(home, proj); }
+});
+
 test('gauge --json: one call returns recover + platform + measure + verdict + breakEven, exit 0', () => {
   const { home, proj } = sandbox();
   try {
@@ -399,8 +477,33 @@ test('gaugeLine SURFACES a refused recovery, and stays silent when there was sim
   assert.ok(refused.length < quiet.length + 90, 'the terse line stays terse — the long reason belongs in --json');
   const done = gaugeLine({ ...base, recover: { recovered: 'rolled-back', restored: 2 } });
   assert.match(done, /recovered dangling run: rolled-back/, 'the success clause is unchanged');
+});
+
+// grad9 R8-F6 (carried from round 8, never routed until now): the assertion
+// this test used to make — that 'partial' reads as "recovered dangling run:
+// partial", the SAME shape as a clean success — WAS THE BUG, encoded as an
+// expected value. `recoverDangling` sets `error` alongside
+// `recovered:'partial'` specifically because SOME restore failed or was
+// refused (journal + snapshot kept, a mixed on-disk state) — the one outcome
+// that most needs the reader's attention read exactly like full success and
+// `rec.error` was never surfaced. RED-FIRST: swap cli.mjs to HEAD (pre-fix),
+// this must fail (the old 'recovered dangling run: partial' text, no mention
+// of the failure/refusal or that anything needs a look).
+test('RED-FIRST/R8-F6: gaugeLine gives a PARTIAL recovery its own visible clause, distinct from a clean success', () => {
+  const base = { verdict: { band: 'LEAN', bmi: 0 }, measure: { alwaysLoaded: { tokensEst: 1000 } } };
   const partial = gaugeLine({ ...base, recover: { recovered: 'partial', restored: 1, error: 'x' } });
-  assert.match(partial, /recovered dangling run: partial/, "'partial' reports as itself, never as a refusal");
+  assert.match(partial, /PARTIALLY recovered/i, `a partial recovery must be visibly distinct from a clean one (got: ${partial})`);
+  assert.doesNotMatch(partial, /recovered dangling run: partial/, 'must not read as the generic success clause');
+  assert.match(partial, /--json/, 'must point at where the failure/refusal detail lives');
+});
+
+test('RED-FIRST/R8-F6 control: a clean success (rolled-back/cleaned/no-mutation) still reports as itself, unaffected by the partial-specific clause', () => {
+  const base = { verdict: { band: 'LEAN', bmi: 0 }, measure: { alwaysLoaded: { tokensEst: 1000 } } };
+  for (const recovered of ['rolled-back', 'cleaned', 'no-mutation']) {
+    const line = gaugeLine({ ...base, recover: { recovered } });
+    assert.match(line, new RegExp(`recovered dangling run: ${recovered}`), `${recovered} must still read as a plain success`);
+    assert.doesNotMatch(line, /PARTIALLY/i);
+  }
 });
 
 
@@ -430,4 +533,263 @@ test('CWK-081: a DISCOVERED ceiling is named on every band — it is a measureme
 test('CWK-081: a gauge object with NO capacity block renders exactly as before (every pre-CWK-081 caller unmoved)', () => {
   const line = gaugeLine({ verdict: { band: 'FULL', bmi: 1 }, measure: { alwaysLoaded: { tokensEst: 1000 } } });
   assert.ok(!/capacity ~/.test(line), line);
+});
+
+// r34c: the entry-point guard compared import.meta.url (Node resolves the entry file to its
+// REALPATH) with argv[1] (the path it was invoked by). Through a symlink or a junction the two
+// differed, main() never ran, and every command exited 0 with no output. A directory junction
+// needs no admin rights on Windows; a host that cannot make one skips.
+test('r34c: invoked through a directory junction, the CLI still runs (no subcommand: usage, exit 1)', (t) => {
+  const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-junction-'));
+  t.after(() => fs.rmSync(holder, { recursive: true, force: true })); // rmSync does not follow a junction (probed)
+  const link = path.join(holder, 'lib-link');
+  try {
+    fs.symlinkSync(here, link, 'junction');
+  } catch (e) {
+    return t.skip(`cannot create a junction or directory symlink on this host (${e.code || e.message})`);
+  }
+  const r = spawnSync(process.execPath, [path.join(link, 'cli.mjs')], {
+    cwd: holder,
+    env: { ...process.env, HOME: holder, USERPROFILE: holder, CLAUDE_CONFIG_DIR: '' },
+    encoding: 'utf8',
+    timeout: 20000,
+  });
+  assert.strictEqual(r.status, 1, `through the junction: exit ${r.status}, output ${JSON.stringify(r.stdout + r.stderr)}`);
+  assert.match(r.stderr, /^usage: node scripts\/lib\/cli\.mjs/);
+});
+
+// ---------------------------------------------------------------------------
+// CWK-137 D3 restore-door hint (the sizing ruling): estate.archiveDir is read from the GLOBAL config only, so a user who once set it in
+// a PROJECT config would otherwise find estate-search / estate-restore silently looking somewhere else. Both say so on STDERR, on every
+// run, when the project layer carries a value the clamp dropped: the ignored path, the directory this run actually read, the global
+// config to set it in. Stdout and the exit code are untouched, so a script reading them sees the ordinary output.
+// ---------------------------------------------------------------------------
+const D3_HINT = /^\[CoalWash\] estate\.archiveDir[: ]/;
+function d3ProjectArchiveDir(proj, value) {
+  fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ estate: { archiveDir: value } }));
+}
+const d3HintLines = (stderr) => stderr.split(/\r?\n/).filter((l) => D3_HINT.test(l));
+
+test('CWK-137 D3 hint: estate-search names an ignored PROJECT estate.archiveDir on stderr -- the ignored path, the directory it read, the global config to use -- and leaves stdout and the exit code alone', () => {
+  const { home, proj } = sandbox();
+  try {
+    const ignored = path.join(os.tmpdir(), 'cw-d3-cli-someone-elses-archive');
+    d3ProjectArchiveDir(proj, ignored);
+    const withValue = run(proj, home, ['estate-search', 'anything']);
+    assert.strictEqual(withValue.status, 0, withValue.stderr);
+    const lines = d3HintLines(withValue.stderr);
+    assert.strictEqual(lines.length, 1, `exactly one hint line, got: ${withValue.stderr}`);
+    const readDir = path.join(home, '.claude', 'coal', 'coalwash', 'estate-archive');
+    assert.ok(lines[0].includes(`asks for ${ignored}, and that was ignored.`), 'names what the project config ASKED for, once, as a description');
+    assert.strictEqual(lines[0].split(ignored).length - 1, 1, 'the repo-chosen value appears ONCE: never restated inside an imperative (N-2)');
+    assert.ok(lines[0].includes('A cloned repo ships a project config, and it must not be able to choose where your own session transcripts are archived, so this key is read from the GLOBAL config only.'), 'states the security REASON (configure.mjs\'s own sentence), not only the mechanism (N-2)');
+    assert.ok(lines[0].includes(`This run read ${readDir}.`), 'names the directory this run actually read, in the sentence that says so');
+    assert.ok(lines[0].includes(path.join(home, '.claude', '.coalwash.json')), 'names the GLOBAL config the code reads (claudeBaseDir), not a literal ~/.claude');
+    assert.ok(lines[0].includes(`If you set that path yourself and want it used, set estate.archiveDir in ${path.join(home, '.claude', '.coalwash.json')}, or move the archives that path holds into ${readDir}.`), 'every remedy is conditional on the user having set the path themselves (N-2)');
+    assert.ok(!/(^|[.,] )(To use|Set|Use) /.test(lines[0]), 'no unconditional imperative at all');
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), '{}');
+    const without = run(proj, home, ['estate-search', 'anything']);
+    assert.strictEqual(without.status, 0, without.stderr);
+    assert.strictEqual(d3HintLines(without.stderr).length, 0, 'no project value, no hint');
+    assert.strictEqual(withValue.stdout, without.stdout, 'stdout is the ordinary output, byte for byte');
+    assert.strictEqual(withValue.status, without.status, 'and so is the exit code');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: estate-restore prints it on EVERY run, beside its ordinary not-found line; a hint never changes the exit code or stdout', () => {
+  const { home, proj } = sandbox();
+  try {
+    d3ProjectArchiveDir(proj, path.join(os.tmpdir(), 'cw-d3-cli-restore-dir'));
+    for (let i = 0; i < 2; i++) {
+      const r = run(proj, home, ['estate-restore', 'no-such-session']);
+      assert.strictEqual(r.status, 1, 'the ordinary not-found failure, exit 1');
+      assert.strictEqual(d3HintLines(r.stderr).length, 1, `run ${i}: the hint is there every time, not only the first, and not only when the default dir is empty`);
+      assert.match(r.stderr, /estate-restore: /, 'beside the ordinary error line, which is still printed');
+      assert.strictEqual(r.stdout, '', 'stdout stays empty');
+    }
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: a user\'s own GLOBAL archiveDir is the directory named as "read"; a project value that only restates it draws no hint', () => {
+  const { home, proj } = sandbox();
+  try {
+    const mine = path.join(home, 'my-archive');
+    fs.mkdirSync(mine);
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ estate: { archiveDir: mine } }));
+    d3ProjectArchiveDir(proj, path.join(os.tmpdir(), 'cw-d3-cli-other'));
+    const other = run(proj, home, ['estate-search', 'x']);
+    assert.strictEqual(other.status, 0, other.stderr);
+    const lines = d3HintLines(other.stderr);
+    assert.strictEqual(lines.length, 1);
+    assert.ok(lines[0].includes(`This run read ${mine}.`), 'this run read the GLOBAL value');
+    d3ProjectArchiveDir(proj, mine);
+    assert.strictEqual(d3HintLines(run(proj, home, ['estate-search', 'x']).stderr).length, 0, 'the project restated the global value: nothing was ignored');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: the value comes from a cloned repo, so the line is ONE line and bounded -- a newline in it cannot forge a second stderr line (log injection)', () => {
+  const { home, proj } = sandbox();
+  try {
+    d3ProjectArchiveDir(proj, `${path.join(os.tmpdir(), 'x')}\nFORGED-LINE ${'a'.repeat(5000)}`);
+    const r = run(proj, home, ['estate-search', 'x']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const all = r.stderr.split(/\r?\n/);
+    assert.ok(all.every((l) => !l.startsWith('FORGED-LINE')), 'the forged text did not start a line of its own');
+    const lines = d3HintLines(r.stderr);
+    assert.strictEqual(lines.length, 1);
+    assert.ok(lines[0].length < 1500, `bounded, not ${lines[0].length} characters`);
+  } finally { clean(home, proj); }
+});
+
+// CWK-137 D3 hint, R11d bounce 2 (N-3, N-4). Invisible characters are built with String.fromCharCode, never written as escapes or as
+// literal characters, so this file cannot itself carry a bidi override.
+// N-3: resolveArchiveDir drops a NON-absolute value on either layer, so a relative project value never directed archives anywhere and the D3
+// clamp changed nothing for it. A line saying it was ignored "because global-only" names the wrong cause, and the remedy it gave (the same
+// relative value in the global config) does nothing while silencing the hint: a mismatch the hint itself produced.
+test('CWK-137 D3 hint: a RELATIVE project estate.archiveDir draws no hint -- the clamp changed nothing for it (N-3)', () => {
+  const { home, proj } = sandbox();
+  try {
+    d3ProjectArchiveDir(proj, 'rel/archive');
+    const r = run(proj, home, ['estate-search', 'x']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(d3HintLines(r.stderr).length, 0, `a relative value never directed anything: nothing to say, got ${r.stderr}`);
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ estate: { archiveDir: 'rel/archive' } }));
+    const r2 = run(proj, home, ['estate-search', 'x']);
+    assert.strictEqual(r2.status, 0, r2.stderr);
+    assert.strictEqual(d3HintLines(r2.stderr).length, 0, 'the same relative value in the global config: still silent, and the run still reads the default');
+    d3ProjectArchiveDir(proj, path.join(os.tmpdir(), 'cw-n3-absolute'));
+    assert.strictEqual(d3HintLines(run(proj, home, ['estate-search', 'x']).stderr).length, 1, 'control: an ABSOLUTE ignored value is still reported, so the silence above is the filter and not a dead hint');
+  } finally { clean(home, proj); }
+});
+
+// N-4: Cc/Zl/Zp were flattened but not Cf, the class that carries the right-to-left override (Trojan Source) and the zero-width characters.
+// A repo-chosen path could display differently from the bytes it holds, in the line an agent may copy from.
+test('CWK-137 D3 hint: invisible format characters from a cloned repo (a right-to-left override, a zero-width space) are flattened (N-4)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const rlo = String.fromCharCode(0x202e);
+    const zwsp = String.fromCharCode(0x200b);
+    const base = path.join(os.tmpdir(), 'cw-n4-');
+    d3ProjectArchiveDir(proj, `${base}${rlo}evil${zwsp}path`);
+    const r = run(proj, home, ['estate-search', 'x']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const lines = d3HintLines(r.stderr);
+    assert.strictEqual(lines.length, 1);
+    assert.ok(!lines[0].includes(rlo), 'the bidi override did not survive into the line');
+    assert.ok(!lines[0].includes(zwsp), 'the zero-width space did not survive into the line');
+    assert.ok(lines[0].includes(`${base} evil path`), 'each was flattened to one space and the readable part kept');
+  } finally { clean(home, proj); }
+});
+
+// N-4 NIT: the 300-character cut sliced UTF-16 units and could leave a lone high surrogate, which a stderr write turns into U+FFFD.
+test('CWK-137 D3 hint: the 300-character cut never splits a surrogate pair (N-4)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const base = path.join(os.tmpdir(), 'cw-n4s-');
+    const emoji = String.fromCodePoint(0x1f600);
+    d3ProjectArchiveDir(proj, `${base}${'a'.repeat(299 - base.length)}${emoji}${'b'.repeat(50)}`);
+    const r = run(proj, home, ['estate-search', 'x']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const lines = d3HintLines(r.stderr);
+    assert.strictEqual(lines.length, 1);
+    assert.ok(!r.stderr.includes(String.fromCharCode(0xfffd)), 'no U+FFFD: a lone surrogate written to stderr decodes as one');
+    assert.ok(lines[0].includes(`${emoji}...`), 'the whole character was kept and the cut marker follows it (the cut is by code point)');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// R14 bounce 1 (E1, the head's ruling: the break is made LOUD). estate-scan and estate-run say, on STDERR and on every run, when the
+// PROJECT layer carries an estate.runBudget field or an estate.purgeAfterDays the bounded merge dropped: the project's value, the value
+// this run used, the global config to set it in. It is built from a cloned repo's bytes, so every field is one line and bounded.
+// ---------------------------------------------------------------------------
+const E1_HINT = /^\[CoalWash\] estate\.(runBudget(\.\w+)?|purgeAfterDays|compressAfterDays)[: ]/;
+const e1Lines = (stderr) => stderr.split(/\r?\n/).filter((l) => E1_HINT.test(l));
+function e1Configs(home, proj, globalEstate, projectEstate) {
+  fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ estate: globalEstate }));
+  fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ estate: projectEstate }));
+}
+
+test('E1: estate-scan names every dropped PROJECT runBudget field and purgeAfterDays on stderr -- the value it asked for, the value this run used, the global config -- and leaves stdout and the exit code alone', () => {
+  const { home, proj } = sandbox();
+  try {
+    e1Configs(home, proj, { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 }, deleteCold: false, purgeAfterDays: 90 },
+      { runBudget: { maxSessionsPerRun: 0, maxBytesPerRun: 999999999999 }, purgeAfterDays: 36500 });
+    const r = run(proj, home, ['estate-scan']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const lines = e1Lines(r.stderr);
+    assert.strictEqual(lines.length, 3, `one line per dropped key, got: ${r.stderr}`);
+    const byKey = Object.fromEntries(lines.map((l) => [/^\[CoalWash\] (\S+?):/.exec(l)[1], l]));
+    const globalCfg = path.join(home, '.claude', '.coalwash.json');
+    assert.ok(byKey['estate.runBudget.maxSessionsPerRun'].includes('asks for 0, and that was ignored.'), 'names what the project asked for');
+    assert.ok(byKey['estate.runBudget.maxSessionsPerRun'].includes('This run used 5.'), 'and what this run used');
+    assert.ok(byKey['estate.runBudget.maxBytesPerRun'].includes('asks for 999999999999, and that was ignored.'));
+    assert.ok(byKey['estate.runBudget.maxBytesPerRun'].includes('This run used 10485760.'));
+    assert.ok(byKey['estate.purgeAfterDays'].includes('asks for 36500, and that was ignored.'));
+    assert.ok(byKey['estate.purgeAfterDays'].includes('This run used 90.'));
+    assert.ok(/may only LOWER this work limit/.test(byKey['estate.runBudget.maxSessionsPerRun']), 'the reason for a run limit');
+    assert.ok(/a project value may only bring the cold boundary earlier \(at or below your own purgeAfterDays, with 0, "never cold", counted as the highest\), whether or not estate\.deleteCold is true in your own config\./.test(byKey['estate.purgeAfterDays']), 'the reason for the cold boundary (R18 BB-5: it holds whether or not deleteCold is true)');
+    assert.ok(!/while estate\.deleteCold is not true/.test(byKey['estate.purgeAfterDays']), 'R18 BB-5: the consented exception is no longer stated');
+    for (const l of lines) {
+      assert.ok(l.includes(`If you want that value, set ${/^\[CoalWash\] (\S+?):/.exec(l)[1]} in ${globalCfg}.`), 'the conditional remedy names the GLOBAL config');
+      assert.ok(l.includes('A cloned repo ships a project config, and it must not be able to widen what an estate run archives and removes'), 'states the security reason');
+    }
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), '{}');
+    const without = run(proj, home, ['estate-scan']);
+    assert.strictEqual(without.status, 0, without.stderr);
+    assert.strictEqual(e1Lines(without.stderr).length, 0, 'no project value, no hint');
+    assert.strictEqual(r.stdout, without.stdout, 'stdout is the ordinary output, byte for byte');
+    assert.strictEqual(r.status, without.status, 'and so is the exit code');
+  } finally { clean(home, proj); }
+});
+
+test('E1 (R14 bounce 2, F-R14-6): estate-scan names a dropped PROJECT compressAfterDays on stderr -- the value it asked for, the value this run used, the reason (it may only keep sessions active LONGER), the global config -- and a raise draws nothing', () => {
+  const { home, proj } = sandbox();
+  try {
+    e1Configs(home, proj, { deleteCold: false, compressAfterDays: 30 }, { compressAfterDays: 1 });
+    const r = run(proj, home, ['estate-scan']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const lines = e1Lines(r.stderr);
+    assert.strictEqual(lines.length, 1, `one line for the dropped key, got: ${r.stderr}`);
+    assert.ok(lines[0].startsWith('[CoalWash] estate.compressAfterDays: the project config ('), lines[0]);
+    assert.ok(lines[0].includes('asks for 1, and that was ignored.'), 'names what the project asked for');
+    assert.ok(lines[0].includes('This run used 30.'), 'and what this run used');
+    assert.ok(/a project value may only keep sessions active LONGER \(at or above your own compressAfterDays\), whether or not estate\.deleteCold is true in your own config\./.test(lines[0]), 'the reason for the warm boundary (R18 BB-5: it holds whether or not deleteCold is true)');
+    assert.ok(!/while estate\.deleteCold is not true/.test(lines[0]), 'R18 BB-5: the consented exception is no longer stated');
+    assert.ok(lines[0].includes(`If you want that value, set estate.compressAfterDays in ${path.join(home, '.claude', '.coalwash.json')}.`), 'the conditional remedy names the GLOBAL config');
+    e1Configs(home, proj, { deleteCold: false, compressAfterDays: 30 }, { compressAfterDays: 60 });
+    assert.strictEqual(e1Lines(run(proj, home, ['estate-scan']).stderr).length, 0, 'a raise was honored: nothing was ignored');
+  } finally { clean(home, proj); }
+});
+
+test('E1: estate-run prints it on EVERY run; a HONORED project value (lower, equal) draws no hint, and (R18 BB-5) a raise draws one with the user\'s own deleteCold true too', () => {
+  const { home, proj } = sandbox();
+  try {
+    e1Configs(home, proj, { runBudget: { maxSessionsPerRun: 5 }, deleteCold: false, purgeAfterDays: 90 }, { runBudget: { maxSessionsPerRun: 1000 } });
+    for (let i = 0; i < 2; i++) {
+      const r = run(proj, home, ['estate-run']);
+      assert.strictEqual(e1Lines(r.stderr).length, 1, `run ${i}: the hint is there every time, got: ${r.stderr}`);
+    }
+    e1Configs(home, proj, { runBudget: { maxSessionsPerRun: 5 }, deleteCold: false, purgeAfterDays: 90 }, { runBudget: { maxSessionsPerRun: 2 }, purgeAfterDays: 90 });
+    assert.strictEqual(e1Lines(run(proj, home, ['estate-scan']).stderr).length, 0, 'lower and equal values were honored: nothing was ignored');
+    // R18 (BB-5): this used to assert 0 lines ('deleteCold already true: the project value stands'), the consented exception the owner
+    // ruled out on 2026-10-03; changed here by name. The clamp holds after consent, so the raise is dropped and named.
+    e1Configs(home, proj, { deleteCold: true, purgeAfterDays: 90 }, { purgeAfterDays: 36500 });
+    const consented = e1Lines(run(proj, home, ['estate-scan']).stderr);
+    assert.strictEqual(consented.length, 1, 'deleteCold true: the raise is still dropped and named');
+    assert.ok(consented[0].includes('asks for 36500, and that was ignored.') && consented[0].includes('This run used 90.'), consented[0]);
+  } finally { clean(home, proj); }
+});
+
+test('E1: the value comes from a cloned repo, so the line is ONE line and bounded -- a newline or a control character in it cannot forge a second stderr line (log injection)', () => {
+  const { home, proj } = sandbox();
+  try {
+    e1Configs(home, proj, { deleteCold: false, purgeAfterDays: 90 }, { purgeAfterDays: `x\nFORGED-LINE ${String.fromCharCode(27)}[2J ${'a'.repeat(5000)}` });
+    const r = run(proj, home, ['estate-scan']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(r.stderr.split(/\r?\n/).every((l) => !l.startsWith('FORGED-LINE')), 'the forged text did not start a line of its own');
+    assert.ok(!r.stderr.includes(String.fromCharCode(27)), 'no raw ESC reached stderr');
+    const lines = e1Lines(r.stderr);
+    assert.strictEqual(lines.length, 1);
+    assert.ok(lines[0].length < 1500, `bounded, not ${lines[0].length} characters`);
+  } finally { clean(home, proj); }
 });

@@ -1,0 +1,293 @@
+// CWK-137 -- CONTAINED WRITES on REPO-DERIVED paths. The READ half (bounded,
+// kind-gated, contained reads) lives in config-load.mjs beside the canonicalization
+// primitives it depends on; this module is the WRITE half. Mirrored from CoalMine
+// v3.20.2 (`scripts/lib/repo-fs.mjs`): same NAMES for the shared rules, plus the one
+// rule this room needs that CoalMine does not -- `ownSandboxDir`.
+//
+// WHY THIS ROOM NEEDS MORE THAN CoalMine's RULE. CoalWash keeps its own transaction
+// state INSIDE the project it serves: `<root>/.claude/coalwash/` holds the write-guard
+// snapshots, the wash journal and snapshots, the bins and keeps.json -- and it DELETES
+// there on its own schedule (the SessionStart write-guard sweep, the snapshot and bin
+// retention). A cloned repository can commit that path, or any directory under it, as
+// a link. Measured before this fix: a junction committed at
+// `.claude/coalwash/writeguard` pointing at a directory holding `Documents/thesis.txt`
+// left that directory EMPTY after one SessionStart (scratchpad/r8/poc/sweep-poc.mjs).
+// Containment alone (CoalMine's checkRepoDirTarget) would not have been enough for a
+// DELETE: a link that stays INSIDE the repo would still aim the sweep at the user's
+// uncommitted work. So our own sandbox gets the stricter rule -- no link at all
+// between the project root and the directory we write or delete in.
+//
+//   WRITE -- the nearest existing ancestor of the target resolves inside the root's
+//            canonical path; the target, if it exists, is a regular file and not a
+//            link; the bytes go to a sibling temp opened O_EXCL and are renamed over
+//            the target, so a link planted after the check is REPLACED, never written
+//            through (node/runtime.md section 5).
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { canonicalOrNull, pathWithin, repoReadOutcome } from './config-load.mjs';
+
+// A refused write. `code` lets a caller tell a refusal from an ordinary I/O error. `folder` is set when the refusal is a
+// FOLDER on the way rather than the target file, and `kind` says why (not `cause`, which Error already defines), so a
+// caller can tell the user which folder to fix and how without parsing the message (INSPECT 83 L83-1, RE-INSPECT 86
+// R86-1). The kinds: 'link' (a link or junction on the
+// way, wherever it points, dangling included) · 'not-dir' (something that is not a folder) · 'outside' (a folder that
+// resolves outside the project with no link found on the way) · 'io' (it could not be inspected or made) · 'vanished' (it
+// was gone right after it was made) · 'escape' (the folder itself is outside the project root).
+export class RepoWriteRefused extends Error {
+  constructor(message, folder = null, kind = null) { super(message); this.code = 'COALWASH_WRITE_REFUSED'; this.folder = folder; this.kind = kind; }
+}
+
+// `projectRoot` joined with `segs`, after proving every EXISTING component below the
+// root is a real directory -- not a symlink, not a junction (Node's lstat reports a
+// junction as a symbolic link), not a file. Missing components are fine: we create
+// them as real directories. Throws RepoWriteRefused otherwise. The root itself may
+// sit anywhere, links above it included; only the part a cloned repo controls is
+// checked.
+export function ownSandboxDir(projectRoot, ...segs) {
+  if (!canonicalOrNull(projectRoot)) throw new RepoWriteRefused(`the project root ${projectRoot} does not resolve`);
+  for (const seg of segs) {
+    if (!seg || seg === '.' || seg === '..' || path.basename(seg) !== seg) throw new RepoWriteRefused(`not a plain directory name: ${seg}`);
+  }
+  let cur = path.resolve(projectRoot);
+  for (let i = 0; i < segs.length; i++) {
+    cur = path.join(cur, segs[i]);
+    if (!plainDirOrMissing(cur)) return path.join(cur, ...segs.slice(i + 1));
+  }
+  return cur;
+}
+
+// One folder on a chain below the project root: true when it is a real directory, false when it does not exist; a link
+// (a junction included -- Node's lstat reports one as a symbolic link), a non-directory or an lstat error is the refusal.
+function plainDirOrMissing(cur) {
+  let st;
+  try { st = fs.lstatSync(cur); } catch (e) {
+    if (e && e.code === 'ENOENT') return false;
+    throw new RepoWriteRefused(`cannot inspect ${cur} (${e && e.code})`, cur, 'io');
+  }
+  if (st.isSymbolicLink()) throw new RepoWriteRefused(`${cur} is a link -- CoalWash never writes or deletes through a link inside the project (a cloned repo can plant one)`, cur, 'link');
+  if (!st.isDirectory()) throw new RepoWriteRefused(`${cur} exists and is not a directory`, cur, 'not-dir');
+  return true;
+}
+
+// Is a path.relative(root, x) result outside the root? A test on the FIRST path segment (`..` alone, `..` plus the separator,
+// or an absolute path on another drive), never a lexical prefix: a real child folder named `..cfg` is inside.
+export function escapesRoot(rel) {
+  return rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel);
+}
+
+// CWK2-048, ported from CoalLedger's exemplar (31a1c3f + ed36168): make `dir` and every missing folder above it, walking
+// from `root` down. Each folder is checked with plainDirOrMissing (the ownSandboxDir rule: a link or junction is refused
+// WHEREVER it points, a link that stays inside the project included); a missing one is made with a plain, NON-recursive
+// mkdirSync and checked again after it is made, so nothing is ever made past a folder that was not checked. The root itself
+// is not walked. `root` null (the user's own file) keeps the plain recursive make. NOT closed: the walk and the write are
+// separate steps, so a hostile local writer that swaps a checked folder for a link before the write still redirects it
+// (fire 77 leg F; SECURITY.md names it).
+export function mkdirRepoParents(dir, root) {
+  if (root == null) { fs.mkdirSync(dir, { recursive: true }); return; }
+  const base = path.resolve(root);
+  const rel = path.relative(base, path.resolve(dir));
+  if (rel === '') return;
+  if (escapesRoot(rel)) throw new RepoWriteRefused(`${dir} is outside the project root ${base}`, path.resolve(dir), 'escape');
+  let cur = base;
+  for (const part of rel.split(path.sep)) {
+    cur = path.join(cur, part);
+    if (plainDirOrMissing(cur)) continue;
+    try { fs.mkdirSync(cur); } catch (e) {
+      if (!e || e.code !== 'EEXIST') throw new RepoWriteRefused(`cannot make ${cur} (${e && e.code})`, cur, 'io');
+    }
+    if (!plainDirOrMissing(cur)) throw new RepoWriteRefused(`${cur} is missing after it was made`, cur, 'vanished');
+  }
+}
+
+function nearestExistingAncestor(p) {
+  let dir = p;
+  for (;;) {
+    try { fs.lstatSync(dir); return dir; } catch { /* keep climbing */ }
+    const up = path.dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+}
+
+// Is `dir` (existing or not) a directory whose writes stay inside `root`? null = yes,
+// else the reason, phrased for a human.
+export function checkRepoDirTarget(dir, root) {
+  const r = repoDirRefusal(dir, root);
+  return r ? r.why : null;
+}
+
+// checkRepoDirTarget's verdict with the folder to fix and its kind (R86-1): null, or { why, folder, kind }, `why` being the
+// exact string checkRepoDirTarget returns. When the nearest existing folder does not resolve or resolves outside, the folder
+// named is the first link on the way from the root down to it (the one to replace); with no link there, that folder itself.
+function repoDirRefusal(dir, root) {
+  const rootPhys = canonicalOrNull(root);
+  if (!rootPhys) return { why: `the root ${root} does not resolve`, folder: null, kind: null };
+  const anc = nearestExistingAncestor(path.resolve(dir));
+  if (anc === null) return { why: `no existing directory above ${dir}`, folder: null, kind: null };
+  const ancPhys = canonicalOrNull(anc);
+  if (!ancPhys) return { why: `${anc} does not resolve`, ...folderToFix(anc, root) };
+  if (!pathWithin(ancPhys, rootPhys)) return { why: `${anc} resolves to ${ancPhys}, outside ${rootPhys}`, ...folderToFix(anc, root) };
+  return null;
+}
+function folderToFix(anc, root) {
+  const base = path.resolve(root);
+  const rel = path.relative(base, anc);
+  if (escapesRoot(rel)) return { folder: anc, kind: 'escape' };
+  let cur = base;
+  for (const part of rel === '' ? [] : rel.split(path.sep)) {
+    cur = path.join(cur, part);
+    try { if (fs.lstatSync(cur).isSymbolicLink()) return { folder: cur, kind: 'link' }; } catch { break; }
+  }
+  return { folder: anc, kind: 'outside' };
+}
+
+// Is `target` a file CoalWash may (re)write inside `root`? null = yes, else the reason.
+export function checkRepoWriteTarget(target, root) {
+  const r = repoWriteRefusal(target, root);
+  return r ? r.why : null;
+}
+
+// checkRepoWriteTarget's verdict as { why, folder, kind } (R86-1); a refusal of the target file itself carries no folder.
+function repoWriteRefusal(target, root) {
+  const dirR = repoDirRefusal(path.dirname(path.resolve(target)), root);
+  if (dirR) return dirR;
+  const fileWhy = targetFileWhy(target);
+  return fileWhy ? { why: fileWhy, folder: null, kind: null } : null;
+}
+function targetFileWhy(target) {
+  let st;
+  try { st = fs.lstatSync(target); } catch (e) {
+    if (e && e.code === 'ENOENT') return null;
+    return `cannot inspect ${target} (${e && e.code})`;
+  }
+  if (st.isSymbolicLink()) {
+    let to = 'an unresolvable target';
+    try { to = fs.realpathSync.native(target); } catch { /* dangling */ }
+    return `${target} is a symbolic link to ${to}`;
+  }
+  if (!st.isFile()) return `${target} exists but is not a regular file`;
+  return null;
+}
+
+// Write `content` (string or Buffer) to `target` through an unpredictable sibling temp
+// opened O_EXCL, then rename it over the target -- the rename replaces whatever
+// directory entry sits there, a planted link included, and never writes through it.
+// The temp sits in the target's own directory, so the rename is same-device by
+// construction. NO containment check here: the caller has already decided the
+// directory is its own (ownSandboxDir) or contained (writeRepoFile below).
+export function replaceFile(target, content) {
+  const tmp = `${target}.coalwash-tmp-${crypto.randomBytes(6).toString('hex')}`;
+  fs.writeFileSync(tmp, content, { flag: 'wx' });
+  try {
+    fs.renameSync(tmp, target);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+    throw e;
+  }
+}
+
+// The self-ignore a CoalWash folder keeps so git never tracks the copies of memory content written there (the journal, the
+// snapshots, the bins, the write-guard airbag). The folder is ours (ownSandboxDir), so its `.gitignore` is ours too, and the only
+// content that counts is the catch-all `*\n`, byte for byte: a cloned repository can ship that file EMPTY, as `!*`, as a comment,
+// or as a link (PR #18, CodeRabbit r4231606757), and under git a `*\r\n` line is the pattern `*\r` (the lone-CR trap), not a
+// catch-all. Anything else at that name is replaced through replaceFile, whose rename swaps the directory entry (a planted link
+// included) and never writes through it; a name that cannot be replaced (a directory, a junction) or that does not read back as
+// the catch-all is the refusal. Two CoalWash writers racing rename the same bytes in, so either result is the catch-all. NOT closed (fire 63,
+// CodeRabbit t114): a hostile LOCAL writer that can already write this folder can swap the entry after the final read-back; the read-back
+// narrows that window to the caller's next write, it does not close it.
+// Returns null when the catch-all is in place, else the reason: a caller about to write a copy of memory content refuses on it.
+export const SELF_IGNORE_BODY = '*\n';
+function isCatchAllIgnore(file, dir) {
+  let st;
+  try { st = fs.lstatSync(file); } catch { return false; }
+  if (st.isSymbolicLink() || !st.isFile() || st.nlink > 1 || st.size !== SELF_IGNORE_BODY.length) return false;
+  const o = repoReadOutcome(file, dir, SELF_IGNORE_BODY.length);
+  return !!o.buf && o.buf.toString('latin1') === SELF_IGNORE_BODY;
+}
+export function ensureCatchAllIgnore(dir) {
+  const file = path.join(dir, '.gitignore');
+  if (isCatchAllIgnore(file, dir)) return null;
+  // Nothing at the name (the ordinary first run): an O_EXCL create, which fails on ANY entry there (a link included,
+  // never followed). Something there: the replace.
+  try { fs.writeFileSync(file, SELF_IGNORE_BODY, { flag: 'wx' }); } catch (e) {
+    if (!e || e.code !== 'EEXIST') return `cannot put the catch-all ${file} in place (${(e && e.code) || (e && e.message)})`;
+    try { replaceFile(file, SELF_IGNORE_BODY); } catch (e2) { return `cannot put the catch-all ${file} in place (${(e2 && e2.code) || (e2 && e2.message)})`; }
+  }
+  return isCatchAllIgnore(file, dir) ? null : `${file} does not read back as the catch-all after the replace`;
+}
+
+// Open an EXISTING file (or, with O_CREAT in `flags`, create it) that the caller means to write IN PLACE, and prove the handle IS
+// the directory entry the caller vetted. CWK-137 fire 10 (CodeQL #43/#44, js/file-system-race).
+//
+// The shape this replaces: `lstat(path)` refuses a link, then `open(path)` opens it. That is two path lookups behind one check:
+// whatever a concurrent writer puts at the name between them is opened without ever having been vetted, and the fstat that
+// follows vouches for whatever the open landed on (a plain single-link file passes). O_NOFOLLOW stops a swapped-in LINK at the
+// open on POSIX; Windows has no O_NOFOLLOW (`fs.constants.O_NOFOLLOW` is undefined there, Node 24.19.0), so a link is FOLLOWED.
+// The order here is the cure, and every step is decided AFTER the open, on the path and the handle together:
+//   1. open (no caller passes O_TRUNC, so nothing is written or truncated by opening, even through a followed link);
+//   2. lstat the PATH now: a plain single-link regular file, not a link;
+//   3. fstat the HANDLE: a plain single-link regular file;
+//   4. dev + ino of the two are the SAME file -- and of `expect` (the caller's own earlier lstat) when the caller judged the entry
+//      on it (the takeover judged the lock STALE from that lstat, and that verdict belongs to that inode only). A link followed at
+//      the open, or another file renamed over the name, is a different inode.
+// dev and ino are compared as BigInt: an NTFS file id measured on this box is 28991922601746602, above 2**53, so the Number
+// form would round neighbouring ids together. A filesystem that reports no id (ino 0) cannot prove identity, so it is refused
+// ('unverifiable'), never waved through.
+//
+// Returns { fd } (the caller closes it) or { why, code? }: 'unopenable' (the open itself failed) · 'not-plain' (a link, a special
+// file or a second name) · 'changed' (the handle is not the entry the caller vetted) · 'unverifiable'. NAMED RESIDUALS: with
+// O_CREAT in `flags`, a link followed at the open creates its (empty) target before the refusal, which the linker could have
+// created itself; and a directory COMPONENT swapped for a junction is a different shape (ownSandboxDir's).
+export function openPlainFile(file, flags, expect = null) {
+  let fd;
+  try { fd = fs.openSync(file, flags); } catch (e) { return { why: 'unopenable', code: e && e.code }; }
+  const refuse = (why) => { try { fs.closeSync(fd); } catch { /* already closed */ } return { why }; };
+  try {
+    const onPath = fs.lstatSync(file, { bigint: true });
+    if (onPath.isSymbolicLink() || !onPath.isFile() || onPath.nlink > 1n) return refuse('not-plain');
+    const onHandle = fs.fstatSync(fd, { bigint: true });
+    if (!onHandle.isFile() || onHandle.nlink > 1n) return refuse('changed');
+    if (!onHandle.ino || !onPath.ino) return refuse('unverifiable');
+    if (onHandle.dev !== onPath.dev || onHandle.ino !== onPath.ino) return refuse('changed');
+    if (expect && (onHandle.dev !== expect.dev || onHandle.ino !== expect.ino)) return refuse('changed');
+    return { fd };
+  } catch {
+    return refuse('changed'); // the name vanished (or could not be inspected) between the open and the check
+  }
+}
+
+// Write `content` to `target` inside `root`, or throw RepoWriteRefused.
+//
+// Windows refuses to rename over a file another process holds open without
+// FILE_SHARE_DELETE (EPERM/EBUSY/EACCES). CoalMine hit it from inside a running git
+// hook; the same can happen to a config an editor holds open. Fall back to an
+// in-place write ONLY when the target is a plain regular file with a single link,
+// proved by openPlainFile (CoalMine's CodeQL #69 lesson, and CoalWash's #43/#44): open
+// without truncating, O_NOFOLLOW and O_NONBLOCK where the platform has them, then check
+// the path and the handle are the same plain single-link file, and only then truncate +
+// write through the SAME fd. A symlink, a hard link (nlink > 1) or a name swapped for
+// another file after the check-time lstat would be written THROUGH, so those still fail
+// with the original error.
+export function writeRepoFile(target, content, root) {
+  const r = repoWriteRefusal(target, root);
+  if (r) throw new RepoWriteRefused(r.why, r.folder, r.kind);
+  mkdirRepoParents(path.dirname(path.resolve(target)), root); // CWK2-048: no link on the way, wherever it points
+  // The folder chain was checked just above; the target name itself is handled by replaceFile's rename, which replaces a
+  // planted link instead of writing through it.
+  try {
+    replaceFile(target, content);
+  } catch (e) {
+    if (!['EPERM', 'EBUSY', 'EACCES'].includes(e && e.code)) throw e;
+    const o = openPlainFile(target, fs.constants.O_WRONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0));
+    if (o.fd === undefined) throw e;
+    try {
+      const buf = Buffer.isBuffer(content) ? content : Buffer.from(String(content), 'utf8');
+      fs.ftruncateSync(o.fd, 0);
+      let off = 0;
+      while (off < buf.length) off += fs.writeSync(o.fd, buf, off, buf.length - off, off);
+    } finally {
+      fs.closeSync(o.fd);
+    }
+  }
+}

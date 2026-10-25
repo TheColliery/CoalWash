@@ -1,0 +1,113 @@
+// scripts/lib/test-plan.mjs: the room's wave-run numbers and the declared-test floor (09a; testing.md, the TAP-names MUST).
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as plan from './test-plan.mjs';
+import { declaredTopLevelTests, shortfallResults, HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS, SLOWEST_FILE_MS, CI_SLOWEST_FILE_MIN_MS, removeTree, TEARDOWN_BUDGET_MS, TEARDOWN_POLL_MS, GIT_LINGER_MAX_MS } from './test-plan.mjs';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
+
+const ROOM = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+// fire 63: the shape PR #22's red had, without git: a child that outlives its caller's call with its cwd inside the temp project. On Windows a plain
+// rmSync of that project throws EBUSY or EPERM until the child exits; on a POSIX host the removal succeeds either way (the platform deletes a cwd).
+test('removeTree removes a temp project while a child process still holds it as its cwd (fire 63, PR #22: EBUSY in a teardown)', async (t) => {
+  const tmp = fs.realpathSync.native(os.tmpdir());
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-teardown-')));
+  const HOLD_MS = 2000;
+  // the child's HOME and temp point into the sandbox (CodeRabbit t120): it writes nothing, and if it ever did, nothing would reach the real home
+  const env = { ...process.env, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir };
+  const child = spawn(process.execPath, ['-e', `require('fs').writeFileSync('ready', ''); setTimeout(() => {}, ${HOLD_MS})`], { cwd: dir, env, stdio: 'ignore', windowsHide: true });
+  const exited = new Promise((res) => child.once('exit', res));
+  t.after(async () => {
+    child.kill();
+    await exited;
+    assert.ok(dir.startsWith(tmp + path.sep), `refusing to remove ${dir}: not under ${tmp}`);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const READY_POLLS = 1500; // bounded by a count of 20 ms polls, never a wall-clock assertion (CodeRabbit t120); the file clock is the outer bound
+  for (let polls = 0; !fs.existsSync(path.join(dir, 'ready')); polls++) {
+    assert.ok(polls < READY_POLLS, `the holding child never started (${READY_POLLS} polls)`);
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  removeTree(dir);
+  assert.ok(!fs.existsSync(dir), 'the held project is gone');
+});
+
+test('removeTree gives up loudly: a directory still held when the budget runs out throws its own error, and a non-hold error throws at once', (t) => {
+  const tmp = fs.realpathSync.native(os.tmpdir());
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, 'cw-teardown-')));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const real = fs.rmSync;
+  let calls = 0;
+  try {
+    fs.rmSync = () => { calls++; throw Object.assign(new Error('held'), { code: 'EBUSY' }); };
+    assert.throws(() => removeTree(dir, { budgetMs: 250, pollMs: 50 }), { code: 'EBUSY' });
+    assert.ok(calls >= 3, `it polled before giving up (${calls} calls)`);
+    calls = 0;
+    fs.rmSync = () => { calls++; throw Object.assign(new Error('bad'), { code: 'EINVAL' }); };
+    assert.throws(() => removeTree(dir, { budgetMs: 5000, pollMs: 50 }), { code: 'EINVAL' });
+    assert.equal(calls, 1, 'a non-hold error is never retried');
+  } finally { fs.rmSync = real; }
+});
+
+test('the teardown budget clears the longest measured git linger at least 3x and stays inside the per-test clock', () => {
+  assert.ok(TEARDOWN_BUDGET_MS >= 3 * GIT_LINGER_MAX_MS, `budget ${TEARDOWN_BUDGET_MS} ms against a linger of ${GIT_LINGER_MAX_MS} ms`);
+  assert.ok(TEARDOWN_BUDGET_MS * 4 < TEST_TIMEOUT_MS, 'a test with a few held teardowns still ends inside its own clock');
+  assert.ok(TEARDOWN_POLL_MS > 0 && TEARDOWN_POLL_MS < TEARDOWN_BUDGET_MS);
+});
+
+test('declaredTopLevelTests counts the test( calls that start a line in column 0, the skip/todo/only forms included, in LF and in CRLF', () => {
+  const lf = ["import { test } from 'node:test';", "test('a', () => {});", "test.skip('b', () => {});", "test.todo('c');", "test.only('d', () => {});", ''].join('\n');
+  assert.equal(declaredTopLevelTests(lf), 4);
+  assert.equal(declaredTopLevelTests(lf.replace(/\n/g, '\r\n')), 4);
+});
+
+test('declaredTopLevelTests never counts an indented, a commented-out or a member test( call: the floor is a LOWER bound', () => {
+  const text = ["for (const v of list) {", "  test(`row ${v}`, () => {});", "}", "// test('old', () => {});", "t.test('sub', () => {});", "contest('x');", ''].join('\n');
+  assert.equal(declaredTopLevelTests(text), 0);
+});
+
+test('shortfallResults turns a PASS that reported fewer tests than it declares into a FAIL naming both numbers, and leaves every other result alone', () => {
+  const text = ["test('one', () => {});", "test('two', () => { process.exit(0); });", "test('three', () => {});", ''].join('\n');
+  const read = (f) => (f === 'gone.test.mjs' ? null : text);
+  const results = [
+    { file: 'short.test.mjs', status: 'PASS', counts: { tests: 1 } },
+    { file: 'whole.test.mjs', status: 'PASS', counts: { tests: 3 } },
+    { file: 'more.test.mjs', status: 'PASS', counts: { tests: 7 } },
+    { file: 'red.test.mjs', status: 'FAIL', counts: { tests: 0 }, reason: 'not ok: x' },
+    { file: 'skipped.test.mjs', status: 'SKIP', counts: { tests: 2 } },
+    { file: 'gone.test.mjs', status: 'PASS', counts: { tests: 1 } },
+  ];
+  const out = shortfallResults(results, read);
+  assert.deepEqual(out.map((r) => r.status), ['FAIL', 'PASS', 'PASS', 'FAIL', 'FAIL', 'PASS']);
+  assert.match(out[0].reason, /^declares 3 top-level test\(s\) but the run reported 1 /);
+  assert.equal(out[3].reason, 'not ok: x', 'a red file keeps its own reason');
+  assert.equal(results[0].status, 'PASS', 'the input array is not mutated');
+});
+
+// 14a fire 53: on Node 22 `--test-timeout` bounds a whole FILE (per test only since Node 24, nodejs/node #57672), so the per-test number is
+// also the Node 22 file clock. At 120 s it sat 1.53x above the slowest file measured on this box and cut apply.test.mjs on CI's Windows Node 22
+// leg (78f24f2, check-run 115828019366: test timed out after 120000ms).
+// 15b fire 56 (L54-1): the box's figure is not the CI figure. CI's Windows Node 22 leg cut apply.test.mjs at 120,006 ms, and its
+// green run prints no per-file time, so that number is a LOWER bound; both bases are declared and the larger one sizes the clocks.
+test('the per-test bound and the file clock each clear the slower of the two declared bases (this box, CI lower bound) at least 3x, because on Node 22 the per-test bound is the clock of a whole file', () => {
+  for (const [name, n] of [['SLOWEST_FILE_MS', SLOWEST_FILE_MS], ['CI_SLOWEST_FILE_MIN_MS', CI_SLOWEST_FILE_MIN_MS]]) assert.ok(Number.isInteger(n) && n > 0, `${name} is declared`);
+  assert.ok(CI_SLOWEST_FILE_MIN_MS >= 120006, 'a measured lower bound only rises: CI cut the file at 120,006 ms on 78f24f2');
+  const basis = Math.max(SLOWEST_FILE_MS, CI_SLOWEST_FILE_MIN_MS);
+  assert.ok(TEST_TIMEOUT_MS >= 3 * basis, `TEST_TIMEOUT_MS ${TEST_TIMEOUT_MS} must be at least 3x the slower basis ${basis}`);
+  assert.ok(FILE_CLOCK_MS >= 3 * basis, `FILE_CLOCK_MS ${FILE_CLOCK_MS} must be at least 3x the slower basis ${basis}`);
+});
+
+test('the room numbers are finite and nest (test < file < run), and every roster file runs under the wave runner (no direct run, 09b)', () => {
+  for (const n of [HEAP_MB, TEST_TIMEOUT_MS, FILE_CLOCK_MS, RUN_TIMEOUT_MS]) assert.ok(Number.isInteger(n) && n > 0);
+  assert.ok(HEAP_MB <= 2048, 'dispatch-transport.md: a test child runs under a heap cap of 2048 MB or lower');
+  assert.ok(TEST_TIMEOUT_MS < FILE_CLOCK_MS && FILE_CLOCK_MS < RUN_TIMEOUT_MS);
+  assert.equal(plan.DIRECT_FILES, undefined, 'the 09a direct run is gone');
+  assert.equal(plan.runDirect, undefined, 'the 09a direct run is gone');
+  const runner = fs.readFileSync(path.join(ROOM, 'scripts', 'test.mjs'), 'utf8');
+  assert.match(runner, /runWaves\(\{ files: TESTS, /, 'the whole roster goes to the wave runner');
+  assert.ok(runner.includes("'scripts/lib/wave-run.test.mjs'"), 'wave-run.test.mjs is on the roster');
+});

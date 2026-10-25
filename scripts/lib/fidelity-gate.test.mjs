@@ -124,6 +124,42 @@ test('grad6 §3: frontmatterIncomplete is false on ordinary closed/none states �
   assert.strictEqual(checkFidelity(ORIG, cleanNext).pass, true, 'an ordinary clean compaction on a real closed block still passes — the abstain never fires on a certifiable census');
 });
 
+test('RED-FIRST/root-A-block-layer: a CLOSED block containing one unreadable (TAB-indented) key line must abstain — a key that line represents can be silently dropped with NO diff signal otherwise', () => {
+  // The fence is fine (state:'closed'); ONE line inside the block is TAB-indented,
+  // which frontmatterBlockParse refuses (YAML forbids tabs for indentation) and
+  // therefore never adds to `entries` in EITHER reading — so an ordinary
+  // frontmatter-key-drop diff sees the identical (missing) key on both sides and
+  // reports nothing. `incomplete` is the ONLY signal available for this class.
+  const tab = String.fromCharCode(9);
+  const orig = ['---', 'topic: routing', `${tab}pinned: true`, '---', '# Notes', 'body unchanged'].join('\n');
+  assert.strictEqual(readFrontmatter(orig).state, 'closed', 'setup sanity: the fence itself is fine, only a line inside is bad');
+  assert.ok(frontmatterBlockParse(readFrontmatter(orig).block).unreadable, 'setup sanity: the TAB line makes the block unreadable at the parser level');
+
+  // The real external edit: the TAB-indented pinned:true line is genuinely
+  // deleted (matches F1's own reproduction — an agent's direct Edit/Write,
+  // watched by writeguard's seatbelt, not applyPlan's own rewrite path).
+  const next = ['---', 'topic: routing', '---', '# Notes', 'body unchanged'].join('\n');
+
+  assert.strictEqual(inventory(orig).frontmatterIncomplete, true, 'the block-layer abstain must fire on the ORIGINAL side');
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false, 'a census that could not read every line must not certify this drop as clean');
+  assert.ok(
+    r.drops.some((d) => d.type === 'frontmatter-inventory-incomplete' && (d.value === 'orig' || d.value === 'both')),
+    `expected frontmatter-inventory-incomplete on the orig side, got ${JSON.stringify(r.drops)}`
+  );
+});
+
+test('RED-FIRST/root-A-block-layer control: the SAME shape with a fully readable block never abstains — the fix does not over-refuse', () => {
+  const orig = ['---', 'topic: routing', 'pinned: true', '---', '# Notes', 'body unchanged'].join('\n');
+  assert.strictEqual(frontmatterBlockParse(readFrontmatter(orig).block).unreadable, null, 'setup sanity: nothing unreadable here');
+  const next = ['---', 'topic: routing', '---', '# Notes', 'body unchanged'].join('\n'); // a REAL, catchable key drop
+  assert.strictEqual(inventory(orig).frontmatterIncomplete, false, 'a fully-readable block is never incomplete');
+  const r = checkFidelity(orig, next);
+  assert.strictEqual(r.pass, false, 'the drop is still caught — by the ordinary frontmatter-key-drop path, not the abstain');
+  assert.ok(r.drops.some((d) => d.type === 'frontmatter-key-drop' && d.value === 'pinned'), `expected an ordinary frontmatter-key-drop, got ${JSON.stringify(r.drops)}`);
+  assert.ok(!r.drops.some((d) => d.type === 'frontmatter-inventory-incomplete'), 'no abstain fired — the readable-block path never needed one');
+});
+
 test('grad6 §3: inventoryDropKeys signals the incomplete census as its own approvable key', () => {
   const BOM = String.fromCharCode(0xfeff);
   const orig = BOM + BOM + '---\nowner: me\n---\nbody';
@@ -1050,6 +1086,21 @@ test('LINE BASIS: a block containing a bare CR refuses — the split basis canno
 // to assert instead of time; the call count is 1 on both the fixed and the
 // broken engine. Elapsed ms is the only available proxy for "is
 // KEY_SEP_STRICT still non-backtracking" here.
+//
+// THAT CLAIM WAS TESTED, NOT CARRIED (F-RR-2, r34), and it holds — for a reason
+// the siblings below do not share. Each sibling's counter instruments a loop or
+// a slice in OUR code (parseNumTokenCalls, evidenceIncludesCalls,
+// fileRefMaxSliceLen). This cost lives inside V8's regex engine, which exposes
+// no backtrack or step count. The only way to get a count is to move the scan
+// out of the regex engine into a JS loop — a rewrite of the parser that decides
+// whether a file is `pinned`, on a door that deletes files, bought for a test
+// instrument. And that counter would watch ONE pattern, while this clock covers
+// every regex frontmatterBlockParse runs on the line (the indent, SEQ_ITEM, the
+// printable-ASCII and indicator-character checks). So the clock STAYS, declared.
+// THE MARGIN, measured on this box (r34): green 0.1-0.5 ms per 60 KiB line;
+// the retired KEY_STRICT regex reintroduced reddened it at 4486 ms. The 1500 ms
+// bound therefore needs a runner ~3000x slower than this one to false-red, and
+// still sits ~3x under the regression it exists to catch.
 // ---------------------------------------------------------------------------
 test('KEY-LINE COST: a 60 KiB pathological line parses in bounded time (was ~5.4 s quadratic)', () => {
   const shapes = [
@@ -1060,6 +1111,10 @@ test('KEY-LINE COST: a 60 KiB pathological line parses in bounded time (was ~5.4
     const t0 = process.hrtime.bigint();
     frontmatterBlockParse(line);
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    // WAVE-8 RE-INSPECT: print on every run, not only on failure -- a
+    // silent-on-success perf assertion never accumulates a baseline (see
+    // apply.test.mjs's GATE COST test, same fix, same reason).
+    console.log(`KEY-LINE COST ms: ${line.length}-char line = ${ms.toFixed(1)}`);
     assert.ok(ms < 1500, `parsing ${line.length} chars took ${ms.toFixed(0)}ms — the quadratic is back`);
   }
 });
@@ -1071,9 +1126,9 @@ test('KEY-LINE COST: a 60 KiB pathological line parses in bounded time (was ~5.4
 // the no-drop path linear. Every second of gate time sits inside applyPlan's
 // window between the staging read and the external-writer compare, so gate
 // time is exposure, not just latency. The candidates are now parsed ONCE per
-// checkFidelity call; the bound below is ~10x the fixed cost and ~2x under
-// the measured quadratic at this size, so it only trips if the quadratic
-// returns. Semantics are pinned by the survivor-order control underneath and
+// checkFidelity call, and the test asserts that as a parseNumToken CALL COUNT
+// against a linear bound — the wall-clock bound that used to stand here is
+// retired (F-RR-2, r34). Semantics are pinned by the survivor-order control underneath and
 // by the old-vs-new corpus differential recorded in the CHANGELOG.
 // ---------------------------------------------------------------------------
 function dropHeavyPair(targetBytes) {
@@ -1098,6 +1153,12 @@ test('GATE COST: a drop-heavy 512 KB pair gates in bounded time (was ~4.8 s quad
   const t0 = process.hrtime.bigint();
   const r = checkFidelity(orig, next);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  // WAVE-8 RE-INSPECT (class-b): print on every run, not only on failure --
+  // kept alongside the COUNT capture below, which is main's own later
+  // press-2 fix (a wall-clock bound alone had produced four cross-platform
+  // CI blocks in one day) and is the actual regression signal this test
+  // asserts on; the print is diagnostic only, additive, never the gate.
+  console.log(`GATE COST ms: drop-heavy-512KB/${r.drops.length}-drops = ${ms.toFixed(1)}`);
   const calls = __testHooks.parseNumTokenCalls; // read before any further parseNumToken traffic
   assert.ok(r.drops.length > 1000, `the fixture must actually be drop-heavy; got ${r.drops.length}`);
   // COUNT, the primary assertion (press 2): the retired quadratic was
@@ -1113,8 +1174,10 @@ test('GATE COST: a drop-heavy 512 KB pair gates in bounded time (was ~4.8 s quad
   const bound = numberDrops + nextNumberCount; // one parseNumToken per dropped orig token + one per next candidate
   assert.ok(calls <= bound,
     `parseNumToken called ${calls} times for ${numberDrops} drops x ${nextNumberCount} candidates (linear bound ${bound}) — the per-drop candidate re-parse is back`);
-  // ms kept as a secondary sanity check, not the regression signal.
-  assert.ok(ms < 2000, `gating ${orig.length} chars with ${r.drops.length} drops took ${ms.toFixed(0)}ms — unexpectedly slow even with the call count in bounds`);
+  // F-RR-2 (r34): the `ms < 2000` leg that stood here is DELETED, not loosened.
+  // The count above is the regression signal; the clock could only add a false
+  // red (2132 ms under parallel load on correct code, r32). The printed ms stays
+  // as a diagnostic a human reads — it never fails a build.
 });
 
 // The SECOND quadratic term in the same function (found while closing #36,
@@ -1140,6 +1203,10 @@ test('GATE COST: a marker-heavy LOW-DROP 1 MB pair gates in bounded time (the ty
   const t0 = process.hrtime.bigint();
   const r = checkFidelity(orig, next);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  // WAVE-8 RE-INSPECT (class-b): print on every run, not only on failure --
+  // kept alongside the COUNT capture below (main's later press-2 fix, the
+  // actual regression signal).
+  console.log(`GATE COST ms: marker-heavy-1MB/${r.drops.length}-drops = ${ms.toFixed(1)}`);
   const includesCalls = __testHooks.evidenceIncludesCalls;
   assert.ok(r.drops.length > 100, `the fixture must still drop something; got ${r.drops.length}`);
   const anchorDrops = r.drops.filter((d) => d.type === 'evidence-anchor-drop').length;
@@ -1154,8 +1221,8 @@ test('GATE COST: a marker-heavy LOW-DROP 1 MB pair gates in bounded time (the ty
   const survivingLines = lines.length - Math.floor(lines.length / 16);
   assert.ok(includesCalls <= anchorDrops + 10,
     `next.includes(tok) evaluated ${includesCalls} times for ${anchorDrops} anchor drops out of ${survivingLines} surviving lines — the nextEvTokens short-circuit is back`);
-  // ms kept as a secondary sanity check, not the regression signal.
-  assert.ok(ms < 2000, `gating 1 MB marker-heavy with ${r.drops.length} drops took ${ms.toFixed(0)}ms — unexpectedly slow even with the call count in bounds`);
+  // F-RR-2 (r34): the `ms < 2000` leg that stood here is DELETED, not loosened —
+  // same reason as the drop-heavy test above. The count is the signal.
 });
 
 test('GATE COST control: the FIRST coarser survivor in inventory order is still the one named — the tie-break is pinned', () => {
@@ -1188,17 +1255,20 @@ test('GATE COST: an unbroken [\\w.-] run with NO valid file extension gates in b
   const t0 = process.hrtime.bigint();
   checkFidelity('proven at commit c19e528b', next);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  // BOUND, the primary assertion (press 2): this is a length-cap regression,
-  // not a call-count one — matchFileRefs still runs FILE_REF_RE once per
-  // [\w.-] run either way. What the fix bounds is the SLICE LENGTH each call
-  // actually sees. Assert the cap held directly: if FILE_REF_RUN_CAP's
-  // enforcement is bypassed, the single ~26 KB pathological run in this
-  // fixture is passed to the regex whole, and this assertion catches it
-  // deterministically — no timing involved.
+  // WAVE-8 RE-INSPECT (class-b): print on every run, not only on failure.
+  console.log(`GATE COST ms: extension-less-256KiB = ${ms.toFixed(1)}`);
+  // BOUND, the primary assertion (press 2, main's later fix -- the actual
+  // regression signal): this is a length-cap regression, not a call-count
+  // one — matchFileRefs still runs FILE_REF_RE once per [\w.-] run either
+  // way. What the fix bounds is the SLICE LENGTH each call actually sees.
+  // Assert the cap held directly: if FILE_REF_RUN_CAP's enforcement is
+  // bypassed, the single ~26 KB pathological run in this fixture is passed
+  // to the regex whole, and this assertion catches it deterministically —
+  // no timing involved.
   assert.ok(__testHooks.fileRefMaxSliceLen <= FILE_REF_RUN_CAP,
     `a ${__testHooks.fileRefMaxSliceLen}-char slice reached FILE_REF_RE (cap is ${FILE_REF_RUN_CAP}) — the run-length cap is not being enforced`);
-  // ms kept as a secondary sanity check, not the regression signal.
-  assert.ok(ms < 1000, `gating a ${next.length}-char extension-less run took ${ms.toFixed(0)}ms — unexpectedly slow even with the cap enforced`);
+  // F-RR-2 (r34): the `ms < 1000` leg that stood here is DELETED, not loosened —
+  // the slice-length cap above is the signal, "no timing involved".
 });
 
 // Same fix, correctness control: an ordinary short filename reference must

@@ -5,7 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { globalConfigPath, projectConfigPath, projectConfigCandidates, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
+import { globalConfigPath, projectConfigPath, projectConfigCandidates, projectConfigResolution, discoverIgnoredConfigs, findProjectRoot, loadMergedConfig, claudeBaseDir, claudeBaseDirs, touchesClaudeBase, canonicalOrNull, pathWithin, mergeSafety, volumeCaseFolds, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
+
+// A NAMESPACE import for the UMB-174 report tests below: a missing export then fails each of those tests by
+// assertion (a TypeError at the call) instead of crashing the whole file at link time, so the red-first evidence
+// for the new API is per-test, not "the file did not load".
+import * as ConfigLoad from './config-load.mjs';
+import { resolveArchiveDir, classifySessions } from './estate-archive.mjs';
+import { ccProjectSlug } from './class-b.mjs';
+import { clampedRead } from './config-schema.mjs';
 
 // realpath'd sandboxes: on macOS os.tmpdir() is a symlink (/var -> /private/var);
 // resolving here keeps assertions in the same physical form the walk sees.
@@ -170,6 +178,53 @@ test('W2-3: a MISSING global (never written at all) is unaffected -- unreadable 
     fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ coalwashMode: 'auto' }));
     const cfg = loadMergedConfig({ cwd: proj, home });
     assert.strictEqual(cfg.coalwashMode, 'auto', 'no global file at all -> the project value is honored (schema default "auto" imposes no constraint here)');
+  } finally { clean(home, proj); }
+});
+
+// grad9 R8-F5 (carried from round 8, never routed until now): `mergeSafety`
+// threaded `globalUnreadable` but never `projectUnreadable` -- readJsonc
+// ALREADY blanks `data` to `{}` on any unreadable condition today, so this is
+// a DEFENSIVE fix, not a live-bug close under the current readJsonc
+// implementation. RED-FIRST at the level that actually matters: mergeSafety
+// is a general, reusable function, and a caller passing REAL (would-be-
+// escalating) project data alongside `projectUnreadable:true` must get the
+// same "nothing asked" treatment global gets on ITS unreadable path -- the
+// function's OWN contract, independent of what any one caller's reader does.
+// A SAFER_ENUM/SAFER_TRUE key (coalwashMode, writeGuard, localOnly) is the
+// WRONG probe here — those are already clamped by the existing enum logic
+// regardless of projectUnreadable, so a test built on one would pass on
+// EITHER engine and prove nothing about the new wiring specifically. A plain
+// PASSTHROUGH key (nothing in OBJECT_SCHEMA_KEYS/SAFER_ENUM/SAFER_TRUE,
+// e.g. fullPercent) is set ONLY by the initial `{...global, ...p}` spread —
+// exactly the one place `projectUnreadable` changes what `p` is.
+test('RED-FIRST/R8-F5: mergeSafety ignores PROJECT data entirely when projectUnreadable is true, even for a plain passthrough key an enum clamp would never touch', () => {
+  const merged = mergeSafety(
+    { fullPercent: 6 },
+    { fullPercent: 99 }, // a real, non-safety-clamped override
+    { projectUnreadable: true },
+  );
+  assert.strictEqual(merged.fullPercent, 6, 'the project\'s override must be ignored entirely — nothing clamps this key, only projectUnreadable can be muting it');
+});
+
+test('RED-FIRST/R8-F5 control: with projectUnreadable FALSE (the default), the same passthrough override still lands — the fix does not silently mute a normally-readable project', () => {
+  const merged = mergeSafety({ fullPercent: 6 }, { fullPercent: 99 });
+  assert.strictEqual(merged.fullPercent, 99, 'a readable project still overrides a plain passthrough key, exactly as before');
+});
+
+// End-to-end symmetry check (not independently red-first — readJsonc already
+// blanks `data` on any unreadable project file today, so this passes on
+// EITHER engine; kept as the room's own "does a MISSING/corrupt project
+// escalate past global" invariant, now stated for the project side the way
+// W2-3 above states it for the global side).
+test('R8-F5 end-to-end: a PRESENT-but-corrupt project config cannot escalate past a stricter global stance', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', '.coalwash.json'), JSON.stringify({ coalwashMode: 'off', writeGuard: 'on' }));
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), '{ not json'); // corrupt, but EXISTS
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.coalwashMode, 'off', 'a corrupt project file must never be read as an escalation attempt');
+    assert.strictEqual(cfg.writeGuard, 'on');
   } finally { clean(home, proj); }
 });
 
@@ -1075,7 +1130,7 @@ test('discoverRetentionCandidateKeys: no matches anywhere -> empty array, never 
 // the structural move-on-write proof + the clamp-unchanged regression.
 // ---------------------------------------------------------------------------
 
-test('projectConfigCandidates: the rail order is .claude -> .agents -> .gemini -> LEGACY, always relative to the resolved project root', () => {
+test('projectConfigCandidates: the rail order is .claude -> .agents -> .gemini -> LEGACY(nested) -> LEGACY(root), always relative to the resolved project root', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
@@ -1084,33 +1139,49 @@ test('projectConfigCandidates: the rail order is .claude -> .agents -> .gemini -
       path.join(proj, '.claude', 'coal', 'coalwash.json'),
       path.join(proj, '.agents', 'coal', 'coalwash.json'),
       path.join(proj, '.gemini', 'coal', 'coalwash.json'),
+      path.join(proj, '.claude', '.coalwash.json'),
       path.join(proj, '.coalwash.json'),
     ]);
   } finally { clean(home, proj); }
 });
 
-test('projectConfigPath precedence 1/3: own-dir (.claude) wins even when every other candidate, including LEGACY, also exists', () => {
+test('projectConfigPath precedence 1/4: own-dir (.claude) wins even when every other candidate, including BOTH legacies, also exists', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'own-dir' });
     writeJson(path.join(proj, '.agents', 'coal', 'coalwash.json'), { coalwashMode: 'other-dir' });
-    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy' });
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'legacy-nested' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy-root' });
     assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
   } finally { clean(home, proj); }
 });
 
-test('projectConfigPath precedence 2/3: .claude absent, .agents present -> the other-known-dir entry wins over LEGACY', () => {
+test('projectConfigPath precedence 2/4: .claude absent, .agents present -> the other-known-dir entry wins over BOTH legacies', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     writeJson(path.join(proj, '.agents', 'coal', 'coalwash.json'), { coalwashMode: 'other-dir' });
-    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy' });
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'legacy-nested' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'legacy-root' });
     assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.agents', 'coal', 'coalwash.json'));
   } finally { clean(home, proj); }
 });
 
-test('projectConfigPath precedence 3/3: no new-shape candidate exists anywhere -> LEGACY root dotfile is read, no breakage for an existing user', () => {
+test('projectConfigPath precedence 3/4: no canonical shape exists anywhere -> the NESTED legacy (.claude/.coalwash.json) wins over the root one, and is actually READ', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    // UMB-133 hole (2): the second legacy shape (CoalTipple's/CoalBoard's) is
+    // now honoured here too, and it comes BEFORE the root legacy in the walk.
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'manual' });
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'auto' });
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', '.coalwash.json'));
+    assert.strictEqual(loadMergedConfig({ cwd: proj, home }).coalwashMode, 'manual', 'the nested legacy is what actually gets READ, not merely resolved');
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigPath precedence 4/4: no new-shape candidate and no nested legacy -> the ROOT legacy dotfile is read, no breakage for an existing user', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
@@ -1124,11 +1195,172 @@ test('projectConfigPath precedence 3/3: no new-shape candidate exists anywhere -
   } finally { clean(home, proj); }
 });
 
+// UMB-133 hole (2), the migration-notice half.
+test('projectConfigResolution: a canonical hit reports legacy:false', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', 'coal', 'coalwash.json'), { coalwashMode: 'auto' });
+    const r = projectConfigResolution(proj, home);
+    assert.deepStrictEqual(r, { path: path.join(proj, '.claude', 'coal', 'coalwash.json'), legacy: false });
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigResolution: a NESTED legacy hit (.claude/.coalwash.json) reports legacy:true', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'auto' });
+    const r = projectConfigResolution(proj, home);
+    assert.deepStrictEqual(r, { path: path.join(proj, '.claude', '.coalwash.json'), legacy: true });
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigResolution: a ROOT legacy hit reports legacy:true', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.coalwash.json'), { coalwashMode: 'auto' });
+    const r = projectConfigResolution(proj, home);
+    assert.deepStrictEqual(r, { path: path.join(proj, '.coalwash.json'), legacy: true });
+  } finally { clean(home, proj); }
+});
+
+test('projectConfigResolution: nothing exists anywhere -> null, nothing to notice', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    assert.strictEqual(projectConfigResolution(proj, home), null);
+  } finally { clean(home, proj); }
+});
+
+// UMB-133 hole (1), the ignored-report half.
+test('discoverIgnoredConfigs: a .coalwash.json planted under .agents (a dir this walk does NOT honour a nested legacy for) is REPORTED, never silently skipped', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.agents', '.coalwash.json'), { coalwashMode: 'auto' });
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home), [path.join(proj, '.agents', '.coalwash.json')]);
+    // and it plays no part in what actually gets read
+    assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+test('discoverIgnoredConfigs: the SAME shape under .gemini is reported too, and both fire together', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.agents', '.coalwash.json'), { coalwashMode: 'auto' });
+    writeJson(path.join(proj, '.gemini', '.coalwash.json'), { coalwashMode: 'auto' });
+    const ignored = discoverIgnoredConfigs(proj, home).sort();
+    assert.deepStrictEqual(ignored, [
+      path.join(proj, '.agents', '.coalwash.json'),
+      path.join(proj, '.gemini', '.coalwash.json'),
+    ].sort());
+  } finally { clean(home, proj); }
+});
+
+test('discoverIgnoredConfigs: the .claude/.coalwash.json shape is NOT reported -- it is a real candidate now, not an ignored path', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    writeJson(path.join(proj, '.claude', '.coalwash.json'), { coalwashMode: 'auto' });
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home), []);
+  } finally { clean(home, proj); }
+});
+
+test('discoverIgnoredConfigs: no stray files anywhere -> empty array', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home), []);
+  } finally { clean(home, proj); }
+});
+
+// UMB-133 INSPECT F2: the probe's cost note used to claim a bound it did not
+// have, because the function derived the project root TWICE (itself, then again
+// inside projectConfigCandidates) while its caller had already derived it once.
+// The cure is an optional resolved root, and these two tests are what make the
+// note true BY CONSTRUCTION rather than by a figure someone has to re-check --
+// the first pins that the passed root is what is USED, the second pins that
+// passing it leaves no marker walk behind at all.
+test('discoverIgnoredConfigs: a PASSED root is what the probe reports under -- not one it re-derives from cwd', () => {
+  const { home, proj } = sandbox();
+  let other; // allocated INSIDE the try: a throw here must still reach the cleanup of home/proj
+  try {
+    other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-otherroot-')));
+    fs.mkdirSync(path.join(proj, '.git'));
+    fs.mkdirSync(path.join(other, '.git'));
+    // the stray sits under OTHER, never under the root `cwd` would resolve to
+    writeJson(path.join(other, '.agents', '.coalwash.json'), { coalwashMode: 'auto' });
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home), [], 'control: cwd resolves to proj, which has no stray');
+    assert.deepStrictEqual(discoverIgnoredConfigs(proj, home, other), [path.join(other, '.agents', '.coalwash.json')],
+      'the third argument must be the root the probe actually uses; ignoring it silently re-derives a different one');
+  } finally { clean(...[home, proj, other].filter(Boolean)); }
+});
+
+test('discoverIgnoredConfigs: passing the resolved root costs ZERO marker-walk calls -- the probe adds only its own existence probes', () => {
+  const { home, proj } = sandbox();
+  try {
+    // a marker several levels up, so a marker walk is expensive enough to be
+    // unmistakable in the counts if one still runs
+    fs.mkdirSync(path.join(proj, '.git'));
+    const deep = path.join(proj, 'a', 'b', 'c');
+    fs.mkdirSync(deep, { recursive: true });
+    const root = findProjectRoot(deep, home);
+    assert.strictEqual(root, proj, 'fixture sanity: the walk must have real work to do');
+
+    const KEYS = ['existsSync', 'lstatSync', 'readFileSync'];
+    const counts = {};
+    const orig = {};
+    const origRealpath = fs.realpathSync;
+    const origNative = fs.realpathSync.native; // captured by the wrapper's `.native` below
+    counts.realpathSync = 0;
+    for (const k of KEYS) { orig[k] = fs[k]; counts[k] = 0; }
+    try {
+      for (const k of KEYS) fs[k] = (...a) => { counts[k]++; return orig[k](...a); };
+      const rp = (...a) => { counts.realpathSync++; return origRealpath(...a); };
+      rp.native = (...a) => { counts.realpathSync++; return origNative(...a); };
+      fs.realpathSync = rp;
+      discoverIgnoredConfigs(deep, home, root);
+    } finally {
+      for (const k of KEYS) fs[k] = orig[k];
+      fs.realpathSync = origRealpath; // restores .native too: the wrapper above never mutated the original's .native
+      // (the dead `origRealpath.native = origNative` that stood here was a no-op -- UMB-133 carry-over)
+    }
+
+    assert.strictEqual(counts.existsSync, 0, `a marker walk still ran (${counts.existsSync} existsSync); the passed root must short-circuit it entirely`);
+    assert.strictEqual(counts.realpathSync, 0, `a marker walk still ran (${counts.realpathSync} realpathSync); the passed root must short-circuit it entirely`);
+    assert.strictEqual(counts.readFileSync, 0, 'the probe reads no file: it reports paths, it never opens one');
+    assert.ok(counts.lstatSync <= 3, `the probe's own loop is bounded by AGENT_DIR_ORDER.length; got ${counts.lstatSync}`);
+  } finally { clean(home, proj); }
+});
+
 test('projectConfigPath: nothing exists anywhere -> the own-dir (.claude) path is the read AND write target, matching a never-configured project', () => {
   const { home, proj } = sandbox();
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     assert.strictEqual(projectConfigPath(proj, home), path.join(proj, '.claude', 'coal', 'coalwash.json'));
+  } finally { clean(home, proj); }
+});
+
+// UMB-133: the reasoned NON-addition to ROOT_MARKERS, made falsifiable rather
+// than left as a comment nobody re-checks. globalConfigPath(home) IS
+// `<home>/.claude/.coalwash.json` -- the SAME relative shape the nested legacy
+// candidate uses. Were that shape ever added to ROOT_MARKERS, a real user's
+// global config would make `home` itself match as a "project root" the moment
+// the walk reaches it, conflating global and project scope one level up from
+// where `isBase()` already guards `~/.claude` itself. This test plants the
+// global file exactly as a real user would and proves the walk still ignores
+// it as a marker -- if this ever reds, the exclusion was silently reversed.
+test('ROOT_MARKERS deliberately excludes .claude/.coalwash.json: a real GLOBAL config at that exact shape does not make an unrelated subdir of home resolve TO home', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeJson(globalConfigPath(home), { scanEverything: true });
+    const startDir = path.join(home, 'unmarked', 'deeper');
+    fs.mkdirSync(startDir, { recursive: true });
+    assert.strictEqual(findProjectRoot(startDir, home), startDir,
+      'a global config must never be read as a project-root marker -- reintroducing .claude/.coalwash.json to ROOT_MARKERS reopens the global/project conflation this guards against');
   } finally { clean(home, proj); }
 });
 
@@ -1209,4 +1441,588 @@ test('CWK-057 clamp: localOnly keeps its OPPOSITE polarity — the two lists mus
   assert.strictEqual(mergeSafety({ localOnly: true }, { localOnly: false }).localOnly, true);
   // scanEverything: a global true is honored, but a project can turn it OFF.
   assert.strictEqual(mergeSafety({ scanEverything: true }, { scanEverything: false }).scanEverything, false);
+});
+
+// ---------------------------------------------------------------------------
+// UMB-174 (b) + CWK-135 (a): the REPORT half of the config loader. A config that EXISTS where the walk reads but
+// cannot be used is named, once, with one of the flock's four reasons; the walk's SELECTION and the fail-safe stance
+// are unchanged. The end-to-end line (the string, both tiers, SessionStart only) is pinned in conductor.test.mjs;
+// this block pins the loader's own contract.
+// ---------------------------------------------------------------------------
+
+// A project the loader anchors on (CLAUDE.md is one of its ROOT_MARKERS), plus the canonical config path.
+function rootedProject() {
+  const { home, proj } = sandbox();
+  fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# fixture project\n');
+  return { home, proj };
+}
+const canonicalProjectConfig = (proj) => path.join(proj, '.claude', 'coal', 'coalwash.json');
+const globalConfigFile = (home) => path.join(home, '.claude', '.coalwash.json');
+function plantProjectConfig(proj, body) {
+  const p = canonicalProjectConfig(proj);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, body);
+  return p;
+}
+
+test('UMB-174: a healthy or an ABSENT config reports NOTHING (silence on the ordinary case)', () => {
+  const { home, proj } = rootedProject();
+  try {
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }), { cfg: {}, unreadable: [], ignored: [] }, 'no config anywhere');
+    plantProjectConfig(proj, '{ "updateCheckDays": 9 }');
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), '// a comment\n{ "language": "en" }');
+    const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(rep.unreadable, []);
+    assert.strictEqual(rep.cfg.updateCheckDays, 9);
+    assert.strictEqual(rep.cfg.language, 'en');
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174: every unusable body gets its reason -- the FALSY bodies (null, 0, false, "") are "not a JSON object", never an empty config', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const cases = [
+      ['{ this is not json', 'malformed JSON'], ['', 'malformed JSON'], ['   \n', 'malformed JSON'],
+      ['[]', 'not a JSON object'], ['[1, 2]', 'not a JSON object'], ['"x"', 'not a JSON object'], ['42', 'not a JSON object'],
+      ['null', 'not a JSON object'], ['0', 'not a JSON object'], ['false', 'not a JSON object'], ['""', 'not a JSON object'], ['true', 'not a JSON object'],
+    ];
+    for (const [body, reason] of cases) {
+      const p = plantProjectConfig(proj, body);
+      const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+      assert.deepStrictEqual(rep.unreadable, [{ tier: 'project', path: p, reason }], `body ${JSON.stringify(body)}`);
+      assert.deepStrictEqual(rep.cfg, {}, `body ${JSON.stringify(body)} contributes nothing`);
+    }
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174: a DIRECTORY at the config path is "a directory"; a file over the 1 MiB read bound is "unreadable" (this room\'s own refusal, mapped to the flock\'s closed set)', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const p = canonicalProjectConfig(proj);
+    fs.mkdirSync(p, { recursive: true });
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).unreadable, [{ tier: 'project', path: p, reason: 'a directory' }]);
+    fs.rmSync(p, { recursive: true });
+    fs.writeFileSync(p, Buffer.alloc(ConfigLoad.MAX_CONFIG_BYTES + 1, 0x20));
+    const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(rep.unreadable, [{ tier: 'project', path: p, reason: 'unreadable' }]);
+    assert.deepStrictEqual(rep.cfg, {}, 'an over-bound config is SKIPPED, never truncated and parsed');
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174: a config that is a LINK OUT of the project is refused by the CWK-137 containment and reads "unreadable"', (t) => {
+  const { home, proj } = rootedProject();
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-outside-')));
+  try {
+    fs.writeFileSync(path.join(outside, 'coalwash.json'), '{ "updateCheckDays": 9 }');
+    const p = canonicalProjectConfig(proj);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    try { fs.symlinkSync(outside, p, 'junction'); } catch (e) { return t.skip(`cannot make a directory link on this host (${e.code || e.message})`); }
+    const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(rep.unreadable, [{ tier: 'project', path: p, reason: 'unreadable' }], 'a link that leaves the project is refused BEFORE it is read');
+    assert.deepStrictEqual(rep.cfg, {});
+  } finally { clean(home, proj, outside); }
+});
+
+test('UMB-174: an EACCES and an EPERM open error (a Windows ACL denial surfaces as EPERM) both read as "unreadable", global and project alike', (t) => {
+  for (const code of ['EACCES', 'EPERM']) {
+    const { home, proj } = rootedProject();
+    try {
+      const pCfg = plantProjectConfig(proj, '{}');
+      fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+      fs.writeFileSync(globalConfigFile(home), '{}');
+      const realOpen = fs.openSync;
+      const denied = new Set([pCfg, globalConfigFile(home)]);
+      const mock = t.mock.method(fs, 'openSync', (p, ...rest) => {
+        if (denied.has(path.resolve(String(p)))) { const e = new Error(`injected ${code}`); e.code = code; throw e; }
+        return realOpen(p, ...rest);
+      });
+      try {
+        const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+        assert.deepStrictEqual(rep.unreadable, [
+          { tier: 'global', path: globalConfigFile(home), reason: 'unreadable' },
+          { tier: 'project', path: pCfg, reason: 'unreadable' },
+        ], code);
+      } finally { mock.mock.restore(); }
+    } finally { clean(home, proj); }
+  }
+});
+
+test('UMB-174: the report touches ONLY the two paths the merge already reads -- never a crawl, never a candidate the walk did not stat', (t) => {
+  const { home, proj } = rootedProject();
+  try {
+    const pCfg = plantProjectConfig(proj, '{ not json');
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), '{ also not json');
+    // A LATER candidate the walk stops before reaching: it must never be opened.
+    const later = path.join(proj, '.gemini', 'coal', 'coalwash.json');
+    fs.mkdirSync(path.dirname(later), { recursive: true });
+    fs.writeFileSync(later, '{ also not json');
+    const opened = [];
+    const realOpen = fs.openSync;
+    const mock = t.mock.method(fs, 'openSync', (p, ...rest) => { opened.push(path.resolve(String(p))); return realOpen(p, ...rest); });
+    try {
+      const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+      assert.deepStrictEqual(rep.unreadable.map((u) => u.path), [globalConfigFile(home), pCfg]);
+    } finally { mock.mock.restore(); }
+    assert.deepStrictEqual(opened, [globalConfigFile(home), pCfg], 'exactly the global config and the walk\'s ONE selected candidate');
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174: the walk\'s SELECTION is unchanged -- an unreadable canonical config still WINS over a valid legacy one, and contributes nothing', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const canon = plantProjectConfig(proj, '{ this is not json');
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), '{ "updateCheckDays": 9 }'); // a valid ROOT legacy behind it
+    const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(rep.unreadable, [{ tier: 'project', path: canon, reason: 'malformed JSON' }]);
+    assert.strictEqual(rep.cfg.updateCheckDays, undefined, 'the legacy file behind an unreadable canonical one is NOT read (exactly as before the report existed)');
+    assert.strictEqual(ConfigLoad.projectConfigPath(proj, home), canon, 'projectConfigPath and the report select the same candidate');
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174: an unreadable GLOBAL config still fails SAFE (coalwashMode off, the W2-3 stance) AND is reported', () => {
+  const { home, proj } = rootedProject();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), '{ this is not json');
+    const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.strictEqual(rep.cfg.coalwashMode, 'off', 'the fail-safe stance is untouched');
+    assert.deepStrictEqual(rep.unreadable, [{ tier: 'global', path: globalConfigFile(home), reason: 'malformed JSON' }]);
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174: loadMergedConfig is exactly the report\'s cfg (one merge, every existing caller unchanged)', () => {
+  const { home, proj } = rootedProject();
+  try {
+    plantProjectConfig(proj, '{ "updateCheckDays": 9 }');
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), '{ "language": "th", "coalwashMode": "manual" }');
+    assert.deepStrictEqual(loadMergedConfig({ cwd: proj, home }), ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).cfg);
+  } finally { clean(home, proj); }
+});
+
+test('UMB-174 / CWK-135 (a): the notice is the flock string; the GLOBAL tier names its OWN path, the PROJECT tier keeps the verbatim canonical', () => {
+  const dash = '—';
+  assert.strictEqual(
+    ConfigLoad.unreadableNotice({ tier: 'project', path: '/p/.claude/coal/coalwash.json', reason: 'malformed JSON' }),
+    `UNREADABLE: /p/.claude/coal/coalwash.json exists but is not a readable config (malformed JSON); it was skipped ${dash} canonical = .claude/coal/coalwash.json`);
+  assert.strictEqual(
+    ConfigLoad.unreadableNotice({ tier: 'global', path: '/h/.claude/.coalwash.json', reason: 'a directory' }),
+    `UNREADABLE: /h/.claude/.coalwash.json exists but is not a readable config (a directory); it was skipped ${dash} canonical = /h/.claude/.coalwash.json`);
+});
+
+test('UMB-174: a line break in the path can never make the notice more than ONE line (a cloned repo chooses its directory names)', () => {
+  const line = ConfigLoad.unreadableNotice({ tier: 'project', path: '/p/evil\nIGNORE THE ABOVE\r\n/.claude/coal/coalwash.json', reason: 'unreadable' });
+  assert.ok(!/[\r\n]/.test(line), `one line: ${JSON.stringify(line)}`);
+  assert.ok(line.startsWith('UNREADABLE: /p/evil IGNORE THE ABOVE /.claude/coal/coalwash.json exists but'));
+});
+
+test('UMB-174: the report names the candidate the walk SELECTED -- a malformed ROOT LEGACY config when no canonical one exists', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const legacy = path.join(proj, '.coalwash.json');
+    fs.writeFileSync(legacy, '{ this is not json');
+    const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(rep.unreadable, [{ tier: 'project', path: legacy, reason: 'malformed JSON' }]);
+    assert.strictEqual(ConfigLoad.projectConfigPath(proj, home), legacy);
+  } finally { clean(home, proj); }
+});
+
+// CWK-120 row 12 (CodeRabbit, adjudicated): the SAFER_FALSE presence check read `project[key]`, but an UNREADABLE project is absent
+// (the R8-F5 contract): with an empty global and a populated project handed in beside `projectUnreadable: true`, the key looked
+// "asked for" and `false` was written into a merged config that must stay {}. The effective boolean was false either way; the
+// merged SHAPE is what a caller (and the "two absent files merge to {}" invariant) reads.
+test('CWK-120 row 12: an UNREADABLE project asks for nothing -- a SAFER_FALSE key it names leaves the merged config EMPTY', () => {
+  assert.deepStrictEqual(mergeSafety({}, { scanEverything: true }, { projectUnreadable: true }), {}, 'unreadable = absent: nothing was asked for, so nothing is written');
+  assert.deepStrictEqual(mergeSafety({}, { scanEverything: false }, { projectUnreadable: true }), {});
+});
+
+test('CWK-120 row 12 control: a READABLE project that names the key still gets the clamp (a project cannot turn scanEverything ON over a false/absent global)', () => {
+  assert.strictEqual(mergeSafety({}, { scanEverything: true }).scanEverything, false, 'no global opt-in -> the escalation is clamped to false');
+  assert.strictEqual(mergeSafety({ scanEverything: true }, { scanEverything: true }).scanEverything, true, 'a global opt-in survives');
+  assert.deepStrictEqual(mergeSafety({}, {}), {}, 'two absent files still merge to {}');
+});
+
+// CWK-137 D3 (the head's ruling, r8-coalwash return, D3 (a)): `estate.archiveDir` is read from the GLOBAL config layer ONLY. It
+// names WHERE a user's own session transcripts are copied and later deleted from (archive-then-delete), so a value a cloned
+// repo ships in its project config must not be able to choose it. This is a REACH clamp, not a consent clamp: there is no
+// "safer value" to fall back to, the project layer simply has no say. It lives in the ONE merge site (`mergeObjectKey`) every
+// consumer reads -- the CLI, the estate report, retier, the wizard handshake -- the row-11 lesson: fix it where all callers route.
+const D3_OUTSIDE = () => path.join(os.tmpdir(), 'cw-d3-someone-elses-archive');
+
+test('CWK-137 D3: a project estate.archiveDir is IGNORED -- where the archive lands does not move (no global config at all)', () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, '.coalwash.json'), JSON.stringify({ estate: { archiveDir: D3_OUTSIDE() } }));
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.estate.archiveDir, undefined, 'the merged config carries no project archiveDir');
+    const landed = resolveArchiveDir(clampedRead(cfg, 'estate'), home);
+    assert.strictEqual(landed, resolveArchiveDir({}, home), 'the archive lands at the OS-citizen DEFAULT, exactly where an absent key puts it');
+    assert.ok(!landed.startsWith(D3_OUTSIDE()), 'and never under the path the cloned config named');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3: a GLOBAL estate.archiveDir wins over a different project value (the user\'s own choice is honoured)', () => {
+  const { home, proj } = sandbox();
+  const mine = path.join(home, 'my-archive');
+  try {
+    writeCfgs(home, proj, { estate: { archiveDir: mine } }, { estate: { archiveDir: D3_OUTSIDE() } });
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.estate.archiveDir, mine, 'the global value, not the project one');
+    assert.ok(!resolveArchiveDir(clampedRead(cfg, 'estate'), home).startsWith(D3_OUTSIDE()));
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3: dropping archiveDir drops ONLY that sub-key -- every other project estate value still wins on its own key', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeCfgs(home, proj,
+      { estate: { purgeAfterDays: 400 } },
+      { estate: { archiveDir: D3_OUTSIDE(), compressAfterDays: 30, indexEnabled: false } });
+    const cfg = loadMergedConfig({ cwd: proj, home });
+    assert.strictEqual(cfg.estate.archiveDir, undefined);
+    assert.strictEqual(cfg.estate.compressAfterDays, 30, 'the project\'s other sub-key is untouched');
+    assert.strictEqual(cfg.estate.indexEnabled, false);
+    assert.strictEqual(cfg.estate.purgeAfterDays, 400, 'and the global sub-key still survives (W2-2)');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3: an UNREADABLE global file gives the project no archiveDir either -- the user\'s stance is unknown, the default stands', () => {
+  // The whole global file could not be read, so what the user had chosen is UNKNOWN; the safe answer for a reach key is the
+  // default location, never the project's value. (mergeSafety is handed `{}` for an unreadable global, as loadMergedConfig does.)
+  const merged = mergeSafety({}, { estate: { archiveDir: D3_OUTSIDE(), compressAfterDays: 30 } }, { globalUnreadable: true });
+  assert.strictEqual(merged.estate.archiveDir, undefined);
+  assert.strictEqual(merged.estate.compressAfterDays, 30, 'the rest of the object still merges');
+});
+
+test('CWK-137 D3: a project-only estate with NOTHING but archiveDir merges to an estate with no archiveDir (never a stray key)', () => {
+  const merged = mergeSafety({}, { estate: { archiveDir: D3_OUTSIDE() } });
+  assert.ok(!('archiveDir' in merged.estate), 'the key is absent, not present-and-undefined, so a strict deep-equal against {} holds');
+});
+
+test('CWK-137 D3: the clamp is keyed by NAME on the object-typed key `estate`, so another object\'s sub-key of the same name is untouched', () => {
+  // `retier` has no archiveDir of its own; a project-wins sub-key there must keep winning. The clamp must not be a blanket
+  // "ignore any archiveDir anywhere".
+  const merged = mergeSafety({}, { retier: { archiveDir: 'elsewhere', armPct: 50 } });
+  assert.strictEqual(merged.retier.archiveDir, 'elsewhere');
+  assert.strictEqual(merged.retier.armPct, 50);
+});
+
+test('CWK-137 D3: a hand-built GLOBAL object handed in beside globalUnreadable:true is not trusted either (the same contract projectUnreadable already states)', () => {
+  // readJsonc returns `{}` for an unreadable file today, so this is DEFENSIVE, like R8-F5 for the project layer: mergeSafety is a
+  // reusable function, and "the global file could not be read" means its content is unverifiable whatever the caller passed.
+  const merged = mergeSafety({ estate: { archiveDir: path.join(os.tmpdir(), 'cw-d3-global-claim') } }, { estate: { archiveDir: D3_OUTSIDE() } }, { globalUnreadable: true });
+  assert.ok(!('archiveDir' in merged.estate), 'neither the project value nor an unverifiable global value is used');
+});
+
+// CWK-137 D3 restore-door hint (the sizing ruling): the report NAMES a project-layer value the global-only clamp dropped, from the
+// ONE bounded read the merge already made, so estate-search / estate-restore can say so instead of silently looking elsewhere.
+test('CWK-137 D3 hint: loadMergedConfigReport().ignored names a project estate.archiveDir the clamp dropped -- key, tier, the config path, the value', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const p = plantProjectConfig(proj, JSON.stringify({ estate: { archiveDir: D3_OUTSIDE() } }));
+    const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(rep.ignored, [{ key: 'estate.archiveDir', tier: 'project', path: p, value: D3_OUTSIDE() }]);
+    assert.ok(!('archiveDir' in (rep.cfg.estate || {})), 'and the merge did drop it: the report describes what the merge did');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: a project value that only RESTATES the readable global value ignored nothing; a different one, or an unreadable global, is reported', () => {
+  const { home, proj } = rootedProject();
+  try {
+    plantProjectConfig(proj, JSON.stringify({ estate: { archiveDir: D3_OUTSIDE() } }));
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { archiveDir: D3_OUTSIDE() } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'same value both layers: the effective archive dir is the project one, nothing was ignored');
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { archiveDir: path.join(os.tmpdir(), 'cw-d3-mine') } }));
+    assert.strictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored.length, 1, 'a different global value: the project one was ignored');
+    fs.writeFileSync(globalConfigFile(home), '{ not json');
+    assert.strictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored.length, 1, 'an unreadable global: the user\'s choice is unknown, the project value was still not used');
+  } finally { clean(home, proj); }
+});
+
+test('CWK-137 D3 hint: nothing to report when the project carries no archiveDir, a junk one (not a string, empty), or is itself unreadable', () => {
+  const { home, proj } = rootedProject();
+  try {
+    plantProjectConfig(proj, JSON.stringify({ estate: { compressAfterDays: 30 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'a project estate without the key');
+    plantProjectConfig(proj, JSON.stringify({ estate: { archiveDir: 42 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'a number has no path to name');
+    plantProjectConfig(proj, JSON.stringify({ estate: { archiveDir: '' } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'the empty default is not a choice');
+    plantProjectConfig(proj, '{ "estate": { "archiveDir": ');
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'an unreadable project is absent, exactly as the merge treats it');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// CWK-162 unit C8 (AI Deep Scan B4 + B10): a project config (it ships with a cloned repo, hooks-safety.md section 9) could raise
+// the estate run's work limits above the user's global ones, and `estate.purgeAfterDays: 0` ("never becomes cold") sent every aged
+// session to the WARM band, whose original is removed after the verified archive, past a global `deleteCold: false`.
+// Witness on the 0cde430 source (scratchpad/r14/witness-prefix.txt): global maxSessionsPerRun=5 / purgeAfterDays=90 / deleteCold=false,
+// project 100000 / 0 -> merged 100000 / 0.
+// ---------------------------------------------------------------------------
+const RB_DEFAULT = { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 }; // the schema default (config-schema.mjs, estate.runBudget)
+
+test('CWK-162 B4: a project estate.runBudget can only LOWER the work limits -- the smaller of the two per field (witness: 5 -> 100000)', () => {
+  const g = { estate: { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 5000000 } } };
+  const up = mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: 100000, maxBytesPerRun: 999999999999 } } }).estate.runBudget;
+  assert.deepStrictEqual(up, { maxSessionsPerRun: 5, maxBytesPerRun: 5000000 }, 'a higher project value never widens the user\'s limit');
+  const down = mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: 2, maxBytesPerRun: 2000000 } } }).estate.runBudget;
+  assert.deepStrictEqual(down, { maxSessionsPerRun: 2, maxBytesPerRun: 2000000 }, 'a lower project value is honored (quietening is always allowed)');
+  const mixed = mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: 2, maxBytesPerRun: 999999999999 } } }).estate.runBudget;
+  assert.deepStrictEqual(mixed, { maxSessionsPerRun: 2, maxBytesPerRun: 5000000 }, 'each field is judged on its own');
+  const equal = mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: 5 } } }).estate.runBudget;
+  assert.deepStrictEqual(equal, { maxSessionsPerRun: 5, maxBytesPerRun: 5000000 }, 'equal is a no-op and an absent field keeps the global one');
+});
+
+test('CWK-162 B4: with NO global runBudget the schema default is the ceiling, and an unreadable global file means the default too', () => {
+  const wide = { estate: { runBudget: { maxSessionsPerRun: 100000, maxBytesPerRun: 999999999999 } } };
+  assert.deepStrictEqual(mergeSafety({}, wide).estate.runBudget, RB_DEFAULT, 'no global value: the default stands, not the project\'s');
+  assert.deepStrictEqual(mergeSafety({ estate: { runBudget: { maxSessionsPerRun: 5000 } } }, wide, { globalUnreadable: true }).estate.runBudget, RB_DEFAULT, 'an unreadable global file: the user\'s stance is unknown, so the default');
+  assert.strictEqual(mergeSafety({}, { estate: { runBudget: { maxSessionsPerRun: 10 } } }).estate.runBudget.maxSessionsPerRun, 10, 'and a LOWER project value still wins over the default');
+});
+
+test('CWK-162 B4: junk in a project runBudget gets no say (a string, NaN, a non-object runBudget)', () => {
+  const g = { estate: { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 5000000 } } };
+  assert.deepStrictEqual(mergeSafety(g, { estate: { runBudget: { maxSessionsPerRun: '1', maxBytesPerRun: null } } }).estate.runBudget, g.estate.runBudget);
+  assert.deepStrictEqual(mergeSafety(g, { estate: { runBudget: 7 } }).estate.runBudget, g.estate.runBudget, 'a non-object runBudget does not replace the global object');
+});
+
+test('CWK-162 B10: a project purgeAfterDays 0 is ignored, whether or not the user\'s deleteCold is true (witness: 90 -> 0 past a global deleteCold:false)', () => {
+  const closed = { estate: { deleteCold: false, purgeAfterDays: 90 } };
+  const m = mergeSafety(closed, { estate: { purgeAfterDays: 0 } }).estate;
+  assert.strictEqual(m.purgeAfterDays, 90, 'the global value stands');
+  assert.strictEqual(m.deleteCold, false);
+  // the pair attack: the project also asks deleteCold:true, which the existing clamp already refuses, so the 0 stays ignored too
+  const pair = mergeSafety(closed, { estate: { deleteCold: true, purgeAfterDays: 0 } }).estate;
+  assert.strictEqual(pair.deleteCold, false);
+  assert.strictEqual(pair.purgeAfterDays, 90);
+  // no global purgeAfterDays at all: the 0 must not survive (the default applies downstream)
+  assert.notStrictEqual(mergeSafety({}, { estate: { purgeAfterDays: 0 } }).estate.purgeAfterDays, 0);
+  assert.notStrictEqual(mergeSafety({ estate: { deleteCold: true } }, { estate: { purgeAfterDays: 0 } }, { globalUnreadable: true }).estate.purgeAfterDays, 0, 'an unreadable global file reads deleteCold as false');
+});
+
+test('CWK-162 B10 control: a global 0 is never touched, a LOWER project value is honored, and (R18, owner sheet BB-5) a project 0 stays ignored with the user\'s own deleteCold true', () => {
+  // R18 (BB-5, Z-2): this assertion used to read `deleteCold: true ... purgeAfterDays: 0 -> 0` ("the user already opted in to cold deletes").
+  // That was the consented-case exception the owner ruled out on 2026-10-03: a user who turned on deleteCold set the cold edge at a number,
+  // and a cloned project file never moves it toward removing more (it may only lower purgeAfterDays or raise compressAfterDays). Changed
+  // here by name; the rule it now pins is the R18 BB-5 tests below.
+  assert.strictEqual(mergeSafety({ estate: { deleteCold: true, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 0 } }).estate.purgeAfterDays, 90, 'deleteCold true: the clamp still holds, a project 0 does not move the user\'s 90');
+  assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 0 } }, {}).estate.purgeAfterDays, 0, 'the user\'s own global 0 is theirs');
+  assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 1 } }).estate.purgeAfterDays, 1, 'a LOWER value is unchanged: it only makes sessions cold sooner, and cold is report-only here');
+  // R14 bounce 1 (F-R14-2): this assertion used to read `{ purgeAfterDays: 400 } -> 400` ("plain project-wins"). That WAS the defect: 400 is
+  // above the user's own 90, so a 200-day session leaves cold (report-only) and becomes warm (archived, original removed). The test encoded
+  // the old shape, so it is changed here by name; the rule it now pins is F-R14-2's, below.
+  assert.strictEqual(mergeSafety({ estate: { deleteCold: false, purgeAfterDays: 90 } }, { estate: { purgeAfterDays: 400 } }).estate.purgeAfterDays, 90, 'a RAISE is not honored while deleteCold is not true');
+});
+
+// ---------------------------------------------------------------------------
+// R14 INSPECT, bounce 1 (F-R14-1, F-R14-2): the first cut of B4/B10 closed the REPORTED shape only. Both rules are asserted through the
+// EFFECTIVE value a reader gets (mergeSafety -> clampedRead, the path cli.mjs's estateOpts takes), never the merged object alone: the
+// reviewer's witness showed the merged object looked right while clampedRead then replaced an invalid field with its DEFAULT.
+// ---------------------------------------------------------------------------
+const effectiveEstate = (g, p, opts) => clampedRead(mergeSafety(g, p, opts), 'estate');
+
+test('F-R14-1: a project runBudget value the SCHEMA rejects never wins as "the smaller" (witness rows 0/1, -1/-1, 2.5/1048575.5 raised a 5 / 10 MiB limit to the 25 / 500 MB default)', () => {
+  const g = { estate: { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 } } };
+  const mine = { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 };
+  for (const [s, b] of [[0, 1], [-1, -1], [2.5, 1048575.5], [100001, 1099511627777], [0, 1048575], [1.5, 2097152.5]]) {
+    assert.deepStrictEqual(effectiveEstate(g, { estate: { runBudget: { maxSessionsPerRun: s, maxBytesPerRun: b } } }).runBudget, mine, `project ${s} / ${b} keeps the user's own limits`);
+  }
+  assert.deepStrictEqual(effectiveEstate(g, { estate: { runBudget: { maxSessionsPerRun: 0, maxBytesPerRun: 2097152 } } }).runBudget, { maxSessionsPerRun: 5, maxBytesPerRun: 2097152 }, 'each field is judged on its own: the invalid one is dropped, the valid lower one is honored');
+  assert.deepStrictEqual(effectiveEstate(g, { estate: { runBudget: { maxSessionsPerRun: 1, maxBytesPerRun: 1048576 } } }).runBudget, { maxSessionsPerRun: 1, maxBytesPerRun: 1048576 }, 'the schema minimum itself is valid and lowers');
+  assert.deepStrictEqual(effectiveEstate(g, { estate: { runBudget: { maxSessionsPerRun: 2, maxBytesPerRun: 2097152 } } }).runBudget, { maxSessionsPerRun: 2, maxBytesPerRun: 2097152 }, 'a lower valid project value is honored');
+});
+
+test('F-R14-1: with no valid global value the DEFAULT is the ceiling -- no global, an invalid global (the user\'s own typo), an unreadable global', () => {
+  const bad = { estate: { runBudget: { maxSessionsPerRun: 0, maxBytesPerRun: 1 } } };
+  assert.deepStrictEqual(effectiveEstate({}, bad).runBudget, RB_DEFAULT, 'no global: an out-of-range project value leaves the default');
+  assert.deepStrictEqual(effectiveEstate({}, { estate: { runBudget: { maxSessionsPerRun: 3, maxBytesPerRun: 1048576 } } }).runBudget, { maxSessionsPerRun: 3, maxBytesPerRun: 1048576 }, 'no global: a lower valid value is honored');
+  const typo = { estate: { runBudget: { maxSessionsPerRun: 0, maxBytesPerRun: 1 } } };
+  assert.deepStrictEqual(effectiveEstate(typo, { estate: { runBudget: { maxSessionsPerRun: 10, maxBytesPerRun: 100000000 } } }).runBudget, { maxSessionsPerRun: 10, maxBytesPerRun: 100000000 }, 'an invalid global reads as the default: a lower project value is honored');
+  assert.deepStrictEqual(effectiveEstate(typo, { estate: { runBudget: { maxSessionsPerRun: 100, maxBytesPerRun: 999999999999 } } }).runBudget, RB_DEFAULT, 'an invalid global reads as the default: a higher project value is not');
+  assert.deepStrictEqual(effectiveEstate({ estate: { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 } } }, bad, { globalUnreadable: true }).runBudget, RB_DEFAULT, 'an unreadable global: the user\'s stance is unknown, so the default');
+});
+
+test('F-R14-2: with deleteCold false a project purgeAfterDays is honored only when it is <= the user\'s own, 0 ordered as +infinity (witness: a 200-day session is cold at 90, warm at 365 or 36500)', () => {
+  const g = { estate: { deleteCold: false, purgeAfterDays: 90 } };
+  const eff = (v) => effectiveEstate(g, { estate: { purgeAfterDays: v } }).purgeAfterDays;
+  for (const v of [36500, 365, 91, 0]) assert.strictEqual(eff(v), 90, `project ${v} is above the user's 90 (0 = never): not honored`);
+  for (const v of [90, 89, 30, 1]) assert.strictEqual(eff(v), v, `project ${v} is <= the user's 90: honored`);
+  for (const v of [-1, 36501, 90.5, '30', null]) assert.strictEqual(eff(v), 90, `project ${JSON.stringify(v)} is not a valid purgeAfterDays: no say`);
+  // the pair attack: the project also asks deleteCold:true, which the existing clamp already refuses, so the raise stays ignored too
+  const pair = effectiveEstate(g, { estate: { deleteCold: true, purgeAfterDays: 36500 } });
+  assert.strictEqual(pair.deleteCold, false);
+  assert.strictEqual(pair.purgeAfterDays, 90);
+});
+
+test('F-R14-2: the user\'s own boundary is their global value, else the schema default 180; a global 0 (never cold) is the user\'s own and bounds nothing; an unreadable global is the default', () => {
+  const closed = (v) => ({ estate: { deleteCold: false, purgeAfterDays: v } });
+  assert.strictEqual(effectiveEstate(closed(0), { estate: { purgeAfterDays: 365 } }).purgeAfterDays, 365, 'the user already holds "never cold": any project value is <= infinity');
+  assert.strictEqual(effectiveEstate(closed(0), { estate: { purgeAfterDays: 0 } }).purgeAfterDays, 0, 'and 0 equals 0');
+  assert.strictEqual(effectiveEstate({}, { estate: { purgeAfterDays: 365 } }).purgeAfterDays, 180, 'no global: the default 180 is the boundary, a raise leaves it');
+  assert.strictEqual(effectiveEstate({}, { estate: { purgeAfterDays: 0 } }).purgeAfterDays, 180, 'no global: 0 leaves the default');
+  assert.strictEqual(effectiveEstate({}, { estate: { purgeAfterDays: 100 } }).purgeAfterDays, 100, 'no global: a lower value is honored');
+  assert.strictEqual(effectiveEstate(closed(30), { estate: { purgeAfterDays: 36500 } }, { globalUnreadable: true }).purgeAfterDays, 180, 'an unreadable global: the default, whatever the readable-looking object says');
+  assert.strictEqual(effectiveEstate(closed(30), { estate: { purgeAfterDays: 100 } }, { globalUnreadable: true }).purgeAfterDays, 100, 'an unreadable global: a value <= the default is honored');
+  assert.strictEqual(effectiveEstate(closed(400), { estate: { purgeAfterDays: 36500 } }).purgeAfterDays, 400, 'the user\'s own 400 bounds a project 36500 to 400 (the user is free to hold a high value)');
+  assert.strictEqual(effectiveEstate(closed(undefined), { estate: { purgeAfterDays: 36500 } }).purgeAfterDays, 180, 'a global estate with no purgeAfterDays: the default');
+});
+
+// R18 (owner sheet BB-5 = (a), zone hooks-safety.md section 9 AMENDED 2026-10-03, "the clamp holds AFTER consent too"): these two tests
+// used to be the F-R14-2 / F-R14-6 CONTROLS, asserting that once the user's own deleteCold is true a project value (raise, lower, 0) stands.
+// That consented-case exception IS the residue Z-2 named; the owner ruled it out, so the controls become the refusal, by name.
+test('R18 BB-5: with the user\'s OWN deleteCold true a project purgeAfterDays above the user\'s value, or 0 while it is not 0, is still DROPPED; a lower or equal one is honored', () => {
+  const open = { estate: { deleteCold: true, purgeAfterDays: 90 } };
+  const eff = (v, g = open) => effectiveEstate(g, { estate: { purgeAfterDays: v } }).purgeAfterDays;
+  for (const v of [36500, 365, 91, 0]) assert.strictEqual(eff(v), 90, `deleteCold true: project ${v} is above the user's 90 (0 = never): not honored`);
+  for (const v of [90, 89, 30, 1]) assert.strictEqual(eff(v), v, `deleteCold true: project ${v} is <= the user's 90: honored`);
+  for (const v of [-1, 36501, 90.5, '30', null]) assert.strictEqual(eff(v), 90, `deleteCold true: project ${JSON.stringify(v)} is not a valid purgeAfterDays: no say`);
+  // no global purgeAfterDays: the schema default 180 is the user's value
+  const openNoValue = { estate: { deleteCold: true } };
+  for (const v of [365, 181, 0]) assert.strictEqual(eff(v, openNoValue), 180, `deleteCold true, no global value: project ${v} is above the default 180: not honored`);
+  for (const v of [180, 100]) assert.strictEqual(eff(v, openNoValue), v, `deleteCold true, no global value: project ${v} is <= 180: honored`);
+  // the user's own global 0 is theirs: it bounds nothing, so any valid project value is honored
+  assert.strictEqual(eff(365, { estate: { deleteCold: true, purgeAfterDays: 0 } }), 365, 'the user already holds "never cold": a project 365 is <= infinity');
+  // deleteCold true from the GLOBAL file is the consent; the project asking deleteCold:true too changes nothing
+  const both = effectiveEstate(open, { estate: { deleteCold: true, purgeAfterDays: 0 } });
+  assert.strictEqual(both.deleteCold, true);
+  assert.strictEqual(both.purgeAfterDays, 90, 'the project also saying deleteCold:true does not reopen the edge');
+});
+
+// R14 bounce 1 (E1, the head's ruling: the break is made LOUD): a project value the bounded estate merge DROPPED is named in the
+// report, the way a dropped estate.archiveDir already is -- from the ONE bounded read the merge made, so the report describes what
+// the merge did and never a second read that could disagree with it.
+test('E1: loadMergedConfigReport().ignored names every project runBudget field and purgeAfterDays the bounded merge dropped -- key, tier, config path, value', () => {
+  const { home, proj } = rootedProject();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { runBudget: { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 }, deleteCold: false, purgeAfterDays: 90 } }));
+    const p = plantProjectConfig(proj, JSON.stringify({ estate: { runBudget: { maxSessionsPerRun: 0, maxBytesPerRun: 999999999999 }, purgeAfterDays: 36500 } }));
+    const rep = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(rep.ignored, [
+      { key: 'estate.runBudget.maxSessionsPerRun', tier: 'project', path: p, value: 0 },
+      { key: 'estate.runBudget.maxBytesPerRun', tier: 'project', path: p, value: 999999999999 },
+      { key: 'estate.purgeAfterDays', tier: 'project', path: p, value: 36500 },
+    ]);
+    assert.deepStrictEqual(rep.cfg.estate.runBudget, { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 }, 'and the merge did drop them: the report describes what the merge did');
+    assert.strictEqual(rep.cfg.estate.purgeAfterDays, 90);
+    assert.deepStrictEqual([...ConfigLoad.PROJECT_BOUNDED_KEYS], ['estate.runBudget.maxSessionsPerRun', 'estate.runBudget.maxBytesPerRun', 'estate.purgeAfterDays', 'estate.compressAfterDays'], 'the one list configure.mjs and the cli read (compressAfterDays joined it at R14 bounce 2: the old three-key list was written before F-R14-6)');
+  } finally { clean(home, proj); }
+});
+
+test('E1: a project value that was HONORED (lower, equal) ignored nothing and draws no report; with deleteCold true a raise is now dropped and reported (R18 BB-5); a non-object runBudget is reported as a whole', () => {
+  const { home, proj } = rootedProject();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { runBudget: { maxSessionsPerRun: 5 }, deleteCold: false, purgeAfterDays: 90 } }));
+    plantProjectConfig(proj, JSON.stringify({ estate: { runBudget: { maxSessionsPerRun: 2, maxBytesPerRun: 2097152 }, purgeAfterDays: 30 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'lower values were honored');
+    plantProjectConfig(proj, JSON.stringify({ estate: { runBudget: { maxSessionsPerRun: 5 }, purgeAfterDays: 90 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'values equal to the user\'s own were honored');
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { deleteCold: true, purgeAfterDays: 90, compressAfterDays: 30 } }));
+    const pc = plantProjectConfig(proj, JSON.stringify({ estate: { purgeAfterDays: 36500, compressAfterDays: 1 } }));
+    const consented = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(consented.ignored, [
+      { key: 'estate.purgeAfterDays', tier: 'project', path: pc, value: 36500 },
+      { key: 'estate.compressAfterDays', tier: 'project', path: pc, value: 1 },
+    ], 'R18 BB-5: deleteCold true, the project raise and the project lower are both dropped and named');
+    assert.strictEqual(consented.cfg.estate.purgeAfterDays, 90);
+    assert.strictEqual(consented.cfg.estate.compressAfterDays, 30);
+    const p = plantProjectConfig(proj, JSON.stringify({ estate: { runBudget: 7 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [{ key: 'estate.runBudget', tier: 'project', path: p, value: 7 }]);
+    fs.writeFileSync(p, '{ not json');
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'an unreadable project reports nothing');
+  } finally { clean(home, proj); }
+});
+
+// R14 bounce 2, F-R14-6 (RE-INSPECT [MEDIUM]): compressAfterDays is the WARM boundary and was plain project-wins, so a project value LOWER
+// than the user's moved a session from active (untouched) to warm (archived, original removed after the verified archive): the escalation
+// the purgeAfterDays rule closes, one edge earlier. A project may only RAISE it (with deleteCold true too since R18, owner sheet BB-5).
+test('F-R14-6: with deleteCold false a project compressAfterDays is honored only when it is >= the user\'s own (witness: a 5-day-old session is active at 14, warm at 1)', () => {
+  const g = { estate: { deleteCold: false, compressAfterDays: 30 } };
+  const eff = (v, gg = g) => effectiveEstate(gg, { estate: { compressAfterDays: v } }).compressAfterDays;
+  for (const v of [1, 14, 29]) assert.strictEqual(eff(v), 30, `project ${v} is below the user's 30: not honored`);
+  for (const v of [30, 31, 365, 3650]) assert.strictEqual(eff(v), v, `project ${v} is >= the user's 30: honored (a raise keeps sessions active longer)`);
+  for (const v of [0, -1, 3651, 30.5, '60', null]) assert.strictEqual(eff(v), 30, `project ${JSON.stringify(v)} is not a valid compressAfterDays: no say`);
+  const pair = effectiveEstate(g, { estate: { deleteCold: true, compressAfterDays: 1 } });
+  assert.strictEqual(pair.deleteCold, false, 'the pair attack: the project also asks deleteCold:true, which the existing clamp refuses');
+  assert.strictEqual(pair.compressAfterDays, 30, 'so the lower value stays ignored too');
+});
+
+test('F-R14-6: the user\'s own boundary is their global value, else the schema default 14; an unreadable global is the default; no global value is a deletion of the project one', () => {
+  assert.strictEqual(effectiveEstate({}, { estate: { compressAfterDays: 1 } }).compressAfterDays, 14, 'no global: the default 14 is the boundary, a lower project value leaves it');
+  assert.strictEqual(effectiveEstate({}, { estate: { compressAfterDays: 60 } }).compressAfterDays, 60, 'no global: a raise is honored');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false, compressAfterDays: 3 } }, { estate: { compressAfterDays: 1 } }, { globalUnreadable: true }).compressAfterDays, 14, 'an unreadable global: the user\'s stance is unknown, so the default, never the readable-looking 3');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false, compressAfterDays: 3 } }, { estate: { compressAfterDays: 5 } }, { globalUnreadable: true }).compressAfterDays, 14, 'an unreadable global: a 5 is below the default 14, dropped');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false, compressAfterDays: 3 } }, { estate: { compressAfterDays: 2 } }).compressAfterDays, 3, 'the user\'s own LOW value is theirs to hold: a lower project value does not undercut it');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false, compressAfterDays: 'x' } }, { estate: { compressAfterDays: 7 } }).compressAfterDays, 14, 'an invalid global value reads as the default: 7 is below it');
+  assert.strictEqual(effectiveEstate({ estate: { deleteCold: false } }, { estate: { compressAfterDays: 20 } }).compressAfterDays, 20, 'a global estate with no compressAfterDays: the default 14, so a 20 is a raise');
+});
+
+test('R18 BB-5: with the user\'s OWN deleteCold true a project compressAfterDays below the user\'s value is still DROPPED; a raise or an equal one is honored', () => {
+  const open = { estate: { deleteCold: true, compressAfterDays: 30 } };
+  const eff = (v, g = open) => effectiveEstate(g, { estate: { compressAfterDays: v } }).compressAfterDays;
+  for (const v of [1, 14, 29]) assert.strictEqual(eff(v), 30, `deleteCold true: project ${v} is below the user's 30: not honored`);
+  for (const v of [30, 31, 365, 3650]) assert.strictEqual(eff(v), v, `deleteCold true: project ${v} is >= the user's 30: honored`);
+  for (const v of [0, -1, 3651, 30.5, '60', null]) assert.strictEqual(eff(v), 30, `deleteCold true: project ${JSON.stringify(v)} is not a valid compressAfterDays: no say`);
+  // no global compressAfterDays: the schema default 14 is the user's value
+  const openNoValue = { estate: { deleteCold: true } };
+  for (const v of [1, 13]) assert.strictEqual(eff(v, openNoValue), 14, `deleteCold true, no global value: project ${v} is below the default 14: not honored`);
+  for (const v of [14, 60]) assert.strictEqual(eff(v, openNoValue), v, `deleteCold true, no global value: project ${v} is >= 14: honored`);
+});
+
+test('R18 BB-5 (the witness, through mergeSafety -> clampedRead -> classifySessions): with the user\'s own deleteCold true, a 5-day-old session stays ACTIVE under a project compressAfterDays 1', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const pdir = path.join(home, '.claude', 'projects', ccProjectSlug(proj));
+    fs.mkdirSync(pdir, { recursive: true });
+    const sid = 'aaaaaaaa-bbbb-cccc-dddd-000000000018';
+    const f = path.join(pdir, `${sid}.jsonl`);
+    fs.writeFileSync(f, '{"x":1}\n');
+    const now = Date.now();
+    const t = (now - 5 * 86400000) / 1000;
+    fs.utimesSync(f, t, t);
+    const g = { estate: { deleteCold: true } };
+    const bandOf = (project) => classifySessions({ projectRoot: proj, home, now, estate: clampedRead(mergeSafety(g, project), 'estate') }).sessions.find((x) => x.id === sid).band;
+    assert.strictEqual(bandOf({}), 'active', 'no project value: 5 days is under the default 14');
+    assert.strictEqual(bandOf({ estate: { compressAfterDays: 1 } }), 'active', 'deleteCold true: the project\'s 1 is still dropped, the session is not archived and removed');
+    assert.strictEqual(bandOf({ estate: { compressAfterDays: 3 } }), 'active', 'and so is a 3');
+  } finally { clean(home, proj); }
+});
+
+test('F-R14-6 (the reviewer\'s witness): a 5-day-old session stays ACTIVE under a project compressAfterDays 1 -- through mergeSafety -> clampedRead -> classifySessions, the path an estate run takes', () => {
+  const { home, proj } = rootedProject();
+  try {
+    const pdir = path.join(home, '.claude', 'projects', ccProjectSlug(proj));
+    fs.mkdirSync(pdir, { recursive: true });
+    const sid = 'aaaaaaaa-bbbb-cccc-dddd-000000000005';
+    const f = path.join(pdir, `${sid}.jsonl`);
+    fs.writeFileSync(f, '{"x":1}\n');
+    const now = Date.now();
+    const t = (now - 5 * 86400000) / 1000;
+    fs.utimesSync(f, t, t);
+    const bandOf = (project) => classifySessions({ projectRoot: proj, home, now, estate: clampedRead(mergeSafety({}, project), 'estate') }).sessions.find((x) => x.id === sid).band;
+    assert.strictEqual(bandOf({}), 'active', 'no project value: 5 days is under the default 14');
+    assert.strictEqual(bandOf({ estate: { compressAfterDays: 1 } }), 'active', 'the project\'s 1 is dropped: the session is not made warm');
+    assert.strictEqual(bandOf({ estate: { compressAfterDays: 30 } }), 'active', 'a raise keeps it active');
+  } finally { clean(home, proj); }
+});
+
+test('E1: a dropped project compressAfterDays is reported (key, tier, path, value); a raised or equal one is not', () => {
+  const { home, proj } = rootedProject();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(globalConfigFile(home), JSON.stringify({ estate: { deleteCold: false, compressAfterDays: 30 } }));
+    const p = plantProjectConfig(proj, JSON.stringify({ estate: { compressAfterDays: 1 } }));
+    const dropped = ConfigLoad.loadMergedConfigReport({ cwd: proj, home });
+    assert.deepStrictEqual(dropped.ignored, [{ key: 'estate.compressAfterDays', tier: 'project', path: p, value: 1 }]);
+    assert.strictEqual(dropped.cfg.estate.compressAfterDays, 30, 'and the merge did drop it: the report describes what the merge did');
+    plantProjectConfig(proj, JSON.stringify({ estate: { compressAfterDays: 60 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'a raise was honored: nothing ignored');
+    plantProjectConfig(proj, JSON.stringify({ estate: { compressAfterDays: 30 } }));
+    assert.deepStrictEqual(ConfigLoad.loadMergedConfigReport({ cwd: proj, home }).ignored, [], 'a value equal to the user\'s own was honored');
+  } finally { clean(home, proj); }
 });

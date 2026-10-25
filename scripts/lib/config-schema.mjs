@@ -62,7 +62,7 @@ export const CONFIG_SCHEMA = [
   // the ruling; the key survives (documents the standing behavior, future-
   // proof) and a legacy obese:'full' config reads as 'quick' silently
   // (clampedRead's per-band safer-value-wins clamp, the CM v3.9.3 pattern).
-  { key: 'exercisePerBand', type: 'bandmap', values: { obese: ['quick'], full: ['quick', 'full'] }, def: { obese: 'quick', full: 'full' }, help: 'Per-ceiling exercise (obese: quick only — OBESE is auto-Quick-silent by ruling, never an ask; full: quick|full); the fat-only scoping refinement is a later release (default: {obese:quick, full:full})' },
+  { key: 'exercisePerBand', type: 'bandmap', values: { obese: ['quick'], full: ['quick', 'full'] }, def: { obese: 'quick', full: 'full' }, help: 'RETAINED FOR OLD CONFIGS: read-tolerated (validated and clamped, never rejected) and NOT read at runtime, so it has no effect; the exercise per ceiling is fixed by ruling (obese: auto-Quick, never an ask; full: a forced Quick pass, then one consent ask if still over) (default: {obese:quick, full:full})' },
   { key: 'managedPaths', type: 'stringList', def: [], help: 'Extra path PREFIXES (relative to their own project/global root, forward-slash form) to auto-declare MANAGED — sync-owned packs never proposed for a local wash, same class as skills (default: [], the byte-identical-across-roots heuristic already covers the common case)' },
   // RE-TIER envelope (the wizard's FOURTH choice, consumed by retier.mjs ONLY
   // inside a wizard-consented run — never a hook/band/BMI). A +/- BAND, never
@@ -123,7 +123,7 @@ export const CONFIG_SCHEMA = [
       maxSessionsPerRun: { type: 'int', min: 1, max: 100000, def: 25 },
       maxBytesPerRun: { type: 'int', min: 1048576, max: 1099511627776, def: 524288000 },
     }, def: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } },
-  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, digCrush: { singleFileTok: 35000, pileTok: 58000, fileCount: 6 }, runBudget: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/; indexEnabled = write dig-index rows; digCrush = the dig-gauge PRE-READ crush thresholds (singleFileTok 20000-200000 / pileTok 40000-200000 / fileCount 3-50 — CRUSHING if any one holds); runBudget = the per-run ULTRA work-limit (maxSessionsPerRun 1-100000 / maxBytesPerRun 1MiB-1TiB — the session loop stops at a unit boundary once either is reached, run again for the rest) (default: {14, 180, false, "", true, {35000, 58000, 6}, {25, 524288000}})' },
+  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, digCrush: { singleFileTok: 35000, pileTok: 58000, fileCount: 6 }, runBudget: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/ (read from the GLOBAL config only: a project value is ignored); indexEnabled = write dig-index rows; digCrush = the dig-gauge PRE-READ crush thresholds (singleFileTok 20000-200000 / pileTok 40000-200000 / fileCount 3-50 — CRUSHING if any one holds); runBudget = the per-run ULTRA work-limit (maxSessionsPerRun 1-100000 / maxBytesPerRun 1MiB-1TiB — the session loop stops at a unit boundary once either is reached, run again for the rest) (default: {14, 180, false, "", true, {35000, 58000, 6}, {25, 524288000}})' },
 ];
 
 // 0m tombstone — "FORCE IS A DICTATOR, NO OFF SWITCH" (USER 2026-07-11:
@@ -271,7 +271,12 @@ export function clampedRead(cfg, key) {
 // defense in depth for direct callers, same pattern as resolveEstateCfg.
 export function resolveRetierCfg(retier) {
   const r = retier && typeof retier === 'object' ? retier : {};
-  const num = (v, def, min, max) => (Number.isFinite(v) && v >= min && v <= max ? v : def);
+  // CWK-120 row 11: INTEGERS only, as the schema declares every retier field (`validateValue`'s int rule). This resolver is the
+  // ONE definition every consumer reads (the hook via envelopeForConfig, the CLI gauge, runRetier), and it takes the raw
+  // config, so it must apply the schema's own rule itself: `Number.isFinite` alone kept an in-range decimal such as
+  // `targetTokens: 4125.5` that clampedRead(cfg, 'retier') degrades to the default. Fixing it at the one shared function,
+  // not at one call site, keeps the CLI and the hook agreeing (cli.mjs's own header names that invariant).
+  const num = (v, def, min, max) => (Number.isInteger(v) && v >= min && v <= max ? v : def);
   return {
     targetTokens: num(r.targetTokens, 4125, 500, 6250), // 6250 = the CC hard cap (25 KB index / 4)
     armPct: num(r.armPct, 20, 5, 50),

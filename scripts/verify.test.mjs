@@ -26,9 +26,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { gitEnv } from './lib/git-env.mjs';
+import { removeTree } from './lib/test-plan.mjs';
 
 const VERIFY = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify.mjs');
+// Every spawn in this file carries a clock (testing.md). verify.mjs measured 2.9-3.6 s a run on this box (fire 154, three runs)
+// and the git calls under a second, so 60 s is far past a live run and inside the suite's per-test clock (test-plan.mjs).
+// `finished` turns a killed run into a failure that names the clock, never an unrelated red on the next assertion.
+const SPAWN_TIMEOUT_MS = 60000;
+function finished(r, what) {
+  if (r.error && r.error.code === 'ETIMEDOUT') assert.fail(`${what} did not finish within ${SPAWN_TIMEOUT_MS} ms and was killed`);
+  return r;
+}
 
 test('verify.mjs REPORTS missing scripts/lib files instead of dying on them', () => {
   // verify.mjs derives `repo` from its OWN location, so a lone copy in an empty
@@ -40,7 +50,7 @@ test('verify.mjs REPORTS missing scripts/lib files instead of dying on them', ()
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(VERIFY, dest);
 
-    const r = spawnSync(process.execPath, [dest], { encoding: 'utf8' });
+    const r = finished(spawnSync(process.execPath, [dest], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
     const stdout = r.stdout ?? '';
     const stderr = r.stderr ?? '';
 
@@ -54,7 +64,7 @@ test('verify.mjs REPORTS missing scripts/lib files instead of dying on them', ()
         `every missing lib gets its own enumerated FAIL line (${lib})\n${stdout}`);
     }
     assert.match(stdout, /\nVERIFY: FAIL \(\d+\)/, `the run must reach its own summary line\n${stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });
 
 // board #64: DESC_CAP walked skill/command frontmatter only; plugin.json's own
@@ -97,8 +107,11 @@ const notScratch = (s) => {
   return !(seg[0] === 'scripts' && seg[1] === 'lib' && (seg[2] || '').startsWith('.'));
 };
 
-test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the gate', () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-')));
+// The gate's own tree in a scratch dir: every top-level path verify.mjs itself reads. Three tests below need it; the copy
+// (and the reason its list is what it is) used to be inlined in each. The dir is cleaned HERE if the copy throws, and by the
+// caller's finally once this returns -- a helper that allocates must not leave the failure half of that to its caller.
+function copyGateTree(prefix) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   try {
     for (const rel of [
       '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
@@ -113,8 +126,15 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
       if (!fs.existsSync(src)) continue;
       fs.cpSync(src, path.join(root, rel), { recursive: true, filter: notScratch });
     }
+  } catch (e) { removeTree(root); throw e; }
+  return root;
+}
+
+test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the gate', () => {
+  const root = copyGateTree('cw-desccap-');
+  try {
     const dest = path.join(root, 'scripts', 'verify.mjs');
-    const run = () => spawnSync(process.execPath, [dest], { encoding: 'utf8' });
+    const run = () => finished(spawnSync(process.execPath, [dest], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
 
     const clean = run();
     assert.strictEqual(clean.status, 0, `pristine copy must PASS\n${clean.stdout}${clean.stderr}`);
@@ -130,33 +150,237 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
     assert.strictEqual(over.status, 1, 'an over-cap plugin.json description must FAIL with exit 1');
     assert.match(over.stdout, /FAIL\s+\.claude-plugin\/plugin\.json: description 1100 chars exceeds the 1024-char cap/,
       `the FAIL line must name the file, the exact length, and the cap\n${over.stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });
 
 test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never silently reads as 0 chars', () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-desccap-nonstring-')));
+  const root = copyGateTree('cw-desccap-nonstring-');
   try {
-    for (const rel of [
-      '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
-      'platform-configs', 'plugin', 'scripts', 'skills',
-      // The config-key drift gate NAMES its ship-text surfaces rather than
-      // existsSync-filtering them, so an absent one is REPORTED as unreadable
-      // instead of silently shrinking the scan. That is the property worth
-      // having, so the fixture grows to match rather than the gate softening.
-      'README.md', 'SECURITY.md', 'PRIVACY.md', 'CONTRIBUTING.md', 'INPUT-CONTRACT.md',
-    ]) {
-      const src = path.join(REPO, rel);
-      if (!fs.existsSync(src)) continue;
-      fs.cpSync(src, path.join(root, rel), { recursive: true, filter: notScratch });
-    }
     const pjPath = path.join(root, '.claude-plugin', 'plugin.json');
     const pj = JSON.parse(fs.readFileSync(pjPath, 'utf8'));
     pj.description = 123; // truthy non-string — must never read as 0 chars and pass
     fs.writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n', 'utf8');
 
-    const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8' });
+    const r = finished(spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
     assert.strictEqual(r.status, 1, 'a non-string description must FAIL, not silently pass as 0 chars');
     assert.match(r.stdout, /FAIL\s+\.claude-plugin\/plugin\.json: description is not a string \(number\)/,
       `must name the actual type, not silently report 0 chars\n${r.stdout}`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
+});
+
+// CWK-120 row 16: two messages named a place the gate never checks. The SessionStart FAIL said `${CLAUDE_PLUGIN_ROOT}/bin` while the
+// check above it tests `${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js`, and the dist ok line listed `bin`, a directory the dist has
+// never shipped (DIST_ITEMS is manifest + commands + hooks + skills + scripts/lib). A maintainer reading either inspects the wrong path.
+// The ok line is now BUILT from DIST_ITEMS, so this asserts the relation (every shipped item is named, and no `bin`) rather than a copy of
+// today's list that would itself go stale the next time DIST_ITEMS moves.
+test('CWK-120 row 16: the hooks FAIL names the path the gate checks, and the dist ok line names exactly what DIST_ITEMS ships', async () => {
+  const root = copyGateTree('cw-verify-text-');
+  try {
+    const run = () => finished(spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
+    const clean = run();
+    assert.strictEqual(clean.status, 0, `pristine copy must PASS\n${clean.stdout}${clean.stderr}`);
+    const { DIST_ITEMS } = await import(pathToFileURL(path.join(REPO, 'scripts', 'build-plugin.mjs')).href);
+    const distLine = clean.stdout.split(/\r?\n/).find((l) => l.includes('plugin/ matches source'));
+    assert.ok(distLine, `the dist ok line must be printed\n${clean.stdout}`);
+    for (const item of DIST_ITEMS) assert.ok(distLine.includes(item.split(path.sep).join('/')), `the dist ok line must name ${item}\n${distLine}`);
+    assert.ok(!/\bbin\b/.test(distLine), `the dist ok line must not name a directory the dist does not ship\n${distLine}`);
+
+    const hj = path.join(root, 'hooks', 'hooks.json');
+    fs.writeFileSync(hj, fs.readFileSync(hj, 'utf8').split('coalwash-conductor.js').join('some-other-hook.js'));
+    const bad = run();
+    assert.strictEqual(bad.status, 1, 'a hooks.json that does not wire the conductor must FAIL the gate');
+    assert.match(bad.stdout, /FAIL\s+hooks\.json does not wire \$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/coalwash-conductor\.js/, `the FAIL must name the path the check reads\n${bad.stdout}`);
+    assert.ok(!bad.stdout.includes('CLAUDE_PLUGIN_ROOT}/bin'), `the FAIL must not name the never-checked bin path\n${bad.stdout}`);
+  } finally { removeTree(root); }
+});
+
+// CW-015 (b), r34: EVERY verify.mjs spawn above runs OUTSIDE a git repository, so
+// verify.mjs's `pointers (ship-text vs the tree):` block took its named "git
+// unavailable" skip in all of them. Its wiring could be deleted with the suite fully
+// green — a gate the suite could not observe. This runs the REAL gate inside a REAL
+// repository and plants one citation of each kind the block exists to refuse.
+//
+// THE FIXTURE RAIL, and each clause is a measured incident, not caution:
+// - the tree lives under os.tmpdir(), never under this repo;
+// - git is invoked with `-C <fixture>` on EVERY call, and with every GIT_* variable
+//   scrubbed. A suite run from `.githooks/pre-commit` inherits GIT_DIR, and from a
+//   linked worktree it is ABSOLUTE — scripts/pointer-check.test.mjs's CWK-079 header
+//   records `git init` in a fixture re-initialising the REAL repository that way. The
+//   scrub is a PREFIX, not that file's list: wider by construction, and no roster to
+//   keep in step with it;
+// - the fixture's own `.git` is ASSERTED to exist before anything else touches it: a
+//   git command with no `.git` beside it walks UP to the nearest repository (on
+//   2026-09-10 a fixture's `git config core.bare true` did exactly that and broke the
+//   umbrella);
+// - and the fixture builder runs NO `git config` at all. `git add` fills the index,
+//   which is what `ls-files` answers from, so no commit, no identity and no signing
+//   config. The ONE `git config` in this file is the BARE-repo test's, and it
+//   re-asserts the fixture's own `.git` at that call.
+//
+// WHY the real-repo test does NOT set `core.bare true`, which CoalHearth's 0413924
+// sets: a bare repository refuses `check-ignore` outright, which would switch off
+// exactly the gitignored-root branch that test needs to see. The bare case is a
+// different question — does an unanswerable check-ignore FAIL the gate — and it has
+// its own test below (r34 F1).
+//
+// THE TREE IS THE TRACKED FILE LIST, copied from disk: it is what a clone has, which
+// is the question the pointer gate asks.
+// CWK-133: scripts/lib/git-env.mjs's `gitEnv` -- the whole GIT_* family out, the given directory's parent as the ceiling. Each call
+// takes it itself (08d: the git-spawn census reads no wrapper).
+
+// The tracked tree in a real repo, fenced per the rail above. Returns null when git is
+// unavailable (the caller skips visibly). The dir is cleaned HERE if building it throws,
+// and by the caller's finally once this returns.
+function trackedTreeRepo() {
+  const listed = finished(spawnSync('git', ['-C', REPO, 'ls-files', '-z'], { encoding: 'utf8', env: gitEnv(path.dirname(REPO)), timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'git ls-files');
+  if (listed.error || listed.status !== 0) return null;
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-git-')));
+  try {
+    const git = (...args) => finished(spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnv(path.dirname(root)), timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), `git ${args.join(' ')}`);
+    const init = git('init', '-q', '-b', 'main');
+    assert.strictEqual(init.status, 0, `git init in the fixture failed\n${init.stderr}`);
+    assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(),
+      'FIXTURE RAIL: the fixture must own its .git before any other git call, or git walks UP to a real repository');
+
+    for (const rel of listed.stdout.split('\0').filter(Boolean)) {
+      const src = path.join(REPO, rel);
+      if (!fs.existsSync(src)) continue; // deleted in the working tree, not yet committed
+      const dest = path.join(root, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+    }
+    const added = git('add', '-A');
+    assert.strictEqual(added.status, 0, `git add in the fixture failed\n${added.stderr}`);
+    const tracked = git('ls-files');
+    assert.ok(tracked.stdout.includes('scripts/verify.mjs'), `the fixture index must hold the tree\n${tracked.stderr}`);
+    const run = () => finished(spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: gitEnv(path.dirname(root)), timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
+    return { root, git, run };
+  } catch (e) { removeTree(root); throw e; }
+}
+
+test('verify.mjs inside a REAL git repo: the pointer-drift block RUNS, and a missing, an untracked and a gitignored citation each FAIL', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root, git, run } = fx;
+  try {
+
+    // CLEAN: the block runs and reports both of its own coverage lines.
+    const clean = run();
+    assert.strictEqual(clean.status, 0, `the tracked tree must PASS inside a repo\n${clean.stdout}${clean.stderr}`);
+    assert.doesNotMatch(clean.stdout, /pointer check: git unavailable/,
+      `inside a real repo the pointer block must RUN, never take its no-git skip\n${clean.stdout}`);
+    assert.match(clean.stdout, /ok\s+gitignored-root citations: \d+ distinct first segment\(s\) cited and shape-qualified/,
+      `the ignore-derivation line must print\n${clean.stdout}`);
+    assert.match(clean.stdout, /ok\s+every path this repo points at from \d+ ship-text surface\(s\) \(\d+ in-scope citations\) resolves to a TRACKED file/,
+      `the resolution line must print\n${clean.stdout}`);
+
+    // PLANTED: one citation per refusal the block exists to make. `scratchpad/` is a
+    // gitignored root in this repo's .gitignore; asserted here so the leg cannot pass
+    // on a .gitignore that stopped saying so.
+    const ignored = git('check-ignore', 'scratchpad/');
+    assert.strictEqual(ignored.status, 0, `the gitignored leg needs scratchpad/ ignored in the fixture\n${ignored.stdout}${ignored.stderr}`);
+    // The untracked plant sits in a NEW top-level dir on purpose: a file under
+    // scripts/lib/ also trips the LIBS roster and the dist-mirror gates (measured), and
+    // then exit 1 would say nothing about the pointer block.
+    fs.mkdirSync(path.join(root, 'r34-probe'));
+    fs.writeFileSync(path.join(root, 'r34-probe', 'untracked-probe.txt'), 'on disk, never added\n');
+    fs.appendFileSync(path.join(root, 'README.md'),
+      '\nPlanted by verify.test.mjs: `scripts/lib/r34-no-such-engine.mjs`, `r34-probe/untracked-probe.txt`, `scratchpad/r34-probe-notes.md`.\n');
+
+    const planted = run();
+    assert.strictEqual(planted.status, 1, `three bad citations must FAIL the gate\n${planted.stdout}${planted.stderr}`);
+    assert.match(planted.stdout, /\nVERIFY: FAIL \(3\)/,
+      `exactly the three planted citations fail — any other count means the exit code is not this block's\n${planted.stdout}`);
+    assert.match(planted.stdout, /FAIL\s+README\.md cites `scripts\/lib\/r34-no-such-engine\.mjs`, which does not resolve in this repo/,
+      `the MISSING citation must be named\n${planted.stdout}`);
+    assert.match(planted.stdout, /FAIL\s+README\.md cites `r34-probe\/untracked-probe\.txt`, which exists here but is UNTRACKED/,
+      `the UNTRACKED citation must be named\n${planted.stdout}`);
+    assert.match(planted.stdout, /FAIL\s+README\.md cites `scratchpad\/r34-probe-notes\.md`, which lives under the gitignored `scratchpad`/,
+      `the GITIGNORED citation must be named\n${planted.stdout}`);
+  } finally { removeTree(root); }
+});
+
+// r34 F1: `git check-ignore` exits 0 (something fed is ignored), 1 (nothing is), or
+// anything else when it CANNOT ANSWER. A bare repository is the portable way to reach
+// the third case with the real git binary: `ls-files` still answers from the index, so
+// the block does not take its no-git skip, while check-ignore exits 128 ("this operation
+// must be run in a work tree"). Measured before the fix: the gate read "0 gitignored",
+// let a citation under a gitignored root fall out of scope, and printed VERIFY: PASS.
+test('verify.mjs in a BARE repo: a check-ignore that cannot answer FAILs the gate — never a "0 gitignored" read as clean', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root, git, run } = fx;
+  try {
+    fs.appendFileSync(path.join(root, 'README.md'), '\nPlanted by verify.test.mjs: `scratchpad/r34-probe-notes.md`.\n');
+    // FIXTURE RAIL, re-asserted at the ONE `git config` call site: without its own .git
+    // beside it, this is the call that walks up and reconfigures a real repository.
+    assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(), 'FIXTURE RAIL: own .git before `git config`');
+    const bare = git('config', 'core.bare', 'true');
+    assert.strictEqual(bare.status, 0, `git config in the fixture failed\n${bare.stderr}`);
+    const probe = git('check-ignore', 'scratchpad/');
+    assert.ok(probe.status !== 0 && probe.status !== 1,
+      `precondition: in a bare repo check-ignore must be UNANSWERABLE, got exit ${probe.status}\n${probe.stderr}`);
+
+    const r = run();
+    assert.strictEqual(r.status, 1, `an unanswered check-ignore must FAIL the gate\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /FAIL\s+git check-ignore --stdin exited \d+/,
+      `the FAIL must name the probe and its exit status\n${r.stdout}`);
+    assert.doesNotMatch(r.stdout, /ok\s+gitignored-root citations:/,
+      `no ok line may count ignored roots from a probe that never answered\n${r.stdout}`);
+    assert.doesNotMatch(r.stdout, /ok\s+every path this repo points at/,
+      `the resolution ok line rests on the ignore set, so it must not print either\n${r.stdout}`);
+    assert.match(r.stdout, /\nVERIFY: FAIL \(1\)/,
+      `exactly one failure, this one — any other count means the exit code is not this probe's\n${r.stdout}`);
+  } finally { removeTree(root); }
+});
+
+// CWK-133: an ABSOLUTE GIT_DIR in the caller's environment (a linked worktree's hook exports one) must not decide which
+// repository this gate's two git calls answer for. A decoy repository with an empty index stands in for the caller's:
+// without the strip `git ls-files` returns the decoy's index, no cited path reads as tracked, and the pointer block FAILs.
+test('verify.mjs inside a REAL git repo: an ambient absolute GIT_DIR cannot make its git calls answer for another repository (CWK-133)', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root } = fx;
+  const decoy = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-verify-decoy-')));
+  try {
+    const made = finished(spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: gitEnv(path.dirname(decoy)), timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'git init (decoy)');
+    assert.strictEqual(made.status, 0, `git init in the decoy failed\n${made.stderr}`);
+    // Observable on the check-ignore call too: were it to run against the DECOY's git dir, this exclude file (which
+    // `check-ignore` reads from the git dir, not from the work tree) would mark every root the ship-text cites as ignored.
+    fs.writeFileSync(path.join(decoy, '.git', 'info', 'exclude'), ['skills/', 'commands/', 'hooks/', 'scripts/', 'plugin/', 'references/', ''].join('\n'));
+    const hostile = { ...gitEnv(path.dirname(root)), GIT_DIR: path.join(decoy, '.git') };
+    const r = finished(spawnSync(process.execPath, [path.join(root, 'scripts', 'verify.mjs')], { encoding: 'utf8', env: hostile, timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
+    assert.strictEqual(r.status, 0, `the tracked tree must still PASS with a hostile GIT_DIR in the environment\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /ok\s+every path this repo points at/, `the pointer block must have run and resolved\n${r.stdout}`);
+  } finally {
+    removeTree(root);
+    removeTree(decoy);
+  }
+});
+
+// CWK-136: the git-spawn census inside the gate. A git spawn planted in the fixture's scripts/ that inherits the ambient env
+// (env: process.env) or names none at all must FAIL verify, and the clean tree must print the census's coverage line. The
+// planted text is built from parts, so it reads the same under every census (since 08d a spawn inside a string is not code).
+test('verify.mjs inside a REAL git repo: a planted git spawn with env: process.env FAILS the census, and so does one with no env: (CWK-136)', (t) => {
+  const fx = trackedTreeRepo();
+  if (!fx) return t.skip('git unavailable');
+  const { root, run } = fx;
+  try {
+    const clean = run();
+    assert.strictEqual(clean.status, 0, `the tracked tree must PASS the census\n${clean.stdout}${clean.stderr}`);
+    assert.match(clean.stdout, /ok\s+\d+ git spawn call\(s\) across \d+ script file\(s\)/, `the census must print its coverage\n${clean.stdout}`);
+
+    const planted = path.join(root, 'scripts', 'zz-planted-spawn.mjs');
+    const spawn = (opts) => `${'spawn' + 'Sync'}(${JSON.stringify('git')}, ['status']${opts})`;
+    fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn(', { env: process.env }')};`, ''].join('\n'));
+    const inherit = run();
+    assert.strictEqual(inherit.status, 1, `env: process.env must FAIL the gate\n${inherit.stdout}${inherit.stderr}`);
+    assert.match(inherit.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) env: holds process\.env without gitEnv\(\)/, `the FAIL must name the file, the line and the reason (the canon census's wording since 09a)\n${inherit.stdout}`);
+    assert.match(inherit.stdout, /\nVERIFY: FAIL \(1\)/, `exactly the planted spawn fails\n${inherit.stdout}`);
+
+    fs.writeFileSync(planted, [`import { spawnSync } from 'node:child_process';`, `${spawn('')};`, ''].join('\n'));
+    const bare = run();
+    assert.strictEqual(bare.status, 1, `a spawn with no env: must FAIL the gate\n${bare.stdout}${bare.stderr}`);
+    assert.match(bare.stdout, /FAIL\s+scripts\/zz-planted-spawn\.mjs:2 spawnSync\('git', \.\.\.\) carries no 'env:'/, `the FAIL must name the missing env\n${bare.stdout}`);
+  } finally { removeTree(root); }
 });

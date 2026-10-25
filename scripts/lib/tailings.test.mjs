@@ -8,6 +8,7 @@ import {
   FAT_BIN_NAME, STORE_OLD_NAME,
   recordBinItem, listBin, restoreFromBin,
   sweepFatBin, sweepStoreOld, readDeathLog, breadcrumb,
+  __testHooks,
 } from './tailings.mjs';
 import { txDirFor } from './apply.mjs';
 import { TIER1_KEEP_ALL_MS, HORIZON_MS } from './retention.mjs';
@@ -118,11 +119,16 @@ test('grad6 F1: an orphaned lock OLDER than the bin\'s own (short) staleness win
     fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'dead', pid: 999999, at: Date.now(), token: 'dead:999999:0' }));
     const oldMtime = new Date(Date.now() - 6000); // 6s old — older than the bin's 5s staleness window
     fs.utimesSync(lockPath, oldMtime, oldMtime);
-    const t0 = Date.now();
+    // F-RR-2 (r34): this used to assert `ms < 500` against a ~600 ms retry
+    // budget — a 100 ms margin on a shared machine, the most false-red-prone
+    // clock in the suite. The clock was the SIGNAL here, not a redundant
+    // secondary, so it is REPLACED rather than deleted: "reclaimed immediately"
+    // means reclaimed on the first acquire attempt, and that is a count.
+    __testHooks.binLockAttempts = 0;
     const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'a cut that must be banked', original: '/f.md' });
-    const ms = Date.now() - t0;
+    assert.strictEqual(__testHooks.binLockAttempts, 1,
+      `reclaiming a stale orphan took ${__testHooks.binLockAttempts} acquire attempts — expected the steal on attempt 1, not a walk through the retry budget`);
     assert.ok(id, 'a lock older than the bin\'s own staleness window must be reclaimed, not return null');
-    assert.ok(ms < 500, `reclaiming a stale orphan took ${ms}ms — expected a near-immediate steal, not the ~600ms full retry budget`);
     assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 1);
   } finally { clean(proj); }
 });
@@ -173,6 +179,16 @@ test('grad6 F2: at heavier load (16x10=160) the catalogue/blobs never diverge fr
     assert.ok(successfulAttempts > 0 && successfulAttempts <= WORKERS * PER_WORKER, `sanity: ${successfulAttempts} successes out of ${WORKERS * PER_WORKER} attempted`);
     assert.strictEqual(onDisk.length, successfulAttempts, 'every successful attempt must have exactly one blob — a refusal must leave nothing behind');
     assert.strictEqual(index.length, onDisk.length, 'the catalogue must never diverge from the blobs, even when some attempts refuse');
+    // INSPECT 109 L109-2: listBin lists a blob that lost its row again (P95-1's reconcile), so it alone can no longer see a
+    // lost save. index.json is read RAW as well: its rows are the blobs on disk, each once, each with the original the
+    // worker recorded.
+    const indexFile = path.join(binPath, 'index.json');
+    const raw = fs.existsSync(indexFile) ? JSON.parse(fs.readFileSync(indexFile, 'utf8')) : [];
+    const lostSave = 'index.json itself must hold every blob on disk, each once, with its original: a missing row is a lost save. '
+      + 'The one window that can legitimately redden this is a bin-lock theft landing between owns() and saveIndex in recordBinItem '
+      + '(P95-1, a holder stalled past BIN_LOCK_STALE_MS): read the rows and the box load before any re-run';
+    assert.deepStrictEqual(raw.map((r) => r.id).sort(), [...onDisk].sort(), lostSave);
+    assert.ok(raw.every((r) => typeof r.original === 'string' && r.original), lostSave);
   } finally { clean(dir); }
 });
 
@@ -583,4 +599,319 @@ test('0h-GUARD: no hook reaches a bin WRITER, directly or through apply/cli (gre
     }
   }
   assert.ok(checked > 0, 'no hook files were scanned — a guard that scans nothing passes vacuously');
+});
+
+// ---------------------------------------------------------------------------
+// CWK-120 rows 4 + 18 (CodeRabbit, adjudicated against the live tree). The sweep is the SECOND writer of a bin's
+// index.json -- a read-modify-write exactly like recordBinItem's -- so it takes the SAME bin lock; and the lock judges
+// staleness by a LIVE clock, never by the item's (backdatable) birth timestamp.
+// ---------------------------------------------------------------------------
+const PAST_HORIZON_MS = HORIZON_MS.fat + 86400000; // 31 days: past the fat bin's 30-day horizon
+const binPathOf = (proj) => path.join(txDirFor(proj), FAT_BIN_NAME);
+// A lock a LIVE holder just took: a fresh mtime, a token that is not ours.
+function plantForeignLock(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const lockPath = path.join(dir, '.bin.lock');
+  fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'other', pid: 1, at: Date.now(), token: 'other:1:0' }));
+  return lockPath;
+}
+// A lock ORPHANED by a crashed holder: older than the bin's own 5 s staleness window.
+function plantOrphanLock(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const lockPath = path.join(dir, '.bin.lock');
+  fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'dead', pid: 999999, at: Date.now(), token: 'dead:999999:0' }));
+  const old = new Date(Date.now() - 6000);
+  fs.utimesSync(lockPath, old, old);
+  return lockPath;
+}
+
+test('CWK-120 row 4: a sweep that finds the bin lock HELD destroys nothing and waits for the next run -- it never rewrites index.json unlocked', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', original: 'notes/old.md', now: now - PAST_HORIZON_MS });
+    const dir = binPathOf(proj);
+    const lockPath = plantForeignLock(dir);
+    const indexBefore = fs.readFileSync(path.join(dir, 'index.json'), 'utf8');
+    const r = sweepFatBin(proj, { now });
+    assert.deepStrictEqual(r, { destroyed: 0, kept: 1 }, 'a held lock: the item past its horizon is still there');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'old cut', 'the blob is untouched');
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'), indexBefore, 'index.json was not rewritten');
+    assert.strictEqual(readDeathLog(proj, FAT_BIN_NAME), '', 'no death certificate for a destruction that did not happen');
+    assert.strictEqual(fs.existsSync(lockPath), true, 'the OTHER holder\'s lock is not ours to remove');
+  } finally { clean(proj); }
+});
+
+test('CWK-120 row 4: a sweep RELEASES the bin lock it took -- a record made right after it succeeds on the FIRST attempt', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', now: now - PAST_HORIZON_MS });
+    assert.deepStrictEqual(sweepFatBin(proj, { now }), { destroyed: 1, kept: 0 });
+    assert.strictEqual(fs.existsSync(path.join(binPathOf(proj), '.bin.lock')), false, 'the sweep released its lock');
+    __testHooks.binLockAttempts = 0;
+    assert.ok(recordBinItem(proj, FAT_BIN_NAME, { content: 'next', now }), 'the next writer gets in');
+    assert.strictEqual(__testHooks.binLockAttempts, 1);
+  } finally { clean(proj); }
+});
+
+test('CWK-120 row 4: a sweep of an ABSENT bin takes no lock and creates nothing -- an absent bin stays absent', () => {
+  const proj = sandbox();
+  try {
+    assert.deepStrictEqual(sweepFatBin(proj), { destroyed: 0, kept: 0 });
+    assert.deepStrictEqual(sweepStoreOld(proj), { destroyed: 0, kept: 0 });
+    assert.strictEqual(fs.existsSync(binPathOf(proj)), false, 'no fat-bin directory was created by a sweep of nothing');
+    assert.strictEqual(fs.existsSync(path.join(txDirFor(proj), STORE_OLD_NAME)), false, 'no store.old directory either');
+  } finally { clean(proj); }
+});
+
+test('CWK-120 row 4: a sweep TAKES OVER an orphaned bin lock on its first attempt (the stale-steal path, on the sweep\'s own live clock)', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut', now: now - PAST_HORIZON_MS });
+    plantOrphanLock(binPathOf(proj));
+    __testHooks.binLockAttempts = 0;
+    assert.deepStrictEqual(sweepFatBin(proj, { now }), { destroyed: 1, kept: 0 }, 'an orphan does not stall the sweep');
+    assert.strictEqual(__testHooks.binLockAttempts, 1);
+  } finally { clean(proj); }
+});
+
+test('CWK-120 row 18: an orphaned lock is reclaimed on the FIRST attempt even when the item is BACKDATED -- the lock judges staleness by a live clock, never the item\'s birth', () => {
+  const proj = sandbox();
+  try {
+    plantOrphanLock(binPathOf(proj));
+    __testHooks.binLockAttempts = 0;
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'a cut banked in the past', original: '/f.md', now: Date.now() - 3 * 86400000 });
+    assert.strictEqual(__testHooks.binLockAttempts, 1,
+      `a backdated item made the orphan look fresh: ${__testHooks.binLockAttempts} acquire attempts (expected the steal on attempt 1)`);
+    assert.ok(id, 'the item is recorded, not refused after the whole retry budget');
+    assert.strictEqual(listBin(proj, FAT_BIN_NAME).length, 1);
+  } finally { clean(proj); }
+});
+
+// P95-1 (INSPECT 95, the 17c unit: `:181` read 76 entries for 84 blobs at CPU 100%): a holder stalled past
+// BIN_LOCK_STALE_MS between loading the index and saving it is stolen from; the thief saves its row, then the stalled
+// holder's save, built from the index it loaded BEFORE the theft, drops the thief's row while the thief's blob stays.
+// Reproduced deterministically, never by load: the seam backdates the held lock and runs the thief inside the window.
+test('P95-1: a writer stalled past the stale window while a second writer steals the bin lock leaves both rows in the catalogue, with their originals', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-p951-')));
+  const proj = path.join(dir, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  let inner = null;
+  let fired = 0;
+  __testHooks.beforeIndexSave = (binDirPath) => {
+    __testHooks.beforeIndexSave = null; // the thief's own critical section runs unhooked
+    fired++;
+    const old = new Date(Date.now() - 60000);
+    fs.utimesSync(path.join(binDirPath, '.bin.lock'), old, old); // the holder now looks stalled far past BIN_LOCK_STALE_MS
+    inner = recordBinItem(proj, FAT_BIN_NAME, { content: 'thief', original: '/thief.md' });
+  };
+  try {
+    const outer = recordBinItem(proj, FAT_BIN_NAME, { content: 'stalled', original: '/stalled.md' });
+    assert.strictEqual(fired, 1, 'the seam ran once, inside the stalled holder');
+    assert.ok(outer && inner, `both writers report success (outer ${outer}, inner ${inner})`);
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    const blobs = fs.readdirSync(binPath).filter((f) => /^\d+-[0-9a-f]{12}$/.test(f)).sort();
+    const rows = listBin(proj, FAT_BIN_NAME);
+    assert.deepStrictEqual(rows.map((r) => r.id).sort(), blobs, 'the catalogue names exactly the blobs on disk, each once');
+    assert.deepStrictEqual(blobs, [outer, inner].sort(), 'the blobs are the two reported ids');
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    assert.strictEqual(byId[outer].original, '/stalled.md', 'the stalled writer keeps its original');
+    assert.strictEqual(byId[inner].original, '/thief.md', 'the thief keeps its original: the stalled save never drops its row');
+  } finally {
+    __testHooks.beforeIndexSave = null;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('P95-1: a blob on disk whose row a lost save dropped is still listed (reconciled from the blob, sized by stat), and nothing else in the bin folder is', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-p951r-')));
+  const proj = path.join(dir, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  try {
+    const a = recordBinItem(proj, FAT_BIN_NAME, { content: 'kept row', original: '/a.md' });
+    const b = recordBinItem(proj, FAT_BIN_NAME, { content: 'row lost by a save', original: '/b.md' });
+    assert.ok(a && b);
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    const indexPath = path.join(binPath, 'index.json');
+    fs.writeFileSync(indexPath, JSON.stringify(JSON.parse(fs.readFileSync(indexPath, 'utf8')).filter((r) => r.id !== b)));
+    fs.mkdirSync(path.join(binPath, '1700000000000-aaaaaaaaaaaa')); // a FOLDER in the blob-id shape is not a blob
+    const rows = listBin(proj, FAT_BIN_NAME);
+    assert.deepStrictEqual(rows.map((r) => r.id).sort(), [a, b].sort(), 'the dropped row is back; no other entry in the bin folder (index.json, .gitignore, a folder named like a blob) is listed');
+    const rb = rows.find((r) => r.id === b);
+    assert.strictEqual(rb.bytes, fs.statSync(path.join(binPath, b)).size, 'its bytes come from stat');
+    assert.strictEqual(rb.at, Number(b.slice(0, b.indexOf('-'))), 'its time comes from the id it was named with');
+    assert.strictEqual(rows.find((r) => r.id === a).original, '/a.md', 'a row the index still holds keeps its original');
+    assert.ok(restoreFromBin(proj, FAT_BIN_NAME, b), 'the reconciled row restores');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('P95-1: a sweep stalled past the stale window while a writer steals the bin lock keeps the writer\'s row with its original, and still destroys what it destroyed', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-p951s-')));
+  const proj = path.join(dir, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  const now = Date.now();
+  const expired = recordBinItem(proj, FAT_BIN_NAME, { content: 'expired', original: '/expired.md', now: now - (HORIZON_MS.fat + 86400000) });
+  let fresh = null;
+  let fired = 0;
+  __testHooks.beforeIndexSave = (binDirPath) => {
+    __testHooks.beforeIndexSave = null;
+    fired++;
+    const old = new Date(Date.now() - 60000);
+    fs.utimesSync(path.join(binDirPath, '.bin.lock'), old, old); // the sweep now looks stalled far past BIN_LOCK_STALE_MS
+    fresh = recordBinItem(proj, FAT_BIN_NAME, { content: 'fresh', original: '/fresh.md' });
+  };
+  try {
+    assert.ok(expired);
+    const r = sweepFatBin(proj, { now });
+    assert.strictEqual(fired, 1, 'the seam ran once, inside the stalled sweep');
+    assert.ok(fresh, 'the thief recorded its item');
+    const binPath = path.join(txDirFor(proj), FAT_BIN_NAME);
+    assert.ok(!fs.existsSync(path.join(binPath, expired)), 'the expired blob is gone');
+    assert.strictEqual(r.destroyed, 1, 'the sweep reports the one item it destroyed');
+    const rows = listBin(proj, FAT_BIN_NAME);
+    assert.deepStrictEqual(rows.map((x) => x.id), [fresh], 'the catalogue holds the thief\'s row and not the destroyed one');
+    assert.strictEqual(rows[0].original, '/fresh.md', 'the thief keeps its original: the stalled sweep never drops its row');
+  } finally {
+    __testHooks.beforeIndexSave = null;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// E1 t173: a copy's id names it only once its bytes are whole. INSPECT 109: a doubt item weighs nothing in the size cap.
+const BLOB_ID_SHAPE = /^\d+-[0-9a-f]{12}$/;
+const TEMP_SHAPE = /^\d+-[0-9a-f]{12}\.[0-9a-f]{12}\.part$/;
+const binDirOf = (proj) => path.join(txDirFor(proj), FAT_BIN_NAME);
+
+test('E1 t173: a writer killed after writing its copy but before naming it leaves nothing in the catalogue; its unfinished temp is never listed', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwbin-t173-')));
+  try {
+    const proj = path.join(dir, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const engineUrl = new URL('./tailings.mjs', import.meta.url).href;
+    const worker = path.join(dir, 'worker-t173.mjs');
+    fs.writeFileSync(worker,
+      `import fs from 'node:fs';\n` +
+      `import { recordBinItem, __testHooks } from ${JSON.stringify(engineUrl)};\n` +
+      // the kill: the temp is torn (truncated) and the process ends with no finally, the way a crash ends it
+      `__testHooks.beforeBlobLink = (tmp) => { fs.truncateSync(tmp, 3); process.exit(7); };\n` +
+      `recordBinItem(process.argv[2], ${JSON.stringify(FAT_BIN_NAME)}, { content: 'the whole copy', original: '/torn.md' });\n`);
+    const r = spawnSync(process.execPath, [worker, proj], { encoding: 'utf8', timeout: 60000 });
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [], 'a copy its writer never finished must never be listed (restore would print it as whole)');
+    assert.strictEqual(r.status, 7, `the worker died at the seam (status ${r.status}, stderr ${String(r.stderr).slice(0, 200)})`);
+    const names = fs.readdirSync(binDirOf(proj));
+    assert.ok(!names.some((f) => BLOB_ID_SHAPE.test(f)), `no id-named entry exists: ${names.join(', ')}`);
+    assert.strictEqual(names.filter((f) => TEMP_SHAPE.test(f)).length, 1, `the dead writer's temp is left in the temp shape: ${names.join(', ')}`);
+  } finally { clean(dir); }
+});
+
+test('E1 t173: the next sweep removes a dead writer\'s temp older than the stale window, and only that: a fresh temp, a folder in the temp shape and other names stay', () => {
+  const proj = sandbox();
+  try {
+    const bin = binDirOf(proj);
+    fs.mkdirSync(bin, { recursive: true });
+    const old = '1700000000000-aaaaaaaaaaaa.bbbbbbbbbbbb.part';
+    const fresh = '1700000000001-aaaaaaaaaaaa.cccccccccccc.part';
+    const folder = '1700000000002-aaaaaaaaaaaa.dddddddddddd.part';
+    const other = 'notes.part';
+    for (const f of [old, fresh, other]) fs.writeFileSync(path.join(bin, f), 'memory content');
+    fs.mkdirSync(path.join(bin, folder));
+    // E1 t180: every mtime is fixed from one reference, an hour either side of it. removeStaleTemps reads the live clock
+    // by design, so `fresh` is set an hour AHEAD: it stays fresh unless the test pauses an hour, past the suite's own
+    // per-test clock (TEST_TIMEOUT_MS, scripts/lib/test-plan.mjs); the others sit an hour behind the 5 s stale window.
+    const ref = Date.now() / 1000;
+    for (const f of [old, other, folder]) fs.utimesSync(path.join(bin, f), ref - 3600, ref - 3600);
+    fs.utimesSync(path.join(bin, fresh), ref + 3600, ref + 3600);
+    sweepFatBin(proj, { storeBytes: 1000 });
+    const names = fs.readdirSync(bin);
+    assert.ok(!names.includes(old), `the stale temp is removed: ${names.join(', ')}`);
+    assert.ok(names.includes(fresh), 'a fresh temp (a writer that may still be alive) stays');
+    assert.ok(names.includes(folder), 'a folder in the temp shape is never removed');
+    assert.ok(names.includes(other), 'a name outside the temp shape is never removed');
+    assert.match(readDeathLog(proj, FAT_BIN_NAME), /removed unfinished temp 1700000000000-aaaaaaaaaaaa\.bbbbbbbbbbbb\.part/);
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [], 'a temp is never listed as a copy');
+  } finally { clean(proj); }
+});
+
+test('E1 t173: a recorded copy is named by its id alone: no temp is left and the copy has one link', () => {
+  const proj = sandbox();
+  try {
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' });
+    assert.ok(id);
+    const names = fs.readdirSync(binDirOf(proj));
+    assert.ok(!names.some((f) => TEMP_SHAPE.test(f)), `no temp is left: ${names.join(', ')}`);
+    assert.strictEqual(fs.statSync(path.join(binDirOf(proj), id)).nlink, 1, 'the temp name is gone, so the copy has one link');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'whole copy');
+  } finally { clean(proj); }
+});
+
+test('E1 t173: on a filesystem without hard links the copy is written at its id directly, whole, and no temp is left', () => {
+  const proj = sandbox();
+  const prev = __testHooks.linkSync;
+  try {
+    __testHooks.linkSync = () => { const e = new Error('no hard links here'); e.code = 'EPERM'; throw e; };
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' });
+    assert.ok(id, 'the copy is still recorded');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'whole copy');
+    assert.ok(!fs.readdirSync(binDirOf(proj)).some((f) => TEMP_SHAPE.test(f)), 'no temp is left');
+  } finally { __testHooks.linkSync = prev; clean(proj); }
+});
+
+test('INSPECT 114 R114-1: a Windows FAT or exFAT volume answers EISDIR for a hard link, and the copy is still written at its id directly', () => {
+  // libuv maps Windows ERROR_INVALID_FUNCTION (CreateHardLinkW on a volume without hard links) to UV_EISDIR.
+  const proj = sandbox();
+  const prev = __testHooks.linkSync;
+  try {
+    __testHooks.linkSync = () => { const e = new Error('EISDIR: illegal operation on a directory, link'); e.code = 'EISDIR'; throw e; };
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' });
+    assert.ok(id, 'the copy is still recorded: EISDIR from this link can only mean the volume has no hard links');
+    assert.strictEqual(binText(proj, FAT_BIN_NAME, id), 'whole copy');
+    assert.ok(!fs.readdirSync(binDirOf(proj)).some((f) => TEMP_SHAPE.test(f)), 'no temp is left');
+  } finally { __testHooks.linkSync = prev; clean(proj); }
+});
+
+test('E1 t173: a link refused because the id name already exists records nothing (no write through or over that entry) and leaves no temp', () => {
+  const proj = sandbox();
+  const prev = __testHooks.beforeBlobLink;
+  try {
+    // E1 t180: a real entry is planted at the id the writer is about to link, so the REAL linkSync fails with EEXIST and
+    // the planted bytes are there to be overwritten if anything wrote through or over them.
+    let planted = null;
+    __testHooks.beforeBlobLink = (tmp) => {
+      planted = path.join(path.dirname(tmp), path.basename(tmp).split('.')[0]);
+      fs.writeFileSync(planted, 'planted bytes');
+    };
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'whole copy', original: '/f.md' });
+    assert.ok(planted, 'the hook planted an entry at the id');
+    assert.strictEqual(fs.readFileSync(planted, 'utf8'), 'planted bytes', 'the entry already at the id is never written through or over');
+    assert.strictEqual(id, null, 'the copy is not recorded');
+    // loadIndex lists the planted id-shaped file itself (its reconcile, original unknown); no row carries this copy's original.
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME).map((r) => [r.id, r.original]), [[path.basename(planted), null]]);
+    assert.ok(!fs.readdirSync(binDirOf(proj)).some((f) => TEMP_SHAPE.test(f)), 'no temp is left');
+  } finally { __testHooks.beforeBlobLink = prev; clean(proj); }
+});
+
+test('INSPECT 109: a doubt item (a future or unreadable time) weighs nothing in the size cap, so a real past-floor copy is never evicted to make room for it', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const DAY = 86400000;
+    // fire 133: retention thins by UTC epoch day (retention.mjs, floor(at / DAY_MS)), and now - 3 d and now - 2.5 d share one
+    // such day whenever the run starts before 12:00 UTC, so last-per-day destroyed r1 for half of every day. Each copy is
+    // anchored to its own epoch day instead: r1 past the 48 h floor, r2 one day later.
+    const dayStart = Math.floor(now / DAY) * DAY;
+    const r1 = recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(10), original: '/r1.md', now: dayStart - 3 * DAY + 3600000 });
+    const r2 = recordBinItem(proj, FAT_BIN_NAME, { content: 'y'.repeat(10), original: '/r2.md', now: dayStart - 2 * DAY + 3600000 });
+    const ip = path.join(binDirOf(proj), 'index.json');
+    const rows = JSON.parse(fs.readFileSync(ip, 'utf8'));
+    rows.push({ id: '99999999999999-ffffffffffff', at: 99999999999999, bytes: 5000, original: '/future.md', origin: 'program-cut' });
+    rows.push({ id: '99999999999998-eeeeeeeeeeee', at: 'soon', bytes: 5000, original: '/unreadable.md', origin: 'program-cut' });
+    fs.writeFileSync(ip, JSON.stringify(rows));
+    const s = sweepFatBin(proj, { now, storeBytes: 100 }); // a 200-byte budget
+    const ids = listBin(proj, FAT_BIN_NAME).map((r) => r.id);
+    assert.ok(ids.includes(r1), `the real 3-day-old copy survives the doubt items: ${JSON.stringify(s)}`);
+    assert.ok(ids.includes(r2), 'the newest real copy survives');
+    assert.strictEqual(s.destroyed, 0, 'nothing is destroyed: the real copies are within the budget');
+  } finally { clean(proj); }
 });

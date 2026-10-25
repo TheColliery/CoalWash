@@ -55,10 +55,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for every write temp (zero-dep builtin)
+import { spawnSync } from 'node:child_process'; // the one optional `git ls-files` (gitLsFiles): R14 D3's recovery check and fire 59's tracked-folder check; never a hook path
+import { gitEnv } from './git-env.mjs'; // the room's one GIT_*-stripping helper (CWK-133), shipped since R14 D3
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
+import { ownSandboxDir, openPlainFile, ensureCatchAllIgnore } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -70,7 +73,7 @@ import { isCloudPlaceholder, ccMemoryDir, physicalForCreate, containedIn } from 
 // forms the SAME shape of cycle (it imports txDirFor/ensureSelfIgnore from
 // here; this file imports sweepFatBin/sweepStoreOld from there) — identical
 // reasoning, identical safety.
-import { loadKeepsAt, KEEPS_NAME, globalKeepsPath } from './keeps.mjs';
+import { loadKeepsAt, loadProjectKeepsAt, globalKeepsPath } from './keeps.mjs';
 // beta.12 item 4: the two bins' retention sweep (fat-bin 30d / store.old 60d,
 // retention.mjs's pure policy; 0i adds the store-proportional size cap)
 // piggybacks on this SAME preflight touchpoint — a sibling housekeeping call
@@ -96,6 +99,162 @@ import { unreferencedTopics } from './retier.mjs';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000; // a lock older than 30min is presumed dead
 export const KEEP_SNAPSHOTS = 3; // post-success snapshot dirs retained (backup §7.6)
+// grad10-round-2 LOW-7: test-only regression counters. Read by nobody in any
+// production code path — a plain integer increment costs nothing measurable,
+// and it exists because wall-clock could not isolate the KEEPS-GATE's own
+// memoization signal from applyPlan's own I/O at any fixture scale (see
+// apply.test.mjs's CALL COUNT tests for the measurement that established
+// this). Reset to 0 by a test before the call it is measuring.
+//
+// GATE COST RULING (main-cmd, CI red at 14deee8 across three platforms):
+// wall-clock could not isolate THIS signal either, for the identical reason
+// — 19.2 MB of incidental applyPlan file I/O dominates any fixture large
+// enough to make normPostTexts's own cost visible, and disk I/O varies by
+// runner in a way a fixed ms bound cannot absorb. `normPostTextsBuilds`
+// counts real builds of the round-9 Root B memo (apply.test.mjs's CALL
+// COUNT test at the KEEPS-GATE) — a count does not vary by runner, disk, or
+// load.
+// CWK-162 (AI Deep Scan B12): the most staged bytes ONE plan may read before any mutation. Each staged file is already bounded by
+// MAX_DOC_BYTES (4 MiB); this bounds the SUM, which the per-file bound never did (a plan is agent-written and has no action-count
+// limit). 64 MiB = 16 files at the per-file bound, about 25 times the WHOLE class-B store (recall tier included) of the largest
+// real project measured here: 2.6 MB over 380 files at the umbrella root, 2026-10-02, the largest single file 340 KB. A plan that
+// rewrote every file of that store would still stage a twenty-fifth of the cap.
+export const STAGED_BYTES_MAX = 16 * MAX_DOC_BYTES;
+
+// CWK-162 (AI Deep Scan B9, B11): git's control directory is never a recovery target. The journal, the manifest and the snapshot
+// that drive recoverDangling all live in <project>/.claude/coalwash, which a clone supplies, and git itself never transmits
+// .git/config or .git/hooks in a clone: a repository author can reach them ONLY through a door like this one (witness: a forged
+// journal rewrote .git/config to `fsmonitor = EVIL-COMMAND`). A path segment names git's control directory when, before any NTFS
+// stream suffix (":..."), it is `.git` or its 8.3 short name `GIT~<n>`, in any case, with any trailing dots and spaces that
+// Windows strips when it resolves the name (so `.git.` and `.git ` are `.git`). `.github`, `.gitignore` and `.gitmodules` are
+// not it. NOT closed here, named: a forged journal can still overwrite any OTHER file inside the trusted roots; that needs the
+// journal to carry provenance (pending decision D3 in scratchpad/r14/cwk162-ruling.md).
+const GIT_SEGMENT = /^(?:\.git|git~\d+)[. ]*$/i;
+function isGitSegment(seg) { return GIT_SEGMENT.test(String(seg).split(':')[0]); }
+function inGitDir(p, roots) {
+  for (const r of roots) {
+    const rel = path.relative(r, p); // callers proved containment already; this finds the segments BELOW the root that holds p
+    // a child directory NAMED "..x" is below the root (its .git is git's); only the segment ".." itself, or an absolute rel (another drive), is an escape
+    if (rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) continue;
+    if (rel.split(/[\\/]/).some(isGitSegment)) return true;
+  }
+  return false;
+}
+// R14 D3 (the interim, pending the provenance unit): a real crash journal is never committed, and a clone delivers ONLY the files git
+// tracks, so a journal or snapshot that git tracks in the project came from a repository, not from an interrupted run. recoverDangling
+// refuses to replay it (`refusedTracked`). git is OPTIONAL (no-external-assumption, Phoenix #7's spirit), and the check FAILS CLOSED:
+//   - where a repository is present (a `.git` git would accept in the transaction directory or any ancestor, what its own discovery looks for)
+//     and the query errors, times out, exits non-zero or overflows its buffer, the journal reads as TRACKED and is refused (counted once);
+//     "too much to measure" and "cannot run" are never "nothing tracked" (R14 RE-INSPECT: an 8,000-name listing overflowed the old 1 MiB
+//     buffer and the committed journal replayed).
+//   - NAMED cannot-tell residual, behaviour UNCHANGED: git is not on PATH (spawn ENOENT), or there is no repository at all (no `.git`
+//     that git would accept anywhere above; see isGitMarker), so the query could not have answered. Also NAMED, and not closed here: a download with no git history (a zip, a
+//     tarball) still replays; only journal provenance closes that.
+// The tracked paths are matched by what the FILESYSTEM resolves them to, never by spelling: git lists every tracked path under the
+// transaction directory in the spelling that was committed, and each is resolved (realpath, native) and compared with the journal's own
+// resolved path and the snapshot directory's. A case-variant name (JOURNAL.json, SNAP-1 beside the committed snap-1), a short name and a
+// link all land on the same physical path, so the volume decides what folds, not this code, and a miss can only come from a path the
+// filesystem cannot resolve (a tracked file absent from disk: nothing there to replay).
+// The command runs from the transaction directory itself, so git reads whichever repository holds the journal (a transaction directory
+// that is its own repository, a submodule, is read as that repository). It takes NO pathspec; `--no-optional-locks` and
+// `core.fsmonitor=false` keep a repository's own config from running a program or taking a lock.
+const GIT_TRACKED_TIMEOUT_MS = 5000; // `git ls-files` on an index of any realistic project answers in tens of ms; past this the query FAILED (closed, where a repository is present)
+const GIT_TRACKED_MAX_BYTES = 16 << 20; // the listing buffer: ~100,000 paths. A listing over it is a failure of the query, refused, never read as empty
+const GIT_TRACKED_MAX_PATHS = 20000; // more tracked paths than this under one transaction directory is not a project's own state, and resolving each is the cost: refused
+// Is the `.git` at `p` something git itself would accept: a directory holding HEAD, objects and refs, or a file naming a gitdir (a
+// worktree, a submodule)? A directory that is not one (an archive's stray `.git/config`) is no repository: git says "not a repository" and
+// walks on, so it is the same cannot-tell residual as no `.git` at all. An entry that cannot be read counts as present (fail closed).
+// R15 (CodeQL #45/#48 js/file-system-race, RE-INSPECT 2 F-R14r2-B): the entry is OPENED first and judged on the HANDLE (a directory, or a file),
+// and at most 64 bytes are read through that handle. The first cut lstat-ed the path and then read it whole by path: a crafted archive's
+// multi-hundred-MB `.git` FILE (the one place a `.git` can be an attacker-sized file, since git refuses tracked paths under `.git`) was
+// allocated before its first 64 characters were looked at, and what the path held at the read was never what the lstat had judged.
+const GIT_MARKER_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0); // O_NONBLOCK: a FIFO named `.git` cannot hang the open
+const GIT_MARKER_READ_BYTES = 64; // `gitdir:` and the start of a path: all the check looks at
+function hasGitDirParts(p) { return ['HEAD', 'objects', 'refs'].every((n) => fs.existsSync(path.join(p, n))); }
+function isGitMarker(p) {
+  let fd;
+  try { fd = fs.openSync(p, GIT_MARKER_FLAGS); } catch (e) {
+    const code = e && e.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    // The open failed for another reason (a directory this host will not open for reading, a permission, a link loop). Decide on what the entry
+    // IS, after the failed open, and read nothing; an entry that cannot even be inspected counts as present (fail closed).
+    try { return fs.lstatSync(p).isDirectory() ? hasGitDirParts(p) : true; } catch { return true; }
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (st.isDirectory()) return hasGitDirParts(p);
+    if (!st.isFile()) return true; // a FIFO, a device: not something git accepts, and not ours to read; present, fail closed
+    const buf = Buffer.alloc(GIT_MARKER_READ_BYTES);
+    const n = fs.readSync(fd, buf, 0, GIT_MARKER_READ_BYTES, 0);
+    return buf.toString('utf8', 0, n).startsWith('gitdir:');
+  } catch { return true; } finally { try { fs.closeSync(fd); } catch { /* already closed */ } }
+}
+// A git marker in `dir` or any ancestor: what git's own discovery looks for.
+function repoMarkerAbove(dir) {
+  for (let d = path.resolve(dir); ; d = path.dirname(d)) {
+    if (isGitMarker(path.join(d, '.git'))) return true;
+    if (path.dirname(d) === d) return false;
+  }
+}
+// The environment is the room's ONE helper (git-env.mjs, CWK-133): the whole GIT_* family deleted, case-insensitively, so an inherited
+// GIT_DIR / GIT_INDEX_FILE cannot point the check at a different repository. No ceiling is passed: the transaction directory sits
+// INSIDE the repository this must find, which may be an ancestor of the project root.
+// Returns { tracked, failed }: `tracked` = how many tracked paths are the journal or lie under its snapshot directory; `failed` = why the
+// query could not answer in a repository (null when it answered, or when it could not have: the cannot-tell residual).
+// The ONE git spawn in this lib, shared by both questions below (R14 D3's rail, pinned by apply.test.mjs: an explicit timeout, the
+// stripped environment, no shell, a bounded listing). `pre` are git's own options, `post` the ls-files pathspec part.
+function gitLsFiles(cwd, pre = [], post = []) {
+  try {
+    return spawnSync('git', ['--no-optional-locks', ...pre, '-c', 'core.fsmonitor=false', 'ls-files', '-z', ...post],
+      { cwd, env: gitEnv(), encoding: 'utf8', timeout: GIT_TRACKED_TIMEOUT_MS, windowsHide: true, maxBuffer: __testHooks.gitMaxBuffer });
+  } catch (e) { return { error: e }; }
+}
+function gitTrackedRecoveryInputs(txDir, journalPath, snapDir) {
+  const r = gitLsFiles(txDir);
+  if (r.error && r.error.code === 'ENOENT') return { tracked: 0, failed: null }; // git is absent: the named cannot-tell residual
+  if (r.error || r.status !== 0) {
+    if (!repoMarkerAbove(txDir)) return { tracked: 0, failed: null }; // no repository at all (git said so): the same residual
+    return { tracked: 0, failed: r.error ? String(r.error.code || r.error.name || 'error') : r.signal ? `signal ${r.signal}` : `exit ${r.status}` };
+  }
+  const listed = String(r.stdout).split('\0').filter(Boolean);
+  if (listed.length > __testHooks.gitMaxPaths) return { tracked: 0, failed: 'listing too large to examine' };
+  if (!listed.length) return { tracked: 0, failed: null };
+  const physJournal = physicalOrNull(journalPath);
+  const txPhys = physicalOrNull(txDir);
+  if (!physJournal || !txPhys) return { tracked: 0, failed: 'journal path not resolvable' };
+  const physSnap = typeof snapDir === 'string' && snapDir !== '' ? physicalForCreate(snapDir) : null;
+  let tracked = 0;
+  for (const rel of listed) {
+    const phys = physicalOrNull(path.join(txDir, rel));
+    if (phys && (phys === physJournal || (physSnap && containedIn(phys, [txPhys]) && containedIn(phys, [physSnap])))) tracked++; // physSnap is journal-derived: it only NARROWS the trusted tx dir
+  }
+  return { tracked, failed: null };
+}
+// 15b fire 59 (INSPECT L58-1): does git TRACK anything in CoalWash's own folder `dir` (the tx dir)? Git ignore rules never apply to a
+// tracked path, so the catch-all `.gitignore` cannot keep a write there out of the next `git commit -a`: a repository that commits
+// `.claude/coalwash/keeps.json`, a bin index, the journal or the `.gitignore` itself would get CoalWash's write (a keep's anchor quotes
+// memory content) staged. Every writer of the folder asks this FIRST, before it creates or rewrites anything there, and refuses on a
+// reason. ONE query covers the whole folder (a repo has no business tracking any file in it). Returns null (nothing tracked, or no
+// repository / no git: the no-external-assumption fallback) or the reason. A query that errors where a repository IS present refuses:
+// the room's rule, an erroring check on a subject already on disk means refuse. Never on a hook path (Phoenix #5: hooks spawn
+// nothing); the airbag's writes sit under a session-id folder a repository cannot name in advance.
+export function trackedInOwnFolder(dir) {
+  let cwd = path.resolve(dir);
+  while (!fs.existsSync(cwd) && path.dirname(cwd) !== cwd) cwd = path.dirname(cwd);
+  if (!repoMarkerAbove(cwd)) return null; // no repository above: nothing can be tracked (and no spawn on the common path)
+  const spec = path.relative(cwd, path.resolve(dir)) || '.';
+  const r = gitLsFiles(cwd, ['--literal-pathspecs'], ['--', spec]);
+  if (r.error && r.error.code === 'ENOENT') return null; // git is absent: the named cannot-tell residual, as in gitTrackedRecoveryInputs
+  if (r.error || r.status !== 0) {
+    const how = r.error ? String(r.error.code || r.error.name || 'error') : r.signal ? `signal ${r.signal}` : `exit ${r.status}`;
+    return `cannot tell whether git tracks files in ${dir} (git ls-files: ${how}) — refusing, since a write over a tracked file would reach the next commit`;
+  }
+  const n = String(r.stdout).split('\0').filter(Boolean).length;
+  if (!n) return null;
+  return `git tracks ${n} file(s) in ${dir} — CoalWash writes nothing into its own folder while the repository tracks files there, since a write over a tracked file would reach the next commit (see them with: git ls-files -- .claude/coalwash)`;
+}
+// onFence (fire 119): called with the fence's label just before applyPlan re-reads its locks, so a test can steal one there.
+export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, isGitMarker, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS, onFence: null };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -196,6 +355,56 @@ function removedLines(origText, newText) {
   return String(origText).split(/\r?\n/).filter((l) => l.trim() && !next.has(l));
 }
 
+// SHARED whitespace-normalized substring survival — grad7 ruling Root B: the
+// merge-pair content-containment check (below, in applyPlan) reused this
+// technique via a comment ("reusing the KEEPS-GATE's own technique") but the
+// KEEPS-GATE's own `norm` was a LOCAL const the merge-pair block never saw —
+// the author believed they had copied it; two divergent copies of one
+// intended helper is the exact twin-drift shape this file's own case-fold
+// primitives were already fixed for (see config-load.mjs). Hoisted to module
+// scope so there is now ONE function, not a belief that two matched.
+// Collapses all whitespace runs (incl. line-ending differences: CRLF vs LF,
+// re-indentation) to a single space — survives the transforms round-8 named
+// (CRLF-normalize, re-indent). Does NOT survive a transform that removes
+// content outright (frontmatter-strip-before-absorb, section-reorder that
+// drops a section) — those are content changes, not whitespace reshaping,
+// and no substring check of any shape can distinguish "reshaped" from
+// "shortened" without a real diff; named as the fix's honest limit, not
+// silently claimed closed.
+// grad7 findings-back (round 9 dispatch): the hoist above closed the twin-
+// drift but paid for it — a caller with a hot loop over MANY needles against
+// the SAME haystacks (the KEEPS-GATE below: one call per keep, per action)
+// re-ran normWhitespace() over every haystack on EVERY call, even though the
+// haystacks themselves are constant for the whole loop. Measured: 98ms ->
+// 3,183ms at 1.2MB of post-texts / 500 miss-path calls (20 keeps x 25
+// actions) — a 32.5x regression on the apply hot path. Fix: an OPTIONAL
+// third argument lets a hot-loop caller pre-normalize its haystacks ONCE and
+// pass them in; textSurvives stays the single shared helper (the whole point
+// of the hoist) rather than growing a second, drifting copy for "the fast
+// case". A caller that doesn't pass it (the merge-pair check, a bounded,
+// cold call) keeps the old lazy-normalize-per-call behavior unchanged.
+const normWhitespace = (s) => String(s).replace(/\s+/g, ' ').trim();
+
+// `haystackLineParts` and `strict` were read ONLY by the multi-line branch the
+// r33 ascent removed with the anchor-check cluster; both are gone rather than
+// left as parameters nothing reads. The two live callers — the KEEPS-GATE's
+// general sweep and the merge-pair delete-exclusion — never used either.
+function textSurvives(needle, haystacks, normHaystacks) {
+  if (haystacks.some((t) => t.includes(needle))) return true;
+  // The multi-line branch here was the anchor-check cluster's only consumer
+  // (needleIndentShape + indentRelativeSurvives). r33 ASCENT, main's ruling:
+  // the cluster does not ascend, so a multi-line needle now falls through to
+  // the normalized-substring check below — which is exactly what main's own
+  // KEEPS-GATE `survives` has always done for every needle, single- or
+  // multi-line. STATED, not smoothed: this is a real behaviour change on the
+  // multi-line path, in the PERMISSIVE direction (a structurally-escaped
+  // anchor whose bytes still appear somewhere now counts as surviving).
+  const normNeedle = normWhitespace(needle);
+  const norms = normHaystacks || haystacks.map(normWhitespace);
+  return norms.some((t) => t.includes(normNeedle));
+}
+
+
 // ---------------------------------------------------------------------------
 // wikilink-orphan advisory (post-apply, NEVER a block) — the git
 // filter-branch cross-reference lesson: RE-TIER's unreferencedTopics() keeps
@@ -237,8 +446,11 @@ function deadLinkScan(actionable, physRoots, txDir) {
   const files = [];
   for (const root of physRoots) collectMdFiles(root, txPhys, files);
   if (!files.length) return [];
+  // CWK-137: bounded + kind-gated. A surviving .md over MAX_DOC_BYTES (or one that turned out not to be a regular
+  // file) contributes nothing: the advisory then UNDER-reports, which is its safe direction, and no file is read whole.
+  // E2-4: root null kept: collectMdFiles keeps only Dirents that are plain files, under the realpath'd declared roots.
   const surviving = files
-    .map((p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } })
+    .map((p) => readRepoFileBounded(p, null, MAX_DOC_BYTES) ?? '')
     .join('\n');
   const topics = deleted.map((a) => ({ path: a.phys, basename: path.basename(a.phys), text: '', mtimeMs: 0 }));
   const unref = new Set(unreferencedTopics({ topics }, surviving).map((t) => t.path));
@@ -525,43 +737,152 @@ export function isPinned(file) {
 function ownerToken(sessionId) {
   return `${sessionId}:${process.pid}:${process.hrtime.bigint()}`;
 }
-function readLockToken(lockPath) {
-  try { return JSON.parse(fs.readFileSync(lockPath, 'utf8')).token ?? null; } catch { return null; }
+// THE THREE-VALUED LOCK READ (fire 122, INSPECT 121 M121-1). A lock file another program holds open (an indexer, an antivirus
+// scanner or a sync client opening it with a share mode that refuses reads, the Windows case) fails to read for a moment;
+// that is not a theft, and the old read, which returned null for it, made owns() call it one. A read that FAILS is retried
+// LOCK_READ_RETRIES times LOCK_READ_WAIT_MS apart: about one second in all, which outlasts the milliseconds such a program
+// holds a file this small, and costs a lock that stays unreadable that second once, since every caller then stops. A read
+// that succeeds is final: no token, or another run's, is a foreign lock. The wait blocks the thread (Atomics.wait); it
+// never spins.
+export const LOCK_READ_RETRIES = 8;
+export const LOCK_READ_WAIT_MS = 125;
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const LOCK_CREATE_TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
+// { state: 'token', token } (token null when the file is absent, refused or carries none) | { state: 'unreadable', code }
+function readLockState(lockPath) {
+  let code = null;
+  for (let i = 0; i <= LOCK_READ_RETRIES; i++) {
+    if (i) pause(LOCK_READ_WAIT_MS);
+    // CWK-137: bounded + kind-gated -- the lock lives in the project's .claude/coalwash/,
+    // which a cloned repo can pre-populate (a lock that is a link to /dev/zero hung this). E2-4: contained to the lock's own
+    // directory, the one its caller derived (ownSandboxDir for the tx and bin locks, ~/.claude for the global one).
+    const o = repoReadOutcome(lockPath, path.dirname(lockPath), MAX_CONFIG_BYTES);
+    if (o.why === 'unreadable') { code = o.code || 'unknown'; continue; }
+    if (!o.buf) return { state: 'token', token: null };
+    try { return { state: 'token', token: JSON.parse(o.buf.toString('utf8')).token ?? null }; } catch { return { state: 'token', token: null }; }
+  }
+  return { state: 'unreadable', code };
 }
-export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs = LOCK_STALE_MS, now = Date.now() } = {}) {
+function readLockToken(lockPath) {
+  const s = readLockState(lockPath);
+  return s.state === 'token' ? s.token : null;
+}
+// The opening of a refusal for a lock this run cannot prove it still holds (fire 122): a theft only for a foreign token.
+// `s` is a lock's state(); `run` names the run ("RE-TIER run"); `after` ends the stop clause ("with no clean-up").
+export function lockLostHead(s, { run, file, where, after }) {
+  return s.state === 'unreadable'
+    ? `lock unreadable: this ${run} could not read its own lock file ${file} for about ${(LOCK_READ_RETRIES * LOCK_READ_WAIT_MS) / 1000} second(s) (${s.code}); another program may be holding it open (an indexer, antivirus or sync client), and no other CoalWash run is known to hold it. It can no longer prove it holds the lock, so it stopped before ${where}, ${after}.`
+    : `lock stolen: another CoalWash run took over the global lock this ${run} held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where}, ${after}.`;
+}
+// An unexpected error that leaves a run (RE-TIER, ULTRA) as a throw rather than a result still names a lock its release had to
+// leave behind (fire 123): the note joins the message and rides as `lockLeft`, exactly as on a result. Returns the error.
+export function withLockLeft(e, lockLeft) {
+  if (lockLeft && e && typeof e === 'object') {
+    e.lockLeft = lockLeft;
+    e.message = withSentence(e.message, lockLeft);
+  }
+  return e;
+}
+// A note joins a message as its own sentence (N125-2): a full stop first unless the message already ends one.
+export function withSentence(msg, note) {
+  const m = String(msg).trimEnd();
+  return /[.!?]$/.test(m) ? `${m} ${note}` : `${m}. ${note}`;
+}
+// What a result says when a release could not remove this run's lock (fire 122): null when nothing was left behind.
+// `staleMs` (E1 t182 #1): the lock's OWN stale window, so the wait it names is the wait that lock has (the keeps lock's 5 s,
+// never the transaction's 30 minutes); it defaults to the transaction value.
+export function lockLeftNote(lockPath, rel, staleMs = LOCK_STALE_MS) {
+  if (!rel || rel.released || rel.why === 'foreign') return null;
+  const how = rel.why === 'unreadable' ? `could not be read to confirm it is this run's own (${rel.code})` : `could not be removed (${rel.code})`;
+  const wait = staleMs >= 60000 ? `${staleMs / 60000} minutes` : `${staleMs / 1000} s`;
+  return `The lock file ${lockPath} ${how}, so it was left in place: a later run defers until it goes stale (${wait}), or remove it by hand once no CoalWash run is active.`;
+}
+// `selfIgnore` (15b fire 56, census row 5): a PROJECT lock (the tx lock, a bin lock) passes true and its folder gets the
+// catch-all through ensureSelfIgnore. The default is false because the GLOBAL lock's folder is the user's own ~/.claude,
+// which a user may version: that lock writes no .gitignore and never touches one that is there.
+export function acquireLock(lockPath, { sessionId = String(process.pid), staleMs = LOCK_STALE_MS, now = Date.now(), selfIgnore = false } = {}) {
   const token = ownerToken(sessionId);
   const body = JSON.stringify({ sessionId, pid: process.pid, at: now, token });
   // release deletes the lock ONLY if it still carries OUR token (a slow/suspended
   // holder whose lock was stolen must not delete the new holder's lock — HIGH #4).
-  const releaseIfOwner = () => { try { if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { force: true }); } catch {} };
+  // fire 122: 'own' | 'foreign' (a stale takeover handed it to another run, or it is gone) | 'unreadable' (after the retries).
+  const state = () => {
+    const s = readLockState(lockPath);
+    return s.state === 'unreadable' ? s : { state: s.token === token ? 'own' : 'foreign' };
+  };
+  // Returns { released: true } or { released: false, why: 'foreign' | 'unreadable' | 'remove-failed', code }. A lock it cannot
+  // read is left in place: it never deletes a lock it cannot prove is its own. A removal that fails is retried like a read.
+  const releaseIfOwner = () => {
+    try {
+      const s = state();
+      if (s.state !== 'own') return { released: false, why: s.state, code: s.code };
+      let code = null;
+      for (let i = 0; i <= LOCK_READ_RETRIES; i++) {
+        if (i) pause(LOCK_READ_WAIT_MS);
+        try { fs.rmSync(lockPath, { force: true }); return { released: true }; } catch (e) { code = (e && e.code) || 'unknown'; }
+      }
+      return { released: false, why: 'remove-failed', code };
+    } catch (e) { return { released: false, why: 'remove-failed', code: (e && e.code) || 'unknown' }; }
+  };
+  // P95-1: does this holder still own the lock, or did a stale takeover hand it to someone else? Doubt (still unreadable after
+  // the retries) = not owned, which is the conservative answer for the bin lock's re-merge; the fences ask state() instead.
+  const owns = () => state().state === 'own';
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    ensureSelfIgnore(path.dirname(lockPath));
+    if (selfIgnore) {
+      const why = ensureSelfIgnore(path.dirname(lockPath));
+      if (why) return { acquired: false, reason: `self-ignore: ${why}` };
+    }
     const fd = fs.openSync(lockPath, 'wx'); // atomic create: exactly one fresh acquirer wins
     try { fs.writeSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     // compare-after-write (the header's named-assumption belt): a foreign
     // token on re-read = O_EXCL did not actually exclude us -> defer.
-    if (readLockToken(lockPath) !== token) return { acquired: false, reason: 'exclusive-create acquire lost a race (non-local filesystem?) — deferring' };
-    return { acquired: true, release: releaseIfOwner };
+    const back = state();
+    if (back.state === 'unreadable') return { acquired: false, transient: true, code: back.code, reason: `the lock file ${lockPath} it had just created could not be read back (${back.code}; another program may be holding it open) — deferring, and the file is left in place since this run cannot prove it is its own` };
+    if (back.state !== 'own') return { acquired: false, held: true, reason: 'exclusive-create acquire lost a race (non-local filesystem?) — deferring' };
+    return { acquired: true, release: releaseIfOwner, owns, state };
   } catch (e) {
-    if (e && e.code !== 'EEXIST') return { acquired: false, reason: `lock error: ${e.message}` };
+    // M135-1: on Windows these codes also mean another process is creating or removing the same name at that moment (measured:
+    // 4 in 900 contended keep records, each landing on the next try), so the refusal is marked `transient`, worth a retry
+    if (e && e.code !== 'EEXIST') return { acquired: false, ...(LOCK_CREATE_TRANSIENT.has(e.code) ? { transient: true, code: e.code } : {}), reason: `lock error: ${e.message}` };
   }
   // Lock exists — stale takeover ONLY when demonstrably old; any doubt = defer.
+  // CWK-137: lstat, never stat, and only a plain single-link regular file is ever
+  // taken over. The old statSync + openSync('r+') FOLLOWED a link: a cloned repo that
+  // committed `.claude/coalwash/<lock>` as a link to an old file (~/.bashrc) had the
+  // next wash judge the TARGET's mtime stale, then truncate it and write the lock
+  // JSON into it.
+  // CodeQL #43/#44 (js/file-system-race), fire 10: that lstat is one PATH lookup and the
+  // open is a second one, so a link (or another file) swapped in at the name between them
+  // was opened without ever being vetted, and the fstat vouched for whatever it landed on
+  // (Windows has no O_NOFOLLOW, so there the link is followed). openPlainFile opens FIRST
+  // and then proves the handle is the entry this lstat judged stale: same dev+ino, the
+  // path still a plain single-link file, the handle too (repo-fs.mjs has the mechanism).
   try {
-    const st = fs.statSync(lockPath);
-    if (now - st.mtimeMs > staleMs) {
+    const st = fs.lstatSync(lockPath, { bigint: true }); // BigInt: a Windows file id can exceed 2**53
+    const notPlain = { acquired: false, reason: `the lock ${lockPath} is not a plain file (a link or special file) — refusing to take it over; remove it by hand if it is yours` };
+    if (st.isSymbolicLink() || !st.isFile() || st.nlink > 1n) return notPlain;
+    if (now - Number(st.mtimeMs) > staleMs) {
       // STEAL IN PLACE (no rm -> no missing-file window a third writer could slip
       // through). Two racing stealers overwrite the same file; whoever's write
       // lands last owns it, the other's compare-after-write fails -> it defers
       // (worst case both defer on a byte-interleave = a safe retry, never a
       // double-hold). Fixed width via truncate so a shorter write leaves no tail.
-      const fd = fs.openSync(lockPath, 'r+');
-      try { fs.ftruncateSync(fd, 0); fs.writeSync(fd, body, 0); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-      if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner };
-      return { acquired: false, reason: 'stale-lock takeover lost a race — deferring' };
+      const o = openPlainFile(lockPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), st);
+      if (o.why === 'not-plain') return notPlain;
+      if (o.why === 'changed') return { acquired: false, held: true, reason: 'the lock changed under the takeover — deferring' };
+      if (o.why === 'unverifiable') return { acquired: false, reason: `the lock ${lockPath} is stale, but this filesystem reports no file identity number, so CoalWash cannot prove the file it opens is the one it checked — refusing to take it over; remove the lock by hand if it is yours` };
+      if (o.fd !== undefined) {
+        try { fs.ftruncateSync(o.fd, 0); fs.writeSync(o.fd, body, 0); fs.fsyncSync(o.fd); } finally { fs.closeSync(o.fd); }
+        if (readLockToken(lockPath) === token) return { acquired: true, stale: true, release: releaseIfOwner, owns, state };
+        return { acquired: false, held: true, reason: 'stale-lock takeover lost a race — deferring' };
+      }
     }
   } catch { /* unreadable lock = doubt = defer */ }
-  return { acquired: false, reason: 'another CoalWash run (or a live session) holds the store — deferring' };
+  // `held` (E1 t182 #2) marks the refusals that mean another holder has the lock, and `transient` (M135-1) the create or read-back
+  // errors that can pass under contention; both are worth a caller's retry. A refusal with neither (another lock error code,
+  // self-ignore, a lock that is not a plain file, no file identity) will not pass by waiting.
+  return { acquired: false, held: true, reason: 'another CoalWash run (or a live session) holds the store — deferring' };
 }
 
 // ---------------------------------------------------------------------------
@@ -571,16 +892,18 @@ export function txDirFor(projectRoot) {
   return path.join(projectRoot, '.claude', 'coalwash');
 }
 
-// The tx dir self-ignores: a `.gitignore` containing `*` INSIDE it keeps the
+// The tx dir self-ignores: a `.gitignore` that is exactly `*\n` INSIDE it keeps the
 // journal/snapshots (memory-content copies) out of version control even when
 // the user's project tracks `.claude/` — code-enforced, not a doc promise.
-// Best-effort (fail-silent): a read-only fs must never block the transaction.
+// 14a fire 55 (PR #18, `apply.mjs:786`): this used to create the file `wx` and take
+// EEXIST as success, so a cloned repo that shipped the file empty, as `!*` or as a
+// comment left every copy committable. The folder is ours, so a file that is not the
+// catch-all is now REPLACED (ensureCatchAllIgnore, repo-fs.mjs), and the return is
+// the reason it could not be put in place (null = in place): applyPlan refuses the
+// transaction on it before the first journal or snapshot byte, a bin refuses the
+// item, a keep refuses the record.
 export function ensureSelfIgnore(dir) {
-  // Exclusive create (no exists-then-write TOCTOU): two racing writers both try
-  // 'wx'; one wins, the other gets EEXIST — both harmless (the content is
-  // identical). Any other error is swallowed (best-effort, must never block a tx).
-  try { fs.writeFileSync(path.join(dir, '.gitignore'), '*\n', { flag: 'wx' }); }
-  catch (e) { if (e && e.code !== 'EEXIST') { /* read-only fs etc — ignore */ } }
+  return ensureCatchAllIgnore(dir);
 }
 
 // plan = {
@@ -746,6 +1069,8 @@ function trustedRootsForAnchor(projectRoot, home, { trustedAnchor = false } = {}
 export function applyPlan(plan, opts = {}) {
   const now = opts.now || Date.now();
   const home = opts.home || os.homedir();
+  let lockLeft = null; // fire 122: set by the release in the transaction's finally when a lock file had to be left behind
+  let leftLocks = []; // N125-1: [path, note] for each lock left, so each is named by its own path
   try {
     // ---- validate shape (fail loud, nothing touched) ----
     if (!plan || typeof plan !== 'object') return { ok: false, error: 'plan must be an object' };
@@ -802,6 +1127,20 @@ export function applyPlan(plan, opts = {}) {
       }
       resolved.push({ ...a, phys });
     }
+    // CWK-162 B12: ONE action per physical target. Every action on a target was staged, snapshotted and gated separately, and the
+    // second always lost to the external-writer check anyway (it sees the first's write): the plan was refused late, after the
+    // work. A merge is a delete of one file plus a rewrite of ANOTHER, never two actions on one path. A create has no file to
+    // canonicalize, so two spellings of one new name are probed on the volume (a miss refuses: the safe direction here).
+    const targetSeen = new Set();
+    const targetSeenLower = new Set();
+    for (const a of resolved) {
+      const lower = a.phys.toLowerCase();
+      if (targetSeen.has(a.phys) || (targetSeenLower.has(lower) && volumeCaseFolds(path.dirname(a.phys), true))) {
+        return { ok: false, error: `plan names the same target more than once: ${a.phys} (one action per file; a merge is a delete of one file plus a rewrite of another)` };
+      }
+      targetSeen.add(a.phys);
+      targetSeenLower.add(lower);
+    }
 
     // ---- staging read + content sniff ----
     // Each rewrite/delete target is read ONCE as raw bytes here — the shared
@@ -811,6 +1150,7 @@ export function applyPlan(plan, opts = {}) {
     const flagged = [];
     const isPlaceholder = opts.isPlaceholder || isCloudPlaceholder; // injectable for tests
     let actionable = []; // let: the KEEPS-GATE below may exclude entries (per-file failure, the sniff pattern)
+    let stagedBytes = 0;
     for (const a of resolved) {
       if (a.type === 'create') { actionable.push(a); continue; }
       // #57(d) cloud-placeholder read poison: sniff the dehydrated stub from
@@ -822,8 +1162,14 @@ export function applyPlan(plan, opts = {}) {
         flagged.push({ path: a.phys, reason: 'cloud placeholder (dehydrated — 0 blocks, size>0): a plain read returns a stub, rewriting would clobber the real content on hydration — flagged, not rewritten (#57d)' });
         continue;
       }
-      let origBuf;
-      try { origBuf = fs.readFileSync(a.phys); } catch { return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed)` }; }
+      // CWK-137: bounded + kind-gated, and the ONE read that admits a plan target (the re-reads below see a file this
+      // one admitted). Over MAX_DOC_BYTES is refused by name, exactly as discovery already refuses to measure it.
+      // E2-4: root null kept here and at the two re-reads below: a.phys is the realpath checked inside physRoots above.
+      const staged = repoReadOutcome(a.phys, null, MAX_DOC_BYTES);
+      if (!staged.buf) return { ok: false, error: `cannot read ${a.phys} to stage it (fail-closed${staged.why ? `: ${staged.why}` : ''})` };
+      const origBuf = staged.buf;
+      stagedBytes += origBuf.length; // CWK-162 B12: the SUM is bounded, not only each file
+      if (stagedBytes > STAGED_BYTES_MAX) return { ok: false, error: `the plan's staged bytes exceed ${STAGED_BYTES_MAX} in total (fail-closed: split the plan, nothing was applied)` };
       if (a.type === 'rewrite') {
         const why = sniffUnrewritable(origBuf);
         if (why) { flagged.push({ path: a.phys, reason: why }); continue; }
@@ -875,11 +1221,13 @@ export function applyPlan(plan, opts = {}) {
     // but src itself survives (refused, not deleted) — two copies of the same
     // text, reported ok:true, on a tool whose product is de-duplication.
     // Detect the pairing the only way available without a schema change,
-    // reusing the KEEPS-GATE's own technique a few lines below (a substring
-    // survival check): a rewrite whose CONTENT still contains an excluded
-    // delete's ORIGINAL bytes is presumed to be that delete's merge target,
-    // and is excluded in the SAME pass — scoped to just the matched pair,
-    // never the whole plan (every other per-file gate in this function
+    // reusing the KEEPS-GATE's shared `textSurvives` helper (module scope,
+    // above): a rewrite whose CONTENT still contains an excluded delete's
+    // ORIGINAL bytes — exact, or whitespace-normalized (survives CRLF
+    // normalization and re-indentation; see textSurvives's own header for
+    // what it does NOT survive) — is presumed to be that delete's merge
+    // target, and is excluded in the SAME pass — scoped to just the matched
+    // pair, never the whole plan (every other per-file gate in this function
     // already fails this way; a merge is not special-cased to fail harder).
     if (unprovable.size) {
       const excludedDeleteTexts = [...unprovable]
@@ -890,7 +1238,12 @@ export function applyPlan(plan, opts = {}) {
         const pairedOut = new Set();
         for (const a of actionable) {
           if (a.type === 'delete' || typeof a.content !== 'string') continue;
-          if (excludedDeleteTexts.some((t) => a.content.includes(t))) {
+          // This check asks "was the deleted text absorbed at all"
+          // (data-loss prevention). It shares `textSurvives` with the
+          // KEEPS-GATE below; the `strict` parameter that used to separate
+          // the two questions went with the anchor-check cluster (r33), which
+          // was the only thing that read it.
+          if (excludedDeleteTexts.some((t) => textSurvives(t, [a.content]))) {
             pairedOut.add(a);
             flagged.push({
               path: a.phys,
@@ -918,9 +1271,12 @@ export function applyPlan(plan, opts = {}) {
     // (per-file failure, the sniffUnrewritable pattern). Keeps without the
     // handle (the pre-beta.12 {target, reason, date} shape) stay advisory —
     // zero behavior change for existing stores.
-    const txDir = opts.txDir || txDirFor(projectRoot);
+    // CWK-137: the DERIVED tx dir is `<project>/.claude/coalwash`, which a cloned repo
+    // can commit as (or under) a link; ownSandboxDir refuses any link between the
+    // project root and it, and the throw lands in this function's own catch as a
+    // loud `{ ok: false }`. A caller-supplied opts.txDir is the caller's own.
+    const txDir = opts.txDir || ownSandboxDir(projectRoot, '.claude', 'coalwash');
     {
-      const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
       // #36 demand 10: this compare decides whether a pinned keep BINDS the action
       // about to delete or rewrite the file it names, and it used to fold case on
       // `process.platform === 'win32'` — the exact defect the #36 pair retires
@@ -951,7 +1307,7 @@ export function applyPlan(plan, opts = {}) {
       };
       let keeps = [];
       try {
-        keeps = [...loadKeepsAt(path.join(txDir, KEEPS_NAME)), ...loadKeepsAt(globalKeepsPath(home))]
+        keeps = [...loadProjectKeepsAt(txDir), ...loadKeepsAt(globalKeepsPath(home))] // E2-4: the project store contained to txDir
           .filter((k) => typeof k.anchor === 'string' && k.anchor && typeof k.anchorFile === 'string' && k.anchorFile);
       } catch { keeps = []; } // an unreadable keeps ledger must never block an apply (it is the shield, not the gate's subject)
       // Fixpoint: excluding one violating action can remove the very text that
@@ -959,15 +1315,37 @@ export function applyPlan(plan, opts = {}) {
       // rewrite) — re-check until stable. Each pass strictly shrinks
       // `actionable`, so this terminates in <= actions.length passes.
       while (keeps.length) {
-        const postTexts = actionable.filter((a) => a.type !== 'delete').map((a) => a.content);
-        const normTexts = postTexts.map(norm);
-        const survives = (anchor) => postTexts.some((t) => t.includes(anchor)) || normTexts.some((t) => t.includes(norm(anchor)));
+        // grad11 STEP 2: kept PARALLEL to postTexts (same filter, same order)
+        // so the fallback sweep below can exclude ONE action's own entry by
+        // reference -- rather than by string equality, which would wrongly
+        // exclude every action sharing byte-identical content.
+        const postActionable = actionable.filter((a) => a.type !== 'delete');
+        const postTexts = postActionable.map((a) => a.content);
+        // grad7 ruling Root B/twin-drift: the module-level `textSurvives` above
+        // is the SAME helper the merge-pair check now calls — one function, not
+        // a belief that two hand-copies matched.
+        // round-9 perf fix: postTexts is constant for the rest of this while-
+        // iteration (it only changes across iterations, after an exclusion
+        // shrinks `actionable`) — normalize it ONCE here and hand the memo to
+        // every textSurvives() call below, instead of paying normWhitespace()
+        // per haystack on every one of the (keeps x actions) calls.
+        const normPostTexts = postTexts.map(normWhitespace);
+        __testHooks.normPostTextsBuilds++; // GATE COST RULING: one build per while-iteration is the invariant this counts
+        // The memo and `excludeAction` that stood here served the multi-line
+        // branch and the own-file fallback respectively — both removed with the
+        // anchor-check cluster (r33 ascent). What is left is the whole-plan
+        // sweep, which is what main has always run.
+        const survives = (anchor) => textSurvives(anchor, postTexts, normPostTexts);
         const excluded = new Set();
         for (const k of keeps) {
           const kf = k.anchorFile;
           for (const a of actionable) {
             if (a.type === 'create' || excluded.has(a)) continue; // a create is never "the keep's file"
             if (!samePathForKeep(a.phys, kf)) continue;
+            // The own-file structural branch that stood here (triedOwnFile +
+            // survivesOwnFile) was the anchor-check cluster's production call site.
+            // r33 ASCENT, main's ruling: the cluster does not ascend, so the gate
+            // returns to the whole-plan sweep alone — main's own shape.
             if (survives(k.anchor)) continue;
             excluded.add(a);
             // 80 chars = display truncation only (keeps the flag line one-line
@@ -1035,9 +1413,21 @@ export function applyPlan(plan, opts = {}) {
       globalLock = acquireLock(globalLockPath(home), { sessionId: plan.sessionId, now });
       if (!globalLock.acquired) return { ok: false, deferred: true, error: `global scope: ${globalLock.reason}` };
     }
-    fs.mkdirSync(txDir, { recursive: true }); // txDir resolved once, above the KEEPS-GATE
-    ensureSelfIgnore(txDir);
-    const lock = acquireLock(path.join(txDir, LOCK_NAME), { sessionId: plan.sessionId, now });
+    const trackedWhy = trackedInOwnFolder(txDir); // fire 59 (L58-1): before ANY write in the folder, the .gitignore included
+    if (trackedWhy) {
+      if (globalLock) globalLock.release();
+      return { ok: false, error: `tracked: ${trackedWhy}` };
+    }
+    try { fs.mkdirSync(txDir, { recursive: true }); } catch (e) { // txDir resolved once, above the KEEPS-GATE
+      if (globalLock) globalLock.release(); // fire 63 (CodeRabbit t114): a throw here used to leave the global lock held until its stale window
+      return { ok: false, error: `apply: cannot create the transaction folder (${(e && e.code) || (e && e.message)})` };
+    }
+    const ignoreWhy = ensureSelfIgnore(txDir); // fire 55: no catch-all, no journal and no snapshot (copies of memory content)
+    if (ignoreWhy) {
+      if (globalLock) globalLock.release();
+      return { ok: false, error: `self-ignore: ${ignoreWhy} — refusing before any journal or snapshot is written, so no copy of memory content lands where git can track it` };
+    }
+    const lock = acquireLock(path.join(txDir, LOCK_NAME), { sessionId: plan.sessionId, now, selfIgnore: true });
     if (!lock.acquired) {
       if (globalLock) globalLock.release();
       return { ok: false, deferred: true, error: lock.reason };
@@ -1046,13 +1436,53 @@ export function applyPlan(plan, opts = {}) {
     const journalPath = path.join(txDir, JOURNAL_NAME);
     const snapDir = path.join(txDir, `snap-${now}`);
     const writeJournal = (j) => { writeDurable(journalPath, JSON.stringify(j, null, 2)); };
+    // THE FENCE (fire 119, 18a). acquireLock lets a run that finds a lock older than LOCK_STALE_MS take it over, so a holder
+    // that stalled that long can be robbed and both then write. Before each write step this run re-reads both locks (one
+    // read of each lock file, never per byte or per line); a robbed run stops there and returns a refusal naming the theft.
+    // It does NOT roll back: the snapshot restore would overwrite whatever the new holder has written since. `landed` is the
+    // journal's steps once the journal exists, `committed` turns true once the commit record is written; the refusal uses
+    // both to say exactly what this run leaves on disk.
+    //
+    // fire 122 (INSPECT 121 M121-1): the fence reads THREE states. Only a FOREIGN token is a theft. A lock file that stays
+    // unreadable through the retries (readLockState) stops the run too, since this run can no longer prove it holds the
+    // store, but its refusal says what happened: no other run is known to hold the lock, the journal is still this run's,
+    // and the next gauge rolls the store back from the snapshot. Both refusals keep `robbed` (callers keep every copy on
+    // it) and add `lockLost: 'stolen' | 'unreadable'`.
+    let landed = null;
+    let committed = false;
+    const txLockPath = path.join(txDir, LOCK_NAME);
+    const trouble = () => {
+      const p = lock.state();
+      if (p.state !== 'own') return { who: 'project', file: txLockPath, ...p };
+      const g = globalLock ? globalLock.state() : { state: 'own' };
+      return g.state !== 'own' ? { who: 'global', file: globalLockPath(home), ...g } : null;
+    };
+    const fence = (where, stateOverride = null) => {
+      if (__testHooks.onFence) __testHooks.onFence(where);
+      const lost = trouble();
+      if (!lost) return;
+      const done = landed ? landed.filter((s) => s.status === 'done').length : 0;
+      const journalFate = lost.state === 'unreadable'
+        ? `the journal on disk is still this run's, so the next gauge (recoverDangling) rolls the store back from that snapshot${done === landed?.length ? ', undoing steps that had all landed' : ''}`
+        : "the journal on disk is this run's until the new holder writes its own over it (while it is still this run's, the next recoverDangling rolls the store back from that snapshot; once it is replaced, compare the store against the snapshot by hand)";
+      const state = stateOverride
+        || (committed ? `every step landed and was committed; only the post-commit housekeeping that had not run yet (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped, and the snapshot ${snapDir} still holds every original`
+        : landed ? `${done} of ${landed.length} step(s) had landed and the rest never ran; the snapshot ${snapDir} holds every original, and ${journalFate}`
+        : 'nothing of this plan had been written to the store');
+      const head = lost.state === 'unreadable'
+        ? `lock unreadable: this transaction could not read its own ${lost.who} lock file ${lost.file} for about ${(LOCK_READ_RETRIES * LOCK_READ_WAIT_MS) / 1000} second(s) (${lost.code}); another program may be holding it open (an indexer, antivirus or sync client), and no other CoalWash run is known to hold it. It can no longer prove it holds the store, so it stopped before ${where}, with no rollback.`
+        : `lock stolen: another CoalWash run took over the ${lost.who} lock this transaction held, after it went stale (${LOCK_STALE_MS / 60000} minutes); stopped before ${where}, with no rollback (a rollback would overwrite what the new holder may have written since).`;
+      throw Object.assign(new Error(`${head} ${state}`), { robbed: lost.who, committed, lockLost: lost.state === 'unreadable' ? 'unreadable' : 'stolen' });
+    };
 
-    try {
+    let out;
+    try { out = (() => { // fire 122: the body's returns land in `out`, so the release below can be reported on every result
       // ---- own-artifact retention at preflight (ports the ReFS thin-pool
       // leak: maintenance that allocates but never releases). Aborted/deferred
       // runs leave snapshot dirs the commit-time sweep never reaches; reap
       // them here, inside the lock. Fail-silent housekeeping; sweepSnapshots
       // itself protects a dangling txn's snapshot (recovery owns it).
+      fence('the preflight snapshot retention');
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
       // ---- bin retention (beta.12 item 4; 0i adds the size cap; P5/P8 fix
       // rebases the budget) — the SAME piggyback touchpoint: every real wash
@@ -1070,6 +1500,7 @@ export function applyPlan(plan, opts = {}) {
       // internally fail-silent (never throw) — no extra guard needed here.
       let storeBytes = 0;
       try { storeBytes = Number(loadState(projectRoot, home)?.lastVerdict?.storeTotalBytes) || 0; } catch { /* horizon-only */ }
+      fence('the preflight bin retention');
       const binSweeps = [
         [FAT_BIN_NAME, sweepFatBin(projectRoot, { storeBytes })],
         [STORE_OLD_NAME, sweepStoreOld(projectRoot, { storeBytes })],
@@ -1083,12 +1514,23 @@ export function applyPlan(plan, opts = {}) {
         .map(([name, r]) => `retention: ${name} over budget (${r.capConflict.keptBytes}B kept > ${r.capConflict.budgetBytes}B budget) — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor holds and byte pressure may not break it; the bin exceeds its cap until items age past the floor`);
 
       // ---- snapshot BEFORE the first mutation, then the completion marker ----
-      fs.mkdirSync(snapDir, { recursive: true });
+      // 15b fire 56 (census row 3): `snap-<now>` is a FRESH name, so it is created NON-recursively under the tx dir (made
+      // and proven link-free above): any entry already there (a junction or a directory a cloned repo committed) is EEXIST
+      // and refuses the run. A recursive mkdir accepted it and the copies below went through it.
+      fence('the snapshot');
+      try { fs.mkdirSync(snapDir); } catch (e) {
+        return { ok: false, flagged, error: `snapshot folder: ${snapDir} already exists or cannot be created (${e && e.code}) — refusing before the first snapshot byte; CoalWash writes a snapshot only into a folder it has just created` };
+      }
       const manifest = [];
       let n = 0;
       for (const a of actionable) {
         if (a.type === 'create') continue; // nothing to snapshot
         const snapName = `f${n++}`;
+        // CWK-137 F-8: the one re-read of a plan target NOT routed through the bounded read, on purpose. It is a kernel-side copy
+        // (no JS buffer holds the bytes), and its result is judged by `verifySnapshot` a few lines below, which reads BOTH sides
+        // bounded at MAX_DOC_BYTES: a target that grew past the staging bound since staging is refused there
+        // ("unverifiable: ... over-bound") before any mutation. Routing the copy through a buffered read would only add a second
+        // bounded read and replace this copy's durability path. Named in the census as the one RESIDUAL_REREAD member.
         fs.copyFileSync(a.phys, path.join(snapDir, snapName));
         const fd = fs.openSync(path.join(snapDir, snapName), 'r+');
         try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
@@ -1126,17 +1568,30 @@ export function applyPlan(plan, opts = {}) {
         status: 'applying',
         steps: ordered.map((a, i) => ({ i, type: a.type, path: a.phys, status: 'pending' })),
       };
+      fence('the journal');
       writeJournal(journal);
+      landed = journal.steps;
 
       // ---- execute ----
       const createdPaths = [];
       // Returns the count of snapshot restores that FAILED — a non-zero count
       // means the rollback was PARTIAL (some originals could not be restored),
       // which the caller must surface honestly instead of claiming "wholesale".
-      const rollback = () => {
+      const rollback = (cause) => {
         let failed = 0;
+        let tried = 0;
+        // fire 119: a rollback that finds its lock stolen stops too; past the first restore the refusal says how far it got.
+        const midway = () => (tried ? `the rollback had tried ${tried} of ${manifest.length} restore(s) from ${snapDir} when it stopped; the journal on disk is this run's unless another run has since written its own over it` : null);
         for (const m of manifest) {
-          try { fs.copyFileSync(path.join(snapDir, m.snap), m.original); } catch { failed++; /* keep restoring the rest */ }
+          fence(`restoring ${m.original} (the rollback after: ${cause})`, midway());
+          tried++;
+          // R46-2: the copy is read contained to the tx dir and bounded, like verifySnapshot's read of the same file a moment
+          // earlier (so a legitimate run's copy always fits); a copy swapped for a link out is one failed restore, never copied.
+          try {
+            const o = repoReadOutcome(path.join(snapDir, m.snap), txDir, MAX_DOC_BYTES);
+            if (!o.buf) { failed++; continue; }
+            fs.writeFileSync(m.original, o.buf);
+          } catch { failed++; /* keep restoring the rest */ }
         }
         // A created file the rollback CANNOT remove LINGERS in the store = a mixed
         // state, exactly like a failed snapshot restore — count it (EPERM/EBUSY: AV
@@ -1156,10 +1611,12 @@ export function applyPlan(plan, opts = {}) {
         // (a restore that failed, a plan-created file still present). A leftover
         // temp is cosmetic litter beside an UNTOUCHED target, and a process crash
         // skipped the old sweep just as completely.
+        if (createdPaths.length) fence(`removing the created file(s) (the rollback after: ${cause})`, midway());
         for (const p of createdPaths) { try { fs.rmSync(p, { force: true }); } catch { if (fs.existsSync(p)) failed++; } }
         // A PARTIAL rollback must NOT be marked terminal-clean, or a cold-start
         // recoverDangling would clear the journal over a mixed on-disk state.
         journal.status = failed ? 'rollback-failed' : 'rolled-back';
+        fence(`the rollback's journal record (the rollback after: ${cause})`, `the rollback had tried every restore from ${snapDir} and every removal of a created file (${failed} failed), and its own journal record was not written; the journal on disk still says the run was applying unless another run has since written its own over it`);
         try { writeJournal(journal); } catch {}
         return failed;
       };
@@ -1175,8 +1632,12 @@ export function applyPlan(plan, opts = {}) {
           // the snapshot, so nothing of this plan is left half-applied). A
           // target that can no longer be read counts as foreign interference.
           if (a.type === 'rewrite' || a.type === 'delete') {
-            let cur = null;
-            try { cur = fs.readFileSync(a.phys); } catch { /* handled below */ }
+            // CWK-137 RESIDUAL_REREAD: bounded + kind-gated like the staging read (MAX_DOC_BYTES, the bound that read already
+            // admitted this target under); a target that grew past it, or is no longer a regular file, is foreign interference:
+            // the same verdict as an unreadable one. The bound is deliberately NOT baseline-length + 1: that would make the size
+            // check a second refusal path beside the compare, and GATE-LIVENESS 7's compare-neutralized mutant would stop
+            // neutralizing the guard for any foreign content longer than the baseline.
+            const cur = repoReadOutcome(a.phys, null, MAX_DOC_BYTES).buf || null;
             if (!cur || Buffer.compare(cur, a.baseBuf) !== 0) {
               throw new Error(`external writer detected: ${a.phys} changed after the plan was gated — aborting the transaction`);
             }
@@ -1184,12 +1645,16 @@ export function applyPlan(plan, opts = {}) {
             // create target appeared mid-txn: same foreign-writer class.
             throw new Error(`external writer detected: create target ${a.phys} appeared mid-transaction`);
           }
+          const stepLabel = `step ${step.i + 1} of ${journal.steps.length} (${a.type} ${a.phys})`;
+          fence(stepLabel); // after the external-writer guard's read, immediately before the write it guards
           if (a.type === 'rewrite' || a.type === 'create') {
             writeDurable(a.phys, a.content); // U7: temp is O_EXCL + unpredictable; the destination is never opened for write
             if (a.type === 'create') createdPaths.push(a.phys);
             // verify: what landed is byte-for-byte what the plan said (blueprint step 3 "verify")
-            const back = fs.readFileSync(a.phys);
-            if (Buffer.compare(back, Buffer.from(a.content, 'utf8')) !== 0) {
+            // CWK-137 RESIDUAL_REREAD: bounded by what was just written, +1 byte so growth is seen as a mismatch, not read whole.
+            const wrote = Buffer.from(a.content, 'utf8');
+            const back = repoReadOutcome(a.phys, null, wrote.length + 1).buf;
+            if (!back || Buffer.compare(back, wrote) !== 0) {
               throw new Error(`post-write verify mismatch: ${a.phys}`);
             }
           } else {
@@ -1197,18 +1662,24 @@ export function applyPlan(plan, opts = {}) {
             fsyncDirBestEffort(path.dirname(a.phys));
           }
           step.status = 'done';
+          fence(`the journal record of ${stepLabel}`);
           writeJournal(journal);
         }
       } catch (e) {
-        const failed = rollback();
+        if (e && e.robbed) throw e; // a robbed run never rolls back (the fence's comment says why)
+        const failed = rollback(e.message);
         if (failed) return { ok: false, rolledBack: 'partial', restoreFailures: failed, error: `apply failed AND rollback left ${failed} item(s) in a mixed state (an original that could not be restored, a created file that could not be removed, or a stranded tmp) — memory may be mixed; snapshot kept at ${snapDir}: ${e.message}` };
         return { ok: false, rolledBack: true, error: `apply failed at a step — snapshot restored: ${e.message}` };
       }
 
       // ---- commit: mark, clear the WAL, sweep old snapshots (keep the newest N) ----
+      fence('the commit record');
       journal.status = 'committed';
       writeJournal(journal);
+      committed = true;
+      fence('removing the committed journal', `every step landed and the commit record was written; the committed journal stays on disk unless another run has since written its own over it (the next recoverDangling clears a committed one), and the post-commit housekeeping (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped; the snapshot ${snapDir} still holds every original`);
       try { fs.rmSync(journalPath, { force: true }); } catch {}
+      fence('the post-commit snapshot retention');
       sweepSnapshots(txDir, opts.keepSnapshots == null ? KEEP_SNAPSHOTS : opts.keepSnapshots);
 
       // ---- bin population (0h "BIN POPULATION WIRING") — AFTER the commit,
@@ -1235,6 +1706,7 @@ export function applyPlan(plan, opts = {}) {
       // CWK-081 (b): the FILES those removals landed on — a Set, because one file
       // can carry several actions and the record is about coverage, not volume.
       const removedFrom = new Set();
+      fence('the bin recovery copies'); // once for the loop: each recordBinItem holds its own bin lock (fire 107)
       for (const a of actionable) {
         if (a.type === 'create') continue; // an addition cut nothing
         // A DELETE banks the BUFFER, never a decode of it (G3-3). `baseBuf` is
@@ -1249,11 +1721,11 @@ export function applyPlan(plan, opts = {}) {
         if (!cut.length) continue;
         removedCount++; // CWK-081 H1: this action removed something
         removedFrom.add(a.phys); // CWK-081 (b): and THIS is the file it removed it from
-        const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now });
+        const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now, trackedChecked: true }); // the folder was checked once above (fire 59)
         if (binId === null) {
           flagged.push({
             path: a.phys,
-            reason: 'bin-stash failed (the file mutation already succeeded — only the RECOVERY COPY is missing): recordBinItem could not acquire its per-bin lock in time, so this cut has no entry in the bin and cannot be pulled back via cli.mjs restore',
+            reason: 'bin-stash failed (the file mutation already succeeded — only the RECOVERY COPY is missing): recordBinItem could not record it (its per-bin lock was busy, or the catch-all .gitignore of the bin, the bin folder, or the item or index write failed), so this cut has no entry in the bin and cannot be pulled back via cli.mjs restore',
           });
         }
       }
@@ -1388,16 +1860,24 @@ export function applyPlan(plan, opts = {}) {
       // advisory above): a state-write failure must never un-commit a run that
       // already succeeded — it only costs the next crossing one ask.
       if (plan.origin === 'wizard-cut' && removedCount > 0) {
+        fence('the Full-clean record');
         try { markFullClean(home, projectRoot, now, plan.sessionId, [...removedFrom]); } catch { /* never un-commits */ }
       }
 
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };
-    } finally {
-      lock.release();
-      if (globalLock) globalLock.release();
+    })(); } finally {
+      leftLocks = [[txLockPath, lockLeftNote(txLockPath, lock.release(), LOCK_STALE_MS)], ...(globalLock ? [[globalLockPath(home), lockLeftNote(globalLockPath(home), globalLock.release(), LOCK_STALE_MS)]] : [])].filter(([, note]) => note);
+      lockLeft = leftLocks.map(([, note]) => note).join(' ') || null;
     }
+    if (!lockLeft) return out;
+    // a lock that could not be released is named on the result: a later run defers on it (fire 122)
+    return out.ok
+      ? { ...out, lockLeft, flagged: [...(out.flagged || []), ...leftLocks.map(([p, note]) => ({ path: p, reason: note }))] }
+      : { ...out, lockLeft, error: withSentence(out.error, lockLeft) };
   } catch (e) {
-    return { ok: false, error: `apply: ${e.message}` };
+    if (e && e.robbed) return { ok: false, robbed: e.robbed, committed: e.committed, lockLost: e.lockLost, ...(lockLeft ? { lockLeft } : {}), error: lockLeft ? withSentence(e.message, lockLeft) : e.message };
+    // fire 123: an unexpected error inside the transaction names a lock the release had to leave, like every other result
+    return { ok: false, ...(lockLeft ? { lockLeft } : {}), error: lockLeft ? withSentence(`apply: ${e.message}`, lockLeft) : `apply: ${e.message}` };
   }
 }
 
@@ -1408,11 +1888,19 @@ export function applyPlan(plan, opts = {}) {
 // Returns [] when every copy restores faithfully, else the failures.
 export function verifySnapshot(snapDir, manifest) {
   const bad = [];
+  const txDir = path.dirname(snapDir); // snap-<n> sits directly in the tx dir its caller derived through ownSandboxDir
   for (const m of manifest) {
     try {
-      const snapBuf = fs.readFileSync(path.join(snapDir, m.snap));
-      const srcBuf = fs.readFileSync(m.original);
-      if (Buffer.compare(snapBuf, srcBuf) !== 0) bad.push(`${m.original} (copy does not match source)`);
+      // CWK-137 RESIDUAL_REREAD: both sides through the bounded, kind-gated read. Over the bound is UNVERIFIABLE by name (the
+      // staging read never admits such a target, so this is only reachable if one grew since), never read whole.
+      // E2-4: the copy is contained to the tx dir ITSELF; the source keeps root null (the run's own a.phys, a checked realpath).
+      const snap = repoReadOutcome(path.join(snapDir, m.snap), txDir, MAX_DOC_BYTES);
+      const src = repoReadOutcome(m.original, null, MAX_DOC_BYTES);
+      if (!snap.buf || !src.buf) {
+        bad.push(`${m.original} (unverifiable: ${!snap.buf ? `copy ${snap.why || 'unreadable'}` : `source ${src.why || 'unreadable'}`})`);
+        continue;
+      }
+      if (Buffer.compare(snap.buf, src.buf) !== 0) bad.push(`${m.original} (copy does not match source)`);
     } catch (e) {
       bad.push(`${m.original} (unverifiable: ${e.message})`);
     }
@@ -1430,9 +1918,14 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
   try {
     let protect = null;
     const jp = path.join(txDir, JOURNAL_NAME);
-    if (fs.existsSync(jp)) {
+    // CWK-137: the journal lives in the directory a cloned repo can commit, so it is read bounded + kind-gated. Absent
+    // means no journal; ANY other refusal (a link, a special file, over the bound) is "cannot know" and freezes the sweep.
+    // E2-4: contained to txDir ITSELF -- a journal that resolves anywhere else is that refusal.
+    const jo = repoReadOutcome(jp, txDir, MAX_DOC_BYTES);
+    if (jo.why && jo.why !== 'absent') return;
+    if (jo.buf) {
       let j = null;
-      try { j = JSON.parse(fs.readFileSync(jp, 'utf8')); } catch { /* unreadable -> freeze below */ }
+      try { j = JSON.parse(jo.buf.toString('utf8')); } catch { /* unreadable -> freeze below */ }
       if (!j || typeof j !== 'object' || Number(j.version) > 1) return; // cannot know what it references -> sweep nothing
       if (j.status !== 'committed' && j.status !== 'rolled-back') protect = path.basename(String(j.snapDir || ''));
     }
@@ -1462,7 +1955,9 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 //   'cleaned'      — a terminal journal (committed/rolled-back) was just removed.
 //   'none'         — nothing done. WITH an `error` field this is a REFUSAL (the
 //                    anchor gate, an unreadable/schema-newer journal, an out-of-tx
-//                    snapDir, no verifiable roots); WITHOUT one it means there was
+//                    snapDir, no verifiable roots, a journal or snapshot git TRACKS, or
+//                    a git query that could not finish in a repository — R14 D3, counted
+//                    as `refusedTracked`); WITHOUT one it means there was
 //                    no journal at all. A caller that treats those two alike is
 //                    the gaugeLine defect (see cli.mjs).
 // `restored` accompanies 'rolled-back' and 'partial'.
@@ -1486,11 +1981,13 @@ export function recoverDangling(projectRoot, opts = {}) {
     // fail-closed reading of both legs.
     const anchorGate = trustedRootsForAnchor(projectRoot, home);
     if (!anchorGate.ok) return { recovered: 'none', error: anchorGate.error };
-    const txDir = opts.txDir || txDirFor(projectRoot);
+    const txDir = opts.txDir || ownSandboxDir(projectRoot, '.claude', 'coalwash'); // CWK-137, as in applyPlan
     const journalPath = path.join(txDir, JOURNAL_NAME);
     if (!fs.existsSync(journalPath)) return { recovered: 'none' };
     let journal;
-    try { journal = JSON.parse(fs.readFileSync(journalPath, 'utf8')); } catch {
+    // CWK-137: bounded. E2-4: contained to txDir ITSELF, and a refused read is unreadable (`?? ''` makes JSON.parse throw;
+    // JSON.parse(null) would have answered null and slipped past this catch).
+    try { journal = JSON.parse(readRepoFileBounded(journalPath, txDir, MAX_DOC_BYTES) ?? ''); } catch {
       // an unreadable journal with NO readable snapDir cannot be replayed —
       // fail-closed: leave it for a human (never guess at memory state).
       return { recovered: 'none', error: 'journal unreadable — left in place for inspection' };
@@ -1502,6 +1999,16 @@ export function recoverDangling(projectRoot, opts = {}) {
     // tool must not even delete a newer tool's "terminal-looking" journal.
     if (journal && typeof journal === 'object' && Number(journal.version) > 1) {
       return { recovered: 'none', error: `journal schema version ${journal.version} is newer than this CoalWash understands — left untouched (for a newer version, or a human)` };
+    }
+    // R14 D3 (interim): a journal or snapshot that git TRACKS came from a repository, never from an interrupted run (see gitTrackedRecoveryInputs).
+    // Before the terminal-status branch on purpose: a tracked file is not ours to delete either, and nothing below may touch it.
+    const gitCheck = gitTrackedRecoveryInputs(txDir, journalPath, journal && journal.snapDir);
+    if (gitCheck.failed) {
+      // fail CLOSED: in a repository, a query that could not finish is not "nothing tracked". The reason is a code (ENOBUFS, ETIMEDOUT, exit N), never repo text.
+      return { recovered: 'none', refusedTracked: 1, error: `git could not say whether the journal or its snapshot is tracked (${gitCheck.failed}) in a project that is a git repository — refusing to replay, failing closed (left for inspection)` };
+    }
+    if (gitCheck.tracked) {
+      return { recovered: 'none', refusedTracked: gitCheck.tracked, error: `the journal or its snapshot is tracked by git (${gitCheck.tracked} tracked path(s) under the transaction directory) — refusing to replay: a real crash journal is never committed and a clone delivers only tracked files, so this one came from a repository, not from an interrupted run (left for inspection)` };
     }
     if (journal.status === 'committed' || journal.status === 'rolled-back') {
       fs.rmSync(journalPath, { force: true });
@@ -1551,8 +2058,11 @@ export function recoverDangling(projectRoot, opts = {}) {
     // canonicalization of the raw journal string. Every read below goes through it,
     // so the manifest is loaded from the bound location, never the raw one.
     const inSnap = (p) => { const q = physicalOrNull(p); return q && snapPhys && containedIn(q, [snapPhys]); };
-    const manifest = JSON.parse(fs.readFileSync(path.join(snapPhys, 'manifest.json'), 'utf8'));
-    let restored = 0, failed = 0, refused = 0, refusedPinned = 0;
+    // CWK-137: bounded. E2-4: contained to txDir ITSELF; a refused or non-list manifest replays nothing and keeps the journal.
+    const manifest = JSON.parse(readRepoFileBounded(path.join(snapPhys, 'manifest.json'), txDir, MAX_DOC_BYTES) ?? 'null');
+    if (!Array.isArray(manifest)) return { recovered: 'none', error: 'snapshot manifest unreadable — refusing to replay (left for inspection)' };
+    let restored = 0, failed = 0, refused = 0, refusedPinned = 0, refusedGit = 0;
+    const replayed = new Set(); // CWK-162 B8: each distinct target is replayed once, however many manifest rows name it
     for (const m of manifest) {
       const src = path.join(snapPhys, m.snap);
       // A DELETED FILE IS THE ONLY DAMAGE A DELETE-PHASE CRASH LEAVES — deletes run
@@ -1570,6 +2080,12 @@ export function recoverDangling(projectRoot, opts = {}) {
       // CALLER-TRUSTED root (the outer gate a poisoned journal can't widen) AND
       // the journal's own declared roots (secondary narrowing).
       if (!inSnap(src) || !origPhys || !containedIn(origPhys, trustedRoots) || !containedIn(origPhys, jroots)) { refused++; continue; }
+      // CWK-162 B8: the snapshot is taken BEFORE the first mutation of a file, so a legitimate manifest has one row per target and the
+      // first row is the pre-transaction state; a repeated row is waste at best and a stale snapshot at worst.
+      if (replayed.has(origPhys)) continue;
+      replayed.add(origPhys);
+      // CWK-162 B9/B11: never git's control directory (see inGitDir). Counted on its own so the report says what was refused.
+      if (inGitDir(origPhys, trustedRoots)) { refusedGit++; continue; }
       // THE PIN PROMISE RIDES THE RECOVERY DOOR TOO (lab-grad2 N3 — the
       // recovery-paths class, 4th instance in this room). This replay had 7
       // fs-mutation lines and ZERO isPinned sites while the module header
@@ -1602,6 +2118,7 @@ export function recoverDangling(projectRoot, opts = {}) {
         if (!fs.existsSync(step.path)) continue; // never written (or already gone) = nothing to undo
         const p = physicalOrNull(step.path);
         if (!p || !containedIn(p, trustedRoots) || !containedIn(p, jroots)) { refused++; continue; } // exists but out-of-(trusted∩journal)-root = refuse
+        if (inGitDir(p, trustedRoots)) { refusedGit++; continue; } // CWK-162 B9: banking then removing a hook or a config is still a delete of it
         // N3, the delete side: the file at this create path EXISTS (checked
         // above) and carries `pinned: true` — an applyPlan create cannot have
         // produced a pinned file the plan gate would then refuse to touch, so
@@ -1653,8 +2170,8 @@ export function recoverDangling(projectRoot, opts = {}) {
     }
     // Only clear the WAL when the recovery was CLEAN. A partial/refused replay keeps
     // the journal + snapshot for a human (never report a mixed state as done).
-    if (failed || refused || refusedPinned) {
-      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, refusedPinned, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root, ${refusedPinned} refused as pinned; journal + snapshot kept at ${snapDir}` };
+    if (failed || refused || refusedPinned || refusedGit) {
+      return { recovered: 'partial', restored, restoreFailures: failed, refusedOutOfRoot: refused, refusedPinned, refusedGit, error: `recovery incomplete — ${failed} restore failure(s), ${refused} target(s) refused as out-of-root or as a create whose copy could not be binned, ${refusedPinned} refused as pinned, ${refusedGit} refused as inside a .git directory; journal + snapshot kept at ${snapDir}` };
     }
     fs.rmSync(journalPath, { force: true });
     return { recovered: 'rolled-back', restored };

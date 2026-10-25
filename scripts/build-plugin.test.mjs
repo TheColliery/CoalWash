@@ -3,8 +3,9 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildDist, checkDist, DIST_ITEMS } from './build-plugin.mjs';
+import { buildDist, checkDist, DIST_ITEMS, DEV_ONLY_LIBS } from './build-plugin.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -12,7 +13,7 @@ function scratchDist() {
   return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-dist-')));
 }
 
-test('buildDist produces a clean, in-sync dist: manifest + bin + hooks + engine, tests filtered out', () => {
+test('buildDist produces a clean, in-sync dist: manifest + hooks + engine, tests filtered out', () => {
   const dist = scratchDist();
   try {
     buildDist(dist);
@@ -42,6 +43,25 @@ test('the UNWIRED class-A engine never ships: absent from a fresh dist, checkDis
     // ...and the exclusion is not a blind spot: a hand-copied engine file is caught.
     fs.copyFileSync(path.join(repoRoot, 'scripts', 'lib', 'explode.mjs'), path.join(dist, 'scripts', 'lib', 'explode.mjs'));
     assert.ok(checkDist(dist).some((d) => d.includes('unwired class-A engine present in plugin/')), 'a leaked engine file fails loud');
+  } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
+test('CWK-174: every DEV_ONLY_LIBS entry never ships: absent from a fresh dist, checkDist still PASSES with them in source, and a hand-copied one fails loud', () => {
+  const dist = scratchDist();
+  try {
+    buildDist(dist);
+    assert.ok(DEV_ONLY_LIBS.length >= 9, `the list is read from build-plugin.mjs (${DEV_ONLY_LIBS.length} entries)`);
+    for (const rel of DEV_ONLY_LIBS) {
+      assert.ok(fs.existsSync(path.join(repoRoot, rel)), `${rel} IS in source (dev tooling, gated by the suite)`);
+      assert.strictEqual(fs.existsSync(path.join(dist, rel)), false, `${rel} is NOT in the dist (dev tooling, not plugin payload)`);
+    }
+    assert.deepStrictEqual(checkDist(dist), [], 'source-present + dist-absent is IN SYNC: the exclusion is what makes verify PASS');
+    // ...and the exclusion is not a blind spot: a hand-copied dev-only lib in the dist is caught.
+    for (const rel of DEV_ONLY_LIBS) {
+      fs.copyFileSync(path.join(repoRoot, rel), path.join(dist, rel));
+      assert.ok(checkDist(dist).some((d) => d.includes('dev-only lib present in plugin/') && d.includes(rel)), `a leaked ${rel} fails loud`);
+      fs.rmSync(path.join(dist, rel));
+    }
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
@@ -192,4 +212,22 @@ test('R4/TP-4: a planted *.test.* inside a DIST_ITEM fails loud — isTest was t
     fs.writeFileSync(path.join(dist, 'scripts', 'lib', 'x.test.mjs', 'deep', 'anything.js'), '// hidden subtree');
     assert.ok(checkDist(dist).some((d) => d.includes('test artifact present in plugin/')), 'a *.test.* DIRECTORY is caught too');
   } finally { fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
+// r34c C: the main-module guard compared import.meta.url (Node resolves the entry file to its
+// REALPATH) with argv[1] (the path it was invoked by). Through a symlink or a junction the two
+// differ and neither the build nor --check ran: exit 0, no output. --check is read-only; its
+// verdict line is asserted to APPEAR, not to be "in sync" (a concurrent test can plant into
+// scripts/lib). A host that cannot make a directory junction skips.
+test('r34c C: invoked through a directory junction, build-plugin.mjs --check still runs and prints its verdict', (t) => {
+  const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-build-junction-'));
+  t.after(() => fs.rmSync(holder, { recursive: true, force: true })); // rmSync does not follow a junction (probed)
+  const link = path.join(holder, 'scripts-link');
+  try {
+    fs.symlinkSync(path.dirname(fileURLToPath(import.meta.url)), link, 'junction');
+  } catch (e) {
+    return t.skip(`cannot create a junction or directory symlink on this host (${e.code || e.message})`);
+  }
+  const r = spawnSync(process.execPath, [path.join(link, 'build-plugin.mjs'), '--check'], { cwd: holder, encoding: 'utf8' });
+  assert.match(r.stdout + r.stderr, /plugin\/ dist (in sync with source|OUT OF SYNC)/, `through the junction: exit ${r.status}, output ${JSON.stringify(r.stdout + r.stderr)}`);
 });

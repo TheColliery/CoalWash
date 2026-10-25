@@ -27,7 +27,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { parseJsonc } from './jsonc.mjs';
-import { CONFIG_SCHEMA } from './config-schema.mjs';
+import { CONFIG_SCHEMA, validateValue } from './config-schema.mjs';
 
 // The ONE dir CoalWash writes to. Must agree with claudeBaseDirs() below or the dir
 // the code actually writes to ends up outside the guarded set — which is exactly what
@@ -424,6 +424,118 @@ export function physicalDir(p) {
   return canonicalOrNull(p) ?? path.resolve(p);
 }
 
+// CWK-137 -- BOUNDED READS OF REPO-DERIVED PATHS. The rules are house law (main-
+// ruled), mirrored from CoalMine v3.20.2 (`scripts/lib/repo-fs.mjs`): same NAMES,
+// same CONSTANTS. They live HERE and not in a module of their own because every
+// primitive they need (canonicalOrNull, pathWithin) lives here, and this file is
+// the one every other lib module already imports -- a separate module importing
+// this one while this one imported it back would be an import cycle.
+//
+// A cloned repository is untrusted input: a path that comes out of it can be a
+// symlink, a junction, a FIFO or a device. A plain readFileSync trusts all of it --
+// a FIFO with no writer hangs the hook, `/dev/zero` or a multi-GB file an @import
+// names allocates without bound, an escaping link reads outside the project.
+//   READ -- lstat; a regular file proceeds; a symlink proceeds only when its target
+//           is a regular file and, with a `root`, its canonical path lies inside the
+//           root's canonical path (canonicalOrNull + pathWithin, the room's one
+//           containment primitive); anything else (FIFO, device, socket, directory,
+//           an escaping or dangling link) is refused BEFORE open. Then open with
+//           O_NONBLOCK where the platform has it, fstat the fd, and re-check regular +
+//           size ON THE FD. Over the bound = SKIPPED, never truncated-and-parsed.
+//   `root = null` = no containment, for the user's OWN files (the global config, a
+//   path discovery already contained against home): the kind gate and the bound
+//   still apply.
+//
+// Bounds, measured on this box 2026-09-24 (scratchpad/r8/measure.mjs over every repo
+// under source/repos plus ~/.claude, 52,104 files): the largest real config is 9,308 B
+// (the shipped, fully commented template), keeps.json 47,380 B, a governance/memory
+// markdown 338,159 B, and this room's own MEMORY.md peaked at 776,264 B before its cap
+// pass (2026-09-09). Headroom: ~112x for config, ~5x over the worst memory file this
+// room has ever produced. A bound a real file crosses silently skips that file, so
+// the doc bound errs wide.
+export const MAX_CONFIG_BYTES = 1024 * 1024;
+export const MAX_DOC_BYTES = 4 * 1024 * 1024;
+
+// O_NONBLOCK makes open() return at once on a FIFO swapped in after the lstat (the
+// path-vs-fd gap); fstat then rejects it. Windows has no O_NONBLOCK (and a repo cannot
+// plant a FIFO there), so it degrades to a plain read-only open.
+const REPO_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0);
+
+// { kind: 'file' | 'dir' } or { why, code? }, decided WITHOUT opening the path.
+// `why` names the refusal so a caller that REPORTS it can say which one it was:
+// absent · not-regular (FIFO/device/socket) · outside-root · root-unresolvable ·
+// dangling · unreadable.
+function repoEntryVerdict(p, root) {
+  let lst;
+  try { lst = fs.lstatSync(p); } catch (e) {
+    const code = e && e.code;
+    return { why: code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'unreadable', code };
+  }
+  if (!lst.isSymbolicLink() && !lst.isFile() && !lst.isDirectory()) return { why: 'not-regular' };
+  if (root != null) {
+    const rootPhys = canonicalOrNull(root);
+    const pPhys = canonicalOrNull(p);
+    if (!pPhys) return { why: lst.isSymbolicLink() ? 'dangling' : 'unreadable' };
+    if (!rootPhys) return { why: 'root-unresolvable' }; // the ROOT could not be canonicalized (UNC, a device path, a mapped drive): not the path's fault
+    if (!pathWithin(pPhys, rootPhys)) return { why: 'outside-root' };
+  }
+  let st = lst;
+  if (lst.isSymbolicLink()) {
+    try { st = fs.statSync(p); } catch (e) { return { why: 'dangling', code: e && e.code }; }
+  }
+  if (st.isFile()) return { kind: 'file' };
+  if (st.isDirectory()) return { kind: 'dir' };
+  return { why: 'not-regular' };
+}
+
+// 'file' | 'dir' | null (CoalMine's name and shape).
+export function repoEntryKind(p, root) {
+  return repoEntryVerdict(p, root).kind || null;
+}
+
+// The bounded read with its REASON: { buf } or { why, code?, size? }, where `why` adds
+// `directory` and `over-bound` to repoEntryVerdict's set. `prefixOnly` reads the first
+// maxBytes of a larger file instead of refusing it -- only for a caller that wants a
+// sample, never for one that parses the whole.
+export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
+  const v = repoEntryVerdict(file, root);
+  if (!v.kind) return v;
+  if (v.kind === 'dir') return { why: 'directory' };
+  let fd;
+  try {
+    fd = fs.openSync(file, REPO_READ_FLAGS);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { why: st.isDirectory() ? 'directory' : 'not-regular' };
+    if (st.size > maxBytes && !prefixOnly) return { why: 'over-bound', size: st.size };
+    const want = Math.min(st.size, maxBytes);
+    const buf = Buffer.alloc(want);
+    let got = 0;
+    while (got < want) {
+      const n = fs.readSync(fd, buf, got, want - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    return { buf: got === want ? buf : buf.subarray(0, got) };
+  } catch (e) {
+    const code = e && e.code;
+    return { why: code === 'EISDIR' ? 'directory' : 'unreadable', code };
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+// The same read, as raw bytes or null (CoalMine's name and shape) -- for a caller that
+// hashes or compares bytes (a utf8 round trip changes the digest of non-UTF-8 input).
+export function readRepoBytesBounded(file, root, maxBytes, prefixOnly = false) {
+  return repoReadOutcome(file, root, maxBytes, prefixOnly).buf || null;
+}
+
+// The file's text, or null (absent, refused, over the bound, unreadable).
+export function readRepoFileBounded(file, root, maxBytes, prefixOnly = false) {
+  const buf = readRepoBytesBounded(file, root, maxBytes, prefixOnly);
+  return buf === null ? null : buf.toString('utf8');
+}
+
 // Project-root markers, in the order a project actually declares itself.
 // `CLAUDE.md` = the GOVERNANCE root — the same up-tree governance walk
 // discoverClassB §2 already performs, added here because it was the missing
@@ -447,6 +559,32 @@ export function physicalDir(p) {
 // match NOTHING and fall through to the raw `startDir` fallback, the exact
 // per-subdir scatter class this file's own history already names above. Same
 // additive-only invariant: each new entry can only make the walk stop LOWER.
+//
+// UMB-133: `.claude/.coalwash.json` (the second, nested legacy shape --
+// CoalTipple's and CoalBoard's) is DELIBERATELY NOT added here, and this is a
+// reasoned exclusion, not an oversight. Every existing entry's relative shape
+// is unique to a PROJECT marker; this one is not: `claudeBaseDir(home) +
+// '.coalwash.json'` is `globalConfigPath`'s own path, so
+// `path.join(dir, '.claude', '.coalwash.json')` is BYTE-IDENTICAL to the
+// user's GLOBAL config file whenever `dir === home`. Measured on this box:
+// this machine's real `~/.claude/.coalwash.json` (a genuine GLOBAL
+// `scanEverything` setting) made the walk match at `dir === home` -- before
+// the `dir === homeAbs` fallback check even runs, since the marker test sits
+// first in the loop body -- misidentifying the user's HOME directory as a
+// CoalWash project root, purely because a global config exists. `isBase()`
+// exists precisely to keep `~/.claude` itself out of marker contention; this
+// entry would have re-opened the identical global/project conflation one
+// level up, for every user who has ever set a global option -- a FAR more
+// common false-positive than the narrow subdir-scatter case it would close.
+// The bare root legacy (`.coalwash.json`, above) has no such collision --
+// `globalConfigPath` never resolves to `<dir>/.coalwash.json` for any `dir`
+// other than `claudeBaseDir(home)` itself, which is a DIFFERENT relative
+// shape (`.claude/.coalwash.json`, not the bare root one). The scatter class
+// this entry would have closed is real but narrow (a project configured ONLY
+// via `.claude/.coalwash.json`, no `.git`, no `CLAUDE.md`, no root legacy)
+// and stays open -- `projectConfigCandidates` still HONOURS the file once a
+// caller's `cwd` already resolves to the right root by other means; only the
+// ROOT-DISCOVERY shortcut is declined.
 const ROOT_MARKERS = [
   '.git', '.coalwash.json', 'CLAUDE.md',
   '.claude/coal/coalwash.json', '.agents/coal/coalwash.json', '.gemini/coal/coalwash.json',
@@ -519,23 +657,108 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
 //      shape) — read normally, no breakage for an existing user.
 // WRITE target = where the config was found; absent everywhere, the running
 // agent's own dir. Hooks never perform this move on a READ (Phoenix #5, no
-// side effects) — and CoalWash has NO project-config WRITER anywhere in this
-// codebase to begin with (no configure.mjs, no consent-persistence call):
-// both `.coalwash.json` files, global and project, are hand-edited by the
-// user or another tool, never written by CoalWash itself. So "move on
-// write" has no code path to hook here — this function is the READ side
-// only, which is this room's entire scope for the campaign.
+// side effects).
+//
+// ⚠️ CORRECTED 2026-09-10 (CWK-023). This block used to end "CoalWash has NO
+// project-config WRITER anywhere in this codebase (no configure.mjs ...) — so
+// 'move on write' has no code path to hook here". `scripts/configure.mjs` IS
+// that writer now, so the premise is gone. What is still true, and is now the
+// accurate statement: THIS FUNCTION is the READ side only. The writer imports
+// it (never forks the walk) and writes back to the path it returns when one
+// exists; on a first-ever write it walks `projectConfigCandidates` itself and
+// picks the first agent dir the project ALREADY has, because candidate[0] is a
+// bare `.claude` even in an `.agents`-only project. The LEGACY-location
+// migrate-and-delete that CoalLedger/CoalMine perform is deliberately NOT
+// implemented here — see configure.mjs's own header for that divergence.
+//
+// UMB-133 hole (2): BOTH legacy shapes are honoured now, nested before root --
+// CoalTipple/CoalBoard's `.claude/.coalwash.json` (the shape a user coming
+// from either of those rooms is likeliest to have already written), then the
+// original bare-root `.coalwash.json`. `firstWriteTarget` (configure.mjs)
+// already skips BOTH: its `path.basename(path.dirname(c)) !== 'coal'` check
+// only accepts a candidate whose parent dir is literally named `coal`, and
+// neither legacy candidate's parent is -- verified unchanged by this addition,
+// not merely assumed, in configure.test.mjs.
 const AGENT_DIR_ORDER = ['.claude', '.agents', '.gemini'];
-export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
-  const root = findProjectRoot(cwd, home);
+// Pure path arithmetic over an ALREADY-RESOLVED root: no filesystem call of any
+// kind. Split out so a caller holding the root (the conductor does) can build
+// the candidate list without paying a second marker walk for it -- see
+// discoverIgnoredConfigs' own cost note below, which this split is what makes
+// TRUE rather than merely asserted.
+function candidatesForRoot(root) {
   const candidates = AGENT_DIR_ORDER.map((d) => path.join(root, d, 'coal', 'coalwash.json'));
-  candidates.push(path.join(root, '.coalwash.json')); // LEGACY, always last
+  candidates.push(path.join(root, '.claude', '.coalwash.json')); // LEGACY (nested)
+  candidates.push(path.join(root, '.coalwash.json')); // LEGACY (root), always last
   return candidates;
 }
-export function projectConfigPath(cwd = process.cwd(), home = os.homedir()) {
-  const candidates = projectConfigCandidates(cwd, home);
+export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
+  return candidatesForRoot(findProjectRoot(cwd, home));
+}
+// The walk's ONE selection rule: the first candidate that exists (lstat, so a directory or a link WINS),
+// else candidate 0 -- nothing found anywhere, so the own-dir is both the read and the write target. Shared by
+// projectConfigPath and loadMergedConfigReport (UMB-174 b), so the two can never select differently.
+function pickCandidate(candidates) {
   for (const c of candidates) if (pathExists(c)) return c;
-  return candidates[0]; // nothing found anywhere -- own-dir is both the read and write target
+  return candidates[0];
+}
+export function projectConfigPath(cwd = process.cwd(), home = os.homedir()) {
+  return pickCandidate(projectConfigCandidates(cwd, home));
+}
+
+// UMB-133 hole (2), the migration-notice half: which candidate did the walk
+// actually read from, and was it a LEGACY one? Index-derived from
+// projectConfigCandidates' own known shape (AGENT_DIR_ORDER.length canonical
+// entries, then both legacy ones) -- never a second hand-written path list, so
+// this cannot drift from the walk it describes. Returns null when nothing
+// exists anywhere (nothing to notice).
+export function projectConfigResolution(cwd = process.cwd(), home = os.homedir()) {
+  const candidates = projectConfigCandidates(cwd, home);
+  const canonicalCount = AGENT_DIR_ORDER.length;
+  for (let i = 0; i < candidates.length; i++) {
+    if (pathExists(candidates[i])) return { path: candidates[i], legacy: i >= canonicalCount };
+  }
+  return null;
+}
+
+// UMB-133 hole (1): a `.coalwash.json` sitting at a path this walk will NEVER
+// read -- specifically, the bare-dotfile legacy SHAPE planted under an agent
+// dir this walk does not honour it for (only `.claude` carries a nested-legacy
+// candidate; `.agents` and `.gemini` do not, so the same habit copied to
+// either of those is silently dead here). DERIVED from AGENT_DIR_ORDER -- the
+// same constant the walk itself uses -- and excludes whatever
+// projectConfigCandidates already covers, so the probe set tracks the walk by
+// construction and cannot rot the day the candidate order changes (the r34/
+// #107 lesson: a hand-enumerated roster rots, a derived one does not).
+//
+// COST, corrected 2026-09-22 (UMB-133 INSPECT F2 -- the prior note read
+// "exactly AGENT_DIR_ORDER.length stat calls under root", which counted this
+// function's OWN loop and silently omitted everything it wrapped). The loop is
+// at most AGENT_DIR_ORDER.length existence probes and never more -- 2 today,
+// since `.claude`'s bare dotfile IS a candidate and is skipped -- with no
+// readdir and no recursion, and that half was always true. What the old note
+// missed is the PROJECT-ROOT RESOLUTION: this function derived the root itself
+// AND called projectConfigCandidates, which derived it again, so the marker
+// walk ran TWICE per call, and a third time in the conductor that had already
+// resolved it on the line above. Measured on this box, one call, fs patched
+// over the real function, fixture = a marker at the 3rd ancestor:
+//   before: existsSync 30 · lstatSync 2 · realpathSync 6   (two marker walks)
+//   after, root omitted: existsSync 15 · lstatSync 2 · realpathSync 3  (one)
+//   after, root passed:  existsSync  0 · lstatSync 2 · realpathSync 0  (none)
+// The optional `root` is what makes this note true BY CONSTRUCTION rather than
+// by a figure someone has to re-check: pass a resolved root and the only
+// filesystem calls left are the loop's own probes. Timing distribution for the
+// root-passed path (n=300, this box, same fixture) is in the UMB-133 bounce
+// return -- a number published without its instrument is a property of one
+// harness, so it is not pinned here.
+export function discoverIgnoredConfigs(cwd = process.cwd(), home = os.homedir(), root = findProjectRoot(cwd, home)) {
+  const candidateSet = new Set(candidatesForRoot(root));
+  const ignored = [];
+  for (const d of AGENT_DIR_ORDER) {
+    const p = path.join(root, d, '.coalwash.json');
+    if (candidateSet.has(p)) continue; // .claude's own nested-legacy IS a candidate
+    if (pathExists(p)) ignored.push(p);
+  }
+  return ignored;
 }
 
 // Decode raw config bytes to text, sniffing the encoding (H6). Node's default
@@ -575,17 +798,52 @@ function decodeConfigText(buf) {
 // is true only when `pathExists` confirms the file is there and reading it
 // still failed; callers decide what "unknown" means for their own keys
 // (mergeSafety below assumes the SAFEST stance, never the schema default).
-function readJsonc(file) {
-  const existed = pathExists(file);
+// CWK-137: the read is BOUNDED (repoReadOutcome, MAX_CONFIG_BYTES) and, for a
+// repo-derived file, CONTAINED in `root` -- a config path a cloned repo planted as a
+// link to /dev/zero, a FIFO or a file outside the project is refused before open
+// instead of hanging or exhausting the hook. A refusal on an EXISTING path is
+// `unreadable`, exactly as a failed read always was, so mergeSafety's fail-safe
+// stance is unchanged; `why` names which refusal it was.
+//
+// UMB-174 (b): every `unreadable: true` also carries `reason`, one of the flock's four
+// (`unreadable` | `a directory` | `malformed JSON` | `not a JSON object`), so a REPORT can
+// say which. The mapping, stated because two of its cells are this room's own choice:
+//   - a directory at the path                          -> `a directory`
+//   - ANY other refusal or failed read on a path that EXISTS -> `unreadable`: the fs codes
+//     the flock names (EACCES, and EPERM, which is what a Windows ACL denial surfaces as)
+//     AND this room's own CWK-137 refusals (over the 1 MiB bound, a FIFO/device, a link
+//     that dangles or leaves the project, an unresolvable root). The flock string has no
+//     fifth reason, and the fail-safe stance above ALREADY applies to every one of them,
+//     so staying silent about a config that is being skipped is the worse answer;
+//   - the parse threw (an empty file included: it is not JSON) -> `malformed JSON`
+//   - valid JSON that is not a plain object (`[]`, `"x"`, `42`, and the FALSY bodies
+//     `null` / `0` / `false`, which a `parsed || {}` would have read as an empty config) -> `not a JSON object`
+// The walk's SELECTION is untouched: an unreadable candidate still wins and contributes {}.
+function readJsonc(file, root = null) {
+  const r = repoReadOutcome(file, root, MAX_CONFIG_BYTES);
+  if (r.why === 'absent') return { data: {}, unreadable: false };
+  if (!r.buf) return { data: {}, unreadable: true, why: r.why, code: r.code, reason: r.why === 'directory' ? 'a directory' : 'unreadable' };
   try {
-    let content = decodeConfigText(fs.readFileSync(file)); // raw bytes -> encoding-sniffed text
+    let content = decodeConfigText(r.buf); // raw bytes -> encoding-sniffed text
     if (content.charCodeAt(0) === 0xfeff) content = content.slice(1); // strip any residual BOM char
     const parsed = parseJsonc(content); // proto-pollution-guarded parse
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return { data: parsed, unreadable: false };
-    return { data: {}, unreadable: existed }; // wrong shape (array/null/scalar) on an EXISTING file
+    return { data: {}, unreadable: true, reason: 'not a JSON object' }; // wrong shape (array/null/scalar) on an EXISTING file
   } catch {
-    return { data: {}, unreadable: existed };
+    return { data: {}, unreadable: true, reason: 'malformed JSON' }; // it exists (a buffer came back); the parse failed
   }
+}
+
+// UMB-174 (b) + CWK-135 (a): ONE flock string for a config that EXISTS where the walk reads but cannot be
+// used, shared by every surface that reports it (never a second hand-written copy). The PROJECT tier keeps
+// the verbatim flock wording, `canonical = .claude/coal/coalwash.json`; the GLOBAL tier names ITS OWN path
+// there, because a global config has no project location to move to and a project path would send the user
+// to the wrong place. Line breaks in the path are neutralized: a path is built from directory names a cloned
+// repo chose, and this text lands in the agent's context (security.md, log injection).
+export function unreadableNotice({ tier, path: p, reason }) {
+  const shown = String(p).replace(/[\r\n]+/g, ' ');
+  const canonical = tier === 'global' ? shown : '.claude/coal/coalwash.json';
+  return `UNREADABLE: ${shown} exists but is not a readable config (${reason}); it was skipped — canonical = ${canonical}`;
 }
 
 // board #55 (owner-ordered): the PLATFORM's own `cleanupPeriodDays` (Claude Code's session-
@@ -642,8 +900,9 @@ function settingsCascadeCandidates({ cwd = process.cwd(), home = os.homedir() } 
   let projectRoot = null;
   try { projectRoot = findProjectRoot(cwd, home); } catch { /* no project root -> skip local/project tiers */ }
   if (projectRoot) {
-    candidates.push({ source: 'local', file: path.join(projectRoot, '.claude', 'settings.local.json') });
-    candidates.push({ source: 'project', file: path.join(projectRoot, '.claude', 'settings.json') });
+    // CWK-137: these two are repo-derived -- read contained in the project root.
+    candidates.push({ source: 'local', file: path.join(projectRoot, '.claude', 'settings.local.json'), root: projectRoot });
+    candidates.push({ source: 'project', file: path.join(projectRoot, '.claude', 'settings.json'), root: projectRoot });
   }
   candidates.push({ source: 'user', file: path.join(claudeBaseDir(home), 'settings.json') });
   return candidates;
@@ -662,8 +921,8 @@ function saneCleanupDays(v) {
 }
 
 export function readCleanupPeriodDays({ cwd = process.cwd(), home = os.homedir() } = {}) {
-  for (const { source, file } of settingsCascadeCandidates({ cwd, home })) {
-    const { data, unreadable } = readJsonc(file);
+  for (const { source, file, root = null } of settingsCascadeCandidates({ cwd, home })) {
+    const { data, unreadable } = readJsonc(file, root);
     if (unreadable) continue; // present but broken -> try the next tier, never guess
     const v = data && data.cleanupPeriodDays;
     if (saneCleanupDays(v)) return { days: v, source, file };
@@ -680,8 +939,8 @@ export function readCleanupPeriodDays({ cwd = process.cwd(), home = os.homedir()
 export function discoverRetentionCandidateKeys({ cwd = process.cwd(), home = os.homedir() } = {}) {
   const RETENTION_KEY_RE = /cleanup|retention|prune|expire|purge/i;
   const found = [];
-  for (const { source, file } of settingsCascadeCandidates({ cwd, home })) {
-    const { data, unreadable } = readJsonc(file);
+  for (const { source, file, root = null } of settingsCascadeCandidates({ cwd, home })) {
+    const { data, unreadable } = readJsonc(file, root);
     if (unreadable || !data || typeof data !== 'object') continue;
     for (const key of Object.keys(data)) {
       if (key === 'cleanupPeriodDays') continue; // the known key -- not a "candidate"
@@ -754,26 +1013,50 @@ const SCHEMA_DEFAULT = Object.fromEntries(CONFIG_SCHEMA.map((s) => [s.key, s.def
 // move the EDGE of a mechanism that was already running, already safe, and
 // already consent-free before this fix existed. Widening or narrowing that
 // edge is not the same kind of escalation `estate.deleteCold` is -- which is
-// why only the boolean is clamped here.
+// why, when this was written, the boolean was the only clamp here. It no
+// longer is: the numeric removal edges are clamped by direction too
+// (CWK-162 B10, R14 F-R14-2 / F-R14-6, R18 BB-5, the amendments below).
 //
-// `estate.purgeAfterDays` is DELIBERATELY NOT listed below (a named decline,
-// not an oversight, and NOT because "deleteCold already gates it" -- that
-// claim is false, per the WARM-band reasoning above). The real reason: (1)
-// the action it paces (WARM's archive-then-remove-original) was never
-// consent-gated to begin with, so a project shifting its boundary is not
-// unlocking a new capability the way a `deleteCold` escalation would; (2) a
-// SENTINEL HAZARD makes it unsafe to clamp with the ordered-list mechanism
-// this file already has: `0` means "never becomes cold" (estate-archive.mjs
-// resolveEstateCfg's own comment) -- the WIDEST possible WARM window, since
-// nothing ever graduates out of WARM's unconditional archive-then-delete
-// into COLD's report-only rest state -- yet `0` sits at the schema's
-// numeric FLOOR, where an ordinary safer-index clamp would read it as the
-// SAFEST value. Safety here is not monotone in the raw number (narrowest,
-// safest WARM window sits NEAR `compressAfterDays`; it widens again toward
-// either extreme), so SAFER_ENUM's ordered-list pattern cannot be reused
-// as-is. Left as a named, flagged decline rather than force-fit a clamp
-// shape that would silently mis-rank the sentinel.
+// CWK-162 (AI Deep Scan B10, B4): the decline that stood here was HALF wrong, and is amended where it stood.
+// `estate.purgeAfterDays` as a NUMBER is still not clamped by the ordered-list mechanism: safety is not monotone in the raw
+// number, and `0` sits at the numeric FLOOR, where that mechanism would read it as the safest value. But the premise that a
+// project shifting the boundary "is not unlocking a new capability" is false for the sentinel itself. `0` means "never becomes
+// cold" (estate-archive.mjs resolveEstateCfg), which sends EVERY aged session to the WARM band, whose original is removed after
+// the verified archive: a session the user's global `deleteCold: false` keeps in place becomes one that is archived and removed,
+// which is exactly the transition `deleteCold` exists to gate. So mergeObjectKey ignores a project `purgeAfterDays: 0` (R14 F-R14-2
+// widened this to every value above the user's own; R18, owner sheet BB-5, removed the old "unless the effective deleteCold is already
+// true" exception: the clamp holds after consent too).
+// `estate.runBudget` follows the same finding: it paces how MUCH one user-invoked estate run does, and a project can only LOWER
+// it (the smaller of the two per field, against the user's own global value or the schema default). hooks-safety.md section 9
+// declined numeric rate dials because the action they pace is already gated by an enum the clamp covers; a user-invoked estate
+// run has no such enum, so this dial is the exception that reason itself names. That paragraph is the CoalWorks zone's and is
+// not edited here (pending decision D2 in scratchpad/r14/cwk162-ruling.md).
+// R14 bounce 2 (F-R14-6): the CORRECTED paragraph above is HALF wrong for `compressAfterDays` too. The WARM edge is consent-free for the
+// USER's own boundary, but a project that LOWERS it moves sessions from active (untouched) to archived-and-removed with no say from the
+// user, the same escalation the purgeAfterDays rule closes. hooks-safety.md section 9 (AMENDED 2026-10-03) now clamps a removal-edge
+// numeric key by direction: a project may only RAISE compressAfterDays (mergeObjectKey, below), whether or not deleteCold is true
+// (R18, owner sheet BB-5: the clamp holds after consent too).
 const SAFER_OBJECT_BOOL = { estate: { deleteCold: false } };
+
+// R14 F-R14-1/2: the schema's own field specs the bounded estate merge below judges a project value with (one validator, never a second
+// copy of the ranges). PROJECT_BOUNDED_KEYS names the keys whose project value is bounded by direction, for the loud-break report and
+// configure.mjs: each runBudget field and purgeAfterDays may only be LOWERED, compressAfterDays may only be RAISED.
+const ESTATE_FIELDS = CONFIG_SCHEMA.find((s) => s.key === 'estate').fields;
+const RUNBUDGET_FIELDS = ESTATE_FIELDS.runBudget.fields;
+const PURGE_SPEC = ESTATE_FIELDS.purgeAfterDays;
+const COMPRESS_SPEC = ESTATE_FIELDS.compressAfterDays;
+export const PROJECT_BOUNDED_KEYS = Object.freeze([...Object.keys(RUNBUDGET_FIELDS).map((f) => `estate.runBudget.${f}`), 'estate.purgeAfterDays', 'estate.compressAfterDays']);
+
+// CWK-137 D3 (head's ruling): sub-keys of an object-typed key that are read from the GLOBAL layer ONLY. Not a consent clamp
+// (SAFER_OBJECT_BOOL above has a "safer value" to fall back to; these have none) but a REACH clamp: `estate.archiveDir` names
+// where the user's own session transcripts are copied to and then deleted from, and a project config ships with a cloned repo
+// (hooks-safety.md §9), so the project layer has no say in it at all. A project value is read-tolerated and ignored; the user's
+// own global value, or the default location, stands. It sits in this ONE merge site because every consumer (the CLI's
+// estate-search and estate-restore, the estate report and archive, RE-TIER) reads the merged config -- fixing it at one caller
+// would have split the others (the row-11 lesson: fix it where all callers route). Exported so configure.mjs can NAME the reason
+// when a project write is ignored, from this one list, never a second copy.
+export const GLOBAL_ONLY_OBJECT_KEYS = { estate: ['archiveDir'] };
+export const GLOBAL_ONLY_KEYS = Object.entries(GLOBAL_ONLY_OBJECT_KEYS).flatMap(([obj, subs]) => subs.map((s) => `${obj}.${s}`));
 const OBJECT_SCHEMA_KEYS = CONFIG_SCHEMA.filter((s) => s.type === 'object').map((s) => s.key);
 
 function isPlainObject(v) {
@@ -808,14 +1091,86 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
       merged[subKey] = pv === undefined ? gv : (pv === safeValue ? safeValue : gv);
     }
   }
+  if (key === 'estate') {
+    // CWK-162 B4 + R14 F-R14-1: a project runBudget can only LOWER each limit, and only with a value the SCHEMA ITSELF accepts
+    // (validateValue, the validator clampedRead uses). A finite number outside the schema's range (0, -1, 2.5, below the 1 MiB
+    // floor, past the max) used to win as "the smaller" and clampedRead then replaced it with the field DEFAULT, which can be
+    // far above the user's own limit: a rejected value must have no say at all. Effective user value = their valid number, else
+    // the schema default (also when the whole global file is unreadable: the user's stance is unknown). Each field is judged alone.
+    if (p.runBudget !== undefined) {
+      if (!isPlainObject(p.runBudget)) {
+        if (g.runBudget === undefined) delete merged.runBudget; else merged.runBudget = g.runBudget;
+      } else {
+        const gRB = !globalUnreadable && isPlainObject(g.runBudget) ? g.runBudget : {};
+        const rb = { ...gRB };
+        for (const [f, spec] of Object.entries(RUNBUDGET_FIELDS)) {
+          const pv = p.runBudget[f];
+          if (validateValue(spec, pv) !== null) continue;
+          const gv = validateValue(spec, gRB[f]) === null ? gRB[f] : spec.def;
+          rb[f] = Math.min(pv, gv);
+        }
+        merged.runBudget = rb;
+      }
+    }
+    // CWK-162 B10 + R14 F-R14-2, ONE RULE: a project purgeAfterDays is honored only when the schema accepts it AND it is <= the user's
+    // own boundary (their global value, else the schema default; 0 = "never cold" is ordered as +infinity). Why: cold is report-only
+    // without deleteCold, but a session that is NOT cold is warm, and a warm session's original is removed once its archive is verified,
+    // so every project value ABOVE the user's boundary moves sessions from "kept in place" to "archived and removed" (a 200-day session:
+    // cold at 90, warm at 365 or 36500), the transition deleteCold gates. A value at or below it only makes sessions cold sooner.
+    // R18 (owner sheet BB-5 = (a), 2026-10-03; zone hooks-safety.md section 9, "the clamp holds AFTER consent too"): the clamp holds
+    // whether or not the user's deleteCold is true. It used to stop at `merged.deleteCold !== true`, so once the user consented a cloned
+    // project's value stood (Z-2). A user who turned on deleteCold set the cold edge at a number, and a cloned project file never moves it
+    // toward removing more (it may only lower purgeAfterDays or raise compressAfterDays).
+    if (p.purgeAfterDays !== undefined) {
+      const userValue = !globalUnreadable && validateValue(PURGE_SPEC, g.purgeAfterDays) === null ? g.purgeAfterDays : PURGE_SPEC.def;
+      const age = (n) => (n === 0 ? Infinity : n);
+      if (validateValue(PURGE_SPEC, p.purgeAfterDays) !== null || age(p.purgeAfterDays) > age(userValue)) {
+        if (!globalUnreadable && g.purgeAfterDays !== undefined) merged.purgeAfterDays = g.purgeAfterDays; else delete merged.purgeAfterDays;
+      }
+    }
+    // R14 bounce 2 F-R14-6, the same rule on the sibling edge (hooks-safety.md section 9, AMENDED 2026-10-03: a numeric key that moves a
+    // removal edge is clamped BY DIRECTION). compressAfterDays is the WARM boundary: a session older than it (and not cold) is archived and
+    // its original removed after the verified archive, so a project LOWER value moves sessions from "active, left untouched" to "archived and
+    // removed" (a 5-day-old session is active at 14 and warm at 1). A project value is honored only when the schema accepts it AND it is
+    // >= the user's own value (their global value, else the schema default): a project may only RAISE it, keeping sessions active longer.
+    // R18 (owner sheet BB-5 = (a)): this holds whether or not the user's deleteCold is true. With deleteCold true a warm AND a cold session
+    // are both archived and their originals removed, so this edge is the one that decides which sessions are removed at all: a project
+    // value below the user's must not move it after consent either.
+    if (p.compressAfterDays !== undefined) {
+      const userValue = !globalUnreadable && validateValue(COMPRESS_SPEC, g.compressAfterDays) === null ? g.compressAfterDays : COMPRESS_SPEC.def;
+      if (validateValue(COMPRESS_SPEC, p.compressAfterDays) !== null || p.compressAfterDays < userValue) {
+        if (!globalUnreadable && g.compressAfterDays !== undefined) merged.compressAfterDays = g.compressAfterDays; else delete merged.compressAfterDays;
+      }
+    }
+  }
+  // CWK-137 D3: a global-only sub-key takes the GLOBAL layer's value or is ABSENT (never the project's). An unreadable global
+  // file means the user's own choice is unknown, so it is absent too: the default location, not whatever a repo asked for.
+  for (const subKey of GLOBAL_ONLY_OBJECT_KEYS[key] || []) {
+    if (globalUnreadable || g[subKey] === undefined) delete merged[subKey]; else merged[subKey] = g[subKey];
+  }
   return merged;
 }
 
-export function mergeSafety(global, project, { globalUnreadable = false } = {}) {
-  const out = { ...global, ...project };
+export function mergeSafety(global, project, { globalUnreadable = false, projectUnreadable = false } = {}) {
+  // grad9 R8-F5: the PROJECT layer's own `unreadable` signal was computed by
+  // readJsonc and never threaded here — only globalUnreadable was. Today
+  // readJsonc always returns `data:{}` on any unreadable condition (parse
+  // error, wrong shape, missing file), so `project` is already effectively
+  // empty by the time it reaches this function and every downstream branch
+  // below already treats an empty project as "nothing asked" (the safe
+  // direction, same as an absent file). This wiring is therefore DEFENSIVE,
+  // not a live-bug close: `mergeSafety` is a general, reusable function, and
+  // its own input contract should never trust PROJECT data the caller has
+  // flagged as unverifiable, regardless of what a particular readJsonc
+  // implementation happens to do today — a caller passing a partially-parsed
+  // or hand-built `project` object alongside `projectUnreadable:true` must
+  // get the same "nothing asked" treatment global gets on its own
+  // unreadable path, not silently have that object's content honored.
+  const p = projectUnreadable ? {} : project;
+  const out = { ...global, ...p };
   for (const key of OBJECT_SCHEMA_KEYS) {
-    if (global[key] !== undefined || project[key] !== undefined) {
-      out[key] = mergeObjectKey(key, global[key], project[key], globalUnreadable);
+    if (global[key] !== undefined || p[key] !== undefined) {
+      out[key] = mergeObjectKey(key, global[key], p[key], globalUnreadable);
     }
   }
   for (const [key, order] of Object.entries(SAFER_ENUM)) {
@@ -825,14 +1180,14 @@ export function mergeSafety(global, project, { globalUnreadable = false } = {}) 
     // asks -- never the schema default, which can be weaker than what the
     // user actually had set before the file broke.
     if (globalUnreadable) { out[key] = order[0]; continue; }
-    if (project[key] === undefined) continue; // nothing the project asked to change
+    if (p[key] === undefined) continue; // nothing the project asked to change (incl. an unreadable project, per grad9 R8-F5 above)
     const globalVal = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
     // CASE-FOLD to match the schema's case-insensitive enum. Comparing raw
     // case let a project 'AUTO' miss the lookup (indexOf -> -1) and fall
     // through to the shallow-merge (project wins), re-enabling a globally-off
     // skill (H5).
     let gi = order.indexOf(String(globalVal).toLowerCase());
-    const pi = order.indexOf(String(project[key]).toLowerCase());
+    const pi = order.indexOf(String(p[key]).toLowerCase());
     // An unreadable GLOBAL VALUE (parsed fine, but this one key's value is
     // invalid) reads as the schema default (the WAVE-2 R2 rule extended from
     // absent to invalid — the user's position cannot be read, and the
@@ -877,15 +1232,68 @@ export function mergeSafety(global, project, { globalUnreadable = false } = {}) 
     // false from the schema, and a merged config for two absent files must stay
     // {} (a shipped invariant with its own test: a genuinely MISSING config is
     // {}). Writing a key nobody asked for would have quietly broken it.
-    if (global[key] === undefined && project[key] === undefined) continue;
+    // CWK-120 row 12: `p`, NOT `project` -- an UNREADABLE project is ABSENT (the R8-F5 contract above), so a populated
+    // `project` handed in beside `projectUnreadable: true` must not make this key look "asked for" and write `false` into a
+    // merged config that is supposed to stay {}. The effective boolean was false either way; the SHAPE was the defect.
+    if (global[key] === undefined && p[key] === undefined) continue;
     const gv = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
     out[key] = (gv === true && out[key] === true);
   }
   return out;
 }
 
-export function loadMergedConfig({ cwd = process.cwd(), home = os.homedir() } = {}) {
-  const g = readJsonc(globalConfigPath(home));
-  const p = readJsonc(projectConfigPath(cwd, home));
-  return mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable });
+// The merged config PLUS the notices a report-capable caller (the SessionStart conductor) emits: one entry per
+// tier whose config EXISTS where the walk reads but could not be used -- `{ tier, path, reason }`, the reason
+// one of readJsonc's four. Still ONE pass: the global path and the ONE candidate the walk selected are read once,
+// and only those two paths are ever touched (never a crawl, never a candidate the walk did not stat).
+export function loadMergedConfigReport({ cwd = process.cwd(), home = os.homedir() } = {}) {
+  const gPath = globalConfigPath(home);
+  const g = readJsonc(gPath); // the user's own file: bounded, never contained
+  // CWK-137: the project config is repo-derived -- contained in its project root.
+  const root = findProjectRoot(cwd, home);
+  const pPath = pickCandidate(candidatesForRoot(root));
+  const p = readJsonc(pPath, root);
+  const unreadable = [];
+  if (g.unreadable) unreadable.push({ tier: 'global', path: gPath, reason: g.reason });
+  if (p.unreadable) unreadable.push({ tier: 'project', path: pPath, reason: p.reason });
+  // CWK-137 D3 (the sizing ruling's restore-door hint): a GLOBAL-ONLY sub-key the PROJECT layer carries and the merge
+  // therefore drops. Read from `p.data`, the ONE bounded read above -- never a second read that could disagree with the
+  // merge. A project value that only restates the user's own (readable) global value ignored nothing, so it is not
+  // reported; an unreadable project is `{}` and reports nothing; a non-string or empty value is junk with no path to name.
+  const ignored = [];
+  for (const [obj, subs] of Object.entries(GLOBAL_ONLY_OBJECT_KEYS)) {
+    const pObj = p.data[obj];
+    if (!isPlainObject(pObj)) continue;
+    const gObj = isPlainObject(g.data[obj]) ? g.data[obj] : {};
+    for (const sub of subs) {
+      const value = pObj[sub];
+      if (typeof value !== 'string' || value === '') continue;
+      if (!g.unreadable && value === gObj[sub]) continue;
+      ignored.push({ key: `${obj}.${sub}`, tier: 'project', path: pPath, value });
+    }
+  }
+  const cfg = mergeSafety(g.data, p.data, { globalUnreadable: g.unreadable, projectUnreadable: p.unreadable });
+  // R14 bounce 1 (E1, the head's ruling: the break is LOUD): a project estate.runBudget field or purgeAfterDays the bounded merge
+  // above DROPPED is named too, from the same read. "Dropped" is read off the merge's own result, never a second copy of the rule: the
+  // project asked for a value and the effective config holds a different one. A value that was honored (in the allowed direction,
+  // or equal) ignored nothing; since R18 (BB-5) the user's deleteCold no longer exempts a value. `value` is whatever the cloned repo wrote (any JSON type), so the caller must sanitize it for print.
+  const pEstate = isPlainObject(p.data.estate) ? p.data.estate : null;
+  if (pEstate) {
+    const eEstate = isPlainObject(cfg.estate) ? cfg.estate : {};
+    const dropped = (key, value, effective) => { if (!Object.is(value, effective)) ignored.push({ key, tier: 'project', path: pPath, value }); };
+    if (pEstate.runBudget !== undefined) {
+      if (!isPlainObject(pEstate.runBudget)) ignored.push({ key: 'estate.runBudget', tier: 'project', path: pPath, value: pEstate.runBudget });
+      else {
+        const eRB = isPlainObject(eEstate.runBudget) ? eEstate.runBudget : {};
+        for (const f of Object.keys(RUNBUDGET_FIELDS)) if (pEstate.runBudget[f] !== undefined) dropped(`estate.runBudget.${f}`, pEstate.runBudget[f], eRB[f]);
+      }
+    }
+    if (pEstate.purgeAfterDays !== undefined) dropped('estate.purgeAfterDays', pEstate.purgeAfterDays, eEstate.purgeAfterDays);
+    if (pEstate.compressAfterDays !== undefined) dropped('estate.compressAfterDays', pEstate.compressAfterDays, eEstate.compressAfterDays);
+  }
+  return { cfg, unreadable, ignored };
+}
+
+export function loadMergedConfig(opts = {}) {
+  return loadMergedConfigReport(opts).cfg;
 }

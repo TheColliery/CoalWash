@@ -1,3 +1,14 @@
+// ponytail: 834 lines at declaration — ONE discovery LAYER, and the
+// cohesion unit is the CLASS-B DEFINITION rather than any one walk. Every step
+// here (global governance, the CLAUDE.md up-tree walk, the memory store, role
+// stores) feeds ONE entry list under ONE set of containment roots, ONE dedupe
+// key and ONE flag sink, and the refusal helpers at the top are shared by all of
+// them — refusalCode/refusalFlag/relLabel are called from eight discovery sites,
+// and the whole point of the r31/r32 rounds was that a refusal must read the same
+// way at every one. Splitting the walks into separate files would hand each half
+// its own copy of that vocabulary, which is the exact drift those rounds closed.
+// The number is HISTORY, not a live claim: 781 through 6a5fb07, crossed by the
+// r32 read-channel and F-T3 fixes.
 // class-b.mjs — per-platform class-B discovery (READ-ONLY).
 //
 // Class B = every FILE the platform auto-loads into context each session
@@ -33,9 +44,31 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape } from './config-load.mjs';
+import { claudeBaseDir, canonicalOrNull, pathExists, isCanonicalShape, repoEntryKind, repoReadOutcome, readRepoBytesBounded, volumeCaseFolds, MAX_DOC_BYTES } from './config-load.mjs';
+import { escapesRoot } from './repo-fs.mjs';
 
 const IMPORT_DEPTH_MAX = 5; // CC @import recursion cap (docs: max 5 hops)
+// CWK-162 (AI Deep Scan A3): the closure had a DEPTH cap and no visited set, so one CLAUDE.md of 8 self-imports was read
+// 4,681 times (1+8+8^2+8^3+8^4) at SessionStart. Every physical file is now expanded once per depth improvement, and the
+// TOTAL number of @import edges followed in one discovery is capped. 500 = 20x the largest real closure measured on this
+// box (25 governance files at the umbrella root, 2026-10-02). Hitting it FLAGS and stops following: the rest is NOT
+// measured, which is the room's stated fail direction (undercount: unseen = unmeasured = uncut).
+export const IMPORT_EDGES_MAX = 500;
+
+// CWK-162 (AI Deep Scan A2): the managedPaths signal compared every entry against every configured prefix with a
+// startsWith each (linear in prefixes x entries, 80,000 prefixes fit under the 1 MiB config read cap). Same predicate,
+// indexed: `rel === pfx || rel.startsWith(pfx ends with "/" ? pfx : pfx + "/")` is "rel equals a prefix, or one of rel's
+// slash-terminated ancestors IS a prefix with a slash". An equivalence sweep in class-b.test.mjs pins it to the old expression.
+export function managedMatcher(prefixes) {
+  const exact = new Set();
+  const dirs = new Set();
+  for (const pfx of prefixes) { exact.add(pfx); dirs.add(pfx.endsWith('/') ? pfx : pfx + '/'); }
+  return (rel) => {
+    if (exact.has(rel)) return true;
+    for (let i = rel.indexOf('/'); i >= 0; i = rel.indexOf('/', i + 1)) if (dirs.has(rel.slice(0, i + 1))) return true;
+    return false;
+  };
+}
 const RULES_FILE_CAP = 500; // defensive cap on a runaway rules tree
 
 // The conservative fallback flag for a non-Claude-Code platform. ONE source of
@@ -117,7 +150,35 @@ function refusalCode(candidate) {
     const code = (err && err.code) || 'UNKNOWN';
     return (code === 'ENOENT' || code === 'ENOTDIR') ? null : code; // absent = silent; refused = named
   }
-  try { fs.realpathSync.native(candidate); return 'UNCOMPARABLE'; } catch (err) { return (err && err.code) || 'UNKNOWN'; }
+  // F-T3: THE SAME CARVE-OUT, THE SAME RULE, BOTH CALLS. This line used to pass
+  // the second call's code through untouched, so `refusalFlag` — which calls
+  // anything that is not UNCOMPARABLE `refused` — labelled an ABSENCE as a
+  // PERMISSION problem five lines below the branch that carves absence out.
+  // REACHED, not argued: a directory junction whose target is deleted lstats OK
+  // and fails realpath with ENOENT, producing
+  // `refused path (governance): DANGLING.md [ENOENT]`; a user then hunts an ACL
+  // problem that does not exist. Nothing is behind a dangling link, so nothing
+  // was lost, so the honest output is the same SILENCE the first call already
+  // gives that pair.
+  //
+  // WHY (a) AND NOT (b), THE CODE-TO-NOUN MAP THE REVIEWER ALSO OFFERED —
+  // measured before choosing (scratchpad/r32/probe-ft3-codes.mjs, win32):
+  // ENOENT is the ONLY code observed reaching this second call at all. A junction
+  // LOOP throws ELOOP from realpath but `lstat` fails first with ENOENT, so it
+  // never arrives here; an overlong name likewise. Building a noun map for codes
+  // nothing could be shown to reach would be inventing a classifier against a
+  // measurement I do not have. With this carve-out every code that still reaches
+  // `refusalFlag` is either UNCOMPARABLE or a genuine refusal, which is what
+  // makes "the noun follows the code" true rather than nearly true.
+  //
+  // NAMED RESIDUAL: that argument rests on a win32 measurement. A POSIX box could
+  // in principle deliver ELOOP here (its lstat may not fail first), and the word
+  // would then read `refused` for a resolution failure. Unmeasured — no seat in
+  // this room has a Linux box.
+  try { fs.realpathSync.native(candidate); return 'UNCOMPARABLE'; } catch (err) {
+    const code = (err && err.code) || 'UNKNOWN';
+    return (code === 'ENOENT' || code === 'ENOTDIR') ? null : code;
+  }
 }
 
 // R3-F3 — THE NOUN FOLLOWS THE CODE. This unit's whole contribution is
@@ -138,11 +199,11 @@ function refusalFlag(what, label, code) {
 // sandbox-invariant, so a flag can never carry a tmpdir or a drive letter into
 // a surface an equivalence test compares across two roots. Purely lexical, so
 // it works on the unresolved path that just refused to canonicalize.
-function relLabel(candidate, roots) {
+export function relLabel(candidate, roots) {
   for (const r of roots) {
     if (!r) continue;
     const rel = path.relative(r, candidate);
-    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
+    if (rel && !escapesRoot(rel)) return rel.split(path.sep).join('/');
   }
   return path.basename(candidate) || String(candidate);
 }
@@ -180,7 +241,7 @@ export function containedIn(p, roots) {
     // admit anything, and an all-non-canonical root set therefore returns false.
     if (!root || !isCanonicalShape(root)) continue;
     const rel = path.relative(root, p);
-    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return true;
+    if (rel === '' || !escapesRoot(rel)) return true;
   }
   return false;
 }
@@ -382,9 +443,26 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // mutation exposure in one move, and leaves the cost REPORTABLE (returned as
   // its own field) rather than invisible.
   const inherited = [];
-  // Windows paths are case-insensitive -> lowercase the dedupe key there ONLY
-  // (lowercasing on POSIX would wrongly merge two case-distinct files).
-  const dedupeKey = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  // CWK-156: two spellings of one path are ONE entry only where the VOLUME folds case
+  // (node/runtime.md section 4: a volume property, never `process.platform` -- wrong in both
+  // directions: APFS folds and is not win32, an fsutil-enabled NTFS directory does not).
+  // `phys` is already canonical (physicalOrNull), so equal strings dedupe with no probe; the
+  // probe runs only when a DIFFERENT spelling with the same lowercase is already seen, which
+  // keeps the SessionStart walk free of extra stats in the ordinary case.
+  // MISS DIRECTION = true (an undecidable probe merges): a merge can only DROP an entry from
+  // the measurement -- this room's stated fail direction is undercount (unseen = unmeasured =
+  // uncut), while a wrong split would hand the wash the same file twice, on a tool that deletes.
+  const seenByLower = new Map(); // lowercased phys -> [phys, ...] already added
+  const isSeen = (phys) => {
+    if (seen.has(phys)) return true;
+    return seenByLower.has(phys.toLowerCase()) && volumeCaseFolds(phys, true);
+  };
+  const markSeen = (phys) => {
+    seen.add(phys);
+    const k = phys.toLowerCase();
+    const bucket = seenByLower.get(k);
+    if (bucket) bucket.push(phys); else seenByLower.set(k, [phys]);
+  };
   // rules-tree entries only, tracked separately for the byte-identical-
   // across-roots cross-check below (relTail = the path under its OWN
   // rules root, forward-slashed — the generalizable pairing key: never
@@ -402,7 +480,75 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // room ⇒ inherited" test would silently drop the one global store CoalWash
   // actually washes out of the cap. Outside-the-room and not-the-room's are
   // different questions; only the ancestor walk asks the second one.
-  const add = (candidate, { scope, kind, alwaysLoaded, upTree = false }) => {
+  // CWK2-029 (b) REACH, the read half (INSPECT 69: a plain project CLAUDE.md holding `@~/.aws/credentials` had
+  // that HOME file listed scope 'project' and its CONTENT parsed for further @imports). A project-scope candidate
+  // whose realpath is OUTSIDE -- not inside the project, not inside ~/.claude (the global tier), not an ancestor
+  // governance file -- is never read for content (no @import recursion through it), never scope 'project', never in
+  // `entries`, sized from stat only (Claude Code may still load it, so the footprint counts it), and named by one flag
+  // (its path, never its content). Location decides for a ROOM-queued candidate (the room's own CLAUDE.md chain, its
+  // rules tree, its memory store): a plain `@~/` import, a `@../` escape and a link out of the project are one class.
+  // INSPECT 99: a room-queued candidate is admitted only inside the project, inside the project's own memory store
+  // (L99-1: never any other file under ~/.claude, such as .credentials.json or settings.json), or when it IS an
+  // ancestor CLAUDE.md (L99-3: never a sibling file inside an ancestor folder). An ANCESTOR-queued candidate (an
+  // ancestor CLAUDE.md's own @import closure, which sits above any clone) keeps the wider rule: the project, ~/.claude,
+  // the ancestor files and the ancestor folders. Global-scope candidates are the user's own ~/.claude chain (a cloned
+  // repo cannot write it) and keep their reach.
+  // ANCESTOR GOVERNANCE (NESTED-HABITAT): each CLAUDE.md the up-tree walk finds ABOVE the project's repository top
+  // (R102-1, below) and up to HOME whose realpath stays in its own folder, plus everything inside such a folder strictly
+  // below HOME. HOME itself never
+  // counts as a governance folder, or one ~/CLAUDE.md would admit every file under HOME.
+  const basePhys = homePhys ? physicalOrNull(claudeBaseDir(home)) : null;
+  // RE-INSPECT 102 R102-1: ancestor governance begins strictly ABOVE the project's repository top, the nearest folder
+  // at or above the project root (up to HOME or the filesystem root) holding a `.git` entry, file or folder, read by
+  // lstat and never followed. A clone cannot commit a `.git` entry, so it cannot move its own top. A CLAUDE.md between
+  // the room and that top is the clone's own (`ownFiles`): it stays in the inherited tier and keeps the room rule, so a
+  // nested session root no longer turns the clone's top CLAUDE.md into an ancestor. With no `.git` found the walk
+  // starts above the room as before: a named residual (a tree with no git history, a session in a nested folder).
+  const hasGitEntry = (dir) => { try { fs.lstatSync(path.join(dir, '.git')); return true; } catch { return false; } };
+  let topPhys = null;
+  if (projPhys) {
+    for (let dir = projPhys; ; dir = path.dirname(dir)) {
+      if (hasGitEntry(dir)) { topPhys = dir; break; }
+      if (dir === homePhys || path.dirname(dir) === dir) break;
+    }
+  }
+  const ownFiles = new Set();
+  if (projPhys && topPhys && topPhys !== projPhys) {
+    for (let dir = path.dirname(projPhys); ; dir = path.dirname(dir)) {
+      const cl = physicalOrNull(path.join(dir, 'CLAUDE.md'));
+      if (cl && path.dirname(cl) === dir) ownFiles.add(cl);
+      if (dir === topPhys || path.dirname(dir) === dir) break;
+    }
+  }
+  const anchorPhys = topPhys || projPhys;
+  const ancestorFiles = new Set();
+  const ancestorDirs = [];
+  if (projPhys && homePhys && anchorPhys !== homePhys && containedIn(anchorPhys, [homePhys])) {
+    for (let dir = path.dirname(anchorPhys); ; dir = path.dirname(dir)) {
+      const cl = physicalOrNull(path.join(dir, 'CLAUDE.md'));
+      if (cl && path.dirname(cl) === dir) {
+        ancestorFiles.add(cl);
+        if (dir !== homePhys) ancestorDirs.push(dir);
+      }
+      if (dir === homePhys || path.dirname(dir) === dir) break;
+    }
+  }
+  // L99-1: the project's own memory store, and only while its realpath stays inside ~/.claude (a store junctioned out
+  // of ~/.claude is OUTSIDE).
+  const memRoot = basePhys ? physicalOrNull(ccMemoryDir(projectRoot, home)) : null;
+  const memPhys = memRoot && containedIn(memRoot, [basePhys]) ? memRoot : null;
+  const isOutside = (phys, origin) => {
+    if (projPhys && containedIn(phys, [projPhys])) return false;
+    if (ancestorFiles.has(phys)) return false;
+    if (ownFiles.has(phys)) return false; // R102-1: the clone's own CLAUDE.md above a nested room; its imports keep the room rule
+    if (origin === 'ancestor') return !(basePhys && containedIn(phys, [basePhys])) && !containedIn(phys, ancestorDirs);
+    return !(memPhys && containedIn(phys, [memPhys]));
+  };
+  const outsideLabel = (phys) => (homePhys && containedIn(phys, [homePhys])
+    ? `~/${path.relative(homePhys, phys).split(path.sep).join('/')}`
+    : phys);
+
+  const add = (candidate, { scope, kind, alwaysLoaded, upTree = false, origin = 'room' }) => {
     const phys = physicalOrNull(candidate);
     if (!phys) {
       // F2-R2: the skip is unchanged and still fail-closed. What is new is that
@@ -425,7 +571,20 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       flags.push(`skipped (outside home/project trees): ${candidate}`);
       return null;
     }
-    if (seen.has(dedupeKey(phys))) return phys;
+    if (scope !== 'global' && isOutside(phys, origin)) {
+      // CWK2-029 (b): null, never phys, so addWithImports never reads it and no walk treats it as an entry.
+      if (isSeen(phys)) return null;
+      const bytes = statBytes(phys);
+      if (bytes == null) {
+        flags.push(`unstattable file: ${outsideLabel(phys)} — its bytes are NOT counted`);
+        return null;
+      }
+      markSeen(phys);
+      inherited.push({ path: phys, bytes, scope: 'outside', kind, alwaysLoaded, managed: false, statOnly: true });
+      flags.push(`outside the project, its own memory store and its ancestor governance (${kind}): ${outsideLabel(phys)} — sized by stat only, never read, never washed`);
+      return null;
+    }
+    if (isSeen(phys)) return phys;
     const bytes = statBytes(phys);
     if (bytes == null) {
       // Same class, one call later: `phys` canonicalized, so the file EXISTED a
@@ -433,23 +592,91 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       flags.push(`unstattable file: ${relLabel(phys, [projPhys, homePhys])} — its bytes are NOT counted`);
       return null;
     }
-    seen.add(dedupeKey(phys));
+    markSeen(phys);
     const isInherited = upTree && projPhys && !containedIn(phys, [projPhys]);
     (isInherited ? inherited : entries).push({ path: phys, bytes, scope, kind, alwaysLoaded, managed: false });
     return phys;
   };
 
   // A governance file + its @import closure (depth-capped, cycle-safe).
-  const addWithImports = (file, scope, upTree = false) => {
-    const queue = [{ file, depth: 0 }];
+  // CWK-162 A3: `expandedAt` maps a physical file to the SHALLOWEST depth its imports were already followed from. A plain
+  // visited set would be wrong here: the first route to a file can be a deep one (depth 5 is added but never expanded), and a
+  // later root reaching the same file at depth 1 must still expand it, or its closure silently shrinks. So a file is expanded
+  // again only when reached SHALLOWER than before (at most IMPORT_DEPTH_MAX + 1 times), which keeps the closure exactly the
+  // set of files within IMPORT_DEPTH_MAX hops of a root, with no walk repeated.
+  const expandedAt = new Map();
+  let edgesFollowed = 0;
+  let edgeCapFlagged = false;
+  // `origin` is the provenance channel (INSPECT 99 L99-3): 'room' for the room's own chain, 'ancestor' for an ancestor
+  // CLAUDE.md's own closure. A room chain that reaches an ancestor CLAUDE.md hands that file's imports the ancestor rule.
+  const addWithImports = (file, scope, upTree = false, origin = 'room') => {
+    const queue = [{ file, depth: 0, origin }];
     while (queue.length) {
-      const { file: f, depth } = queue.shift();
-      const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true, upTree });
+      const { file: f, depth, origin: o } = queue.shift();
+      const phys = add(f, { scope, kind: 'governance', alwaysLoaded: true, upTree, origin: o });
       if (!phys || depth >= IMPORT_DEPTH_MAX) continue;
+      const prior = expandedAt.get(phys);
+      if (prior !== undefined && prior <= depth) continue; // its imports were already followed from here or shallower
+      expandedAt.set(phys, depth);
+      // CWK-137: BOUNDED and kind-gated. `phys` is already contained (add() above), so
+      // no root here -- but an @import may name ANY file under home (`@~/big.iso`), and a
+      // plain readFileSync read it whole. Over MAX_DOC_BYTES, or not a regular file, it is
+      // refused and flagged below exactly like an unreadable one -- its own bytes are
+      // still counted from stat, its @import closure is not.
       let text;
-      try { text = fs.readFileSync(phys, 'utf8'); } catch { continue; }
-      for (const imp of parseImports(text, path.dirname(phys), home)) {
-        queue.push({ file: imp, depth: depth + 1 });
+      try {
+        const r = repoReadOutcome(phys, null, MAX_DOC_BYTES); // E2-4: root null kept: a class-B entry discovery already realpath-checked inside the home/project trees (add() above)
+        if (!r.buf) throw Object.assign(new Error(r.why), { code: r.code || r.why.toUpperCase() });
+        text = r.buf.toString('utf8');
+      } catch (err) {
+        // r32, THE (a) FORK. This `continue` dropped the whole @import closure
+        // of a governance file whose CONTENT could not be read, with flags: [].
+        // Pre-existing since cec4a4d (beta.1); measured in r31 at 4 entries -> 2.
+        //
+        // WHY refusalCode() IS THE WRONG INSTRUMENT HERE, stated because the
+        // obvious reading is to reuse it: refusalCode RE-PROBES with lstat and
+        // realpathSync.native, and on exactly the fixture that produces this loss
+        // BOTH succeed — the path resolves, only the READ is denied.
+        //
+        // ⚠️ THE REASON THIS COMMENT FIRST GAVE WAS FALSE, and is corrected here
+        // rather than quietly reworded (F-R32-1): it said refusalCode "returns
+        // null and no flag would ever fire". It does not. lstat OK then realpath
+        // OK falls into the SUCCESS branch, which returns 'UNCOMPARABLE', and
+        // refusalFlag maps that word to `unresolvable`. So reusing it here would
+        // have printed `unresolvable path (governance): CLAUDE.md [UNCOMPARABLE]`
+        // about a path that resolves perfectly.
+        //
+        // WHICH MAKES THE REAL REASON STRONGER THAN THE ONE IT REPLACES: the
+        // failure mode is A WRONG FLAG, not a missing one. Reusing refusalCode
+        // would have shipped a fresh instance of F-T3 — the
+        // wrong-noun-for-the-code defect the very next commit in this dispatch
+        // closes. The error's own code is the only witness to a failure that
+        // happens at the read itself.
+        //
+        // NO ENOENT/ENOTDIR CARVE-OUT, and that is deliberate rather than an
+        // omission: the silence carve-out exists for a candidate that never
+        // existed. `phys` canonicalized one call ago, so the file DID exist a
+        // moment ago and an ENOENT now is a real mid-walk loss — identical
+        // reasoning to the `unstattable file` sibling directly above, which
+        // likewise carves nothing out.
+        //
+        // THE MESSAGE IS NOT WIDER THAN THE TRUTH: add() already succeeded, so
+        // the file's OWN bytes ARE counted. What vanishes is everything it
+        // imports.
+        const code = (err && err.code) || 'UNKNOWN';
+        flags.push(`unreadable governance file: ${relLabel(phys, [projPhys, homePhys])} [${code}] — its own bytes ARE counted, its @import closure is NOT`);
+        continue;
+      }
+      for (const imp of new Set(parseImports(text, path.dirname(phys), home))) {
+        if (edgesFollowed >= IMPORT_EDGES_MAX) {
+          if (!edgeCapFlagged) {
+            edgeCapFlagged = true;
+            flags.push(`@import closure capped: ${IMPORT_EDGES_MAX} imports followed in one discovery, the rest are NOT measured`);
+          }
+          break;
+        }
+        edgesFollowed++;
+        queue.push({ file: imp, depth: depth + 1, origin: o === 'room' && ancestorFiles.has(phys) ? 'ancestor' : o });
       }
     }
   };
@@ -543,7 +770,16 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     // directories were queued and never visited, so their contents are missing.
     if (stack.length) flags.push(`rules tree capped (${count} files / ${dirs} dirs at cap ${RULES_FILE_CAP}, scope ${scope}) — ${stack.length} director${stack.length === 1 ? 'y' : 'ies'} left UNVISITED, their contents are NOT counted`);
   };
-  if (projPhys) walkRulesTree(path.join(projPhys, '.claude', 'rules'), 'project');
+  // CWK-137: the PROJECT walk root must itself be a directory inside the project. A
+  // cloned repo can commit `.claude/rules` as a link (to `/`, to home): readdirSync
+  // follows a ROOT link, so the walk -- and every add() it feeds -- would start in the
+  // link's target. The Dirent rule below only protects entries INSIDE the root.
+  // Absent stays silent (the ordinary case); present-but-refused says so.
+  if (projPhys) {
+    const rulesRoot = path.join(projPhys, '.claude', 'rules');
+    if (repoEntryKind(rulesRoot, projPhys) === 'dir') walkRulesTree(rulesRoot, 'project');
+    else if (pathExists(rulesRoot)) flags.push('refused path (rules tree, scope project): .claude/rules — not a directory inside the project (a link out of it, or not a directory) — its contents are NOT counted');
+  }
   if (homePhys) walkRulesTree(path.join(claudeBaseDir(home), 'rules'), 'global');
 
   // 4. Memory store: ~/.claude/projects/<slug>/memory/ — MEMORY.md is the
@@ -634,7 +870,12 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
         for (const g of glob) {
           if (p.entry.bytes !== g.entry.bytes) continue; // cheap pre-check
           let same = false;
-          try { same = Buffer.compare(fs.readFileSync(p.entry.path), fs.readFileSync(g.entry.path)) === 0; } catch { same = false; }
+          try {
+            // CWK-137: bounded bytes, both sides; a refusal is simply not-the-same. E2-4: root null kept: a class-B entry discovery already realpath-checked inside the home/project trees.
+            const pb = readRepoBytesBounded(p.entry.path, null, MAX_DOC_BYTES);
+            const gb = readRepoBytesBounded(g.entry.path, null, MAX_DOC_BYTES);
+            same = !!pb && !!gb && Buffer.compare(pb, gb) === 0;
+          } catch { same = false; }
           if (same) { p.entry.managed = true; g.entry.managed = true; }
         }
       }
@@ -648,12 +889,13 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   if (Array.isArray(managedPaths) && managedPaths.length) {
     const prefixes = managedPaths.filter((s) => typeof s === 'string' && s).map((s) => s.split(path.sep).join('/'));
     if (prefixes.length) {
+      const isManaged = managedMatcher(prefixes);
       for (const e of entries) {
         if (e.managed) continue; // already tagged by signal (1)
         const scopeRoot = e.scope === 'global' ? homePhys : projPhys;
         if (!scopeRoot) continue;
         const rel = path.relative(scopeRoot, e.path).split(path.sep).join('/');
-        if (prefixes.some((pfx) => rel === pfx || rel.startsWith(pfx.endsWith('/') ? pfx : pfx + '/'))) e.managed = true;
+        if (isManaged(rel)) e.managed = true;
       }
     }
   }
@@ -715,6 +957,12 @@ export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.ho
   }
   const roots = [homePhys, projPhys].filter(Boolean);
   const agentBase = path.join(projPhys, '.claude', 'agent-memory');
+  // CWK-137: the same walk-root rule as the rules tree -- a cloned repo's
+  // `.claude/agent-memory` link would make every directory in its target a "role".
+  if (pathExists(agentBase) && repoEntryKind(agentBase, projPhys) !== 'dir') {
+    flags.push('refused path (role stores): .claude/agent-memory — not a directory inside the project (a link out of it, or not a directory) — its contents are NOT counted');
+    return [];
+  }
   let roles = [];
   try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch (err) {
     const code = (err && err.code) || 'UNKNOWN';

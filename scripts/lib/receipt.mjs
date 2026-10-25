@@ -54,6 +54,40 @@ export function oneLineResult(opts) {
   return `[CoalWash] cut ~${ktok(raw)} tok (−${pct}%)`;
 }
 
+// CWK2-062 + INSPECT 170: the gate's PASS line. It names what the gate checks
+// (the list below), never "facts lost": the gate reads STRUCTURED tokens only
+// (fidelity-gate.mjs), so a PASS proves no structured drop beyond the plan's own
+// approvedDrops, and nothing about prose. A drop value is caller data (a link
+// target, a file name, a fenced code line), so each member renders as a JSON
+// string: quoted, with every C0 control escaped by JSON itself. JSON leaves
+// U+0085, U+2028 and U+2029 raw, so those three are replaced here by their
+// escape text, which is built from code points: a backslash-u literal typed into
+// source can arrive as the raw character (AGENTS, the escape-transit hazard).
+const FIDELITY_LISTED_MAX = 5;
+const FIDELITY_CHECKED = 'checked: links, dates, versions, frontmatter keys, code, quotes, numbers';
+const BACKSLASH = String.fromCharCode(92);
+const RAW_SEPARATORS = [0x85, 0x2028, 0x2029].map((cp) => [
+  String.fromCharCode(cp),
+  `${BACKSLASH}u${cp.toString(16).padStart(4, '0')}`,
+]);
+// A plan member is a JSON value: a string is itself, anything else its JSON text.
+function memberForm(member) {
+  return typeof member === 'string' ? member : (JSON.stringify(member) ?? String(member));
+}
+function receiptText(member) {
+  let text = JSON.stringify(memberForm(member));
+  for (const [raw, escaped] of RAW_SEPARATORS) text = text.split(raw).join(escaped);
+  return text;
+}
+// apply.mjs holds approvedDrops as a Set, so a repeated member counts once here too.
+function fidelityPassLine(approved) {
+  const members = [...new Set(approved.map(memberForm))];
+  if (members.length === 0) return `fidelity gate: PASS (no structured-token drop; ${FIDELITY_CHECKED})`;
+  const shown = members.slice(0, FIDELITY_LISTED_MAX).map(receiptText).join(', ');
+  const more = members.length > FIDELITY_LISTED_MAX ? ` +${members.length - FIDELITY_LISTED_MAX} more` : '';
+  return `fidelity gate: PASS (no structured-token drop beyond the ${members.length} the plan approved: ${shown}${more}; ${FIDELITY_CHECKED})`;
+}
+
 // r = {
 //   when?: ISO date string,
 //   beforeBytes, afterBytes,                    — whole class-B store (deterministic)
@@ -61,6 +95,11 @@ export function oneLineResult(opts) {
 //   oneTimeCostTokens?,                         — this run's spend (~est; 0 for a pure-mechanical Quick)
 //   removed, trimmed, kept, flaggedKept?,       — counts
 //   gatePass: bool, gateDrops?: number,
+//   approvedDrops?: string[],                   — CWK2-062: the plan's own "type:value"
+//     list (apply.mjs plan.approvedDrops). The PASS line names what the gate
+//     checked and, when this is non-empty, the count and the drops (at most
+//     FIDELITY_LISTED_MAX named, then "+N more"). The gate proves no STRUCTURED
+//     token dropped; it says nothing about prose facts, so no line claims it.
 //   breakEvenSessions?: number,
 //   dryRun?: bool,
 //   pendingUserKeeps?: number,                  — board #129: count of keeps.mjs's
@@ -88,7 +127,7 @@ export function buildReceipt(r) {
   lines.push(r.gatePass == null
     ? 'fidelity gate: unknown (fields not provided)'
     : r.gatePass
-      ? 'fidelity gate: PASS (0 facts lost — links/dates/versions/frontmatter all preserved)'
+      ? fidelityPassLine(Array.isArray(r.approvedDrops) ? r.approvedDrops : [])
       : `fidelity gate: FAIL — ${r.gateDrops || '?'} drop(s); the apply is BLOCKED until every drop is restored`);
   // wikilink-orphan advisory (apply.mjs deadLinkLine — one line, never a
   // block): present only when a deleted topic is still referenced.

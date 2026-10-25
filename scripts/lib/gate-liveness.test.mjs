@@ -290,10 +290,12 @@ test('GATE-LIVENESS 6 — chJournalGuard is load-bearing: a FRESH in-progress CH
 
     // MUTANT: neutralize the guard — the handoff now reads a non-in_progress
     // status → chJournalGuard returns none → the session bands WARM → archived + deleted.
-    const orig = fs.readFileSync;
-    const restore = patch(fs, 'readFileSync', (p, ...rest) => (typeof p === 'string' && p.endsWith('session_handoff.json')) ? '{"status":"idle"}' : orig(p, ...rest));
-    let r2;
-    try { r2 = runEstate({ projectRoot: proj, home, now, estate: estateCfg() }); } finally { restore(); }
+    // (INSTRUMENT CHANGED, CWK-137 item 1b: this used to stub fs.readFileSync for the handoff path. The guard now
+    // reads through the bounded reader (openSync/readSync), so that stub no longer reached it and the "neutralized"
+    // leg stopped neutralizing anything. The neutralization is now the file's own content, which needs no stub and
+    // survives the next change of read primitive; the assertions below are unchanged.)
+    write(handoff, '{"status":"idle"}');
+    const r2 = runEstate({ projectRoot: proj, home, now, estate: estateCfg() });
     assert.strictEqual(r2.archived.length, 1, 'guard neutralized → the active session is archived');
     assert.ok(!fs.existsSync(jsonl), 'the LIVE session transcript was deleted out from under it = the loss chJournalGuard prevents');
   } finally { clean(home, proj); }

@@ -20,7 +20,7 @@ import {
 } from './retier.mjs';
 import { tokensEst } from './caliper.mjs';
 import { restoreSession, ESTATE_INDEX_NAME } from './estate-archive.mjs';
-import { acquireLock, globalLockPath, txDirFor } from './apply.mjs';
+import { acquireLock, globalLockPath, txDirFor, LOCK_STALE_MS, __testHooks as applyHooks } from './apply.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 import { CONFIG_SCHEMA, clampedRead } from './config-schema.mjs';
 import { STORE_OLD_NAME } from './tailings.mjs';
@@ -234,12 +234,34 @@ test('grad6 WAVE-16 finding 2: a bin-stash failure on the RE-TIER path is now th
     seedMainStore(home, proj); // zeta-old.md is unreferenced -> demoted -> deleted -> wizard-cut bin-stash
     const binDir = path.join(txDirFor(proj), STORE_OLD_NAME);
     fs.mkdirSync(binDir, { recursive: true });
-    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other-live-session', pid: 654321, at: now, token: 'other-live-session:654321:0' }));
+    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other-live-session', pid: 654321, at: now, token: ['other-live-session', '654321', '0'].join(':') }));  // assembled at runtime: the same bytes, and no secret-shaped literal for the house scan (CWK-174)
     const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), now });
     assert.strictEqual(res.ok, true, runRetierReport(res));
     assert.ok(Array.isArray(res.flagged), 'runRetier\'s success return must expose flagged');
     assert.ok(res.flagged.some((f) => /bin-stash failed/.test(f.reason)), `the bin-stash failure must be flagged: ${JSON.stringify(res.flagged)}`);
     assert.match(runRetierReport(res), /FLAGGED .*bin-stash failed/, 'runRetierReport must render the flagged bin-stash failure, not drop it silently');
+  } finally { clean(home, proj); }
+});
+
+// grad7 ruling Root D: `flagged` was the ONE field WAVE-16 threaded off
+// applyPlan's real multi-field success return (apply.mjs:1235 —
+// flagged/deadLinks/deadLinkLine/binConflicts). Three siblings were still
+// silently dropped on the exact same object. This asserts the OBJECT SHAPE
+// itself — the property existing (even as an empty array/null) is what
+// distinguishes "threaded, currently empty" from "dropped entirely", which
+// is the precise bug: pre-fix these keys are `undefined` (absent), not `[]`.
+test('RED-FIRST/root-D-success-shape: runRetier\'s success return exposes ALL of applyPlan\'s sibling fields, not just flagged', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    seedMainStore(home, proj);
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(Object.prototype.hasOwnProperty.call(res, 'deadLinks'), 'deadLinks must be threaded (pre-fix: property absent entirely, not just empty)');
+    assert.ok(Array.isArray(res.deadLinks), `deadLinks must be an array: ${JSON.stringify(res.deadLinks)}`);
+    assert.ok(Object.prototype.hasOwnProperty.call(res, 'deadLinkLine'), 'deadLinkLine must be threaded');
+    assert.ok(Object.prototype.hasOwnProperty.call(res, 'binConflicts'), 'binConflicts must be threaded');
+    assert.ok(Array.isArray(res.binConflicts), `binConflicts must be an array: ${JSON.stringify(res.binConflicts)}`);
   } finally { clean(home, proj); }
 });
 
@@ -588,6 +610,144 @@ test('grad6 W2-F1: unreferencedTopics is case-folded — a case-different refere
   );
 });
 
+// grad9 F4 [HIGH, content-loss by displacement]: case-folding closed the CASE
+// axis (grad6 W2-F1 above) but not the PUNCTUATION one. `[[Topic Name]]` (a
+// real wikilink, spaces) has ZERO substring overlap with a topic file's own
+// slugified basename/stem `topic-name.md`/`topic-name` (hyphens) — a
+// genuinely-referenced topic reads as unreferenced and gets archived while
+// the referring file still literally contains the wikilink.
+test('RED-FIRST/F4: unreferencedTopics normalizes delimiter punctuation — a wikilink written with SPACES still counts against a HYPHENATED basename/stem', () => {
+  const store = {
+    topics: [{ path: '/s/topic-name.md', basename: 'topic-name.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'see [[Topic Name]] for detail\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    [],
+    'a SPACED wikilink must still count as a reference to the HYPHENATED topic-name.md — same reference, different delimiter'
+  );
+});
+
+test('RED-FIRST/F4 control: a genuinely unreferenced topic (no delimiter variant anywhere) is still correctly archived', () => {
+  const store = {
+    topics: [{ path: '/s/topic-name.md', basename: 'topic-name.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'nothing about it here\nplain';
+  assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), ['topic-name.md']);
+});
+
+// grad10 F6 [MEDIUM, opposite-polarity — introduced by F4's own fix]: F4's
+// delimiter fold ran over the WHOLE corpus, so a stem that spells out
+// ordinary English words (`the-plan` -> `the plan`) matches any prose
+// sentence containing those two words in sequence, with no reference
+// anywhere. Scoping the delimiter leg to `[[...]]` wikilink spans closes it.
+test('RED-FIRST/F6: a stem that reads as ordinary prose after delimiter-folding (the-plan -> "the plan") is NOT counted as referenced by a coincidental sentence — it is genuinely unreferenced and must archive', () => {
+  const store = {
+    topics: [{ path: '/s/the-plan.md', basename: 'the-plan.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'we should review the plan carefully before shipping\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    ['the-plan.md'],
+    'no [[...]] wikilink anywhere -- an ordinary sentence containing "the plan" must not count as a reference'
+  );
+});
+
+test('RED-FIRST/F6 control: the-plan.md IS correctly kept live when a real spaced wikilink references it', () => {
+  const store = {
+    topics: [{ path: '/s/the-plan.md', basename: 'the-plan.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'see [[The Plan]] for detail\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    [],
+    'F4\'s original case must still hold: a real spaced wikilink still counts, even against a stem that also reads as ordinary prose'
+  );
+});
+
+// grad10 F7a [MEDIUM, content-loss]: a markdown link target written
+// percent-encoded (`topic%2Dname.md`) has zero raw-substring overlap with
+// the topic's own hyphenated basename until the corpus is percent-decoded.
+test('RED-FIRST/F7a: a percent-encoded link target still counts as a reference', () => {
+  const store = {
+    topics: [{ path: '/s/topic-name.md', basename: 'topic-name.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'see [doc](topic%2Dname.md) for detail\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    [],
+    'topic%2Dname.md decodes to topic-name.md — a real reference, must not be archived'
+  );
+});
+
+test('RED-FIRST/F7a control: a genuinely unreferenced topic is still archived even with an unrelated % sign in the corpus (decode never throws, never over-matches)', () => {
+  const store = {
+    topics: [{ path: '/s/topic-name.md', basename: 'topic-name.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'the job is 50% done, nothing about it here\nplain';
+  assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), ['topic-name.md']);
+});
+
+// grad10 F7b [MEDIUM, content-loss, directionally asymmetric]: a plural
+// filename referenced only by singular prose has zero substring overlap in
+// THAT direction — the reverse (singular filename, plural prose) is already
+// caught for free by ordinary substring containment.
+test('RED-FIRST/F7b: a plural filename (guidelines.md) referenced only by singular prose ("the guideline") still counts as a reference', () => {
+  const store = {
+    topics: [{ path: '/s/guidelines.md', basename: 'guidelines.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'always read the guideline before shipping\nplain';
+  assert.deepStrictEqual(
+    unreferencedTopics(store, all).map((t) => t.basename),
+    [],
+    'singular prose referencing a plural filename must still count — it is a genuine reference, just a different grammatical number'
+  );
+});
+
+test('RED-FIRST/F7b control: the reverse direction (singular filename, plural prose) was already caught and stays caught', () => {
+  const store = {
+    topics: [{ path: '/s/guideline.md', basename: 'guideline.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'the guidelines here are clear\nplain';
+  assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), []);
+});
+
+test('RED-FIRST/F7b control: a genuinely unreferenced plural-named topic is still archived', () => {
+  const store = {
+    topics: [{ path: '/s/guidelines.md', basename: 'guidelines.md', text: 'plain', mtimeMs: 1 }],
+  };
+  const all = 'nothing about it here\nplain';
+  assert.deepStrictEqual(unreferencedTopics(store, all).map((t) => t.basename), ['guidelines.md']);
+});
+
+// Same finding, driven through the REAL runRetier end-to-end (the lab's own
+// method — a unit-level pass alone can't prove the top-anchor safety net
+// structurally cannot catch this: the referring line survives verbatim in
+// the index, so probeAnchors sees nothing wrong while the target file
+// leaves the live tree).
+test('RED-FIRST/F4-integration: a topic referenced ONLY via a spaced wikilink survives a real over-arm demotion pass — it must NOT be archived', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    const idx = ['# Memory index', '', '- See [[Topic Name]] for detail — the referenced pointer [[flock-law]] v9.9.9'];
+    for (let i = 0; i < 24; i++) {
+      idx.push(`- [[uniq-${i}]] bullet ${i} — a long index line carrying enough prose to be worth demoting when the envelope arms [[flock-law]] v9.9.9 \`key-${i}\``);
+    }
+    write(path.join(dir, 'MEMORY.md'), idx.join('\n') + '\n');
+    const topicOrig = 'Plain prose body, referenced only from the index above via a spaced wikilink.\n';
+    write(path.join(dir, 'topic-name.md'), topicOrig);
+    write(path.join(dir, 'state.json'), '{"machine":true}');
+    write(path.join(dir, 'trace.jsonl'), '{"vendor":true}\n');
+
+    const estate = estateCfg(home);
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate, now });
+    assert.strictEqual(res.ok, true, runRetierReport(res));
+    assert.ok(fs.existsSync(path.join(dir, 'topic-name.md')), 'the topic must STAY LIVE — it is genuinely referenced, just via a different delimiter');
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'topic-name.md'), 'utf8'), topicOrig, 'untouched, byte-identical');
+  } finally { clean(home, proj); }
+});
+
 // grad6 W2-F2 (CoalBoard verdict): collectStores classified `.md` byte-exact,
 // so a referrer file saved as NOTES.MD (a case-preserving editor, or a tool
 // that writes uppercase extensions) fell into others[] instead of topics[] —
@@ -848,6 +1008,37 @@ test('BREAK-3h genuine miss (index ON): a probe anchor surviving in NEITHER a ke
     assert.ok(Array.isArray(res.anchorMisses) && res.anchorMisses.some((m) => m.token === 'split anchor'), `the real miss is the multi-word "split anchor" (got ${JSON.stringify((res.anchorMisses || []).map((m) => m.token))})`);
     assert.strictEqual(fs.readFileSync(path.join(dir, 'topic-a.md'), 'utf8'), aOrig, 'rollback restores topic-a byte-exact');
     assert.strictEqual(fs.readFileSync(path.join(dir, 'topic-b.md'), 'utf8'), bOrig, 'rollback restores topic-b byte-exact');
+  } finally { clean(home, proj); }
+});
+
+// grad7 ruling Root D (2026-07-31, sharpened by grad8's round-8 relay,
+// 2026-08-03): the WAVE-16 fix threaded applyPlan's `flagged[]` onto
+// runRetier's SUCCESS return only — the object's OWN two rollback-failure
+// returns (the anchor-probe-throws branch and the anchor-miss branch above)
+// dropped it just the same, even though `r` (the successful applyPlan call
+// that precedes both) already carries real per-file refusal data describing
+// what happened during the now-undone apply. Reusing BREAK-3h's exact
+// genuine-miss fixture (the rollback path this test needs is hard to force
+// any other way) — this test only ADDS the flagged-shape assertion.
+test('RED-FIRST/root-D: a rollback-failure return still exposes `flagged` — the same object shape WAVE-16 already granted the success path', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex());
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index.\n');
+    let a = '# topicA\n\n';
+    for (let i = 0; i < 20; i++) a += `- [[a${i}]] co-anchor\n- [[a${i}]] again\n`;
+    a += '- [[split anchor]] here\n- [[split anchor]] again\n';
+    write(path.join(dir, 'topic-a.md'), a);
+    let b = '# topicB\n\n';
+    for (let i = 0; i < 20; i++) b += `- [[b${i}]] co-anchor\n- [[b${i}]] again\n`;
+    b += '- [[split anchor]] once\n';
+    write(path.join(dir, 'topic-b.md'), b);
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: true }), now });
+    assert.strictEqual(res.ok, false, 'setup sanity: the same genuine top-anchor miss as BREAK-3h');
+    assert.ok(res.rolledBack, runRetierReport(res));
+    assert.ok(Array.isArray(res.flagged), `a rollback-failure return must still expose flagged (even if empty) — the object shape WAVE-16 already granted the success path; got ${JSON.stringify(res.flagged)}`);
   } finally { clean(home, proj); }
 });
 
@@ -1171,4 +1362,251 @@ test('BREAK-3g Vector 2 end-to-end (index OFF): a sole-home codespan anchor `api
     assert.ok(fs.readFileSync(path.join(dir, 'orphan.md'), 'utf8').includes('`apiz`'), '`apiz` stays reachable in the live tree');
     assert.ok(res.kept.some((k) => k.path.endsWith('orphan.md')), 'the keep is recorded');
   } finally { clean(home, proj); }
+});
+
+// CWK-120 row 2 (CodeRabbit, adjudicated): `JSON.parse` enforces no shape, and rollbackFromSnapshot is the LAST resort of a
+// failed post-commit probe -- an exception escaping it means the rollback never completes and the caller never learns.
+test('CWK-120 row 2: a manifest that is not an ARRAY reads as unreadable (-1), never a thrown TypeError', () => {
+  const { home, proj } = sandbox();
+  try {
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir, { recursive: true });
+    for (const body of ['{}', 'null', '42', '"x"', 'true', '{"snap":"f0","original":"x"}']) {
+      fs.writeFileSync(path.join(snapDir, 'manifest.json'), body);
+      assert.strictEqual(rollbackFromSnapshot(snapDir, [], [proj]), -1, `manifest ${body}`);
+    }
+  } finally { clean(home, proj); }
+});
+
+test('CWK-120 row 2: a malformed ENTRY is one failed restore and the REST of the manifest is still restored (fail closed, keep going)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir, { recursive: true });
+    const good = path.join(proj, 'a.md');
+    write(good, 'CHANGED-AFTER-COMMIT');
+    fs.writeFileSync(path.join(snapDir, 'f0'), 'PRISTINE-A');
+    const manifest = [
+      null, 7, {}, { snap: 'f0' }, { original: good }, { snap: 5, original: good }, { snap: 'f0', original: 5 },
+      { snap: 'f0' + String.fromCharCode(0) + 'x', original: good }, // a NUL in a path: path arithmetic that throws
+      { snap: 'f0', original: good }, // the one well-formed entry, AFTER the malformed ones
+    ];
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify(manifest));
+    const failed = rollbackFromSnapshot(snapDir, [], [proj]);
+    assert.strictEqual(failed, manifest.length - 1, 'every malformed entry is counted as a failed restore');
+    assert.strictEqual(fs.readFileSync(good, 'utf8'), 'PRISTINE-A', 'the well-formed entry after the malformed ones was still restored');
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// fire 119 (18a): THE LOCK FENCE on RE-TIER. Its global lock can be taken over once it is LOCK_STALE_MS old; before each
+// write the run re-reads it and a robbed run stops with no clean-up and no rollback, keeping every archive copy it wrote.
+// The thefts below are what a second CoalWash run does: the held lock's mtime backdated past the stale window, then a real
+// acquireLock. The applyPlan legs use apply.mjs's onFence seam (RE-TIER itself ships none) and the blessed gzip injectable.
+// ---------------------------------------------------------------------------
+function treeOf(roots) {
+  const out = {};
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { out[p] = 'dir'; walk(p); } else out[p] = fs.readFileSync(p).toString('base64');
+    }
+  };
+  for (const r of roots) if (fs.existsSync(r)) walk(r);
+  return out;
+}
+function stealAt(lockPath) {
+  const old = new Date(Date.now() - LOCK_STALE_MS - 60000);
+  fs.utimesSync(lockPath, old, old);
+  const thief = acquireLock(lockPath, { sessionId: 'thief' });
+  assert.ok(thief.acquired && thief.stale, `the thief took the stale lock over (${JSON.stringify(thief)})`);
+  return thief;
+}
+const gzOf = (home) => { const d = path.join(estateCfg(home).archiveDir); const out = []; const walk = (x) => { if (!fs.existsSync(x)) return; for (const e of fs.readdirSync(x, { withFileTypes: true })) { const p = path.join(x, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith('.gz')) out.push(p); } }; walk(d); return out; };
+// Runs a RE-TIER pass with apply.mjs's onFence seam stealing `which` lock at the fence named `where`.
+function retierRobbedInApply(home, proj, where, lockPath) {
+  let thief = null;
+  applyHooks.onFence = (w) => { if (w === where && !thief) thief = stealAt(lockPath); };
+  try { return { res: runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), now: Date.now() }), thief }; } finally { applyHooks.onFence = null; }
+}
+
+test('fire 119: a RE-TIER run robbed of its global lock before an archive copy stops there: nothing more is written, the memory store is untouched', () => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = seedMainStore(home, proj);
+    let shot = null;
+    let thief = null;
+    const gzip = (buf) => {
+      if (!shot) { thief = stealAt(globalLockPath(home)); write(path.join(home, 'thief.txt'), 'THIEF'); shot = treeOf([home, proj]); }
+      return zlib.gzipSync(buf);
+    };
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), gzip });
+    assert.ok(shot, 'the theft happened inside the run');
+    assert.strictEqual(res.ok, false, runRetierReport(res));
+    assert.strictEqual(res.robbed, 'global');
+    assert.strictEqual(res.lockLost, 'stolen', 'a foreign token is a theft (fire 122)');
+    assert.ok(res.error.includes('lock stolen') && res.error.includes('stopped before the archive copy of') && res.error.includes('nothing in the memory store was touched'), res.error);
+    assert.deepStrictEqual(treeOf([home, proj]), shot, 'the robbed run wrote nothing after the theft');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), true, 'the topic stays');
+    assert.strictEqual(thief.owns(), true, 'the robbed run\'s release left the thief\'s lock in place');
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: a RE-TIER run robbed after its archive copies stops before the transaction, keeping the copies', () => {
+  const { home, proj } = sandbox();
+  const real = fs.writeFileSync;
+  try {
+    const dir = seedMainStore(home, proj);
+    let shot = null;
+    fs.writeFileSync = function patched(p, ...rest) {
+      const out = real.call(fs, p, ...rest);
+      if (!shot && String(p).endsWith('.gz')) { stealAt(globalLockPath(home)); shot = treeOf([home, proj]); }
+      return out;
+    };
+    let res;
+    try { res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) }); } finally { fs.writeFileSync = real; }
+    assert.ok(shot, 'the theft happened after an archive copy was written');
+    assert.strictEqual(res.robbed, 'global', runRetierReport(res));
+    assert.ok(res.error.includes('stopped before the transaction'), res.error);
+    assert.deepStrictEqual(treeOf([home, proj]), shot, 'nothing written or removed after the theft');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), true, 'the topic stays');
+    assert.strictEqual(gzOf(home).length, 1, 'its archive copy stays');
+  } finally { fs.writeFileSync = real; clean(home, proj); }
+});
+
+test('fire 119: when the transaction under RE-TIER is robbed after its deletes, RE-TIER keeps the archive copies (a deleted topic is never left without its copy)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = seedMainStore(home, proj);
+    const { res } = retierRobbedInApply(home, proj, 'the commit record', path.join(txDirFor(proj), '.coalwash.lock'));
+    assert.strictEqual(res.robbed, 'project', runRetierReport(res));
+    assert.ok(res.error.includes('stopped before the commit record') && res.error.includes('RE-TIER kept its 1 archive copy(ies)'), res.error);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), false, 'the delete had landed');
+    const gz = gzOf(home);
+    assert.strictEqual(gz.length, 1, 'its archive copy stays');
+    assert.ok(zlib.gunzipSync(fs.readFileSync(gz[0])).toString('utf8').startsWith('ZETA-ORIGINAL-BYTES'), 'and holds the deleted topic');
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: a RE-TIER run robbed of its global lock during the transaction stops before the dig-index rows (the topic stays restorable from the archive)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = seedMainStore(home, proj);
+    const { res } = retierRobbedInApply(home, proj, 'the Full-clean record', globalLockPath(home));
+    assert.strictEqual(res.robbed, 'global', runRetierReport(res));
+    assert.ok(res.error.includes('stopped before the dig-index rows'), res.error);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), false, 'the transaction committed');
+    assert.strictEqual(fs.existsSync(path.join(estateCfg(home).archiveDir, ESTATE_INDEX_NAME)), false, 'no dig-index row was appended');
+    assert.strictEqual(gzOf(home).length, 1, 'the archive copy stays');
+  } finally { clean(home, proj); }
+});
+
+test('fire 119: a RE-TIER run robbed of its global lock before a probe-miss rollback stops without rolling back', () => {
+  const { home, proj } = sandbox();
+  try {
+    // the BREAK-3h fixture: an anchor split across two demoted topics is a genuine probe miss
+    const dir = memDir(home, proj);
+    write(path.join(dir, 'MEMORY.md'), bigIndex());
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA referenced by the index.\n');
+    let a = '# topicA\n\n';
+    for (let i = 0; i < 20; i++) a += `- [[a${i}]] co-anchor\n- [[a${i}]] again\n`;
+    write(path.join(dir, 'topic-a.md'), a + '- [[split anchor]] here\n- [[split anchor]] again\n');
+    let b = '# topicB\n\n';
+    for (let i = 0; i < 20; i++) b += `- [[b${i}]] co-anchor\n- [[b${i}]] again\n`;
+    write(path.join(dir, 'topic-b.md'), b + '- [[split anchor]] once\n');
+    const { res } = retierRobbedInApply(home, proj, 'the Full-clean record', globalLockPath(home));
+    assert.strictEqual(res.robbed, 'global', runRetierReport(res));
+    assert.ok(res.error.includes('stopped before the rollback') && res.error.includes('probe missed'), res.error);
+    assert.ok(Array.isArray(res.anchorMisses) && res.anchorMisses.length > 0, 'the misses are still reported');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'topic-a.md')), false, 'no rollback ran');
+    assert.strictEqual(gzOf(home).length, 2, 'both archive copies stay');
+  } finally { clean(home, proj); }
+});
+
+// fire 122: another program holding the lock file open with a share mode that refuses reads makes its READ opens fail with
+// EBUSY; this does exactly that, n times once armed (the house's fs-patch seam, as the fire-119 legs use).
+function faultLockReads(lockPath, { n = Infinity } = {}) {
+  const real = fs.openSync;
+  const want = path.resolve(lockPath);
+  const f = { armed: false, n, hits: 0 };
+  fs.openSync = function patched(p, flags, ...rest) {
+    const isRead = typeof flags === 'number' && (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0;
+    if (f.armed && isRead && f.n > 0 && path.resolve(String(p)) === want) { f.n--; f.hits++; throw Object.assign(new Error(`EBUSY: resource busy or locked, open '${p}'`), { code: 'EBUSY' }); }
+    return real.call(fs, p, flags, ...rest);
+  };
+  f.restore = () => { fs.openSync = real; };
+  return f;
+}
+
+test('fire 122: a RE-TIER run whose global lock file stays unreadable stops with an honest refusal (no theft claimed) and names the lock it left', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  try {
+    const dir = seedMainStore(home, proj);
+    const gzip = (buf) => { fault.armed = true; return zlib.gzipSync(buf); };
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), gzip });
+    fault.restore();
+    assert.strictEqual(res.robbed, 'global', runRetierReport(res));
+    assert.strictEqual(res.lockLost, 'unreadable');
+    assert.ok(res.error.startsWith(`lock unreadable: this RE-TIER run could not read its own lock file ${globalLockPath(home)} for about 1 second(s) (EBUSY)`), res.error);
+    assert.ok(!res.error.includes('took over'), res.error);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), true, 'the topic stays');
+    assert.ok(res.lockLeft && res.lockLeft.includes('so it was left in place'), JSON.stringify(res));
+    assert.ok(runRetierReport(res).includes(`LOCK LEFT: ${res.lockLeft}`), runRetierReport(res));
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
+  } finally { fault.restore(); clean(home, proj); }
+});
+
+test('fire 123: an unexpected error inside a RE-TIER run still names a lock its release had to leave behind', () => {
+  const { home, proj } = sandbox();
+  const fault = faultLockReads(globalLockPath(home));
+  try {
+    seedMainStore(home, proj);
+    // the seam: the estate config throws on its first read, which happens inside the locked run, and from then on the
+    // global lock file cannot be read, so the release has to leave it
+    const estate = estateCfg(home);
+    Object.defineProperty(estate, 'compressAfterDays', { get() { fault.armed = true; throw new Error('simulated failure'); } });
+    let caught = null;
+    try { runRetier({ projectRoot: proj, home, retier: R, estate }); } catch (e) { caught = e; }
+    fault.restore();
+    assert.ok(caught, 'the error still leaves the run as a throw');
+    assert.ok(caught.lockLeft && caught.lockLeft.includes(`The lock file ${globalLockPath(home)} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), String(caught && caught.message));
+    assert.strictEqual(caught.message, `simulated failure. ${caught.lockLeft}`, 'the note is its own sentence (N125-2)');
+    assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
+  } finally { fault.restore(); clean(home, proj); }
+});
+
+test('N125-3: a failed RE-TIER run prints a lock its transaction left behind once, never again on a LOCK LEFT line', () => {
+  const { home, proj } = sandbox();
+  const txLock = path.join(txDirFor(proj), '.coalwash.lock');
+  const fault = faultLockReads(txLock);
+  try {
+    seedMainStore(home, proj);
+    applyHooks.onFence = (w) => { if (w === 'the commit record') fault.armed = true; };
+    let res;
+    try { res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) }); } finally { applyHooks.onFence = null; fault.restore(); }
+    assert.strictEqual(res.lockLost, 'unreadable', runRetierReport(res));
+    assert.ok(res.lockLeft && res.lockLeft.includes(txLock), JSON.stringify(res));
+    const report = runRetierReport(res);
+    assert.strictEqual(report.split(res.lockLeft).length - 1, 1, `the note is printed once (${report})`);
+    assert.ok(!report.includes('LOCK LEFT:'), report);
+  } finally { applyHooks.onFence = null; fault.restore(); clean(home, proj); }
+});
+
+test('N125-3: when the transaction underneath and the RE-TIER run both leave a lock, the result names both and the report prints each once', () => {
+  const { home, proj } = sandbox();
+  const txLock = path.join(txDirFor(proj), '.coalwash.lock');
+  const faultTx = faultLockReads(txLock);
+  const faultGlobal = faultLockReads(globalLockPath(home));
+  try {
+    seedMainStore(home, proj);
+    applyHooks.onFence = (w) => { if (w === 'the commit record') { faultTx.armed = true; faultGlobal.armed = true; } };
+    let res;
+    try { res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) }); } finally { applyHooks.onFence = null; faultGlobal.restore(); faultTx.restore(); }
+    assert.ok(res.lockLeft && res.lockLeft.includes(txLock) && res.lockLeft.includes(globalLockPath(home)), JSON.stringify(res));
+    const report = runRetierReport(res);
+    for (const lock of [txLock, globalLockPath(home)]) {
+      assert.strictEqual(report.split(`The lock file ${lock} `).length - 1, 1, `${lock} is named once (${report})`);
+    }
+  } finally { applyHooks.onFence = null; faultGlobal.restore(); faultTx.restore(); clean(home, proj); }
 });

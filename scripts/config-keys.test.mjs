@@ -282,3 +282,31 @@ test('L3 fires only in a config CONTEXT, not in arbitrary prose', () => {
   assert.deepStrictEqual([...configProseKeys('## Configure\n\n## Other\n\nSet ' + bt('someFunction') + '.')], [],
     'the config section must END at the next heading');
 });
+
+// CWK-120 row 10: the section ends at the next heading of ANY ATX level, and a heading-shaped line inside a
+// fenced block is not a heading. Each case below is red against a different wrong shape of the locator.
+const FENCE = '`'.repeat(3);
+const CFG = '## Configure\n\nSet ' + bt('coalwashMode') + '.\n\n';
+test('CWK-120 row 10: an H1, H5, H6 or an empty ATX heading ends the config section, not only H2-H4', () => {
+  for (const h of ['# Other', '##### Other', '###### Other', '#']) {
+    assert.deepStrictEqual([...configProseKeys(CFG + h + '\n\nSet ' + bt('someFunction') + '.')], ['coalwashMode'], 'section must end at: ' + h);
+  }
+});
+
+test('CWK-120 row 10: a `# comment` inside a fenced block does NOT end the config section (the naive H1-H6 shape does)', () => {
+  const text = '## Configure\n\n' + FENCE + 'sh\n# a shell comment\n' + FENCE + '\n\nSet ' + bt('coalwashMode') + '.\n';
+  assert.deepStrictEqual([...configProseKeys(text)], ['coalwashMode'], 'the claim after the snippet is still inside the section');
+});
+
+test('CWK-120 row 10: a heading-shaped line inside a fence does not START a config section either', () => {
+  const text = '## Usage\n\n' + FENCE + 'md\n# Configure\n' + FENCE + '\n\nSet ' + bt('someFunction') + '.\n';
+  assert.deepStrictEqual([...configProseKeys(text)], []);
+});
+
+test('CWK-120 row 10: a longer outer fence is not closed by a shorter inner one, and a tilde fence is its own kind', () => {
+  const outer = '`'.repeat(4);
+  const nested = '## Configure\n\n' + outer + 'md\n' + FENCE + '\n# not a heading\n' + FENCE + '\n' + outer + '\n\nSet ' + bt('coalwashMode') + '.\n';
+  assert.deepStrictEqual([...configProseKeys(nested)], ['coalwashMode'], 'the inner three-backtick line must not close the four-backtick fence');
+  const tilde = '## Configure\n\n~~~\n' + FENCE + '\n# not a heading\n~~~\n\nSet ' + bt('coalwashMode') + '.\n';
+  assert.deepStrictEqual([...configProseKeys(tilde)], ['coalwashMode'], 'a backtick line does not close a tilde fence');
+});

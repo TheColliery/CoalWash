@@ -49,8 +49,9 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
 import { tokensEst } from './caliper.mjs';
+import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
-import { applyPlan, acquireLock, globalLockPath, isPinned } from './apply.mjs';
+import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 
@@ -159,8 +160,11 @@ export function assertTreatmentAllowed(type, treatment) {
 // store collection (main memory store + agent-memory stores)
 // ---------------------------------------------------------------------------
 
-function readOrNull(p) {
-  try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
+function readOrNull(p, storeDir) {
+  // CWK-137: bounded and kind-gated -- a store under <project>/.claude/agent-memory is
+  // repo-derived. E2-4: contained to the store's own physical directory ITSELF, so an index
+  // or topic planted as a link that resolves anywhere else reads as unreadable.
+  return readRepoFileBounded(p, storeDir, MAX_DOC_BYTES);
 }
 
 // A STORE = a directory holding a MEMORY.md index: the CC main memory dir
@@ -177,7 +181,7 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
     const phys = physicalOrNull(dir);
     if (!phys || !containedIn(phys, roots)) return; // fail-closed
     const indexPath = path.join(phys, 'MEMORY.md');
-    const indexText = readOrNull(indexPath);
+    const indexText = readOrNull(indexPath, phys);
     if (indexText === null) return; // no index = not a store
     const topics = [];
     const others = [];
@@ -206,7 +210,7 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
       // than only in the census-fix rationale above.
       if (d.name.toLowerCase() === 'memory.md') continue;
       if (path.extname(d.name).toLowerCase() === '.md') {
-        const text = readOrNull(p);
+        const text = readOrNull(p, phys);
         if (text === null) continue;
         let st = null;
         try { st = fs.statSync(p); } catch { continue; }
@@ -305,14 +309,96 @@ export function planIndexDemotion(indexText, env) {
 // here is the SAME direction the module already commits to below ("a false
 // 'referenced' keeps the file in place — the safe fail direction"); this is
 // that same asymmetry applied to case instead of to a coincidental substring.
-function countOccurrences(hay, needle) {
-  if (!needle) return 0;
-  const h = hay.toLowerCase();
-  const n2 = needle.toLowerCase();
+//
+// grad9 F4 [HIGH, content-loss by displacement]: case-folding closed the
+// CASE axis but not the PUNCTUATION one. `[[Topic Name]]` (a real wikilink,
+// spaces) has ZERO substring overlap with a topic file's own slugified
+// basename/stem `topic-name.md`/`topic-name` (hyphens) — a genuinely
+// REFERENCED topic reads as unreferenced and gets archived out of the live
+// tree, while the referring file still literally contains the wikilink (the
+// top-anchor safety net checks that a token still resolves SOMEWHERE, and
+// the wikilink text itself never moved — it just points at a file that is
+// no longer there). Fix: when the exact case-folded match finds nothing, ALSO
+// try a DELIMITER-normalized match (hyphens/underscores/whitespace runs all
+// folded to a single space, on BOTH sides). This only ever WIDENS what
+// counts as "referenced" — the same safe-fail direction this function's own
+// header already commits to; a false "referenced" keeps the file in place,
+// it never manufactures a false "unreferenced".
+const DELIM_RE = /[-_\s]+/g;
+const normDelim = (s) => s.replace(DELIM_RE, ' ');
+function countRuns(h, n2) {
   let n = 0;
   let i = h.indexOf(n2);
   while (i !== -1) { n++; i = h.indexOf(n2, i + n2.length); }
   return n;
+}
+// grad10 F6 [MEDIUM, opposite-polarity — introduced by grad9's own F4 fix]:
+// the delimiter fold above was scoped to the WHOLE corpus. A stem that
+// happens to spell out an ordinary run of English words — `the-plan` ->
+// `the plan` — then matches ANY sentence containing those two words in
+// sequence, not because anything references the file, but because the fold
+// erased the one signal (the hyphen) that told a real compound apart from
+// plain prose. Driven through the real applyPlan: `the-plan.md`, referenced
+// by nobody, survived a demotion pass it should have failed.
+//
+// The genuine case the fold exists for (grad9 F4) is syntactically marked: a
+// WIKILINK written with spaces, `[[Topic Name]]`, against a filename written
+// with hyphens, `topic-name.md`. So the delimiter-normalized leg is scoped to
+// wikilink-bracketed spans of the corpus ONLY — the exact (un-normalized)
+// leg still searches the whole corpus, unchanged, since a literal hyphenated
+// stem appearing in ordinary prose was never the source of this bug. A
+// markdown link target (`(topic-name.md)`) needs no bracket-scoping either:
+// its hyphenated form already matches the exact leg verbatim.
+const WIKILINK_RE = /\[\[([^[\]]*)\]\]/g;
+function wikilinkSpans(hay) {
+  let out = '';
+  let m;
+  WIKILINK_RE.lastIndex = 0;
+  while ((m = WIKILINK_RE.exec(hay))) out += `${m[1]}\n`;
+  return out;
+}
+function countOccurrences(hay, needle, delimHay = hay) {
+  if (!needle) return 0;
+  const h = hay.toLowerCase();
+  const n2 = needle.toLowerCase();
+  // BOTH counted, never short-circuited: a topic's own text commonly
+  // contains its own EXACT hyphenated stem (e.g. a self-titled header),
+  // which would make an exact-count>0 early-return miss a delimiter-variant
+  // reference living ELSEWHERE (the wikilink in an index line) — the two
+  // counts are of DIFFERENT occurrences and neither substitutes for the
+  // other. max(), not sum(): still monotone-widening (never below the old
+  // exact-only count), never double-counts one real occurrence twice.
+  // `delimHay` is the NARROWER haystack the delimiter-normalized leg reads
+  // from — bracket-scoped spans for the corpus, or `hay` itself (unchanged
+  // old behavior) when the caller has no narrower span to offer.
+  return Math.max(countRuns(h, n2), countRuns(normDelim(delimHay.toLowerCase()), normDelim(n2)));
+}
+
+// grad10 F7a [MEDIUM, content-loss] percent-encoding: a markdown link target
+// written percent-encoded (`topic%2Dname.md`) has zero substring overlap
+// with the topic's own raw basename ("topic-name.md") — `%2D` decodes to
+// the exact hyphen the filename already contains. A plain `%XX` -> one-byte
+// substitution (never `decodeURIComponent`, which THROWS on a malformed or
+// partial sequence — ordinary prose is full of bare `%` signs, e.g. "50% done",
+// that are not escapes at all, and a throw here would crash the whole census
+// on innocuous text) closes it: decode the corpus once, then a plain exact
+// substring search — no delimiter fold needed on this leg, since decoding
+// already produces the real character the exact leg was always looking for.
+function percentDecodeAscii(s) {
+  return s.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+// grad10 F7b [MEDIUM, content-loss, directionally asymmetric]: a PLURAL
+// filename referenced only in SINGULAR prose ("guidelines.md" vs "the
+// guideline") has zero substring overlap in that direction. The reverse (a
+// singular filename referenced by plural prose) is already caught for free
+// by ordinary substring containment — "guideline" IS a substring of
+// "guidelines". Trying the stem with ONE trailing "s" stripped, as an
+// additional candidate, closes the missing direction without a stemming
+// library — deliberately narrow (the one shape reported), and the safe
+// direction: it only ever widens what counts as referenced.
+function englishSingular(stem) {
+  return stem.length > 1 && stem.endsWith('s') ? stem.slice(0, -1) : null;
 }
 
 // Hop-2: topic files UNREFERENCED anywhere else in the merged tree (neither
@@ -323,13 +409,24 @@ function countOccurrences(hay, needle) {
 // resolution if FP-keeps ever matter.
 export function unreferencedTopics(store, allTextConcat) {
   const out = [];
+  const wikilinkHay = wikilinkSpans(allTextConcat); // grad10 F6: computed once, not per topic
+  const decodedHay = percentDecodeAscii(allTextConcat).toLowerCase(); // grad10 F7a: computed once, not per topic
   for (const t of store.topics) {
     if (t.basename === OVERFLOW_BASENAME) continue; // the ladder's own tier-2 rung — never cascades itself
     const stem = t.basename.replace(/\.md$/i, '');
-    const ownBase = countOccurrences(t.text, t.basename);
+    const ownBase = countOccurrences(t.text, t.basename); // own text: unscoped, unaffected by F6/F7
     const ownStem = countOccurrences(t.text, stem);
-    const allBase = countOccurrences(allTextConcat, t.basename);
-    const allStem = countOccurrences(allTextConcat, stem);
+    let allBase = countOccurrences(allTextConcat, t.basename, wikilinkHay); // grad10 F6: delimiter leg scoped to [[...]] spans
+    let allStem = countOccurrences(allTextConcat, stem, wikilinkHay);
+    // grad10 F7a: also try the percent-decoded corpus, exact-only (no delimiter
+    // fold — decoding already produced the real hyphen/underscore/space).
+    allBase = Math.max(allBase, countRuns(decodedHay, t.basename.toLowerCase()));
+    allStem = Math.max(allStem, countRuns(decodedHay, stem.toLowerCase()));
+    // grad10 F7b: also try the stem's English singular as an additional
+    // reference candidate (basename is skipped — the ".md" extension already
+    // breaks the "ends in s" test, so it never applies there).
+    const singular = englishSingular(stem);
+    if (singular) allStem = Math.max(allStem, countOccurrences(allTextConcat, singular, wikilinkHay));
     if (allBase > ownBase || allStem > ownStem) continue; // referenced elsewhere (case-insensitive) -> stays
     out.push(t);
   }
@@ -667,19 +764,29 @@ export function moveVerify({ origIndex, indexNew, overflowText, movedLines }) {
 // safe direction: a failed rollback beats a write outside the stores).
 export function rollbackFromSnapshot(snapshotDir, createdPaths = [], trustedRoots = []) {
   let manifest;
-  try { manifest = JSON.parse(fs.readFileSync(path.join(snapshotDir, 'manifest.json'), 'utf8')); } catch { return -1; }
+  // R46-2: bounded and contained to the folder the snapshot sits in, like recoverDangling's twin read (a link out reads as none).
+  try { manifest = JSON.parse(readRepoFileBounded(path.join(snapshotDir, 'manifest.json'), path.dirname(snapshotDir), MAX_DOC_BYTES) ?? ''); } catch { return -1; }
+  // CWK-120 row 2: `JSON.parse` enforces no shape, and this is the LAST resort of a failed post-commit probe -- an
+  // exception escaping here means the rollback never completes. Reject a non-array at the read boundary (the same -1
+  // sentinel as an unreadable manifest; anchor-diff's manifest reader already does), and treat an entry that is not
+  // { snap: string, original: string }, or whose path arithmetic throws, as ONE failed restore that leaves the rest of
+  // the manifest to be restored: fail closed and keep going, never abort halfway.
+  if (!Array.isArray(manifest)) return -1;
   const snapPhys = physicalOrNull(snapshotDir);
   const roots = (Array.isArray(trustedRoots) ? trustedRoots : []).map((r) => physicalOrNull(r)).filter(Boolean);
   let failed = 0;
   for (const m of manifest) {
-    const src = path.join(snapshotDir, m.snap);
-    const srcPhys = physicalOrNull(src);
-    const dstPhys = physicalForCreate(m.original);
-    if (!snapPhys || !srcPhys || !containedIn(srcPhys, [snapPhys]) || !dstPhys || !containedIn(dstPhys, roots)) { failed++; continue; }
-    // Write to dstPhys — the form that was VALIDATED — not the raw `m.original`.
-    // Same check-one-spelling-act-on-another mismatch as apply.mjs's restore twin;
-    // fixed in the same commit so the two do not drift.
-    try { fs.copyFileSync(src, dstPhys); } catch { failed++; }
+    if (!m || typeof m.snap !== 'string' || typeof m.original !== 'string') { failed++; continue; }
+    try {
+      const src = path.join(snapshotDir, m.snap);
+      const srcPhys = physicalOrNull(src);
+      const dstPhys = physicalForCreate(m.original);
+      if (!snapPhys || !srcPhys || !containedIn(srcPhys, [snapPhys]) || !dstPhys || !containedIn(dstPhys, roots)) { failed++; continue; }
+      // Write to dstPhys — the form that was VALIDATED — not the raw `m.original`.
+      // Same check-one-spelling-act-on-another mismatch as apply.mjs's restore twin;
+      // fixed in the same commit so the two do not drift.
+      fs.copyFileSync(src, dstPhys);
+    } catch { failed++; }
   }
   for (const p of createdPaths) {
     const pp = physicalForCreate(p);
@@ -720,8 +827,25 @@ export function runRetier({
   if (!lock.acquired) return { ok: false, deferred: true, error: lock.reason };
   const gzWritten = [];
   const rmGz = () => { for (const g of gzWritten) { try { fs.rmSync(g, { force: true }); } catch {} } };
-  try {
+  // THE FENCE (fire 119, 18a): this run's global lock can be taken over once it is LOCK_STALE_MS old. Before each write the
+  // run re-reads it, and a robbed run stops with no clean-up and no rollback (either could undo or overwrite what the new
+  // holder wrote since). The archive copies it already wrote stay, so a topic it deleted is never left without its copy.
+  // The writes INSIDE applyPlan are fenced by applyPlan's own project lock, which guards those files.
+  const kept = [];
+  // fire 122: only a foreign token is a theft; a lock file that stays unreadable through the retries stops the run with its
+  // own message (lockLostHead). Both keep `robbed`; `lockLost` says which.
+  const stolen = (where, state) => {
+    const s = lock.state();
+    if (s.state === 'own') return null;
+    const head = lockLostHead(s, { run: 'RE-TIER run', file: globalLockPath(home), where, after: 'with no clean-up and no rollback' });
+    return { ok: false, robbed: 'global', lockLost: s.state === 'unreadable' ? 'unreadable' : 'stolen', env, kept, error: `${head} ${state}` };
+  };
+  let out;
+  let rel;
+  let thrown = null;
+  try { out = (() => { // fire 122: the body's returns land in `out`, so the release below can be reported on every result
     const archiveDir = resolveArchiveDir(estate, home);
+    const untouched = () => `nothing in the memory store was touched; the ${gzWritten.length} archive copy(ies) already written stay in ${archiveDir}`;
     // Write-side containment root (the SAME guard as archiveSession — loss
     // class #57 / GHSA-2hvf-7c8p-28fx): resolve the archive root physically
     // ONCE; every hop-2 dest below must land inside it. Unresolvable root =
@@ -739,7 +863,6 @@ export function runRetier({
     const roots = [];
     const digRows = [];
     const createdPaths = [];
-    const kept = [];
     let seq = 0;
 
     // #3 STRANDING GUARD: the archived-topic dig rows persist ONLY when
@@ -806,8 +929,11 @@ export function runRetier({
         // copy-verify (the estate protocol): write .gz -> gunzip back -> byte-compare.
         // A failed verify keeps the original in place (that topic is skipped).
         try {
+          const gz = gzip(buf);
+          const robbedGz = stolen(`the archive copy of ${t.path}`, untouched());
+          if (robbedGz) return robbedGz;
           fs.mkdirSync(path.dirname(dest), { recursive: true });
-          fs.writeFileSync(dest, gzip(buf));
+          fs.writeFileSync(dest, gz);
           gzWritten.push(dest);
           const back = zlib.gunzipSync(fs.readFileSync(dest));
           if (!back.equals(buf)) throw new Error('verify mismatch');
@@ -869,8 +995,16 @@ export function runRetier({
     // projectRoot rides opts (the CALLER-TRUSTED anchor applyPlan uses for
     // containment) — runRetier's projectRoot is itself cwd-derived (cli.mjs passes
     // findProjectRoot(cwd)); the plan field is ignored by applyPlan.
+    const robbedTx = stolen('the transaction', untouched());
+    if (robbedTx) return robbedTx;
     const r = applyPlan({ projectRoot, roots, actions, sessionId, origin: 'wizard-cut', approvedDrops }, { home, now, projectRoot });
-    if (!r.ok) { rmGz(); return { ...r, env, kept }; }
+    // A robbed transaction may already have deleted topics, so their archive copies stay (removing them would leave no copy).
+    if (!r.ok) {
+      if (r.robbed) return { ...r, env, kept, error: `${r.error} RE-TIER kept its ${gzWritten.length} archive copy(ies) in ${archiveDir}.` };
+      rmGz();
+      return { ...r, env, kept };
+    }
+    const afterCommit = (what) => `the transaction had committed and ${what}; the snapshot ${r.snapshotDir} holds every original and the ${gzWritten.length} archive copy(ies) stay in ${archiveDir} (no rollback ran: compare the store against the snapshot by hand)`;
 
     // THE CLOSING CHECK — top-anchor survival: the N most-referenced pre-pass
     // anchors must still resolve somewhere in the post-pass tree (hot index,
@@ -897,18 +1031,27 @@ export function runRetier({
     try {
       misses = probeAnchors(anchors, postTexts);
     } catch (e) {
+      const robbedThrow = stolen('the rollback', afterCommit(`the top-anchor survival probe threw (${e.message})`));
+      if (robbedThrow) return robbedThrow;
       const failed = rollbackFromSnapshot(r.snapshotDir, createdPaths, roots);
       rmGz();
       return {
         ok: false,
         rolledBack: failed === 0 ? true : 'partial',
         error: `top-anchor survival probe THREW (${e.message}) — run rolled back${failed ? ` (${failed} restore failure(s) — check snapshot ${r.snapshotDir})` : ''}`,
+        // grad7 ruling Root D: applyPlan's own per-file refusals (e.g. a
+        // bin-stash failure) describe what happened during the now-rolled-
+        // back apply — real diagnostic context, not something the rollback
+        // erases. Both rollback-failure returns below used to drop it.
+        flagged: r.flagged || [],
       };
     }
     if (misses.length) {
       // `roots` = the resolved over-store dirs (already realpath-contained); the
       // snapshot's originals + this run's created overflow files all live inside
       // them, so they pass the H1 containment while a tampered manifest can't.
+      const robbedMiss = stolen('the rollback', afterCommit(`the top-anchor survival probe missed ${misses.length} of ${anchors.length} anchor(s)`));
+      if (robbedMiss) return { ...robbedMiss, anchorMisses: misses };
       const failed = rollbackFromSnapshot(r.snapshotDir, createdPaths, roots);
       rmGz();
       return {
@@ -916,12 +1059,17 @@ export function runRetier({
         rolledBack: failed === 0 ? true : 'partial',
         anchorMisses: misses,
         error: `top-anchor survival probe FAILED (${misses.length} of ${anchors.length} anchors unresolved) — run rolled back${failed ? ` (${failed} restore failure(s) — check snapshot ${r.snapshotDir})` : ''}`,
+        flagged: r.flagged || [], // grad7 ruling Root D — see the sibling throw-path return above
       };
     }
 
     // dig rows AFTER deletes + probe (row-follows-bytes: a crash here only
     // under-indexes; restore scans the archive itself, never the index).
     let rows = 0;
+    if (indexEnabled && digRows.length) {
+      const robbedRows = stolen('the dig-index rows', `the transaction committed and the top-anchor survival probe passed; the ${gzWritten.length} archive copy(ies) stay in ${archiveDir}, but their ${digRows.length} dig-index row(s) were not appended (estate-restore reads the archive itself, so every demoted topic stays restorable)`);
+      if (robbedRows) return robbedRows;
+    }
     if (indexEnabled) for (const row of digRows) { if (appendIndexRow(archiveDir, row)) rows++; }
 
     return {
@@ -939,6 +1087,18 @@ export function runRetier({
       // main agent-driven path already sees it (method.md prints the whole
       // result JSON). Threaded through so runRetierReport can render it.
       flagged: r.flagged || [],
+      // grad7 ruling Root D: three SIBLINGS of `flagged` on applyPlan's own
+      // return object (apply.mjs:1235) were dropped the exact same way —
+      // the WAVE-16 fix threaded ONE field off a multi-field object and
+      // never checked whether the object had others. `deadLinks`/
+      // `deadLinkLine` mirror receipt.mjs's own field (the main apply path
+      // already renders `deadLinkLine`); `binConflicts` is threaded here
+      // for data completeness even though NO consumer in this codebase
+      // renders it today (receipt.mjs doesn't either — a wider, separate
+      // gap, reported not fixed here; see the room MEMORY.md entry).
+      deadLinks: r.deadLinks || [],
+      deadLinkLine: r.deadLinkLine || null,
+      binConflicts: r.binConflicts || [],
       stores: over.map(({ st, p }) => ({
         label: st.label,
         movedLines: p.hop1.movedLines.length,
@@ -948,16 +1108,37 @@ export function runRetier({
         shortfall: p.hop1.shortfall,
       })),
     };
-  } finally {
-    lock.release();
+  })(); } catch (e) { thrown = e; } finally {
+    rel = lock.release();
   }
+  const lockLeft = lockLeftNote(globalLockPath(home), rel, LOCK_STALE_MS);
+  if (thrown) throw withLockLeft(thrown, lockLeft); // fire 123: an unexpected error still names a lock left behind
+  // N125-3: a lock the transaction underneath left rides in out.lockLeft already; this run's own joins it, never replaces it
+  return lockLeft ? { ...out, lockLeft: out && out.lockLeft ? `${out.lockLeft} ${lockLeft}` : lockLeft } : out;
 }
 
+// fire 122: a lock the release had to leave behind is named under every report shape.
 export function runRetierReport(res) {
+  const body = retierReportBody(res);
+  // N125-3: print each note once. A failed result's error already carries the notes of the transaction underneath, so the
+  // LOCK LEFT line names only those it does not. Every note opens "The lock file " (lockLeftNote), the split point.
+  const notes = res && res.lockLeft ? String(res.lockLeft).split(/ (?=The lock file )/).filter((n) => !String(res.error || '').includes(n)) : [];
+  return notes.length ? `${body}\n  LOCK LEFT: ${notes.join(' ')}` : body;
+}
+
+function retierReportBody(res) {
   if (!res) return '[CoalWash] RE-TIER: no result';
   if (res.refused) return `[CoalWash] RE-TIER refused: ${res.reason}`;
   if (res.deferred) return `[CoalWash] RE-TIER deferred: ${res.error || 'lock held'} — nothing touched`;
-  if (!res.ok) return `[CoalWash] RE-TIER failed: ${res.error}${res.rolledBack ? ` (rolled back: ${res.rolledBack})` : ''}`;
+  if (!res.ok) {
+    // grad7 ruling Root D: `flagged` describes the now-rolled-back apply's
+    // OWN per-file refusals (e.g. a bin-stash failure) — real diagnostic
+    // context for a failed run, not something the rollback should also
+    // erase from the operator's view.
+    const base = `[CoalWash] RE-TIER failed: ${res.error}${res.rolledBack ? ` (rolled back: ${res.rolledBack})` : ''}`;
+    const flaggedLines = (res.flagged || []).map((f) => `\n  FLAGGED ${f.path}: ${f.reason}`).join('');
+    return base + flaggedLines;
+  }
   const lines = [];
   const moved = res.stores.reduce((n, s) => n + s.movedLines, 0);
   const arch = res.stores.reduce((n, s) => n + s.topicsArchived, 0);
@@ -971,5 +1152,10 @@ export function runRetierReport(res) {
   // same reason KEPT is rendered above (a per-file exclusion the operator
   // needs to see), never silently dropped now that it is threaded through.
   for (const f of res.flagged || []) lines.push(`  FLAGGED ${f.path}: ${f.reason}`);
+  // grad7 ruling Root D: deadLinkLine is applyPlan's own one-line advisory
+  // (already formatted — see apply.mjs's deadLinkLine), mirroring exactly
+  // how receipt.mjs already renders it on the main apply path. It was
+  // threaded onto the return object above but never reached this renderer.
+  if (res.deadLinkLine) lines.push(`  ${res.deadLinkLine}`);
   return lines.join('\n');
 }
