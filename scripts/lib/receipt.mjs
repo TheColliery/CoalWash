@@ -54,6 +54,23 @@ export function oneLineResult(opts) {
   return `[CoalWash] cut ~${ktok(raw)} tok (−${pct}%)`;
 }
 
+// CWK2-062: the gate's PASS line. It states what was checked, never "facts
+// lost": the gate reads STRUCTURED tokens only (fidelity-gate.mjs), so a PASS
+// proves no structured drop beyond the plan's own approvedDrops, nothing about
+// prose. A drop value is caller data (a link target, a file name): CR/LF
+// collapse to a space and a pipe is escaped, so one value cannot break the
+// receipt into extra lines or a forged gate line (security.md, log injection).
+const FIDELITY_LISTED_MAX = 5;
+function receiptText(value) {
+  return String(value).replace(/[\r\n\u2028\u2029]+/g, ' ').replace(/\|/g, '\\|');
+}
+function fidelityPassLine(approved) {
+  if (approved.length === 0) return 'fidelity gate: PASS (no structured-token drop: links/dates/versions/frontmatter checked)';
+  const shown = approved.slice(0, FIDELITY_LISTED_MAX).map(receiptText).join(', ');
+  const more = approved.length > FIDELITY_LISTED_MAX ? ` +${approved.length - FIDELITY_LISTED_MAX} more` : '';
+  return `fidelity gate: PASS (no structured-token drop beyond the ${approved.length} the plan approved: ${shown}${more})`;
+}
+
 // r = {
 //   when?: ISO date string,
 //   beforeBytes, afterBytes,                    — whole class-B store (deterministic)
@@ -61,6 +78,11 @@ export function oneLineResult(opts) {
 //   oneTimeCostTokens?,                         — this run's spend (~est; 0 for a pure-mechanical Quick)
 //   removed, trimmed, kept, flaggedKept?,       — counts
 //   gatePass: bool, gateDrops?: number,
+//   approvedDrops?: string[],                   — CWK2-062: the plan's own "type:value"
+//     list (apply.mjs plan.approvedDrops). The PASS line names what the gate
+//     checked and, when this is non-empty, the count and the drops (at most
+//     FIDELITY_LISTED_MAX named, then "+N more"). The gate proves no STRUCTURED
+//     token dropped; it says nothing about prose facts, so no line claims it.
 //   breakEvenSessions?: number,
 //   dryRun?: bool,
 //   pendingUserKeeps?: number,                  — board #129: count of keeps.mjs's
@@ -88,7 +110,7 @@ export function buildReceipt(r) {
   lines.push(r.gatePass == null
     ? 'fidelity gate: unknown (fields not provided)'
     : r.gatePass
-      ? 'fidelity gate: PASS (0 facts lost — links/dates/versions/frontmatter all preserved)'
+      ? fidelityPassLine(Array.isArray(r.approvedDrops) ? r.approvedDrops : [])
       : `fidelity gate: FAIL — ${r.gateDrops || '?'} drop(s); the apply is BLOCKED until every drop is restored`);
   // wikilink-orphan advisory (apply.mjs deadLinkLine — one line, never a
   // block): present only when a deleted topic is still referenced.

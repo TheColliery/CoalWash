@@ -87,6 +87,10 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gitEnv } from './lib/git-env.mjs';
 
+// CWK2-062 C (N167-2): a git spawn needs a finite clock (testing.md; coding-style §Error Handling 6). A timed-out
+// ls-files reaches the FAIL branch below, never the 'git not found' line, which is ENOENT only.
+const GIT_SPAWN_TIMEOUT_MS = 60000;
+
 // CWK-162 (AI Deep Scan A4): every Markdown file this gate reads is contributed text (a PR can add any file at any path), and
 // it was read with a bare readFileSync: no kind gate (a link was followed, a device or FIFO was opened) and no byte bound.
 // readDocBounded refuses a symlink, a non-regular file and anything over MAX_DOC_BYTES BEFORE reading. R15 (CodeQL #51 js/file-system-race):
@@ -455,7 +459,7 @@ function main(argv) {
   let tracked = null;
   // CWK-133: no ambient GIT_* reaches this spawn. No ceiling: `root` is wherever the contributor stands, which may
   // be a subdirectory of the repository git has to find (scripts/lib/git-env.mjs, the `ceilingDir` paragraph).
-  const ls = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: gitEnv() });
+  const ls = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: gitEnv(), timeout: GIT_SPAWN_TIMEOUT_MS });
   if (ls.error && ls.error.code === 'ENOENT') {
     console.log('  --   git not found: targets are checked for existence only, not for being tracked');
   } else if (ls.error || ls.status !== 0) {

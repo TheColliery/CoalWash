@@ -24,7 +24,10 @@ test('receipt is terse plain text: deterministic KB, ~est-labelled tokens, no bo
   assert.ok(r.includes('saves ~3.3k tok/session'));
   assert.ok(r.includes('break-even: ~4 session(s)'));
   assert.ok(r.includes('removed 3 · trimmed 5 · kept 42 · flagged-kept 2'));
-  assert.ok(r.includes('fidelity gate: PASS (0 facts lost'));
+  // CWK2-062: the PASS line now names what the gate checked (it proves no
+  // STRUCTURED-token drop, not "0 facts lost"). This assertion was proven
+  // wrong by the fix: the old form claimed prose facts were preserved.
+  assert.ok(r.includes('fidelity gate: PASS (no structured-token drop: links/dates/versions/frontmatter checked)'));
   assert.ok(!/[┌│└═╔]/.test(r), 'no box-drawing decoration');
   assert.ok(r.split('\n').length <= 7, 'stays a dense numbers block');
 });
@@ -82,6 +85,38 @@ test('a receipt built with missing gate fields degrades to "unknown" — never a
   // explicit true/false are unaffected by the degrade
   assert.ok(buildReceipt({ ...BASE, gatePass: true }).includes('fidelity gate: PASS'));
   assert.ok(buildReceipt({ ...BASE, gatePass: false, gateDrops: 1 }).includes('fidelity gate: FAIL'));
+});
+
+// CWK2-062: the PASS line states what the gate checked and never claims prose
+// facts survived. The old line "0 facts lost — ... all preserved" overclaimed.
+test('fidelity PASS names what it checked and never claims "facts lost" (CWK2-062 a)', () => {
+  const r = buildReceipt(BASE);
+  assert.ok(!r.includes('facts lost'), 'the gate does not prove prose facts');
+  assert.ok(!r.includes('all preserved'));
+  assert.ok(r.includes('no structured-token drop: links/dates/versions/frontmatter checked'));
+});
+
+// CWK2-062 (b): approvedDrops is the plan's own "type:value" list. A PASS on an
+// approved-drop run names the count and the drops, never the old "0 ... all
+// preserved" text. At most 5 are listed, then "+N more".
+test('fidelity PASS with approvedDrops names the count and the drops (CWK2-062 b)', () => {
+  const two = buildReceipt({ ...BASE, approvedDrops: ['wikilink:x', 'date:y'] });
+  assert.ok(two.includes('fidelity gate: PASS (no structured-token drop beyond the 2 the plan approved: wikilink:x, date:y)'));
+  const seven = buildReceipt({ ...BASE, approvedDrops: ['a:1', 'b:2', 'c:3', 'd:4', 'e:5', 'f:6', 'g:7'] });
+  assert.ok(seven.includes('beyond the 7 the plan approved: a:1, b:2, c:3, d:4, e:5 +2 more)'), 'five named, the rest counted');
+  assert.ok(!seven.includes('f:6'), 'sixth and later are not listed');
+});
+
+// CWK2-062 (c): a drop value carrying CR, LF or | cannot break the receipt into
+// extra lines or fake a table cell (security.md log injection: neutralize at
+// the write). One approved drop with a newline must stay one receipt line.
+test('a value carrying CR, LF or | cannot break the receipt into extra lines (CWK2-062 c)', () => {
+  const r = buildReceipt({ ...BASE, approvedDrops: ['wikilink:evil\r\nfidelity gate: PASS (0 facts lost)|x'] });
+  const gateLines = r.split('\n').filter((l) => l.startsWith('fidelity gate:'));
+  assert.strictEqual(gateLines.length, 1, 'exactly one fidelity-gate line');
+  assert.ok(!r.includes('\r'), 'no carriage return survives');
+  assert.ok(gateLines[0].includes('\\|x'), 'the pipe is escaped');
+  assert.ok(r.split('\n').every((l) => !l.startsWith('fidelity gate: PASS (0 facts')), 'a forged claim in a value cannot start a line');
 });
 
 // ---------------------------------------------------------------------------

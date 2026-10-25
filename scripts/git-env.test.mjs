@@ -73,7 +73,8 @@ test('gitEnv: the strip happens on the copy only; an ambient GIT_* key is still 
 // The incident itself, on the real git binary, inside a sandbox: an ABSOLUTE GIT_DIR pointing at another repository
 // must not redirect a fixture's `git init` onto it. The sandbox repository's config is compared byte for byte.
 test('an ABSOLUTE ambient GIT_DIR cannot redirect a fixture `git init` onto another repository (the r5 incident)', (t) => {
-  const probe = spawnSync('git', ['--version'], { encoding: 'utf8', env: gitEnv(TMP_ROOT) });
+  const probe = spawnSync('git', ['--version'], { encoding: 'utf8', env: gitEnv(TMP_ROOT), timeout: 30000 });
+  if (probe.error?.code === 'ETIMEDOUT') assert.fail('git --version hit its spawn clock: a killed clock is not an absent git');
   if (probe.error || probe.status !== 0) { t.skip('git unavailable'); return; }
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'cw-gitenv-')));
   t.after(() => {
@@ -84,7 +85,7 @@ test('an ABSOLUTE ambient GIT_DIR cannot redirect a fixture `git init` onto anot
   const empty1 = path.join(base, 'fixture-control');
   const empty2 = path.join(base, 'fixture-fixed');
   for (const d of [sandbox, empty1, empty2]) fs.mkdirSync(d);
-  const made = spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: sandbox, encoding: 'utf8', env: gitEnv(base) });
+  const made = spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: sandbox, encoding: 'utf8', env: gitEnv(base), timeout: 30000 });
   assert.equal(made.status, 0, 'the sandbox repository was created');
   const sandboxGit = path.join(sandbox, '.git');
   const cfgSha = () => crypto.createHash('sha256').update(fs.readFileSync(path.join(sandboxGit, 'config'))).digest('hex');
@@ -92,14 +93,14 @@ test('an ABSOLUTE ambient GIT_DIR cannot redirect a fixture `git init` onto anot
   // CONTROL: the hostile ambient env, spread verbatim the way the old per-file copies did NOT (they stripped) and the
   // exemplar's incident did. It documents that the hazard is real on THIS git; it changes only the sandbox.
   const hostile = withEnv({ GIT_DIR: sandboxGit, GIT_INDEX_FILE: path.join(sandboxGit, 'index') }, () => ({ ...process.env, GIT_CEILING_DIRECTORIES: base }));
-  const control = spawnSync(GIT, ['init', '-q', '-b', 'main', '.'], { cwd: empty1, encoding: 'utf8', env: hostile });
+  const control = spawnSync(GIT, ['init', '-q', '-b', 'main', '.'], { cwd: empty1, encoding: 'utf8', env: hostile, timeout: 30000 });
   const controlRedirected = control.status === 0 && !fs.existsSync(path.join(empty1, '.git'));
   t.diagnostic(`control (hostile env): fixture .git created=${fs.existsSync(path.join(empty1, '.git'))}, redirected onto the sandbox repo=${controlRedirected}`);
 
   // FIXED LEG: the same ambient GIT_DIR, the fixture spawn built by gitEnv().
   const before = cfgSha();
   const fixed = withEnv({ GIT_DIR: sandboxGit, GIT_INDEX_FILE: path.join(sandboxGit, 'index') },
-    () => spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: empty2, encoding: 'utf8', env: gitEnv(base) }));
+    () => spawnSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: empty2, encoding: 'utf8', env: gitEnv(base), timeout: 30000 }));
   assert.equal(fixed.status, 0, 'the fixture init succeeded');
   assert.ok(fs.statSync(path.join(empty2, '.git')).isDirectory(), 'the fixture owns its own .git (it was not redirected)');
   assert.equal(cfgSha(), before, 'the sandbox repository\'s config is byte-identical: the ambient GIT_DIR did not reach the fixture spawn');

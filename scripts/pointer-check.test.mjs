@@ -323,6 +323,9 @@ function gitFixture(gitignoreText) {
     // #107's litter class on the one path nobody here runs (git is present on this box).
     // Cleaned HERE because this is the only scope that still has the name.
     removeTree(dir);
+    // CWK2-062 B (L167-1): a git init killed by its 30 s clock is a FAILURE, not an absent
+    // git. Throw before the null/skip path so the caller cannot t.skip it as 'git unavailable'.
+    if (r.error?.code === 'ETIMEDOUT') throw new Error('git init hit its spawn clock (ETIMEDOUT) in the fixture; the fixture dir was removed');
     return null; // git unavailable — caller SKIPs visibly
   }
   fs.writeFileSync(path.join(dir, '.gitignore'), gitignoreText);
@@ -484,6 +487,8 @@ test('CWK2-060 REAL GIT: a core.bare repository fed input past the pipe buffer n
   t.after(() => removeTree(dir));
   const env = gitEnv(path.dirname(dir));
   const init = spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8', env, timeout: 30000 });
+  // CWK2-062 B (L167-1): a timed-out init is a failure, never the 'git unavailable' skip below.
+  if (init.error?.code === 'ETIMEDOUT') assert.fail('git init hit its spawn clock (ETIMEDOUT) — a killed clock is not an absent git');
   if (init.error || init.status !== 0) return t.skip('git unavailable');
   const bare = spawnSync('git', ['config', 'core.bare', 'true'], { cwd: dir, encoding: 'utf8', env, timeout: 30000 });
   assert.strictEqual(bare.status, 0, 'precondition: the fixture repository is made bare');

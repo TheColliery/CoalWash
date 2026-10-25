@@ -224,12 +224,13 @@ test('checkLinks: an unreadable input file is a finding, never a skipped clean f
 // CWK-133: the scrub is scripts/lib/git-env.mjs's `gitEnv` (the whole GIT_* family out, the fixture's parent as the
 // ceiling), never a copy of it here.
 function cliRepo(t) {
-  const init = spawnSync('git', ['--version'], { encoding: 'utf8', env: gitEnv(os.tmpdir()) });
+  const init = spawnSync('git', ['--version'], { encoding: 'utf8', env: gitEnv(os.tmpdir()), timeout: 30000 });
+  if (init.error?.code === 'ETIMEDOUT') assert.fail('git --version hit its spawn clock: a killed clock is not an absent git');
   if (init.error || init.status !== 0) return null;
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-git-')));
   t.after(() => removeTree(root));
   const fixtureEnv = gitEnv(path.dirname(root));
-  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnv(path.dirname(root)) }); // 08d: the census reads gitEnv() at the spawn
+  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnv(path.dirname(root)), timeout: 30000 }); // 08d: the census reads gitEnv() at the spawn
   assert.strictEqual(git('init', '-q', '-b', 'main').status, 0, 'git init in the fixture');
   assert.ok(fs.statSync(path.join(root, '.git')).isDirectory(), 'FIXTURE RAIL: the fixture owns its .git');
   const run = (...files) => spawnSync(process.execPath, [ENGINE, ...files], { cwd: root, encoding: 'utf8', env: fixtureEnv });
@@ -269,7 +270,7 @@ test('CLI: an ambient absolute GIT_DIR cannot make the engine answer tracked-nes
   const { root, git } = fx;
   const decoy = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-linkcheck-decoy-')));
   t.after(() => removeTree(decoy));
-  const made = spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: gitEnv(path.dirname(decoy)) });
+  const made = spawnSync('git', ['-C', decoy, 'init', '-q', '-b', 'main'], { encoding: 'utf8', env: gitEnv(path.dirname(decoy)), timeout: 30000 });
   assert.strictEqual(made.status, 0, 'git init in the decoy');
   fs.writeFileSync(path.join(root, 'A.md'), '# Alpha\n\nsee [b](B.md)\n');
   fs.writeFileSync(path.join(root, 'B.md'), '# Beta\n');
