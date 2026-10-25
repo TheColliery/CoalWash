@@ -437,7 +437,7 @@ function seedRoomFatAndCapIndex(home, room) {
   const slug = fs.realpathSync.native(room).replace(/[^A-Za-z0-9]/g, '-');
   const mem = path.join(home, '.claude', 'projects', slug, 'memory');
   fs.mkdirSync(mem, { recursive: true });
-  fs.writeFileSync(path.join(mem, 'MEMORY.md'), 'i'.repeat(26 * 1024), 'utf8'); // over CC_INDEX_CAP_BYTES
+  fs.writeFileSync(path.join(mem, 'MEMORY.md'), 'i'.repeat(26 * 1024), 'utf8'); // over CC_INDEX_CAP_CHARS (25,000 characters)
 }
 
 test('NESTED-HABITAT CONTROL: a room over its OWN cap still reads FULL — the wall did not stop firing', () => {

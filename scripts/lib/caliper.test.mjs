@@ -314,6 +314,92 @@ test('CWK2-067: bandVerdict trips on indexChars at 25,000 and not at 24,999', ()
   assert.strictEqual(bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: PLATFORM_INDEX_CAP_CHARS }).band, 'FULL');
 });
 
+// ---------------------------------------------------------------------------
+// CWK2-188 (INSPECT 178): the shipped gauge (gaugeVerdict, the only path the hook and the CLI take) and the fallbacks,
+// where characters and bytes differ. Non-ASCII is built from code points: THAI_WORD above, CYRILLIC_DE here.
+// ---------------------------------------------------------------------------
+const CYRILLIC_DE = String.fromCodePoint(0x0434); // 2 UTF-8 bytes, 1 UTF-16 unit
+
+test('CWK2-188 L178-1 (K2): the shipped gauge reads a MEASURED Thai index in characters: 9,000 characters (27,000 bytes) does not trip', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(idx, THAI_WORD.repeat(1800), 'utf8'); // 9,000 characters, 27,000 bytes
+    const m = measureEntries([indexEntry(idx, fs.statSync(idx).size)]);
+    assert.strictEqual(m.index.chars, 9000, 'fixture: the index was measured in characters');
+    const gv = gaugeVerdict({ measure: m, envelope: ENV });
+    assert.notStrictEqual(gv.verdict.band, 'FULL', 'gaugeVerdict must hand the cap characters, not bytes');
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-188 L178-1 (K7): a past-budget Thai index is READ, and its characters are measured: 8,400 characters (25,200 bytes) read 8,400', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(home, 'CLAUDE.md');
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(gov, 'g'.repeat(5000), 'utf8');
+    fs.writeFileSync(idx, THAI_WORD.repeat(1680), 'utf8'); // 8,400 characters, 25,200 bytes
+    const entries = [
+      { path: gov, bytes: fs.statSync(gov).size, scope: 'project', kind: 'governance', alwaysLoaded: true },
+      indexEntry(idx, fs.statSync(idx).size),
+    ];
+    const m = measureEntries(entries, { readBudgetBytes: 5000 }); // the governance file takes the whole budget
+    assert.strictEqual(m.index.chars, 8400, 'read past the budget: the characters, not the 25,200 bytes');
+    assert.strictEqual(bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: m.index.chars }).band, 'LEAN', 'under the cap by characters');
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-188 L178-1 (K9): an UNREADABLE index keeps its stat bytes as the characters bound, and that bound trips the cap', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(idx, THAI_WORD.repeat(1680), 'utf8'); // 25,200 bytes
+    const bytes = fs.statSync(idx).size;
+    const entries = [indexEntry(idx, bytes)];
+    fs.rmSync(idx); // the stat is captured; the READ will now fail
+    const m = measureEntries(entries);
+    assert.strictEqual(m.index.chars, bytes, 'the read failed: the stat bytes are the fire-safe upper bound on characters');
+    assert.strictEqual(bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: m.index.chars }).band, 'FULL', 'the bound trips the cap');
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-188 L178-1 (statOnly): a statOnly index is never read; its characters are its stat bytes, and 25,200 bytes trip', () => {
+  const m = measureEntries([{ ...indexEntry('/nonexistent/MEMORY.md', 25200), statOnly: true }]);
+  assert.strictEqual(m.index.chars, 25200, 'the stat bytes stand as the upper bound');
+  assert.strictEqual(m.index.lines, 0, 'never read, so no line count');
+  assert.strictEqual(bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: m.index.chars }).band, 'FULL');
+});
+
+// CWK2-188 L178-4 (INSPECT 178): the reorg proof (condition 2b) sizes the RE-TIER index the way RE-TIER does, on its
+// tokensEst of the text, not bytes / 4. Each case: the measured index, and the gauge's demotable mass against the arm.
+test('CWK2-188 L178-4: a Thai 7,000-character index is UNDER RE-TIER\'s arm (4,667 tokensEst): the reorg proof demotes nothing', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    const text = THAI_WORD.repeat(1400); // 7,000 characters, 21,000 bytes
+    fs.writeFileSync(idx, text, 'utf8');
+    const m = measureEntries([indexEntry(idx, fs.statSync(idx).size)]);
+    assert.ok(tokensEst(text) < ENV.armAt, 'fixture: RE-TIER measures this index under the arm');
+    assert.strictEqual(m.index.tokens, tokensEst(text), 'the read index carries RE-TIER\'s own measure of its text');
+    const gv = gaugeVerdict({ measure: m, envelope: ENV });
+    assert.strictEqual(gv.demotableTokens, 0, 'the reorg proof agrees with RE-TIER: nothing to demote under the arm');
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-188 L178-4: a Cyrillic 9,000-character index is OVER RE-TIER\'s arm (6,000 tokensEst): the reorg proof demotes the excess', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    const text = CYRILLIC_DE.repeat(9000); // 9,000 characters, 18,000 bytes
+    fs.writeFileSync(idx, text, 'utf8');
+    const m = measureEntries([indexEntry(idx, fs.statSync(idx).size)]);
+    assert.ok(tokensEst(text) >= ENV.armAt, 'fixture: RE-TIER measures this index over the arm');
+    const gv = gaugeVerdict({ measure: m, envelope: ENV });
+    assert.strictEqual(gv.demotableTokens, tokensEst(text) - ENV.fillCeiling, 'the demotable mass is RE-TIER\'s overflow past the fill ceiling');
+    assert.ok(gv.demotableTokens > 0, 'over the arm: the reorg proof sees the mass');
+  } finally { clean(home, proj); }
+});
+
 test('bandVerdict: certain fat below the arm mark is LEAN; at/above FAT_ARM_TOKENS (un-armed) arms OBESE', () => {
   const at = (fat, wasOver = false) => bandVerdict({ footprintTokens: 50000, mechFatTokens: fat, wasOver });
   assert.strictEqual(at(FAT_ARM_TOKENS - 1).band, 'LEAN');

@@ -240,7 +240,7 @@ test('SessionStart: FULL via the absolute index cap fires on day one — cached,
   const { home, proj } = sandbox();
   try {
     muteUpdate(home);
-    seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // index over the 25KB cap class
+    seedClassB(home, proj, { claudeMdBytes: 100, indexBytes: 26 * 1024 }); // index over the 25,000-character cap class
     const r = run(proj, home, { hook_event_name: 'SessionStart' });
     assertGraceful(r);
     assert.strictEqual(r.stdout, '');

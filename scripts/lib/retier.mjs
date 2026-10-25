@@ -282,7 +282,8 @@ export function planIndexDemotion(indexText, env) {
     return kept.join('\n');
   };
   // Greedy fill: measure the REAL assembled text each step (stores are <=
-  // ~25 KB — the O(n^2) re-measure is cheap and exact; ponytail: replace with
+  // ~25 KB of ASCII; a 25,000-character index of 3-byte Thai text is ~75 KB, so the
+  // O(n^2) re-measure is still cheap at that size and exact; ponytail: replace with
   // a running estimate if a giant store ever surfaces).
   for (const c of cand) {
     if (tokensEst(assemble()) <= env.fillCeiling) break;

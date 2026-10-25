@@ -205,7 +205,9 @@ export const CC_INDEX_CAP_CHARS = 25000;
 export const CC_INDEX_CAP_LINES = 200;
 // The platform reads the index with a 4 x 25,000 = 100,000-byte bound. A UTF-8 character is at most 4 bytes, and a
 // 4-byte one is 2 UTF-16 units, so 100,000 bytes always hold at least 25,000 units: an index past this bound trips
-// without being read.
+// without being read. That holds for the untrimmed read. Trimming can drop whitespace, so a whitespace-heavy head can
+// leave fewer than 25,000 units inside the bound; the saturation is then an over-trip, the fire-safe direction, never
+// an under-trip (INSPECT 178 L178-2).
 export const CC_INDEX_READ_CAP_BYTES = 4 * CC_INDEX_CAP_CHARS;
 export const RUN_COST_MULTIPLIER = 3; // one Full run ~ store read x2 (outsider+insider) + rewrite
 export const ECON_HORIZON_DAYS = 14; // carry-cost horizon the break-even is judged against
@@ -306,10 +308,12 @@ export function mechFatFromText(text) {
 }
 
 // The memory index's cap units from its TRIMMED text, as the platform counts them (CWK2-067): characters are the
-// trimmed JavaScript string length, lines are its newlines + 1. One helper, both read paths.
+// trimmed JavaScript string length, lines are its newlines + 1. tokens is RE-TIER's own measure of the whole text
+// (retier.mjs planStore: tokensEst of the index file), which the reorg proof uses too (INSPECT 178 L178-4). One helper,
+// both read paths.
 function indexUnitsOf(text) {
   const trimmed = text.trim();
-  return { chars: trimmed.length, lines: trimmed.split('\n').length };
+  return { chars: trimmed.length, lines: trimmed.split('\n').length, tokens: tokensEst(text) };
 }
 
 // Measure a discovered class-B entry set. Reads content ONLY for always-loaded
@@ -326,7 +330,7 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
     totalBytes: 0,
     totalTokensEst: 0,
     alwaysLoaded: { files: 0, bytes: 0, tokensEst: 0 },
-    index: { bytes: 0, chars: 0, lines: 0 }, // chars + lines: the platform's units (CC_INDEX_CAP_CHARS, CC_INDEX_CAP_LINES); bytes: a stat fact
+    index: { bytes: 0, chars: 0, lines: 0, tokens: null }, // chars + lines: the platform's units (CC_INDEX_CAP_CHARS, CC_INDEX_CAP_LINES); bytes: a stat fact; tokens: RE-TIER's measure, null until read
     mechFat: { tokensEst: 0, dupTokens: 0, blankTokens: 0 }, // task #4 — certain fat, accumulated from the texts read below
     gzipRatio: null,
     est: true, // token numbers are estimates — receipt must label "~est"
@@ -641,7 +645,9 @@ export function gaugeVerdict({ measure, wasOver = false, wasEconLatched = false,
   // placement, so its overflow IS the demotable mass; the outsider's
   // semantic judgments beyond that are unquantifiable and deliberately not
   // counted). Under the envelope's arm mark = dead zone = nothing to demote.
-  const indexTokens = tokensEstFromBytes(measure.index.bytes);
+  // INSPECT 178 L178-4: the index is sized the way RE-TIER sizes it (tokensEst of its text), so this proof and
+  // retier-run agree on over/under the arm. Bytes / 4 is the fallback only for an index we did not read (ASCII-only).
+  const indexTokens = measure.index.tokens ?? tokensEstFromBytes(measure.index.bytes);
   const demotableTokens = (envelope && Number.isFinite(envelope.armAt) && Number.isFinite(envelope.fillCeiling) && indexTokens >= envelope.armAt)
     ? Math.max(0, indexTokens - envelope.fillCeiling)
     : 0;
