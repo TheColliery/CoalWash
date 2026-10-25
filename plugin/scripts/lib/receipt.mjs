@@ -54,34 +54,46 @@ export function oneLineResult(opts) {
   return `[CoalWash] cut ~${ktok(raw)} tok (−${pct}%)`;
 }
 
-// CWK2-062 + INSPECT 170: the gate's PASS line. It names what the gate checks
-// (the list below), never "facts lost": the gate reads STRUCTURED tokens only
-// (fidelity-gate.mjs), so a PASS proves no structured drop beyond the plan's own
-// approvedDrops, and nothing about prose. A drop value is caller data (a link
-// target, a file name, a fenced code line), so each member renders as a JSON
-// string: quoted, with every C0 control escaped by JSON itself. JSON leaves
-// U+0085, U+2028 and U+2029 raw, so those three are replaced here by their
-// escape text, which is built from code points: a backslash-u literal typed into
-// source can arrive as the raw character (AGENTS, the escape-transit hazard).
+// CWK2-062 + INSPECT 170 + INSPECT 172: the gate's PASS line. It names what the gate checks (the list below), never
+// "facts lost": the gate reads STRUCTURED tokens only (fidelity-gate.mjs), so a PASS proves no structured drop beyond
+// the plan's own approvedDrops, and nothing about prose. A drop value is caller data (a link target, a file name, a
+// fenced code line), so each member renders as a JSON string: quoted, with every C0 control escaped by JSON itself.
+// JSON leaves DEL, the C1 controls (U+0080 to U+009F) and the two line separators raw, so escapeRawControls replaces
+// every one of those by its escape text, built from code points: a backslash-u literal typed into source can arrive
+// as the raw character (AGENTS, the escape-transit hazard).
 const FIDELITY_LISTED_MAX = 5;
 const FIDELITY_CHECKED = 'checked: links, dates, versions, frontmatter keys, code, quotes, numbers';
 const BACKSLASH = String.fromCharCode(92);
-const RAW_SEPARATORS = [0x85, 0x2028, 0x2029].map((cp) => [
-  String.fromCharCode(cp),
-  `${BACKSLASH}u${cp.toString(16).padStart(4, '0')}`,
-]);
-// A plan member is a JSON value: a string is itself, anything else its JSON text.
+const UNRENDERABLE = '<unrenderable>';
+// Code points JSON leaves raw and a terminal or a log can act on: DEL, the C1 controls, U+2028 and U+2029.
+function isRawControl(cp) {
+  return cp === 0x7f || (cp >= 0x80 && cp <= 0x9f) || cp === 0x2028 || cp === 0x2029;
+}
+function escapeRawControls(text) {
+  let out = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    out += isRawControl(cp) ? `${BACKSLASH}u${cp.toString(16).padStart(4, '0')}` : ch;
+  }
+  return out;
+}
+// A plan member is a JSON value: a string is itself, anything else its JSON text. A member that cannot be rendered
+// (a BigInt, a cyclic object, a throwing toJSON or toString) prints as UNRENDERABLE and never throws the receipt (R172-2).
 function memberForm(member) {
-  return typeof member === 'string' ? member : (JSON.stringify(member) ?? String(member));
+  try {
+    if (typeof member === 'string') return member;
+    return JSON.stringify(member) ?? String(member);
+  } catch {
+    return UNRENDERABLE;
+  }
 }
 function receiptText(member) {
-  let text = JSON.stringify(memberForm(member));
-  for (const [raw, escaped] of RAW_SEPARATORS) text = text.split(raw).join(escaped);
-  return text;
+  return escapeRawControls(JSON.stringify(memberForm(member)));
 }
-// apply.mjs holds approvedDrops as a Set, so a repeated member counts once here too.
+// apply.mjs holds approvedDrops as a Set. Here a member's key is its type plus its form, so a string and a non-string
+// with the same rendered form (null and 'null') stay two drops (R172-3), while two equal strings stay one.
 function fidelityPassLine(approved) {
-  const members = [...new Set(approved.map(memberForm))];
+  const members = [...new Map(approved.map((m) => [`${typeof m}:${memberForm(m)}`, memberForm(m)])).values()];
   if (members.length === 0) return `fidelity gate: PASS (no structured-token drop; ${FIDELITY_CHECKED})`;
   const shown = members.slice(0, FIDELITY_LISTED_MAX).map(receiptText).join(', ');
   const more = members.length > FIDELITY_LISTED_MAX ? ` +${members.length - FIDELITY_LISTED_MAX} more` : '';

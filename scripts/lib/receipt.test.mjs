@@ -96,11 +96,15 @@ const ESC = String.fromCharCode(0x1b);
 const VT = String.fromCharCode(0x0b);
 const FF = String.fromCharCode(0x0c);
 const NEL = String.fromCharCode(0x85);
-// Any C0 control, DEL, NEL, U+2028 or U+2029 anywhere on the line.
+// Any C0 control, DEL, any C1 control (U+0080-U+009F), U+2028 or U+2029 anywhere on the line (R172-1: the C1 range).
 const hasRawControl = (s) => [...s].some((c) => {
   const k = c.codePointAt(0);
-  return k < 0x20 || k === 0x7f || k === 0x85 || k === 0x2028 || k === 0x2029;
+  return k < 0x20 || (k >= 0x7f && k <= 0x9f) || k === 0x2028 || k === 0x2029;
 });
+const BS = String.fromCharCode(92);
+const DEL = String.fromCharCode(0x7f);
+const CSI = String.fromCharCode(0x9b);
+const UNRENDERABLE = '<unrenderable>';
 
 test('fidelity PASS names what it checked and never claims "facts lost" (CWK2-062 a)', () => {
   const r = buildReceipt(BASE);
@@ -162,6 +166,50 @@ test('a non-string drop member never throws: object, null, number and array rend
 test('duplicate drop members count once, as apply.mjs holds them in a Set (INSPECT 170 L170-2)', () => {
   const [line] = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: ['wikilink:a', 'wikilink:a'] }));
   assert.ok(line.includes('beyond the 1 the plan approved: "wikilink:a"; '), 'one entry, a count of one');
+});
+
+// R172-1: JSON escapes only C0 and leaves DEL and the C1 controls raw. A member carrying them must render with no
+// raw code point in that range; the escape text is built from BS so no backslash-u literal sits in source.
+test('DEL and the C1 controls inside a drop value are escaped, never raw (R172-1)', () => {
+  const r = buildReceipt({ ...BASE, approvedDrops: [`x${DEL}2Ky`, `z${CSI}2Ky`] });
+  const [line] = gateLinesOf(r);
+  assert.strictEqual(gateLinesOf(r).length, 1, 'one gate line');
+  assert.ok(line.includes('beyond the 2 the plan approved:'), 'two entries');
+  assert.ok(line.includes(`x${BS}u007f2Ky`), 'DEL is its escape text');
+  assert.ok(line.includes(`z${BS}u009b2Ky`), 'U+009B is its escape text');
+  assert.ok(!hasRawControl(line), 'no raw DEL or C1 survives on the line');
+});
+
+test('every C1 code point, U+0080 to U+009F, inside one drop value leaves no raw control (R172-1)', () => {
+  const allC1 = Array.from({ length: 0x9f - 0x80 + 1 }, (_, i) => String.fromCharCode(0x80 + i)).join('x');
+  const [line] = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: [allC1] }));
+  assert.ok(!hasRawControl(line), 'the whole C1 range is escaped');
+  assert.ok(line.includes(`${BS}u0080`) && line.includes(`${BS}u009f`), 'both ends of the range are escaped');
+});
+
+// R172-2: memberForm must never throw. Each of these four used to throw out of buildReceipt.
+test('an unrenderable member never throws the receipt: BigInt, cyclic, throwing toJSON, toJSON-undefined with a non-callable toString (R172-2)', () => {
+  const cyclic = {};
+  cyclic.self = cyclic;
+  const throwingToJSON = { toJSON() { throw new Error('nope'); } };
+  const noPrimitive = { toJSON() { return undefined; }, toString: 'x' };
+  for (const member of [1n, cyclic, throwingToJSON, noPrimitive]) {
+    let r;
+    assert.doesNotThrow(() => { r = buildReceipt({ ...BASE, approvedDrops: [member] }); });
+    const lines = gateLinesOf(r);
+    assert.strictEqual(lines.length, 1, 'one gate line');
+    assert.ok(lines[0].includes(`"${UNRENDERABLE}"`), 'the member prints as <unrenderable>');
+  }
+});
+
+// R172-3: dedupe keeps a string and a non-string with the same rendered form apart, as apply.mjs's Set does.
+test('a string and a non-string member with the same rendered form are two drops (R172-3)', () => {
+  const [nullPair] = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: [null, 'null'] }));
+  assert.ok(nullPair.includes('beyond the 2 the plan approved:'), "null and 'null' are two");
+  const [numPair] = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: [7, '7'] }));
+  assert.ok(numPair.includes('beyond the 2 the plan approved:'), "7 and '7' are two");
+  const [same] = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: ['wikilink:a', 'wikilink:a'] }));
+  assert.ok(same.includes('beyond the 1 the plan approved: "wikilink:a";'), 'two equal strings are still one');
 });
 
 // ---------------------------------------------------------------------------
