@@ -97,10 +97,10 @@ const VT = String.fromCharCode(0x0b);
 const FF = String.fromCharCode(0x0c);
 const NEL = String.fromCharCode(0x85);
 // Any C0 control, DEL, any C1 control (U+0080-U+009F), U+2028 or U+2029 anywhere on the line (R172-1: the C1 range).
-const hasRawControl = (s) => [...s].some((c) => {
-  const k = c.codePointAt(0);
-  return k < 0x20 || (k >= 0x7f && k <= 0x9f) || k === 0x2028 || k === 0x2029;
-});
+// The whole class a raw line must not carry (INSPECT 182 F182-1): C0, DEL, C1, the format controls (Cf, bidi and
+// zero-width included, BOM too), and the line and paragraph separators (Zl, Zp). The same property the receipt escapes.
+const RAW_CONTROL_CLASS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const hasRawControl = (s) => [...s].some((c) => RAW_CONTROL_CLASS.test(c));
 const BS = String.fromCharCode(92);
 const DEL = String.fromCharCode(0x7f);
 const CSI = String.fromCharCode(0x9b);
@@ -198,7 +198,8 @@ test('an unrenderable member never throws the receipt: BigInt, cyclic, throwing 
     assert.doesNotThrow(() => { r = buildReceipt({ ...BASE, approvedDrops: [member] }); });
     const lines = gateLinesOf(r);
     assert.strictEqual(lines.length, 1, 'one gate line');
-    assert.ok(lines[0].includes(`"${UNRENDERABLE}"`), 'the member prints as <unrenderable>');
+    // F182-3: the sentinel prints UNQUOTED, so it can never equal a quoted string entry. This line was proven wrong by that fix.
+    assert.ok(lines[0].includes(`: ${UNRENDERABLE}; `), 'the member prints as a bare <unrenderable>');
   }
 });
 
@@ -210,6 +211,26 @@ test('a string and a non-string member with the same rendered form are two drops
   assert.ok(numPair.includes('beyond the 2 the plan approved:'), "7 and '7' are two");
   const [same] = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: ['wikilink:a', 'wikilink:a'] }));
   assert.ok(same.includes('beyond the 1 the plan approved: "wikilink:a";'), 'two equal strings are still one');
+});
+
+// INSPECT 182 F182-1 / F182-2: the whole format-control class and the line separators, one member at a time, so the
+// 5-entry display cap cannot hide one. Each must render as its escape text and leave no raw character on the line.
+// The astral one (U+E0001, a Cf tag character) takes the \u{...} form, since the four-digit form cannot hold it.
+test('each format control and line separator inside a drop value renders escaped, alone (F182-1, F182-2)', () => {
+  const cps = [0x200b, 0xfeff, 0x202e, 0x2066, 0x2028, 0x2029, 0x061c, 0x200e, 0xe0001];
+  for (const cp of cps) {
+    const hex = cp.toString(16);
+    const escaped = cp > 0xffff ? `${BS}u{${hex}}` : `${BS}u${hex.padStart(4, '0')}`;
+    const [line] = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: [`x${String.fromCodePoint(cp)}y`] }));
+    assert.ok(!hasRawControl(line), `U+${hex} must not be raw on the line`);
+    assert.ok(line.includes(`x${escaped}y`), `U+${hex} must render as ${escaped}`);
+  }
+});
+
+// INSPECT 182 F182-3: a JSON string that spells the sentinel prints quoted; the unrenderable member prints bare.
+test('the unrenderable sentinel prints bare, and a string that spells it prints quoted (F182-3)', () => {
+  const [line] = gateLinesOf(buildReceipt({ ...BASE, approvedDrops: [1n, '<unrenderable>'] }));
+  assert.ok(line.includes(`beyond the 2 the plan approved: ${UNRENDERABLE}, "${UNRENDERABLE}"; `), 'one bare, one quoted, two entries');
 });
 
 // ---------------------------------------------------------------------------

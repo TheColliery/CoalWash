@@ -54,50 +54,64 @@ export function oneLineResult(opts) {
   return `[CoalWash] cut ~${ktok(raw)} tok (−${pct}%)`;
 }
 
-// CWK2-062 + INSPECT 170 + INSPECT 172: the gate's PASS line. It names what the gate checks (the list below), never
-// "facts lost": the gate reads STRUCTURED tokens only (fidelity-gate.mjs), so a PASS proves no structured drop beyond
-// the plan's own approvedDrops, and nothing about prose. A drop value is caller data (a link target, a file name, a
-// fenced code line), so each member renders as a JSON string: quoted, with every C0 control escaped by JSON itself.
-// JSON leaves DEL, the C1 controls (U+0080 to U+009F) and the two line separators raw, so escapeRawControls replaces
-// every one of those by its escape text, built from code points: a backslash-u literal typed into source can arrive
-// as the raw character (AGENTS, the escape-transit hazard).
+// CWK2-062 + INSPECT 170 + INSPECT 172 + INSPECT 182: the gate's PASS line. It names what the gate checks (the list
+// below), never "facts lost": the gate reads STRUCTURED tokens only (fidelity-gate.mjs), so a PASS proves no structured
+// drop beyond the plan's own approvedDrops, and nothing about prose. A drop value is caller data (a link target, a file
+// name, a fenced code line), so each member renders as a JSON string: quoted, with every C0 control escaped by JSON
+// itself. escapeRawControls then escapes the rest of the class. A backslash-u literal typed into source can arrive as
+// the raw character (AGENTS, the escape-transit hazard), so every escape here is built from code points.
 const FIDELITY_LISTED_MAX = 5;
 const FIDELITY_CHECKED = 'checked: links, dates, versions, frontmatter keys, code, quotes, numbers';
 const BACKSLASH = String.fromCharCode(92);
 const UNRENDERABLE = '<unrenderable>';
-// Code points JSON leaves raw and a terminal or a log can act on: DEL, the C1 controls, U+2028 and U+2029.
-function isRawControl(cp) {
-  return cp === 0x7f || (cp >= 0x80 && cp <= 0x9f) || cp === 0x2028 || cp === 0x2029;
+// The whole class of characters a terminal, a log or a bidi-aware renderer can act on: Cc (C0, DEL, C1), Cf (the bidi
+// controls, the zero-width characters, the BOM, the tag characters), and the line and paragraph separators Zl and Zp.
+// A display spoof on a consent-adjacent line is the Trojan Source class (CVE-2021-42574); one property test covers it.
+const RAW_CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+function isRawControl(ch) {
+  return RAW_CONTROL.test(ch);
+}
+// The escape text for one raw character: \uXXXX in the BMP, \u{...} above it (a four-digit form cannot hold U+E0001).
+function escapeText(cp) {
+  const hex = cp.toString(16);
+  return cp > 0xffff ? `${BACKSLASH}u{${hex}}` : `${BACKSLASH}u${hex.padStart(4, '0')}`;
 }
 function escapeRawControls(text) {
   let out = '';
   for (const ch of text) {
-    const cp = ch.codePointAt(0);
-    out += isRawControl(cp) ? `${BACKSLASH}u${cp.toString(16).padStart(4, '0')}` : ch;
+    out += isRawControl(ch) ? escapeText(ch.codePointAt(0)) : ch;
   }
   return out;
 }
-// A plan member is a JSON value: a string is itself, anything else its JSON text. A member that cannot be rendered
-// (a BigInt, a cyclic object, a throwing toJSON or toString) prints as UNRENDERABLE and never throws the receipt (R172-2).
+// A member's text: a string is itself; anything else is its JSON text. null means the member cannot be rendered (a
+// BigInt, a cyclic object, a throwing toJSON or toString). Two unrenderable members share a key and collapse; no JSON
+// plan can carry one (INSPECT 182), so that stays as it is.
 function memberForm(member) {
   try {
     if (typeof member === 'string') return member;
     return JSON.stringify(member) ?? String(member);
   } catch {
-    return UNRENDERABLE;
+    return null;
   }
 }
-function receiptText(member) {
-  return escapeRawControls(JSON.stringify(memberForm(member)));
+// The unrenderable sentinel is printed bare, so it can never equal a quoted string entry (F182-3). A renderable member
+// is its form, JSON-quoted and escaped.
+function receiptText(entry) {
+  return entry.form === null ? UNRENDERABLE : escapeRawControls(JSON.stringify(entry.form));
 }
 // apply.mjs holds approvedDrops as a Set. Here a member's key is its type plus its form, so a string and a non-string
-// with the same rendered form (null and 'null') stay two drops (R172-3), while two equal strings stay one.
+// with the same rendered form (null and 'null') stay two drops (R172-3), while two equal strings stay one. The Set
+// matches these keys for strings and the other primitives; a JSON object or array is compared by identity there and by
+// its text here.
 function fidelityPassLine(approved) {
-  const members = [...new Map(approved.map((m) => [`${typeof m}:${memberForm(m)}`, memberForm(m)])).values()];
-  if (members.length === 0) return `fidelity gate: PASS (no structured-token drop; ${FIDELITY_CHECKED})`;
-  const shown = members.slice(0, FIDELITY_LISTED_MAX).map(receiptText).join(', ');
-  const more = members.length > FIDELITY_LISTED_MAX ? ` +${members.length - FIDELITY_LISTED_MAX} more` : '';
-  return `fidelity gate: PASS (no structured-token drop beyond the ${members.length} the plan approved: ${shown}${more}; ${FIDELITY_CHECKED})`;
+  const entries = [...new Map(approved.map((m) => {
+    const form = memberForm(m);
+    return [`${typeof m}:${form ?? 'unrenderable'}`, { form }];
+  })).values()];
+  if (entries.length === 0) return `fidelity gate: PASS (no structured-token drop; ${FIDELITY_CHECKED})`;
+  const shown = entries.slice(0, FIDELITY_LISTED_MAX).map(receiptText).join(', ');
+  const more = entries.length > FIDELITY_LISTED_MAX ? ` +${entries.length - FIDELITY_LISTED_MAX} more` : '';
+  return `fidelity gate: PASS (no structured-token drop beyond the ${entries.length} the plan approved: ${shown}${more}; ${FIDELITY_CHECKED})`;
 }
 
 // r = {
