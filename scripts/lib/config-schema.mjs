@@ -70,8 +70,9 @@ export const CONFIG_SCHEMA = [
   // cross-AI Tier-1 memory-index cap median (CC 6250 hard · Letta 10000 hard ·
   // Zep 625 default · LangChain-legacy 2000 default; WHATSNEW-LEDGER row 27,
   // 2026-07-16) and independently ~2% of the 200k binding envelope. Max 6250 =
-  // the CC hard cap. The envelope decides TIER PLACEMENT ONLY — it may never
-  // choose or escalate a treatment (retier.mjs's core rail).
+  // the CC hard cap (25,000 index characters / 4: the unit is characters, not bytes,
+  // CWK2-067). The envelope decides TIER PLACEMENT ONLY — it may never choose or
+  // escalate a treatment (retier.mjs's core rail).
   { key: 'retier', type: 'object', fields: {
     targetTokens: { type: 'int', min: 500, max: 6250, def: 4125 },
     armPct: { type: 'int', min: 5, max: 50, def: 20 },
@@ -278,7 +279,7 @@ export function resolveRetierCfg(retier) {
   // not at one call site, keeps the CLI and the hook agreeing (cli.mjs's own header names that invariant).
   const num = (v, def, min, max) => (Number.isInteger(v) && v >= min && v <= max ? v : def);
   return {
-    targetTokens: num(r.targetTokens, 4125, 500, 6250), // 6250 = the CC hard cap (25 KB index / 4)
+    targetTokens: num(r.targetTokens, 4125, 500, 6250), // 6250 = the CC hard cap (25,000 index characters / 4)
     armPct: num(r.armPct, 20, 5, 50),
     disarmPct: num(r.disarmPct, 10, 5, 50),
     headroomPct: num(r.headroomPct, 10, 5, 50),

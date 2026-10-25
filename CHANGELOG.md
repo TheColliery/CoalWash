@@ -12,6 +12,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 - The gate's `git check-ignore --stdin` probe (`scripts/verify.mjs`) reads git's own exit when a pipe error (EPIPE on POSIX, EOF on Windows) arrives beside it, so a bare-repository refusal reads `exited 128 — …` instead of `failed to spawn`; the classifier is `classifyCheckIgnoreResult` in `scripts/pointer-check.mjs`, the class fix from CoalHearth `6f39694`. Gate-only, no `plugin/` byte moves. — test: `scripts/pointer-check.test.mjs`
 - The fidelity receipt no longer prints "0 facts lost": the PASS line states what the gate checked (structured tokens: links, dates, versions, frontmatter keys, code, quotes, numbers), and an approved-drop run names the approved drops, each quoted and de-duplicated (at most five, then "+N more"); the gate reads structured tokens only, so no receipt line claims prose facts. — test: `scripts/lib/receipt.test.mjs`
+- The memory-index cap is measured in characters of the trimmed index (25,000) and its lines (200), the unit Claude Code itself counts, not bytes: an ASCII index of 25,100 characters trips the cap now, and a Thai index of 9,000 characters (27,000 bytes) no longer trips. An index past the platform's 100,000-byte read bound trips without being read. — test: `scripts/lib/caliper.test.mjs`
 
 ## [1.12.13] - 2026-10-18
 

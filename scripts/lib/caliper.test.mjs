@@ -12,7 +12,7 @@ import {
   STATE_SCHEMA, SCHEMA_RESET_FIELDS,
   updateStampPath, oldUpdateStampPath, readUpdateStamp, writeUpdateStamp,
   BAND_RANK, recordCrossing, sanitizeCrossing, consumeCrossing,
-  FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_BYTES, CC_INDEX_CAP_LINES,
+  FLOOR_MIN_TOKENS, CAPACITY_TOKENS, CC_INDEX_CAP_CHARS, CC_INDEX_CAP_LINES,
   FAT_ARM_TOKENS, FAT_REARM_TOKENS, mechFatFromText,
   RUN_COST_MULTIPLIER, ECON_HORIZON_DAYS, STAMP_RING_MAX, REGAUGE_DELTA_TOKENS, ALWAYS_LOADED_PATHS_CAP,
   readBudgetFor, READ_BUDGET_DEFAULT,
@@ -150,12 +150,12 @@ test('capacity wall: the index LINES leg survives the index entry falling past t
     const idx = path.join(home, 'MEMORY.md');
     // A governance file big enough to eat the whole budget ahead of the index.
     fs.writeFileSync(gov, 'g'.repeat(5000), 'utf8');
-    // 250 short lines: OVER CC_INDEX_CAP_LINES (200), UNDER CC_INDEX_CAP_BYTES
-    // (25 KB) — so the LINES leg is the only one that can fire, which is what
-    // makes this fixture discriminate rather than pass via the bytes leg.
+    // 250 short lines: OVER CC_INDEX_CAP_LINES (200), UNDER CC_INDEX_CAP_CHARS
+    // (25,000) — so the LINES leg is the only one that can fire, which is what
+    // makes this fixture discriminate rather than pass via the characters leg.
     fs.writeFileSync(idx, Array.from({ length: 250 }, (_, i) => `row ${i}`).join('\n'), 'utf8');
     const idxBytes = fs.statSync(idx).size;
-    assert.ok(idxBytes < CC_INDEX_CAP_BYTES, 'fixture must sit UNDER the bytes cap or it proves the wrong leg');
+    assert.ok(idxBytes < CC_INDEX_CAP_CHARS, 'fixture must sit UNDER the characters cap or it proves the wrong leg');
     const entries = [
       { path: gov, bytes: fs.statSync(gov).size, scope: 'project', kind: 'governance', alwaysLoaded: true },
       { path: idx, bytes: idxBytes, scope: 'project', kind: 'memory-index', alwaysLoaded: true },
@@ -169,35 +169,37 @@ test('capacity wall: the index LINES leg survives the index entry falling past t
     // produces: fat=0 is un-armed, and an un-armed capHit is FULL/externalize.
     const v = bandVerdict({
       footprintTokens: 1000, mechFatTokens: 0, capacityTokens: CAPACITY_TOKENS,
-      indexBytes: m.index.bytes, indexLines: m.index.lines,
+      indexChars: m.index.chars, indexLines: m.index.lines,
     });
     assert.strictEqual(v.band, 'FULL', 'the wall must fire on the lines leg alone');
     assert.strictEqual(v.reason, 'externalize', 'un-armed capHit routes to externalize');
   } finally { clean(home, proj); }
 });
 
-// The bounded-read contract: an index entry OVER the bytes cap is not read at
-// all (the bytes leg already fires unconditionally), so no arbitrarily large
-// file can be pulled in by the fix above.
-test('capacity wall: an over-budget index ABOVE the bytes cap is not read for lines — the bytes leg already fires', () => {
+// The bounded-read contract (CWK2-067 rewrites the premise): an index OVER the
+// characters cap but UNDER the platform's read bound is still read — its
+// characters are the cap's unit, so the read is what measures them — and the
+// read is bounded at 100,000 bytes. Past that bound the index is not read at
+// all (the next test below), so no arbitrarily large file is pulled in here.
+test('capacity wall: an over-budget index ABOVE the characters cap but under the read bound is read, and trips on characters', () => {
   const { home, proj } = sandbox();
   try {
     const gov = path.join(home, 'CLAUDE.md');
     const idx = path.join(home, 'MEMORY.md');
     fs.writeFileSync(gov, 'g'.repeat(5000), 'utf8');
-    fs.writeFileSync(idx, 'x'.repeat(CC_INDEX_CAP_BYTES + 1), 'utf8'); // one byte over the cap, ZERO newlines
+    fs.writeFileSync(idx, 'x'.repeat(CC_INDEX_CAP_CHARS + 1), 'utf8'); // one character over the cap, ZERO newlines
     const entries = [
       { path: gov, bytes: fs.statSync(gov).size, scope: 'project', kind: 'governance', alwaysLoaded: true },
       { path: idx, bytes: fs.statSync(idx).size, scope: 'project', kind: 'memory-index', alwaysLoaded: true },
     ];
     const m = measureEntries(entries, { readBudgetBytes: 5000 });
-    assert.ok(m.index.bytes > CC_INDEX_CAP_BYTES, 'the bytes leg carries this case');
-    assert.strictEqual(m.index.lines, 0, 'no read was attempted above the cap');
+    assert.strictEqual(m.index.chars, CC_INDEX_CAP_CHARS + 1, 'read: the trimmed characters are measured');
+    assert.strictEqual(m.index.lines, 1, 'read: one line, no newlines');
     const v = bandVerdict({
       footprintTokens: 1000, mechFatTokens: 0, capacityTokens: CAPACITY_TOKENS,
-      indexBytes: m.index.bytes, indexLines: m.index.lines,
+      indexChars: m.index.chars, indexLines: m.index.lines,
     });
-    assert.strictEqual(v.band, 'FULL', 'the wall still fires — via bytes, not lines');
+    assert.strictEqual(v.band, 'FULL', 'the wall fires — via characters');
   } finally { clean(home, proj); }
 });
 
@@ -232,6 +234,86 @@ test('capacity wall: an UNREADABLE index still yields its stat-known bytes (only
 // fullPercent/fatMultiple walls) are retired WITH the definition they tested.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// CWK2-067: the memory-index cap is measured in CHARACTERS, the platform's unit.
+// Claude Code 2.1.310 (scratchpad/18a/cwk2-067-evidence.md): the TRIMMED text's
+// JavaScript string length against 25,000; its line count is the trimmed text's
+// newlines + 1 against 200; the index is read with a 100,000-byte bound. The
+// numbers below are the platform's, stated as literals on purpose: the spec is
+// the platform's, not this file's constant.
+// ---------------------------------------------------------------------------
+const PLATFORM_INDEX_CAP_CHARS = 25000;
+const PLATFORM_INDEX_READ_BOUND_BYTES = 100000;
+const indexEntry = (p, bytes) => ({ path: p, bytes, scope: 'project', kind: 'memory-index', alwaysLoaded: true });
+
+test('CWK2-067: an ASCII index of 25,100 characters trips the cap (25,100 bytes sat under the old 25,600-byte cap)', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(idx, 'a'.repeat(25100), 'utf8');
+    const m = measureEntries([indexEntry(idx, fs.statSync(idx).size)]);
+    assert.strictEqual(m.index.chars, 25100, 'measured in characters, the platform unit');
+    const v = bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: m.index.chars });
+    assert.strictEqual(v.band, 'FULL', `the index cap trips at ${PLATFORM_INDEX_CAP_CHARS} characters`);
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-067: a Thai index of 9,000 characters (27,000 bytes, over the old byte cap) does NOT trip, and IS read', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(idx, THAI_WORD.repeat(1800), 'utf8'); // 9,000 characters, 3 bytes each
+    assert.strictEqual(fs.statSync(idx).size, 27000, 'fixture: 27,000 bytes');
+    const m = measureEntries([indexEntry(idx, fs.statSync(idx).size)]);
+    assert.strictEqual(m.index.chars, 9000, 'the index was read: its characters were measured, not skipped');
+    const v = bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: m.index.chars });
+    assert.notStrictEqual(v.band, 'FULL', 'a Thai index under 25,000 characters does not trip');
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-067: the cap and the line count use the TRIMMED text: leading and trailing whitespace do not count', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    // 1,000 spaces + 24,000 characters + 1,000 newlines: 26,000 raw characters (over the old byte cap), 24,000 trimmed, one line.
+    fs.writeFileSync(idx, ' '.repeat(1000) + 'a'.repeat(24000) + '\n'.repeat(1000), 'utf8');
+    const m = measureEntries([indexEntry(idx, fs.statSync(idx).size)]);
+    assert.strictEqual(m.index.chars, 24000, 'trimmed characters');
+    assert.strictEqual(m.index.lines, 1, 'trimmed line count: newlines of the trimmed text + 1');
+    const v = bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: m.index.chars, indexLines: m.index.lines });
+    assert.notStrictEqual(v.band, 'FULL', 'whitespace padding trips neither leg');
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-067: an index of exactly 100,000 bytes is read at the platform read bound, and its trimmed lines are counted', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(idx, 'x\n'.repeat(50000), 'utf8');
+    assert.strictEqual(fs.statSync(idx).size, PLATFORM_INDEX_READ_BOUND_BYTES, 'fixture: exactly the read bound');
+    const m = measureEntries([indexEntry(idx, fs.statSync(idx).size)]);
+    assert.strictEqual(m.index.lines, 50000, 'read: 50,000 trimmed lines (a raw split would give 50,001)');
+    assert.strictEqual(m.index.chars, 99999, 'read: 99,999 trimmed characters');
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-067: an index of 100,001 bytes is past the read bound: it is NOT read, and it trips without a read', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    fs.writeFileSync(idx, 'a'.repeat(PLATFORM_INDEX_READ_BOUND_BYTES + 1), 'utf8'); // one byte past the bound, no newline
+    const m = measureEntries([indexEntry(idx, fs.statSync(idx).size)]);
+    assert.strictEqual(m.index.lines, 0, 'no read: a read would count one line');
+    const v = bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: m.index.chars });
+    assert.strictEqual(v.band, 'FULL', 'past the read bound the index trips without being read');
+  } finally { clean(home, proj); }
+});
+
+test('CWK2-067: bandVerdict trips on indexChars at 25,000 and not at 24,999', () => {
+  assert.strictEqual(bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: PLATFORM_INDEX_CAP_CHARS - 1 }).band, 'LEAN');
+  assert.strictEqual(bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: PLATFORM_INDEX_CAP_CHARS }).band, 'FULL');
+});
+
 test('bandVerdict: certain fat below the arm mark is LEAN; at/above FAT_ARM_TOKENS (un-armed) arms OBESE', () => {
   const at = (fat, wasOver = false) => bandVerdict({ footprintTokens: 50000, mechFatTokens: fat, wasOver });
   assert.strictEqual(at(FAT_ARM_TOKENS - 1).band, 'LEAN');
@@ -265,12 +347,12 @@ test('the 1:1 line (the task-#4 ruling verbatim): muscle +10 units moves the rep
   assert.strictEqual(b.hardCeilingTokens - a.hardCeilingTokens, 10, 'muscle +10 => threshold +10, exactly');
 });
 
-test('bandVerdict capacity wall arms FULL: true capacity, index bytes, index lines — each leg independent', () => {
+test('bandVerdict capacity wall arms FULL: true capacity, index characters, index lines — each leg independent', () => {
   const hard = bandVerdict({ footprintTokens: CAPACITY_TOKENS, mechFatTokens: 0 });
   assert.strictEqual(hard.band, 'FULL');
   assert.strictEqual(hard.reason, 'externalize', '~all muscle at the capacity line -> externalize, never wash-harder');
-  const bytes = bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexBytes: CC_INDEX_CAP_BYTES });
-  assert.strictEqual(bytes.band, 'FULL');
+  const chars = bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexChars: CC_INDEX_CAP_CHARS });
+  assert.strictEqual(chars.band, 'FULL');
   const lines = bandVerdict({ footprintTokens: 10, mechFatTokens: 0, indexLines: CC_INDEX_CAP_LINES });
   assert.strictEqual(lines.band, 'FULL');
 });
@@ -288,10 +370,10 @@ test('capHit splits on MEASURED fat: armed -> absolute-cap (wash first), un-arme
 test('index-cap capHit is independent of the fat axis entirely (the 0r/MED-B intent, re-based)', () => {
   // a small, un-armed store still routes FULL/externalize the instant a CC
   // index cap clears — the index legs are platform limits, not fat findings.
-  const bytes = bandVerdict({ footprintTokens: 10100, mechFatTokens: 0, indexBytes: CC_INDEX_CAP_BYTES });
-  assert.strictEqual(bytes.band, 'FULL');
-  assert.strictEqual(bytes.reason, 'externalize');
-  assert.strictEqual(bytes.over, false);
+  const chars = bandVerdict({ footprintTokens: 10100, mechFatTokens: 0, indexChars: CC_INDEX_CAP_CHARS });
+  assert.strictEqual(chars.band, 'FULL');
+  assert.strictEqual(chars.reason, 'externalize');
+  assert.strictEqual(chars.over, false);
   const lines = bandVerdict({ footprintTokens: 10100, mechFatTokens: 0, indexLines: CC_INDEX_CAP_LINES });
   assert.strictEqual(lines.reason, 'externalize');
 });
@@ -918,10 +1000,10 @@ test('WARP-HOLE STRUCTURAL GATE: statOnlyFootprintBytes opens ZERO file content 
 // is passed explicitly (the conductor resolves it from config; absent =>
 // condition 2b fails closed and the wizard ask cannot arm).
 const ENV = { targetTokens: 4125, armAt: 4950, disarmAt: 3712, fillCeiling: 3712 };
-function measureOf({ footprint, mechFat = 0, indexBytes = 0, indexLines = 0, total = footprint }) {
+function measureOf({ footprint, mechFat = 0, indexBytes = 0, indexChars = indexBytes, indexLines = 0, total = footprint }) {
   return {
     alwaysLoaded: { tokensEst: footprint, bytes: footprint * 4 },
-    index: { bytes: indexBytes, lines: indexLines },
+    index: { bytes: indexBytes, chars: indexChars, lines: indexLines },
     mechFat: { tokensEst: mechFat, dupTokens: mechFat, blankTokens: 0 },
     totalTokensEst: total,
   };

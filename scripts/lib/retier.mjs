@@ -29,7 +29,7 @@
 // ULTRA-COLD's gated path + the wash's adjudicated plan).
 //
 // ENVELOPE PROVENANCE (the numbers): targetTokens 4,125 = the cross-AI Tier-1
-// (hot memory-index) cap MEDIAN — CC 6,250 hard (the 25 KB index cap / 4) ·
+// (hot memory-index) cap MEDIAN — CC 6,250 hard (the 25,000-character index cap / 4) ·
 // Letta 10,000 hard · Zep 625 default · LangChain-legacy 2,000 default
 // (WHATSNEW-LEDGER row 27, 2026-07-16) — AND independently ~2% of the 200k
 // binding envelope (the user's minimax derivation: the min-of-max context the

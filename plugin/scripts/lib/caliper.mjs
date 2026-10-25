@@ -197,8 +197,16 @@ export const FLOOR_MIN_TOKENS = 2500;
 export const CAPACITY_STANDARD_WINDOW_TOKENS = 200000;
 export const CAPACITY_AUTOCOMPACT_RESERVE_TOKENS = 33000;
 export const CAPACITY_TOKENS = CAPACITY_STANDARD_WINDOW_TOKENS - CAPACITY_AUTOCOMPACT_RESERVE_TOKENS;
-export const CC_INDEX_CAP_BYTES = 25 * 1024; // CC memory-index platform cap class (25KB)
-export const CC_INDEX_CAP_LINES = 200; // CC memory-index platform cap class (200 lines)
+// The memory-index caps, in the PLATFORM's own units (CWK2-067). Claude Code 2.1.310, measured 2026-10-25
+// (scratchpad/18a/cwk2-067-evidence.md): the index check compares the TRIMMED text's JavaScript string length
+// (UTF-16 code units) against 25,000, and its line count (the trimmed text's newlines + 1) against 200. Bytes
+// are not the unit of this cap. Version-bound: re-read at the next major Claude Code change.
+export const CC_INDEX_CAP_CHARS = 25000;
+export const CC_INDEX_CAP_LINES = 200;
+// The platform reads the index with a 4 x 25,000 = 100,000-byte bound. A UTF-8 character is at most 4 bytes, and a
+// 4-byte one is 2 UTF-16 units, so 100,000 bytes always hold at least 25,000 units: an index past this bound trips
+// without being read.
+export const CC_INDEX_READ_CAP_BYTES = 4 * CC_INDEX_CAP_CHARS;
 export const RUN_COST_MULTIPLIER = 3; // one Full run ~ store read x2 (outsider+insider) + rewrite
 export const ECON_HORIZON_DAYS = 14; // carry-cost horizon the break-even is judged against
 export const STAMP_RING_MAX = 60; // per-project session-stamp ring buffer cap
@@ -297,6 +305,13 @@ export function mechFatFromText(text) {
   return { tokensEst: dupTokens + blankTokens, dupTokens, blankTokens };
 }
 
+// The memory index's cap units from its TRIMMED text, as the platform counts them (CWK2-067): characters are the
+// trimmed JavaScript string length, lines are its newlines + 1. One helper, both read paths.
+function indexUnitsOf(text) {
+  const trimmed = text.trim();
+  return { chars: trimmed.length, lines: trimmed.split('\n').length };
+}
+
 // Measure a discovered class-B entry set. Reads content ONLY for always-loaded
 // entries (small by definition) up to `readBudgetBytes`; recall entries are
 // sized from stat bytes (deterministic) with the ASCII token heuristic.
@@ -311,7 +326,7 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
     totalBytes: 0,
     totalTokensEst: 0,
     alwaysLoaded: { files: 0, bytes: 0, tokensEst: 0 },
-    index: { bytes: 0, lines: 0 },
+    index: { bytes: 0, chars: 0, lines: 0 }, // chars + lines: the platform's units (CC_INDEX_CAP_CHARS, CC_INDEX_CAP_LINES); bytes: a stat fact
     mechFat: { tokensEst: 0, dupTokens: 0, blankTokens: 0 }, // task #4 — certain fat, accumulated from the texts read below
     gzipRatio: null,
     est: true, // token numbers are estimates — receipt must label "~est"
@@ -321,12 +336,14 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
   for (const e of entries) {
     m.totalBytes += e.bytes;
     let tok = tokensEstFromBytes(e.bytes);
+    // CWK2-067: an index past the platform's read bound is never read, so the cap trips without a read.
+    const indexPastReadBound = e.kind === 'memory-index' && e.bytes > CC_INDEX_READ_CAP_BYTES;
     if (e.alwaysLoaded) {
       m.alwaysLoaded.files++;
       m.alwaysLoaded.bytes += e.bytes;
       // CWK2-029 (b): a statOnly entry (a class-B file OUTSIDE the project, ~/.claude and its ancestor governance) is
       // sized from stat and never read, whatever the budget or scanEverything says.
-      if (!e.statOnly && readSoFar + e.bytes <= readBudgetBytes) {
+      if (!e.statOnly && !indexPastReadBound && readSoFar + e.bytes <= readBudgetBytes) {
         try {
           // CWK-137: bounded and kind-gated. The budget above is judged on a STAT size
           // taken at discovery; the read itself trusted the path, so a file swapped or
@@ -343,7 +360,7 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
           m.mechFat.blankTokens += mf.blankTokens;
           if (e.kind === 'memory-index') {
             m.index.bytes = e.bytes;
-            m.index.lines = text.split('\n').length;
+            Object.assign(m.index, indexUnitsOf(text));
           }
         } catch {
           // stat-based estimate stands; unread => 0 certain fat (muscle).
@@ -353,7 +370,9 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
           // index legs (a capacity wall that dies quietly is worse than one
           // that fires); lines stays 0, which is the safe direction for the
           // one leg we genuinely cannot compute.
-          if (e.kind === 'memory-index') m.index.bytes = e.bytes;
+          // CWK2-067: the characters of an index we could not read are unknown; its stat bytes are an UPPER bound
+          // (a character is at least one byte), so the cap stays fire-safe, the direction this leg has always taken.
+          if (e.kind === 'memory-index') { m.index.bytes = e.bytes; m.index.chars = e.bytes; }
         }
       } else if (e.kind === 'memory-index') {
         // THE CAP LEGS MUST NOT DEPEND ON DISCOVERY ORDER. `bytes` was always
@@ -365,21 +384,24 @@ export function measureEntries(entries, { readBudgetBytes = 262144, withGzip = f
         // corpus grew toward the wall it guards.
         //
         // The line count is recovered with a BOUNDED read, never by widening
-        // the global budget: an index over CC_INDEX_CAP_BYTES already trips
-        // the bytes leg unconditionally, so the lines leg only decides
-        // anything BELOW that cap — which bounds this read at 25 KB, once,
+        // the global budget: an index past CC_INDEX_READ_CAP_BYTES already
+        // trips the cap unconditionally (CWK2-067), so the read happens only
+        // BELOW that bound — which bounds it at 100,000 bytes, once,
         // for the single memory-index entry. `readSoFar` is deliberately not
         // charged: this is a cap check, not part of the fat scan, and the
         // overage is bounded by construction rather than by inspection.
         // The text is used for newlines ONLY and never reaches
         // mechFatFromText — the fat definition is untouched.
         m.index.bytes = e.bytes;
+        // Not measured in characters here, so the stat bytes stand as the fire-safe upper bound (see the read-error
+        // path above); past the read bound the index is saturated and trips without being read (CWK2-067).
+        m.index.chars = indexPastReadBound ? CC_INDEX_CAP_CHARS : e.bytes;
         // INSPECT 99 L99-2: a statOnly index keeps its stat bytes and is never read, not even for its line count.
-        if (!e.statOnly && e.bytes <= CC_INDEX_CAP_BYTES) {
+        if (!e.statOnly && !indexPastReadBound) {
           try {
-            const t = readRepoFileBounded(e.path, null, MAX_DOC_BYTES); // CWK-137: bounded. E2-4: root null kept: a class-B entry discovery already realpath-checked inside the home/project trees
-            if (t !== null) m.index.lines = t.split('\n').length;
-          } catch { /* unreadable: lines stays 0, same safe direction as the read-error path above */ }
+            const t = readRepoFileBounded(e.path, null, CC_INDEX_READ_CAP_BYTES); // CWK-137: bounded. CWK2-067: the platform's own read bound, not MAX_DOC_BYTES
+            if (t !== null) Object.assign(m.index, indexUnitsOf(t));
+          } catch { /* unreadable: chars keeps its stat bound, lines stays 0 — the same fire-safe direction as the read-error path above */ }
         }
       }
       m.alwaysLoaded.tokensEst += tok;
@@ -448,7 +470,7 @@ export function bandVerdict({
   footprintTokens,
   mechFatTokens = 0,
   capacityTokens = CAPACITY_TOKENS,
-  indexBytes = 0,
+  indexChars = 0,
   indexLines = 0,
   wasOver = false,
   economical = false,
@@ -469,7 +491,7 @@ export function bandVerdict({
   // muscle growth as capacity pressure (the task-#4 false positive).
   const capHit =
     footprintTokens >= capacityTokens ||
-    indexBytes >= CC_INDEX_CAP_BYTES ||
+    indexChars >= CC_INDEX_CAP_CHARS || // CWK2-067: the platform's unit, characters of the trimmed index
     indexLines >= CC_INDEX_CAP_LINES;
   // bmi survives as an INFORMATIONAL ratio only — footprint over MEASURED
   // muscle, no longer footprint over a stamped floor and no longer a band
@@ -636,7 +658,7 @@ export function gaugeVerdict({ measure, wasOver = false, wasEconLatched = false,
     footprintTokens,
     mechFatTokens,
     capacityTokens,
-    indexBytes: measure.index.bytes,
+    indexChars: measure.index.chars,
     indexLines: measure.index.lines,
     wasOver,
     economical: bothEconomical,
