@@ -400,6 +400,25 @@ test('CWK2-188 L178-4: a Cyrillic 9,000-character index is OVER RE-TIER\'s arm (
   } finally { clean(home, proj); }
 });
 
+// CWK2-192 L191-2 (INSPECT 191): RE-TIER reads the index untrimmed, so the reorg proof must measure the untrimmed text.
+// A Thai 7,000-character index with 3,000 trailing spaces is 5,417 tokensEst untrimmed (over the arm) and 4,667 trimmed
+// (under it). The proof must say over, as RE-TIER does. A mutant that measures the trimmed text (T3) must fail this.
+test('CWK2-188 L178-4 (untrimmed): a Thai 7,000-character index with 3,000 trailing spaces is OVER the arm, as RE-TIER reads it untrimmed', () => {
+  const { home, proj } = sandbox();
+  try {
+    const idx = path.join(home, 'MEMORY.md');
+    const text = THAI_WORD.repeat(1400) + ' '.repeat(3000); // 7,000 characters + 3,000 trailing spaces
+    fs.writeFileSync(idx, text, 'utf8');
+    const m = measureEntries([indexEntry(idx, fs.statSync(idx).size)]);
+    assert.strictEqual(m.index.tokens, tokensEst(text), 'the proof measures the untrimmed text, as RE-TIER does');
+    assert.ok(tokensEst(text.trim()) < ENV.armAt, 'fixture: the TRIMMED text is under the arm');
+    assert.ok(tokensEst(text) >= ENV.armAt, 'fixture: the UNTRIMMED text is over the arm');
+    const gv = gaugeVerdict({ measure: m, envelope: ENV });
+    assert.strictEqual(gv.demotableTokens, tokensEst(text) - ENV.fillCeiling, 'the demotable mass is the untrimmed overflow');
+    assert.ok(gv.demotableTokens > 0, 'over the arm untrimmed: the reorg proof sees the mass');
+  } finally { clean(home, proj); }
+});
+
 test('bandVerdict: certain fat below the arm mark is LEAN; at/above FAT_ARM_TOKENS (un-armed) arms OBESE', () => {
   const at = (fat, wasOver = false) => bandVerdict({ footprintTokens: 50000, mechFatTokens: fat, wasOver });
   assert.strictEqual(at(FAT_ARM_TOKENS - 1).band, 'LEAN');
