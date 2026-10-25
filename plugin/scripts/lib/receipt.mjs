@@ -54,21 +54,38 @@ export function oneLineResult(opts) {
   return `[CoalWash] cut ~${ktok(raw)} tok (−${pct}%)`;
 }
 
-// CWK2-062: the gate's PASS line. It states what was checked, never "facts
-// lost": the gate reads STRUCTURED tokens only (fidelity-gate.mjs), so a PASS
-// proves no structured drop beyond the plan's own approvedDrops, nothing about
-// prose. A drop value is caller data (a link target, a file name): CR/LF
-// collapse to a space and a pipe is escaped, so one value cannot break the
-// receipt into extra lines or a forged gate line (security.md, log injection).
+// CWK2-062 + INSPECT 170: the gate's PASS line. It names what the gate checks
+// (the list below), never "facts lost": the gate reads STRUCTURED tokens only
+// (fidelity-gate.mjs), so a PASS proves no structured drop beyond the plan's own
+// approvedDrops, and nothing about prose. A drop value is caller data (a link
+// target, a file name, a fenced code line), so each member renders as a JSON
+// string: quoted, with every C0 control escaped by JSON itself. JSON leaves
+// U+0085, U+2028 and U+2029 raw, so those three are replaced here by their
+// escape text, which is built from code points: a backslash-u literal typed into
+// source can arrive as the raw character (AGENTS, the escape-transit hazard).
 const FIDELITY_LISTED_MAX = 5;
-function receiptText(value) {
-  return String(value).replace(/[\r\n\u2028\u2029]+/g, ' ').replace(/\|/g, '\\|');
+const FIDELITY_CHECKED = 'checked: links, dates, versions, frontmatter keys, code, quotes, numbers';
+const BACKSLASH = String.fromCharCode(92);
+const RAW_SEPARATORS = [0x85, 0x2028, 0x2029].map((cp) => [
+  String.fromCharCode(cp),
+  `${BACKSLASH}u${cp.toString(16).padStart(4, '0')}`,
+]);
+// A plan member is a JSON value: a string is itself, anything else its JSON text.
+function memberForm(member) {
+  return typeof member === 'string' ? member : (JSON.stringify(member) ?? String(member));
 }
+function receiptText(member) {
+  let text = JSON.stringify(memberForm(member));
+  for (const [raw, escaped] of RAW_SEPARATORS) text = text.split(raw).join(escaped);
+  return text;
+}
+// apply.mjs holds approvedDrops as a Set, so a repeated member counts once here too.
 function fidelityPassLine(approved) {
-  if (approved.length === 0) return 'fidelity gate: PASS (no structured-token drop: links/dates/versions/frontmatter checked)';
-  const shown = approved.slice(0, FIDELITY_LISTED_MAX).map(receiptText).join(', ');
-  const more = approved.length > FIDELITY_LISTED_MAX ? ` +${approved.length - FIDELITY_LISTED_MAX} more` : '';
-  return `fidelity gate: PASS (no structured-token drop beyond the ${approved.length} the plan approved: ${shown}${more})`;
+  const members = [...new Set(approved.map(memberForm))];
+  if (members.length === 0) return `fidelity gate: PASS (no structured-token drop; ${FIDELITY_CHECKED})`;
+  const shown = members.slice(0, FIDELITY_LISTED_MAX).map(receiptText).join(', ');
+  const more = members.length > FIDELITY_LISTED_MAX ? ` +${members.length - FIDELITY_LISTED_MAX} more` : '';
+  return `fidelity gate: PASS (no structured-token drop beyond the ${members.length} the plan approved: ${shown}${more}; ${FIDELITY_CHECKED})`;
 }
 
 // r = {
