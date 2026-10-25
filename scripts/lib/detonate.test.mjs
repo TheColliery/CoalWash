@@ -637,7 +637,7 @@ test('RUNG5 A2 PARSER PARITY — the census reads a line through the REDUCER\'s 
     // splice a U+FEFF-prefixed unit in: JS `.trim()` treats a BOM as whitespace, the reducer's
     // lineText does not. Enough good lines around it that discovery still classifies ndjson.
     const lines = fs.readFileSync(src, 'utf8').split('\n').filter(Boolean);
-    lines.splice(20, 0, '﻿' + JSON.stringify({ type: 'mode', i: 'BOMMED' }));
+    lines.splice(20, 0, '\uFEFF' + JSON.stringify({ type: 'mode', i: 'BOMMED' }));
     fs.writeFileSync(src, lines.join('\n') + '\n', 'utf8');
 
     const r = survey(src);
@@ -1235,5 +1235,72 @@ test('gate 4 REFUSE-polarity: a namespaced src INSIDE the store is refused ON PU
     assert.strictEqual(r.triggered, false, 'before the reducer runs');
     assert.match(r.reason, /snapshot store/i, 'and it says why');
     assert.strictEqual(sha256File(src), before, 'source byte-intact');
+  } finally { rm(dir); }
+});
+
+// CWK2-066: Antigravity-shaped estate files. The two shapes below came from the 2026-10-26 structure-only
+// survey of ONE box (scratchpad/18a/ag-estate-shape.md). Of the 103 `.json` files, 86 share the majority
+// shape (top-level name, description, parameters; parameters holds a NESTED type) and 5 of those 86 were
+// key-checked; the other `.json` files are a minority shape (the first file: a metadata object with
+// summary, updatedAt and userFacing). Every VALUE below is made up, built in code, and the non-ASCII comes
+// from code points. No text from that estate is used. Each test pins what the engine does with one shape:
+// the structure gate ACCEPTS it as json-single, and the cut-list gate REFUSES it, because no default cut
+// type is a top-level `type`, so nothing is written and the source is untouched. The refusal is the answer,
+// not a bug to fix here: an "AG coverage" claim needs these witnesses to hold before it means anything.
+
+// The minority shape: a metadata object (first file of the survey's `.json` kind).
+test('CWK2-066: an Antigravity-shaped estate file is accepted by the structure gate and refused at the cut-list gate (source intact, nothing written)', () => {
+  const dir = tmp();
+  try {
+    const summary = String.fromCodePoint(0x0e01, 0x0e2d, 0x0e07, 0x0e04, 0x0e4c) + ' sample summary';
+    const src = path.join(dir, 'estate-meta.json');
+    fs.writeFileSync(src, JSON.stringify({ summary, updatedAt: '2000-01-01T00:00:00Z', userFacing: true }, null, 2) + '\n');
+    const before = fs.readFileSync(src);
+
+    const s = survey(src);
+    assert.strictEqual(s.ok, true, 'the structure gate accepts the shape');
+    assert.strictEqual(s.structure, 'json-single', 'as a single JSON value');
+
+    const out = path.join(dir, 'estate-meta.out');
+    const snap = path.join(dir, 'snap');
+    const r = detonate(src, { cutTypes: CLAUDE_DEFAULT_CUT_TYPES, outPath: out, snapshotDir: snap });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.refused, true);
+    assert.strictEqual(r.triggered, false);
+    assert.strictEqual(r.failedCheck, 'cutlist', 'refused at the cut-list gate: no requested cut-type is present');
+    assert.strictEqual(fs.existsSync(out), false, 'no output written');
+    assert.strictEqual(fs.existsSync(snap), false, 'no snapshot written');
+    assert.ok(fs.readFileSync(src).equals(before), 'source byte-identical');
+  } finally { rm(dir); }
+});
+
+// The majority shape: a tool-schema object whose `parameters` holds a NESTED `"type": "mode"`. The nested type
+// must NEVER make a cut candidate: only a top-level type is a unit's type (the engine reads obj[typeField]).
+test('CWK2-066: the majority Antigravity .json shape is refused at the cut-list gate — a NESTED type never makes a cut candidate (source intact, nothing written)', () => {
+  const dir = tmp();
+  try {
+    const src = path.join(dir, 'estate-tool.json');
+    const shape = {
+      name: 'sample-tool',
+      description: 'made-up description for the fixture',
+      parameters: { type: 'mode', required: ['value'], properties: { value: { type: 'string' } } },
+    };
+    fs.writeFileSync(src, JSON.stringify(shape, null, 2) + '\n');
+    const before = fs.readFileSync(src);
+
+    const s = survey(src);
+    assert.strictEqual(s.ok, true, 'the structure gate accepts the shape');
+    assert.strictEqual(s.structure, 'json-single', 'as a single JSON value');
+
+    const out = path.join(dir, 'estate-tool.out');
+    const snap = path.join(dir, 'snap');
+    const r = detonate(src, { cutTypes: CLAUDE_DEFAULT_CUT_TYPES, outPath: out, snapshotDir: snap });
+    assert.strictEqual(r.ok, false, 'a nested type must not let the default cut-types through');
+    assert.strictEqual(r.refused, true);
+    assert.strictEqual(r.triggered, false);
+    assert.strictEqual(r.failedCheck, 'cutlist', 'refused at the cut-list gate: no top-level type is a requested cut-type');
+    assert.strictEqual(fs.existsSync(out), false, 'no output written');
+    assert.strictEqual(fs.existsSync(snap), false, 'no snapshot written');
+    assert.ok(fs.readFileSync(src).equals(before), 'source byte-identical');
   } finally { rm(dir); }
 });
