@@ -225,7 +225,9 @@ function saveIndex(dir, index) {
 // (no ceremony, no ask: "born silent" per the ledger). `original` = the
 // source path it was cut from (advisory metadata only, never dereferenced by
 // this module); `origin` = 'program-cut' (the certain-garbage broom,
-// default) or 'wizard-cut' (a judgment-tier muscle-reorg pre-surgery image).
+// default), 'wizard-cut' (a judgment-tier muscle-reorg pre-surgery image), or 'clobber-bank' (0ad D: the
+// occupant of a forced restore's destination, PRESERVED rather than cut, so a recovery index never says it
+// was CUT). The label picks no bin and changes no retention; the caller picks the bin.
 // Returns the item id (also the on-disk filename), or null on any failure —
 // a failed stash must never block the wash it was backing up (fail-silent,
 // the safety net's own failure is not the caller's problem to crash over).
@@ -340,7 +342,7 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     writeBlobWhole(dir, id, body);
     // bytes (0i): the size-cap layer's weight — recorded at birth so the
     // sweep never has to re-stat the common case.
-    const row = { id, at: now, bytes: body.length, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' ? 'wizard-cut' : 'program-cut' };
+    const row = { id, at: now, bytes: body.length, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' || origin === 'clobber-bank' ? origin : 'program-cut' };
     // loadIndex lists this item's own blob (written above) as a bare reconciled row; the full row replaces it.
     let index = loadIndex(dir).filter((i) => i.id !== id);
     index.push(row);
