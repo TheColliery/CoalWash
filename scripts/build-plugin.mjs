@@ -43,9 +43,10 @@ const isTest = (p) => /\.test\.[cm]?js$/.test(p);
 // the engine then ships together with the caller that makes it reachable.
 //
 // LANDING PRECONDITION (rung-2 F2 — the full boundary + the 7-fix kill-list live TODAY in
-// scripts/lib/explode.mjs, restoreFromSnapshot's STEP 2 header comment, NOT yet in SECURITY.md):
+// scripts/lib/explode.mjs, restoreFromSnapshot's STEP 2 header comment, now in SECURITY.md under
+// "The class-A engine (not in the plugin)", the F2 subsection):
 // explode.mjs may leave this list ONLY once EITHER per-tenant manifests exist (F2 closed in code) OR
-// that boundary is COPIED into shipped SECURITY.md (F2 closed by disclosure, still to be written) — a
+// that boundary is COPIED into shipped SECURITY.md (F2 closed by disclosure, now written there) — a
 // co-tenant with manifest write access can forge ownership of any blob in a shared snapshotDir today,
 // and nothing here enforces isolation.
 const UNWIRED_ENGINE = [
