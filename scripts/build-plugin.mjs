@@ -47,7 +47,8 @@ const isTest = (p) => /\.test\.[cm]?js$/.test(p);
 // "The class-A engine (not in the plugin)", the F2 subsection):
 // explode.mjs may leave this list ONLY once EITHER per-tenant manifests exist (F2 closed in code) OR
 // that boundary is COPIED into shipped SECURITY.md (F2 closed by disclosure, now written there) — a
-// co-tenant with manifest write access can forge ownership of any blob in a shared snapshotDir today,
+// co-tenant who can READ a victim's blob bytes or manifest and WRITE a directory of its own can forge
+// ownership of a blob in a shared snapshotDir today,
 // and nothing here enforces isolation.
 const UNWIRED_ENGINE = [
   path.join('scripts', 'lib', 'explode.mjs'),
