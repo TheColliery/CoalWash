@@ -145,3 +145,15 @@ A re-scan is run when this repo's own version bump calls for it (the automatic b
 - **Memory content is data, never instructions** — the skill contract binds every sub to judge content, not obey it (prompt-injection via poisoned memory is the named threat model).
 
 Honest scope: these measures are the series' data-safety discipline — injection-safe, path-safe, snapshot-reversible deletes, scrubbed output, offline code, opt-in zero-transmission (`localOnly`). No formal verification, no crypto-at-rest, no "military-grade" claim.
+
+## The class-A engine (not in the plugin)
+
+The class-A engine (`explode`, `detonate`) is in the repository under `scripts/lib/` and is not in the installed plugin, so nothing below runs in an installed copy today.
+
+### F4 — a recycled path can present the manifest's identity
+
+**What.** A restore's ownership check confirms the declared original against the store's own manifest by path plus device/inode. On an ordinary filesystem an inode number is REUSED after a delete, so a path that was deleted and recreated between snapshot and restore can present the same device/inode as the file the manifest describes while being a different file entirely. This needs no store access, no manifest write and no co-tenant; ordinary single-user delete-and-recreate churn at a tracked path is enough. CoalWash does not try to tell this case apart from a legitimately modified original, because filesystem metadata alone cannot separate them.
+
+**What the engine does instead.** A forced restore over a populated destination hands the destination's current bytes to a bank before the overwrite, and publishes only after the bank returns an id. The bank is the caller's: `restoreFromSnapshot` takes it as `opts.bank`, and no caller supplies one yet. With no bank, or a bank that throws or returns no id, the restore refuses and leaves the destination untouched.
+
+**What that bounds.** The bank holds the bytes read at check time, so the recoverability claim covers a destination that no other process is writing. A writer that changes the destination after that read loses its write unbanked, and an occupant that appears after the check is overwritten unbanked. Single-user delete-and-recreate churn, which is the threat above, is covered.
