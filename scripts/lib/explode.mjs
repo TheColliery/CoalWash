@@ -1896,7 +1896,10 @@ export function restoreFromSnapshot(ref, toPath, opts) {
   // `= {}` only defaults `undefined`, so an explicit null third argument threw on
   // destructuring — the one caller shape that crashed a primitive whose own contract
   // (below) is that it never throws. Normalize first, destructure after.
-  const { snapshotDir = null, src = null, force = false, original = null } = (opts && typeof opts === 'object') ? opts : {};
+  // bank: `(bytes: Buffer, original: string) => id | null`, supplied by the caller. Needed only by a FORCED
+  // overwrite of a populated destination (0ad D); without it that overwrite refuses. The engine stays
+  // built-ins-only (it loads in isolation), so the recovery bin is the caller's to wire.
+  const { snapshotDir = null, src = null, force = false, original = null, bank = null } = (opts && typeof opts === 'object') ? opts : {};
   // A RECOVERY PRIMITIVE MUST NEVER THROW. Every other bad ref returns a fail-closed
   // {ok:false}, but a non-string ref reached path.isAbsolute and threw
   // ERR_INVALID_ARG_TYPE — the one input shape that crashes the caller instead of
@@ -2102,8 +2105,28 @@ export function restoreFromSnapshot(ref, toPath, opts) {
         : `ownership unconfirmed: the store's manifest does not record '${original}' as the source of this blob (sha256 ${expect}) — refused (the manifest is absent, unreadable, or has no matching row)`;
       return { ok: false, verified: false, reason };
     }
+    // (d) 0ad option D — BANK-BEFORE-CLOBBER. A forced publish over a POPULATED destination first banks the
+    // occupant's bytes into the recovery bin, then publishes. Discriminating a recycled inode from a genuinely
+    // modified original is impossible (dev/ino + ctime cannot separate them), so recoverability is guaranteed
+    // for both instead. Structural, not inspectional: between the force refusal above and the return, the
+    // rename below is the ONLY write to toPath (the one other write, the staging copy, lands on tmpPath).
+    // Fail CLOSED: a bank that does not land refuses the restore before any rename, destination untouched.
+    // The bank is the CALLER's (opts.bank). Whatever it is, a bank that is absent, throws, or does not return a
+    // non-empty string refuses here, so the bank cannot be skipped by omitting it.
+    let bankedId = null;
+    if (force && existsPopulated(toPath)) {
+      let occupant = null;
+      try { occupant = fs.readFileSync(toPath); } catch { /* unreadable occupant → no bank → refused below */ }
+      if (occupant !== null && typeof bank === 'function') {
+        try { bankedId = bank(occupant, path.resolve(toPath)); } catch { bankedId = null; }
+      }
+      if (typeof bankedId !== 'string' || bankedId === '') {
+        try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+        return { ok: false, verified: false, reason: 'forced restore refused: the destination current contents could not be banked to the recovery bin first, so the overwrite was not made (destination untouched). The caller must supply a bank that returns an id, and the occupant must be readable.' };
+      }
+    }
     fs.renameSync(tmpPath, toPath); // atomic publish — only content-verified, destination-guarded, OWNERSHIP-confirmed bytes land here
-    return { ok: true, sha256: got, verified: true };
+    return bankedId ? { ok: true, sha256: got, verified: true, bankedId } : { ok: true, sha256: got, verified: true };
   } catch (e) {
     // ONLY our own inode. The EEXIST that lands here is precisely the case where the temp path
     // holds somebody ELSE's file — reaping the bare path would delete it while refusing to write it.

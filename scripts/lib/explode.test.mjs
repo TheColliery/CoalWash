@@ -17,6 +17,7 @@ import {
   CLAUDE_DEFAULT_CUT_TYPES, SNAPSHOT_MANIFEST, isContainedIn, physicalForCreate,
   containment,
 } from './explode.mjs';
+import { listBin, restoreFromBin, recordBinItem, FAT_BIN_NAME } from './tailings.mjs';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'cwx-')); }
 function rm(dir) { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -1407,9 +1408,129 @@ test('WAVE-7 L1 (BREAK 1): restoreFromSnapshot INTRINSICALLY refuses to clobber 
     assert.strictEqual(rFresh.verified, true);
     // (c) force:true is the explicit override (calibrated, not lock-tight)
     const populated = write(dir, 'populated.out', Buffer.from('stale bytes to be replaced'));
-    const rForce = restoreFromSnapshot(fsnap.sha256, populated, { snapshotDir: snapDir, force: true, original: foreign });
+    const rForce = restoreFromSnapshot(fsnap.sha256, populated, { snapshotDir: snapDir, force: true, original: foreign, bank: binBank(dir) });
     assert.strictEqual(rForce.ok, true, 'force:true overrides the clobber guard for an intentional overwrite');
     assert.ok(fs.readFileSync(populated).equals(fs.readFileSync(foreign)), 'and publishes the verified bytes');
+  } finally { rm(dir); }
+});
+
+// 0ad option D (CWK2-065): a FORCED publish over a populated destination banks the occupant first.
+// The occupant bytes are built from numbers: a non-UTF-8 byte sequence, so a text round-trip would show.
+const OCCUPANT_BYTES = Buffer.from([0x50, 0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28, 0x0a]);
+
+// The caller-side bank the tests supply (R176-1): the real recovery bin, through the real recordBinItem.
+function binBank(projectRoot) {
+  return (bytes, original) => recordBinItem(projectRoot, FAT_BIN_NAME, { content: bytes, original, origin: 'clobber-bank' });
+}
+
+// Shared fixture: a verified foreign blob, a populated destination holding OCCUPANT_BYTES, and a project
+// root whose recovery bin is `<proj>/.claude/coalwash/fat-bin`.
+function bankFixture(dir) {
+  const snapDir = path.join(dir, 'snap');
+  const foreign = write(dir, 'foreign.jsonl', Buffer.from('{"type":"user","message":"the verified bytes"}\n'));
+  const fsnap = snapshotSource(foreign, snapDir);
+  const toPath = write(dir, 'occupant.out', OCCUPANT_BYTES);
+  const proj = path.join(dir, 'proj');
+  fs.mkdirSync(proj);
+  return { snapDir, foreign, fsnap, toPath, proj };
+}
+
+test('0ad D (a): force over a populated destination banks the occupant byte-exact in the fat bin, then publishes', () => {
+  const dir = tmp();
+  try {
+    const { snapDir, foreign, fsnap, toPath, proj } = bankFixture(dir);
+    const r = restoreFromSnapshot(fsnap.sha256, toPath, { snapshotDir: snapDir, force: true, original: foreign, bank: binBank(proj) });
+    assert.strictEqual(r.ok, true, `forced restore over a banked occupant must publish: ${r.reason}`);
+    assert.ok(fs.readFileSync(toPath).equals(fs.readFileSync(foreign)), 'publishes the verified bytes');
+    assert.strictEqual(typeof r.bankedId, 'string', 'the result names the banked id');
+    const rows = listBin(proj, FAT_BIN_NAME);
+    assert.strictEqual(rows.length, 1, 'exactly one occupant banked');
+    assert.strictEqual(rows[0].id, r.bankedId);
+    assert.strictEqual(rows[0].origin, 'clobber-bank', 'a recovery index must not say CoalWash CUT a file it only PRESERVED');
+    assert.strictEqual(rows[0].original, path.resolve(toPath), 'the bank records the RESOLVED destination, so the index carries an anchor');
+    assert.ok(restoreFromBin(proj, FAT_BIN_NAME, r.bankedId).equals(OCCUPANT_BYTES), 'the banked copy is the occupant, byte-exact');
+  } finally { rm(dir); }
+});
+
+test('0ad D (b): a bank that returns null refuses the forced restore — destination byte-identical, no temp left (fail CLOSED)', () => {
+  const dir = tmp();
+  try {
+    const { snapDir, foreign, fsnap, toPath } = bankFixture(dir);
+    const r = restoreFromSnapshot(fsnap.sha256, toPath, { snapshotDir: snapDir, force: true, original: foreign, bank: () => null });
+    assert.strictEqual(r.ok, false, 'a bank that returns null must refuse the restore');
+    assert.strictEqual(r.verified, false);
+    assert.match(r.reason, /bank/i);
+    assert.ok(fs.readFileSync(toPath).equals(OCCUPANT_BYTES), 'destination byte-identical: the occupant was never displaced');
+    assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => n.endsWith('.tmp')), [], 'the restore temp is reaped');
+  } finally { rm(dir); }
+});
+
+test('0ad D (b2): a bank that throws refuses the forced restore — destination byte-identical, no temp left (fail CLOSED)', () => {
+  const dir = tmp();
+  try {
+    const { snapDir, foreign, fsnap, toPath } = bankFixture(dir);
+    const r = restoreFromSnapshot(fsnap.sha256, toPath, { snapshotDir: snapDir, force: true, original: foreign, bank: () => { throw new Error('injected: bank unwritable'); } });
+    assert.strictEqual(r.ok, false, 'a bank that throws must refuse the restore');
+    assert.strictEqual(r.verified, false);
+    assert.ok(fs.readFileSync(toPath).equals(OCCUPANT_BYTES), 'destination byte-identical');
+    assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => n.endsWith('.tmp')), [], 'the restore temp is reaped');
+  } finally { rm(dir); }
+});
+
+test('0ad D (b3): a bank that returns a non-string or an empty id refuses the forced restore', () => {
+  const dir = tmp();
+  try {
+    const { snapDir, foreign, fsnap, toPath } = bankFixture(dir);
+    for (const bad of [42, '', undefined, {}]) {
+      const r = restoreFromSnapshot(fsnap.sha256, toPath, { snapshotDir: snapDir, force: true, original: foreign, bank: () => bad });
+      assert.strictEqual(r.ok, false, `a bank returning ${JSON.stringify(bad)} must refuse`);
+      assert.ok(fs.readFileSync(toPath).equals(OCCUPANT_BYTES), 'destination byte-identical');
+    }
+  } finally { rm(dir); }
+});
+
+test('0ad D (c): without force a populated destination still refuses, and the bank is never called', () => {
+  const dir = tmp();
+  try {
+    const { snapDir, foreign, fsnap, toPath, proj } = bankFixture(dir);
+    let calls = 0;
+    const r = restoreFromSnapshot(fsnap.sha256, toPath, { snapshotDir: snapDir, original: foreign, bank: (b, o) => { calls++; return binBank(proj)(b, o); } });
+    assert.strictEqual(r.ok, false, 'no force → the clobber guard still refuses');
+    assert.strictEqual(r.bankedId, undefined, 'a refused restore banks nothing');
+    assert.strictEqual(calls, 0, 'the bank is not consulted on the non-force path');
+    assert.ok(fs.readFileSync(toPath).equals(OCCUPANT_BYTES), 'destination untouched');
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [], 'nothing banked on the non-force path');
+  } finally { rm(dir); }
+});
+
+test('0ad D (d): force over an absent or empty destination banks nothing', () => {
+  const dir = tmp();
+  try {
+    const { snapDir, foreign, fsnap, proj } = bankFixture(dir);
+    let calls = 0;
+    const bank = (b, o) => { calls++; return binBank(proj)(b, o); };
+    const absent = path.join(dir, 'absent.out');
+    const rAbsent = restoreFromSnapshot(fsnap.sha256, absent, { snapshotDir: snapDir, force: true, original: foreign, bank });
+    assert.strictEqual(rAbsent.ok, true);
+    assert.strictEqual(rAbsent.bankedId, undefined, 'no occupant, no bank');
+    const empty = write(dir, 'empty.out', Buffer.alloc(0));
+    const rEmpty = restoreFromSnapshot(fsnap.sha256, empty, { snapshotDir: snapDir, force: true, original: foreign, bank });
+    assert.strictEqual(rEmpty.ok, true);
+    assert.strictEqual(rEmpty.bankedId, undefined, 'a zero-byte occupant is not populated, so nothing is banked');
+    assert.strictEqual(calls, 0, 'the bank is never consulted for an unpopulated destination');
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [], 'the bin stays empty');
+  } finally { rm(dir); }
+});
+
+test('0ad D (e): force over a populated destination with NO bank refuses fail closed — the bank cannot be skipped by omission', () => {
+  const dir = tmp();
+  try {
+    const { snapDir, foreign, fsnap, toPath } = bankFixture(dir);
+    const r = restoreFromSnapshot(fsnap.sha256, toPath, { snapshotDir: snapDir, force: true, original: foreign });
+    assert.strictEqual(r.ok, false, 'force with no bank must refuse');
+    assert.strictEqual(r.verified, false);
+    assert.ok(fs.readFileSync(toPath).equals(OCCUPANT_BYTES), 'destination byte-identical');
+    assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => n.endsWith('.tmp')), [], 'the restore temp is reaped');
   } finally { rm(dir); }
 });
 
@@ -2313,7 +2434,7 @@ test('RUNG5 A6 PRIMARY UNDO: restoring a snapshot back OVER its own source succe
     const snap = snapshotSource(src, store);
     fs.writeFileSync(src, 'CORRUPTED-BY-A-BAD-RUN'); // the disaster the undo net exists for
 
-    const r = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src, force: true, original: src });
+    const r = restoreFromSnapshot(snap.sha256, src, { snapshotDir: store, src, force: true, original: src, bank: binBank(dir) });
     assert.strictEqual(r.ok, true,
       'the PRIMARY undo must work. Pre-fix the src-alias branch fired unconditionally, so a caller who declared src (being explicit about what it protects) and set force:true was refused — by a message telling them to pass force:true, which they had already passed');
     assert.strictEqual(fs.readFileSync(src, 'utf8'), 'GOOD-ORIGINAL', 'the source really is restored');
