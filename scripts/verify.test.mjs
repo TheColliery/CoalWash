@@ -165,6 +165,25 @@ test('verify.mjs: a line break inside a manifest field cannot forge a report lin
     const r = finished(spawnSync(process.execPath, [dest], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
     const lines = r.stdout.split(String.fromCharCode(10));
     assert.ok(!lines.some((l) => l.startsWith('  ok   forged')), `a forged report line reached stdout\n${r.stdout}`);
+    const BS = String.fromCharCode(92);
+    assert.ok(r.stdout.includes(BS + 'u000a'), `the escaped line feed must appear in stdout, proving the escape rather than only the absence\n${r.stdout}`);
+  } finally { removeTree(root); }
+});
+
+// A code point above U+FFFF has no four-digit escape: it prints in the braced form, so the escape reads back unambiguously.
+test('verify.mjs: a code point above U+FFFF prints as a braced escape', () => {
+  const root = copyGateTree('cw-astral-');
+  try {
+    const dest = path.join(root, 'scripts', 'verify.mjs');
+    const pjPath = path.join(root, '.claude-plugin', 'plugin.json');
+    const pj = JSON.parse(fs.readFileSync(pjPath, 'utf8'));
+    const tag = String.fromCodePoint(0xe0001);
+    pj.name = 'x' + tag;
+    fs.writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n', 'utf8');
+    const r = finished(spawnSync(process.execPath, [dest], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
+    const BS = String.fromCharCode(92);
+    assert.ok(r.stdout.includes(BS + 'u{e0001}'), `U+E0001 must print as the braced escape\n${r.stdout}`);
+    assert.ok(!r.stdout.includes(tag), 'the raw code point must not reach stdout');
   } finally { removeTree(root); }
 });
 

@@ -23,7 +23,13 @@ let fails = 0;
 // message) is printed as its escape, so no field can start a report line of its own. Built from code points, no typed escape.
 const BS = String.fromCharCode(92);
 const CONTROL_CLASS = new RegExp('[' + BS + 'p{Cc}' + BS + 'p{Cf}' + BS + 'p{Zl}' + BS + 'p{Zp}]', 'gu');
-const escapeControls = (m) => String(m).replace(CONTROL_CLASS, (ch) => BS + 'u' + ch.codePointAt(0).toString(16).padStart(4, '0'));
+// A code point above U+FFFF takes the braced form: a five-digit escape would read as a four-digit one followed by a digit.
+const escapeOne = (ch) => {
+  const cp = ch.codePointAt(0);
+  const hex = cp.toString(16);
+  return cp > 0xffff ? BS + 'u{' + hex + '}' : BS + 'u' + hex.padStart(4, '0');
+};
+const escapeControls = (m) => String(m).replace(CONTROL_CLASS, escapeOne);
 const ok = (m) => console.log(`  ok   ${escapeControls(m)}`);
 const fail = (m) => { console.log(`  FAIL ${escapeControls(m)}`); fails++; };
 // Every git spawn in this gate carries a deadline (CWK2-061 / N165-1): an unbounded wait is a hung gate, never a verdict.
