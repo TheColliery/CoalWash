@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { execSync, spawnSync } from 'node:child_process';
 import { gitEnv } from './git-env.mjs';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, LOCK_READ_WAIT_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks, writeDurable } from './apply.mjs';
-import { recordKeep, recordGlobalKeep, loadKeeps } from './keeps.mjs';
+import { recordKeep, recordGlobalKeep, loadKeeps, keepsPath } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin, __testHooks as tailHooks } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
 import { recordVerdict, loadState } from './caliper.mjs';
@@ -1592,6 +1592,23 @@ test('KEEPS-GATE: GLOBAL keeps are consulted too (an adjudicated keep shields ma
     ]), { home });
     assert.strictEqual(r.ok, false, 'the only action was keep-excluded');
     assert.ok(r.flagged.some((x) => /keep enforcement/.test(x.reason)));
+    assert.match(fs.readFileSync(f, 'utf8'), /never trust a raw floor value/);
+  } finally { clean(proj, home); }
+});
+
+// triage row 40: a poisoned PROJECT ledger must not drop the GLOBAL keep that shields the same text.
+test('KEEPS-GATE: an unreadable project ledger leaves the GLOBAL keeps in force (the cut is still refused)', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const f = path.join(store, 'shared.md');
+    write(f, 'Global wisdom: never trust a raw floor value. Extra.');
+    recordGlobalKeep(home, { target: 'shared', anchor: 'never trust a raw floor value', anchorFile: f });
+    write(keepsPath(proj), '{"v":{"toString":1},"keeps":[]}');
+    const r = apply(planFor(proj, store, [
+      { type: 'rewrite', path: f, content: 'Global wisdom: (trimmed). Extra.' },
+    ]), { home });
+    assert.strictEqual(r.ok, false, 'the global keep must still refuse the cut');
     assert.match(fs.readFileSync(f, 'utf8'), /never trust a raw floor value/);
   } finally { clean(proj, home); }
 });

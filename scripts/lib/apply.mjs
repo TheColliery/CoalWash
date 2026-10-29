@@ -1305,11 +1305,14 @@ export function applyPlan(plan, opts = {}) {
         if (pa === pb) return true;
         return (volumeCaseFolds(pa, true) || volumeCaseFolds(pb, true)) && pa.toLowerCase() === pb.toLowerCase();
       };
-      let keeps = [];
-      try {
-        keeps = [...loadProjectKeepsAt(txDir), ...loadKeepsAt(globalKeepsPath(home))] // E2-4: the project store contained to txDir
-          .filter((k) => typeof k.anchor === 'string' && k.anchor && typeof k.anchorFile === 'string' && k.anchorFile);
-      } catch { keeps = []; } // an unreadable keeps ledger must never block an apply (it is the shield, not the gate's subject)
+      // triage row 40: each store loads under its own try, so an unreadable project ledger cannot drop the global keeps (and the reverse).
+      // An unreadable keeps ledger must never block an apply (it is the shield, not the gate's subject).
+      let projectKeeps = [];
+      let globalKeeps = [];
+      try { projectKeeps = loadProjectKeepsAt(txDir); } catch { projectKeeps = []; } // E2-4: the project store contained to txDir
+      try { globalKeeps = loadKeepsAt(globalKeepsPath(home)); } catch { globalKeeps = []; }
+      let keeps = [...projectKeeps, ...globalKeeps]
+        .filter((k) => typeof k.anchor === 'string' && k.anchor && typeof k.anchorFile === 'string' && k.anchorFile);
       // Fixpoint: excluding one violating action can remove the very text that
       // satisfied ANOTHER keep (an anchor "migrated" into a now-excluded
       // rewrite) — re-check until stable. Each pass strictly shrinks
