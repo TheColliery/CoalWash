@@ -1180,8 +1180,13 @@ export function mergeSafety(global, project, { globalUnreadable = false, project
     // asks -- never the schema default, which can be weaker than what the
     // user actually had set before the file broke.
     if (globalUnreadable) { out[key] = order[0]; continue; }
-    if (p[key] === undefined) continue; // nothing the project asked to change (incl. an unreadable project, per grad9 R8-F5 above)
-    const globalVal = global[key] === undefined ? SCHEMA_DEFAULT[key] : global[key];
+    // triage row 18: a JSON object is not a setting, and String() on it can throw. A project object reads as absent (the global
+    // stands); a global object reads as the schema default. The object spread above copied both onto `out`, so both are reset here.
+    const isObjectValue = (v) => v !== null && typeof v === 'object';
+    const cleanGlobal = isObjectValue(global[key]) ? SCHEMA_DEFAULT[key] : global[key];
+    if (isObjectValue(p[key])) { out[key] = cleanGlobal === undefined ? SCHEMA_DEFAULT[key] : cleanGlobal; continue; }
+    if (p[key] === undefined) { if (isObjectValue(global[key])) out[key] = SCHEMA_DEFAULT[key]; continue; } // nothing the project asked to change (incl. an unreadable project, per grad9 R8-F5 above)
+    const globalVal = cleanGlobal === undefined ? SCHEMA_DEFAULT[key] : cleanGlobal;
     // CASE-FOLD to match the schema's case-insensitive enum. Comparing raw
     // case let a project 'AUTO' miss the lookup (indexOf -> -1) and fall
     // through to the shallow-merge (project wins), re-enabling a globally-off
