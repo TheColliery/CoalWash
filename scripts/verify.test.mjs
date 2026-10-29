@@ -153,6 +153,21 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
   } finally { removeTree(root); }
 });
 
+// triage row 54: a manifest field holding a line break must not print a report line of its own.
+test('verify.mjs: a line break inside a manifest field cannot forge a report line', () => {
+  const root = copyGateTree('cw-forge-');
+  try {
+    const dest = path.join(root, 'scripts', 'verify.mjs');
+    const pjPath = path.join(root, '.claude-plugin', 'plugin.json');
+    const pj = JSON.parse(fs.readFileSync(pjPath, 'utf8'));
+    pj.name = 'x' + String.fromCharCode(10) + '  ok   forged';
+    fs.writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n', 'utf8');
+    const r = finished(spawnSync(process.execPath, [dest], { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }), 'verify.mjs');
+    const lines = r.stdout.split(String.fromCharCode(10));
+    assert.ok(!lines.some((l) => l.startsWith('  ok   forged')), `a forged report line reached stdout\n${r.stdout}`);
+  } finally { removeTree(root); }
+});
+
 test('verify.mjs: a truthy NON-STRING plugin.json description FAILs loud, never silently reads as 0 chars', () => {
   const root = copyGateTree('cw-desccap-nonstring-');
   try {
