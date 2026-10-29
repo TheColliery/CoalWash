@@ -19,7 +19,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let fails = 0;
-// triage row 54: a report line is one line. A control or format character in a field (a line break from a manifest, an error
+// A report line is one line. A control or format character in a field (a line break from a manifest, an error
 // message) is printed as its escape, so no field can start a report line of its own. Built from code points, no typed escape.
 const BS = String.fromCharCode(92);
 const CONTROL_CLASS = new RegExp('[' + BS + 'p{Cc}' + BS + 'p{Cf}' + BS + 'p{Zl}' + BS + 'p{Zp}]', 'gu');

@@ -153,7 +153,7 @@ test('verify.mjs: an over-cap .claude-plugin/plugin.json description FAILs the g
   } finally { removeTree(root); }
 });
 
-// triage row 54: a manifest field holding a line break must not print a report line of its own.
+// A manifest field holding a line break must not print a report line of its own.
 test('verify.mjs: a line break inside a manifest field cannot forge a report line', () => {
   const root = copyGateTree('cw-forge-');
   try {

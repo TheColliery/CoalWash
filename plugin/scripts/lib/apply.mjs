@@ -1305,7 +1305,7 @@ export function applyPlan(plan, opts = {}) {
         if (pa === pb) return true;
         return (volumeCaseFolds(pa, true) || volumeCaseFolds(pb, true)) && pa.toLowerCase() === pb.toLowerCase();
       };
-      // triage row 40: each store loads under its own try, so an unreadable project ledger cannot drop the global keeps (and the reverse).
+      // Each store loads under its own try, so an unreadable project ledger cannot drop the global keeps (and the reverse).
       // An unreadable keeps ledger must never block an apply (it is the shield, not the gate's subject).
       let projectKeeps = [];
       let globalKeeps = [];

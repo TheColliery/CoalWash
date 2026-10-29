@@ -1180,7 +1180,7 @@ export function mergeSafety(global, project, { globalUnreadable = false, project
     // asks -- never the schema default, which can be weaker than what the
     // user actually had set before the file broke.
     if (globalUnreadable) { out[key] = order[0]; continue; }
-    // triage row 18: a JSON object is not a setting, and String() on it can throw. A project object reads as absent (the global
+    // A JSON object is not a setting, and String() on it can throw. A project object reads as absent (the global
     // stands); a global object reads as the schema default. The object spread above copied both onto `out`, so both are reset here.
     const isObjectValue = (v) => v !== null && typeof v === 'object';
     const cleanGlobal = isObjectValue(global[key]) ? SCHEMA_DEFAULT[key] : global[key];

@@ -1596,7 +1596,7 @@ test('KEEPS-GATE: GLOBAL keeps are consulted too (an adjudicated keep shields ma
   } finally { clean(proj, home); }
 });
 
-// triage row 40: a poisoned PROJECT ledger must not drop the GLOBAL keep that shields the same text.
+// A poisoned PROJECT ledger must not drop the GLOBAL keep that shields the same text.
 test('KEEPS-GATE: an unreadable project ledger leaves the GLOBAL keeps in force (the cut is still refused)', () => {
   const { proj, store } = sandbox();
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));

@@ -8,7 +8,7 @@ import * as keepsModule from './keeps.mjs';
 import { txDirFor, acquireLock } from './apply.mjs';
 import { loadKeepsAt } from './keeps.mjs';
 
-// triage row 40: a keeps ledger whose schema field is an object is unreadable (an empty list), never a throw.
+// A keeps ledger whose schema field is an object is unreadable (an empty list), never a throw.
 test('loadKeepsAt: an object-valued schema field reads as unreadable, never throws', (t) => {
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwk-keeps-v-')));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

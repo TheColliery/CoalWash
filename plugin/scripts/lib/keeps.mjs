@@ -115,7 +115,7 @@ function rawKeepsOrNull(file, root) {
 export function loadKeepsAt(file, root = null) {
   const parsed = rawKeepsOrNull(file, root);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-  if (parsed.v !== null && typeof parsed.v === 'object') return []; // triage row 40: an object schema field is unreadable, and Number() on it throws
+  if (parsed.v !== null && typeof parsed.v === 'object') return []; // An object schema field is unreadable, and Number() on it throws
   if (Number(parsed.v) > KEEPS_SCHEMA_V) return []; // newer schema: unreadable to us
   return Array.isArray(parsed.keeps) ? parsed.keeps.filter((k) => k && typeof k.target === 'string') : [];
 }

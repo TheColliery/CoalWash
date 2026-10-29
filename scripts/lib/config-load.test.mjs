@@ -36,7 +36,7 @@ test('mergeSafety: NO global at all + project sets writeGuard weaker than the sc
   assert.strictEqual(merged.writeGuard, 'on', 'a cloned repo with no global config must not be able to disable the undo net for gitignored governance files');
 });
 
-// triage row 18: a config value that is a JSON object is not a setting. String() on it can throw, and the hook that loads the
+// A config value that is a JSON object is not a setting. String() on it can throw, and the hook that loads the
 // config fails silent, so the write-guard snapshot never runs. Both layers must read it without throwing.
 test('mergeSafety: a project value that is an object reads as absent, never throws (writeGuard, coalwashMode)', () => {
   let merged;
