@@ -3,8 +3,9 @@
 // a value ending in a literal backslash, e.g. "C:\\", must terminate its string
 // correctly instead of leaking escape state into the next token).
 
+// An unclosed opener is consumed to the end of the input in one match and kept as written, so the strip stays linear and a malformed config still fails to parse.
 export function stripJsonc(content) {
-  return content.replace(/"(?:\\.|[^"\\])*"|\/\/.*|\/\*[\s\S]*?\*\//g, (m) => (m[0] === '"' ? m : ''));
+  return content.replace(/"(?:\\[\s\S]|[^"\\])*(?:"|\\?$)|\/\/.*|\/\*[\s\S]*?(\*\/|$)/g, (m, close) => (m[0] === '"' || (m[1] === '*' && close !== '*/') ? m : ''));
 }
 
 // Prototype-pollution guard (OWASP Node.js): a poisoned project .coalwash.json
