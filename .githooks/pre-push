@@ -23,7 +23,7 @@
 # whose value is a scheme and a token (Authorization: Bearer <key>, X-Api-Token: Bearer <key>) unless that token is provider-shaped,
 # or a key split across lines. (CoalWash keeps the URL clause "or the whole URL is a high-entropy value assigned to such a name"
 # beside the canon text, a named divergence: the generic rule judges a secret-named value whole, scripts/lib/secret-scan.mjs
-# its sentence "a key inside a secret-named value is reported only if the whole value passes the content test", and it finds
+# its sentence "a generic key inside a secret-named value is reported only if the whole value passes the content test", and it finds
 # password = "https://user:<key>@host" (measured 08d).) git hands
 # only pre-push the ref lines on stdin, so only pre-push passes --pre-push (every pushed commit, message and tag);
 # pre-commit scans the tracked tree. One file, two hook names, identical bytes: the branch is on the name git invoked.
