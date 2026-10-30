@@ -4,9 +4,9 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [1.12.14] - 2026-10-30
 
-config parsing stays linear; unreadable keeps no longer drop a protection
+Config parsing stays linear; unreadable keeps no longer drop a protection
 
-Three fixes reach you in this release. A project config full of unclosed comment or string openers no longer slows the hooks, and a malformed config still fails to parse. A config value written as an object no longer stops the hooks: it reads as unset, and the global setting or the default stands. An unreadable project keeps file no longer drops the keeps in the global file, so your global protections still hold. The installed plugin moved in 12 files since 1.12.13 (145 insertions, 38 deletions, the manifest included). `skills/coalwash/references/method.md` (lines 25, 146 and 364 of the plugin copy) and `platform-cc.md` (line 9) changed wording since 1.12.13; their check across two other model families is still owed.
+Six fixes and one change reach you in this release. The fidelity receipt names what its gate checked instead of printing "0 facts lost", the memory-index cap counts characters, and the reorg proof sizes its index by the tokens RE-TIER measures. A project config full of unclosed comment or string openers no longer slows the hooks, and a malformed config still fails to parse. A config value written as an object no longer stops the hooks: it reads as unset, and the global setting or the default stands. An unreadable project keeps file no longer drops the keeps in the global file, so your global protections still hold. The bin index takes a `clobber-bank` label for a forced restore that preserved the file it replaced. The installed plugin moved in 12 files since 1.12.13 (145 insertions, 38 deletions, the manifest included). `skills/coalwash/references/method.md` (lines 28, 149 and 367 of the plugin copy) and `platform-cc.md` (line 12) changed wording since 1.12.13; their check across two other model families is still owed.
 
 ### Changed
 
