@@ -613,10 +613,9 @@ const ROOT_MARKERS = [
 // (`touchesClaudeBase`). That is one check at the TRUST BOUNDARY, in the opposite
 // nature to this resolver — stacking more conditions in here is what R2 walked past
 // twice. Do not re-add a security claim to this function.
-// opts.extraMarkers (29g fire 412, unit D): more root markers for a platform whose project folder carries its own rule file (the AG
-// route passes ['GEMINI.md', 'AGENTS.md']). Absent, the walk is the one it was. Names are caller-supplied constants, never read from a file.
+// opts.rootMarkers (29g fire 417): the marker set this walk looks for. Absent, it is ROOT_MARKERS, the walk it was. Caller-supplied constants.
 export function findProjectRoot(startDir = process.cwd(), home = os.homedir(), opts = {}) {
-  const markers = Array.isArray(opts.extraMarkers) && opts.extraMarkers.length ? [...ROOT_MARKERS, ...opts.extraMarkers] : ROOT_MARKERS;
+  const markers = Array.isArray(opts.rootMarkers) && opts.rootMarkers.length ? opts.rootMarkers : ROOT_MARKERS;
   let dir = physicalDir(startDir);
   const homeAbs = physicalDir(home);
   const bases = claudeBaseDirs(home).map(physicalDir);
@@ -643,6 +642,18 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir(), o
     if (parent === dir) return startDir; // filesystem root reached
     dir = parent;
   }
+}
+// 29g fire 417, fix 1: the AG project root is the REPOSITORY root (the nearest ancestor holding .git). The AG rule files are discovery
+// targets only, never root markers: a subfolder AGENTS.md must not become the project. With no .git above the cwd, the root is what the
+// Claude Code walk gives for that cwd (the CC route is unchanged).
+export function findAgProjectRoot(startDir = process.cwd(), home = os.homedir()) {
+  const gitRoot = findProjectRoot(startDir, home, { rootMarkers: ['.git'] });
+  if (fs.existsSync(path.join(gitRoot, '.git'))) return gitRoot;
+  return findProjectRoot(startDir, home);
+}
+// The project root for a platform: the AG route resolves to the repository root; any other platform (or none) is the Claude Code walk.
+export function projectRootFor(startDir = process.cwd(), home = os.homedir(), { platform } = {}) {
+  return platform === 'antigravity' ? findAgProjectRoot(startDir, home) : findProjectRoot(startDir, home);
 }
 // Namespace campaign (#69+#39, owner-designated 2026-08-08). Per-project
 // config lives under an agent dir, never bare at the project root any more.

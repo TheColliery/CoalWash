@@ -54,7 +54,7 @@ function targetPath(args, workspace) {
 // Prior-conversation sweep without the gauge. Mirrors the CC SessionStart order:
 // coalwashMode off returns before the sweep, and writeGuard off skips it.
 async function sweepPriorConversations(conversationId) {
-  const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, writeguard] = await Promise.all([
+  const [{ loadMergedConfig, projectRootFor }, { clampedRead }, writeguard] = await Promise.all([
     import(conductor.lib('config-load.mjs')),
     import(conductor.lib('config-schema.mjs')),
     import(conductor.lib('writeguard.mjs')),
@@ -63,7 +63,7 @@ async function sweepPriorConversations(conversationId) {
   if (clampedRead(cfg, 'coalwashMode') === 'off') return;
   if (clampedRead(cfg, 'writeGuard') === 'off') return;
   const home = os.homedir();
-  const projectRoot = findProjectRoot(process.cwd(), home);
+  const projectRoot = projectRootFor(process.cwd(), home, { platform: 'antigravity' }); // the AG repository root (29g fire 417)
   writeguard.sweepWriteguard(projectRoot, conversationId, { home });
 }
 

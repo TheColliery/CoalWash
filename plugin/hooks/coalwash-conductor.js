@@ -156,11 +156,6 @@ const STDIN_IDLE_MS = 30;
 const STDIN_HANG_CEILING_MS = 1500;
 const DAY_MS = 86400000;
 
-// 29g fire 412 (unit D): the AG route's project root also walks up to a GEMINI.md or AGENTS.md (the AG rule files are the project's own
-// marker). The gauge, the Stop and the airbag must agree on that root, or a snapshot taken from a subfolder is never read back. The CC
-// route passes no platform, so its walk is unchanged.
-const AG_ROOT_MARKERS = ['GEMINI.md', 'AGENTS.md'];
-function rootOptsOf(opts) { return opts && opts.platform === 'antigravity' ? { extraMarkers: AG_ROOT_MARKERS } : {}; }
 function lib(name) {
   return pathToFileURL(path.join(__dirname, '..', 'scripts', 'lib', name)).href;
 }
@@ -235,7 +230,7 @@ function updateDue(cfg, clampedRead, caliper) {
 async function handleSessionStart(input, opts = {}) {
   // opts.emit: the sanctioned-channel writer (default: CC's plain-stdout injection). opts.updateNudge: false skips the self-update schedule entirely, so no stamp is written for a host whose context channel cannot carry it.
   const emit = opts.emit || ((text) => console.log(text));
-  const [{ loadMergedConfigReport, unreadableNotice, findProjectRoot, discoverIgnoredConfigs }, { clampedRead, envelopeForConfig }, classB, caliper] = await Promise.all([
+  const [{ loadMergedConfigReport, unreadableNotice, projectRootFor, discoverIgnoredConfigs }, { clampedRead, envelopeForConfig }, classB, caliper] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
     import(lib('class-b.mjs')),
@@ -267,7 +262,7 @@ async function handleSessionStart(input, opts = {}) {
   const envelope = envelopeForConfig(cfg);
 
   const home = os.homedir();
-  const projectRoot = findProjectRoot(process.cwd(), home, rootOptsOf(opts));
+  const projectRoot = projectRootFor(process.cwd(), home, opts);
   const out = [];
   for (const n of notices) out.push(n);
 
@@ -324,7 +319,7 @@ async function handleSessionStart(input, opts = {}) {
   // hook kills the whole gauge in silence. Hoisting is about SCOPE only: it
   // never decides whether the disclosure fires (see its own gate below).
   const scanEverything = clampedRead(cfg, 'scanEverything') === true;
-  const disc = mode === 'auto' ? classB.discoverClassB({ projectRoot, home, managedPaths, platform: opts.platform }) : { entries: [] };
+  const disc = mode === 'auto' ? classB.discoverClassB({ projectRoot, home, managedPaths, platform: opts.platform, cwd: process.cwd() }) : { entries: [] };
   if (disc.entries.length) {
     // CWK-057: ON lifts the read budget on the gauge path too. Phoenix #3 is
     // NOT breached and is not being quietly stretched: the LETTER of #3 binds
@@ -476,7 +471,7 @@ async function handleStop(input, opts = {}) {
   // opts.emit receives the block reason. Default writes CC's structured block object, byte-for-byte as before.
   const emit = opts.emit || ((reason) => process.stdout.write(JSON.stringify({ decision: 'block', reason })));
   if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
-  const [{ loadMergedConfig, findProjectRoot }, { clampedRead, envelopeForConfig }, caliper, ask, classB] = await Promise.all([
+  const [{ loadMergedConfig, projectRootFor }, { clampedRead, envelopeForConfig }, caliper, ask, classB] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
     import(lib('caliper.mjs')),
@@ -491,7 +486,7 @@ async function handleStop(input, opts = {}) {
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
   const home = os.homedir();
-  const projectRoot = findProjectRoot(process.cwd(), home, rootOptsOf(opts));
+  const projectRoot = projectRootFor(process.cwd(), home, opts);
   let proj = caliper.loadState(projectRoot, home);
   const now = Date.now();
   let lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
@@ -534,7 +529,7 @@ async function handleStop(input, opts = {}) {
       const freshBytes = caliper.statOnlyFootprintBytes(cachedPaths);
       const deltaTokens = caliper.tokensEstFromBytes(Math.abs(freshBytes - cachedBytes));
       if (deltaTokens > caliper.REGAUGE_DELTA_TOKENS) {
-        const disc = classB.discoverClassB({ projectRoot, home, managedPaths, platform: opts.platform });
+        const disc = classB.discoverClassB({ projectRoot, home, managedPaths, platform: opts.platform, cwd: process.cwd() });
         const scanEverything = clampedRead(cfg, 'scanEverything') === true; // CWK-057, same clamped cascade
         const m = caliper.measureEntries(disc.entries, { readBudgetBytes: caliper.readBudgetFor(scanEverything, READ_BUDGET_BYTES), withGzip: false });
         // task #4: same measured-not-stamped gauge as SessionStart — fat and
@@ -781,7 +776,7 @@ async function handleAirbag(input, opts = {}) {
     if (!input || !WRITE_TOOLS.has(input.tool_name)) return; // belt: pre-import, ~free
     const p = touchedPath(input);
     if (!p) return;
-    const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, writeguard] = await Promise.all([
+    const [{ loadMergedConfig, projectRootFor }, { clampedRead }, writeguard] = await Promise.all([
       import(lib('config-load.mjs')),
       import(lib('config-schema.mjs')),
       import(lib('writeguard.mjs')),
@@ -790,7 +785,7 @@ async function handleAirbag(input, opts = {}) {
     if (clampedRead(cfg, 'coalwashMode') === 'off') return; // master kill
     if (clampedRead(cfg, 'writeGuard') === 'off') return;   // its own off switch
     const home = os.homedir();
-    const projectRoot = findProjectRoot(process.cwd(), home, rootOptsOf(opts));
+    const projectRoot = projectRootFor(process.cwd(), home, opts);
     writeguard.snapshotOnFirstWrite(projectRoot, input.session_id, p, { home, extraBasenames: opts.extraBasenames });
     // NOTHING emitted (airbag is write-only) — Phoenix #13.
   } catch { /* fail-silent — never block a write */ }

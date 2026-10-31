@@ -92,9 +92,11 @@ function readState(home, proj) {
   return JSON.parse(fs.readFileSync(projStatePath(home, proj), 'utf8'));
 }
 // 29g fire 412: the AG transport reads only its own state namespace (coalwash/ag/state.json under the project's slug dir).
+// Where the AG state is written: the fallback under ~/.claude/coal (29g fire 417 moves it to ~/.gemini, with its own witness). These fixtures have no
+// Claude Code slug folder, so the fallback is the location in use.
 function agStatePath(home, proj) {
   const slug = fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-');
-  return path.join(home, '.claude', 'projects', slug, 'coalwash', 'ag', 'state.json');
+  return path.join(home, '.claude', 'coal', 'coalwash', 'ag', `state-${slug}.json`);
 }
 function seedAgPendingCrossing(home, proj) {
   const p = agStatePath(home, proj);
@@ -409,6 +411,7 @@ test('D5c a stale AG conversation folder is removed by the Claude Code sweep', (
 test('D7b the AG airbag from a subfolder snapshots the project GEMINI.md under the project root, not under the subfolder', async () => {
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-d7b-home-')));
   const bare = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-d7b-proj-')));
+  fs.mkdirSync(path.join(bare, '.git')); // an AG project is a repository: the root is the repository root (29g fire 417)
   try {
     const sub = path.join(bare, 'sub');
     fs.mkdirSync(sub, { recursive: true });
@@ -443,4 +446,26 @@ test('D8 the AG Stop delivers no directive, even for a pending FULL crossing, an
     assert.deepStrictEqual(lines, [], 'no force, no OBESE auto-Quick, no wizard ask on AG');
     assert.strictEqual(JSON.parse(fs.readFileSync(agStatePath(home, proj), 'utf8')).lastCrossing.consumed, false, 'nothing is consumed: no directive was delivered');
   } finally { clean(home, proj); }
+});
+
+// 29g fire 417, fix 1: the AG project root is the REPOSITORY root (the nearest ancestor holding .git), not the nearest folder that holds a
+// rule file. From a subfolder, the AG state sits under the repo-root slug, and the footprint counts the repo-root GEMINI.md AND sub/AGENTS.md.
+test('F417-1 AG from a subfolder: the project root is the repository root, and the footprint counts both rule files', async () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-f1-home-')));
+  const repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-f1-repo-')));
+  try {
+    fs.mkdirSync(path.join(repo, '.git'));
+    const sub = path.join(repo, 'sub');
+    fs.mkdirSync(sub);
+    const rootGemini = path.join(repo, 'GEMINI.md');
+    const subAgents = path.join(sub, 'AGENTS.md');
+    fs.writeFileSync(rootGemini, 'r'.repeat(120), 'utf8');
+    fs.writeFileSync(subAgents, 'a'.repeat(40), 'utf8');
+    await routeIn(home, commonPayload(sub), 'SessionStart', { agDiscovery: true });
+    const st = agStatePath(home, repo);
+    assert.ok(fs.existsSync(st), `the AG state sits under the repository root slug: ${st}`);
+    const lv = JSON.parse(fs.readFileSync(st, 'utf8')).lastVerdict;
+    assert.strictEqual(lv.alwaysLoadedBytes, fs.statSync(rootGemini).size + fs.statSync(subAgents).size, 'the footprint counts the repo-root GEMINI.md and sub/AGENTS.md');
+    assert.strictEqual(fs.existsSync(agStatePath(home, sub)), false, 'nothing is recorded under the subfolder slug');
+  } finally { clean(home, repo); }
 });

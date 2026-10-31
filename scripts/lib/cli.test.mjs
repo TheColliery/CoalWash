@@ -799,10 +799,13 @@ test('E1: the value comes from a cloned repo, so the line is ONE line and bounde
 test('D7 writeguard-list and writeguard-restore take --platform antigravity, and find the AG root from a subfolder', () => {
   const { home } = sandbox();
   const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-agproj-'))); // bare: the sandbox() project has CLAUDE.md and .coalwash.json
+  fs.mkdirSync(path.join(proj, '.git')); // an AG project is a repository: the root is the repository root (29g fire 417)
   try {
     const sub = path.join(proj, 'sub');
     fs.mkdirSync(sub, { recursive: true });
-    const gemini = path.join(proj, 'GEMINI.md'); // no .git, no CLAUDE.md, no .coalwash.json: the AG project has only its rule file
+    // A subfolder CLAUDE.md is a Claude Code root marker: the Claude Code walk stops at sub, the AG walk goes to the repository root (29g fire 417).
+    fs.writeFileSync(path.join(sub, 'CLAUDE.md'), '# sub\n', 'utf8');
+    const gemini = path.join(proj, 'GEMINI.md');
     fs.writeFileSync(gemini, '# AG rules\n', 'utf8');
     const snap = snapshotOnFirstWrite(proj, 'ag-conv', gemini, { home, extraBasenames: ['GEMINI.md'] });
     assert.ok(snap, 'the AG project file is snapshotted under the project root');
