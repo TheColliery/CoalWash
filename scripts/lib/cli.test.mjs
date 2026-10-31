@@ -874,3 +874,25 @@ test('(h) RE-TIER and ULTRA commands refuse --platform antigravity by name', () 
     }
   } finally { clean(home, proj); }
 });
+
+// 29j fire 450, (e) config-status (INSPECT 442): --platform antigravity reports the project config from the AG repository root, not from a
+// subfolder walk that stops at a Claude Code marker. Without the flag the CC walk is unchanged.
+test('(e) config-status --platform antigravity reports the repository-root config from a subfolder with a CC marker', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-e-home-')));
+  const repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-e-repo-')));
+  try {
+    fs.mkdirSync(path.join(repo, '.git'));
+    fs.mkdirSync(path.join(repo, '.claude', 'coal'), { recursive: true });
+    const rootCfg = path.join(repo, '.claude', 'coal', 'coalwash.json');
+    fs.writeFileSync(rootCfg, '{"coalwashMode":"off"}', 'utf8');
+    const sub = path.join(repo, 'sub');
+    fs.mkdirSync(sub);
+    fs.writeFileSync(path.join(sub, 'CLAUDE.md'), '# sub\n', 'utf8');
+    const ag = run(sub, home, ['config-status', '--json', '--platform', 'antigravity']);
+    assert.strictEqual(ag.status, 0, ag.stderr);
+    assert.strictEqual(JSON.parse(ag.stdout).resolution.path, rootCfg, 'the AG route reads the repository-root config');
+    const cc = run(sub, home, ['config-status', '--json']);
+    assert.strictEqual(cc.status, 0, cc.stderr);
+    assert.strictEqual(JSON.parse(cc.stdout).resolution, null, 'control: without the flag the CC walk stops in sub, which holds no config');
+  } finally { clean(home, repo); }
+});

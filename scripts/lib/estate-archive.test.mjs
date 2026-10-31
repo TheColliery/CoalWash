@@ -1310,3 +1310,21 @@ test('D6 estate: an AG-only home is refused with the platform flag, archives not
     assert.deepStrictEqual(r.archived, [], 'nothing archived');
   } finally { clean(home, proj); }
 });
+
+// 29j fire 450, (d) F442-2 (ruling 4): estate-search takes its query from the words only. The --platform flag and its value are not part of it,
+// so an indexed hit is still found. Today the value joins the query and the search misses.
+test('F442-2 estate-search: --platform claude-code is not part of the query, so an indexed hit is still found', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-warm', 30);
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(res.archived.length, 1);
+    const cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+    const r = spawnSync(process.execPath, [cli, 'estate-search', 'modloader', '--platform', 'claude-code'], {
+      cwd: proj, encoding: 'utf8', timeout: 60000,
+      env: { ...process.env, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, CLAUDE_CONFIG_DIR: '' },
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes('sess-warm'), `the indexed hit is found with the flag beside the query: ${r.stdout.slice(0, 200)}`);
+  } finally { clean(home, proj); }
+});

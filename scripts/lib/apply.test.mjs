@@ -4781,14 +4781,19 @@ test('fire 122: a lock file that stays unreadable stops the run with an honest r
     assert.ok(r.error.includes(`lock unreadable: this transaction could not read its own project lock file ${fx.lockPath} for about 1 second(s) (EBUSY)`), r.error);
     assert.ok(r.error.includes('another program may be holding it open (an indexer, antivirus or sync client)'), r.error);
     assert.ok(r.error.includes('stopped before step 2 of 3') && r.error.includes('1 of 3 step(s) had landed'), r.error);
-    assert.ok(r.error.includes("the journal on disk is still this run's, so the next gauge (recoverDangling) rolls the store back from that snapshot"), r.error);
+    assert.ok(r.error.includes("the journal on disk is still this run's, so the next gauge (recoverDangling) rolls the store back from that snapshot once this lock is stale"), r.error);
     assert.ok(!r.error.includes('undoing steps that had all landed'), 'only 1 of 3 had landed');
     assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${fx.lockPath} could not be read to confirm it is this run's own (EBUSY), so it was left in place`), JSON.stringify(r));
     assert.ok(r.error.endsWith(r.lockLeft), 'the refusal says the lock was left');
     assert.strictEqual(fs.existsSync(fx.lockPath), true, 'a lock it cannot prove is its own is never deleted');
+    // 29j F450-1 (ruling 1): the lock this run left is FRESH, so the next gauge defers, touching nothing, until it goes stale.
+    const storeBefore = fs.readFileSync(fx.a, 'utf8');
     const rec = recoverDangling(fx.proj, { home: fx.home });
-    assert.strictEqual(rec.recovered, 'rolled-back', JSON.stringify(rec));
-    assert.strictEqual(fs.readFileSync(fx.a, 'utf8'), 'alpha\nkeep\n', 'as the refusal said, the store is rolled back from the snapshot');
+    assert.strictEqual(rec.deferred, true, JSON.stringify(rec));
+    assert.strictEqual(fs.readFileSync(fx.a, 'utf8'), storeBefore, 'the store is untouched while the lock is fresh');
+    const later = recoverDangling(fx.proj, { home: fx.home, now: Date.now() + LOCK_STALE_MS + 1000 });
+    assert.strictEqual(later.recovered, 'rolled-back', JSON.stringify(later));
+    assert.strictEqual(fs.readFileSync(fx.a, 'utf8'), 'alpha\nkeep\n', 'as the refusal said, the store is rolled back from the snapshot once the lock is stale');
   } finally { clean(fx.proj, fx.home); }
 });
 
@@ -4966,7 +4971,7 @@ test('N125-2: a refusal that names a lock left behind gives the note its own sen
   try {
     const { r } = applyWithFault(fx, 'step 2 of 3', {});
     assert.ok(r.lockLeft, JSON.stringify(r));
-    assert.ok(r.error.endsWith(`rolls the store back from that snapshot. ${r.lockLeft}`), r.error);
+    assert.ok(r.error.endsWith(`rolls the store back from that snapshot once this lock is stale (about 30 minutes), or at once if it is removed by hand. ${r.lockLeft}`), r.error);
   } finally { clean(fx.proj, fx.home); }
 });
 
@@ -5022,7 +5027,7 @@ test('F435-1 an AG-route recovery of a journal that reaches the CC memory store 
     const { ccMemoryDir } = await import('./class-b.mjs');
     const ccFile = path.join(ccMemoryDir(proj, home), 'MEMORY.md');
     write(ccFile, 'AFTER (mid-transaction CC write)\n');
-    const { txDir, snap } = danglingTx(proj, [{ target: ccFile, before: 'BEFORE (CC snapshot)\n' }], [path.dirname(ccFile)]);
+    const { txDir, snap } = danglingTx(proj, [{ target: ccFile, before: 'BEFORE (CC snapshot)\n' }], [proj]); // 29j F445-1: only [proj] as roots, so the manifest guard is what refuses
     const r = recoverDangling(proj, { home, platform: 'antigravity' });
     assert.strictEqual(r.recovered, 'none', `refused on the AG route: ${JSON.stringify(r)}`);
     assert.match(r.error || '', /trusted roots/, 'the refusal is named');
@@ -5040,7 +5045,7 @@ test('F435-1 an AG-route journal holding one project row and one CC-store row re
     const ccFile = path.join(ccMemoryDir(proj, home), 'MEMORY.md');
     write(projFile, 'AFTER project\n');
     write(ccFile, 'AFTER cc\n');
-    danglingTx(proj, [{ target: projFile, before: 'BEFORE project\n' }, { target: ccFile, before: 'BEFORE cc\n' }], [proj, path.dirname(ccFile)]);
+    danglingTx(proj, [{ target: projFile, before: 'BEFORE project\n' }, { target: ccFile, before: 'BEFORE cc\n' }], [proj]); // 29j F445-1: [proj] only
     const r = recoverDangling(proj, { home, platform: 'antigravity' });
     assert.strictEqual(r.recovered, 'none', `refused whole: ${JSON.stringify(r)}`);
     assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'AFTER project\n', 'the project row was NOT restored either');
@@ -5071,5 +5076,82 @@ test('F435-1 control: the Claude Code route (no platform) still recovers the CC 
     const r = recoverDangling(proj, { home });
     assert.strictEqual(r.recovered, 'rolled-back', JSON.stringify(r));
     assert.strictEqual(fs.readFileSync(ccFile, 'utf8'), 'BEFORE\n');
+  } finally { clean(proj, home); }
+});
+
+// 29j fire 450, (a) the recovery lock (ruling 1): a dangling journal is recovered under the SAME project transaction lock applyPlan holds.
+// A live owner's lock defers the recovery (named, nothing touched). A stale lock is taken over; no lock recovers as before. The lock file is
+// the apply.mjs LOCK_NAME; it is named here because apply.mjs does not export it.
+const TX_LOCK = '.coalwash.lock';
+test('F450-1 a live transaction lock defers the recovery on both routes: nothing touched, the lock left as it was', async () => {
+  for (const platform of [undefined, 'antigravity']) {
+    const { proj } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f450-live-')));
+    try {
+      const projFile = path.join(proj, 'GEMINI.md');
+      write(projFile, 'AFTER\n');
+      const { txDir } = danglingTx(proj, [{ target: projFile, before: 'BEFORE\n' }], [proj]);
+      const lockPath = path.join(txDir, TX_LOCK);
+      const lockBody = JSON.stringify({ sessionId: 'live-other-run', pid: 4242, at: Date.now(), token: 'held-by-another-run' });
+      fs.writeFileSync(lockPath, lockBody, 'utf8');
+      const journalBefore = fs.readFileSync(path.join(txDir, 'journal.json'), 'utf8');
+      const r = recoverDangling(proj, { home, platform });
+      assert.strictEqual(r.recovered, 'none', `deferred on platform ${platform}: ${JSON.stringify(r)}`);
+      assert.strictEqual(r.deferred, true, 'the deferral is named');
+      assert.match(r.error || '', /holds the store/, 'the error names the held lock');
+      assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'AFTER\n', 'the project file is untouched');
+      assert.strictEqual(fs.readFileSync(path.join(txDir, 'journal.json'), 'utf8'), journalBefore, 'the journal is byte-for-byte unchanged');
+      assert.strictEqual(fs.readFileSync(lockPath, 'utf8'), lockBody, 'the live owner lock is byte-for-byte unchanged');
+    } finally { clean(proj, home); }
+  }
+});
+test('F450-1 control: a STALE lock (older than LOCK_STALE_MS) is taken over, the recovery proceeds, and the lock is released', () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f450-stale-')));
+  try {
+    const projFile = path.join(proj, 'GEMINI.md');
+    write(projFile, 'AFTER\n');
+    const { txDir } = danglingTx(proj, [{ target: projFile, before: 'BEFORE\n' }], [proj]);
+    const now = Date.now();
+    const lockPath = path.join(txDir, TX_LOCK);
+    fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'crashed-run', pid: 4243, at: now - LOCK_STALE_MS - 1000, token: 'crashed' }), 'utf8');
+    const oldMtime = new Date(now - LOCK_STALE_MS - 1000); // acquireLock judges staleness by the file's mtime
+    fs.utimesSync(lockPath, oldMtime, oldMtime);
+    const r = recoverDangling(proj, { home, now });
+    assert.strictEqual(r.recovered, 'rolled-back', JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'BEFORE\n');
+    assert.strictEqual(fs.existsSync(lockPath), false, 'the stale lock is released after the recovery');
+  } finally { clean(proj, home); }
+});
+test('F450-1 control: with no lock the recovery proceeds as before, and it leaves no lock behind', () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f450-none-')));
+  try {
+    const projFile = path.join(proj, 'GEMINI.md');
+    write(projFile, 'AFTER\n');
+    const { txDir } = danglingTx(proj, [{ target: projFile, before: 'BEFORE\n' }], [proj]);
+    const r = recoverDangling(proj, { home });
+    assert.strictEqual(r.recovered, 'rolled-back', JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'BEFORE\n');
+    assert.strictEqual(fs.existsSync(path.join(txDir, TX_LOCK)), false, 'no lock file is left behind');
+  } finally { clean(proj, home); }
+});
+
+// 29j fire 450, (c) F442-3 (ruling 3): a malformed manifest row refuses the WHOLE recovery on the CC route too. Today the CC loop restores the
+// earlier valid row and then throws on the row with no original, so the restore is partial.
+test('F442-3 a manifest row with no original refuses the whole recovery on the CC route: no earlier row is restored', async () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f442-')));
+  try {
+    const { ccMemoryDir } = await import('./class-b.mjs');
+    const projFile = path.join(proj, 'GEMINI.md');
+    const ccFile = path.join(ccMemoryDir(proj, home), 'MEMORY.md');
+    write(projFile, 'AFTER project\n');
+    write(ccFile, 'AFTER cc\n');
+    const { snap } = danglingTx(proj, [{ target: projFile, before: 'BEFORE project\n' }, { target: ccFile, before: 'BEFORE cc\n' }], [proj, path.dirname(ccFile)]);
+    fs.writeFileSync(path.join(snap, 'manifest.json'), JSON.stringify([{ snap: 'f0', original: projFile }, { snap: 'f1' }]), 'utf8');
+    const r = recoverDangling(proj, { home });
+    assert.strictEqual(r.recovered, 'none', `refused whole: ${JSON.stringify(r)}`);
+    assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'AFTER project\n', 'the valid earlier row was NOT restored');
   } finally { clean(proj, home); }
 });

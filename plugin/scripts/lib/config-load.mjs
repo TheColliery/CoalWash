@@ -705,8 +705,9 @@ function candidatesForRoot(root) {
   candidates.push(path.join(root, '.coalwash.json')); // LEGACY (root), always last
   return candidates;
 }
-export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir()) {
-  return candidatesForRoot(findProjectRoot(cwd, home));
+// 29j (ruling 5): the platform picks the root the walk starts from (projectRootFor); without it, the Claude Code walk it was.
+export function projectConfigCandidates(cwd = process.cwd(), home = os.homedir(), opts = {}) {
+  return candidatesForRoot(projectRootFor(cwd, home, opts));
 }
 // The walk's ONE selection rule: the first candidate that exists (lstat, so a directory or a link WINS),
 // else candidate 0 -- nothing found anywhere, so the own-dir is both the read and the write target. Shared by
@@ -725,8 +726,8 @@ export function projectConfigPath(cwd = process.cwd(), home = os.homedir()) {
 // entries, then both legacy ones) -- never a second hand-written path list, so
 // this cannot drift from the walk it describes. Returns null when nothing
 // exists anywhere (nothing to notice).
-export function projectConfigResolution(cwd = process.cwd(), home = os.homedir()) {
-  const candidates = projectConfigCandidates(cwd, home);
+export function projectConfigResolution(cwd = process.cwd(), home = os.homedir(), opts = {}) {
+  const candidates = projectConfigCandidates(cwd, home, opts);
   const canonicalCount = AGENT_DIR_ORDER.length;
   for (let i = 0; i < candidates.length; i++) {
     if (pathExists(candidates[i])) return { path: candidates[i], legacy: i >= canonicalCount };

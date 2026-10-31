@@ -1470,7 +1470,7 @@ export function applyPlan(plan, opts = {}) {
       if (!lost) return;
       const done = landed ? landed.filter((s) => s.status === 'done').length : 0;
       const journalFate = lost.state === 'unreadable'
-        ? `the journal on disk is still this run's, so the next gauge (recoverDangling) rolls the store back from that snapshot${done === landed?.length ? ', undoing steps that had all landed' : ''}`
+        ? `the journal on disk is still this run's, so the next gauge (recoverDangling) rolls the store back from that snapshot once this lock is stale (about 30 minutes), or at once if it is removed by hand${done === landed?.length ? ', undoing steps that had all landed' : ''}`
         : "the journal on disk is this run's until the new holder writes its own over it (while it is still this run's, the next recoverDangling rolls the store back from that snapshot; once it is replaced, compare the store against the snapshot by hand)";
       const state = stateOverride
         || (committed ? `every step landed and was committed; only the post-commit housekeeping that had not run yet (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped, and the snapshot ${snapDir} still holds every original`
@@ -1974,6 +1974,7 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 //                    the gaugeLine defect (see cli.mjs).
 // `restored` accompanies 'rolled-back' and 'partial'.
 export function recoverDangling(projectRoot, opts = {}) {
+  let txLock = null; // 29j F450-1: held from the journal existence check to the end of the call, released in finally
   try {
     const home = opts.home || os.homedir();
     // ONE clock reading for the whole recovery, exactly as applyPlan takes one
@@ -1998,6 +1999,11 @@ export function recoverDangling(projectRoot, opts = {}) {
     const txDir = opts.txDir || ownSandboxDir(projectRoot, '.claude', 'coalwash'); // CWK-137, as in applyPlan
     const journalPath = path.join(txDir, JOURNAL_NAME);
     if (!fs.existsSync(journalPath)) return { recovered: 'none' };
+    // 29j F450-1 (ruling 1): the SAME project transaction lock applyPlan holds, taken before the journal is read or acted on. A live owner
+    // defers, named, touching nothing (it never waits: a gauge is a hook-side read). A stale lock is taken over by acquireLock's own rule,
+    // which is the crash case recovery exists for. selfIgnore is off: the journal's folder already exists, so the only new write is the lock.
+    txLock = acquireLock(path.join(txDir, LOCK_NAME), { now, selfIgnore: false });
+    if (!txLock.acquired) return { recovered: 'none', deferred: true, error: `${txLock.reason} — nothing touched` };
     let journal;
     // CWK-137: bounded. E2-4: contained to txDir ITSELF, and a refused read is unreadable (`?? ''` makes JSON.parse throw;
     // JSON.parse(null) would have answered null and slipped past this catch).
@@ -2085,6 +2091,11 @@ export function recoverDangling(projectRoot, opts = {}) {
     // CWK-137: bounded. E2-4: contained to txDir ITSELF; a refused or non-list manifest replays nothing and keeps the journal.
     const manifest = JSON.parse(readRepoFileBounded(path.join(snapPhys, 'manifest.json'), txDir, MAX_DOC_BYTES) ?? 'null');
     if (!Array.isArray(manifest)) return { recovered: 'none', error: 'snapshot manifest unreadable — refusing to replay (left for inspection)' };
+    // 29j F442-3 (ruling 3): ONE shape pre-check for BOTH routes. Every row must name a string original and a string snapshot name, or the whole
+    // recovery is refused before the first copy. Without it the CC loop restores the earlier valid rows and then throws on this one.
+    if (manifest.some((m) => !m || typeof m.original !== 'string' || typeof m.snap !== 'string')) {
+      return { recovered: 'none', error: 'a snapshot manifest row is malformed (no string original or snapshot name) — refusing to replay; nothing was restored (left for inspection)' };
+    }
     // 29i F435-1: on the AG route every manifest row (a restore target) is checked against the AG trusted roots BEFORE the first copy.
     if (opts.platform === 'antigravity') {
       const rowOutside = (m) => !m || typeof m.original !== 'string' || !physicalForCreate(m.original) || !containedIn(physicalForCreate(m.original), trustedRoots);
@@ -2206,5 +2217,7 @@ export function recoverDangling(projectRoot, opts = {}) {
     return { recovered: 'rolled-back', restored };
   } catch (e) {
     return { recovered: 'none', error: e.message };
+  } finally {
+    if (txLock && txLock.acquired) txLock.release(); // 29j F450-1: the lock this call took, released on every path
   }
 }

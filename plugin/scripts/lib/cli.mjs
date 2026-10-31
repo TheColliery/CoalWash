@@ -419,6 +419,15 @@ function projectBoundHints({ ignored, estate, home }) {
   return out;
 }
 
+// 29j F442-2 (ruling 4): the query is the words only. A --platform flag and its value are not part of it (a --platform=X token starts with --).
+function estateQueryWords(args) {
+  const words = [];
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--platform') { i++; continue; }
+    if (!args[i].startsWith('--')) words.push(args[i]);
+  }
+  return words;
+}
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -433,11 +442,14 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'config-status') {
+    // 29j (ruling 5): --platform antigravity reads the config from the repository root the AG route measures; without it, the CC walk.
+    const statusRoot = rootOptsFor(args);
+    if (statusRoot === null) { console.error(PLATFORM_USAGE); process.exitCode = 1; return; }
     try {
       const home = os.homedir();
       const cwd = process.cwd();
-      const resolution = projectConfigResolution(cwd, home);
-      const ignored = discoverIgnoredConfigs(cwd, home);
+      const resolution = projectConfigResolution(cwd, home, statusRoot);
+      const ignored = discoverIgnoredConfigs(cwd, home, projectRootFor(cwd, home, statusRoot));
       if (args.includes('--json')) {
         console.log(JSON.stringify({ resolution, ignored }, null, 1));
       } else {
@@ -584,7 +596,7 @@ function main() {
     }
   } else if (cmd === 'estate-search') {
     if (refusedOnAg(args, 'estate-search')) return;
-    const query = args.slice(1).filter((a) => !a.startsWith('--')).join(' ');
+    const query = estateQueryWords(args).join(' ');
     if (!query) { console.error(USAGE); process.exitCode = 1; return; }
     try {
       const opts = estateOpts(args);
