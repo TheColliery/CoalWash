@@ -10,15 +10,15 @@ Claude Code behaves as in 1.15.0. Note on 1.15.0: its sentence "never on Claude 
 
 ### Fixed
 
-- Crash recovery on Antigravity no longer rolls back a Claude Code transaction: a journal that reaches outside the Antigravity trusted roots is left in place and reported, not replayed (`scripts/lib/apply.mjs`, lines 1994-1997 and 2052-2062).
+- Crash recovery on Antigravity no longer rolls back a Claude Code transaction: a journal that reaches outside the Antigravity trusted roots is left in place and reported, not replayed (`scripts/lib/apply.mjs`, lines 1994-1997 and 2052-2062); the journal's manifest rows are checked before the first touch (`scripts/lib/apply.mjs`, lines 2088-2092).
 - `--platform=antigravity` is parsed like `--platform antigravity`, instead of being silently ignored (`scripts/lib/cli.mjs`, lines 338-347).
-- `retier-scan`, `retier-run`, `estate`, `estate-scan`, `estate-run`, `estate-search` and `estate-restore` refuse `--platform antigravity` by name and exit 1 (`scripts/lib/cli.mjs`, lines 547-636).
-- The wizard's neutral scan counts a subfolder `GEMINI.md`, because it passes `cwd` to discovery (`scripts/lib/wizard.mjs`, lines 103-104).
+- `retier-scan`, `retier-run`, `estate`, `estate-scan`, `estate-run`, `estate-search` and `estate-restore` refuse `--platform antigravity` by name and exit 1, and a bare or invalid `--platform` value on them is a usage error that exits 1 (`scripts/lib/cli.mjs`, lines 547-636).
+- The wizard's neutral scan counts a subfolder `GEMINI.md`, because it passes `cwd` to discovery (`scripts/lib/wizard.mjs`, lines 103-104; test: `scripts/lib/wizard.test.mjs`, lines 334-351).
 
 ### Changed
 
 - The A4 census note in `applyPlan` is re-adjudicated: 13 inputs read, 5 from the plan and 8 from opts; `plan.projectRoot` is named and never read (`scripts/lib/apply.mjs`, lines 1822-1830). The pin's message follows (`scripts/lib/apply.test.mjs`, line 3756).
-- The gauge test adds a project `GEMINI.md` and asserts `measure.files === 1` (`scripts/lib/wizard.test.mjs`, lines 334-351).
+- The gauge test adds a project `GEMINI.md` and asserts `measure.files === 1` (`scripts/lib/cli.test.mjs`, lines 843 and 847).
 
 ## [1.15.0] - 2026-11-01
 
