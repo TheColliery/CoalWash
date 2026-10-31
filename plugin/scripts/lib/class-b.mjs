@@ -370,6 +370,51 @@ function statBytes(p) {
   try { const st = fs.statSync(p); return st.isFile() ? st.size : null; } catch { return null; }
 }
 
+// ANTIGRAVITY (29g fire 412, unit D). The rule files agy 1.4.12 loads, measured by the 29g fire 411 probe (RECORD.md):
+//   - the PROJECT WALK: GEMINI.md and AGENTS.md from the cwd up to the repo root, always on, knife-eligible (scope 'project');
+//   - five GLOBAL files under ~/.gemini, always on and inline (scope 'global'): GEMINI.md, AGENTS.md, config/GEMINI.md,
+//     config/AGENTS.md, config/rules/AGENTS.md.
+// NOT in the set, measured: a file above the repo root, CLAUDE.md, MEMORY.md, a plain .md in config/rules (not picked up), the
+// brain transcripts and conversation DBs (class-A, the estate: written every run, never loaded into a new conversation), and the
+// knowledge store (read only when its path is in the prompt). So none of those is listed.
+// MEASURED, NOT WASHED: the global files cost context, so they are counted, and tagged managed:true, the wash-jurisdiction tag
+// (parcel.mjs 0l: capture all, then filter the knife). The user's own global rules are never a wash candidate, and the discovery
+// grants no write reach into ~/.gemini (head ruling 1). Realpath-contained, fail-closed, and a link that escapes is flagged, never read.
+const AG_PROJECT_RULE_FILES = ['GEMINI.md', 'AGENTS.md'];
+const AG_GLOBAL_RULE_PARTS = [['GEMINI.md'], ['AGENTS.md'], ['config', 'GEMINI.md'], ['config', 'AGENTS.md'], ['config', 'rules', 'AGENTS.md']];
+export function discoverAntigravityClassB({ projectRoot = process.cwd(), cwd = projectRoot, home = os.homedir() } = {}) {
+  const flags = [];
+  const entries = [];
+  const seen = new Set();
+  const homePhys = physicalOrNull(home);
+  const projPhys = physicalOrNull(projectRoot);
+  const cwdPhys = physicalOrNull(cwd);
+  // Containment is written against the two literal anchors, never a parameter (the root-provenance gate reads the expression).
+  const add = (candidate, scope, managed) => {
+    const phys = physicalOrNull(candidate);
+    if (!phys) return; // absent, or unresolvable: not loaded here
+    const inside = scope === 'global' ? (homePhys !== null && containedIn(phys, [homePhys])) : (projPhys !== null && containedIn(phys, [projPhys]));
+    if (!inside) { flags.push(`skipped (outside home/project trees): ${candidate}`); return; }
+    if (seen.has(phys)) return;
+    const bytes = statBytes(phys);
+    if (bytes == null) return;
+    seen.add(phys);
+    entries.push({ path: phys, bytes, scope, kind: 'governance', alwaysLoaded: true, managed });
+  };
+  // The walk starts at the cwd when it sits inside the project, else at the project root, and stops at the root.
+  if (projPhys) {
+    const start = cwdPhys && containedIn(cwdPhys, [projPhys]) ? cwdPhys : projPhys;
+    for (let dir = start; ; dir = path.dirname(dir)) {
+      for (const name of AG_PROJECT_RULE_FILES) add(path.join(dir, name), 'project', false);
+      if (dir === projPhys || path.dirname(dir) === dir) break;
+    }
+  }
+  if (homePhys) {
+    for (const parts of AG_GLOBAL_RULE_PARTS) add(path.join(home, '.gemini', ...parts), 'global', true);
+  }
+  return { platform: 'antigravity', entries, inherited: [], flags, roleMemories: [] };
+}
+
 // Discover the Claude Code class-B set for one project.
 // Returns { platform, entries, flags } where each entry =
 //   { path (physical), bytes, scope: 'global'|'project',
@@ -393,9 +438,10 @@ function statBytes(p) {
 // branch, none of which can flatten without losing the cap/flag accounting the
 // F1 fix depends on. Declared at the CWK-082 F2-R2 round, which added ~10 lines
 // to a function already well past the signal; the N is HISTORY, not a live claim.
-export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(), platform, managedPaths = [] } = {}) {
+export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(), platform, managedPaths = [], cwd } = {}) {
   const plat = platform || detectPlatform(home);
   const flags = [];
+  if (plat === 'antigravity') return discoverAntigravityClassB({ projectRoot, cwd: cwd || projectRoot, home });
   if (plat !== 'claude-code') {
     return {
       platform: plat,

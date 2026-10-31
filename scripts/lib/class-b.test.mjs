@@ -1652,3 +1652,43 @@ test('RE-INSPECT 102 R102-1: the .git entry that marks the repository top is rea
     assert.ok(!allListed(d).some((e) => e.path === path.join(home, 'marker-b1.md')), 'its import is unlisted');
   } finally { clean(home); }
 });
+
+// ---------------------------------------------------------------------------
+// 29g fire 412 step 1 (unit D): the Antigravity discovery. The load set is the one the 29g fire 411 probe measured on agy 1.4.12:
+// the project walk (GEMINI.md / AGENTS.md from the cwd up to the repo root) and five global files, all always on. A file above the
+// repo root, CLAUDE.md, MEMORY.md, a plain .md in ~/.gemini/config/rules, and the knowledge store are NOT loaded, so NOT listed.
+// ---------------------------------------------------------------------------
+
+test('D1 antigravity: the discovery lists exactly the rule files agy loads, the project walk to the root and the global set', () => {
+  const parent = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwb-ag-parent-')));
+  const { home } = sandbox();
+  try {
+    const proj = path.join(parent, 'repo');
+    fs.mkdirSync(path.join(proj, 'sub'), { recursive: true });
+    write(path.join(parent, 'GEMINI.md'), 'above the repo root, not loaded');
+    write(path.join(proj, 'GEMINI.md'), 'repo root');
+    write(path.join(proj, 'sub', 'AGENTS.md'), 'subfolder, the cwd');
+    write(path.join(proj, 'CLAUDE.md'), 'not an AG file');
+    write(path.join(proj, 'MEMORY.md'), 'not an AG file');
+    write(path.join(home, '.gemini', 'GEMINI.md'), 'global');
+    write(path.join(home, '.gemini', 'config', 'AGENTS.md'), 'global config');
+    write(path.join(home, '.gemini', 'config', 'rules', 'AGENTS.md'), 'global rules');
+    write(path.join(home, '.gemini', 'config', 'rules', 'extra.md'), 'a plain md, not loaded');
+    write(path.join(home, '.gemini', 'antigravity', 'knowledge', 'index.md'), 'knowledge, not loaded by default');
+    const d = discoverClassB({ projectRoot: proj, cwd: path.join(proj, 'sub'), home, platform: 'antigravity' });
+    assert.strictEqual(d.platform, 'antigravity');
+    assert.ok(!d.flags.some((f) => /unknown platform/.test(f)), 'antigravity is a known platform now, not the conservative fallback');
+    const got = d.entries.map((e) => path.relative(parent, e.path).split(path.sep).join('/')).sort();
+    const want = [
+      'repo/GEMINI.md',
+      'repo/sub/AGENTS.md',
+      path.relative(parent, path.join(home, '.gemini', 'GEMINI.md')).split(path.sep).join('/'),
+      path.relative(parent, path.join(home, '.gemini', 'config', 'AGENTS.md')).split(path.sep).join('/'),
+      path.relative(parent, path.join(home, '.gemini', 'config', 'rules', 'AGENTS.md')).split(path.sep).join('/'),
+    ].sort();
+    assert.deepStrictEqual(got, want, 'the AG set is exactly the measured load set');
+    assert.ok(d.entries.every((e) => e.alwaysLoaded === true), 'every AG rule file is always on');
+    assert.ok(d.entries.filter((e) => e.scope === 'global').every((e) => e.managed === true), 'the global AG files are measured but never a wash candidate');
+    assert.ok(d.entries.filter((e) => e.scope === 'project').every((e) => e.managed === false), 'the project walk files are knife-eligible');
+  } finally { clean(parent, home); }
+});
