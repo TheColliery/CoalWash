@@ -2,6 +2,21 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.13.0] - 2026-10-31
+
+No change for Claude Code users; groundwork for a later platform unit
+
+Claude Code behaves as in 1.12.14: its hook manifest (`plugin/hooks/hooks.json`) and its hook output are unchanged. This release adds the files a later platform unit builds on, and the conductor takes the output writer that unit needs. The installed plugin moved in 6 files since 1.12.14 (189 insertions, 10 deletions, the manifests included).
+
+### Added
+
+- A root manifest (`plugin.json`), a root hooks file (`hooks.json`) and `assets/logo.svg`, in the dist, as transport for a later platform unit. Claude Code does not read them.
+- A second hook script for that unit, `hooks/ag-conductor.js`. It routes PreToolUse (the airbag on a write tool) and SessionStart (the sweep of prior snapshots); its Stop handler and the gauge line stay off until that unit's discovery work lands.
+
+### Changed
+
+- The conductor's SessionStart and Stop handlers take an options object: `opts.emit` replaces the plain output write, and `opts.updateNudge: false` skips the self-update schedule. The conductor exports its handlers and runs its main only as the hook entry (`hooks/coalwash-conductor.js` lines 230-232, 252, 432, 438, 470-472, 670 and 850-856). With no options the output is byte for byte what 1.12.14 wrote, and the conductor's test suite passes 106 of 106.
+
 ## [1.12.14] - 2026-10-30
 
 Config parsing stays linear; unreadable keeps no longer drop a protection
