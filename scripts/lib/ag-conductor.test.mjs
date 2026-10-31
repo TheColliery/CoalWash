@@ -92,11 +92,10 @@ function readState(home, proj) {
   return JSON.parse(fs.readFileSync(projStatePath(home, proj), 'utf8'));
 }
 // 29g fire 412: the AG transport reads only its own state namespace (coalwash/ag/state.json under the project's slug dir).
-// Where the AG state is written: the fallback under ~/.claude/coal (29g fire 417 moves it to ~/.gemini, with its own witness). These fixtures have no
-// Claude Code slug folder, so the fallback is the location in use.
+// Where the AG state is written: under ~/.gemini/coal/coalwash/ag/ (29g fire 417: never under ~/.claude).
 function agStatePath(home, proj) {
   const slug = fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-');
-  return path.join(home, '.claude', 'coal', 'coalwash', 'ag', `state-${slug}.json`);
+  return path.join(home, '.gemini', 'coal', 'coalwash', 'ag', `state-${slug}.json`);
 }
 function seedAgPendingCrossing(home, proj) {
   const p = agStatePath(home, proj);
@@ -467,5 +466,22 @@ test('F417-1 AG from a subfolder: the project root is the repository root, and t
     const lv = JSON.parse(fs.readFileSync(st, 'utf8')).lastVerdict;
     assert.strictEqual(lv.alwaysLoadedBytes, fs.statSync(rootGemini).size + fs.statSync(subAgents).size, 'the footprint counts the repo-root GEMINI.md and sub/AGENTS.md');
     assert.strictEqual(fs.existsSync(agStatePath(home, sub)), false, 'nothing is recorded under the subfolder slug');
+  } finally { clean(home, repo); }
+});
+
+// 29g fire 417, fix 2: an AG-only box never gets a Claude Code base dir. The AG state lives under ~/.gemini/coal/coalwash/ag/ (AG's own
+// dir), and nothing on the AG route creates ~/.claude. A ~/.claude created by AG would turn detectPlatform to claude-code on that box.
+test('F417-2 an AG-only HOME: after an AG SessionStart and a PreToolUse edit there is still no ~/.claude, and the AG state is under ~/.gemini', async () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-f2-home-')));
+  const repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-f2-repo-')));
+  try {
+    fs.mkdirSync(path.join(repo, '.git'));
+    fs.writeFileSync(path.join(repo, 'GEMINI.md'), 'g'.repeat(120), 'utf8');
+    await routeIn(home, commonPayload(repo), 'SessionStart', { agDiscovery: true });
+    await routeIn(home, toolPayload(repo, 'edit_file', { Path: path.join(repo, 'GEMINI.md') }), 'PreToolUse', { agDiscovery: true });
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude')), false, 'no ~/.claude on an AG-only box after the AG route ran');
+    const slug = fs.realpathSync.native(repo).replace(/[^A-Za-z0-9]/g, '-');
+    const st = path.join(home, '.gemini', 'coal', 'coalwash', 'ag', `state-${slug}.json`);
+    assert.ok(fs.existsSync(st), `the AG state is under ~/.gemini/coal/coalwash/ag/: ${st}`);
   } finally { clean(home, repo); }
 });

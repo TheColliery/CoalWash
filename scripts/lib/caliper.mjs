@@ -783,8 +783,9 @@ export function setStateNamespace(ns) {
   if (ns !== null && !(typeof ns === 'string' && /^[a-z]+$/.test(ns))) throw new Error(`setStateNamespace: invalid namespace ${JSON.stringify(ns)}`);
   STATE_NAMESPACE = ns;
 }
-// The subfolder(s) a namespace adds under coalwash/ (CC: none, so every path is byte-identical to before).
-function stateDirParts() { return STATE_NAMESPACE ? [STATE_NAMESPACE] : []; }
+// 29g fire 417, fix 2: the AG namespace's state lives under ~/.gemini (AG's own dir), never under ~/.claude, so an AG-only box never gets a
+// Claude Code base dir (detectPlatform would read claude-code there). Every AG state path is under this folder.
+function agStateBase(home) { return path.join(home, '.gemini', 'coal', 'coalwash', 'ag'); }
 // The per-project state path — beside the CC memory dir. Fail-closed to the
 // global coal/coalwash/ namespace (still inside ~/.claude) if the derived path
 // somehow escapes the sandbox (task #13 pt 2). Never throws: ccMemoryDir is a
@@ -792,7 +793,8 @@ function stateDirParts() { return STATE_NAMESPACE ? [STATE_NAMESPACE] : []; }
 // yields a deterministic path here and simply an empty read downstream (pt 5).
 // The fail-closed home: the global coal/ namespace, still inside ~/.claude.
 export function stateFallbackPath(projectRoot, home = os.homedir()) {
-  return path.join(claudeBaseDir(home), 'coal', 'coalwash', ...stateDirParts(), `state-${ccProjectSlug(projectRoot)}.json`);
+  if (STATE_NAMESPACE) return path.join(agStateBase(home), `state-${ccProjectSlug(projectRoot)}.json`);
+  return path.join(claudeBaseDir(home), 'coal', 'coalwash', `state-${ccProjectSlug(projectRoot)}.json`);
 }
 
 // NEVER-CREATE GUARD (2026-07-25 field fix, layer 2 — independent of the layer-1
@@ -807,9 +809,10 @@ function isExistingDir(p) {
   try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
 export function statePath(projectRoot, home = os.homedir()) {
+  if (STATE_NAMESPACE) return stateFallbackPath(projectRoot, home); // the AG namespace never uses a Claude Code slug folder (fire 417)
   const base = claudeBaseDir(home);
   const slugDir = path.dirname(ccMemoryDir(projectRoot, home)); // <base>/projects/<slug>
-  const derived = path.join(slugDir, 'coalwash', ...stateDirParts(), 'state.json');
+  const derived = path.join(slugDir, 'coalwash', 'state.json');
   if (isExistingDir(slugDir) && containedNewPath(derived, base)) return derived;
   return stateFallbackPath(projectRoot, home);
 }
@@ -1261,6 +1264,7 @@ export const __testHooks = {
 // file, never a non-empty dir (the recovery-paths lesson). Fail-silent.
 function pruneStrayStateDirs(projectRoot, home) {
   __testHooks.strayPruneCalls++;
+  if (STATE_NAMESPACE) return; // the AG namespace never reads or removes Claude Code's slug folders (fire 417)
   try {
     const base = claudeBaseDir(home);
     const projectsDir = path.join(base, 'projects');
@@ -1269,7 +1273,7 @@ function pruneStrayStateDirs(projectRoot, home) {
     for (const name of fs.readdirSync(projectsDir)) {
       if (name === mine) continue;
       const slugDir = path.join(projectsDir, name);
-      const f = path.join(slugDir, 'coalwash', ...stateDirParts(), 'state.json');
+      const f = path.join(slugDir, 'coalwash', 'state.json');
       const rec = readStateFile(f)?.projectRoot;
       if (typeof rec !== 'string' || !rec) continue;            // legacy/unknown → keep-on-doubt
       if (name !== ccProjectSlug(rec)) continue;                // the dir must BE that root's slug (anti-plant)
@@ -1277,7 +1281,6 @@ function pruneStrayStateDirs(projectRoot, home) {
       if (physicalDir(rec) === mineRoot) continue;              // that IS this project's root, not a stray
       if (!containedNewPath(f, base)) continue;                 // realpath-and-contain before ANY rm (junction escape)
       fs.rmSync(f, { force: true });                            // ours, and spurious
-      rmdirIfEmpty(path.join(slugDir, 'coalwash', ...stateDirParts()));
       rmdirIfEmpty(path.join(slugDir, 'coalwash'));
       rmdirIfEmpty(slugDir);
     }
@@ -1343,7 +1346,7 @@ export function rootIsGone(root, anchors, statSyncFn = fs.statSync) {
   return containedIn(ancPhys, roots);
 }
 export function deadProjectStateFiles(home = os.homedir()) {
-  const dir = path.join(claudeBaseDir(home), 'coal', 'coalwash', ...stateDirParts()); // the namespace's own folder: a CC sweep never lists an AG file, nor the reverse
+  const dir = STATE_NAMESPACE ? agStateBase(home) : path.join(claudeBaseDir(home), 'coal', 'coalwash'); // the namespace's own folder: a CC sweep never lists an AG file, nor the reverse
   const out = [];
   const anchors = [home, os.tmpdir()];
   let names;
@@ -1387,7 +1390,7 @@ const DEAD_SWEEP_EVERY_MS = 24 * 60 * 60 * 1000;
 function sweepDeadProjectStates(home, projectRoot) {
   __testHooks.deadStateSweepCalls++;
   try {
-    const base = claudeBaseDir(home);
+    const base = STATE_NAMESPACE ? agStateBase(home) : claudeBaseDir(home);
     const mine = `state-${ccProjectSlug(projectRoot)}.json`;
     for (const c of deadProjectStateFiles(home)) {
       if (c.name === mine) continue;                       // never the project being written

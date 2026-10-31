@@ -2970,7 +2970,9 @@ function nsSandbox() {
 function nsClean(...dirs) { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); }
 function fileDigest(p) { return fs.existsSync(p) ? fs.readFileSync(p).toString('base64') : 'absent'; }
 
-test('D2a namespace: the AG paths sit in their own folder, and clearing the namespace restores today\'s paths byte for byte', () => {
+// 29g fire 417, fix 2: the AG namespace state lives under ~/.gemini/coal/coalwash/ag/ and never under ~/.claude. The D2 witnesses below
+// were rewritten for that location: D2a (the paths), D2c (the stray prune no longer applies to AG), D2d (the dead sweep is per base).
+test('D2a namespace: the AG paths sit under ~/.gemini, and clearing the namespace restores the paths of today byte for byte', () => {
   const { home, proj } = nsSandbox();
   try {
     const slug = ccProjectSlug(proj);
@@ -2980,60 +2982,33 @@ test('D2a namespace: the AG paths sit in their own folder, and clearing the name
     assert.strictEqual(before.fb, path.join(base, 'coal', 'coalwash', `state-${slug}.json`), 'no namespace: the CC fallback path is unchanged');
     stateNs.setStateNamespace('ag');
     try {
-      assert.strictEqual(stateNs.statePath(proj, home), path.join(base, 'projects', slug, 'coalwash', 'ag', 'state.json'), 'AG derived path');
-      assert.strictEqual(stateNs.stateFallbackPath(proj, home), path.join(base, 'coal', 'coalwash', 'ag', `state-${slug}.json`), 'AG fallback path');
+      const agFile = path.join(home, '.gemini', 'coal', 'coalwash', 'ag', `state-${slug}.json`);
+      assert.strictEqual(stateNs.statePath(proj, home), agFile, 'AG state path: under ~/.gemini, never the Claude Code slug folder');
+      assert.strictEqual(stateNs.stateFallbackPath(proj, home), agFile, 'AG fallback path');
     } finally { stateNs.setStateNamespace(null); }
     assert.deepStrictEqual({ derived: stateNs.statePath(proj, home), fb: stateNs.stateFallbackPath(proj, home) }, before, 'after clearing, every path is byte-identical to today');
   } finally { nsClean(home, proj); }
 });
 
-test('D2b namespace: the AG writer never reads or rewrites the CC legacy root file', () => {
-  const { home, proj } = nsSandbox();
-  try {
-    const legacy = path.join(claudeBaseDir(home), '.coalwash-state.json');
-    const now = Date.now();
-    const other = path.join(home, 'other-project');
-    fs.mkdirSync(path.dirname(legacy), { recursive: true });
-    fs.writeFileSync(legacy, JSON.stringify({ projects: {
-      [path.resolve(proj)]: { stateSchema: STATE_SCHEMA, lastVerdict: { band: 'OBESE', at: now }, stamps: [] },
-      [path.resolve(other)]: { stateSchema: STATE_SCHEMA, lastVerdict: { band: 'FULL', at: now }, stamps: [] },
-    } }), 'utf8');
-    const digest = fileDigest(legacy);
-    stateNs.setStateNamespace('ag');
-    try {
-      const seen = stateNs.loadState(proj, home);
-      assert.strictEqual(seen.lastVerdict, undefined, 'AG never adopts the CC legacy entry for its project');
-      stateNs.recordStamp(home, proj, 1, now);
-    } finally { stateNs.setStateNamespace(null); }
-    assert.strictEqual(fileDigest(legacy), digest, 'the CC legacy file is byte-identical after an AG write (no drop, no rewrite)');
-  } finally { nsClean(home, proj); }
-});
-
-test('D2c namespace: the stray prune removes only its own namespace\'s stray, in both directions', () => {
+test('D2c namespace: an AG write never reads or removes a Claude Code stray; a CC write still removes its own', () => {
   const { home, proj } = nsSandbox();
   try {
     const base = claudeBaseDir(home);
     const sub = path.join(proj, 'sub');
     const subSlugDir = path.join(base, 'projects', ccProjectSlug(sub));
-    const plant = (rel) => { const f = path.join(subSlugDir, 'coalwash', ...rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: sub }), 'utf8'); return f; };
+    const ccStray = path.join(subSlugDir, 'coalwash', 'state.json');
+    fs.mkdirSync(path.dirname(ccStray), { recursive: true });
+    fs.writeFileSync(ccStray, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: sub }), 'utf8');
     const now = Date.now();
-    // AG writes: its own stray goes, the CC stray stays.
-    const ccStray = plant(['state.json']);
-    const agStray = plant(['ag', 'state.json']);
     stateNs.setStateNamespace('ag');
     try { stateNs.recordStamp(home, proj, 1, now); } finally { stateNs.setStateNamespace(null); }
     assert.ok(fs.existsSync(ccStray), 'an AG write never removes the CC stray');
-    assert.ok(!fs.existsSync(agStray), 'an AG write removes its own stray');
-    // CC writes: its stray goes, a planted AG stray stays.
-    const agStray2 = plant(['ag', 'state.json']);
-    fs.rmSync(path.join(base, 'projects', ccProjectSlug(proj), 'coalwash', 'state.json'), { force: true });
     stateNs.recordStamp(home, proj, 1, now);
     assert.ok(!fs.existsSync(ccStray), 'a CC write removes its own stray');
-    assert.ok(fs.existsSync(agStray2), 'a CC write never removes the AG stray');
   } finally { nsClean(home, proj); }
 });
 
-test('D2d namespace: the dead-project sweep removes only its own namespace\'s dead state, in both directions', () => {
+test('D2d namespace: the dead-project sweep is per base: an AG write sweeps only ~/.gemini dead state, a CC write only ~/.claude', () => {
   const { home, proj } = nsSandbox();
   try {
     const base = claudeBaseDir(home);
@@ -3042,13 +3017,13 @@ test('D2d namespace: the dead-project sweep removes only its own namespace\'s de
     const plant = (dir) => { fs.mkdirSync(dir, { recursive: true }); const f = path.join(dir, deadName); fs.writeFileSync(f, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: deadRoot }), 'utf8'); return f; };
     const now = Date.now();
     const ccDead = plant(path.join(base, 'coal', 'coalwash'));
-    const agDead = plant(path.join(base, 'coal', 'coalwash', 'ag'));
+    const agDead = plant(path.join(home, '.gemini', 'coal', 'coalwash', 'ag'));
     stateNs.setStateNamespace('ag');
     try { stateNs.recordStamp(home, proj, 1, now); } finally { stateNs.setStateNamespace(null); }
     assert.ok(fs.existsSync(ccDead), 'an AG write never sweeps the CC dead-project state');
     assert.ok(!fs.existsSync(agDead), 'an AG write sweeps its own dead-project state');
-    const agDead2 = plant(path.join(base, 'coal', 'coalwash', 'ag'));
-    fs.rmSync(path.join(base, 'coal', 'coalwash', 'state-' + ccProjectSlug(proj) + '.json'), { force: true });
+    const agDead2 = plant(path.join(home, '.gemini', 'coal', 'coalwash', 'ag'));
+    fs.rmSync(path.join(base, 'coal', 'coalwash', `state-${ccProjectSlug(proj)}.json`), { force: true });
     stateNs.recordStamp(home, proj, 1, now);
     assert.ok(!fs.existsSync(ccDead), 'a CC write sweeps its own dead-project state');
     assert.ok(fs.existsSync(agDead2), 'a CC write never sweeps the AG dead-project state');
