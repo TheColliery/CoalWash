@@ -2990,6 +2990,28 @@ test('D2a namespace: the AG paths sit under ~/.gemini, and clearing the namespac
   } finally { nsClean(home, proj); }
 });
 
+test('D2b namespace: the AG writer never reads or rewrites the CC legacy root file', () => {
+  const { home, proj } = nsSandbox();
+  try {
+    const legacy = path.join(claudeBaseDir(home), '.coalwash-state.json');
+    const now = Date.now();
+    const other = path.join(home, 'other-project');
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    fs.writeFileSync(legacy, JSON.stringify({ projects: {
+      [path.resolve(proj)]: { stateSchema: STATE_SCHEMA, lastVerdict: { band: 'OBESE', at: now }, stamps: [] },
+      [path.resolve(other)]: { stateSchema: STATE_SCHEMA, lastVerdict: { band: 'FULL', at: now }, stamps: [] },
+    } }), 'utf8');
+    const digest = fileDigest(legacy);
+    stateNs.setStateNamespace('ag');
+    try {
+      const seen = stateNs.loadState(proj, home);
+      assert.strictEqual(seen.lastVerdict, undefined, 'AG never adopts the CC legacy entry for its project');
+      stateNs.recordStamp(home, proj, 1, now);
+    } finally { stateNs.setStateNamespace(null); }
+    assert.strictEqual(fileDigest(legacy), digest, 'the CC legacy file is byte-identical after an AG write (no drop, no rewrite)');
+  } finally { nsClean(home, proj); }
+});
+
 test('D2c namespace: an AG write never reads or removes a Claude Code stray; a CC write still removes its own', () => {
   const { home, proj } = nsSandbox();
   try {
