@@ -5099,6 +5099,10 @@ test('F450-1 a live transaction lock defers the recovery on both routes: nothing
       assert.strictEqual(r.recovered, 'none', `deferred on platform ${platform}: ${JSON.stringify(r)}`);
       assert.strictEqual(r.deferred, true, 'the deferral is named');
       assert.match(r.error || '', /holds the store/, 'the error names the held lock');
+      // 29j fire 453 (F452-1): the deferral names the remedy in plain words: the lock path, the stale wait, and the removal by hand.
+      assert.ok(r.error.includes(lockPath), `the error names the lock file path: ${r.error}`);
+      assert.match(r.error, /remove the lock file by hand/, 'the error says how to clear it by hand');
+      assert.match(r.error, /stale \(about 30 minutes\)/, 'the error says recovery runs once the lock is stale');
       assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'AFTER\n', 'the project file is untouched');
       assert.strictEqual(fs.readFileSync(path.join(txDir, 'journal.json'), 'utf8'), journalBefore, 'the journal is byte-for-byte unchanged');
       assert.strictEqual(fs.readFileSync(lockPath, 'utf8'), lockBody, 'the live owner lock is byte-for-byte unchanged');

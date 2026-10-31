@@ -2003,7 +2003,8 @@ export function recoverDangling(projectRoot, opts = {}) {
     // defers, named, touching nothing (it never waits: a gauge is a hook-side read). A stale lock is taken over by acquireLock's own rule,
     // which is the crash case recovery exists for. selfIgnore is off: the journal's folder already exists, so the only new write is the lock.
     txLock = acquireLock(path.join(txDir, LOCK_NAME), { now, selfIgnore: false });
-    if (!txLock.acquired) return { recovered: 'none', deferred: true, error: `${txLock.reason} — nothing touched` };
+    // 29j fire 453 (F452-1): the deferral names the remedy in plain words. acquireLock's shared reason is unchanged (applyPlan keeps its own text).
+    if (!txLock.acquired) return { recovered: 'none', deferred: true, error: `${txLock.reason} — nothing touched. If no CoalWash run is active, an interrupted run left this lock: recovery runs once the lock is stale (about 30 minutes), or remove the lock file by hand (${path.join(txDir, LOCK_NAME)}).` };
     let journal;
     // CWK-137: bounded. E2-4: contained to txDir ITSELF, and a refused read is unreadable (`?? ''` makes JSON.parse throw;
     // JSON.parse(null) would have answered null and slipped past this catch).
