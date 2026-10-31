@@ -50,7 +50,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
-import { ensureSelfIgnore, acquireLock, trackedInOwnFolder } from './apply.mjs';
+import { ensureSelfIgnore, acquireLock, trackedInOwnFolder, lockLeftNote } from './apply.mjs';
 import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
@@ -318,7 +318,13 @@ function acquireBinLock(dir) {
   }
   return lock;
 }
-export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now(), trackedChecked = false } = {}) {
+// 29k F452-B: the note for a bin lock this call took that its release could not remove (null when released, or when the lock was not ours).
+function binLockNote(dir, lock) {
+  return lockLeftNote(path.join(dir, BIN_LOCK_NAME), lock.release(), BIN_LOCK_STALE_MS);
+}
+// `onLockLeft` (29k F452-B): receives that note when the release could not remove the bin lock. The item is already saved, so the
+// return value stays the item id; the note is the caller's to report.
+export function recordBinItem(projectRoot, name, { content, original, origin = 'program-cut', now = Date.now(), trackedChecked = false, onLockLeft = null } = {}) {
   let dir;
   let lock;
   try {
@@ -360,7 +366,10 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
   } catch {
     return null;
   } finally {
-    if (lock && lock.acquired) lock.release();
+    if (lock && lock.acquired) {
+      const note = binLockNote(dir, lock);
+      if (note && typeof onLockLeft === 'function') onLockLeft(note);
+    }
   }
 }
 
@@ -436,7 +445,11 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
   if (!peek.length && !removeStaleTemps(dir, { dryRun: true }).length) return { destroyed: 0, kept: 0 };
   const lock = acquireBinLock(dir);
   if (!lock.acquired) return { destroyed: 0, kept: peek.length };
-  try { return sweepBinLocked(dir, horizonMs, now, budgetBytes, lock); } finally { lock.release(); }
+  // 29k F452-B: a release that could not remove the bin lock rides on the sweep's own result as `lockLeft`, never dropped.
+  let out;
+  let lockLeft = null;
+  try { out = sweepBinLocked(dir, horizonMs, now, budgetBytes, lock); } finally { lockLeft = binLockNote(dir, lock); }
+  return lockLeft ? { ...out, lockLeft } : out;
 }
 function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   const temps = removeStaleTemps(dir); // E1 t173: inside the lock, which a live writer holds while its temp exists

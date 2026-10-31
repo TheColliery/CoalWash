@@ -888,3 +888,40 @@ test('CWK2-051: escapesRoot tests the FIRST path segment: ..x and ..cfg are insi
   assert.strictEqual(escapesRoot(path.join('..', 'a')), true);
   assert.strictEqual(escapesRoot(path.resolve('/abs')), true);
 });
+
+// 29k build 460 (RED first, F452-B): a bin lock whose release fails is reported by the sweep, and by recordBinItem through onLockLeft.
+test('F452-B sweepFatBin reports a bin lock its release could not remove, with the bin lock\'s own 5 s window', (t) => {
+  const { project } = sandbox(t, 'binlockrel');
+  const { now } = binWithOneOldItem(project, 'notes/old.md');
+  const binLock = path.join(project, '.claude', 'coalwash', FAT_BIN_NAME, '.bin.lock');
+  const real = fs.rmSync;
+  const want = path.resolve(binLock);
+  fs.rmSync = function patched(p, ...rest) {
+    if (path.resolve(String(p)) === want) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+    return real.call(fs, p, ...rest);
+  };
+  try {
+    const r = sweepFatBin(project, { now });
+    assert.equal(r.destroyed, 1, 'the sweep ran');
+    assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${binLock} could not be removed (EBUSY), so it was left in place`), JSON.stringify(r));
+    assert.ok(r.lockLeft.includes('(5 s)'), `the wait is the bin lock's own 5 s window: ${r.lockLeft}`);
+  } finally { fs.rmSync = real; }
+});
+
+test('F452-B recordBinItem hands a bin lock whose release failed to its caller through onLockLeft, and keeps the item', (t) => {
+  const { project } = sandbox(t, 'binnoterel');
+  const binLock = path.join(project, '.claude', 'coalwash', FAT_BIN_NAME, '.bin.lock');
+  const real = fs.rmSync;
+  const want = path.resolve(binLock);
+  fs.rmSync = function patched(p, ...rest) {
+    if (path.resolve(String(p)) === want) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+    return real.call(fs, p, ...rest);
+  };
+  const notes = [];
+  try {
+    const id = recordBinItem(project, FAT_BIN_NAME, { content: 'x', original: 'x.md', now: Date.now(), onLockLeft: (n) => notes.push(n) });
+    assert.ok(id, 'the item was saved: a release failure does not undo it');
+    assert.equal(notes.length, 1, JSON.stringify(notes));
+    assert.ok(notes[0].includes(`The lock file ${binLock} could not be removed (EBUSY), so it was left in place`), notes[0]);
+  } finally { fs.rmSync = real; }
+});
