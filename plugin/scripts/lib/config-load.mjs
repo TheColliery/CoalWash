@@ -1265,11 +1265,12 @@ export function mergeSafety(global, project, { globalUnreadable = false, project
 // tier whose config EXISTS where the walk reads but could not be used -- `{ tier, path, reason }`, the reason
 // one of readJsonc's four. Still ONE pass: the global path and the ONE candidate the walk selected are read once,
 // and only those two paths are ever touched (never a crawl, never a candidate the walk did not stat).
-export function loadMergedConfigReport({ cwd = process.cwd(), home = os.homedir() } = {}) {
+export function loadMergedConfigReport({ cwd = process.cwd(), home = os.homedir(), platform } = {}) {
   const gPath = globalConfigPath(home);
   const g = readJsonc(gPath); // the user's own file: bounded, never contained
   // CWK-137: the project config is repo-derived -- contained in its project root.
-  const root = findProjectRoot(cwd, home);
+  // 29h F422-1: the AG route reads the project config from the repository root it measures, never a subfolder that carries a CC marker.
+  const root = projectRootFor(cwd, home, { platform });
   const pPath = pickCandidate(candidatesForRoot(root));
   const p = readJsonc(pPath, root);
   const unreadable = [];

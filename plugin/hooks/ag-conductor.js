@@ -59,7 +59,7 @@ async function sweepPriorConversations(conversationId) {
     import(conductor.lib('config-schema.mjs')),
     import(conductor.lib('writeguard.mjs')),
   ]);
-  const cfg = loadMergedConfig();
+  const cfg = loadMergedConfig({ platform: 'antigravity' });
   if (clampedRead(cfg, 'coalwashMode') === 'off') return;
   if (clampedRead(cfg, 'writeGuard') === 'off') return;
   const home = os.homedir();

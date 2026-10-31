@@ -377,9 +377,10 @@ function statBytes(p) {
 // NOT in the set, measured: a file above the repo root, CLAUDE.md, MEMORY.md, a plain .md in config/rules (not picked up), the
 // brain transcripts and conversation DBs (class-A, the estate: written every run, never loaded into a new conversation), and the
 // knowledge store (read only when its path is in the prompt). So none of those is listed.
-// MEASURED, NOT WASHED: the global files cost context, so they are counted, and tagged managed:true, the wash-jurisdiction tag
-// (parcel.mjs 0l: capture all, then filter the knife). The user's own global rules are never a wash candidate, and the discovery
-// grants no write reach into ~/.gemini (head ruling 1). Realpath-contained, fail-closed, and a link that escapes is flagged, never read.
+// MEASURED, NOT WASHED: the global files cost context, so they are counted and tagged managed:true. The tag is a MEASUREMENT label only
+// (parcel.mjs 0l: capture all). Nothing reads it to filter a write: the wall is applyPlan's trusted roots (the project root on the AG route,
+// the project and the CC memory store on the CC route), so a rewrite of a ~/.gemini file is refused by containment (29h F415-3).
+// Realpath-contained, fail-closed, and a link that escapes is flagged, never read.
 const AG_PROJECT_RULE_FILES = ['GEMINI.md', 'AGENTS.md'];
 const AG_GLOBAL_RULE_PARTS = [['GEMINI.md'], ['AGENTS.md'], ['config', 'GEMINI.md'], ['config', 'AGENTS.md'], ['config', 'rules', 'AGENTS.md']];
 export function discoverAntigravityClassB({ projectRoot = process.cwd(), cwd = projectRoot, home = os.homedir() } = {}) {

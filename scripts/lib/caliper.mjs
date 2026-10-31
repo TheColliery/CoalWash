@@ -1025,7 +1025,9 @@ function probeCompactWindow(home, projectRoot, env) {
     return null; // any doubt -> no window, the other probes answer (Phoenix #4)
   }
 }
-export function discoverCapacity({ home = os.homedir(), projectRoot, env = process.env } = {}) {
+export function discoverCapacity({ home = os.homedir(), projectRoot, env = process.env, platform } = {}) {
+  // 29h F415-4: the AG route exposes no window (29g ruling 3), so none of Claude Code's window sources is read there.
+  if (platform === 'antigravity') return conservativeCapacity();
   const found = probeStatsCache(home) || probeCapacityFile(home) || conservativeCapacity();
   const window = probeCompactWindow(home, projectRoot, env);
   return window !== null && window < found.capacityTokens ? { capacityTokens: window, source: 'auto-compact-window', discovered: true } : found;

@@ -485,3 +485,48 @@ test('F417-2 an AG-only HOME: after an AG SessionStart and a PreToolUse edit the
     assert.ok(fs.existsSync(st), `the AG state is under ~/.gemini/coal/coalwash/ag/: ${st}`);
   } finally { clean(home, repo); }
 });
+
+// 29h fire 430, F422-1 (CodeRabbit t238): the AG route loads the project config from the repository root it measures, never from a
+// subfolder that carries a Claude Code root marker. A repo-root off switch must hold on the AG route.
+test('F422-1 an AG session in a subfolder: the repository-root off switch holds, so the gauge and the airbag write nothing', async () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-f422-home-')));
+  const repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-f422-repo-')));
+  try {
+    fs.mkdirSync(path.join(repo, '.git'));
+    fs.mkdirSync(path.join(repo, '.claude', 'coal'), { recursive: true });
+    fs.writeFileSync(path.join(repo, '.claude', 'coal', 'coalwash.json'), '{"coalwashMode":"off"}', 'utf8');
+    fs.writeFileSync(path.join(repo, 'GEMINI.md'), '# rules\n- a line\n', 'utf8');
+    const sub = path.join(repo, 'sub');
+    fs.mkdirSync(sub);
+    fs.writeFileSync(path.join(sub, 'CLAUDE.md'), '# sub\n', 'utf8'); // a Claude Code root marker, so the CC walk stops in sub
+    await routeIn(home, commonPayload(sub), 'SessionStart', { agDiscovery: true });
+    await routeIn(home, toolPayload(sub, 'edit_file', { Path: path.join(repo, 'GEMINI.md') }), 'PreToolUse', { agDiscovery: true });
+    assert.strictEqual(fs.existsSync(agStatePath(home, repo)), false, 'no AG state: the repository-root off switch was read');
+    assert.strictEqual(fs.existsSync(wgRoot(repo)), false, 'no write-guard folder: the airbag honoured the off switch');
+  } finally { clean(home, repo); }
+});
+
+// 29h fire 430, F415-2: the AG airbag never snapshots a file under ~/.gemini. The project GEMINI.md still snapshots (the control).
+function snapshotNames(dir) {
+  const out = [];
+  if (!fs.existsSync(dir)) return out;
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else out.push(e.name); } };
+  walk(dir);
+  return out;
+}
+test('F415-2 the AG airbag snapshots project rule files and never a file under ~/.gemini', async () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-f415-home-')));
+  const repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-f415-repo-')));
+  try {
+    fs.mkdirSync(path.join(repo, '.git'));
+    fs.writeFileSync(path.join(repo, 'GEMINI.md'), 'project rules\n', 'utf8');
+    fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
+    const globalAgents = path.join(home, '.gemini', 'AGENTS.md');
+    fs.writeFileSync(globalAgents, 'global agents\n', 'utf8');
+    await routeIn(home, commonPayload(repo), 'SessionStart', { agDiscovery: true });
+    await routeIn(home, toolPayload(repo, 'edit_file', { Path: globalAgents }), 'PreToolUse', { agDiscovery: true });
+    assert.deepStrictEqual(snapshotNames(wgRoot(repo)).filter((n) => n.startsWith('AGENTS.md--')), [], 'no snapshot of ~/.gemini/AGENTS.md');
+    await routeIn(home, toolPayload(repo, 'edit_file', { Path: path.join(repo, 'GEMINI.md') }), 'PreToolUse', { agDiscovery: true });
+    assert.ok(snapshotNames(wgRoot(repo)).some((n) => n.startsWith('GEMINI.md--')), 'control: the project GEMINI.md is snapshotted');
+  } finally { clean(home, repo); }
+});

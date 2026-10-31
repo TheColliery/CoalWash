@@ -93,13 +93,14 @@ export function neutralScan(opts) {
   // still drives OFF unconditionally, and drives ON only where the effective
   // global already permits it -- which is what "goes through the same clamp"
   // means, and is the only honest way to test the ON side anyway.
-  const merged = loadMergedConfig({ cwd: projectRoot, home });
+  const platform = opts && opts.platform; // 29h F415-1: the measure takes a platform (the AG route measures the AG parcel)
+  const merged = loadMergedConfig({ cwd: projectRoot, home, platform });
   const effective = opts && opts.scanEverything !== undefined
     ? mergeSafety(merged, { scanEverything: opts.scanEverything })
     : merged;
   const scanEverything = clampedRead(effective, 'scanEverything');
   const readBudgetBytes = readBudgetFor(scanEverything);
-  const disc = discoverClassB({ projectRoot, home, managedPaths });
+  const disc = discoverClassB({ projectRoot, home, managedPaths, platform });
   const m = measureEntries(disc.entries, { withGzip: false, readBudgetBytes });
   return { platform: disc.platform, flags: disc.flags, measure: m };
 }

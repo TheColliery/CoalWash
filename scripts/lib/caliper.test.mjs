@@ -3051,3 +3051,22 @@ test('D2d namespace: the dead-project sweep is per base: an AG write sweeps only
     assert.ok(fs.existsSync(agDead2), 'a CC write never sweeps the AG dead-project state');
   } finally { nsClean(home, proj); }
 });
+
+// 29h fire 430, F415-4: on the AG route the capacity probe reads none of Claude Code's window sources (the env var, the user's settings,
+// the project's settings). It takes the unmeasured path. The CC route still reads them (the control).
+test('F415-4 AG capacity: discoverCapacity with platform antigravity reads no Claude Code window source', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-f415-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-f415-proj-')));
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({ autoCompactWindow: 50000 }), 'utf8');
+    fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ autoCompactWindow: 40000 }), 'utf8');
+    const env = { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '30000' };
+    const cc = discoverCapacity({ home, projectRoot: proj, env });
+    assert.strictEqual(cc.source, 'auto-compact-window', 'control: the CC route reads the window');
+    const ag = discoverCapacity({ home, projectRoot: proj, env, platform: 'antigravity' });
+    assert.strictEqual(ag.source, 'conservative-default', `AG reads no CC window: ${JSON.stringify(ag)}`);
+    assert.strictEqual(ag.discovered, false);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(proj, { recursive: true, force: true }); }
+});

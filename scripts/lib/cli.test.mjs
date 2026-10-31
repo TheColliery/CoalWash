@@ -821,3 +821,27 @@ test('D7 writeguard-list and writeguard-restore take --platform antigravity, and
     assert.strictEqual(bad.status, 1, 'an unknown platform is refused loud, not ignored');
   } finally { clean(home, proj); }
 });
+
+// 29h fire 430, F422-2 (CodeRabbit): --platform with no value, or with a value it does not take, is a named usage error. It is never
+// the Claude Code walk, and it exits non-zero.
+test('F422-2 --platform with no value, or with an unknown value, is a named usage error', () => {
+  const { home, proj } = sandbox();
+  try {
+    for (const args of [['writeguard-list', '--platform'], ['writeguard-list', '--platform', 'foo']]) {
+      const r = run(proj, home, args);
+      assert.notStrictEqual(r.status, 0, `${args.join(' ')} exits non-zero`);
+      assert.ok(/--platform takes antigravity or claude-code/.test(r.stderr), `${args.join(' ')} names the values it takes: ${r.stderr.slice(0, 160)}`);
+    }
+  } finally { clean(home, proj); }
+});
+
+// 29h fire 430, F415-1 (code half): gauge measures the platform it is told. On a box that also has Claude Code, an explicit
+// --platform antigravity must measure the AG parcel, not Claude Code's store.
+test('F415-1 gauge --platform antigravity measures the AG parcel, even on a box that also has Claude Code', () => {
+  const { home, proj } = sandbox(); // sandbox() makes ~/.claude: a two-agent box
+  try {
+    const r = run(proj, home, ['gauge', '--json', '--platform', 'antigravity']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(JSON.parse(r.stdout).platform, 'antigravity');
+  } finally { clean(home, proj); }
+});

@@ -237,7 +237,7 @@ async function handleSessionStart(input, opts = {}) {
     import(lib('caliper.mjs')),
   ]);
 
-  const { cfg, unreadable } = loadMergedConfigReport();
+  const { cfg, unreadable } = loadMergedConfigReport({ platform: opts.platform });
   // UMB-174 (b) + CWK-135 (a): a config that EXISTS where the walk reads but could not be used is REPORTED, once,
   // on this sanctioned channel (Phoenix #13) -- the walk's SELECTION is unchanged, only the silence goes. ONE flock
   // string, built by the lib (the global tier names its own path). Only the two paths the merge already read.
@@ -363,7 +363,7 @@ async function handleSessionStart(input, opts = {}) {
     // SessionStart already pays for a full discovery+measure, so one small
     // in-sandbox JSON read rides along free; the Stop hot path never calls it
     // (Phoenix #3), it renders the cached number instead.
-    const gv = caliper.gaugeVerdict({ measure: m, wasOver, wasEconLatched, stamps: proj.stamps, envelope, capacity: caliper.discoverCapacity({ home }) });
+    const gv = caliper.gaugeVerdict({ measure: m, wasOver, wasEconLatched, stamps: proj.stamps, envelope, capacity: caliper.discoverCapacity({ home, platform: opts.platform }) });
     const { verdict, fatTokens, economical, perDay, breakEvenDays } = gv;
 
     // WARP-HOLE (beta.13 item 3): the always-loaded path list + byte total —
@@ -478,7 +478,7 @@ async function handleStop(input, opts = {}) {
     import(lib('ask.mjs')),
     import(lib('class-b.mjs')),
   ]);
-  const cfg = loadMergedConfig();
+  const cfg = loadMergedConfig({ platform: opts.platform });
   // coalwashMode:off = the skill's whole power switch — and the ONLY stop
   // (0m: force itself has no off switch; a legacy forceMode key in a config
   // is read-tolerated and ignored, see config-schema.mjs RETIRED_KEYS).
@@ -538,7 +538,7 @@ async function handleStop(input, opts = {}) {
         // the floor-driven band. The reorg envelope resolves via
         // config-schema's envelope resolver (see the SessionStart site's
         // comment for why it does NOT live in the RE-TIER module).
-        const gv = caliper.gaugeVerdict({ measure: m, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps, envelope: envelopeForConfig(cfg), capacity: caliper.discoverCapacity({ home }) }); // CWK-081: the gated re-gauge is the OTHER full-measure site, so the adapter rides it too
+        const gv = caliper.gaugeVerdict({ measure: m, wasOver: !!lastVerdict.overCeiling, wasEconLatched: !!lastVerdict.econLatched, stamps: proj.stamps, envelope: envelopeForConfig(cfg), capacity: caliper.discoverCapacity({ home, platform: opts.platform }) }); // CWK-081: the gated re-gauge is the OTHER full-measure site, so the adapter rides it too
         const alwaysLoadedPaths = disc.entries.filter((e) => e.alwaysLoaded).map((e) => e.path);
         const externalizable = caliper.externalizableResidue(disc.entries); // CWK-082 L2, same as the SessionStart gauge
         caliper.recordVerdict(home, projectRoot, {
@@ -781,12 +781,12 @@ async function handleAirbag(input, opts = {}) {
       import(lib('config-schema.mjs')),
       import(lib('writeguard.mjs')),
     ]);
-    const cfg = loadMergedConfig();
+    const cfg = loadMergedConfig({ platform: opts.platform });
     if (clampedRead(cfg, 'coalwashMode') === 'off') return; // master kill
     if (clampedRead(cfg, 'writeGuard') === 'off') return;   // its own off switch
     const home = os.homedir();
     const projectRoot = projectRootFor(process.cwd(), home, opts);
-    writeguard.snapshotOnFirstWrite(projectRoot, input.session_id, p, { home, extraBasenames: opts.extraBasenames });
+    writeguard.snapshotOnFirstWrite(projectRoot, input.session_id, p, { home, extraBasenames: opts.extraBasenames, platform: opts.platform });
     // NOTHING emitted (airbag is write-only) — Phoenix #13.
   } catch { /* fail-silent — never block a write */ }
 }

@@ -75,7 +75,7 @@ import { recoverDangling } from './apply.mjs';
 import { discoverClassB } from './class-b.mjs';
 import {
   measureEntries, readBudgetFor, gaugeVerdict,
-  loadState, armDigGauge, discoverCapacity,
+  loadState, armDigGauge, discoverCapacity, setStateNamespace,
 } from './caliper.mjs';
 import { envelopeFor } from './retier.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
@@ -107,17 +107,17 @@ import { retierScan, retierScanLines, runRetier, runRetierReport } from './retie
 // wants to hear about both. Measuring silently past it would be a silent-refusal
 // defect arriving through a path we built on purpose. A guard whose reason has
 // been forgotten is the one that gets deleted, so the reason lives here.
-export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
-  const projectRoot = findProjectRoot(cwd, home);
-  const cfg = loadMergedConfig({ cwd, home });
+export function measureOnly({ cwd = process.cwd(), home = os.homedir(), platform } = {}) {
+  const projectRoot = projectRootFor(cwd, home, { platform });
+  const cfg = loadMergedConfig({ cwd, home, platform });
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
-  const disc = discoverClassB({ projectRoot, home, managedPaths });
+  const disc = discoverClassB({ projectRoot, home, managedPaths, platform, cwd });
   // CWK-057: read through the SAME clamped cascade as every other key -- never a
   // second read path (hooks-safety §9's SCOPE test).
   const readBudgetBytes = readBudgetFor(clampedRead(cfg, 'scanEverything'));
   const m = measureEntries(disc.entries, { withGzip: true, readBudgetBytes });
-  const proj = loadState(projectRoot, home);
+  const proj = withStateNamespace(platform, () => loadState(projectRoot, home));
   // Read-only hysteresis + latch state — the gauge CONSUMES these and never
   // stamps or records them (the conductor's SessionStart/Stop are the stamping
   // site). That is a claim about THIS composition only: the recovery preflight
@@ -136,7 +136,7 @@ export function measureOnly({ cwd = process.cwd(), home = os.homedir() } = {}) {
   // gauge sites, so the CLI gauge and the hook can never disagree about the
   // ceiling they judged against (the "a second call site re-derived it by hand"
   // bug this file's own header names).
-  const capacity = discoverCapacity({ home });
+  const capacity = discoverCapacity({ home, platform });
   const gv = gaugeVerdict({
     measure: m,
     wasOver,
@@ -197,7 +197,7 @@ export function gauge(opts = {}) {
   // against the REAL ~/.claude, so a config-territory case could never fire
   // through this front door and the gate would pass vacuously.
   const home = opts.home || os.homedir();
-  const projectRoot = findProjectRoot(opts.cwd || process.cwd(), home);
+  const projectRoot = projectRootFor(opts.cwd || process.cwd(), home, { platform: opts.platform });
   const recover = recoverDangling(projectRoot, { home });
   return { ...measureOnly(opts), recover };
 }
@@ -332,11 +332,21 @@ function argAfter(args, flag) {
 }
 // 29g fire 412/417: the writeguard commands take --platform antigravity, which resolves the AG project root to the repository root (projectRootFor).
 // No flag or claude-code is the Claude Code walk it was; any other value is refused (null).
+// 29h F422-2: an absent flag is the Claude Code walk. A flag with no value, or with a value it does not take, is refused (null) with a
+// named message; it is never silently read as Claude Code.
+const PLATFORM_USAGE = '[CoalWash] --platform takes antigravity or claude-code (omit it for Claude Code)';
 function rootOptsFor(args) {
+  if (!args.includes('--platform')) return {};
   const p = argAfter(args, '--platform');
-  if (p === null || p === 'claude-code') return {};
+  if (p === 'claude-code') return {};
   if (p === 'antigravity') return { platform: 'antigravity' };
   return null;
+}
+// 29h F415-1: the AG route's state lives in the AG namespace, so a CLI read of it goes through that namespace, and the namespace is reset after.
+function withStateNamespace(platform, fn) {
+  if (platform !== 'antigravity') return fn();
+  setStateNamespace('ag');
+  try { return fn(); } finally { setStateNamespace(null); }
 }
 function estateOpts(args) {
   const home = os.homedir();
@@ -395,8 +405,10 @@ function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
   if (cmd === 'gauge') {
+    const gaugeRoot = rootOptsFor(args);
+    if (!gaugeRoot) { console.error(PLATFORM_USAGE); process.exitCode = 1; return; }
     try {
-      const g = gauge();
+      const g = gauge(gaugeRoot);
       console.log(args.includes('--json') ? JSON.stringify(g, null, 1) : gaugeLine(g));
     } catch (e) {
       console.error(`gauge failed: ${e.message}`);
@@ -460,7 +472,7 @@ function main() {
     }
   } else if (cmd === 'writeguard-list') {
     const rootOpts = rootOptsFor(args);
-    if (!rootOpts) { console.error(USAGE); process.exitCode = 1; return; }
+    if (!rootOpts) { console.error(PLATFORM_USAGE); process.exitCode = 1; return; }
     try {
       const rows = listWriteguard(projectRootFor(process.cwd(), os.homedir(), rootOpts), { home: os.homedir() });
       if (!rows.length) { console.log('[CoalWash] no write-guard snapshots this session.'); return; }
@@ -474,7 +486,8 @@ function main() {
     // The snapshot name is the first argument that is not a flag and not the value of --platform (29g fire 412: the flag may come first).
     const name = args.slice(1).find((a, i, arr) => !a.startsWith('--') && arr[i - 1] !== '--platform');
     const rootOpts = rootOptsFor(args);
-    if (!name || !rootOpts) { console.error(USAGE); process.exitCode = 1; return; }
+    if (!rootOpts) { console.error(PLATFORM_USAGE); process.exitCode = 1; return; }
+    if (!name) { console.error(USAGE); process.exitCode = 1; return; }
     try {
       const projectRoot = projectRootFor(process.cwd(), os.homedir(), rootOpts);
       const r = readWriteguardSnapshot(projectRoot, name, { home: os.homedir() });

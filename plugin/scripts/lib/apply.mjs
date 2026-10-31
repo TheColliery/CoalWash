@@ -60,7 +60,7 @@ import { gitEnv } from './git-env.mjs'; // the room's one GIT_*-stripping helper
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, findProjectRoot, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, projectRootFor, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir, openPlainFile, ensureCatchAllIgnore } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
@@ -977,7 +977,7 @@ export function ensureSelfIgnore(dir) {
 // home. recoverDangling never sets it: its `projectRoot` parameter is whatever
 // its caller derived from cwd, and it has no way to tell a derived anchor from a
 // vouched one, so it takes the fail-closed reading.
-function trustedRootsForAnchor(projectRoot, home, { trustedAnchor = false } = {}) {
+function trustedRootsForAnchor(projectRoot, home, { trustedAnchor = false, platform } = {}) {
   // SECURITY — DERIVED-ANCHOR HOME-SWALLOW GUARD (untrusted-anchor path only).
   // When the anchor is DERIVED, findProjectRoot can collapse it to home: cwd=home
   // with no marker (returns home), OR a non-git cwd under a home that itself
@@ -1061,7 +1061,11 @@ function trustedRootsForAnchor(projectRoot, home, { trustedAnchor = false } = {}
   // never widen past these. ponytail: when the PENDING global-GOVERNANCE wash
   // driver ships (MEMORY "Global lock/keeps DRIVER"), add those SPECIFIC roots
   // here — never claudeBaseDir wholesale.
-  const roots = [physicalOrNull(projectRoot), physicalOrNull(ccMemoryDir(projectRoot, home))].filter(Boolean);
+  // 29h F415-1: on the AG route the trusted outer gate is the PROJECT root alone. Claude Code's memory store is not an AG store, so an
+  // AG session cannot reach it even when a plan names it (the plan supplies its roots; only this gate decides which roots may be named).
+  const roots = platform === 'antigravity'
+    ? [physicalOrNull(projectRoot)].filter(Boolean)
+    : [physicalOrNull(projectRoot), physicalOrNull(ccMemoryDir(projectRoot, home))].filter(Boolean);
   if (!roots.length) return { ok: false, error: 'containment: no trusted root resolves (fail-closed)' };
   return { ok: true, roots };
 }
@@ -1085,12 +1089,12 @@ export function applyPlan(plan, opts = {}) {
     // agent's REAL working dir, which a forged PLAN.json cannot move. plan.projectRoot
     // is IGNORED; a forged one is then caught below because its declared roots will
     // not sit inside the real trusted set (the fail-closed the containment gate gives).
-    const projectRoot = opts.projectRoot || findProjectRoot(opts.cwd || process.cwd(), home);
+    const projectRoot = opts.projectRoot || projectRootFor(opts.cwd || process.cwd(), home, { platform: opts.platform });
     // THE ANCHOR GATE (see trustedRootsForAnchor above): the home-swallow guard,
     // the config-territory guard, and the trusted-root derivation — the SAME three
     // recoverDangling runs, from the same primitive, so they cannot drift apart.
     // A trusted opts.projectRoot skips only the home-swallow leg.
-    const anchorGate = trustedRootsForAnchor(projectRoot, home, { trustedAnchor: Boolean(opts.projectRoot) });
+    const anchorGate = trustedRootsForAnchor(projectRoot, home, { trustedAnchor: Boolean(opts.projectRoot), platform: opts.platform });
     if (!anchorGate.ok) return { ok: false, error: anchorGate.error };
     if (!Array.isArray(roots) || !roots.length) return { ok: false, error: 'plan needs non-empty roots[]' };
     if (!Array.isArray(actions) || !actions.length) return { ok: false, error: 'plan needs non-empty actions[]' };
@@ -1811,8 +1815,8 @@ export function applyPlan(plan, opts = {}) {
       //   RECEIVED FROM THE PLAN (method.md's documented shape + approvedDrops) — 6:
       //     origin · sessionId · roots · actions · approvedDrops   READ by this code
       //     projectRoot                                            RECEIVED AND NEVER READ
-      //   RECEIVED FROM THE CALLER (opts) — 7, all read:
-      //     cwd · home · isPlaceholder · keepSnapshots · now · projectRoot · txDir
+      //   RECEIVED FROM THE CALLER (opts) — 8, all read (29h F415-1 added platform: it narrows the trusted outer gate to the project root):
+      //     cwd · home · isPlaceholder · keepSnapshots · now · platform · projectRoot · txDir
       //   AMBIENT — 3:  Date.now() · os.homedir() · process.cwd()
       //
       // THE ONE-FIELD CORRECTION IS LOAD-BEARING, not bookkeeping. INSPECT counted

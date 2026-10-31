@@ -3750,10 +3750,10 @@ test('CWK-081 A4 FOURTH TENSE: applyPlan\'s CODE-READ input census is PINNED —
     ['actions', 'approvedDrops', 'origin', 'roots', 'sessionId'],
     'plan.* moved — re-adjudicate the new field against A4 before touching this pin');
   assert.deepStrictEqual(c.opts,
-    ['cwd', 'home', 'isPlaceholder', 'keepSnapshots', 'now', 'projectRoot', 'txDir'],
+    ['cwd', 'home', 'isPlaceholder', 'keepSnapshots', 'now', 'platform', 'projectRoot', 'txDir'],
     'opts.* moved — this is the exact case the A4 note used to say nothing fires on');
   assert.deepStrictEqual(c.ambient, ['Date.now()', 'os.homedir()', 'process.cwd()'], 'the ambient channel moved');
-  assert.strictEqual(c.plan.length + c.opts.length, 12, '12 CODE-READ named inputs — the figure the A4 note publishes');
+  assert.strictEqual(c.plan.length + c.opts.length, 13, '13 CODE-READ named inputs — the figure the A4 note publishes (29h F415-1 added opts.platform)');
 });
 
 // THE TRUST ANCHOR, pinned from the other side: `plan.projectRoot` is RECEIVED
@@ -4968,4 +4968,36 @@ test('N125-2: a refusal that names a lock left behind gives the note its own sen
     assert.ok(r.lockLeft, JSON.stringify(r));
     assert.ok(r.error.endsWith(`rolls the store back from that snapshot. ${r.lockLeft}`), r.error);
   } finally { clean(fx.proj, fx.home); }
+});
+
+// 29h fire 430, F415-1 (code half) and F415-3: on the AG route applyPlan trusts the PROJECT root only. The Claude Code memory store is
+// refused there (red today: the store is a trusted root for every platform), and so are the five ~/.gemini rule files. The wall is the
+// trusted roots, not the discovery tag. The project GEMINI.md still lands (the control).
+test('F415-1/F415-3 an AG-route plan trusts the project root only: the CC memory store and the five ~/.gemini files are refused', async () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f415-home-')));
+  try {
+    const { ccMemoryDir } = await import('./class-b.mjs');
+    const ccFile = path.join(ccMemoryDir(proj, home), 'MEMORY.md');
+    write(ccFile, 'cc memory\n');
+    const globals = [
+      path.join(home, '.gemini', 'GEMINI.md'),
+      path.join(home, '.gemini', 'AGENTS.md'),
+      path.join(home, '.gemini', 'config', 'GEMINI.md'),
+      path.join(home, '.gemini', 'config', 'AGENTS.md'),
+      path.join(home, '.gemini', 'config', 'rules', 'AGENTS.md'),
+    ];
+    for (const g of globals) write(g, 'global rules\n');
+    for (const target of [ccFile, ...globals]) {
+      const before = fs.readFileSync(target, 'utf8');
+      const r = applyPlan({ roots: [path.dirname(target)], actions: [{ type: 'rewrite', path: target, content: 'CUT\n' }], sessionId: 'f415-1' }, { projectRoot: proj, home, platform: 'antigravity' });
+      assert.strictEqual(r.ok, false, `refused on the AG route: ${target}`);
+      assert.strictEqual(fs.readFileSync(target, 'utf8'), before, `unchanged: ${target}`);
+    }
+    const gem = path.join(proj, 'GEMINI.md');
+    write(gem, 'old\n');
+    const ok = applyPlan({ roots: [proj], actions: [{ type: 'rewrite', path: gem, content: 'new\n' }], sessionId: 'f415-1b' }, { projectRoot: proj, home, platform: 'antigravity' });
+    assert.strictEqual(ok.ok, true, `control: the project GEMINI.md lands on the AG route: ${ok.error}`);
+    assert.strictEqual(fs.readFileSync(gem, 'utf8'), 'new\n');
+  } finally { clean(proj, home); }
 });
