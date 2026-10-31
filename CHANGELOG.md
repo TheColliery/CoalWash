@@ -8,6 +8,10 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 - The plugin build refuses a link or junction in any source it copies, before it removes the old dist, and the dist check names a link instead of following it.
 
+### Removed
+
+- The README no longer lists Antigravity as a supported agent or shows its badge.
+
 ## [1.13.0] - 2026-10-31
 
 No change for Claude Code users; groundwork for a later platform unit

@@ -13,7 +13,6 @@
 
 **Compatibility** ·
 ![Claude Code](https://img.shields.io/badge/Claude_Code-validated-brightgreen)
-![Antigravity: works with](https://img.shields.io/badge/Antigravity-works_with-blue)
 ![Cursor: works with](https://img.shields.io/badge/Cursor-works_with-blue)
 ![Codex: works with](https://img.shields.io/badge/Codex-works_with-blue)
 ![Gemini CLI: works with](https://img.shields.io/badge/Gemini_CLI-works_with-blue)
@@ -107,7 +106,7 @@ claude plugin marketplace add TheColliery/CoalWash
 claude plugin install coalwash@coalwash
 ```
 
-**Other agents** (Antigravity · Cursor · Codex · Gemini CLI · Cline · Copilot) — file-copy: copy `skills/coalwash/` (skill + references) and `scripts/lib/` (the engine) into your platform's skill directory, keeping the relative layout (`skills/coalwash/SKILL.md` resolves the engine at `../../scripts/lib`). On **Antigravity** that directory is `~/.gemini/config/skills/` (global) or `<workspace>/.agents/skills/` (per-project). The gauge hook is Claude-Code-only; elsewhere run `/coalwash` manually. No API keys, no network, no `npm install`.
+**Other agents** (Cursor · Codex · Gemini CLI · Cline · Copilot) — file-copy: copy `skills/coalwash/` (skill + references) and `scripts/lib/` (the engine) into your platform's skill directory, keeping the relative layout (`skills/coalwash/SKILL.md` resolves the engine at `../../scripts/lib`). The gauge hook is Claude-Code-only; elsewhere run `/coalwash` manually. No API keys, no network, no `npm install`.
 
 > [!TIP]
 > Install **globally** — CoalWash is a maintenance utility you want available everywhere, and it still operates per-project, per-session. A project config can tune or shut it off locally.
