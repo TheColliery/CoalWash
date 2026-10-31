@@ -6,11 +6,12 @@
 //     file snapshots it first, through the same handleAirbag the CC conductor uses.
 //   - SessionStart fires once per conversation. The prior-conversation writeguard
 //     sweep runs here, through the same sweepWriteguard the CC conductor uses.
-//   - Stop and the gauge's SessionStart line are gated behind AG_DISCOVERY below.
-//     The gauge reads the Claude Code session layout (detectPlatform is
-//     claude-code only), and a Stop here would consume a pending crossing that
-//     belongs to the Claude Code session on the same project. Both wait for unit
-//     D (AG discovery).
+//   - Stop and the gauge's SessionStart line run on AG (unit D, 29g fire 412).
+//     They read only the AG state NAMESPACE (setStateNamespace('ag')), so a
+//     pending Claude Code crossing is never consumed by an AG session. The gauge's
+//     class-B set is the AG discovery (class-b.mjs discoverAntigravityClassB), not
+//     the Claude Code layout. AG_DISCOVERY below stays a switch: false returns to
+//     the prior-conversation sweep alone.
 // NOT wired, and why:
 //   - PostToolUse: AG allows only `{}` back, so the CC seatbelt's advisory line
 //     has no channel. Not wired.
@@ -27,9 +28,12 @@ const os = require('os');
 
 const conductor = require('./coalwash-conductor.js');
 
-// Gate for the gauge and Stop on AG. Flip it only with unit D, once AG discovery
-// exists (the Claude Code session layout must not be read from an AG session).
-const AG_DISCOVERY = false;
+// Gate for the gauge and Stop on AG. On since unit D (29g fire 412): the AG discovery exists and the AG state is namespaced.
+const AG_DISCOVERY = true;
+
+// The AG project rule file the airbag guards on the AG route, beyond the basenames every route guards (AGENTS.md, MEMORY.md, CLAUDE.md).
+// Only inside the project: a GEMINI.md under HOME is AG's global rule file, and the airbag never reaches it (writeguard.mjs).
+const AG_PROJECT_RULE_BASENAMES = ['GEMINI.md'];
 
 // Tool names AG reports for a file write. edit_file is measured on 1.4.12; the
 // others are the names AG's own tool set uses for a write, unmeasured headless.
@@ -67,6 +71,13 @@ async function sweepPriorConversations(conversationId) {
 // hook's side effects. Exported for the hermetic tests, which pin the outputs
 // without a spawn. An input the hook cannot place (no workspace, no
 // conversation) returns no lines.
+// The AG state namespace (29g fire 412), set before any calibration state is read or written. Imported here, never on the PreToolUse
+// hot path, which returns before any state module loads.
+async function setAgNamespace() {
+  const caliper = await import(conductor.lib('caliper.mjs'));
+  caliper.setStateNamespace('ag');
+}
+
 async function route(payload, event, opts = {}) {
   const lines = [];
   const emitLine = (doc) => lines.push(JSON.stringify(doc));
@@ -83,15 +94,17 @@ async function route(payload, event, opts = {}) {
     const file = targetPath(call.args, workspace);
     if (!file) return lines;
     // The CC airbag reads tool_input.file_path, so the AG path is handed in that shape.
-    await conductor.handleAirbag({ session_id: conversationId, tool_name: 'Write', tool_input: { file_path: file } });
+    await conductor.handleAirbag({ session_id: conversationId, tool_name: 'Write', tool_input: { file_path: file } }, { extraBasenames: AG_PROJECT_RULE_BASENAMES });
     return lines;
   }
 
   if (event === 'SessionStart') {
     if (opts.agDiscovery) {
+      await setAgNamespace();
       await conductor.handleSessionStart(hookInput, {
         emit: (text) => emitLine({ injectSteps: [{ ephemeralMessage: text }] }),
         updateNudge: false,
+        platform: 'antigravity',
       });
     } else {
       await sweepPriorConversations(conversationId);
@@ -101,8 +114,10 @@ async function route(payload, event, opts = {}) {
 
   if (event === 'Stop') {
     if (!opts.agDiscovery) return lines;
+    await setAgNamespace();
     await conductor.handleStop(hookInput, {
       emit: (reason) => emitLine({ decision: 'continue', reason }),
+      platform: 'antigravity',
     });
     return lines;
   }

@@ -583,3 +583,19 @@ test('29f F306-1: a folder backdated past the floor but holding one entry writte
     assert.ok(fs.existsSync(dir), 'the newest entry is young, so the session is live and kept');
   } finally { clean(home, proj); }
 });
+
+// 29g fire 412 step 3 (unit D): a project GEMINI.md is guarded only when the AG route names it. The CC route passes no extra names,
+// so its guard set is unchanged; and the AG name never reaches a GEMINI.md under HOME.
+test('D3d the guard set is unchanged without the AG option: a project GEMINI.md is not guarded on the CC route', () => {
+  const { home, proj } = sandbox();
+  try {
+    const g = path.join(proj, 'GEMINI.md');
+    fs.writeFileSync(g, '# rules\n', 'utf8');
+    assert.strictEqual(isGuardedTarget(g, { projectRoot: proj, home }), null, 'no option: not guarded (CC behaviour)');
+    assert.ok(isGuardedTarget(g, { projectRoot: proj, home, extraBasenames: ['GEMINI.md'] }), 'the AG option guards it inside the project');
+    const homeG = path.join(home, '.gemini', 'GEMINI.md');
+    fs.mkdirSync(path.dirname(homeG), { recursive: true });
+    fs.writeFileSync(homeG, '# global\n', 'utf8');
+    assert.strictEqual(isGuardedTarget(homeG, { projectRoot: proj, home, extraBasenames: ['GEMINI.md'] }), null, 'the AG option never reaches a GEMINI.md under HOME');
+  } finally { clean(home, proj); }
+});

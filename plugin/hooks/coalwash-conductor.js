@@ -319,7 +319,7 @@ async function handleSessionStart(input, opts = {}) {
   // hook kills the whole gauge in silence. Hoisting is about SCOPE only: it
   // never decides whether the disclosure fires (see its own gate below).
   const scanEverything = clampedRead(cfg, 'scanEverything') === true;
-  const disc = mode === 'auto' ? classB.discoverClassB({ projectRoot, home, managedPaths }) : { entries: [] };
+  const disc = mode === 'auto' ? classB.discoverClassB({ projectRoot, home, managedPaths, platform: opts.platform }) : { entries: [] };
   if (disc.entries.length) {
     // CWK-057: ON lifts the read budget on the gauge path too. Phoenix #3 is
     // NOT breached and is not being quietly stretched: the LETTER of #3 binds
@@ -529,7 +529,7 @@ async function handleStop(input, opts = {}) {
       const freshBytes = caliper.statOnlyFootprintBytes(cachedPaths);
       const deltaTokens = caliper.tokensEstFromBytes(Math.abs(freshBytes - cachedBytes));
       if (deltaTokens > caliper.REGAUGE_DELTA_TOKENS) {
-        const disc = classB.discoverClassB({ projectRoot, home, managedPaths });
+        const disc = classB.discoverClassB({ projectRoot, home, managedPaths, platform: opts.platform });
         const scanEverything = clampedRead(cfg, 'scanEverything') === true; // CWK-057, same clamped cascade
         const m = caliper.measureEntries(disc.entries, { readBudgetBytes: caliper.readBudgetFor(scanEverything, READ_BUDGET_BYTES), withGzip: false });
         // task #4: same measured-not-stamped gauge as SessionStart — fat and
@@ -770,7 +770,8 @@ function touchedPath(input) {
 // own failure must never block the write). The cheap prefilter
 // (isGuardedTarget) runs inside snapshotOnFirstWrite so a source-code edit
 // skips after one realpath — no discovery walk EVER on the write path.
-async function handleAirbag(input) {
+// opts.extraBasenames: the AG route's own project rule file names (29g fire 412); the CC route passes none, so its guard set is unchanged.
+async function handleAirbag(input, opts = {}) {
   try {
     if (!input || !WRITE_TOOLS.has(input.tool_name)) return; // belt: pre-import, ~free
     const p = touchedPath(input);
@@ -785,7 +786,7 @@ async function handleAirbag(input) {
     if (clampedRead(cfg, 'writeGuard') === 'off') return;   // its own off switch
     const home = os.homedir();
     const projectRoot = findProjectRoot(process.cwd(), home);
-    writeguard.snapshotOnFirstWrite(projectRoot, input.session_id, p, { home });
+    writeguard.snapshotOnFirstWrite(projectRoot, input.session_id, p, { home, extraBasenames: opts.extraBasenames });
     // NOTHING emitted (airbag is write-only) — Phoenix #13.
   } catch { /* fail-silent — never block a write */ }
 }

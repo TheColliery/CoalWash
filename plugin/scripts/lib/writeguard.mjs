@@ -129,7 +129,7 @@ function selfIgnore(dir) { return ensureCatchAllIgnore(dir); }
 // full-discovery version would be, at a per-edit budget we deliberately refuse
 // to pay (unseen = unguarded = safe; the airbag/seatbelt are a best-effort
 // net, not a correctness guarantee).
-export function isGuardedTarget(touchedPath, { projectRoot, home } = {}) {
+export function isGuardedTarget(touchedPath, { projectRoot, home, extraBasenames } = {}) {
   if (typeof touchedPath !== 'string' || !touchedPath || !projectRoot) return null;
   const phys = physicalOrNull(touchedPath);
   if (!phys) return null; // unresolvable / missing -> fail-closed
@@ -145,6 +145,12 @@ export function isGuardedTarget(touchedPath, { projectRoot, home } = {}) {
   // Admit: a root governance basename anywhere, OR any markdown under a
   // .claude tree (global governance/rules + the per-project memory store).
   if (GOV_BASENAMES.has(path.basename(phys))) return phys;
+  // 29g fire 412 (unit D): the AG route names its own project rule file (GEMINI.md) as one more governance basename, but ONLY inside
+  // the project it sits in. A GEMINI.md under HOME is AG's global rule file and is never guarded here (no reach into ~/.gemini).
+  if (Array.isArray(extraBasenames) && extraBasenames.includes(path.basename(phys))) {
+    const projPhys = physicalOrNull(projectRoot);
+    if (projPhys && containedIn(phys, [projPhys])) return phys;
+  }
   if (/\.md$/i.test(phys)) {
     const trees = [physicalOrNull(base), physicalOrNull(path.join(projectRoot, '.claude'))].filter(Boolean);
     if (containedIn(phys, trees)) return phys;
@@ -281,9 +287,9 @@ function resolveSnapPath(dir, phys) {
 // AIRBAG — snapshot-on-FIRST-write per file per session. Returns the snapshot
 // path (or the existing one), or null (not guarded / new file with no orig /
 // guard failure). Fail-silent: the airbag's own failure never blocks the write.
-export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home } = {}) {
+export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home, extraBasenames } = {}) {
   try {
-    const phys = isGuardedTarget(touchedPath, { projectRoot, home });
+    const phys = isGuardedTarget(touchedPath, { projectRoot, home, extraBasenames });
     if (!phys) return null;
     if (!fs.existsSync(phys)) return null; // a Write CREATING a new file: no orig to snapshot
     const dir = sessionDir(projectRoot, sessionId);

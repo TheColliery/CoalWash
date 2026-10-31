@@ -90,6 +90,21 @@ function seedPendingCrossing(home, proj) {
 function readState(home, proj) {
   return JSON.parse(fs.readFileSync(projStatePath(home, proj), 'utf8'));
 }
+// 29g fire 412: the AG transport reads only its own state namespace (coalwash/ag/state.json under the project's slug dir).
+function agStatePath(home, proj) {
+  const slug = fs.realpathSync.native(proj).replace(/[^A-Za-z0-9]/g, '-');
+  return path.join(home, '.claude', 'projects', slug, 'coalwash', 'ag', 'state.json');
+}
+function seedAgPendingCrossing(home, proj) {
+  const p = agStatePath(home, proj);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify({
+    stateSchema: 1,
+    lastCrossing: { band: 'OBESE', at: Date.now(), consumed: false },
+    lastVerdict: { band: 'OBESE', reason: 'bmi', economical: false, fatTokens: 1234, at: Date.now() },
+  }), 'utf8');
+  return p;
+}
 
 // In-process route() with HOME pinned to the sandbox; the cwd the route moves
 // into is restored afterwards so the runner's own cwd is never left changed.
@@ -215,13 +230,13 @@ test('an unknown event name, and no event name at all, exit 0 silently', () => {
   } finally { clean(home, proj); }
 });
 
-test('Stop with AG discovery off prints nothing and leaves a pending crossing unconsumed', () => {
+test('Stop reads only the AG namespace: a pending Claude Code crossing is not consumed, and nothing prints', () => {
   const { home, proj } = sandbox();
   try {
     seedPendingCrossing(home, proj);
     const r = spawnAg(proj, home, ['Stop'], commonPayload(proj, { terminationReason: 'NO_TOOL_CALL', fullyIdle: true }));
     assert.strictEqual(r.status, 0, r.stderr);
-    assert.strictEqual(r.stdout, '', 'Stop is off until unit D: no decision line');
+    assert.strictEqual(r.stdout, '', 'the AG namespace holds no pending crossing of its own, so no decision line');
     assert.strictEqual(readState(home, proj).lastCrossing.consumed, false, 'the CC crossing is not consumed by an AG Stop');
   } finally { clean(home, proj); }
 });
@@ -246,14 +261,14 @@ test('route Stop with AG discovery on emits one continue line for a pending cros
   const { home, proj } = sandbox();
   try {
     seedClassB(home, proj);
-    seedPendingCrossing(home, proj);
+    seedAgPendingCrossing(home, proj); // the AG namespace: 29g fire 412 (the old seed wrote the Claude Code state file, which AG no longer reads)
     const lines = await routeIn(home, commonPayload(proj), 'Stop', { agDiscovery: true });
     assert.strictEqual(lines.length, 1, 'exactly one decision line');
     const decision = JSON.parse(lines[0]);
     assert.strictEqual(decision.decision, 'continue', 'AG blocks a stop with decision "continue"');
     assert.ok(decision.reason.includes('memory crossed the OBESE ceiling'), decision.reason);
     assert.ok(decision.reason.includes('Quick pass NOW, no ask'), decision.reason);
-    assert.strictEqual(readState(home, proj).lastCrossing.consumed, true, 'consumed at emission');
+    assert.strictEqual(JSON.parse(fs.readFileSync(agStatePath(home, proj), 'utf8')).lastCrossing.consumed, true, 'consumed at emission, in the AG namespace');
     const again = await routeIn(home, commonPayload(proj), 'Stop', { agDiscovery: true });
     assert.deepStrictEqual(again, [], 'a second Stop for the same crossing stays silent');
   } finally { clean(home, proj); }
@@ -262,7 +277,7 @@ test('route Stop with AG discovery on emits one continue line for a pending cros
 test('route SessionStart with AG discovery on emits one injectSteps line, with no self-update nudge', async () => {
   const { home, proj } = sandbox();
   try {
-    seedClassB(home, proj);
+    fs.writeFileSync(path.join(proj, 'GEMINI.md'), 'a'.repeat(100), 'utf8'); // the AG project rule file: the AG discovery reads it, not the Claude Code layout (29g fire 412)
     writeGlobalCfg(home, { scanEverything: true });
     const lines = await routeIn(home, commonPayload(proj), 'SessionStart', { agDiscovery: true });
     assert.strictEqual(lines.length, 1, 'exactly one line when the gauge has something to say');
@@ -292,5 +307,46 @@ test('route Stop with AG discovery off returns nothing and does not consume the 
     const lines = await routeIn(home, commonPayload(proj), 'Stop', { agDiscovery: false });
     assert.deepStrictEqual(lines, []);
     assert.strictEqual(readState(home, proj).lastCrossing.consumed, false);
+  } finally { clean(home, proj); }
+});
+
+// ---------------------------------------------------------------------------
+// 29g fire 412 step 3 (unit D): the adapter. AG discovery is on; the AG route reads and writes only its own state namespace; the airbag
+// guards the AG project rule file GEMINI.md on the AG route only (AGENTS.md was already a guarded basename on both routes).
+// ---------------------------------------------------------------------------
+
+function fileDigest(p) { return fs.existsSync(p) ? fs.readFileSync(p).toString('base64') : 'absent'; }
+
+test('D3a the AG transport is on: the route is built with discovery enabled', () => {
+  const { AG_DISCOVERY } = requireCjs(AG_HOOK);
+  assert.strictEqual(AG_DISCOVERY, true, 'unit D turns the AG gauge and Stop on');
+});
+
+test('D3b the AG gauge and Stop leave a pending Claude Code crossing and its state file byte-identical', async () => {
+  const { home, proj } = sandbox();
+  try {
+    seedPendingCrossing(home, proj);
+    const before = fileDigest(projStatePath(home, proj));
+    await routeIn(home, commonPayload(proj), 'SessionStart', { agDiscovery: true });
+    await routeIn(home, commonPayload(proj), 'Stop', { agDiscovery: true });
+    assert.strictEqual(fileDigest(projStatePath(home, proj)), before, 'the Claude Code state file is not rewritten by an AG session');
+    assert.strictEqual(JSON.parse(fs.readFileSync(projStatePath(home, proj), 'utf8')).lastCrossing.consumed, false, 'and its crossing is not consumed');
+  } finally { clean(home, proj); }
+});
+
+test('D3c the airbag snapshots the project GEMINI.md on the AG route, and never a GEMINI.md under HOME', async () => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, 'GEMINI.md'), '# project rules\n', 'utf8');
+    const homeGemini = path.join(home, '.gemini', 'GEMINI.md');
+    fs.mkdirSync(path.dirname(homeGemini), { recursive: true });
+    fs.writeFileSync(homeGemini, '# global rules\n', 'utf8');
+    await routeIn(home, toolPayload(proj, 'edit_file', { Path: path.join(proj, 'GEMINI.md') }), 'PreToolUse', { agDiscovery: true });
+    await routeIn(home, toolPayload(proj, 'edit_file', { Path: homeGemini }), 'PreToolUse', { agDiscovery: true });
+    const snaps = [];
+    const walk = (d) => { if (!fs.existsSync(d)) return; for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (e.name.startsWith('GEMINI.md--') && !e.name.endsWith('.origpath')) snaps.push(p); } };
+    walk(wgRoot(proj));
+    assert.strictEqual(snaps.length, 1, `exactly the project GEMINI.md is snapshotted (found ${snaps.length})`);
+    assert.strictEqual(fs.readFileSync(snaps[0], 'utf8'), '# project rules\n', 'the snapshot holds the project file\'s original bytes');
   } finally { clean(home, proj); }
 });
