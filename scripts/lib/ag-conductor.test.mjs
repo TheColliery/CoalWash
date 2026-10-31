@@ -222,12 +222,15 @@ test('Stop with AG discovery off prints nothing and leaves a pending crossing un
   } finally { clean(home, proj); }
 });
 
-test('requiring the CC conductor prints nothing and exports its handlers', () => {
-  const probe = `const m = require(${JSON.stringify(CC_HOOK)}); process.stdout.write('KEYS:' + Object.keys(m).sort().join(','));`;
-  const r = spawnSync(process.execPath, ['-e', probe], { cwd: REPO, encoding: 'utf8', timeout: 20000, env: sandboxEnv(os.tmpdir()) });
+test('requiring the CC conductor prints nothing and exports its handlers, under a HOME the test owns', (t) => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-require-')));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  // The probe echoes the HOME it ran under, so the witness is the HOME itself, never a comment about it.
+  const probe = `const m = require(${JSON.stringify(CC_HOOK)}); process.stdout.write('KEYS:' + Object.keys(m).sort().join(',') + '|HOME:' + process.env.HOME);`;
+  const r = spawnSync(process.execPath, ['-e', probe], { cwd: REPO, encoding: 'utf8', timeout: 20000, env: sandboxEnv(home) });
   assert.strictEqual(r.status, 0, r.stderr);
-  assert.strictEqual(r.stdout, 'KEYS:handleAirbag,handleSessionStart,handleStop,lib,readStdinJson',
-    'require is silent (no main() run) and the five handlers are exported');
+  assert.strictEqual(r.stdout, `KEYS:handleAirbag,handleSessionStart,handleStop,lib,readStdinJson|HOME:${home}`,
+    'require is silent (no main() run), the five handlers are exported, and the probe ran under the test-owned HOME');
 });
 
 // ---------------------------------------------------------------------------
