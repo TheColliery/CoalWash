@@ -5159,3 +5159,90 @@ test('F442-3 a manifest row with no original refuses the whole recovery on the C
     assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'AFTER project\n', 'the valid earlier row was NOT restored');
   } finally { clean(proj, home); }
 });
+
+// 29k build 460 (RED first, F452-R / N2 / D / the applyPlan carry of the bin lock). Each release-failure witness makes the REAL removal fail.
+test('F452-R a recovery whose lock release fails names the lock it left behind, on both routes', () => {
+  for (const platform of [undefined, 'antigravity']) {
+    const { proj } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f452r-')));
+    const real = fs.rmSync;
+    try {
+      const projFile = path.join(proj, 'GEMINI.md');
+      write(projFile, 'AFTER\n');
+      const { txDir } = danglingTx(proj, [{ target: projFile, before: 'BEFORE\n' }], [proj]);
+      const lockPath = path.join(txDir, TX_LOCK);
+      const want = path.resolve(lockPath);
+      fs.rmSync = function patched(p, ...rest) {
+        if (path.resolve(String(p)) === want) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+        return real.call(fs, p, ...rest);
+      };
+      const r = recoverDangling(proj, { home, platform });
+      assert.strictEqual(r.recovered, 'rolled-back', `the rollback landed on platform ${platform}: ${JSON.stringify(r)}`);
+      assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'BEFORE\n', 'the rollback restored the file');
+      assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${lockPath} could not be removed (EBUSY), so it was left in place`), `the release failure rides on the return: ${JSON.stringify(r)}`);
+      assert.ok(fs.existsSync(lockPath), 'the lock stays in place: never deleted by force');
+    } finally { fs.rmSync = real; clean(proj, home); }
+  }
+});
+
+test('F452-N2 a journal removed while recovery waited for the lock is nothing to recover, not an unreadable journal', () => {
+  for (const platform of [undefined, 'antigravity']) {
+    const { proj } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f452n2-')));
+    const realExists = fs.existsSync;
+    try {
+      const projFile = path.join(proj, 'GEMINI.md');
+      write(projFile, 'AFTER\n');
+      const { txDir } = danglingTx(proj, [{ target: projFile, before: 'BEFORE\n' }], [proj]);
+      const journal = path.join(txDir, 'journal.json');
+      const want = path.resolve(journal);
+      let raced = false;
+      // the race, made deterministic: the journal exists at the first check, then a live run removes it before the read.
+      fs.existsSync = function patched(p) {
+        const hit = realExists.call(fs, p);
+        if (!raced && hit && path.resolve(String(p)) === want) { raced = true; fs.rmSync(journal, { force: true }); }
+        return hit;
+      };
+      const r = recoverDangling(proj, { home, platform });
+      assert.strictEqual(raced, true, 'the journal was removed after the existence check');
+      assert.strictEqual(r.recovered, 'none', `nothing to recover on platform ${platform}: ${JSON.stringify(r)}`);
+      assert.strictEqual(r.error, undefined, `no error is reported: ${r.error}`);
+      assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'AFTER\n', 'the project file is untouched');
+    } finally { fs.existsSync = realExists; clean(proj, home); }
+  }
+});
+
+test('F452-D the deferral waits as long as the lock\'s own stale window, never a typed 30 minutes', () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f452d-')));
+  try {
+    const projFile = path.join(proj, 'GEMINI.md');
+    write(projFile, 'AFTER\n');
+    const { txDir } = danglingTx(proj, [{ target: projFile, before: 'BEFORE\n' }], [proj]);
+    fs.writeFileSync(path.join(txDir, TX_LOCK), JSON.stringify({ sessionId: 'live-other-run', pid: 4242, at: Date.now(), token: 'held-by-another-run' }), 'utf8');
+    const r = recoverDangling(proj, { home, staleMs: 2 * 60000 });
+    assert.strictEqual(r.deferred, true, JSON.stringify(r));
+    assert.match(r.error, /stale \(about 2 minutes\)/, r.error);
+    assert.doesNotMatch(r.error, /30 minutes/, 'the typed 30 minutes is gone from the deferral');
+  } finally { clean(proj, home); }
+});
+
+test('F452-B a preflight bin sweep whose bin-lock release fails rides on applyPlan\'s result, named', () => {
+  const fx = unreadableFixture('bz');
+  const binLock = path.join(fx.proj, '.claude', 'coalwash', FAT_BIN_NAME, '.bin.lock');
+  recordBinItem(fx.proj, FAT_BIN_NAME, { content: 'old', original: 'old.md', now: Date.now() - (HORIZON_MS.fat + 86400000) });
+  const real = fs.rmSync;
+  const want = path.resolve(binLock);
+  let armed = false;
+  fs.rmSync = function patched(p, ...rest) {
+    if (armed && path.resolve(String(p)) === want) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+    return real.call(fs, p, ...rest);
+  };
+  // armed for the preflight sweep only: the next fence disarms it, so the cuts' own bin locks still release.
+  __testHooks.onFence = (w) => { armed = w === 'the preflight bin retention'; };
+  try {
+    const r = apply(fx.plan, { home: fx.home });
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${binLock} could not be removed (EBUSY), so it was left in place`), `the bin-lock release failure rides on applyPlan's result: ${JSON.stringify(r)}`);
+  } finally { __testHooks.onFence = null; fs.rmSync = real; clean(fx.proj, fx.home, fx.store); }
+});

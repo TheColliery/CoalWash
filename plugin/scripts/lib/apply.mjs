@@ -791,10 +791,14 @@ export function withSentence(msg, note) {
 // What a result says when a release could not remove this run's lock (fire 122): null when nothing was left behind.
 // `staleMs` (E1 t182 #1): the lock's OWN stale window, so the wait it names is the wait that lock has (the keeps lock's 5 s,
 // never the transaction's 30 minutes); it defaults to the transaction value.
+// 29k F452-D: a stale window as the words a user reads it. Every note and refusal that names a wait takes it here, never a typed number.
+export function staleWait(staleMs) {
+  return staleMs >= 60000 ? `${staleMs / 60000} minutes` : `${staleMs / 1000} s`;
+}
 export function lockLeftNote(lockPath, rel, staleMs = LOCK_STALE_MS) {
   if (!rel || rel.released || rel.why === 'foreign') return null;
   const how = rel.why === 'unreadable' ? `could not be read to confirm it is this run's own (${rel.code})` : `could not be removed (${rel.code})`;
-  const wait = staleMs >= 60000 ? `${staleMs / 60000} minutes` : `${staleMs / 1000} s`;
+  const wait = staleWait(staleMs);
   return `The lock file ${lockPath} ${how}, so it was left in place: a later run defers until it goes stale (${wait}), or remove it by hand once no CoalWash run is active.`;
 }
 // `selfIgnore` (15b fire 56, census row 5): a PROJECT lock (the tx lock, a bin lock) passes true and its folder gets the
@@ -1075,6 +1079,7 @@ export function applyPlan(plan, opts = {}) {
   const home = opts.home || os.homedir();
   let lockLeft = null; // fire 122: set by the release in the transaction's finally when a lock file had to be left behind
   let leftLocks = []; // N125-1: [path, note] for each lock left, so each is named by its own path
+  const binLockNotes = []; // 29k F452-B: bin-lock releases that could not remove the bin lock (the sweeps and the cut stashes), named on the result
   try {
     // ---- validate shape (fail loud, nothing touched) ----
     if (!plan || typeof plan !== 'object') return { ok: false, error: 'plan must be an object' };
@@ -1470,7 +1475,7 @@ export function applyPlan(plan, opts = {}) {
       if (!lost) return;
       const done = landed ? landed.filter((s) => s.status === 'done').length : 0;
       const journalFate = lost.state === 'unreadable'
-        ? `the journal on disk is still this run's, so the next gauge (recoverDangling) rolls the store back from that snapshot once this lock is stale (about 30 minutes), or at once if it is removed by hand${done === landed?.length ? ', undoing steps that had all landed' : ''}`
+        ? `the journal on disk is still this run's, so the next gauge (recoverDangling) rolls the store back from that snapshot once this lock is stale (about ${staleWait(LOCK_STALE_MS)}), or at once if it is removed by hand${done === landed?.length ? ', undoing steps that had all landed' : ''}`
         : "the journal on disk is this run's until the new holder writes its own over it (while it is still this run's, the next recoverDangling rolls the store back from that snapshot; once it is replaced, compare the store against the snapshot by hand)";
       const state = stateOverride
         || (committed ? `every step landed and was committed; only the post-commit housekeeping that had not run yet (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped, and the snapshot ${snapDir} still holds every original`
@@ -1512,6 +1517,7 @@ export function applyPlan(plan, opts = {}) {
         [FAT_BIN_NAME, sweepFatBin(projectRoot, { storeBytes })],
         [STORE_OLD_NAME, sweepStoreOld(projectRoot, { storeBytes })],
       ];
+      for (const [, sweep] of binSweeps) if (sweep && sweep.lockLeft) binLockNotes.push(sweep.lockLeft); // 29k F452-B
       // Unsatisfiable-cap advisory lines for the receipt (the deadLinkLine
       // shape: program-built, caller-surfaced, never a block) — the one thing
       // no senior retention system says out loud: "your cap and your keep-all
@@ -1728,7 +1734,7 @@ export function applyPlan(plan, opts = {}) {
         if (!cut.length) continue;
         removedCount++; // CWK-081 H1: this action removed something
         removedFrom.add(a.phys); // CWK-081 (b): and THIS is the file it removed it from
-        const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now, trackedChecked: true }); // the folder was checked once above (fire 59)
+        const binId = recordBinItem(projectRoot, binName, { content: cut, original: a.phys, origin: binOrigin, now, trackedChecked: true, onLockLeft: (n) => binLockNotes.push(n) }); // the folder was checked once above (fire 59) · 29k F452-B
         if (binId === null) {
           flagged.push({
             path: a.phys,
@@ -1878,7 +1884,7 @@ export function applyPlan(plan, opts = {}) {
 
       return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };
     })(); } finally {
-      leftLocks = [[txLockPath, lockLeftNote(txLockPath, lock.release(), LOCK_STALE_MS)], ...(globalLock ? [[globalLockPath(home), lockLeftNote(globalLockPath(home), globalLock.release(), LOCK_STALE_MS)]] : [])].filter(([, note]) => note);
+      leftLocks = [[txLockPath, lockLeftNote(txLockPath, lock.release(), LOCK_STALE_MS)], ...(globalLock ? [[globalLockPath(home), lockLeftNote(globalLockPath(home), globalLock.release(), LOCK_STALE_MS)]] : []), ...binLockNotes.map((note) => [path.join(projectRoot, '.claude', 'coalwash'), note])].filter(([, note]) => note); // 29k F452-B: a bin-lock note is named by the bin folder that holds the lock; its own text names the lock file
       lockLeft = leftLocks.map(([, note]) => note).join(' ') || null;
     }
     if (!lockLeft) return out;
@@ -1973,8 +1979,22 @@ export function sweepSnapshots(txDir, keep = KEEP_SNAPSHOTS) {
 //                    no journal at all. A caller that treats those two alike is
 //                    the gaugeLine defect (see cli.mjs).
 // `restored` accompanies 'rolled-back' and 'partial'.
+// 29k F452-R: the lock this call takes is released HERE, after the body returns, so its release result rides on the return as
+// `lockLeft` (a release that could not remove the lock is named, never dropped). The body records what it holds in `held`.
 export function recoverDangling(projectRoot, opts = {}) {
-  let txLock = null; // 29j F450-1: held from the journal existence check to the end of the call, released in finally
+  const held = { lock: null, lockPath: null, binNotes: [] }; // 29j F450-1 · 29k F452-R (the lock) · F452-B (bin-lock notes)
+  const staleMs = opts.staleMs ?? LOCK_STALE_MS; // 29k F452-D: the window the lock is judged by, and the deferral names
+  let out;
+  let leftNote = null;
+  try { out = recoverDanglingHeld(projectRoot, opts, held); } finally {
+    leftNote = held.lock && held.lock.acquired ? lockLeftNote(held.lockPath, held.lock.release(), staleMs) : null; // 29j F450-1: released on every path
+  }
+  const notes = [...held.binNotes, ...(leftNote ? [leftNote] : [])];
+  if (!notes.length) return out;
+  const lockLeft = notes.join(' ');
+  return out.error ? { ...out, lockLeft, error: withSentence(out.error, lockLeft) } : { ...out, lockLeft };
+}
+function recoverDanglingHeld(projectRoot, opts, held) {
   try {
     const home = opts.home || os.homedir();
     // ONE clock reading for the whole recovery, exactly as applyPlan takes one
@@ -2002,13 +2022,21 @@ export function recoverDangling(projectRoot, opts = {}) {
     // 29j F450-1 (ruling 1): the SAME project transaction lock applyPlan holds, taken before the journal is read or acted on. A live owner
     // defers, named, touching nothing (it never waits: a gauge is a hook-side read). A stale lock is taken over by acquireLock's own rule,
     // which is the crash case recovery exists for. selfIgnore is off: the journal's folder already exists, so the only new write is the lock.
-    txLock = acquireLock(path.join(txDir, LOCK_NAME), { now, selfIgnore: false });
+    const staleMs = opts.staleMs ?? LOCK_STALE_MS; // 29k F452-D: the window the lock is judged by, and the deferral names
+    const txLock = acquireLock(path.join(txDir, LOCK_NAME), { now, selfIgnore: false, staleMs });
+    held.lock = txLock;
+    held.lockPath = path.join(txDir, LOCK_NAME);
     // 29j fire 453 (F452-1): the deferral names the remedy in plain words. acquireLock's shared reason is unchanged (applyPlan keeps its own text).
-    if (!txLock.acquired) return { recovered: 'none', deferred: true, error: `${txLock.reason} — nothing touched. If no CoalWash run is active, an interrupted run left this lock: recovery runs once the lock is stale (about 30 minutes), or remove the lock file by hand (${path.join(txDir, LOCK_NAME)}).` };
+    // 29k F452-D: the wait is the lock's own window, never a typed number.
+    if (!txLock.acquired) return { recovered: 'none', deferred: true, error: `${txLock.reason} — nothing touched. If no CoalWash run is active, an interrupted run left this lock: recovery runs once the lock is stale (about ${staleWait(staleMs)}), or remove the lock file by hand (${path.join(txDir, LOCK_NAME)}).` };
     let journal;
     // CWK-137: bounded. E2-4: contained to txDir ITSELF, and a refused read is unreadable (`?? ''` makes JSON.parse throw;
     // JSON.parse(null) would have answered null and slipped past this catch).
-    try { journal = JSON.parse(readRepoFileBounded(journalPath, txDir, MAX_DOC_BYTES) ?? ''); } catch {
+    // 29k N2: a journal that existed at the check above and is gone now was removed by a live run while this call waited for the lock.
+    // Nothing is left to recover, and it is not "unreadable". A refused or unreadable journal still exists, so it keeps the path below.
+    const journalText = readRepoFileBounded(journalPath, txDir, MAX_DOC_BYTES);
+    if (journalText === null && !fs.existsSync(journalPath)) return { recovered: 'none' };
+    try { journal = JSON.parse(journalText ?? ''); } catch {
       // an unreadable journal with NO readable snapDir cannot be replayed —
       // fail-closed: leave it for a human (never guess at memory state).
       return { recovered: 'none', error: 'journal unreadable — left in place for inspection' };
@@ -2201,7 +2229,7 @@ export function recoverDangling(projectRoot, opts = {}) {
         try { body = fs.readFileSync(p); } catch { body = null; }
         // `now` is the run's single reading, never recordBinItem's per-call
         // Date.now() default — see the const at the top of this function.
-        if (body === null || !recordBinItem(projectRoot, FAT_BIN_NAME, { content: body, original: p, origin: 'program-cut', now })) { refused++; continue; }
+        if (body === null || !recordBinItem(projectRoot, FAT_BIN_NAME, { content: body, original: p, origin: 'program-cut', now, onLockLeft: (n) => held.binNotes.push(n) })) { refused++; continue; }
         // Remove p, the spelling that was VALIDATED — not the raw `step.path`.
         // Checking one spelling and acting on another lets the OS re-resolve the
         // path a second time (THE PROVENANCE RULE's fourth clause); the restore
@@ -2218,7 +2246,5 @@ export function recoverDangling(projectRoot, opts = {}) {
     return { recovered: 'rolled-back', restored };
   } catch (e) {
     return { recovered: 'none', error: e.message };
-  } finally {
-    if (txLock && txLock.acquired) txLock.release(); // 29j F450-1: the lock this call took, released on every path
   }
 }
