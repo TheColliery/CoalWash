@@ -6,7 +6,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 Act only on Antigravity's own project rule files in Quick passes
 
-Claude Code behaves as in 1.14.0. On Antigravity, a Quick pass with `--platform antigravity` acts on the project's `GEMINI.md` and `AGENTS.md` only, never on Claude Code's files or `~/.gemini`. Hermetic tests cover that path; it was not measured end to end on Antigravity, because agy's headless agent cannot run a shell command. The paid tiers, RE-TIER and ULTRA refuse on Antigravity.
+Claude Code behaves as in 1.14.0. On Antigravity, a Quick pass with `--platform antigravity` acts on the project's `GEMINI.md` and `AGENTS.md` only, never on Claude Code's files or `~/.gemini`. Hermetic tests cover that path; it was not measured end to end on Antigravity, because agy's headless agent cannot run a shell command. On a box with only Antigravity, the engine refuses RE-TIER and ULTRA; on a box that also has Claude Code, they act on Claude Code's store, so do not run them from an Antigravity session. The paid wizard tiers are not for Antigravity either.
 
 ### Added
 
@@ -15,7 +15,7 @@ Claude Code behaves as in 1.14.0. On Antigravity, a Quick pass with `--platform 
 ### Fixed
 
 - Antigravity sessions read the project config from the repository root, so a project off switch takes effect there (`hooks/ag-conductor.js`, line 62; `scripts/lib/config-load.mjs`, lines 1268-1273). Hermetic test, not measured on Antigravity.
-- `--platform` with no value, or with a value other than `antigravity`, is a usage error: a named message on stderr and exit 1 (`scripts/lib/cli.mjs`, lines 335-350).
+- `--platform` with no value, or with a value other than `antigravity` or `claude-code`, is a usage error: a named message on stderr and exit 1 (`scripts/lib/cli.mjs`, lines 335-350).
 - The Antigravity write guard never snapshots a file under `~/.gemini` (`scripts/lib/writeguard.mjs`, lines 132, 145-149 and 295-297).
 - The Antigravity gauge reads no Claude Code window source (`scripts/lib/caliper.mjs`, lines 1028-1030).
 
