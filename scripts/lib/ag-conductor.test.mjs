@@ -258,20 +258,16 @@ test('requiring the CC conductor prints nothing and exports its handlers, under 
 // AG discovery is on, none while it is off.
 // ---------------------------------------------------------------------------
 
-test('route Stop with AG discovery on emits one continue line for a pending crossing, then silent', async () => {
+// 29g fire 416 branch 3: this test pinned the AG Stop's OBESE auto-Quick directive (one continue line, consumed at emission). The AG route
+// no longer delivers it: the Quick pass is agent-run and no cli.mjs command reaches it on AG. Replaced by the no-directive form below (D8 covers FULL).
+test('route Stop with AG discovery on delivers no directive for a pending OBESE crossing, and consumes nothing', async () => {
   const { home, proj } = sandbox();
   try {
     seedClassB(home, proj);
-    seedAgPendingCrossing(home, proj); // the AG namespace: 29g fire 412 (the old seed wrote the Claude Code state file, which AG no longer reads)
+    seedAgPendingCrossing(home, proj); // the AG namespace (29g fire 412)
     const lines = await routeIn(home, commonPayload(proj), 'Stop', { agDiscovery: true });
-    assert.strictEqual(lines.length, 1, 'exactly one decision line');
-    const decision = JSON.parse(lines[0]);
-    assert.strictEqual(decision.decision, 'continue', 'AG blocks a stop with decision "continue"');
-    assert.ok(decision.reason.includes('memory crossed the OBESE ceiling'), decision.reason);
-    assert.ok(decision.reason.includes('Quick pass NOW, no ask'), decision.reason);
-    assert.strictEqual(JSON.parse(fs.readFileSync(agStatePath(home, proj), 'utf8')).lastCrossing.consumed, true, 'consumed at emission, in the AG namespace');
-    const again = await routeIn(home, commonPayload(proj), 'Stop', { agDiscovery: true });
-    assert.deepStrictEqual(again, [], 'a second Stop for the same crossing stays silent');
+    assert.deepStrictEqual(lines, [], 'no OBESE auto-Quick directive on AG');
+    assert.strictEqual(JSON.parse(fs.readFileSync(agStatePath(home, proj), 'utf8')).lastCrossing.consumed, false, 'nothing is consumed on AG');
   } finally { clean(home, proj); }
 });
 
@@ -424,4 +420,27 @@ test('D7b the AG airbag from a subfolder snapshots the project GEMINI.md under t
     assert.strictEqual(underRoot.length, 1, 'the snapshot is under the project root (the walk found GEMINI.md above the subfolder)');
     assert.ok(!fs.existsSync(path.join(sub, '.claude')), 'nothing is written under the subfolder');
   } finally { clean(home, bare); }
+});
+
+// 29g fire 416 part 2 (branch 3): the Quick pass is agent-run (method §1: "no code in this engine dedups… YOU, the agent, compute and edit by
+// hand") and no cli.mjs command reaches it, so --platform cannot point it at AG's files. The AG Stop therefore delivers NO directive: no FULL
+// force, no OBESE auto-Quick, no wizard ask. The SessionStart notices and the airbag stay on.
+function seedAgFullCrossing(home, proj) {
+  const p = agStatePath(home, proj);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify({
+    stateSchema: 1,
+    lastCrossing: { band: 'FULL', at: Date.now(), consumed: false },
+    lastVerdict: { band: 'FULL', reason: 'bmi', economical: true, fatTokens: 90000, at: Date.now() },
+  }), 'utf8');
+  return p;
+}
+test('D8 the AG Stop delivers no directive, even for a pending FULL crossing, and leaves the crossing unconsumed', async () => {
+  const { home, proj } = sandbox();
+  try {
+    seedAgFullCrossing(home, proj);
+    const lines = await routeIn(home, commonPayload(proj), 'Stop', { agDiscovery: true });
+    assert.deepStrictEqual(lines, [], 'no force, no OBESE auto-Quick, no wizard ask on AG');
+    assert.strictEqual(JSON.parse(fs.readFileSync(agStatePath(home, proj), 'utf8')).lastCrossing.consumed, false, 'nothing is consumed: no directive was delivered');
+  } finally { clean(home, proj); }
 });

@@ -6,12 +6,11 @@
 //     file snapshots it first, through the same handleAirbag the CC conductor uses.
 //   - SessionStart fires once per conversation. The prior-conversation writeguard
 //     sweep runs here, through the same sweepWriteguard the CC conductor uses.
-//   - Stop and the gauge's SessionStart line run on AG (unit D, 29g fire 412).
-//     They read only the AG state NAMESPACE (setStateNamespace('ag')), so a
-//     pending Claude Code crossing is never consumed by an AG session. The gauge's
-//     class-B set is the AG discovery (class-b.mjs discoverAntigravityClassB), not
-//     the Claude Code layout. AG_DISCOVERY below stays a switch: false returns to
-//     the prior-conversation sweep alone.
+//   - The gauge's SessionStart notices run on AG (unit D, 29g fire 412), with the AG state NAMESPACE
+//     (setStateNamespace('ag')) and the AG class-B set (class-b.mjs discoverAntigravityClassB).
+//   - Stop delivers NO directive on AG (29g fire 416): the Quick pass is agent-run and no cli.mjs command
+//     reaches it with --platform, so the force, OBESE and wizard directives stay off. AG_DISCOVERY below
+//     stays a switch: false returns to the prior-conversation sweep alone.
 // NOT wired, and why:
 //   - PostToolUse: AG allows only `{}` back, so the CC seatbelt's advisory line
 //     has no channel. Not wired.
@@ -113,15 +112,10 @@ async function route(payload, event, opts = {}) {
     return lines;
   }
 
-  if (event === 'Stop') {
-    if (!opts.agDiscovery) return lines;
-    await setAgNamespace();
-    await conductor.handleStop(hookInput, {
-      emit: (reason) => emitLine({ decision: 'continue', reason }),
-      platform: 'antigravity',
-    });
-    return lines;
-  }
+  // 29g fire 416, branch 3: the AG Stop delivers NO directive. The force, the OBESE auto-Quick and the wizard ask all ask the agent to run
+  // the Quick pass, which is agent-run (method §1) and not reachable through any cli.mjs command with --platform, so on AG it would
+  // wash the wrong files or none. The Stop handler is not called, so nothing is consumed either. The SessionStart notices and the airbag stay on.
+  if (event === 'Stop') return lines;
 
   return lines;
 }
