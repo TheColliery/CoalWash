@@ -2,6 +2,25 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.2] - 2026-11-01
+
+Crash recovery leaves a live transaction alone and refuses bad journals
+
+Claude Code and Antigravity behave as in 1.15.1, except where the bullets below say otherwise. The one change a user will notice is the crash deferral under `### Changed`.
+
+### Fixed
+
+- Crash recovery takes the project transaction lock before it reads a journal. A live lock is reported and nothing is touched; the lock is released on every path (`scripts/lib/apply.mjs`, lines 2002-2006 and 2220-2221).
+- A malformed crash journal is refused whole. A manifest row without a string original or snapshot name stops the recovery before the first copy, on both routes, so nothing is restored half-way (`scripts/lib/apply.mjs`, lines 2094-2098).
+- `estate-search` leaves the `--platform` flag and its value out of the query, so an indexed hit is still found (`scripts/lib/cli.mjs`, lines 422-430 and 599; test: `scripts/lib/estate-archive.test.mjs`, lines 1316-1330).
+- `config-status --platform antigravity` reads the config from the Antigravity project root, not from a subfolder walk (`scripts/lib/cli.mjs`, lines 445-452; `scripts/lib/config-load.mjs`, lines 708-710 and 729-730).
+
+### Changed
+
+- Crash deferral. After a CoalWash run crashes, the lock it leaves is fresh, so the next gauge now waits until that lock is stale (about 30 minutes; `LOCK_STALE_MS` in `scripts/lib/apply.mjs`, line 100) before it rolls the crashed run back, instead of rolling it back at once. A lock that may still be live is never taken. The lock can be removed by hand once no CoalWash run is active, and the refusal says so (`scripts/lib/apply.mjs`, line 1473; tests: `scripts/lib/apply.test.mjs`, lines 4784-4792 and 4974).
+- The manifest-guard tests declare only the project as a root, so the manifest check, not the earlier root check, refuses the two mixed-route recoveries. With that check disabled, they fail (`scripts/lib/apply.test.mjs`, lines 5030 and 5048).
+- `config-status` refuses a bad `--platform` value with the usage error and exits 1. Before, it ignored the flag (`scripts/lib/cli.mjs`, lines 445-447).
+
 ## [1.15.1] - 2026-11-01
 
 Keep Antigravity recovery from rolling back Claude Code journals
