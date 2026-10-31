@@ -231,3 +231,103 @@ test('r34c C: invoked through a directory junction, build-plugin.mjs --check sti
   const r = spawnSync(process.execPath, [path.join(link, 'build-plugin.mjs'), '--check'], { cwd: holder, encoding: 'utf8' });
   assert.match(r.stdout + r.stderr, /plugin\/ dist (in sync with source|OUT OF SYNC)/, `through the junction: exit ${r.status}, output ${JSON.stringify(r.stdout + r.stderr)}`);
 });
+
+// ---- CWK2-079: a link in a source the build copies is refused by name, and a link in plugin/ is named, never followed. ----
+// The port of CoalLedger d36c2ea and 4e61638. Each witness builds from a fixture copy of the sources under os.tmpdir(), never the
+// real repo. A directory junction needs no privilege on Windows; a file symlink does, so its leg probes and skips VISIBLY.
+
+// A fixture copy of every DIST_ITEM source, so a witness can plant a link without touching the real tree.
+function fixtureSources(t) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-build-src-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true })); // rmSync unlinks a link, it does not follow it (probed above)
+  for (const rel of DIST_ITEMS) {
+    const src = path.join(repoRoot, rel);
+    if (fs.existsSync(src)) fs.cpSync(src, path.join(root, rel), { recursive: true });
+  }
+  return root;
+}
+
+function scratchDistFor(t) {
+  const d = scratchDist();
+  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  return d;
+}
+
+// A folder outside every source and dist, holding one file. A link into it must never be read through.
+function outsideFolder(t) {
+  const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-build-out-')));
+  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(d, 'payload.txt'), 'outside the tree\n', 'utf8');
+  return d;
+}
+
+// Creates a link, or skips the test VISIBLY (returns false) when the host refuses it.
+function tryLink(t, target, link, type) {
+  try {
+    fs.symlinkSync(target, link, type);
+    return true;
+  } catch (e) {
+    t.skip(`cannot create a ${type} on this host (${e.code || e.message}); the Linux CI legs run this leg`);
+    return false;
+  }
+}
+
+test('CWK2-079: a directory junction inside a DIST_ITEM source is refused by name, and the old dist is left in place', (t) => {
+  const clean = fixtureSources(t);
+  const dist = scratchDistFor(t);
+  buildDist(dist, clean);
+  const linked = fixtureSources(t);
+  if (!tryLink(t, outsideFolder(t), path.join(linked, 'hooks', 'linked'), 'junction')) return;
+  assert.throws(() => buildDist(dist, linked), /hooks[\\/]linked: a link or junction in the source tree is refused/, 'the refusal names the junction in its own words, not a copy error that quotes the path');
+  assert.ok(fs.existsSync(path.join(dist, '.claude-plugin', 'plugin.json')), 'the old dist survives a refused build');
+  assert.deepStrictEqual(checkDist(dist, clean), [], 'the surviving dist is still in sync with the clean source');
+});
+
+test('CWK2-079: a junction at a PARENT folder of a DIST_ITEM is refused by name, and the old dist is left in place', (t) => {
+  const clean = fixtureSources(t);
+  const dist = scratchDistFor(t);
+  buildDist(dist, clean);
+  const linked = fixtureSources(t);
+  fs.renameSync(path.join(linked, 'scripts'), path.join(linked, 'scripts-real'));
+  if (!tryLink(t, path.join(linked, 'scripts-real'), path.join(linked, 'scripts'), 'junction')) return;
+  assert.throws(() => buildDist(dist, linked), /scripts: a link or junction in the source tree is refused/, 'the refusal names the parent junction (scripts), not the child (scripts/lib)');
+  assert.ok(fs.existsSync(path.join(dist, '.claude-plugin', 'plugin.json')), 'the old dist survives a refused build');
+});
+
+test('CWK2-079: a junction inside plugin/ is named by checkDist and never followed into its target', (t) => {
+  const clean = fixtureSources(t);
+  const dist = scratchDistFor(t);
+  buildDist(dist, clean);
+  if (!tryLink(t, outsideFolder(t), path.join(dist, 'hooks', 'linked'), 'junction')) return;
+  const out = checkDist(dist, clean);
+  assert.ok(out.some((l) => l.startsWith('link in plugin/') && l.includes(path.join('hooks', 'linked'))), `named: ${JSON.stringify(out)}`);
+  assert.ok(!out.some((l) => l.includes('payload.txt')), `the junction's target is not followed: ${JSON.stringify(out)}`);
+});
+
+test('CWK2-079: a DANGLING junction in plugin/ is named, not read as an absent path', (t) => {
+  const clean = fixtureSources(t);
+  const dist = scratchDistFor(t);
+  buildDist(dist, clean);
+  const gone = path.join(os.tmpdir(), `cw-build-gone-${process.pid}-${Date.now()}`); // never created
+  if (!tryLink(t, gone, path.join(dist, 'hooks', 'dangling'), 'junction')) return;
+  const out = checkDist(dist, clean);
+  assert.ok(out.some((l) => l.startsWith('link in plugin/') && l.includes('dangling')), `named: ${JSON.stringify(out)}`);
+});
+
+test('CWK2-079: a file symlink inside a DIST_ITEM source is refused by name (probed: needs privilege on Windows, skips visibly when absent)', (t) => {
+  const src = fixtureSources(t);
+  const dist = scratchDistFor(t);
+  const target = path.join(outsideFolder(t), 'payload.txt');
+  if (!tryLink(t, target, path.join(src, 'hooks', 'filelink.txt'), 'file')) return;
+  assert.throws(() => buildDist(dist, src), /hooks[\\/]filelink\.txt: a link or junction in the source tree is refused/, 'the refusal names the file link in its own words');
+});
+
+test('CWK2-079: a junction at a parent folder inside plugin/ is named by checkDist, not walked', (t) => {
+  const clean = fixtureSources(t);
+  const dist = scratchDistFor(t);
+  buildDist(dist, clean);
+  fs.renameSync(path.join(dist, 'scripts'), path.join(dist, 'scripts-real'));
+  if (!tryLink(t, path.join(dist, 'scripts-real'), path.join(dist, 'scripts'), 'junction')) return;
+  const out = checkDist(dist, clean);
+  assert.ok(out.some((l) => l.startsWith('link in plugin/') && l.endsWith('scripts')), `named: ${JSON.stringify(out)}`);
+});

@@ -110,8 +110,33 @@ const isNotShipped = (rel) => isUnwiredEngine(rel) || isDevOnlyLib(rel);
 // this function fails loud if either side moves (CWK-066 F2).
 export const hasStrayDotDir = (sub) => sub.split(/[\\/]/).some((seg) => seg.startsWith('.') && seg !== '.' && seg !== '..');
 
+// 29d CWK2-079: ported from CoalLedger d36c2ea and 4e61638 (scripts/build-plugin.mjs), copied as they are. A link or junction in a source
+// the build copies is refused by name, never copied as a link and never followed. Walks with lstat; a source that is absent is left to the
+// copy below, which fails on its own. Runs BEFORE the dist is removed, so a refused build leaves plugin/ as it was.
+// The first link on the path from `root` down to `rel`, component by component with lstat. `root` itself is not walked, and a link at a
+// PARENT component is found as well as the entry's own (29d c2, r34 M1). Null when there is none, or when the path is absent.
+function firstLinkAbove(root, rel) {
+  let cur = '';
+  for (const part of rel.split(path.sep)) {
+    cur = cur ? path.join(cur, part) : part;
+    let st;
+    try { st = fs.lstatSync(path.join(root, cur)); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+    if (st.isSymbolicLink()) return cur;
+  }
+  return null;
+}
+
+function assertNoLinks(root, rel) {
+  const link = firstLinkAbove(root, rel);
+  if (link !== null) throw new Error(`${link}: a link or junction in the source tree is refused (the build copies files, never links)`);
+  let st;
+  try { st = fs.lstatSync(path.join(root, rel)); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  if (st.isDirectory()) for (const n of fs.readdirSync(path.join(root, rel))) assertNoLinks(root, path.join(rel, n));
+}
+
 // srcRoot is the seam the witnesses use: a fixture copy of the sources, never the real repo (a link planted in the real tree is the bug).
 export function buildDist(distRoot = dist, srcRoot = repo) {
+  for (const rel of DIST_ITEMS) assertNoLinks(srcRoot, rel); // before the old dist is removed: a refused build leaves plugin/ as it was
   fs.rmSync(distRoot, { recursive: true, force: true });
   for (const rel of DIST_ITEMS) {
     const src = path.join(srcRoot, rel);
@@ -149,20 +174,34 @@ function contentEquals(pathA, pathB) {
 // in sync.
 export function checkDist(distRoot = dist, srcRoot = repo) {
   const out = [];
+  // 29d CWK2-079: a link is NAMED and never followed. A dangling link would pass as absent under existsSync, and a link to a parent would recurse without end.
+  const whereOf = (root) => (root === srcRoot ? 'source' : 'plugin/');
+  const namedLink = (root, rel) => { const line = `link in ${whereOf(root)}: ${rel}`; if (!out.includes(line)) out.push(line); };
   const filesUnder = (root, rel, item = rel) => {
     if (isTest(rel) || isNotShipped(rel) || hasStrayDotDir(path.relative(item, rel))) return []; // excluded from the dist -> excluded here too, both directions
     const abs = path.join(root, rel);
-    if (!fs.existsSync(abs)) return [];
-    if (fs.statSync(abs).isDirectory()) return fs.readdirSync(abs).flatMap((n) => filesUnder(root, path.join(rel, n), item));
+    let st;
+    try { st = fs.lstatSync(abs); } catch (e) { if (e.code === 'ENOENT') return []; throw e; } // absent is nothing to compare; any other failure is loud
+    if (st.isSymbolicLink()) { namedLink(root, rel); return []; }
+    if (st.isDirectory()) return fs.readdirSync(abs).flatMap((n) => filesUnder(root, path.join(rel, n), item));
     return [rel];
   };
+  // A link at a PARENT folder of an item (29d c2, r34 M1): named in its tree, and that item is skipped there instead of compared or walked through.
+  const linkAboveItem = (root, item) => {
+    const link = firstLinkAbove(root, item);
+    if (link === null) return false;
+    namedLink(root, link);
+    return true;
+  };
   for (const item of DIST_ITEMS) {
-    for (const rel of filesUnder(srcRoot, item)) {
+    const srcLinked = linkAboveItem(srcRoot, item);
+    for (const rel of srcLinked ? [] : filesUnder(srcRoot, item)) {
       const d = path.join(distRoot, rel);
       if (!fs.existsSync(d)) out.push(`missing in plugin/: ${rel}`);
       else if (!contentEquals(path.join(srcRoot, rel), d)) out.push(`stale in plugin/: ${rel}`);
     }
-    for (const rel of filesUnder(distRoot, item)) {
+    const distLinked = linkAboveItem(distRoot, item);
+    for (const rel of distLinked ? [] : filesUnder(distRoot, item)) {
       if (!fs.existsSync(path.join(srcRoot, rel))) out.push(`orphan in plugin/ (no source): ${rel}`);
     }
   }
@@ -210,6 +249,7 @@ export function checkDist(distRoot = dist, srcRoot = repo) {
     if (!fs.existsSync(abs)) return;
     for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
       const r = rel ? path.join(rel, e.name) : e.name;
+      if (e.isSymbolicLink()) { namedLink(distRoot, r); continue; } // 29d CWK2-079: named, never followed; a link inside an item is named by filesUnder, and namedLink de-duplicates
       if (underItem(r)) continue;                                   // a DIST_ITEM's own subtree
       if (e.isDirectory() && ancestorOfItem(r)) { sweepUnaccounted(r); continue; } // on the way to one
       out.push(`orphan in plugin/ (no DIST_ITEM accounts for it): ${r}`);
