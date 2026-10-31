@@ -788,13 +788,13 @@ export function withSentence(msg, note) {
   const m = String(msg).trimEnd();
   return /[.!?]$/.test(m) ? `${m} ${note}` : `${m}. ${note}`;
 }
-// What a result says when a release could not remove this run's lock (fire 122): null when nothing was left behind.
-// `staleMs` (E1 t182 #1): the lock's OWN stale window, so the wait it names is the wait that lock has (the keeps lock's 5 s,
-// never the transaction's 30 minutes); it defaults to the transaction value.
-// 29k F452-D: a stale window as the words a user reads it. Every note and refusal that names a wait takes it here, never a typed number.
+// 29k F452-D: the stale window as the words a user reads it (minutes, or seconds under one). Takes no lock.
 export function staleWait(staleMs) {
   return staleMs >= 60000 ? `${staleMs / 60000} minutes` : `${staleMs / 1000} s`;
 }
+// What a result says when a release could not remove this run's lock (fire 122): null when nothing was left behind.
+// `staleMs` (E1 t182 #1): the lock's OWN stale window, so the wait it names is the wait that lock has (the keeps lock's 5 s,
+// never the transaction's 30 minutes); it defaults to the transaction value.
 export function lockLeftNote(lockPath, rel, staleMs = LOCK_STALE_MS) {
   if (!rel || rel.released || rel.why === 'foreign') return null;
   const how = rel.why === 'unreadable' ? `could not be read to confirm it is this run's own (${rel.code})` : `could not be removed (${rel.code})`;

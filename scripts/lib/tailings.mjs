@@ -50,7 +50,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
-import { ensureSelfIgnore, acquireLock, trackedInOwnFolder, lockLeftNote } from './apply.mjs';
+import { ensureSelfIgnore, acquireLock, trackedInOwnFolder, lockLeftNote, withLockLeft } from './apply.mjs';
 import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
@@ -96,7 +96,7 @@ const BIN_LOCK_STALE_MS = 5000;
 // `beforeBlobLink(tmp)` (E1 t173): called after a copy's bytes are written and synced to its temp, right before the temp is
 // linked to the copy's id, so a test can kill a writer at that point. `linkSync` replaces fs.linkSync so a test can stand
 // in for a filesystem without hard links. Both null in production.
-export const __testHooks = { binLockAttempts: 0, beforeIndexSave: null, beforeBlobLink: null, linkSync: null };
+export const __testHooks = { binLockAttempts: 0, beforeIndexSave: null, beforeBlobLink: null, linkSync: null, beforeSweepPlan: null };
 
 // CWK-137: a bin is `<project>/.claude/coalwash/<name>` -- repo-plantable. ownSandboxDir
 // THROWS when any directory between the project root and the bin is a link, and
@@ -446,10 +446,18 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
   const lock = acquireBinLock(dir);
   if (!lock.acquired) return { destroyed: 0, kept: peek.length };
   // 29k F452-B: a release that could not remove the bin lock rides on the sweep's own result as `lockLeft`, never dropped.
+  // 29k F452-B2: and on the throw path too. The note is taken AFTER the body, error or not, and joined onto the error by
+  // withLockLeft (apply.mjs, the one implementation of that join); sweepFatBin / sweepStoreOld carry it on their zero result.
   let out;
-  let lockLeft = null;
-  try { out = sweepBinLocked(dir, horizonMs, now, budgetBytes, lock); } finally { lockLeft = binLockNote(dir, lock); }
+  let thrown = null;
+  try { out = sweepBinLocked(dir, horizonMs, now, budgetBytes, lock); } catch (e) { thrown = e; }
+  const lockLeft = binLockNote(dir, lock);
+  if (thrown) throw withLockLeft(thrown, lockLeft);
   return lockLeft ? { ...out, lockLeft } : out;
+}
+// The zero result a failed sweep reports. It keeps a bin-lock note its throw carried (29k F452-B2), so a failure never hides a lock left behind.
+function emptySweep(e) {
+  return { destroyed: 0, kept: 0, ...(e && e.lockLeft ? { lockLeft: e.lockLeft } : {}) };
 }
 function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   const temps = removeStaleTemps(dir); // E1 t173: inside the lock, which a live writer holds while its temp exists
@@ -467,6 +475,7 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
       try { item.bytes = fs.statSync(path.join(dir, item.id)).size; } catch { /* weightless -> never size-evicted */ }
     }
   }
+  if (typeof __testHooks.beforeSweepPlan === 'function') __testHooks.beforeSweepPlan(dir); // 29k F452-B2: a fault seam inside the locked section (beforeIndexSave's twin)
   const { keep, destroy, reasons, capConflict } = retentionPlan(index, now, { horizonMs, budgetBytes });
   const survivors = [...keep];
   const cert = [];
@@ -537,11 +546,11 @@ function budgetFrom(storeBytes) {
 // a real wash run's applyPlan preflight — never wire these to a hook/cron.
 export function sweepFatBin(projectRoot, { now = Date.now(), storeBytes } = {}) {
   try { return sweepBinAt(binDir(projectRoot, FAT_BIN_NAME), HORIZON_MS.fat, now, budgetFrom(storeBytes)); }
-  catch { return { destroyed: 0, kept: 0 }; }
+  catch (e) { return emptySweep(e); }
 }
 export function sweepStoreOld(projectRoot, { now = Date.now(), storeBytes } = {}) {
   try { return sweepBinAt(binDir(projectRoot, STORE_OLD_NAME), HORIZON_MS['store.old'], now, budgetFrom(storeBytes)); }
-  catch { return { destroyed: 0, kept: 0 }; }
+  catch (e) { return emptySweep(e); }
 }
 
 // Read the death log (the pull-surface for "what got destroyed and when" —

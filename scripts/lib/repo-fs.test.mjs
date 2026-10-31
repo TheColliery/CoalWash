@@ -23,7 +23,7 @@ import {
 } from './config-load.mjs';
 import { ownSandboxDir, RepoWriteRefused, writeRepoFile, escapesRoot } from './repo-fs.mjs';
 import { sweepWriteguard, snapshotOnFirstWrite } from './writeguard.mjs';
-import { recordBinItem, restoreFromBin, sweepFatBin, readDeathLog, FAT_BIN_NAME } from './tailings.mjs';
+import { recordBinItem, restoreFromBin, sweepFatBin, readDeathLog, FAT_BIN_NAME, __testHooks as tailHooks } from './tailings.mjs';
 import { acquireLock, applyPlan, sweepSnapshots, verifySnapshot, LOCK_STALE_MS } from './apply.mjs';
 import { chJournalGuard, readRosterSids } from './estate-archive.mjs';
 import { HORIZON_MS } from './retention.mjs';
@@ -924,4 +924,23 @@ test('F452-B recordBinItem hands a bin lock whose release failed to its caller t
     assert.equal(notes.length, 1, JSON.stringify(notes));
     assert.ok(notes[0].includes(`The lock file ${binLock} could not be removed (EBUSY), so it was left in place`), notes[0]);
   } finally { fs.rmSync = real; }
+});
+
+// 29k fire 463 (F452-B2, RED first): a sweep that throws inside its locked section still reports a bin lock its release could not remove.
+test('F452-B2 a sweep that throws inside its locked section still names a bin lock its release could not remove', (t) => {
+  const { project } = sandbox(t, 'binthrow');
+  const { now } = binWithOneOldItem(project, 'notes/old.md');
+  const binLock = path.join(project, '.claude', 'coalwash', FAT_BIN_NAME, '.bin.lock');
+  const real = fs.rmSync;
+  const want = path.resolve(binLock);
+  fs.rmSync = function patched(p, ...rest) {
+    if (path.resolve(String(p)) === want) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+    return real.call(fs, p, ...rest);
+  };
+  tailHooks.beforeSweepPlan = () => { throw new Error('simulated failure inside the locked sweep'); };
+  try {
+    const r = sweepFatBin(project, { now });
+    assert.equal(r.destroyed, 0, 'the sweep threw, so nothing was destroyed');
+    assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${binLock} could not be removed (EBUSY), so it was left in place`), `the throw path keeps the note: ${JSON.stringify(r)}`);
+  } finally { tailHooks.beforeSweepPlan = null; fs.rmSync = real; }
 });
