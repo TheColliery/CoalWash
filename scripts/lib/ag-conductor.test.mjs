@@ -17,6 +17,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { sweepWriteguard } from './writeguard.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(here, '..', '..');
@@ -361,5 +362,48 @@ test('D4 multi_replace_file_content on MEMORY.md snapshots it, with the path in 
     const walk = (d) => { if (!fs.existsSync(d)) return; for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (e.name.startsWith('MEMORY.md--') && !e.name.endsWith('.origpath')) snaps.push(p); } };
     walk(wgRoot(proj));
     assert.strictEqual(snaps.length, 1, `one snapshot of MEMORY.md through multi_replace_file_content (found ${snaps.length})`);
+  } finally { clean(home, proj); }
+});
+
+// 29g fire 412 step 5: the F306-1 class for AG's folders. An AG conversation and a Claude Code session on one project share the
+// writeguard root. The 24-hour floor keeps a LIVE folder of either route from being swept by the other; a folder idle past the floor
+// is swept by either route, which is the design. Witnesses D5a, D5b and D5c.
+function ageFolder(dir, ageMs) {
+  const t = new Date(Date.now() - ageMs);
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) fs.utimesSync(path.join(dir, e.name), t, t);
+  fs.utimesSync(dir, t, t);
+}
+function plantSession(proj, sessionId) {
+  const dir = path.join(wgRoot(proj), sessionId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'MEMORY.md--witness'), 'snapshot bytes\n', 'utf8');
+  return dir;
+}
+test('D5a a fresh Claude Code session folder survives the AG sweep, and a stale one is removed by it', async () => {
+  const { home, proj } = sandbox();
+  try {
+    const fresh = plantSession(proj, 'cc-sess-live');
+    const stale = plantSession(proj, 'cc-sess-old');
+    ageFolder(stale, 25 * 60 * 60 * 1000);
+    await routeIn(home, commonPayload(proj), 'SessionStart', { agDiscovery: false });
+    assert.ok(fs.existsSync(fresh), 'a live CC session survives an AG session start');
+    assert.ok(!fs.existsSync(stale), 'a CC session idle past the 24-hour floor is swept (the design)');
+  } finally { clean(home, proj); }
+});
+test('D5b an AG conversation folder survives a Claude Code sweep while it is live', () => {
+  const { home, proj } = sandbox();
+  try {
+    const agLive = plantSession(proj, CONVERSATION);
+    sweepWriteguard(proj, 'cc-sess-current', {});
+    assert.ok(fs.existsSync(agLive), 'a live AG conversation folder survives a CC sweep');
+  } finally { clean(home, proj); }
+});
+test('D5c a stale AG conversation folder is removed by the Claude Code sweep', () => {
+  const { home, proj } = sandbox();
+  try {
+    const agStale = plantSession(proj, PRIOR_CONVERSATION);
+    ageFolder(agStale, 25 * 60 * 60 * 1000);
+    sweepWriteguard(proj, 'cc-sess-current', {});
+    assert.ok(!fs.existsSync(agStale), 'an AG folder idle past the floor is swept by CC too');
   } finally { clean(home, proj); }
 });
