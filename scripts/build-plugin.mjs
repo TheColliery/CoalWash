@@ -110,13 +110,14 @@ const isNotShipped = (rel) => isUnwiredEngine(rel) || isDevOnlyLib(rel);
 // this function fails loud if either side moves (CWK-066 F2).
 export const hasStrayDotDir = (sub) => sub.split(/[\\/]/).some((seg) => seg.startsWith('.') && seg !== '.' && seg !== '..');
 
-export function buildDist(distRoot = dist) {
+// srcRoot is the seam the witnesses use: a fixture copy of the sources, never the real repo (a link planted in the real tree is the bug).
+export function buildDist(distRoot = dist, srcRoot = repo) {
   fs.rmSync(distRoot, { recursive: true, force: true });
   for (const rel of DIST_ITEMS) {
-    const src = path.join(repo, rel);
+    const src = path.join(srcRoot, rel);
     const dst = path.join(distRoot, rel);
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isNotShipped(path.relative(repo, s)) && !hasStrayDotDir(path.relative(src, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine + every DEV_ONLY_LIBS entry + any stray dot-dir BELOW the item
+    fs.cpSync(src, dst, { recursive: true, filter: (s) => !isTest(s) && !isNotShipped(path.relative(srcRoot, s)) && !hasStrayDotDir(path.relative(src, s)) }); // recursive always; EXCLUDE *.test.* (dev-only, clean-clone) + the unwired class-A engine + every DEV_ONLY_LIBS entry + any stray dot-dir BELOW the item
   }
 }
 
@@ -146,7 +147,7 @@ function contentEquals(pathA, pathB) {
 // hold nothing under those items without a source (orphan), and no
 // top-level entry may exist that no DIST_ITEM accounts for. Returns [] when
 // in sync.
-export function checkDist(distRoot = dist) {
+export function checkDist(distRoot = dist, srcRoot = repo) {
   const out = [];
   const filesUnder = (root, rel, item = rel) => {
     if (isTest(rel) || isNotShipped(rel) || hasStrayDotDir(path.relative(item, rel))) return []; // excluded from the dist -> excluded here too, both directions
@@ -156,13 +157,13 @@ export function checkDist(distRoot = dist) {
     return [rel];
   };
   for (const item of DIST_ITEMS) {
-    for (const rel of filesUnder(repo, item)) {
+    for (const rel of filesUnder(srcRoot, item)) {
       const d = path.join(distRoot, rel);
       if (!fs.existsSync(d)) out.push(`missing in plugin/: ${rel}`);
-      else if (!contentEquals(path.join(repo, rel), d)) out.push(`stale in plugin/: ${rel}`);
+      else if (!contentEquals(path.join(srcRoot, rel), d)) out.push(`stale in plugin/: ${rel}`);
     }
     for (const rel of filesUnder(distRoot, item)) {
-      if (!fs.existsSync(path.join(repo, rel))) out.push(`orphan in plugin/ (no source): ${rel}`);
+      if (!fs.existsSync(path.join(srcRoot, rel))) out.push(`orphan in plugin/ (no source): ${rel}`);
     }
   }
   // The exclusion above must not become a BLIND SPOT: skipping these paths in both walks means a
