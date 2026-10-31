@@ -50,6 +50,8 @@ test('agy validate: the built plugin has no error, no missing-logo note, and onl
 
   const r = validateAgyPlugin({ pluginDir: path.join(repo, 'plugin'), env, timeoutMs: AGY_TIMEOUT_MS });
   assert.equal(r.error, undefined, `agy plugin validate did not run: ${r.error && r.error.code}`);
+  // Exit status first: a report can parse and carry no error entry while the validator exited non-zero (agy --strict exits 1 on warnings alone).
+  assert.equal(r.status, 0, `agy plugin validate exited ${r.status}, not 0: ${r.stderr}`);
   let report;
   try { report = JSON.parse(r.stdout); } catch (e) {
     assert.fail(`agy plugin validate printed no JSON report (exit ${r.status}): ${e.message}\n${r.stdout}\n${r.stderr}`);
