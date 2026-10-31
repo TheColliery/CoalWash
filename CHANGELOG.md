@@ -2,6 +2,27 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.0] - 2026-11-01
+
+Act only on Antigravity's own project rule files in Quick passes
+
+Claude Code behaves as in 1.14.0. On Antigravity, a Quick pass with `--platform antigravity` acts on the project's `GEMINI.md` and `AGENTS.md` only, never on Claude Code's files or `~/.gemini`. Hermetic tests cover that path; it was not measured end to end on Antigravity, because agy's headless agent cannot run a shell command. The paid tiers, RE-TIER and ULTRA refuse on Antigravity.
+
+### Added
+
+- `--platform antigravity` on the gauge and the Quick path: `measureOnly`, `neutralScan` and `applyPlan` take a platform, and on Antigravity `applyPlan` trusts the project root only (`scripts/lib/cli.mjs`, lines 110-120 and 335-350; `scripts/lib/wizard.mjs`, lines 96-103; `scripts/lib/apply.mjs`, lines 1064-1068 and 1092-1097).
+
+### Fixed
+
+- Antigravity sessions read the project config from the repository root, so a project off switch takes effect there (`hooks/ag-conductor.js`, line 62; `scripts/lib/config-load.mjs`, lines 1268-1273). Hermetic test, not measured on Antigravity.
+- `--platform` with no value, or with a value other than `antigravity`, is a usage error: a named message on stderr and exit 1 (`scripts/lib/cli.mjs`, lines 335-350).
+- The Antigravity write guard never snapshots a file under `~/.gemini` (`scripts/lib/writeguard.mjs`, lines 132, 145-149 and 295-297).
+- The Antigravity gauge reads no Claude Code window source (`scripts/lib/caliper.mjs`, lines 1028-1030).
+
+### Changed
+
+- The comment naming the Antigravity wall now names `applyPlan`'s trusted roots, not the tag, and a test pins that Antigravity refuses the five `~/.gemini` files and the Claude Code memory store (`scripts/lib/class-b.mjs`, lines 380-383).
+
 ## [1.14.0] - 2026-10-31
 
 Gauge and snapshot Antigravity sessions' own rule files

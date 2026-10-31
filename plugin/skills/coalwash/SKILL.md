@@ -138,7 +138,7 @@ Advisory nets for every OTHER hand editing a class-B governance/memory file (mai
 
 ## Activation ladder (capability-keyed; prohibition #51)
 
-Has lifecycle hooks → the shipped conductor runs the gauge at `SessionStart`, delivers any pending ask/force at `Stop`, counts sub spawns at `PostToolUse` (Claude Code today). No hooks → best-effort agent-driven offer: DESIGNED, not shipped on a file-copy install (nothing installs the always-loaded instruction; prohibition #49). Always → manual `/coalwash`. A platform adding hooks moves UP (wire the hook, retire the emulation).
+Has lifecycle hooks → the shipped conductor runs the gauge at `SessionStart`, delivers any pending ask/force at `Stop`, counts sub spawns at `PostToolUse` (Claude Code). Antigravity's hooks run the gauge at `SessionStart` and the write guard at `PreToolUse`, and deliver nothing at `Stop`; there a Quick pass is a manual `/coalwash`, with `--platform antigravity` on `cli.mjs gauge` and `platform: 'antigravity'` on the engine calls (`measureOnly`, `neutralScan`, `applyPlan`). It acts on the project's `GEMINI.md`/`AGENTS.md` only, never on Claude Code's files or `~/.gemini`; hermetic-tested, not measured end to end there. The paid tiers, RE-TIER and ULTRA refuse on Antigravity. The flag selects the discovery layout, not the rung. No hooks → best-effort agent-driven offer: DESIGNED, not shipped on a file-copy install (nothing installs the always-loaded instruction; prohibition #49). Always → manual `/coalwash`. A platform adding hooks moves UP (wire the hook, retire the emulation).
 
 ## Background
 > [!CAUTION]
