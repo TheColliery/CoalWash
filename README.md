@@ -106,7 +106,9 @@ claude plugin marketplace add TheColliery/CoalWash
 claude plugin install coalwash@coalwash
 ```
 
-**Other agents** (Cursor · Codex · Gemini CLI · Cline · Copilot) — file-copy: copy `skills/coalwash/` (skill + references) and `scripts/lib/` (the engine) into your platform's skill directory, keeping the relative layout (`skills/coalwash/SKILL.md` resolves the engine at `../../scripts/lib`). The gauge hook is Claude-Code-only; elsewhere run `/coalwash` manually. No API keys, no network, no `npm install`.
+**Other agents** (Cursor · Codex · Gemini CLI · Cline · Copilot) — file-copy: copy `skills/coalwash/` (skill + references) and `scripts/lib/` (the engine) into your platform's skill directory, keeping the relative layout (`skills/coalwash/SKILL.md` resolves the engine at `../../scripts/lib`). The gauge hook runs on Claude Code and on the Antigravity route below; elsewhere run `/coalwash` manually. No API keys, no network, no `npm install`.
+
+**Antigravity (CoalWash 1.14.0, measured 2026-10-31 on agy 1.4.12, headless, Windows).** Install from a clone of the repository root with `agy plugin install <clone>`. Measured: the session-start gauge reads that session's rule files (`GEMINI.md` and `AGENTS.md`, and the global rule files) into its own state under `~/.gemini`, and the write guard takes a snapshot of a project `GEMINI.md` or `AGENTS.md` before an `edit_file` or `write_file` edit. The gauge tells the agent nothing on Antigravity: no band line and no ask reach the model. Not on Antigravity: the forced or OBESE Quick pass and the wizard ask; the Stop handler delivers no directive.
 
 > [!TIP]
 > Install **globally** — CoalWash is a maintenance utility you want available everywhere, and it still operates per-project, per-session. A project config can tune or shut it off locally.

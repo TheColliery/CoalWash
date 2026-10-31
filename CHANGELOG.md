@@ -2,6 +2,24 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.14.0] - 2026-10-31
+
+Antigravity sessions now gauge and snapshot their own rule files
+
+Claude Code behaves as in 1.13.1. On Antigravity, measured on agy 1.4.12 (headless, Windows) from a plugin install of the repository root: the session-start gauge reads that session's rule files (`GEMINI.md` and `AGENTS.md`, and the global rule files) into its own state, and the write guard takes a snapshot of a project `GEMINI.md` or `AGENTS.md` before an `edit_file` or `write_file` edit. In the measured runs agy refused the edit it had snapshotted. Not measured on Antigravity: the forced or OBESE Quick pass and the wizard ask. The Antigravity Stop handler delivers no directive, by design.
+
+### Added
+
+- Antigravity discovery: the gauge lists the rule files agy loads, from the project root down to the working folder, plus the global rule files (`scripts/lib/class-b.mjs`, lines 373-417, 441 and 444).
+- Antigravity state kept apart from Claude Code's: an Antigravity session writes its state under `~/.gemini/coal/coalwash/ag/` and never shares a file with a Claude Code session (`scripts/lib/caliper.mjs`, lines 778-788, 796 and 812).
+- The write guard snapshots a project `GEMINI.md` or `AGENTS.md` before an `edit_file` or `write_file` edit on Antigravity (`scripts/lib/writeguard.mjs`, lines 148-153).
+- `--platform antigravity` on `writeguard-list` and `writeguard-restore`, which finds the Antigravity project root from a subfolder (`scripts/lib/cli.mjs`, lines 333-340).
+
+### Changed
+
+- The Antigravity Stop handler delivers no directive: the forced Quick pass and the OBESE auto-Quick are agent-run on Antigravity (`hooks/ag-conductor.js`, lines 115-118).
+- The skill body (`skills/coalwash/SKILL.md`) lists the rails and the wizard hand-off ahead of the background, and the activation ladder has its own heading. The moved blocks are identical; the new text is headings and one pointer sentence.
+
 ## [1.13.1] - 2026-10-31
 
 A session start no longer deletes another live session's undo snapshots
