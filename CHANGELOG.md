@@ -10,8 +10,8 @@ Claude Code and Antigravity behave as in 1.15.1, except where the bullets below 
 
 ### Fixed
 
-- Crash recovery takes the project transaction lock before it reads a journal. A live lock is reported and nothing is touched; the lock is released on every path (`scripts/lib/apply.mjs`, lines 2002-2006 and 2220-2221).
-- A malformed crash journal is refused whole. A manifest row without a string original or snapshot name stops the recovery before the first copy, on both routes, so nothing is restored half-way (`scripts/lib/apply.mjs`, lines 2094-2098).
+- Crash recovery takes the project transaction lock before it reads a journal. A live lock is reported and nothing is touched; the lock is released on every path (`scripts/lib/apply.mjs`, lines 2002-2007 and 2221-2222).
+- A malformed crash journal is refused whole. A manifest row without a string original or snapshot name stops the recovery before the first copy, on both routes, so nothing is restored half-way (`scripts/lib/apply.mjs`, lines 2095-2099).
 - `estate-search` leaves the `--platform` flag and its value out of the query, so an indexed hit is still found (`scripts/lib/cli.mjs`, lines 422-430 and 599; test: `scripts/lib/estate-archive.test.mjs`, lines 1316-1330).
 - `config-status --platform antigravity` reads the config from the Antigravity project root, not from a subfolder walk (`scripts/lib/cli.mjs`, lines 445-452; `scripts/lib/config-load.mjs`, lines 708-710 and 729-730).
 
