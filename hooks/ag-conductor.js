@@ -95,7 +95,7 @@ async function route(payload, event, opts = {}) {
     const file = targetPath(call.args, workspace);
     if (!file) return lines;
     // The CC airbag reads tool_input.file_path, so the AG path is handed in that shape.
-    await conductor.handleAirbag({ session_id: conversationId, tool_name: 'Write', tool_input: { file_path: file } }, { extraBasenames: AG_PROJECT_RULE_BASENAMES });
+    await conductor.handleAirbag({ session_id: conversationId, tool_name: 'Write', tool_input: { file_path: file } }, { extraBasenames: AG_PROJECT_RULE_BASENAMES, platform: 'antigravity' });
     return lines;
   }
 

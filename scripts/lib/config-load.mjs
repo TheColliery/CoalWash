@@ -613,7 +613,10 @@ const ROOT_MARKERS = [
 // (`touchesClaudeBase`). That is one check at the TRUST BOUNDARY, in the opposite
 // nature to this resolver — stacking more conditions in here is what R2 walked past
 // twice. Do not re-add a security claim to this function.
-export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
+// opts.extraMarkers (29g fire 412, unit D): more root markers for a platform whose project folder carries its own rule file (the AG
+// route passes ['GEMINI.md', 'AGENTS.md']). Absent, the walk is the one it was. Names are caller-supplied constants, never read from a file.
+export function findProjectRoot(startDir = process.cwd(), home = os.homedir(), opts = {}) {
+  const markers = Array.isArray(opts.extraMarkers) && opts.extraMarkers.length ? [...ROOT_MARKERS, ...opts.extraMarkers] : ROOT_MARKERS;
   let dir = physicalDir(startDir);
   const homeAbs = physicalDir(home);
   const bases = claudeBaseDirs(home).map(physicalDir);
@@ -634,7 +637,7 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir()) {
   // a wrong assumption, so it is corrected rather than merely narrowed.
   const isBase = (d) => bases.some((b) => pathWithin(d, b) && pathWithin(b, d));
   while (true) {
-    if (!isBase(dir) && ROOT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))) return dir;
+    if (!isBase(dir) && markers.some((m) => fs.existsSync(path.join(dir, m)))) return dir;
     if (dir === homeAbs) return startDir;
     const parent = path.dirname(dir);
     if (parent === dir) return startDir; // filesystem root reached

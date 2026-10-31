@@ -407,3 +407,21 @@ test('D5c a stale AG conversation folder is removed by the Claude Code sweep', (
     assert.ok(!fs.existsSync(agStale), 'an AG folder idle past the floor is swept by CC too');
   } finally { clean(home, proj); }
 });
+
+// 29g fire 412 step 7 (the adapter's root, a correctness fix found while wiring the CLI): an AG project has GEMINI.md and no other root
+// marker. From a subfolder the airbag must still find the project root, or its snapshot lands where the CLI never reads it.
+test('D7b the AG airbag from a subfolder snapshots the project GEMINI.md under the project root, not under the subfolder', async () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-d7b-home-')));
+  const bare = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwag-d7b-proj-')));
+  try {
+    const sub = path.join(bare, 'sub');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(bare, 'GEMINI.md'), '# AG project rules\n', 'utf8');
+    await routeIn(home, toolPayload(sub, 'edit_file', { Path: path.join(bare, 'GEMINI.md') }), 'PreToolUse', { agDiscovery: true });
+    const underRoot = [];
+    const walk = (d) => { if (!fs.existsSync(d)) return; for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (e.name.startsWith('GEMINI.md--') && !e.name.endsWith('.origpath')) underRoot.push(p); } };
+    walk(path.join(bare, '.claude', 'coalwash', 'writeguard'));
+    assert.strictEqual(underRoot.length, 1, 'the snapshot is under the project root (the walk found GEMINI.md above the subfolder)');
+    assert.ok(!fs.existsSync(path.join(sub, '.claude')), 'nothing is written under the subfolder');
+  } finally { clean(home, bare); }
+});

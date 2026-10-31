@@ -156,6 +156,11 @@ const STDIN_IDLE_MS = 30;
 const STDIN_HANG_CEILING_MS = 1500;
 const DAY_MS = 86400000;
 
+// 29g fire 412 (unit D): the AG route's project root also walks up to a GEMINI.md or AGENTS.md (the AG rule files are the project's own
+// marker). The gauge, the Stop and the airbag must agree on that root, or a snapshot taken from a subfolder is never read back. The CC
+// route passes no platform, so its walk is unchanged.
+const AG_ROOT_MARKERS = ['GEMINI.md', 'AGENTS.md'];
+function rootOptsOf(opts) { return opts && opts.platform === 'antigravity' ? { extraMarkers: AG_ROOT_MARKERS } : {}; }
 function lib(name) {
   return pathToFileURL(path.join(__dirname, '..', 'scripts', 'lib', name)).href;
 }
@@ -262,7 +267,7 @@ async function handleSessionStart(input, opts = {}) {
   const envelope = envelopeForConfig(cfg);
 
   const home = os.homedir();
-  const projectRoot = findProjectRoot(process.cwd(), home);
+  const projectRoot = findProjectRoot(process.cwd(), home, rootOptsOf(opts));
   const out = [];
   for (const n of notices) out.push(n);
 
@@ -486,7 +491,7 @@ async function handleStop(input, opts = {}) {
   const managedPaths = clampedRead(cfg, 'managedPaths');
 
   const home = os.homedir();
-  const projectRoot = findProjectRoot(process.cwd(), home);
+  const projectRoot = findProjectRoot(process.cwd(), home, rootOptsOf(opts));
   let proj = caliper.loadState(projectRoot, home);
   const now = Date.now();
   let lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
@@ -785,7 +790,7 @@ async function handleAirbag(input, opts = {}) {
     if (clampedRead(cfg, 'coalwashMode') === 'off') return; // master kill
     if (clampedRead(cfg, 'writeGuard') === 'off') return;   // its own off switch
     const home = os.homedir();
-    const projectRoot = findProjectRoot(process.cwd(), home);
+    const projectRoot = findProjectRoot(process.cwd(), home, rootOptsOf(opts));
     writeguard.snapshotOnFirstWrite(projectRoot, input.session_id, p, { home, extraBasenames: opts.extraBasenames });
     // NOTHING emitted (airbag is write-only) — Phoenix #13.
   } catch { /* fail-silent — never block a write */ }

@@ -793,3 +793,28 @@ test('E1: the value comes from a cloned repo, so the line is ONE line and bounde
     assert.ok(lines[0].length < 1500, `bounded, not ${lines[0].length} characters`);
   } finally { clean(home, proj); }
 });
+
+// 29g fire 412 step 7 (unit D): an AG project's root marker is GEMINI.md, which the root walk does not know. From a subfolder, the
+// writeguard commands find the project root only with --platform antigravity (the directive's restore command acts on AG's files).
+test('D7 writeguard-list and writeguard-restore take --platform antigravity, and find the AG root from a subfolder', () => {
+  const { home } = sandbox();
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-agproj-'))); // bare: the sandbox() project has CLAUDE.md and .coalwash.json
+  try {
+    const sub = path.join(proj, 'sub');
+    fs.mkdirSync(sub, { recursive: true });
+    const gemini = path.join(proj, 'GEMINI.md'); // no .git, no CLAUDE.md, no .coalwash.json: the AG project has only its rule file
+    fs.writeFileSync(gemini, '# AG rules\n', 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'ag-conv', gemini, { home, extraBasenames: ['GEMINI.md'] });
+    assert.ok(snap, 'the AG project file is snapshotted under the project root');
+    const without = run(sub, home, ['writeguard-list']);
+    assert.ok(!without.stdout.includes(path.basename(snap)), 'without the flag the walk stops at the subfolder: the snapshot is not listed');
+    const withFlag = run(sub, home, ['writeguard-list', '--platform', 'antigravity']);
+    assert.strictEqual(withFlag.status, 0, withFlag.stderr);
+    assert.ok(withFlag.stdout.includes(path.basename(snap)), 'with --platform antigravity the walk reaches the project root and lists the snapshot');
+    const restore = run(sub, home, ['writeguard-restore', path.basename(snap), '--platform', 'antigravity']);
+    assert.strictEqual(restore.status, 0, restore.stderr);
+    assert.strictEqual(restore.stdout, '# AG rules\n', 'the restore prints the original bytes');
+    const bad = run(sub, home, ['writeguard-list', '--platform', 'goose']);
+    assert.strictEqual(bad.status, 1, 'an unknown platform is refused loud, not ignored');
+  } finally { clean(home, proj); }
+});

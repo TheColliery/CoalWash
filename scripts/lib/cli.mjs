@@ -294,7 +294,7 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   return refused ? { found: false, id, refused } : { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list | writeguard-restore <snapName> | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>] | config-status [--json]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> [--platform antigravity] | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>] | config-status [--json]';
 
 // UMB-133 — the READ-ONLY report for BOTH holes: was the config actually read
 // from a LEGACY path, and is there a `.coalwash.json` sitting somewhere this
@@ -329,6 +329,15 @@ function configStatusLines({ resolution, ignored }) {
 function argAfter(args, flag) {
   const i = args.indexOf(flag);
   return i !== -1 && args[i + 1] ? args[i + 1] : null;
+}
+// 29g fire 412 (unit D): an AG project's folder carries GEMINI.md or AGENTS.md, which the Claude Code root walk does not know. The
+// writeguard commands take --platform antigravity to walk up to it. No flag or claude-code is the walk it was; any other value is refused.
+const AG_ROOT_MARKERS = ['GEMINI.md', 'AGENTS.md'];
+function rootOptsFor(args) {
+  const p = argAfter(args, '--platform');
+  if (p === null || p === 'claude-code') return {};
+  if (p === 'antigravity') return { extraMarkers: AG_ROOT_MARKERS };
+  return null;
 }
 function estateOpts(args) {
   const home = os.homedir();
@@ -451,8 +460,10 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'writeguard-list') {
+    const rootOpts = rootOptsFor(args);
+    if (!rootOpts) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const rows = listWriteguard(findProjectRoot(process.cwd(), os.homedir()), { home: os.homedir() });
+      const rows = listWriteguard(findProjectRoot(process.cwd(), os.homedir(), rootOpts), { home: os.homedir() });
       if (!rows.length) { console.log('[CoalWash] no write-guard snapshots this session.'); return; }
       // Metadata ONLY — the agent points at a snapshot, never reproduces bytes.
       for (const r of rows) console.log(`${r.name}\t${r.bytes} bytes\tsession ${r.session}\t${r.snapshotPath}`);
@@ -461,10 +472,12 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'writeguard-restore') {
-    const name = args[1];
-    if (!name) { console.error(USAGE); process.exitCode = 1; return; }
+    // The snapshot name is the first argument that is not a flag and not the value of --platform (29g fire 412: the flag may come first).
+    const name = args.slice(1).find((a, i, arr) => !a.startsWith('--') && arr[i - 1] !== '--platform');
+    const rootOpts = rootOptsFor(args);
+    if (!name || !rootOpts) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const projectRoot = findProjectRoot(process.cwd(), os.homedir());
+      const projectRoot = findProjectRoot(process.cwd(), os.homedir(), rootOpts);
       const r = readWriteguardSnapshot(projectRoot, name, { home: os.homedir() });
       if (!r) {
         // grad10-round-2 MED-5: readWriteguardSnapshot returns null for TWO
