@@ -463,6 +463,8 @@ test('sweep: keeps the CURRENT session\'s snapshots, drops every prior session\'
     const gov = path.join(proj, 'MEMORY.md'); fs.writeFileSync(gov, GOV, 'utf8');
     snapshotOnFirstWrite(proj, 'old-session', gov, { home });
     snapshotOnFirstWrite(proj, 'current-session', gov, { home });
+    // 29f F306-1: 'old-session' is 25 h idle, so the sweep may remove it. A fresh one is another live session's.
+    backdateSession(path.join(wgRoot(proj), 'old-session'), 25 * 60 * 60 * 1000);
     // a sibling bin dir that must never be touched by the sweep.
     const bin = path.join(proj, '.claude', 'coalwash', 'fat-bin');
     fs.mkdirSync(bin, { recursive: true }); fs.writeFileSync(path.join(bin, 'item'), 'x', 'utf8');
@@ -523,9 +525,61 @@ test('sweep: a committed session-dir LINK is removed as a link -- the link targe
     snapshotOnFirstWrite(proj, 'current-session', gov, { home });
     fs.writeFileSync(path.join(outside, 'keep.txt'), 'KEEP');
     try { fs.symlinkSync(outside, path.join(wgRoot(proj), 'old-session'), process.platform === 'win32' ? 'junction' : 'dir'); } catch { t.skip('this volume cannot make a directory link'); return; }
+    // 29f F306-1: the link's own mtime is 25 h old (lutimes never follows it); the sweep reads a link by lstat only.
+    const linkAged = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    fs.lutimesSync(path.join(wgRoot(proj), 'old-session'), linkAged, linkAged);
     sweepWriteguard(proj, 'current-session', { home });
     assert.strictEqual(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'KEEP', 'the link target keeps its file: the sweep did not follow the link');
     assert.throws(() => fs.lstatSync(path.join(wgRoot(proj), 'old-session')), { code: 'ENOENT' }, 'the sweep did visit the link entry and removed the link itself');
     assert.ok(fs.existsSync(path.join(wgRoot(proj), 'current-session')), 'the current session survives');
   } finally { clean(home, proj, outside); }
+});
+
+// ---- 29f F306-1: the sweep keeps a LIVE session's undo net. A folder whose newest entry (its own mtime included) is younger than
+// 24 h belongs to another session. Fixtures are sandbox folders under os.tmpdir(); no real clock waits.
+function writeSession(proj, name, files = ['snap.bin']) {
+  const dir = path.join(wgRoot(proj), name);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const f of files) fs.writeFileSync(path.join(dir, f), 'snapshot\n', 'utf8');
+  return dir;
+}
+// Ages a session folder: its direct entries first, then the folder itself (writing an entry moves the folder's mtime to now).
+function backdateSession(dir, ageMs) {
+  const t = new Date(Date.now() - ageMs);
+  for (const n of fs.readdirSync(dir)) fs.utimesSync(path.join(dir, n), t, t);
+  fs.utimesSync(dir, t, t);
+}
+
+test('29f F306-1: two live sessions, both written now, keep each other through a sweep from either side', () => {
+  const { home, proj } = sandbox();
+  try {
+    writeSession(proj, 'cc-sess-1');
+    writeSession(proj, 'ag-conv-1');
+    sweepWriteguard(proj, 'cc-sess-1', { home });
+    assert.ok(fs.existsSync(path.join(wgRoot(proj), 'ag-conv-1')), 'a sweep from cc-sess-1 keeps the other live session');
+    sweepWriteguard(proj, 'ag-conv-1', { home });
+    assert.ok(fs.existsSync(path.join(wgRoot(proj), 'cc-sess-1')), 'and a sweep from ag-conv-1 keeps cc-sess-1');
+  } finally { clean(home, proj); }
+});
+
+test('29f F306-1: a prior session idle 25 hours is removed, its folder and entries backdated', () => {
+  const { home, proj } = sandbox();
+  try {
+    backdateSession(writeSession(proj, 'old-sess'), 25 * 60 * 60 * 1000);
+    writeSession(proj, 'cur-sess');
+    sweepWriteguard(proj, 'cur-sess', { home });
+    assert.strictEqual(fs.existsSync(path.join(wgRoot(proj), 'old-sess')), false, 'a session idle past the floor is removed');
+    assert.ok(fs.existsSync(path.join(wgRoot(proj), 'cur-sess')), 'the current session is kept');
+  } finally { clean(home, proj); }
+});
+
+test('29f F306-1: a folder backdated past the floor but holding one entry written now is kept', () => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = writeSession(proj, 'mixed-sess', ['old.bin']);
+    backdateSession(dir, 25 * 60 * 60 * 1000);
+    fs.writeFileSync(path.join(dir, 'new.bin'), 'fresh\n', 'utf8'); // a fresh entry: the newest mtime is now
+    sweepWriteguard(proj, 'cur-sess', { home });
+    assert.ok(fs.existsSync(dir), 'the newest entry is young, so the session is live and kept');
+  } finally { clean(home, proj); }
 });

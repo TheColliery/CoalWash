@@ -169,6 +169,10 @@ test('SessionStart sweeps prior-conversation snapshots and keeps the current one
     const current = path.join(wgRoot(proj), CONVERSATION);
     fs.mkdirSync(prior, { recursive: true });
     fs.writeFileSync(path.join(prior, 'stale.snap'), 'old', 'utf8');
+    // 29f F306-1: the prior conversation is 25 h idle, so the sweep may remove it. A fresh one is another live session's.
+    const aged = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    fs.utimesSync(path.join(prior, 'stale.snap'), aged, aged);
+    fs.utimesSync(prior, aged, aged);
     fs.mkdirSync(current, { recursive: true });
     fs.writeFileSync(path.join(current, 'live.snap'), 'new', 'utf8');
     const r = spawnAg(proj, home, ['SessionStart'], commonPayload(proj));

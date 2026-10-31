@@ -480,10 +480,23 @@ export function readWriteguardSnapshot(projectRoot, snapName, { home } = {}) {
   return null;
 }
 
+// 29f F306-1: a session folder whose newest entry is younger than this is another LIVE session's undo net, and the sweep keeps it.
+// 24 hours outlives a working day. A session idle longer than that loses its undo net: that is the residual, and storage stays
+// bounded by one day of snapshots.
+export const WRITEGUARD_LIVE_MS = 24 * 60 * 60 * 1000;
+
+// The newest mtime over a session folder: its own, and its direct entries'. A link is read by lstat and never followed into its target.
+function newestSessionMtime(dir) {
+  const st = fs.lstatSync(dir);
+  let newest = st.mtimeMs;
+  if (st.isSymbolicLink() || !st.isDirectory()) return newest;
+  for (const n of fs.readdirSync(dir)) newest = Math.max(newest, fs.lstatSync(path.join(dir, n)).mtimeMs);
+  return newest;
+}
+
 // Run-gated cleanup (SessionStart, event-driven — NEVER a clock; 0h-GUARD
-// spirit): drop every writeguard session dir except the current one. NOT a bin
-// sweep, NOT retention.mjs — a plain keep-current-drop-prior fs cleanup, the
-// same discipline as the spawn-meter's per-session counter reset. Fail-silent.
+// spirit): drop every writeguard session dir except the current one and any
+// younger than WRITEGUARD_LIVE_MS. NOT a bin sweep, NOT retention.mjs. Fail-silent.
 export function sweepWriteguard(projectRoot, currentSessionId, { home: _home } = {}) {
   try {
     const root = writeguardRoot(projectRoot);
@@ -491,7 +504,11 @@ export function sweepWriteguard(projectRoot, currentSessionId, { home: _home } =
     const keep = sanitizeSession(currentSessionId);
     for (const name of fs.readdirSync(root)) {
       if (name === keep || name === '.gitignore') continue;
-      try { fs.rmSync(path.join(root, name), { recursive: true, force: true }); } catch { /* leftover waits for the next pass */ }
+      const dir = path.join(root, name);
+      let newest;
+      try { newest = newestSessionMtime(dir); } catch { continue; } // unreadable: keep it, the next pass decides
+      if (Date.now() - newest < WRITEGUARD_LIVE_MS) continue;
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* leftover waits for the next pass */ }
     }
   } catch { /* fail-silent */ }
 }

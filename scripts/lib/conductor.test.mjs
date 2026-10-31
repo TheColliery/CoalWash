@@ -1650,6 +1650,10 @@ test('0p sweep: SessionStart drops a PRIOR session\'s writeguard snapshots, keep
     fs.writeFileSync(gov, GOV_BODY, 'utf8');
     run(proj, home, { hook_event_name: 'PreToolUse', tool_name: 'Edit', session_id: 'old', tool_input: { file_path: gov } });
     assert.ok(fs.existsSync(path.join(wgDir(proj), 'old')));
+    // 29f F306-1: the old session is 25 h idle, so the sweep may remove it. A fresh one is another live session's.
+    const aged = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    for (const n of fs.readdirSync(path.join(wgDir(proj), 'old'))) fs.utimesSync(path.join(wgDir(proj), 'old', n), aged, aged);
+    fs.utimesSync(path.join(wgDir(proj), 'old'), aged, aged);
     // A new SessionStart with a different session_id sweeps the old dir.
     const r = run(proj, home, { hook_event_name: 'SessionStart', session_id: 'new' });
     assertGraceful(r);
