@@ -840,8 +840,37 @@ test('F422-2 --platform with no value, or with an unknown value, is a named usag
 test('F415-1 gauge --platform antigravity measures the AG parcel, even on a box that also has Claude Code', () => {
   const { home, proj } = sandbox(); // sandbox() makes ~/.claude: a two-agent box
   try {
+    fs.writeFileSync(path.join(proj, 'GEMINI.md'), '# project rules\n', 'utf8'); // the AG parcel; sandbox()'s CLAUDE.md is the CC file beside it
     const r = run(proj, home, ['gauge', '--json', '--platform', 'antigravity']);
     assert.strictEqual(r.status, 0, r.stderr);
     assert.strictEqual(JSON.parse(r.stdout).platform, 'antigravity');
+    assert.strictEqual(JSON.parse(r.stdout).measure.files, 1, 'the measured AG files: the project GEMINI.md, and not the CC CLAUDE.md beside it');
+  } finally { clean(home, proj); }
+});
+
+// 29i fire 440, F432-2 (INSPECT 432, ruling 3): the --platform= form is parsed as the same value as --platform <value>. An unknown value in
+// that form is refused, never read as the Claude Code walk.
+test('F432-2 --platform=antigravity behaves like --platform antigravity; --platform=foo is refused', () => {
+  const { home, proj } = sandbox();
+  try {
+    const ok = run(proj, home, ['gauge', '--json', '--platform=antigravity']);
+    assert.strictEqual(ok.status, 0, ok.stderr);
+    assert.strictEqual(JSON.parse(ok.stdout).platform, 'antigravity', 'the = form selects the AG route');
+    const bad = run(proj, home, ['gauge', '--json', '--platform=foo']);
+    assert.notStrictEqual(bad.status, 0, '--platform=foo exits non-zero');
+    assert.ok(/--platform takes antigravity or claude-code/.test(bad.stderr), `named refusal: ${bad.stderr.slice(0, 120)}`);
+  } finally { clean(home, proj); }
+});
+
+// 29i fire 440, item (h) (INSPECT 432 F432-1, ruling 2): RE-TIER and ULTRA act on Claude Code's store. Given --platform antigravity they are
+// refused by name, never silently run or silently ignoring the flag.
+test('(h) RE-TIER and ULTRA commands refuse --platform antigravity by name', () => {
+  const { home, proj } = sandbox();
+  try {
+    for (const cmd of ['retier-scan', 'retier-run', 'estate', 'estate-scan', 'estate-run', 'estate-search', 'estate-restore']) {
+      const r = run(proj, home, [cmd, '--platform', 'antigravity', 'x']);
+      assert.notStrictEqual(r.status, 0, `${cmd} --platform antigravity exits non-zero`);
+      assert.ok(/does not run on Antigravity/.test(r.stderr), `${cmd} refuses by name: ${r.stderr.slice(0, 140)}`);
+    }
   } finally { clean(home, proj); }
 });

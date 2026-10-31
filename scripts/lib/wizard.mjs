@@ -100,7 +100,8 @@ export function neutralScan(opts) {
     : merged;
   const scanEverything = clampedRead(effective, 'scanEverything');
   const readBudgetBytes = readBudgetFor(scanEverything);
-  const disc = discoverClassB({ projectRoot, home, managedPaths, platform });
+  // 29i F435-2: cwd reaches discovery, so the AG walk starts at the working folder; an omitted cwd keeps the root walk.
+  const disc = discoverClassB({ projectRoot, home, managedPaths, platform, cwd: opts && opts.cwd });
   const m = measureEntries(disc.entries, { withGzip: false, readBudgetBytes });
   return { platform: disc.platform, flags: disc.flags, measure: m };
 }

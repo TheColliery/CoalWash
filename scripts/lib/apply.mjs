@@ -60,7 +60,7 @@ import { gitEnv } from './git-env.mjs'; // the room's one GIT_*-stripping helper
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, findProjectRoot, projectRootFor, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
+import { claudeBaseDir, projectRootFor, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir, openPlainFile, ensureCatchAllIgnore } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
@@ -1819,10 +1819,15 @@ export function applyPlan(plan, opts = {}) {
       //     cwd · home · isPlaceholder · keepSnapshots · now · platform · projectRoot · txDir
       //   AMBIENT — 3:  Date.now() · os.homedir() · process.cwd()
       //
-      // THE ONE-FIELD CORRECTION IS LOAD-BEARING, not bookkeeping. INSPECT counted
-      // 13 CODE-READ named inputs; the code reads 12. `plan.projectRoot` appears in
-      // this function ONLY inside comments — the trust anchor above deliberately
-      // ignores it and derives the root from `opts.projectRoot || findProjectRoot(...)`.
+      // THE ONE-FIELD CORRECTION IS LOAD-BEARING, not bookkeeping. INSPECT first
+      // counted 13 and the code read 12; the gap was `plan.projectRoot`, named in
+      // this function ONLY inside comments. 29h F415-1 then added opts.platform: on
+      // the AG route it narrows the trusted outer gate to the project root and moves
+      // the anchor to the .git root (findAgProjectRoot). The derived-anchor home-swallow
+      // guard holds on the moved anchor (INSPECT 432 H1). The count is 13 CODE-READ
+      // named inputs (5 plan + 8 opts, all read) plus plan.projectRoot, named and never
+      // read: the trust anchor above derives the root from `opts.projectRoot ||
+      // projectRootFor(...)`, and plan.projectRoot never reaches it.
       // It is still an INPUT (a forger puts it in PLAN.json), so it belongs in the
       // census; it simply cannot close A4 for a STRONGER reason than the others:
       // not merely "the forger types it" but "nothing here ever reads it".
@@ -1986,8 +1991,10 @@ export function recoverDangling(projectRoot, opts = {}) {
     // copy — see its comment for why a paste was the wrong fix. No trustedAnchor:
     // the caller derived this root from cwd (cli.mjs gauge), so it takes the
     // fail-closed reading of both legs.
-    const anchorGate = trustedRootsForAnchor(projectRoot, home);
+    // 29i F435-1: the platform narrows the trusted outer gate exactly as it does for applyPlan (the AG route trusts the project root only).
+    const anchorGate = trustedRootsForAnchor(projectRoot, home, { platform: opts.platform });
     if (!anchorGate.ok) return { recovered: 'none', error: anchorGate.error };
+    const trustedRoots = anchorGate.roots; // named here so the AG pre-checks below and the copy/create loops read the same trusted gate
     const txDir = opts.txDir || ownSandboxDir(projectRoot, '.claude', 'coalwash'); // CWK-137, as in applyPlan
     const journalPath = path.join(txDir, JOURNAL_NAME);
     if (!fs.existsSync(journalPath)) return { recovered: 'none' };
@@ -2042,6 +2049,17 @@ export function recoverDangling(projectRoot, opts = {}) {
     if (snapDir && (!txPhys || !snapPhys || !containedIn(snapPhys, [txPhys]))) {
       return { recovered: 'none', error: 'journal snapDir is outside the transaction directory — refusing to replay (left for inspection)' };
     }
+    // 29i F435-1 (ruling 1): on the AG route the WHOLE journal is checked against the AG trusted roots before the first touch. A journal that
+    // names a root, or a create path, outside them is left exactly as it is. A half rollback (the project rows restored, the CC rows refused)
+    // is worse than either whole, so no row is restored and the Claude Code session that owns the journal recovers it whole.
+    if (opts.platform === 'antigravity') {
+      const outside = (p) => typeof p !== 'string' || !physicalForCreate(p) || !containedIn(physicalForCreate(p), trustedRoots);
+      const declared = Array.isArray(journal.roots) ? journal.roots : [];
+      const creates = (journal.steps || []).filter((s) => s && s.type === 'create').map((s) => s.path);
+      if (declared.some(outside) || creates.some(outside)) {
+        return { recovered: 'none', error: 'the journal reaches outside this platform\'s trusted roots (the Antigravity project root); left for a Claude Code session to recover' };
+      }
+    }
     const marker = snapPhys && fs.existsSync(path.join(snapPhys, SNAP_MARKER));
     if (!marker) {
       // no complete snapshot => the first mutation never happened
@@ -2056,11 +2074,10 @@ export function recoverDangling(projectRoot, opts = {}) {
     if (!jroots.length) {
       return { recovered: 'none', error: 'journal has no verifiable roots — refusing to replay (left for inspection)' };
     }
-    // The trusted outer gate, resolved by the anchor gate at the top of this
+    // The trusted outer gate is `trustedRoots`, declared next to the anchor gate at the top of this
     // function (its comment carries the full rationale). jroots below is the
     // SECONDARY narrowing — ANDed with these on every use, never standing alone,
     // which is the circularity a poisoned journal would otherwise exploit.
-    const trustedRoots = anchorGate.roots;
     // snapPhys is the tx-dir-BOUND canonical form resolved above — not a fresh
     // canonicalization of the raw journal string. Every read below goes through it,
     // so the manifest is loaded from the bound location, never the raw one.
@@ -2068,6 +2085,11 @@ export function recoverDangling(projectRoot, opts = {}) {
     // CWK-137: bounded. E2-4: contained to txDir ITSELF; a refused or non-list manifest replays nothing and keeps the journal.
     const manifest = JSON.parse(readRepoFileBounded(path.join(snapPhys, 'manifest.json'), txDir, MAX_DOC_BYTES) ?? 'null');
     if (!Array.isArray(manifest)) return { recovered: 'none', error: 'snapshot manifest unreadable — refusing to replay (left for inspection)' };
+    // 29i F435-1: on the AG route every manifest row (a restore target) is checked against the AG trusted roots BEFORE the first copy.
+    if (opts.platform === 'antigravity') {
+      const rowOutside = (m) => !m || typeof m.original !== 'string' || !physicalForCreate(m.original) || !containedIn(physicalForCreate(m.original), trustedRoots);
+      if (manifest.some(rowOutside)) return { recovered: 'none', error: 'the journal reaches outside this platform\'s trusted roots (the Antigravity project root); left for a Claude Code session to recover' };
+    }
     let restored = 0, failed = 0, refused = 0, refusedPinned = 0, refusedGit = 0;
     const replayed = new Set(); // CWK-162 B8: each distinct target is replayed once, however many manifest rows name it
     for (const m of manifest) {

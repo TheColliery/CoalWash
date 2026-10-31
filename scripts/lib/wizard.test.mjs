@@ -331,3 +331,21 @@ test('CWK-120 row 14: a main-side root spelled as an 8.3 SHORT name derives the 
     assert.deepStrictEqual([r.ok, r.refuse, r.mismatches], [true, false, []], 'the clone, which lands in the long form, matches');
   } finally { clean(home, longRoot); }
 });
+
+// 29i fire 440, F435-2 (CodeRabbit t239, ruling 4): neutralScan takes cwd and passes it to discovery, so a subfolder GEMINI.md the working
+// folder carries is counted. A caller that omits cwd keeps the root walk.
+test('F435-2 neutralScan takes cwd: a subfolder GEMINI.md is counted from the working folder; an omitted cwd keeps the root walk', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwiz-f435-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwiz-f435-proj-')));
+  try {
+    fs.mkdirSync(path.join(proj, '.git'));
+    const sub = path.join(proj, 'sub');
+    fs.mkdirSync(sub);
+    fs.writeFileSync(path.join(proj, 'GEMINI.md'), 'root rules\n', 'utf8');
+    fs.writeFileSync(path.join(sub, 'GEMINI.md'), 'sub rules\n', 'utf8');
+    const withCwd = neutralScan({ projectRoot: proj, home, platform: 'antigravity', cwd: sub });
+    const withoutCwd = neutralScan({ projectRoot: proj, home, platform: 'antigravity' });
+    assert.strictEqual(withCwd.measure.files, 2, 'the root and the subfolder GEMINI.md are both counted from the working folder');
+    assert.strictEqual(withoutCwd.measure.files, 1, 'an omitted cwd keeps the root walk: the root GEMINI.md only');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(proj, { recursive: true, force: true }); }
+});

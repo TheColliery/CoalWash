@@ -198,7 +198,7 @@ export function gauge(opts = {}) {
   // through this front door and the gate would pass vacuously.
   const home = opts.home || os.homedir();
   const projectRoot = projectRootFor(opts.cwd || process.cwd(), home, { platform: opts.platform });
-  const recover = recoverDangling(projectRoot, { home });
+  const recover = recoverDangling(projectRoot, { home, platform: opts.platform }); // 29i F435-1: the AG route recovers only inside its own roots
   return { ...measureOnly(opts), recover };
 }
 
@@ -335,12 +335,30 @@ function argAfter(args, flag) {
 // 29h F422-2: an absent flag is the Claude Code walk. A flag with no value, or with a value it does not take, is refused (null) with a
 // named message; it is never silently read as Claude Code.
 const PLATFORM_USAGE = '[CoalWash] --platform takes antigravity or claude-code (omit it for Claude Code)';
+// 29i F432-2: one parser for both forms. `--platform=<value>` and `--platform <value>` carry the same value; an absent flag is undefined.
+function platformValue(args) {
+  const eq = args.find((a) => a.startsWith('--platform='));
+  if (eq !== undefined) return eq.slice('--platform='.length);
+  if (!args.includes('--platform')) return undefined;
+  return argAfter(args, '--platform') ?? '';
+}
 function rootOptsFor(args) {
-  if (!args.includes('--platform')) return {};
-  const p = argAfter(args, '--platform');
-  if (p === 'claude-code') return {};
+  const p = platformValue(args);
+  if (p === undefined || p === 'claude-code') return {};
   if (p === 'antigravity') return { platform: 'antigravity' };
   return null;
+}
+// 29i (ruling 2): RE-TIER and ULTRA act on Claude Code's store and do not run on Antigravity. Given the flag they are refused by name
+// (exit 1) and never run; an invalid value is the usage error of rootOptsFor. Returns true when the command must stop.
+function refusedOnAg(args, cmd) {
+  const rootOpts = rootOptsFor(args);
+  if (rootOpts === null) { console.error(PLATFORM_USAGE); process.exitCode = 1; return true; }
+  if (rootOpts.platform === 'antigravity') {
+    console.error(`[CoalWash] ${cmd} acts on Claude Code's store and does not run on Antigravity (--platform antigravity refused)`);
+    process.exitCode = 1;
+    return true;
+  }
+  return false;
 }
 // 29h F415-1: the AG route's state lives in the AG namespace, so a CLI read of it goes through that namespace, and the namespace is reset after.
 function withStateNamespace(platform, fn) {
@@ -526,6 +544,7 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'estate') {
+    if (refusedOnAg(args, 'estate')) return;
     try {
       const home = os.homedir();
       const projectRoot = findProjectRoot(process.cwd(), home);
@@ -541,6 +560,7 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'estate-scan') {
+    if (refusedOnAg(args, 'estate-scan')) return;
     try {
       const opts = estateOpts(args);
       for (const line of projectBoundHints(opts)) console.error(line);
@@ -551,6 +571,7 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'estate-run') {
+    if (refusedOnAg(args, 'estate-run')) return;
     try {
       const opts = estateOpts(args);
       for (const line of projectBoundHints(opts)) console.error(line);
@@ -562,6 +583,7 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'estate-search') {
+    if (refusedOnAg(args, 'estate-search')) return;
     const query = args.slice(1).filter((a) => !a.startsWith('--')).join(' ');
     if (!query) { console.error(USAGE); process.exitCode = 1; return; }
     try {
@@ -579,6 +601,7 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'retier-scan') {
+    if (refusedOnAg(args, 'retier-scan')) return;
     // RE-TIER (wizard's FOURTH choice) — the bill AFTER the choice: envelope
     // state (band now vs target/arm/disarm), planned placement per item, #55
     // contradiction flags. REPORT-ONLY: no lock, no state, no writes.
@@ -592,6 +615,7 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'retier-run') {
+    if (refusedOnAg(args, 'retier-run')) return;
     // The transactional pass (RUN-GATED BY CONTRACT: the SKILL invokes it only
     // after the wizard's RE-TIER choice — never wired to a hook). Refuses in
     // the dead zone (LEAN-stop); lock held elsewhere -> deferred, untouched.
@@ -609,6 +633,7 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'estate-restore') {
+    if (refusedOnAg(args, 'estate-restore')) return;
     const sessionId = args[1];
     if (!sessionId || sessionId.startsWith('--')) { console.error(USAGE); process.exitCode = 1; return; }
     try {

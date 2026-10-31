@@ -3753,7 +3753,7 @@ test('CWK-081 A4 FOURTH TENSE: applyPlan\'s CODE-READ input census is PINNED —
     ['cwd', 'home', 'isPlaceholder', 'keepSnapshots', 'now', 'platform', 'projectRoot', 'txDir'],
     'opts.* moved — this is the exact case the A4 note used to say nothing fires on');
   assert.deepStrictEqual(c.ambient, ['Date.now()', 'os.homedir()', 'process.cwd()'], 'the ambient channel moved');
-  assert.strictEqual(c.plan.length + c.opts.length, 13, '13 CODE-READ named inputs — the figure the A4 note publishes (29h F415-1 added opts.platform)');
+  assert.strictEqual(c.plan.length + c.opts.length, 13, '13 CODE-READ named inputs (5 plan + 8 opts, all read) — the figure the A4 note publishes (29h F415-1 added opts.platform)');
 });
 
 // THE TRUST ANCHOR, pinned from the other side: `plan.projectRoot` is RECEIVED
@@ -4999,5 +4999,77 @@ test('F415-1/F415-3 an AG-route plan trusts the project root only: the CC memory
     const ok = applyPlan({ roots: [proj], actions: [{ type: 'rewrite', path: gem, content: 'new\n' }], sessionId: 'f415-1b' }, { projectRoot: proj, home, platform: 'antigravity' });
     assert.strictEqual(ok.ok, true, `control: the project GEMINI.md lands on the AG route: ${ok.error}`);
     assert.strictEqual(fs.readFileSync(gem, 'utf8'), 'new\n');
+  } finally { clean(proj, home); }
+});
+
+// 29i fire 440, F435-1 (CodeRabbit t239, ruling 1): the AG route's crash recovery leaves any journal that reaches outside the AG trusted
+// roots (the project root only) untouched, before the first touch. A half rollback is worse than either whole, so no row is restored.
+// A journal wholly inside the project recovers as before. The CC route (no platform) is unchanged.
+function danglingTx(proj, rows, roots, cc) {
+  const txDir = path.join(proj, '.claude', 'coalwash');
+  const snap = path.join(txDir, 'snap-1');
+  fs.mkdirSync(snap, { recursive: true });
+  rows.forEach((r, i) => { fs.writeFileSync(path.join(snap, `f${i}`), r.before, 'utf8'); });
+  fs.writeFileSync(path.join(snap, 'snap.complete'), '', 'utf8');
+  fs.writeFileSync(path.join(snap, 'manifest.json'), JSON.stringify(rows.map((r, i) => ({ snap: `f${i}`, original: r.target }))), 'utf8');
+  fs.writeFileSync(path.join(txDir, 'journal.json'), JSON.stringify({ version: 1, status: 'applying', snapDir: snap, roots, steps: [] }), 'utf8');
+  return { txDir, snap, cc };
+}
+test('F435-1 an AG-route recovery of a journal that reaches the CC memory store leaves it untouched: nothing restored, journal and snapshot kept', async () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f435-home-')));
+  try {
+    const { ccMemoryDir } = await import('./class-b.mjs');
+    const ccFile = path.join(ccMemoryDir(proj, home), 'MEMORY.md');
+    write(ccFile, 'AFTER (mid-transaction CC write)\n');
+    const { txDir, snap } = danglingTx(proj, [{ target: ccFile, before: 'BEFORE (CC snapshot)\n' }], [path.dirname(ccFile)]);
+    const r = recoverDangling(proj, { home, platform: 'antigravity' });
+    assert.strictEqual(r.recovered, 'none', `refused on the AG route: ${JSON.stringify(r)}`);
+    assert.match(r.error || '', /trusted roots/, 'the refusal is named');
+    assert.strictEqual(fs.readFileSync(ccFile, 'utf8'), 'AFTER (mid-transaction CC write)\n', 'the CC memory file is untouched');
+    assert.ok(fs.existsSync(path.join(txDir, 'journal.json')), 'the journal is kept for a Claude Code session');
+    assert.ok(fs.existsSync(path.join(snap, 'snap.complete')), 'the snapshot is kept');
+  } finally { clean(proj, home); }
+});
+test('F435-1 an AG-route journal holding one project row and one CC-store row restores NOTHING (no half rollback)', async () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f435-half-')));
+  try {
+    const { ccMemoryDir } = await import('./class-b.mjs');
+    const projFile = path.join(proj, 'GEMINI.md');
+    const ccFile = path.join(ccMemoryDir(proj, home), 'MEMORY.md');
+    write(projFile, 'AFTER project\n');
+    write(ccFile, 'AFTER cc\n');
+    danglingTx(proj, [{ target: projFile, before: 'BEFORE project\n' }, { target: ccFile, before: 'BEFORE cc\n' }], [proj, path.dirname(ccFile)]);
+    const r = recoverDangling(proj, { home, platform: 'antigravity' });
+    assert.strictEqual(r.recovered, 'none', `refused whole: ${JSON.stringify(r)}`);
+    assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'AFTER project\n', 'the project row was NOT restored either');
+    assert.strictEqual(fs.readFileSync(ccFile, 'utf8'), 'AFTER cc\n', 'the CC row was not restored');
+  } finally { clean(proj, home); }
+});
+test('F435-1 an AG-route journal wholly inside the project recovers whole', async () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f435-ok-')));
+  try {
+    const projFile = path.join(proj, 'GEMINI.md');
+    write(projFile, 'AFTER\n');
+    danglingTx(proj, [{ target: projFile, before: 'BEFORE\n' }], [proj]);
+    const r = recoverDangling(proj, { home, platform: 'antigravity' });
+    assert.strictEqual(r.recovered, 'rolled-back', JSON.stringify(r));
+    assert.strictEqual(r.restored, 1);
+    assert.strictEqual(fs.readFileSync(projFile, 'utf8'), 'BEFORE\n');
+  } finally { clean(proj, home); }
+});
+test('F435-1 control: the Claude Code route (no platform) still recovers the CC memory row', async () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f435-cc-')));
+  try {
+    const { ccMemoryDir } = await import('./class-b.mjs');
+    const ccFile = path.join(ccMemoryDir(proj, home), 'MEMORY.md');
+    write(ccFile, 'AFTER\n');
+    danglingTx(proj, [{ target: ccFile, before: 'BEFORE\n' }], [path.dirname(ccFile)]);
+    const r = recoverDangling(proj, { home });
+    assert.strictEqual(r.recovered, 'rolled-back', JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(ccFile, 'utf8'), 'BEFORE\n');
   } finally { clean(proj, home); }
 });
