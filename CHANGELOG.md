@@ -2,7 +2,13 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.13.1] - 2026-10-31
+
+A session start no longer deletes another live session's undo snapshots
+
+### Fixed
+
+- A session start keeps any session's undo snapshots written in the last 24 hours, so two sessions on one project no longer delete each other's. Changed lines in `scripts/lib/writeguard.mjs`: 483-496, 498-499 and 507-511.
 
 ### Security
 
