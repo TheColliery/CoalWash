@@ -227,7 +227,9 @@ function updateDue(cfg, clampedRead, caliper) {
   } catch { return false; }
 }
 
-async function handleSessionStart(input) {
+async function handleSessionStart(input, opts = {}) {
+  // opts.emit: the sanctioned-channel writer (default: CC's plain-stdout injection). opts.updateNudge: false skips the self-update schedule entirely, so no stamp is written for a host whose context channel cannot carry it.
+  const emit = opts.emit || ((text) => console.log(text));
   const [{ loadMergedConfigReport, unreadableNotice, findProjectRoot, discoverIgnoredConfigs }, { clampedRead, envelopeForConfig }, classB, caliper] = await Promise.all([
     import(lib('config-load.mjs')),
     import(lib('config-schema.mjs')),
@@ -247,7 +249,7 @@ async function handleSessionStart(input) {
     // readable `off` stays fully silent, and so does an unreadable PROJECT config beneath it (nothing to report to
     // someone who switched the skill off).
     const failSafe = unreadable.filter((u) => u.tier === 'global').map((u) => `[CoalWash] ${unreadableNotice(u)}`);
-    if (failSafe.length) console.log(failSafe.join('\n')); // sanctioned SessionStart context-injection channel (Phoenix #13)
+    if (failSafe.length) emit(failSafe.join('\n')); // sanctioned SessionStart context-injection channel (Phoenix #13)
     return;
   }
   const language = clampedRead(cfg, 'language');
@@ -427,13 +429,13 @@ async function handleSessionStart(input) {
     out.push('[CoalWash] Scan scope: scanEverything is ON — both SCAN-scope cuts were bypassed for the gauge that just ran: (1) the always-loaded READ BUDGET (262144 B) is lifted, so no always-loaded entry is skipped for budget and its certain fat is measured instead of counting as muscle by default (an entry whose read FAILS still contributes nothing — that path is unchanged); (2) the 200-path cap on the Stop hook\'s cheap re-stat baseline is not applied. It widens only what is SEEN: keeps.json, the KEEPS-GATE, every other delete gate, localOnly and every consent gate are untouched — nothing is deleted, merged or mutated that would not have been. Still narrower than "everything": recall-tier entries are sized from stat bytes and never read, and a file the platform never surfaced as class-B is not here. Costs more than a normal gauge by design. Set scanEverything to false to restore the normal scan scope.');
   }
 
-  if (updateDue(cfg, clampedRead, caliper)) {
+  if (opts.updateNudge !== false && updateDue(cfg, clampedRead, caliper)) {
     out.push('[CoalWash] [self-update due] Offer the /coalwash:update check: web-check the latest CoalWash tag vs the installed plugin.json version; if newer, OFFER `claude plugin update coalwash@coalwash`; if current, say "up to date"; if git/network is unavailable, say so and suggest updating manually later (never assume). Consent-gated; the hook only scheduled it.');
   }
 
   if (out.length) {
     if (language !== 'auto') out.push(`[CoalWash] (language=${language} — deliver user-facing prose in that language; keep technical terms, commands, and paths verbatim)`);
-    console.log(out.join('\n')); // sanctioned SessionStart context-injection channel (Phoenix #13)
+    emit(out.join('\n')); // sanctioned SessionStart context-injection channel (Phoenix #13)
   }
 }
 
@@ -465,7 +467,9 @@ async function handleSessionStart(input) {
 // (the saving-guarantee floor). Post-0m the FULL surfacing is the forced
 // run's own receipt numbers (oneLineResult) — the user always sees what
 // happened; the wizard-escalation ask remains the only question ever asked.
-async function handleStop(input) {
+async function handleStop(input, opts = {}) {
+  // opts.emit receives the block reason. Default writes CC's structured block object, byte-for-byte as before.
+  const emit = opts.emit || ((reason) => process.stdout.write(JSON.stringify({ decision: 'block', reason })));
   if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
   const [{ loadMergedConfig, findProjectRoot }, { clampedRead, envelopeForConfig }, caliper, ask, classB] = await Promise.all([
     import(lib('config-load.mjs')),
@@ -663,7 +667,7 @@ async function handleStop(input) {
   }
 
   caliper.consumeCrossing(home, projectRoot, now); // once per crossing (consume-at-emission)
-  process.stdout.write(JSON.stringify({ decision: 'block', reason })); // sanctioned Stop blocking-feedback channel (Phoenix #13; mirrors rot-canary-stop.js)
+  emit(reason); // sanctioned Stop blocking-feedback channel (Phoenix #13; mirrors rot-canary-stop.js)
 }
 
 // 0o "SUBAGENT BLIND SPOT" — the TRUE-BILL COUNTER (spawn meter). The
@@ -843,7 +847,11 @@ async function main() {
   // shape. (Formerly an unconditional `return handleSessionStart(input);`.)
 }
 
-main().catch(() => {
-  // Phoenix #4: fail-silent, never throw, never crash the parent agent.
-});
+// Run only as the hook entry. A require() (the AG transport, or a test) gets the handlers and nothing else.
+if (require.main === module) {
+  main().catch(() => {
+    // Phoenix #4: fail-silent, never throw, never crash the parent agent.
+  });
+}
+module.exports = { readStdinJson, handleSessionStart, handleStop, handleAirbag, lib };
 // No process.exit() — Phoenix #4 (would truncate the sanctioned stdout write above).
