@@ -37,7 +37,8 @@ const AG_PROJECT_RULE_BASENAMES = ['GEMINI.md'];
 
 // Tool names AG reports for a file write. edit_file is measured on 1.4.12; the
 // others are the names AG's own tool set uses for a write, unmeasured headless.
-const AG_WRITE_TOOLS = new Set(['edit_file', 'write_file', 'write_to_file', 'create_file', 'replace_file_content', 'multi_edit']);
+// multi_replace_file_content is a real AG tool (grep of agy.exe, 29e INSPECT 309 t233): its path is TargetFile (PATH_KEYS).
+const AG_WRITE_TOOLS = new Set(['edit_file', 'write_file', 'write_to_file', 'create_file', 'replace_file_content', 'multi_replace_file_content', 'multi_edit']);
 
 // The argument keys that can carry a file path. Path is measured on edit_file
 // and read_file; the rest are the spellings AG's other write tools use.

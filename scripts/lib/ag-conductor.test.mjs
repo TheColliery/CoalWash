@@ -350,3 +350,16 @@ test('D3c the airbag snapshots the project GEMINI.md on the AG route, and never 
     assert.strictEqual(fs.readFileSync(snaps[0], 'utf8'), '# project rules\n', 'the snapshot holds the project file\'s original bytes');
   } finally { clean(home, proj); }
 });
+
+// 29g fire 412 step 4: multi_replace_file_content is a real AG write tool (INSPECT 309, t233 major: grep of agy.exe names it), with its
+// path in TargetFile. Before this step the airbag took no snapshot of an edit made through it.
+test('D4 multi_replace_file_content on MEMORY.md snapshots it, with the path in TargetFile', async () => {
+  const { home, proj } = sandbox();
+  try {
+    await routeIn(home, toolPayload(proj, 'multi_replace_file_content', { TargetFile: path.join(proj, 'MEMORY.md'), ReplacementChunks: [] }), 'PreToolUse', { agDiscovery: true });
+    const snaps = [];
+    const walk = (d) => { if (!fs.existsSync(d)) return; for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (e.name.startsWith('MEMORY.md--') && !e.name.endsWith('.origpath')) snaps.push(p); } };
+    walk(wgRoot(proj));
+    assert.strictEqual(snaps.length, 1, `one snapshot of MEMORY.md through multi_replace_file_content (found ${snaps.length})`);
+  } finally { clean(home, proj); }
+});
