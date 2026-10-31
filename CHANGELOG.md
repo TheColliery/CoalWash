@@ -4,9 +4,9 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [1.14.0] - 2026-10-31
 
-Antigravity sessions now gauge and snapshot their own rule files
+Gauge and snapshot Antigravity sessions' own rule files
 
-Claude Code behaves as in 1.13.1. On Antigravity, measured on agy 1.4.12 (headless, Windows) from a plugin install of the repository root: the session-start gauge reads that session's rule files (`GEMINI.md` and `AGENTS.md`, and the global rule files) into its own state, and the write guard takes a snapshot of a project `GEMINI.md` or `AGENTS.md` before an `edit_file` or `write_file` edit. In the measured runs agy refused the edit it had snapshotted. Not measured on Antigravity: the forced or OBESE Quick pass and the wizard ask. The Antigravity Stop handler delivers no directive, by design.
+Claude Code behaves as in 1.13.1. On Antigravity, measured on agy 1.4.12 (headless, Windows) from a plugin install of the repository root: the session-start gauge reads that session's rule files (`GEMINI.md` and `AGENTS.md`, and the global rule files) into its own state, and the write guard takes a snapshot of a project `GEMINI.md` before an `edit_file` or `write_file` edit (measured on `GEMINI.md`; `AGENTS.md` by the hermetic tests). In the measured runs agy refused the edit it had snapshotted. Not measured on Antigravity: the forced or OBESE Quick pass and the wizard ask. The Antigravity Stop handler delivers no directive, by design.
 
 ### Added
 
