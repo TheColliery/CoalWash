@@ -775,6 +775,16 @@ export function containedNewPath(target, base) {
   return containedIn(physicalOrNull(anc), [basePhys]);
 }
 
+// 29g fire 412 (unit D): the state NAMESPACE, process-scoped. Antigravity sets it to 'ag' so its per-project state never shares a file
+// with Claude Code's. The namespace is a SUBDIRECTORY (coalwash/ag/, coal/coalwash/ag/), never a filename suffix: a suffix collides
+// (the CC project slug "foo-ag" and the AG slug "foo" both name state-foo-ag.json). With no namespace every path is the one it was.
+let STATE_NAMESPACE = null;
+export function setStateNamespace(ns) {
+  if (ns !== null && !(typeof ns === 'string' && /^[a-z]+$/.test(ns))) throw new Error(`setStateNamespace: invalid namespace ${JSON.stringify(ns)}`);
+  STATE_NAMESPACE = ns;
+}
+// The subfolder(s) a namespace adds under coalwash/ (CC: none, so every path is byte-identical to before).
+function stateDirParts() { return STATE_NAMESPACE ? [STATE_NAMESPACE] : []; }
 // The per-project state path — beside the CC memory dir. Fail-closed to the
 // global coal/coalwash/ namespace (still inside ~/.claude) if the derived path
 // somehow escapes the sandbox (task #13 pt 2). Never throws: ccMemoryDir is a
@@ -782,7 +792,7 @@ export function containedNewPath(target, base) {
 // yields a deterministic path here and simply an empty read downstream (pt 5).
 // The fail-closed home: the global coal/ namespace, still inside ~/.claude.
 export function stateFallbackPath(projectRoot, home = os.homedir()) {
-  return path.join(claudeBaseDir(home), 'coal', 'coalwash', `state-${ccProjectSlug(projectRoot)}.json`);
+  return path.join(claudeBaseDir(home), 'coal', 'coalwash', ...stateDirParts(), `state-${ccProjectSlug(projectRoot)}.json`);
 }
 
 // NEVER-CREATE GUARD (2026-07-25 field fix, layer 2 — independent of the layer-1
@@ -799,7 +809,7 @@ function isExistingDir(p) {
 export function statePath(projectRoot, home = os.homedir()) {
   const base = claudeBaseDir(home);
   const slugDir = path.dirname(ccMemoryDir(projectRoot, home)); // <base>/projects/<slug>
-  const derived = path.join(slugDir, 'coalwash', 'state.json');
+  const derived = path.join(slugDir, 'coalwash', ...stateDirParts(), 'state.json');
   if (isExistingDir(slugDir) && containedNewPath(derived, base)) return derived;
   return stateFallbackPath(projectRoot, home);
 }
@@ -1123,6 +1133,7 @@ function migrateProjSchema(proj) {
 // genuinely pre-schema store — an rc.2-era crossing is PRESERVED across the pure
 // LOCATION move (a move is not a version change).
 function readOldRootEntry(projectRoot, home) {
+  if (STATE_NAMESPACE) return null; // the legacy file is Claude Code's: an AG namespace never adopts its entry (29g fire 412, D2b)
   const all = readStateFile(oldStatePath(home));
   if (!all || !all.projects || typeof all.projects !== 'object') return null;
   const entry = all.projects[projKey(projectRoot)];
@@ -1154,6 +1165,7 @@ function pruneDeadEntries(projects) {
 // stale entry. Touches ONLY CoalWash's OWN old-root file — never a wildcard
 // sweep (the recovery-paths lesson). Fail-silent (best-effort migration).
 function dropOldRootEntry(projectRoot, home) {
+  if (STATE_NAMESPACE) return; // the legacy file is Claude Code's: an AG namespace never drops, prunes or rewrites it (29g fire 412, D2b)
   try {
     const p = oldStatePath(home);
     const all = readStateFile(p);
@@ -1257,7 +1269,7 @@ function pruneStrayStateDirs(projectRoot, home) {
     for (const name of fs.readdirSync(projectsDir)) {
       if (name === mine) continue;
       const slugDir = path.join(projectsDir, name);
-      const f = path.join(slugDir, 'coalwash', 'state.json');
+      const f = path.join(slugDir, 'coalwash', ...stateDirParts(), 'state.json');
       const rec = readStateFile(f)?.projectRoot;
       if (typeof rec !== 'string' || !rec) continue;            // legacy/unknown → keep-on-doubt
       if (name !== ccProjectSlug(rec)) continue;                // the dir must BE that root's slug (anti-plant)
@@ -1265,6 +1277,7 @@ function pruneStrayStateDirs(projectRoot, home) {
       if (physicalDir(rec) === mineRoot) continue;              // that IS this project's root, not a stray
       if (!containedNewPath(f, base)) continue;                 // realpath-and-contain before ANY rm (junction escape)
       fs.rmSync(f, { force: true });                            // ours, and spurious
+      rmdirIfEmpty(path.join(slugDir, 'coalwash', ...stateDirParts()));
       rmdirIfEmpty(path.join(slugDir, 'coalwash'));
       rmdirIfEmpty(slugDir);
     }
@@ -1330,7 +1343,7 @@ export function rootIsGone(root, anchors, statSyncFn = fs.statSync) {
   return containedIn(ancPhys, roots);
 }
 export function deadProjectStateFiles(home = os.homedir()) {
-  const dir = path.join(claudeBaseDir(home), 'coal', 'coalwash');
+  const dir = path.join(claudeBaseDir(home), 'coal', 'coalwash', ...stateDirParts()); // the namespace's own folder: a CC sweep never lists an AG file, nor the reverse
   const out = [];
   const anchors = [home, os.tmpdir()];
   let names;
