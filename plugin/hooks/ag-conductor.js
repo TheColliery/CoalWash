@@ -1,0 +1,126 @@
+// CoalWash — the transport for a later Antigravity unit: the two conductor paths
+// the AG hook contract can carry today. Built on the measured contract of agy 1.4.12
+// (probe run 301, scratchpad/29e/probe/RECORD.md):
+//   - PreToolUse fires for the tool calls the agent makes (read_file and
+//     edit_file measured). The airbag runs here: a write to a guarded class-B
+//     file snapshots it first, through the same handleAirbag the CC conductor uses.
+//   - SessionStart fires once per conversation. The prior-conversation writeguard
+//     sweep runs here, through the same sweepWriteguard the CC conductor uses.
+//   - Stop and the gauge's SessionStart line are gated behind AG_DISCOVERY below.
+//     The gauge reads the Claude Code session layout (detectPlatform is
+//     claude-code only), and a Stop here would consume a pending crossing that
+//     belongs to the Claude Code session on the same project. Both wait for unit
+//     D (AG discovery).
+// NOT wired, and why:
+//   - PostToolUse: AG allows only `{}` back, so the CC seatbelt's advisory line
+//     has no channel. Not wired.
+//   - PostInvocation / PreInvocation: no CoalWash path needs them yet.
+//   - The write path itself (edit_file, write_file) is unmeasured headless: agy
+//     1.4.12 auto-denies writes in `agy -p`, so the airbag's live snapshot on AG
+//     is proven by the hermetic tests, not by an AG run.
+// Zero-dep, fail-silent (Phoenix #4): every path returns, nothing is printed
+// except the sanctioned JSON lines, and no process.exit() runs.
+'use strict';
+
+const path = require('path');
+const os = require('os');
+
+const conductor = require('./coalwash-conductor.js');
+
+// Gate for the gauge and Stop on AG. Flip it only with unit D, once AG discovery
+// exists (the Claude Code session layout must not be read from an AG session).
+const AG_DISCOVERY = false;
+
+// Tool names AG reports for a file write. edit_file is measured on 1.4.12; the
+// others are the names AG's own tool set uses for a write, unmeasured headless.
+const AG_WRITE_TOOLS = new Set(['edit_file', 'write_file', 'write_to_file', 'create_file', 'replace_file_content', 'multi_edit']);
+
+// The argument keys that can carry a file path. Path is measured on edit_file
+// and read_file; the rest are the spellings AG's other write tools use.
+const PATH_KEYS = ['Path', 'path', 'file_path', 'filePath', 'TargetFile', 'AbsolutePath'];
+
+function targetPath(args, workspace) {
+  if (!args || typeof args !== 'object') return '';
+  for (const key of PATH_KEYS) {
+    if (typeof args[key] === 'string' && args[key]) return path.resolve(workspace, args[key]);
+  }
+  return '';
+}
+
+// Prior-conversation sweep without the gauge. Mirrors the CC SessionStart order:
+// coalwashMode off returns before the sweep, and writeGuard off skips it.
+async function sweepPriorConversations(conversationId) {
+  const [{ loadMergedConfig, findProjectRoot }, { clampedRead }, writeguard] = await Promise.all([
+    import(conductor.lib('config-load.mjs')),
+    import(conductor.lib('config-schema.mjs')),
+    import(conductor.lib('writeguard.mjs')),
+  ]);
+  const cfg = loadMergedConfig();
+  if (clampedRead(cfg, 'coalwashMode') === 'off') return;
+  if (clampedRead(cfg, 'writeGuard') === 'off') return;
+  const home = os.homedir();
+  const projectRoot = findProjectRoot(process.cwd(), home);
+  writeguard.sweepWriteguard(projectRoot, conversationId, { home });
+}
+
+// Pure routing: returns the JSON lines the hook prints, and performs the
+// hook's side effects. Exported for the hermetic tests, which pin the outputs
+// without a spawn. An input the hook cannot place (no workspace, no
+// conversation) returns no lines.
+async function route(payload, event, opts = {}) {
+  const lines = [];
+  const emitLine = (doc) => lines.push(JSON.stringify(doc));
+  const workspace = payload && Array.isArray(payload.workspacePaths) ? payload.workspacePaths[0] : null;
+  const conversationId = payload && payload.conversationId;
+  if (typeof workspace !== 'string' || !workspace) return lines;
+  if (typeof conversationId !== 'string' || !conversationId) return lines;
+  try { process.chdir(workspace); } catch { return lines; }
+  const hookInput = { session_id: conversationId };
+
+  if (event === 'PreToolUse') {
+    const call = payload.toolCall;
+    if (!call || !AG_WRITE_TOOLS.has(call.name)) return lines;
+    const file = targetPath(call.args, workspace);
+    if (!file) return lines;
+    // The CC airbag reads tool_input.file_path, so the AG path is handed in that shape.
+    await conductor.handleAirbag({ session_id: conversationId, tool_name: 'Write', tool_input: { file_path: file } });
+    return lines;
+  }
+
+  if (event === 'SessionStart') {
+    if (opts.agDiscovery) {
+      await conductor.handleSessionStart(hookInput, {
+        emit: (text) => emitLine({ injectSteps: [{ ephemeralMessage: text }] }),
+        updateNudge: false,
+      });
+    } else {
+      await sweepPriorConversations(conversationId);
+    }
+    return lines;
+  }
+
+  if (event === 'Stop') {
+    if (!opts.agDiscovery) return lines;
+    await conductor.handleStop(hookInput, {
+      emit: (reason) => emitLine({ decision: 'continue', reason }),
+    });
+    return lines;
+  }
+
+  return lines;
+}
+
+async function main() {
+  const event = process.argv[2] || '';
+  const payload = await conductor.readStdinJson();
+  const lines = await route(payload, event, { agDiscovery: AG_DISCOVERY });
+  for (const line of lines) process.stdout.write(line + '\n');
+}
+
+// Run only as the hook entry. A require() (a test) gets route() and nothing else.
+if (require.main === module) {
+  main().catch(() => {
+    // Phoenix #4: fail-silent, never throw, never crash the parent agent.
+  });
+}
+module.exports = { route, AG_DISCOVERY, AG_WRITE_TOOLS };

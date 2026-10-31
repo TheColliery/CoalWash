@@ -20,10 +20,16 @@ import { fileURLToPath } from 'node:url';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dist = path.join(repo, 'plugin');
 
-// EXACTLY what a Claude Code plugin loads — nothing the marketplace clone
-// carries that a user does not need.
+// EXACTLY what a plugin loads, on either route — nothing the marketplace clone
+// carries that a user does not need. The root plugin.json, hooks.json and
+// assets/ are the Antigravity route's manifest, its hook table and its logo
+// (AG reads the root plugin.json only, and its hooks from the root hooks.json);
+// the Claude Code route never reads them.
 export const DIST_ITEMS = [
   path.join('.claude-plugin', 'plugin.json'),
+  'plugin.json',
+  'hooks.json',
+  'assets',
   'commands',
   'hooks',
   'skills',
@@ -75,6 +81,7 @@ export const DEV_ONLY_LIBS = [ // exported (PR #18, build-plugin.test.mjs:65) so
   path.join('scripts', 'lib', 'stdout-sync.mjs'),
   path.join('scripts', 'lib', 'test-plan.mjs'), // the room's numbers for the wave runner and its declared-test floor
   path.join('scripts', 'lib', 'front-door-links.mjs'), // 16f: the canon front-door link check's engine (its CLI and workflow run it in CI, shipped code never does)
+  path.join('scripts', 'lib', 'agy-probe.mjs'), // 29e: the agy CLI probe the AG validate test uses (scripts/agy-validate.test.mjs), never shipped code
 ];
 const isDevOnlyLib = (rel) => DEV_ONLY_LIBS.includes(rel);
 const isNotShipped = (rel) => isUnwiredEngine(rel) || isDevOnlyLib(rel);

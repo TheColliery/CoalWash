@@ -47,7 +47,7 @@ const LIBS = [
 // roster — listed-but-missing is caught by the file loop below, this catches
 // on-disk-but-unlisted. Tests + the deliberately-unshipped class-A engine are
 // gated by the suite and build-plugin respectively, not here.
-const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs', 'secret-scan.mjs', 'release-shape.mjs', // + the dev-only libs (build-plugin DEV_ONLY_LIBS: the house secret scan, the release deriver; CWK-174)
+const UNLISTED_OK = new Set(['explode.mjs', 'detonate.mjs', 'secret-scan.mjs', 'release-shape.mjs', 'agy-probe.mjs', // + the dev-only libs (build-plugin DEV_ONLY_LIBS: the house secret scan, the release deriver, the agy probe; CWK-174, 29e)
   'git-env-census.mjs', 'git-env-census.vectors.mjs', 'git-env-pins.mjs', 'wave-run.mjs', 'machine-reading.mjs', 'stdout-sync.mjs', 'test-plan.mjs', 'front-door-links.mjs']); // + the canon census and wave-run trios, and the room's wave-run numbers (09a)
 console.log('lib roster drift:');
 try {

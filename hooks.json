@@ -1,0 +1,30 @@
+{
+  "coalwash": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node hooks/ag-conductor.js SessionStart",
+        "timeout": 30
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node hooks/ag-conductor.js PreToolUse",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node hooks/ag-conductor.js Stop",
+        "timeout": 30
+      }
+    ]
+  }
+}
