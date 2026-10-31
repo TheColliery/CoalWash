@@ -1610,3 +1610,20 @@ test('N125-3: when the transaction underneath and the RE-TIER run both leave a l
     }
   } finally { applyHooks.onFence = null; faultGlobal.restore(); faultTx.restore(); clean(home, proj); }
 });
+
+// 29g fire 412 step 6 (unit D): an AG-only box has no Claude Code memory layout. RE-TIER refuses by name and writes nothing.
+test('D6 retier: an AG-only home is refused with the platform flag, and nothing is created', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-ag-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwrt-ag-proj-')));
+  try {
+    fs.writeFileSync(path.join(proj, 'GEMINI.md'), '# rules\n', 'utf8');
+    const scan = retierScan({ projectRoot: proj, home, retier: R });
+    assert.strictEqual(scan.platform, 'unknown');
+    assert.match(scan.verdict, /unknown platform/, 'the scan names the platform flag');
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) });
+    assert.strictEqual(res.refused, true);
+    assert.strictEqual(res.platform, 'unknown');
+    assert.match(res.reason, /unknown platform/, 'the refusal names the platform flag');
+    assert.deepStrictEqual(fs.readdirSync(home), [], 'an AG-only home gains nothing');
+  } finally { clean(home, proj); }
+});

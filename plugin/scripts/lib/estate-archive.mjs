@@ -672,6 +672,8 @@ export function estateUltraScan({ projectRoot = process.cwd(), home = os.homedir
   // Platform gate (armor #2, one-flock with discoverClassB): a non-Claude-Code
   // home has no CC projects/<slug>/ session layout — conservative no-op, NEVER
   // a CC-layout-assumed scan. Mirrors class-b.mjs's fallback flag verbatim.
+  // AG reason (29g fire 412, head ruling 4): the estate engine reads Claude Code JSONL sessions, and an AG estate has none (b05a2e5:
+  // the AG shape fixture holds no JSONL), so this refusal is the named answer, not a gap.
   if (detectPlatform(home) !== 'claude-code') {
     return {
       platform: 'unknown', flags: [UNKNOWN_PLATFORM_FLAG],
@@ -721,6 +723,8 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
   // Platform gate (armor #2): a non-Claude-Code home has no CC session estate to
   // touch — conservative no-op BEFORE the lock, nothing mutated (mirrors
   // discoverClassB / estateUltraScan). ok:true = "correctly did nothing".
+  // AG reason (29g fire 412, head ruling 4): the estate engine reads Claude Code JSONL sessions, and an AG estate has none (b05a2e5:
+  // the AG shape fixture holds no JSONL), so this refusal is the named answer, not a gap.
   if (detectPlatform(home) !== 'claude-code') {
     return {
       ok: true, platform: 'unknown', flags: [UNKNOWN_PLATFORM_FLAG],

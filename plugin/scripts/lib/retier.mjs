@@ -676,6 +676,8 @@ export function retierScan({ projectRoot = process.cwd(), home = os.homedir(), r
   // CC-layout-assumed scan. NAMED divergence: retierScan's `flags` field is the
   // #55 contradiction array (retierScanLines iterates it as claim objects), so
   // the conservative note rides `verdict` here, not `flags`.
+  // AG reason (29g fire 412, head ruling 4): RE-TIER demotes inside Claude Code's memory layout (the ccMemoryDir store). An AG-only box
+  // has no such layout, so this refusal is the named answer, not a gap.
   if (detectPlatform(home) !== 'claude-code') {
     return { platform: 'unknown', env, stores: [], flags: [], overArm: 0, verdict: `no action — ${UNKNOWN_PLATFORM_FLAG}` };
   }
@@ -813,6 +815,8 @@ export function runRetier({
   // layout to re-tier — conservative no-op BEFORE the lock, nothing
   // touched (mirrors discoverClassB; `refused` = RE-TIER's own no-action shape,
   // the same outcome as the dead-zone refusal). The verbatim flag rides reason.
+  // AG reason (29g fire 412, head ruling 4): RE-TIER demotes inside Claude Code's memory layout (the ccMemoryDir store). An AG-only box
+  // has no such layout, so this refusal is the named answer, not a gap.
   if (detectPlatform(home) !== 'claude-code') {
     return { ok: false, refused: true, platform: 'unknown', reason: `no action — ${UNKNOWN_PLATFORM_FLAG}`, env };
   }

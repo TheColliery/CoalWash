@@ -1294,3 +1294,19 @@ test('fire 123: an unexpected error inside an ULTRA run still names a lock its r
     assert.strictEqual(fs.existsSync(globalLockPath(home)), true);
   } finally { fault.restore(); clean(home, proj); }
 });
+
+// 29g fire 412 step 6 (unit D): an AG-only box has no Claude Code session estate. The estate engine refuses by name, archives nothing,
+// and does not crash.
+test('D6 estate: an AG-only home is refused with the platform flag, archives nothing, and does not crash', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwea-ag-home-')));
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwea-ag-proj-')));
+  try {
+    fs.writeFileSync(path.join(proj, 'GEMINI.md'), '# rules\n', 'utf8');
+    const scan = EA.estateUltraScan({ projectRoot: proj, home, estate: estateCfg() });
+    assert.ok(scan.flags.some((f) => /unknown platform/.test(f)), 'the scan names the platform flag');
+    const r = EA.runEstate({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(r.ok, true, 'the no-op is ok:true, the documented shape for a box with nothing to do');
+    assert.strictEqual(r.platform, 'unknown');
+    assert.deepStrictEqual(r.archived, [], 'nothing archived');
+  } finally { clean(home, proj); }
+});
