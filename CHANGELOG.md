@@ -2,6 +2,24 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.1] - 2026-11-01
+
+Keep Antigravity recovery from rolling back Claude Code journals
+
+Claude Code behaves as in 1.15.0. Note on 1.15.0: its sentence "never on Claude Code's files or `~/.gemini`" was false for the gauge's crash recovery on a project shared with Claude Code. That entry is not edited; this release corrects it. On the Antigravity route the Quick pass and the crash recovery act only inside the project folder. Hermetic tests cover that path; it was not measured end to end on Antigravity.
+
+### Fixed
+
+- Crash recovery on Antigravity no longer rolls back a Claude Code transaction: a journal that reaches outside the Antigravity trusted roots is left in place and reported, not replayed (`scripts/lib/apply.mjs`, lines 1994-1997 and 2052-2062).
+- `--platform=antigravity` is parsed like `--platform antigravity`, instead of being silently ignored (`scripts/lib/cli.mjs`, lines 338-347).
+- `retier-scan`, `retier-run`, `estate`, `estate-scan`, `estate-run`, `estate-search` and `estate-restore` refuse `--platform antigravity` by name and exit 1 (`scripts/lib/cli.mjs`, lines 547-636).
+- The wizard's neutral scan counts a subfolder `GEMINI.md`, because it passes `cwd` to discovery (`scripts/lib/wizard.mjs`, lines 103-104).
+
+### Changed
+
+- The A4 census note in `applyPlan` is re-adjudicated: 13 inputs read, 5 from the plan and 8 from opts; `plan.projectRoot` is named and never read (`scripts/lib/apply.mjs`, lines 1822-1830). The pin's message follows (`scripts/lib/apply.test.mjs`, line 3756).
+- The gauge test adds a project `GEMINI.md` and asserts `measure.files === 1` (`scripts/lib/wizard.test.mjs`, lines 334-351).
+
 ## [1.15.0] - 2026-11-01
 
 Act only on Antigravity's own project rule files in Quick passes
