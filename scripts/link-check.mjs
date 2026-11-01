@@ -189,11 +189,17 @@ function maskInline(line) {
   }
   return { masked: out, spans };
 }
-function unmask(s, spans) {
+// 29n F470-d (T-D row 51): one stored span can be referenced many times, so the expansion has a bound. Past UNMASK_MAX_CHARS a
+// further reference stays as its placeholder character (visible and unmatched), never an unbounded copy of the span.
+const UNMASK_MAX_CHARS = 1 << 20;
+export function unmask(s, spans) { // exported for the 29n F470-d witness (the export is a test seam, no behaviour change)
   let out = '';
   for (const ch of s) {
     const cp = ch.codePointAt(0);
-    if (cp >= CODE_BASE && cp < CODE_BASE + spans.length) out += spans[cp - CODE_BASE];
+    if (cp >= CODE_BASE && cp < CODE_BASE + spans.length) {
+      const span = spans[cp - CODE_BASE];
+      out += out.length + span.length > UNMASK_MAX_CHARS ? ch : span;
+    }
     else if (cp >= ESC_BASE && cp < ESC_BASE + 0x80) out += String.fromCharCode(cp - ESC_BASE);
     else out += ch;
   }

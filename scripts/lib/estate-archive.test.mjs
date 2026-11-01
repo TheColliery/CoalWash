@@ -1328,3 +1328,32 @@ test('F442-2 estate-search: --platform claude-code is not part of the query, so 
     assert.ok(r.stdout.includes('sess-warm'), `the indexed hit is found with the flag beside the query: ${r.stdout.slice(0, 200)}`);
   } finally { clean(home, proj); }
 });
+
+// 29n fire 470 (T-E row 22, T-D row 21): printed keep fields are escaped; a keep anchor written twice is one anchor.
+import { collectTombstones as f470Collect, searchLines as f470Search } from './estate-archive.mjs';
+import { keepsPath as f470KeepsPath } from './keeps.mjs';
+
+test('F470-a the tombstone line prints a keep anchor and date with control characters escaped (CWE-117)', () => {
+  const rows = [{ sessionId: 's1', projectSlug: 'p', startISO: 'a', endISO: 'b', bytes: 10, msgCount: 1, firstUserLine: 'x‮y',
+    laterRemoved: [{ anchor: 'bad\nFORGED line ‮end', target: null, date: '2026-01-01\r\nfake' }] }];
+  const out = f470Search(rows, { hasDeathLog: false });
+  const lines = out.split('\n');
+  assert.ok(!lines.some((l) => l.startsWith('FORGED') || l.startsWith('fake')), `no raw line break from a keep text: ${JSON.stringify(out)}`);
+  assert.ok(!out.includes('‮'), 'the bidi control is escaped on every printed field, not printed as itself');
+});
+
+test('F470-c a keep anchor written twice is one anchor, not two', () => {
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwe-f470c-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwe-f470h-')));
+  try {
+    const kp = f470KeepsPath(proj);
+    fs.mkdirSync(path.dirname(kp), { recursive: true });
+    const keep = { target: 'a.md:3', anchor: 'the same adjudicated span', date: '2026-01-01' };
+    fs.writeFileSync(kp, JSON.stringify({ v: 1, keeps: [keep, { ...keep, date: '2026-01-02' }] }), 'utf8');
+    const t = f470Collect({ projectRoot: proj, home });
+    assert.strictEqual(t.anchors.length, 1, `one anchor for one text: ${JSON.stringify(t.anchors.map((a) => a.text))}`);
+  } finally {
+    fs.rmSync(proj, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

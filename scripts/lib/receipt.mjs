@@ -76,7 +76,7 @@ function escapeText(cp) {
   const hex = cp.toString(16);
   return cp > 0xffff ? `${BACKSLASH}u{${hex}}` : `${BACKSLASH}u${hex.padStart(4, '0')}`;
 }
-function escapeRawControls(text) {
+export function escapeRawControls(text) { // exported for estate-archive's printed keep and index fields (29n F470-a)
   let out = '';
   for (const ch of text) {
     out += isRawControl(ch) ? escapeText(ch.codePointAt(0)) : ch;

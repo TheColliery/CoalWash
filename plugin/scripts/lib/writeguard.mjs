@@ -57,7 +57,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { physicalOrNull, containedIn } from './class-b.mjs';
 import { claudeBaseDir, repoReadOutcome, readRepoBytesBounded, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir, replaceFile, ensureCatchAllIgnore } from './repo-fs.mjs';
+import { ownSandboxDir, replaceFile, ensureCatchAllIgnore, fileModeOr600 } from './repo-fs.mjs';
 import { gateFiles } from './fidelity-gate.mjs';
 
 // The root governance basenames, guarded anywhere in the trees. Memory-store
@@ -312,7 +312,7 @@ export function snapshotOnFirstWrite(projectRoot, sessionId, touchedPath, { home
     // E2-4: root null kept: `phys` is the governed file itself, the realpath isGuardedTarget contained to the class-B trees.
     const bytes = readRepoBytesBounded(phys, null, MAX_DOC_BYTES);
     if (!bytes) return null;
-    replaceFile(snap, bytes);
+    replaceFile(snap, bytes, fileModeOr600(phys)); // 29n F470-f: the snapshot keeps the file's own mode (0600 if unreadable)
     // hash what's ACTUALLY on disk at `snap` now (not `phys` before the
     // copy) — this guards the copy step itself, not just a promise about
     // the source.

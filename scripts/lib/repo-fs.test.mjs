@@ -944,3 +944,21 @@ test('F452-B2 a sweep that throws inside its locked section still names a bin lo
     assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${binLock} could not be removed (EBUSY), so it was left in place`), `the throw path keeps the note: ${JSON.stringify(r)}`);
   } finally { tailHooks.beforeSweepPlan = null; fs.rmSync = real; }
 });
+
+// 29n fire 470 (T-F row 48): replaceFile honours the mode it is given, 0600 by default (the seam is the write call).
+import { replaceFile as f470Replace } from './repo-fs.mjs';
+
+test('F470-f replaceFile creates its temp with the mode it is given, 0600 by default (the seam is the write call)', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'rf-f470f-')));
+  const realWrite = fs.writeFileSync;
+  const opts = [];
+  fs.writeFileSync = function patched(p, data, o, ...rest) {
+    if (o && typeof o === 'object' && o.flag === 'wx') opts.push(o);
+    return realWrite.call(fs, p, data, o, ...rest);
+  };
+  try {
+    f470Replace(path.join(dir, 'a.txt'), 'x');
+    f470Replace(path.join(dir, 'b.txt'), 'y', 0o640);
+    assert.deepStrictEqual(opts.map((o) => o.mode), [0o600, 0o640], `the mode each temp is created with: ${JSON.stringify(opts)}`);
+  } finally { fs.writeFileSync = realWrite; fs.rmSync(dir, { recursive: true, force: true }); }
+});

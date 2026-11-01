@@ -205,7 +205,12 @@ try {
   const lib = (l) => import(pathToFileURL(path.join(repo, 'scripts', 'lib', l)).href);
   const { CONFIG_SCHEMA, validateConfig } = await lib('config-schema.mjs');
   const { stripJsonc } = await lib('jsonc.mjs');
-  let c = fs.readFileSync(path.join(repo, 'platform-configs', '.coalwash.json'), 'utf8');
+  // 29n F470-e (T-D): read at the room's own config ceiling (config-load's MAX_CONFIG_BYTES). An absent, oversized or refused file
+  // throws here, and the enclosing try reports it as a FAIL line: the gate never reads an unbounded file whole.
+  const { MAX_CONFIG_BYTES, readRepoFileBounded } = await lib('config-load.mjs');
+  const cfgPath = path.join(repo, 'platform-configs', '.coalwash.json');
+  let c = readRepoFileBounded(cfgPath, path.dirname(cfgPath), MAX_CONFIG_BYTES);
+  if (c === null) throw new Error(`platform-configs/.coalwash.json is absent, over the ${MAX_CONFIG_BYTES}-byte config ceiling, or refused`);
   if (c.charCodeAt(0) === 0xFEFF) c = c.slice(1);
   const cfg = JSON.parse(stripJsonc(c));
   const errors = validateConfig(cfg);

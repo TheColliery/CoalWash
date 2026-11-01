@@ -5272,3 +5272,18 @@ test('F462-2 an early refusal releases the global lock it took, and names it whe
     assert.ok(r.error.endsWith(r.lockLeft), 'the note is its own sentence on the error');
   } finally { fs.rmSync = real; clean(proj, home); }
 });
+
+// 29n fire 470 (T-F rows 7, 48): the copies the room writes are created with an owner-only mode by default (the seam is the open call).
+test('F470-f writeDurable creates its temp with 0600 by default (the seam is the open call)', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f470f-')));
+  const realOpen = fs.openSync;
+  const modes = [];
+  fs.openSync = function patched(p, flags, mode, ...rest) {
+    if (String(flags) === 'wx') modes.push(mode);
+    return realOpen.call(fs, p, flags, mode, ...rest);
+  };
+  try {
+    writeDurable(path.join(dir, 'snap.json'), 'x');
+    assert.deepStrictEqual(modes, [0o600], `the temp is opened with 0600 by default: ${JSON.stringify(modes)}`);
+  } finally { fs.openSync = realOpen; fs.rmSync(dir, { recursive: true, force: true }); }
+});

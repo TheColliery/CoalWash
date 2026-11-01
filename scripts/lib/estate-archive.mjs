@@ -64,13 +64,14 @@ import zlib from 'node:zlib';
 import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
 import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS } from './apply.mjs';
-import { ownSandboxDir } from './repo-fs.mjs';
+import { ownSandboxDir, fileModeOr600 } from './repo-fs.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
 // death-log (destroyed cuts). Function-declaration imports used only at CALL
 // time (collectTombstones), so the existing apply<->retier<->estate cycle stays
 // safe. Advisory-only — this NEVER blocks a dig/restore.
 import { loadKeeps, loadGlobalKeeps } from './keeps.mjs';
 import { readDeathLog, FAT_BIN_NAME, STORE_OLD_NAME } from './tailings.mjs';
+import { escapeRawControls } from './receipt.mjs'; // 29n F470-a: the room's printed-line escape, Cc/Cf/Zl/Zp, for every keep- or index-derived field
 
 export const ESTATE_ARCHIVE_DIRNAME = 'estate-archive';
 export const ESTATE_INDEX_NAME = 'index.jsonl';
@@ -832,13 +833,17 @@ export function runEstateReport(res) {
 // the signal says "verify against the CURRENT store", the safe qualification.
 export function collectTombstones({ projectRoot = process.cwd(), home = os.homedir() } = {}) {
   const anchors = [];
+  const seenLc = new Set(); // 29n F470-c: one anchor text is one tombstone, however many keeps repeat it
   const addKeep = (k) => {
     // ONLY a verbatim `anchor` is content-matchable — a bare `target` is a
     // path/line reference, not prose that appears in a transcript (matching it
     // would false-fire on path fragments).
     const text = k && typeof k.anchor === 'string' && k.anchor.trim() ? k.anchor.trim() : null;
     if (!text) return;
-    anchors.push({ text, textLc: text.toLowerCase(), target: (k && k.target) || null, date: (k && k.date) || null });
+    const textLc = text.toLowerCase();
+    if (seenLc.has(textLc)) return;
+    seenLc.add(textLc);
+    anchors.push({ text, textLc, target: (k && k.target) || null, date: (k && k.date) || null });
   };
   try { for (const k of loadKeeps(projectRoot)) addKeep(k); } catch { /* no project keeps */ }
   try { for (const k of loadGlobalKeeps(home)) addKeep(k); } catch { /* no global keeps */ }
@@ -892,7 +897,9 @@ export function searchIndex(query, { archiveDir, tombstones } = {}) {
 export function searchLines(rows, { hasDeathLog = false } = {}) {
   if (!rows.length) return '[CoalWash] estate-search: no match in the archive index.';
   return rows.map((r) => {
-    let line = `${r.sessionId}  ${r.projectSlug || '?'}  ${r.startISO || '?'}..${r.endISO || '?'}  ${mb(r.bytes)}  ${r.msgCount ?? '?'} msg${r.cold ? '  [cold-deleted]' : ''}\n    ${String(r.firstUserLine || '').slice(0, 160) || '(no first user line)'}`;
+    // 29n F470-a: every index-derived field is escaped before it is printed (a cloned repo's index reaches this line).
+    const show = (v) => escapeRawControls(String(v));
+    let line = `${show(r.sessionId)}  ${r.projectSlug ? show(r.projectSlug) : '?'}  ${r.startISO ? show(r.startISO) : '?'}..${r.endISO ? show(r.endISO) : '?'}  ${mb(r.bytes)}  ${r.msgCount ?? '?'} msg${r.cold ? '  [cold-deleted]' : ''}\n    ${escapeRawControls(String(r.firstUserLine || '').slice(0, 160)) || '(no first user line)'}`;
     if (Array.isArray(r.laterRemoved) && r.laterRemoved.length) line += `\n    ${tombstoneSignal(r.laterRemoved, hasDeathLog)}`;
     return line;
   }).join('\n');
@@ -902,7 +909,8 @@ export function searchLines(rows, { hasDeathLog = false } = {}) {
 // discipline). Names the adjudicated anchor(s) + the registry to check; frames
 // it as "verify against the CURRENT store", never a bare "was removed".
 function tombstoneSignal(hits, hasDeathLog) {
-  const named = hits.slice(0, 2).map((h) => `"${h.anchor}"${h.date ? ` (${h.date})` : ''}`).join('; ');
+  // 29n F470-a: a keep's anchor and date come from keeps.json (a cloned repo's file): escaped before they are printed.
+  const named = hits.slice(0, 2).map((h) => `"${escapeRawControls(String(h.anchor))}"${h.date ? ` (${escapeRawControls(String(h.date))})` : ''}`).join('; ');
   const more = hits.length > 2 ? ` +${hits.length - 2} more` : '';
   const deathNote = hasDeathLog ? ' + destroyed records in the bin death-log' : '';
   return `⚠ later-removed? this recovered wording matches a gate-adjudicated keep${hits.length > 1 ? 's' : ''}: ${named}${more} — the live store may have since removed/changed it; VERIFY against the current store before treating this archived copy as current fact (see keeps.json${deathNote}).`;
@@ -1035,7 +1043,7 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones } 
       try { st = fs.lstatSync(dest); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
       if (st && st.isSymbolicLink()) return { ok: false, error: `restore refused on ${s.rel}: the destination file is a link (a restore never writes through a link under its destination)`, dir, files };
       if (st && (!st.isFile() || st.nlink > 1)) return { ok: false, error: `restore refused on ${s.rel}: the destination entry is not a single-link regular file (a restore never writes through a link under its destination)`, dir, files };
-      writeDurable(dest, buf); // MED: recovery write matches the forward path's durability (this tier keeps no snapshot)
+      writeDurable(dest, buf, fileModeOr600(dest)); // 29n F470-f: a restored file keeps its own mode, 0600 when it is new. MED: recovery write matches the forward path's durability (this tier keeps no snapshot)
       fsyncDirBestEffort(path.dirname(dest));
       files.push({ rel: s.rel, bytes: buf.length });
       if (wantTombstoneScan) combinedText += `${buf.toString('utf8')}\n`;

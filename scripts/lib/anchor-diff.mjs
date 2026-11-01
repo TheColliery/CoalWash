@@ -126,11 +126,14 @@ function oldestAnchor(txDir, physTarget) {
 // Every bin record (fat-bin + store.old) naming `physTarget`, recorded AT OR
 // AFTER `sinceAt` — CW's own approved drops for this file since the anchor.
 // Content via tailings.mjs's own pull-only restoreFromBin (never a fresh read).
-function approvedSince(projectRoot, physTarget, sinceAt) {
+export function approvedSince(projectRoot, physTarget, sinceAt) { // exported for the 29n F470-b witness (a seam, no behaviour change)
   const texts = [];
+  const decoded = new Set(); // 29n F470-b: one record decodes once, however many times the bin lists it (bin:id is the record)
   for (const name of [FAT_BIN_NAME, STORE_OLD_NAME]) {
     for (const item of listBin(projectRoot, name)) {
       if (!item || item.at < sinceAt || !samePath(item.original, physTarget)) continue;
+      if (decoded.has(name + ':' + item.id)) continue;
+      decoded.add(name + ':' + item.id);
       const content = restoreFromBin(projectRoot, name, item.id);
       // restoreFromBin hands back BYTES (G3-3). This is an ANALYSIS path — it
       // scans the text for structured tokens — so it decodes HERE, at the call,

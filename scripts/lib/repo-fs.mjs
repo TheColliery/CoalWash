@@ -176,9 +176,14 @@ function targetFileWhy(target) {
 // The temp sits in the target's own directory, so the rename is same-device by
 // construction. NO containment check here: the caller has already decided the
 // directory is its own (ownSandboxDir) or contained (writeRepoFile below).
-export function replaceFile(target, content) {
+// 29n F470-f: the temp is created with the mode the caller gives (owner-only 0600 by default): a copy of memory content is not
+// world-readable because the file it copies was created with the default umask.
+export function fileModeOr600(p) {
+  try { return fs.statSync(p).mode & 0o777; } catch { return 0o600; }
+}
+export function replaceFile(target, content, mode = 0o600) {
   const tmp = `${target}.coalwash-tmp-${crypto.randomBytes(6).toString('hex')}`;
-  fs.writeFileSync(tmp, content, { flag: 'wx' });
+  fs.writeFileSync(tmp, content, { flag: 'wx', mode });
   try {
     fs.renameSync(tmp, target);
   } catch (e) {

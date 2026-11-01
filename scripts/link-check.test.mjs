@@ -381,3 +381,14 @@ test('CWK-162 A5: ordinary destinations print unchanged (Unicode letters, an em 
   const r = run('doc.md');
   assert.ok(r.stdout.includes('café—notes.md#über'), JSON.stringify(r.stdout));
 });
+
+// 29n fire 470 (T-D row 51): one stored inline-code span cannot expand without bound.
+import { unmask as f470Unmask } from './link-check.mjs';
+
+test('F470-d one stored span cannot expand past the output bound (many references to one span)', () => {
+  const span = 'x'.repeat(2000);
+  const placeholder = String.fromCodePoint(0xF1000); // CODE_BASE: the first inline-code placeholder (link-check.mjs)
+  const masked = placeholder.repeat(20000); // 20,000 references to one 2,000-char span: 40 MB unbounded
+  const out = f470Unmask(masked, [span]);
+  assert.ok(out.length < 2 * 1024 * 1024, `the expansion is bounded, not ${out.length} chars`);
+});

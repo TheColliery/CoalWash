@@ -237,3 +237,20 @@ test('CWK-156 miss leg: a manifest spelling that resolves to NOTHING on a case-s
     assert.strictEqual(anchorDiff(real, { projectRoot: proj }), null, 'an unresolvable spelling is a probe MISS, and a miss must not turn into a match');
   } finally { clean(proj); }
 });
+
+// 29n fire 470 (T-D rows 4/5): a bin row listed twice is decoded once.
+import { approvedSince as f470Approved } from './anchor-diff.mjs';
+import { recordBinItem as f470Record, FAT_BIN_NAME as f470Fat } from './tailings.mjs';
+
+test('F470-b a bin row listed twice is decoded once', () => {
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'anc-f470b-')));
+  try {
+    const orig = path.join(proj, 'memory', 'a.md');
+    f470Record(proj, f470Fat, { content: 'alpha', original: orig, now: Date.now() });
+    const idxPath = path.join(proj, '.claude', 'coalwash', f470Fat, 'index.json');
+    const index = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
+    fs.writeFileSync(idxPath, JSON.stringify([...index, ...index]), 'utf8');
+    const texts = f470Approved(proj, orig, 0);
+    assert.strictEqual(texts.length, 1, `one decode per record: ${JSON.stringify(texts)}`);
+  } finally { fs.rmSync(proj, { recursive: true, force: true }); }
+});

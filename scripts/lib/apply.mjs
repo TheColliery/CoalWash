@@ -61,7 +61,7 @@ import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockPars
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
 import { claudeBaseDir, projectRootFor, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir, openPlainFile, ensureCatchAllIgnore } from './repo-fs.mjs';
+import { ownSandboxDir, openPlainFile, ensureCatchAllIgnore, fileModeOr600 } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
@@ -313,11 +313,12 @@ export function globalLockPath(home = os.homedir()) {
 // site that created it — a name-based sweep at a distance cannot find an
 // unpredictable name — and surfaces to applyPlan's step catch -> whole-run
 // rollback: fail-closed, destination untouched, no stranded temp.
-export function writeDurable(p, data) {
+// 29n F470-f: the temp is created with `mode` (owner-only 0600 by default). A rewrite of a user file passes that file's own mode.
+export function writeDurable(p, data, mode = 0o600) {
   const tmp = `${p}.${crypto.randomBytes(12).toString('hex')}.coalwash-tmp`;
   let fd = null;
   try {
-    fd = fs.openSync(tmp, 'wx');
+    fd = fs.openSync(tmp, 'wx', mode);
     fs.writeSync(fd, data);
     fs.fsyncSync(fd);
     fs.closeSync(fd);
@@ -1658,7 +1659,7 @@ export function applyPlan(plan, opts = {}) {
           const stepLabel = `step ${step.i + 1} of ${journal.steps.length} (${a.type} ${a.phys})`;
           fence(stepLabel); // after the external-writer guard's read, immediately before the write it guards
           if (a.type === 'rewrite' || a.type === 'create') {
-            writeDurable(a.phys, a.content); // U7: temp is O_EXCL + unpredictable; the destination is never opened for write
+            writeDurable(a.phys, a.content, fileModeOr600(a.phys)); // 29n F470-f: the rewritten file keeps its own mode (0600 if unreadable). U7: temp is O_EXCL + unpredictable; the destination is never opened for write
             if (a.type === 'create') createdPaths.push(a.phys);
             // verify: what landed is byte-for-byte what the plan said (blueprint step 3 "verify")
             // CWK-137 RESIDUAL_REREAD: bounded by what was just written, +1 byte so growth is seen as a mismatch, not read whole.
