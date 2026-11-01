@@ -5246,3 +5246,29 @@ test('F452-B a preflight bin sweep whose bin-lock release fails rides on applyPl
     assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${binLock} could not be removed (EBUSY), so it was left in place`), `the bin-lock release failure rides on applyPlan's result: ${JSON.stringify(r)}`);
   } finally { __testHooks.onFence = null; fs.rmSync = real; clean(fx.proj, fx.home, fx.store); }
 });
+
+// 29k fire 464 (F462-2, RED first): an early refusal releases the global lock and reports it when that release fails.
+test('F462-2 an early refusal releases the global lock it took, and names it when that release cannot remove it', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f464-')));
+  const real = fs.rmSync;
+  try {
+    const g = path.join(store, 'global.md');
+    write(g, 'global content');
+    // a LIVE transaction lock held by another run: applyPlan takes the global lock first, then refuses at the tx lock.
+    const lockPath = txLockOf(proj);
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({ sessionId: 'live-other-run', pid: 4242, at: Date.now(), token: 'held-by-another-run' }), 'utf8');
+    const gl = path.resolve(globalLockPath(home));
+    fs.rmSync = function patched(p, ...rest) {
+      if (path.resolve(String(p)) === gl) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+      return real.call(fs, p, ...rest);
+    };
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: g, content: 'new global content', scope: 'global' }]), { home });
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.strictEqual(r.deferred, true, 'the refusal is the deferral at the tx lock');
+    assert.strictEqual(fs.readFileSync(g, 'utf8'), 'global content', 'nothing was written');
+    assert.ok(r.lockLeft && r.lockLeft.includes(`The lock file ${globalLockPath(home)} could not be removed (EBUSY), so it was left in place`), `the global-lock release failure rides on the refusal: ${JSON.stringify(r)}`);
+    assert.ok(r.error.endsWith(r.lockLeft), 'the note is its own sentence on the error');
+  } finally { fs.rmSync = real; clean(proj, home); }
+});

@@ -254,6 +254,9 @@ export function gaugeLine(g) {
     : (rec.recovered && rec.recovered !== 'none'
         ? ` · recovered dangling run: ${rec.recovered}`
         : (rec.error ? ' · dangling run REFUSED, left for inspection (--json for the reason)' : ''));
+  // 29k F462-1: a recovery whose own lock release could not remove the lock names it here, with the note the recovery already built (never
+  // a second message). A refusal already carries the note inside rec.error, so it is not repeated.
+  const leftLock = rec.lockLeft && !rec.error ? ` · ${rec.lockLeft}` : '';
   // CWK-081 — THE ADAPTER'S FLAG, on the one line a reader actually sees. The
   // blueprint's capacity contract ends in "unknown -> conservative estimate +
   // FLAG", and a flag that never reaches a surface is not a flag. Shown only
@@ -266,7 +269,7 @@ export function gaugeLine(g) {
     : cap.discovered
       ? ` · capacity ~${cap.capacityTokens} tok (discovered: ${cap.source})`
       : (g.verdict.band === 'FULL' ? ` · capacity ~${cap.capacityTokens} tok (CONSERVATIVE DEFAULT — no platform figure discovered)` : '');
-  return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${capBit}${recovered}`;
+  return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${capBit}${recovered}${leftLock}`;
 }
 
 // The 0-token human recovery lookup (importable, pure read): searches BOTH

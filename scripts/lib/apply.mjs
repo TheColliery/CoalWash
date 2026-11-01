@@ -1425,25 +1425,22 @@ export function applyPlan(plan, opts = {}) {
       globalLock = acquireLock(globalLockPath(home), { sessionId: plan.sessionId, now });
       if (!globalLock.acquired) return { ok: false, deferred: true, error: `global scope: ${globalLock.reason}` };
     }
+    // 29k F462-2: every early refusal below releases the global lock this call took, exactly once. A release that cannot remove it is
+    // named on the refusal (lockLeft, joined onto the error as its own sentence), the way the transaction's finally reports its locks.
+    const refuseEarly = (result) => {
+      const note = globalLock ? lockLeftNote(globalLockPath(home), globalLock.release(), LOCK_STALE_MS) : null;
+      return note ? { ...result, lockLeft: note, error: withSentence(result.error, note) } : result;
+    };
     const trackedWhy = trackedInOwnFolder(txDir); // fire 59 (L58-1): before ANY write in the folder, the .gitignore included
-    if (trackedWhy) {
-      if (globalLock) globalLock.release();
-      return { ok: false, error: `tracked: ${trackedWhy}` };
-    }
+    if (trackedWhy) return refuseEarly({ ok: false, error: `tracked: ${trackedWhy}` });
     try { fs.mkdirSync(txDir, { recursive: true }); } catch (e) { // txDir resolved once, above the KEEPS-GATE
-      if (globalLock) globalLock.release(); // fire 63 (CodeRabbit t114): a throw here used to leave the global lock held until its stale window
-      return { ok: false, error: `apply: cannot create the transaction folder (${(e && e.code) || (e && e.message)})` };
+      // fire 63 (CodeRabbit t114): a throw here used to leave the global lock held until its stale window
+      return refuseEarly({ ok: false, error: `apply: cannot create the transaction folder (${(e && e.code) || (e && e.message)})` });
     }
     const ignoreWhy = ensureSelfIgnore(txDir); // fire 55: no catch-all, no journal and no snapshot (copies of memory content)
-    if (ignoreWhy) {
-      if (globalLock) globalLock.release();
-      return { ok: false, error: `self-ignore: ${ignoreWhy} — refusing before any journal or snapshot is written, so no copy of memory content lands where git can track it` };
-    }
+    if (ignoreWhy) return refuseEarly({ ok: false, error: `self-ignore: ${ignoreWhy} — refusing before any journal or snapshot is written, so no copy of memory content lands where git can track it` });
     const lock = acquireLock(path.join(txDir, LOCK_NAME), { sessionId: plan.sessionId, now, selfIgnore: true });
-    if (!lock.acquired) {
-      if (globalLock) globalLock.release();
-      return { ok: false, deferred: true, error: lock.reason };
-    }
+    if (!lock.acquired) return refuseEarly({ ok: false, deferred: true, error: lock.reason });
 
     const journalPath = path.join(txDir, JOURNAL_NAME);
     const snapDir = path.join(txDir, `snap-${now}`);
