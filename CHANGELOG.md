@@ -2,6 +2,17 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.3] - 2026-11-01
+
+Report bin and recovery locks that cannot be released, not drop them
+
+### Fixed
+
+- Crash recovery names a lock it cannot release, with the lock's path, instead of dropping the note (`scripts/lib/apply.mjs`, lines 1982-1996).
+- A bin lock whose release fails is named on the result. That includes a sweep that throws inside its locked section (`scripts/lib/tailings.mjs`, lines 369-372, 448-460 and 549-553; `scripts/lib/apply.mjs`, line 1520).
+- A journal removed while recovery waited for the lock is no longer reported as unreadable. Recovery finds nothing to recover and says so (`scripts/lib/apply.mjs`, lines 2035-2038).
+- The deferral's wait follows the lock's own stale window, not a typed 30 minutes (`scripts/lib/apply.mjs`, lines 791-794 and 2025-2031).
+
 ## [1.15.2] - 2026-11-01
 
 Crash recovery leaves a live transaction alone and refuses bad journals
