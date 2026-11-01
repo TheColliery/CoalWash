@@ -908,9 +908,13 @@ export function searchLines(rows, { hasDeathLog = false } = {}) {
 // The #58 per-result advisory line (program-built — the fixed-template
 // discipline). Names the adjudicated anchor(s) + the registry to check; frames
 // it as "verify against the CURRENT store", never a bare "was removed".
+// 29n F472-1: the one renderer for the keep names a result cites (estate-search and estate-restore print the same line). A keep's
+// anchor and date come from keeps.json (a cloned repo's file), so both are escaped before they are printed.
+export function namedKeeps(hits) {
+  return hits.slice(0, 2).map((h) => `"${escapeRawControls(String(h.anchor))}"${h.date ? ` (${escapeRawControls(String(h.date))})` : ''}`).join('; ');
+}
 function tombstoneSignal(hits, hasDeathLog) {
-  // 29n F470-a: a keep's anchor and date come from keeps.json (a cloned repo's file): escaped before they are printed.
-  const named = hits.slice(0, 2).map((h) => `"${escapeRawControls(String(h.anchor))}"${h.date ? ` (${escapeRawControls(String(h.date))})` : ''}`).join('; ');
+  const named = namedKeeps(hits);
   const more = hits.length > 2 ? ` +${hits.length - 2} more` : '';
   const deathNote = hasDeathLog ? ' + destroyed records in the bin death-log' : '';
   return `⚠ later-removed? this recovered wording matches a gate-adjudicated keep${hits.length > 1 ? 's' : ''}: ${named}${more} — the live store may have since removed/changed it; VERIFY against the current store before treating this archived copy as current fact (see keeps.json${deathNote}).`;

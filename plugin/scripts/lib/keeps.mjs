@@ -349,7 +349,7 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
       ...(mergedPendingUser ? { pendingUser: true, pendingSince: mergedPendingSince } : {}),
     });
     const name = `${file}.${crypto.randomBytes(12).toString('hex')}.tmp`;
-    fs.writeFileSync(name, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { encoding: 'utf8', flag: 'wx' });
+    fs.writeFileSync(name, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { encoding: 'utf8', flag: 'wx', mode: 0o600 }); // 29n F472-2: keeps quote memory content
     tmp = name;
     // fire 126: a recorder that stalled past KEEPS_LOCK_STALE_MS may have been robbed, and its new holder may have renamed its
     // own store since. This one REFUSES rather than re-merging: unlike a bin item (whose blob is already on disk and needs its

@@ -1334,12 +1334,12 @@ import { collectTombstones as f470Collect, searchLines as f470Search } from './e
 import { keepsPath as f470KeepsPath } from './keeps.mjs';
 
 test('F470-a the tombstone line prints a keep anchor and date with control characters escaped (CWE-117)', () => {
-  const rows = [{ sessionId: 's1', projectSlug: 'p', startISO: 'a', endISO: 'b', bytes: 10, msgCount: 1, firstUserLine: 'x‮y',
-    laterRemoved: [{ anchor: 'bad\nFORGED line ‮end', target: null, date: '2026-01-01\r\nfake' }] }];
+  const rows = [{ sessionId: 's1', projectSlug: 'p', startISO: 'a', endISO: 'b', bytes: 10, msgCount: 1, firstUserLine: 'x' + String.fromCharCode(0x202e) + 'y',
+    laterRemoved: [{ anchor: 'bad\nFORGED line ' + String.fromCharCode(0x202e) + 'end', target: null, date: '2026-01-01\r\nfake' }] }];
   const out = f470Search(rows, { hasDeathLog: false });
   const lines = out.split('\n');
   assert.ok(!lines.some((l) => l.startsWith('FORGED') || l.startsWith('fake')), `no raw line break from a keep text: ${JSON.stringify(out)}`);
-  assert.ok(!out.includes('‮'), 'the bidi control is escaped on every printed field, not printed as itself');
+  assert.ok(!out.includes(String.fromCharCode(0x202e)), 'the bidi control is escaped on every printed field, not printed as itself');
 });
 
 test('F470-c a keep anchor written twice is one anchor, not two', () => {
@@ -1356,4 +1356,13 @@ test('F470-c a keep anchor written twice is one anchor, not two', () => {
     fs.rmSync(proj, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+// 29n fire 473 (F472-1, RED first): the keep-name renderer, shared by estate-search and estate-restore, escapes what a keep carries.
+import * as f472Estate from './estate-archive.mjs';
+
+test('F472-1 the shared keep-name renderer escapes a line break and a bidi control in an anchor and a date', () => {
+  const named = f472Estate.namedKeeps([{ anchor: 'bad\nFORGED ' + String.fromCharCode(0x202e), date: '2026-01-01\r\nfake' }]);
+  assert.ok(!/[\r\n]/.test(named), `no raw line break from a keep: ${JSON.stringify(named)}`);
+  assert.ok(!named.includes(String.fromCharCode(0x202e)), 'no raw bidi control from a keep');
 });

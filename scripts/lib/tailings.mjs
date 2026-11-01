@@ -85,6 +85,8 @@ const BIN_LOCK_NAME = '.bin.lock'; // per-bin (not per-tx) exclusive lock — se
 // the happy-path hold time on the target filesystem, and treat an
 // unquantified network/cloud mount as the open question, not a solved one.
 const BIN_LOCK_STALE_MS = 5000;
+// 29n F472-2: a bin blob and its index are copies of memory content, so they are created owner-only (the mode applies on creation).
+const BIN_FILE_MODE = 0o600;
 // Perf-regression counter for tests only (the apply.mjs / fidelity-gate.mjs
 // `__testHooks` precedent, GATE COST ruling 2026-08-04: a count, not a clock).
 // `binLockAttempts` counts every acquireLock call recordBinItem or the sweep makes, so a
@@ -144,7 +146,7 @@ function writeBlobWhole(dir, id, body) {
   const tmp = path.join(dir, `${id}.${crypto.randomBytes(6).toString('hex')}.part`);
   let made = false;
   try {
-    const fd = fs.openSync(tmp, 'wx'); // a fresh inode or EEXIST, never a write through an entry planted at the name
+    const fd = fs.openSync(tmp, 'wx', BIN_FILE_MODE); // a fresh inode or EEXIST, never a write through an entry planted at the name
     made = true;
     try { fs.writeFileSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     if (typeof __testHooks.beforeBlobLink === 'function') __testHooks.beforeBlobLink(tmp);
@@ -154,7 +156,7 @@ function writeBlobWhole(dir, id, body) {
       if (!(e && NO_HARD_LINKS.has(e.code))) throw e;
       // shortcut: no hard links here, so the copy is written at its id directly (the pre-t173 path); a writer killed
       // mid-write on such a filesystem still leaves a torn copy that loadIndex lists. Upgrade if such a mount is ever measured.
-      fs.writeFileSync(final, body, { flag: 'wx' });
+      fs.writeFileSync(final, body, { flag: 'wx', mode: BIN_FILE_MODE });
     }
   } finally {
     if (made) { try { fs.unlinkSync(tmp); } catch { /* a leftover temp is removed by the next sweep */ } }
@@ -212,7 +214,7 @@ function saveIndex(dir, index) {
     // fsync is added here on purpose: this closes a security hole, it does not
     // change this path's durability posture.
     const tmp = path.join(dir, `${INDEX_NAME}.${crypto.randomBytes(12).toString('hex')}.tmp`);
-    fs.writeFileSync(tmp, JSON.stringify(index), { encoding: 'utf8', flag: 'wx' });
+    fs.writeFileSync(tmp, JSON.stringify(index), { encoding: 'utf8', flag: 'wx', mode: BIN_FILE_MODE });
     fs.renameSync(tmp, path.join(dir, INDEX_NAME));
     return true;
   } catch {

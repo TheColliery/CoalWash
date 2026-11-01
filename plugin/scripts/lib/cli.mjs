@@ -89,8 +89,9 @@ import { estateReport } from './estate.mjs';
 import {
   estateUltraScan, ultraBillLine, runEstate, runEstateReport,
   searchIndex, searchLines, restoreSession, resolveArchiveDir, collectTombstones,
-  readEstateKeyResolvedState, writeEstateKeyResolvedState,
+  readEstateKeyResolvedState, writeEstateKeyResolvedState, namedKeeps,
 } from './estate-archive.mjs';
+import { escapeRawControls } from './receipt.mjs'; // 29n F472-1: the printed-line escape for every bin- or archive-derived string
 import { retierScan, retierScanLines, runRetier, runRetierReport } from './retier.mjs';
 
 // RECOVERY-FREE measurement — the same gauge composition with the write-capable
@@ -498,7 +499,7 @@ function main() {
         return;
       }
       process.stdout.write(r.content); // the payload — pipeable, verbatim
-      console.error(`[CoalWash] restored ${r.id} from ${r.bin} (${r.bytes} bytes${r.original ? `, cut from ${r.original}` : ''}) — content on stdout; nothing was written to the store`);
+      console.error(`[CoalWash] restored ${r.id} from ${r.bin} (${r.bytes} bytes${r.original ? `, cut from ${escapeRawControls(String(r.original))}` : ''}) — content on stdout; nothing was written to the store`);
     } catch (e) {
       console.error(`restore failed: ${e.message}`);
       process.exitCode = 1;
@@ -660,11 +661,11 @@ function main() {
       const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: argAfter(args, '--to'), tombstones });
       if (!r.ok) { console.error(`estate-restore: ${r.error}`); process.exitCode = 1; return; }
       console.log(`[CoalWash] restored ${r.files.length} file(s) of session ${sessionId} to ${r.dir} — byte-exact originals; nothing written into the live CC tree${argAfter(args, '--to') ? ' beyond your --to choice' : ''}`);
-      for (const f of r.files) console.log(`  ${f.rel} (${f.bytes} bytes)`);
+      for (const f of r.files) console.log(`  ${escapeRawControls(String(f.rel))} (${f.bytes} bytes)`); // 29n F472-1: the archive manifest's path is data
       // #58 deletion-unaware time-travel restore: label recovered content that
       // overlaps an adjudicated/cut tombstone — advisory, the restore stands.
       if (Array.isArray(r.laterRemoved) && r.laterRemoved.length) {
-        const named = r.laterRemoved.slice(0, 2).map((h) => `"${h.anchor}"${h.date ? ` (${h.date})` : ''}`).join('; ');
+        const named = namedKeeps(r.laterRemoved); // 29n F472-1: the shared, escaped renderer (estate-search's line, byte for byte)
         console.log(`  ⚠ later-removed? this recovered session matches ${r.laterRemoved.length} gate-adjudicated keep(s): ${named} — VERIFY against the CURRENT live store before treating it as current fact; it may have been deliberately removed/changed (keeps.json${tombstones.hasDeathLog ? ' + the bin death-log' : ''}).`);
       }
     } catch (e) {

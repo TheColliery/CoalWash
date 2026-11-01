@@ -962,3 +962,27 @@ test('F470-f replaceFile creates its temp with the mode it is given, 0600 by def
     assert.deepStrictEqual(opts.map((o) => o.mode), [0o600, 0o640], `the mode each temp is created with: ${JSON.stringify(opts)}`);
   } finally { fs.writeFileSync = realWrite; fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// 29n fire 473 (F472-2, RED first): the bin blob and index are created at 0600 (the seam is the open and write calls).
+import { recordBinItem as f472Bin, FAT_BIN_NAME as f472Fat } from './tailings.mjs';
+
+test('F472-2 the bin blob and index are created at 0600 (the seam is the open and write calls)', () => {
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'bin-f472-')));
+  const realOpen = fs.openSync;
+  const realWrite = fs.writeFileSync;
+  const made = [];
+  const skip = (p) => /\.gitignore$|\.lock$/.test(String(p));
+  fs.openSync = function patched(p, flags, mode, ...rest) {
+    if (String(flags) === 'wx' && !skip(p)) made.push({ at: 'open', mode });
+    return realOpen.call(fs, p, flags, mode, ...rest);
+  };
+  fs.writeFileSync = function patched(p, data, o, ...rest) {
+    if (o && typeof o === 'object' && o.flag === 'wx' && !skip(p)) made.push({ at: 'write', mode: o.mode });
+    return realWrite.call(fs, p, data, o, ...rest);
+  };
+  try {
+    f472Bin(proj, f472Fat, { content: 'alpha', original: path.join(proj, 'a.md'), now: Date.now() });
+    assert.ok(made.length >= 2, `the blob and the index were both created: ${JSON.stringify(made)}`);
+    assert.deepStrictEqual(made.filter((m) => m.mode !== 0o600), [], `every bin writer is created at 0600: ${JSON.stringify(made)}`);
+  } finally { fs.openSync = realOpen; fs.writeFileSync = realWrite; fs.rmSync(proj, { recursive: true, force: true }); }
+});

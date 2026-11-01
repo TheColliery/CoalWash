@@ -938,7 +938,7 @@ export function runRetier({
           const robbedGz = stolen(`the archive copy of ${t.path}`, untouched());
           if (robbedGz) return robbedGz;
           fs.mkdirSync(path.dirname(dest), { recursive: true });
-          fs.writeFileSync(dest, gz);
+          fs.writeFileSync(dest, gz, { mode: 0o600 }); // 29n F472-2: the archive holds a copy of memory content, owner-only
           gzWritten.push(dest);
           const back = zlib.gunzipSync(fs.readFileSync(dest));
           if (!back.equals(buf)) throw new Error('verify mismatch');
