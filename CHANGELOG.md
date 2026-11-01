@@ -8,10 +8,11 @@ Report bin and recovery locks that cannot be released, not drop them
 
 ### Fixed
 
-- Crash recovery names a lock it cannot release, with the lock's path, instead of dropping the note (`scripts/lib/apply.mjs`, lines 1982-1996).
-- A bin lock whose release fails is named on the result. That includes a sweep that throws inside its locked section (`scripts/lib/tailings.mjs`, lines 369-372, 448-460 and 549-553; `scripts/lib/apply.mjs`, line 1520).
-- A journal removed while recovery waited for the lock is no longer reported as unreadable. Recovery finds nothing to recover and says so (`scripts/lib/apply.mjs`, lines 2035-2038).
-- The deferral's wait follows the lock's own stale window, not a typed 30 minutes (`scripts/lib/apply.mjs`, lines 791-794 and 2025-2031).
+- Crash recovery names a lock it cannot release, with the lock's path, instead of dropping the note (`scripts/lib/apply.mjs`, lines 1979-1993).
+- The gauge's summary line names a lock a recovery left behind, and an early refusal reports a global lock it could not release, instead of dropping the note (`scripts/lib/cli.mjs`, lines 257-259; `scripts/lib/apply.mjs`, lines 1428-1446).
+- A bin lock whose release fails is named on the result. That includes a sweep that throws inside its locked section (`scripts/lib/tailings.mjs`, lines 369-372, 448-460 and 549-553; `scripts/lib/apply.mjs`, line 1517).
+- A journal removed while recovery waited for the lock is no longer reported as unreadable. Recovery finds nothing to recover and says so (`scripts/lib/apply.mjs`, lines 2032-2035).
+- The deferral's wait follows the lock's own stale window, not a typed 30 minutes (`scripts/lib/apply.mjs`, lines 791-794 and 2022-2028).
 
 ## [1.15.2] - 2026-11-01
 
