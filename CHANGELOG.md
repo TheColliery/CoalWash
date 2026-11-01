@@ -2,6 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.4] - 2026-11-01
+
+Escape keep and archive text in output and tighten copy file modes
+
+### Security
+
+- `estate-search` prints a keep's anchor and date, and an archived session's index fields, with control characters and line breaks escaped, so a cloned repository's `keeps.json` cannot forge a line of output (`scripts/lib/estate-archive.mjs`, lines 900-902 and 912-913; `scripts/lib/receipt.mjs`, line 79).
+- Recovery, snapshot and journal copies are created readable by the owner only (mode 0600). A rewritten memory file and an airbag snapshot keep the file's own mode. On Windows the folder's permissions still apply (`scripts/lib/apply.mjs`, lines 316-321 and 1662; `scripts/lib/repo-fs.mjs`, lines 179-186; `scripts/lib/writeguard.mjs`, line 315).
+- A transcript restored by `estate-restore` is created 0600. An existing file keeps its own mode, so a restore that must be 0644 is a request the user makes (`scripts/lib/estate-archive.mjs`, line 1046).
+- Duplicate bin records and duplicate keep anchors are read once, not once per copy (`scripts/lib/anchor-diff.mjs`, lines 131-136; `scripts/lib/estate-archive.mjs`, lines 836 and 843-846).
+- **Contributor-facing:** the link checker's expansion of a masked span is bounded at 1 MiB, and `verify.mjs` reads the platform config through the size bound it already uses for config (`scripts/link-check.mjs`, lines 192-202; `scripts/verify.mjs`, lines 208-213).
+
 ## [1.15.3] - 2026-11-01
 
 Report bin and recovery locks that cannot be released, not drop them
