@@ -5310,3 +5310,21 @@ test('W5 (29ax): applyPlan reports an index-disk mismatch as a counts-only line 
     assert.ok(fs.existsSync(path.join(txDirFor(proj), FAT_BIN_NAME, 'index.json')), 'the index file is untouched');
   } finally { clean(proj, home); }
 });
+
+test('29ay M24: a row-less blob is counted on its own binMismatches line, with no id', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'orphan', original: 'o.md', now });
+    const idxPath = path.join(txDirFor(proj), FAT_BIN_NAME, 'index.json');
+    fs.writeFileSync(idxPath, JSON.stringify(JSON.parse(fs.readFileSync(idxPath, 'utf8')).filter((x) => x.id !== id)));
+    const f1 = path.join(store, 'f1.md');
+    write(f1, 'plain prose\n');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'still plain prose\n' }]), { home });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.binMismatches.length, 1, 'the bin with a row-less blob reports one line');
+    assert.ok(/1 blobs have no row/.test(r.binMismatches[0]), 'the count is stated');
+    assert.ok(!r.binMismatches.join('\n').includes(id), 'no id in the line');
+  } finally { clean(proj, home); }
+});

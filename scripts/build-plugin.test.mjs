@@ -378,7 +378,7 @@ test('29ax M13: a junction at the plugin document source folder is refused by na
   t.after(() => fs.rmSync(other, { recursive: true, force: true }));
   fs.writeFileSync(path.join(other, 'README.md'), 'a real file, reached through a junction\n');
   fs.rmSync(path.join(fx, 'plugin-src'), { recursive: true, force: true });
-  fs.symlinkSync(other, path.join(fx, 'plugin-src'), 'junction');
+  if (!tryLink(t, other, path.join(fx, 'plugin-src'), 'junction')) return;
   assert.throws(() => buildDist(dist, fx), /link/i, 'a link above the document source is refused, never followed');
   assert.ok(fs.existsSync(path.join(dist, 'README.md')), 'the old dist is left in place');
 });

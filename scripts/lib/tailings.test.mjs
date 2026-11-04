@@ -1166,7 +1166,7 @@ test('29ax BB-408 (ข): a blob with no row ages by its name, is named once with
     assert.deepStrictEqual(r.rowless, [{ id, dueAt: at + HORIZON_MS.fat }], 'the result names it with its due date');
     const hits = () => readDeathLog(proj, FAT_BIN_NAME).split('\n').filter((l) => l.includes(`index-disk no row: ${id} `));
     assert.strictEqual(hits().length, 1, 'named once');
-    assert.ok(hits()[0].includes(`removed by ${new Date(at + HORIZON_MS.fat).toISOString()} at the latest`), 'with its due date');
+    assert.ok(hits()[0].includes(`horizon ${new Date(at + HORIZON_MS.fat).toISOString()}: goes at the first wash past that date`), 'with its due date');
     sweepFatBin(proj, { now });
     assert.strictEqual(hits().length, 1, 'a second wash does not name it again');
   } finally { clean(proj); }
@@ -1181,5 +1181,75 @@ test('29ax BB-408 (ข): a blob with no row past its horizon is destroyed as tod
     const r = sweepFatBin(proj, { now });
     assert.strictEqual(r.destroyed, 1);
     assert.ok(!fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), id)), 'past its horizon: destroyed, as before');
+  } finally { clean(proj); }
+});
+
+test('29ay F515-1: a planted name with an out-of-range date gives its blob no due date; the wash still writes its certificate', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const old = recordBinItem(proj, FAT_BIN_NAME, { content: 'old copy', original: 'o.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
+    const planted = '99999999999999999-aaaaaaaaaaaa';
+    fs.writeFileSync(path.join(w29BinPath(proj, FAT_BIN_NAME), planted), 'planted');
+    let r;
+    assert.doesNotThrow(() => { r = sweepFatBin(proj, { now }); }, 'a planted name cannot throw out of the sweep');
+    assert.strictEqual(r.destroyed, 1, 'the due copy is destroyed');
+    const log = readDeathLog(proj, FAT_BIN_NAME);
+    assert.ok(log.includes(`destroyed ${old} `), 'the destroyed copy has its certificate');
+    assert.ok(log.includes(`index-disk no row: ${planted} ages by its name, horizon not stated`), 'the planted blob is named with no date');
+    assert.deepStrictEqual(r.rowless, [{ id: planted }], 'no dueAt on the entry');
+  } finally { clean(proj); }
+});
+
+test('29ay F515-1: a row whose at is not a date gives the same result: no throw, no dueAt', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
+    w29Write(proj, FAT_BIN_NAME, w29Rows(proj, FAT_BIN_NAME).map((x) => (x.id === id ? { ...x, original: null, origin: null, at: 'not a date' } : x)));
+    let r;
+    assert.doesNotThrow(() => { r = sweepFatBin(proj, { now }); });
+    assert.deepStrictEqual(r.rowless, [{ id }]);
+  } finally { clean(proj); }
+});
+
+test('29ay F515-2: a row-less blob destroyed in this pass is not named; a surviving one is named with its horizon and the caveat', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const gone = recordBinItem(proj, FAT_BIN_NAME, { content: 'x', original: 'x.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
+    const kept = recordBinItem(proj, FAT_BIN_NAME, { content: 'y', original: 'y.md', now: now - 3600000 });
+    w29Write(proj, FAT_BIN_NAME, w29Rows(proj, FAT_BIN_NAME).filter((x) => x.id !== gone && x.id !== kept));
+    sweepFatBin(proj, { now });
+    const log = readDeathLog(proj, FAT_BIN_NAME);
+    assert.ok(!log.includes(`index-disk no row: ${gone} `), 'destroyed in this pass: not named');
+    assert.ok(log.includes(`index-disk no row: ${kept} ages by its name, horizon `), 'surviving: named with its horizon');
+    assert.ok(log.includes('goes at the first wash past that date, or sooner under density or cap pressure'), 'the caveat is stated');
+  } finally { clean(proj); }
+});
+
+test('29ay F515-4: a held id that appears in the words of a held line is named by its own token, never by a substring', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: 'x1', at: now - 3600000, bytes: 9, original: 'x.md', origin: 'program-cut' }]);
+    sweepFatBin(proj, { now });
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: 'kept', at: now - 3600000, bytes: 9, original: 'k.md', origin: 'program-cut' }]);
+    sweepFatBin(proj, { now });
+    assert.ok(readDeathLog(proj, FAT_BIN_NAME).includes('kept (missing, 0B)'), 'named by its own token, not by the word kept in the first line');
+  } finally { clean(proj); }
+});
+
+test('29ay M19: a destroyed row original is escaped in its certificate, as its id is', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'c', original: 'o\u001bx.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
+    sweepFatBin(proj, { now });
+    const log = readDeathLog(proj, FAT_BIN_NAME);
+    assert.ok(log.includes('original o\\u001bx.md'), 'the original is written as its escape');
+    assert.ok(!/\u001b/.test(log), 'no raw ESC reaches the log');
   } finally { clean(proj); }
 });

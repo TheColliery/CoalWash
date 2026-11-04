@@ -483,12 +483,27 @@ function certField(v) {
   const s = escapeRawControls(String(v));
   return s.length > CERT_FIELD_MAX ? `${s.slice(0, CERT_FIELD_MAX)}...` : s;
 }
-// BB-408 (ค): the held ids this bin's death log already names. Only the index-disk lines are read; a log that cannot be
-// read names nothing, so the line repeats rather than being dropped.
+// Owner item 6, exact tokens (29ay F515-4): a held id is named by its own line's `<id> (<kind>, <n>B)` token, and a row-less
+// id by its `index-disk no row: <id> ages` token. A substring match counted a planted id that appears in the words of a line
+// (`kept 5 rows`) as already named, so the two line kinds are read apart and matched whole.
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function namedHeld(text, id) { return new RegExp(`(?:^|[ :,])${escapeRe(certField(id))} \\((?:missing|size|unreadable), \\d+B\\)`, 'm').test(text); }
+function namedNoRow(text, id) { return new RegExp(`(?:^|[ :,])${escapeRe(certField(id))} ages by its name`, 'm').test(text); }
+// Owner item 7 (29ay F515-1): the due date comes from the id's own name, so it can be no date at all. Such an entry carries
+// no dueAt, and nothing below calls toISOString on it, so a planted name cannot stop the wash's certificates.
+function dueOf(row, horizonMs) {
+  const dueAt = Number(row.at) + horizonMs;
+  return { id: row.id, ...(Number.isFinite(dueAt) && Math.abs(dueAt) <= 8.64e15 ? { dueAt } : {}) };
+}
+// The death log's held and row-less lines, read apart. An unreadable log names nothing, so the line repeats (never dropped).
 function namedInLog(dir) {
   let text = '';
   try { text = readRepoFileBounded(path.join(dir, DEATH_LOG_NAME), dir, MAX_DOC_BYTES, true) ?? ''; } catch { text = ''; }
-  return text.split('\n').filter((l) => l.includes('index-disk')).join('\n');
+  const lines = text.split('\n');
+  return {
+    held: lines.filter((l) => l.includes('index-disk mismatch')).join('\n'),
+    noRow: lines.filter((l) => l.includes('index-disk no row:')).join('\n'),
+  };
 }
 function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   const temps = removeStaleTemps(dir); // E1 t173: inside the lock, which a live writer holds while its temp exists
@@ -507,11 +522,11 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   const heldIds = new Set(held.map((h) => h.id));
   const heldBytes = held.reduce((n, h) => n + (h.kind === 'size' ? h.size : 0), 0);
   const copies = [];
-  const rowless = []; // BB-408 (ข): a blob with no row still goes to the plan, and is named once with its due date
+  const rowless = []; // owner item 7: a blob with no row still goes to the plan, and is named once with its due date
   for (const { row, shape } of shapes) {
     if (heldIds.has(row.id)) continue;
     copies.push({ ...row, bytes: shape.size });
-    if (row.original === null && row.origin === null) rowless.push({ id: row.id, dueAt: Number(row.at) + horizonMs });
+    if (row.original === null && row.origin === null) rowless.push(dueOf(row, horizonMs));
   }
   if (typeof __testHooks.beforeSweepPlan === 'function') __testHooks.beforeSweepPlan(dir); // 29k F452-B2: a fault seam inside the locked section (beforeIndexSave's twin)
   const { destroy, reasons, capConflict } = retentionPlan(copies, now, { horizonMs, budgetBytes });
@@ -536,20 +551,28 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   if (capConflict) {
     cert.push(`${new Date(now).toISOString()} cap-conflict kept ${capConflict.keptBytes}B > budget ${capConflict.budgetBytes}B — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor (+ the newest-copy anchor) exceeds the cap; bin over budget this run, nothing young destroyed`);
   }
-  // BB-408 (ค) + (ข): a held row is named in the death log ONCE. Only ids the log does not already name are written, at most
+  // owner items 6 and 7: a held row is named in the death log ONCE. Only ids the log does not already name are written, at most
   // MISMATCH_IDS_SHOWN of them; the rest appear on a later wash. A wash with nothing new writes no line.
   const named = namedInLog(dir);
   const iso = new Date(now).toISOString();
   const freshHeld = [];
-  for (const h of held) if (!named.includes(certField(h.id)) && !freshHeld.some((f) => f.id === h.id)) freshHeld.push(h);
+  for (const h of held) if (!namedHeld(named.held, h.id) && !freshHeld.some((f) => f.id === h.id)) freshHeld.push(h);
   if (freshHeld.length) {
     const kindCount = (k) => held.filter((h) => h.kind === k).length;
     const shown = freshHeld.slice(0, MISMATCH_IDS_SHOWN).map((h) => `${certField(h.id)} (${h.kind}, ${h.size}B)`).join(', ');
     const more = freshHeld.length > MISMATCH_IDS_SHOWN ? `, +${freshHeld.length - MISMATCH_IDS_SHOWN} more on a later wash` : '';
     cert.push(`${iso} index-disk mismatch: kept ${held.length} rows (missing ${kindCount('missing')}, size ${kindCount('size')}, unreadable ${kindCount('unreadable')}; held ${heldBytes}B), nothing deleted or edited, new in this wash: ${shown}${more}`);
   }
-  const freshRowless = rowless.filter((r) => !named.includes(certField(r.id))).slice(0, MISMATCH_IDS_SHOWN);
-  for (const r of freshRowless) cert.push(`${iso} index-disk no row: ${certField(r.id)} ages by its name, removed by ${new Date(r.dueAt).toISOString()} at the latest`);
+  // Owner item 7 (29ay F515-2): a row-less blob this pass destroyed is not named (it is gone). The rest state the horizon and
+  // what the horizon is: the first wash past that date, or sooner under density or cap pressure.
+  const live = rowless.filter((r) => !gone.has(r.id));
+  const freshRowless = live.filter((r) => !namedNoRow(named.noRow, r.id)).slice(0, MISMATCH_IDS_SHOWN);
+  for (const r of freshRowless) {
+    const what = r.dueAt === undefined
+      ? 'ages by its name, horizon not stated: its name carries no usable date'
+      : `ages by its name, horizon ${new Date(r.dueAt).toISOString()}: goes at the first wash past that date, or sooner under density or cap pressure`;
+    cert.push(`${iso} index-disk no row: ${certField(r.id)} ${what}`);
+  }
   if (cert.length) {
     try { fs.mkdirSync(dir, { recursive: true }); appendOwnLog(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n'); } catch { /* the certificate is a record, not a gate */ }
   }
@@ -568,7 +591,8 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   const out = { destroyed: gone.size, kept };
   if (capConflict) out.capConflict = capConflict;
   if (held.length) { out.mismatches = held.map(({ id, kind }) => ({ id, kind })); out.heldBytes = heldBytes; }
-  if (rowless.length) out.rowless = rowless.map(({ id, dueAt }) => ({ id, dueAt }));
+  const rowlessOut = rowless.filter((r) => !gone.has(r.id)).map(({ id, dueAt }) => (dueAt === undefined ? { id } : { id, dueAt }));
+  if (rowlessOut.length) out.rowless = rowlessOut;
   return out;
 }
 // storeBytes (0i) -> the bin's size budget: BIN_BUDGET_STORE_MULTIPLE x the
