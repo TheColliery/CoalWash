@@ -10,10 +10,11 @@ Hold a bin row the disk disagrees with; document install paths
 
 - A recovery-bin row whose file is missing, whose declared size differs from the file, or which cannot be examined is held out of the sweep whole. Nothing is deleted or edited, and the death log names each held row once, with its real bytes; a wash with nothing new writes no line. Before, such a row could be certified destroyed for a file that was never there, could evict genuine copies through its declared size, or could be dropped from the index (`scripts/lib/tailings.mjs`, the bin sweep; `scripts/lib/apply.mjs`, the preflight; test: `scripts/lib/tailings.test.mjs`).
 - A held file weighs nothing against the bin's budget, and its real bytes are named on the mismatch line.
+- A recovery-bin file whose name or index row carries a date the calendar cannot hold no longer stops the sweep. The certificates of that wash are written, and the file is named in the death log with no horizon date.
 
 ### Changed
 
-- A recovery-bin file with no index row is named in the death log with the date it will be destroyed, and is destroyed on that date by the age in its own name, as before.
+- A recovery-bin file with no index row is named in the death log with its horizon date, the first wash it is seen, unless that same wash destroys it. It goes at the first wash past that date, or sooner under density or cap pressure. Never "at the latest", never "on that date".
 - `plugin/README.md` is new. It is the plugin's own README, built from `plugin-src/README.md` by `scripts/build-plugin.mjs`.
 - The README's Install section names the install paths measured on 2026-11-05. `npx skills add` installs the skill text only; `apm install` lands the skill, the commands and the hook entries, and its hooks were not run. The plugin install is the path for a working tool.
 

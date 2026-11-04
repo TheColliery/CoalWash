@@ -14,7 +14,7 @@ Report a security issue in this repo through GitHub's private vulnerability repo
 
 **Fixed** in `v1.15.5` (its `CHANGELOG.md` `### Fixed` entry carries the mechanism): such a row is held out of the plan whole. Nothing is deleted or edited, the row stays in the index past its horizon, and the death log names each held row once, with its real bytes.
 
-**Not closed, by name.** (1) A held file stays on disk and stays held. Its real bytes are named on the mismatch line and count against no budget, so nothing reclaims them. (2) A file with no index row is weighed by its size on disk and destroyed at the date in its own name, as before; the death log names it once, with that date, before it goes.
+**Not closed, by name.** (1) A held file stays on disk and stays held. Its real bytes are named on the mismatch line and count against no budget, so nothing reclaims them. (2) A file with no index row is weighed by its size on disk and goes at the first wash past its horizon date, or sooner under density or cap pressure. The death log names it with that horizon date on the first wash it is seen, unless that same wash destroys it.
 
 **Affected versions:** not derived in this unit. The red witnesses were run on the `1.15.4` tree (`48c8d90`), which is the only tree measured here.
 

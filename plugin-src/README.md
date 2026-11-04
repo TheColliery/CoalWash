@@ -38,7 +38,7 @@ Memory content is read only by your own session's model, the same as any memory 
 ## Example uses
 
 1. **A quick wash.** Type `/coalwash` and choose the first option, fat only. The pass is mechanical and snapshot-backed. It returns one line of numbers, even when it cut nothing, so you can tell a working run from no run.
-2. **The Full wizard.** Type `/coalwash` and choose fat plus muscle reorganisation. A zero-context reviewer judges the content. The wizard states the break-even numbers as a process notice, and then you start or cancel the run.
+2. **The Full wizard.** Type `/coalwash` and choose fat plus muscle reorganisation. A zero-context reviewer judges the content. The wizard states its estimated time and token cost as a process notice, and then you start or cancel the run.
 3. **Find and restore an archived transcript.** From the plugin's `scripts/lib/` folder, `node cli.mjs estate-search <query>` searches the archive's index without unpacking anything. `node cli.mjs estate-restore <sessionId>` writes the transcript back byte for byte into a scratch folder, never into the live tree.
 4. **Check a project.** Run `/coalwash:stats`. It shows the band, the certain fat, the break-even numbers when the band is OBESE or FULL, the Memory-BMI ratio, and the count of kept and cut items.
 
