@@ -8,6 +8,16 @@ Report a security issue in this repo through GitHub's private vulnerability repo
 
 ## Advisories
 
+### 2026-11-05 — a recovery-bin row the index and the disk disagree on was destroyed or dropped; it is now held
+
+**What.** The bin sweep trusted the index. A row whose file was missing, whose declared size differed from the file, or whose file could not be read could be certified destroyed for a file that was never there, could push genuine copies out under the size cap through its declared size, or could be removed from the index with its record.
+
+**Fixed** in `v1.15.5` (its `CHANGELOG.md` `### Fixed` entry carries the mechanism): such a row is held out of the plan whole. Nothing is deleted or edited, the row stays in the index past its horizon, and the death log names the held ids, twenty at most.
+
+**Not closed, by name.** (1) A real file on disk still weighs against the budget at its real size, so a planted but real file still presses older copies. (2) A blob with no index row keeps today's disk-derived retention: it is listed from the folder, weighed by its size on disk, and dated by its own name.
+
+**Affected versions:** not derived in this unit. The red witnesses were run on the `1.15.4` tree (`48c8d90`), which is the only tree measured here.
+
 ### 2026-10-18 — a repository, or a project unpacked from an archive, could plant a future-dated bin item to push your real recovery copies out under the size cap, and a killed writer could leave a truncated copy that was listed as whole
 
 **What.** Each recovery bin (the fat bin, `store.old`) has a byte budget. A bin item whose date is in the future or unreadable is never evicted (CoalWash keeps what it cannot date), but its size still counted toward that budget, so a repository, or a project unpacked from an archive, that planted one such row, or one such file in the bin-id shape (v1.12.9 lists a file with no row), could make the size cap evict genuine, older recovery copies to make room for it. Separately, a copy was written straight under its final name, so a CoalWash process killed mid-write left a truncated file under that name, which v1.12.9 listed and `restore` printed as complete.
