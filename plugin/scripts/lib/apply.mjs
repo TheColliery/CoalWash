@@ -1523,10 +1523,14 @@ export function applyPlan(plan, opts = {}) {
       const binConflicts = binSweeps
         .filter(([, r]) => r && r.capConflict)
         .map(([name, r]) => `retention: ${name} over budget (${r.capConflict.keptBytes}B kept > ${r.capConflict.budgetBytes}B budget) — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor holds and byte pressure may not break it; the bin exceeds its cap until items age past the floor`);
-      // 29ax: the index and the disk disagree on some rows. Counts only, never an id (the ids are in the death log).
-      const binMismatches = binSweeps
-        .filter(([, r]) => r && Array.isArray(r.mismatches) && r.mismatches.length)
-        .map(([name, r]) => `retention: ${name}: the index and the disk disagree on ${r.mismatches.length} rows; nothing deleted or edited, the bin is weighed from the disk; see the death log`);
+      // 29ax: the index and the disk disagree on some rows (held, weighed from the disk), and some blobs have no row (aged by
+      // their name). Counts only, never an id: the ids are in the death log.
+      const binMismatches = binSweeps.flatMap(([name, r]) => {
+        const lines = [];
+        if (r && Array.isArray(r.mismatches) && r.mismatches.length) lines.push(`retention: ${name}: the index and the disk disagree on ${r.mismatches.length} rows (${r.heldBytes || 0}B real held); nothing deleted or edited, the bin is weighed from the disk; see the death log`);
+        if (r && Array.isArray(r.rowless) && r.rowless.length) lines.push(`retention: ${name}: ${r.rowless.length} blobs have no row and age by their name; see the death log`);
+        return lines;
+      });
 
       // ---- snapshot BEFORE the first mutation, then the completion marker ----
       // 15b fire 56 (census row 3): `snap-<now>` is a FRESH name, so it is created NON-recursively under the tx dir (made

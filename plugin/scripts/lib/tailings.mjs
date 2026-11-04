@@ -54,6 +54,7 @@ import { ensureSelfIgnore, acquireLock, trackedInOwnFolder, lockLeftNote, withLo
 import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
+import { escapeRawControls } from './receipt.mjs'; // 29ax F512-4: the one escaper a certificate field uses (receipt.mjs imports nothing back)
 
 export const FAT_BIN_NAME = 'fat-bin';
 export const STORE_OLD_NAME = 'store.old';
@@ -98,7 +99,7 @@ const BIN_FILE_MODE = 0o600;
 // `beforeBlobLink(tmp)` (E1 t173): called after a copy's bytes are written and synced to its temp, right before the temp is
 // linked to the copy's id, so a test can kill a writer at that point. `linkSync` replaces fs.linkSync so a test can stand
 // in for a filesystem without hard links. Both null in production.
-export const __testHooks = { binLockAttempts: 0, beforeIndexSave: null, beforeBlobLink: null, linkSync: null, beforeSweepPlan: null };
+export const __testHooks = { binLockAttempts: 0, beforeIndexSave: null, beforeBlobLink: null, linkSync: null, beforeSweepPlan: null, lstatSync: null };
 
 // CWK-137: a bin is `<project>/.claude/coalwash/<name>` -- repo-plantable. ownSandboxDir
 // THROWS when any directory between the project root and the bin is a link, and
@@ -467,13 +468,27 @@ function emptySweep(e) {
 // A clean row (a regular file whose bytes are equal, or not finite on a legacy row) carries its real size.
 function diskShape(dir, row) {
   let st;
-  try { st = fs.lstatSync(path.join(dir, row.id)); } catch (e) {
+  try { st = (__testHooks.lstatSync || fs.lstatSync)(path.join(dir, row.id)); } catch (e) { // lstatSync seam: the unreadable witness (513)
     return { kind: e && e.code === 'ENOENT' ? 'missing' : 'unreadable', size: 0 };
   }
   if (!st.isFile()) return { kind: 'missing', size: 0 };
   const declared = Number(row.bytes);
   if (Number.isFinite(declared) && declared !== st.size) return { kind: 'size', size: st.size };
   return { kind: null, size: st.size };
+}
+// 29ax F512-4: a certificate field is ONE escaped line, cut to a fixed length. Its id and `original` come out of index.json, which a
+// cloned repo can plant (CR, LF, ESC, U+2028 and an over-long id all arrive there).
+const CERT_FIELD_MAX = 200;
+function certField(v) {
+  const s = escapeRawControls(String(v));
+  return s.length > CERT_FIELD_MAX ? `${s.slice(0, CERT_FIELD_MAX)}...` : s;
+}
+// BB-408 (ค): the held ids this bin's death log already names. Only the index-disk lines are read; a log that cannot be
+// read names nothing, so the line repeats rather than being dropped.
+function namedInLog(dir) {
+  let text = '';
+  try { text = readRepoFileBounded(path.join(dir, DEATH_LOG_NAME), dir, MAX_DOC_BYTES, true) ?? ''; } catch { text = ''; }
+  return text.split('\n').filter((l) => l.includes('index-disk')).join('\n');
 }
 function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   const temps = removeStaleTemps(dir); // E1 t173: inside the lock, which a live writer holds while its temp exists
@@ -482,74 +497,63 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   }
   const index = loadIndex(dir); // re-read INSIDE the lock: the peek above may be stale by now
   if (!index.length) return { destroyed: 0, kept: 0 };
-  // 29ax: the index and the disk can disagree (a row whose file is gone, a declared size that is not the file's). The bin
-  // is weighed from what is ON DISK. A disputed row never reaches the plan, its bytes are never counted, and it is neither
-  // destroyed nor edited. A clean row goes to the plan as a COPY carrying its real size, so a legacy row's missing `bytes`
-  // is no longer written back: the index is saved only when something was destroyed (below).
+  // 29ax: the index and the disk can disagree (a row whose file is gone, a declared size that is not the file's). The bin is
+  // weighed from what is ON DISK. A held row never reaches the plan and weighs nothing (F512-1: a held file cannot be evicted,
+  // so counting it would press older copies for ever); a held id keeps EVERY row of that id out of the plan (F512-3). A clean
+  // row goes to the plan as a COPY carrying its real size, so a legacy row's missing `bytes` is not written back.
+  const shapes = index.map((row) => ({ row, shape: diskShape(dir, row) }));
+  const held = []; // { id, kind, size } for every disputed row
+  for (const { row, shape } of shapes) if (shape.kind) held.push({ id: row.id, kind: shape.kind, size: shape.size });
+  const heldIds = new Set(held.map((h) => h.id));
+  const heldBytes = held.reduce((n, h) => n + (h.kind === 'size' ? h.size : 0), 0);
   const copies = [];
-  const disputed = [];
-  let disputedBytes = 0;
-  for (const row of index) {
-    const shape = diskShape(dir, row);
-    if (shape.kind) {
-      disputed.push({ id: row.id, kind: shape.kind });
-      if (shape.kind === 'size') disputedBytes += shape.size;
-      continue;
-    }
+  const rowless = []; // BB-408 (ข): a blob with no row still goes to the plan, and is named once with its due date
+  for (const { row, shape } of shapes) {
+    if (heldIds.has(row.id)) continue;
     copies.push({ ...row, bytes: shape.size });
+    if (row.original === null && row.origin === null) rowless.push({ id: row.id, dueAt: Number(row.at) + horizonMs });
   }
   if (typeof __testHooks.beforeSweepPlan === 'function') __testHooks.beforeSweepPlan(dir); // 29k F452-B2: a fault seam inside the locked section (beforeIndexSave's twin)
-  const planBudget = Number.isFinite(budgetBytes) ? Math.max(0, budgetBytes - disputedBytes) : budgetBytes;
-  const plan = retentionPlan(copies, now, { horizonMs, budgetBytes: planBudget });
-  const { destroy, reasons } = plan;
-  let capConflict = plan.capConflict;
-  if (capConflict) capConflict = { budgetBytes: capConflict.budgetBytes + disputedBytes, keptBytes: capConflict.keptBytes + disputedBytes };
+  const { destroy, reasons, capConflict } = retentionPlan(copies, now, { horizonMs, budgetBytes });
   const cert = [];
-  // CWE-117 (below): a certificate is one line, and its id/original come out of index.json, which a cloned repo can plant.
-  const oneLine = (v) => String(v).replace(/[\r\n]/g, ' ');
   const gone = new Set(); // ids whose blob this pass verified destroyed
   for (const item of destroy) {
     const p = path.join(dir, item.id);
     try { fs.rmSync(p, { force: true }); } catch { /* leftover dust waits for the next pass */ }
     if (!fs.existsSync(p)) {
       const ageDays = Math.round((now - item.at) / 86400000);
-      // name/age/rule — the full certificate this module's header always
-      // promised (the P8 audit finding: the old line carried only id+age
-      // while the id->file mapping died in the SAME operation, leaving a
-      // human unable to say WHAT was destroyed or WHY). The source filename
-      // and the axis that fired now live in the certificate itself, so they
-      // survive the index entry's deletion.
+      // name/age/rule — the full certificate this module's header always promised (the P8 audit finding). The source
+      // filename and the axis that fired live in the certificate itself, so they survive the index entry's deletion.
       const rule = reasons.get(item) || 'horizon';
       const orig = (typeof item.original === 'string' && item.original) ? item.original : '-';
-      // CWK-137 / CWE-117: `id` and `original` come out of index.json, which a cloned
-      // repo can plant, so CR and LF are neutralized (oneLine, above) before they reach a line-oriented
-      // log -- one certificate is one line, never a forged second one.
-      cert.push(`${new Date(now).toISOString()} destroyed ${oneLine(item.id)} (age ${ageDays}d, rule ${rule}) original ${oneLine(orig)}`);
+      // CWK-137 / CWE-117: `id` and `original` come out of index.json, a planted field; certField escapes and cuts them.
+      cert.push(`${new Date(now).toISOString()} destroyed ${certField(item.id)} (age ${ageDays}d, rule ${rule}) original ${certField(orig)}`);
       gone.add(item.id);
-    } else {
-      // unverifiable death -> never claimed; the row stays in the index (the save keeps every row not destroyed)
-    }
+    } // else: an unverifiable death is never claimed; the row stays in the index (the save keeps every row not destroyed)
   }
-  // The unsatisfiable-cap audit line (retention.mjs capConflict): the floor +
-  // retrievability protections outweigh the byte budget (doubt items weigh nothing), so the bin is
-  // deliberately over cap this run. Logged here (the bin's own audit trail)
-  // AND surfaced on the sweep's return for the caller's receipt — a config
-  // conflict resolved by silence is the senior-domain failure not to port.
+  // The unsatisfiable-cap audit line (retention.mjs capConflict): the floor + retrievability protections outweigh the byte
+  // budget, so the bin is deliberately over cap this run. Logged here AND surfaced on the sweep's return for the receipt.
   if (capConflict) {
     cert.push(`${new Date(now).toISOString()} cap-conflict kept ${capConflict.keptBytes}B > budget ${capConflict.budgetBytes}B — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor (+ the newest-copy anchor) exceeds the cap; bin over budget this run, nothing young destroyed`);
   }
-  // 29ax: the held rows are named by count and by a bounded id list, one line; nothing about them is deleted or edited.
-  if (disputed.length) {
-    const shown = disputed.slice(0, MISMATCH_IDS_SHOWN).map((d) => oneLine(d.id)).join(', ');
-    const more = disputed.length > MISMATCH_IDS_SHOWN ? `, +${disputed.length - MISMATCH_IDS_SHOWN} more` : '';
-    const kindCount = (k) => disputed.filter((d) => d.kind === k).length;
-    cert.push(`${new Date(now).toISOString()} index-disk mismatch: kept ${disputed.length} rows (missing ${kindCount('missing')}, size ${kindCount('size')}, unreadable ${kindCount('unreadable')}), nothing deleted or edited: ${shown}${more}`);
+  // BB-408 (ค) + (ข): a held row is named in the death log ONCE. Only ids the log does not already name are written, at most
+  // MISMATCH_IDS_SHOWN of them; the rest appear on a later wash. A wash with nothing new writes no line.
+  const named = namedInLog(dir);
+  const iso = new Date(now).toISOString();
+  const freshHeld = [];
+  for (const h of held) if (!named.includes(certField(h.id)) && !freshHeld.some((f) => f.id === h.id)) freshHeld.push(h);
+  if (freshHeld.length) {
+    const kindCount = (k) => held.filter((h) => h.kind === k).length;
+    const shown = freshHeld.slice(0, MISMATCH_IDS_SHOWN).map((h) => `${certField(h.id)} (${h.kind}, ${h.size}B)`).join(', ');
+    const more = freshHeld.length > MISMATCH_IDS_SHOWN ? `, +${freshHeld.length - MISMATCH_IDS_SHOWN} more on a later wash` : '';
+    cert.push(`${iso} index-disk mismatch: kept ${held.length} rows (missing ${kindCount('missing')}, size ${kindCount('size')}, unreadable ${kindCount('unreadable')}; held ${heldBytes}B), nothing deleted or edited, new in this wash: ${shown}${more}`);
   }
+  const freshRowless = rowless.filter((r) => !named.includes(certField(r.id))).slice(0, MISMATCH_IDS_SHOWN);
+  for (const r of freshRowless) cert.push(`${iso} index-disk no row: ${certField(r.id)} ages by its name, removed by ${new Date(r.dueAt).toISOString()} at the latest`);
   if (cert.length) {
     try { fs.mkdirSync(dir, { recursive: true }); appendOwnLog(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n'); } catch { /* the certificate is a record, not a gate */ }
   }
-  // 29ax: index.json is rewritten only when a row was destroyed. Otherwise it stays byte-identical, so a sweep that found
-  // nothing to remove leaves the bin's own manifest exactly as it was written.
+  // index.json is rewritten only when a row was destroyed. Otherwise it stays byte-identical.
   let kept = index.length - gone.size;
   if (gone.size) {
     if (typeof __testHooks.beforeIndexSave === 'function') __testHooks.beforeIndexSave(dir);
@@ -560,15 +564,13 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
     saveIndex(dir, saved);
     kept = saved.length;
   }
-  // capConflict / mismatches only present when live: existing callers/tests deepStrictEqual
-  // the two-field shape, and an always-null field would churn every one
-  // for no information (ponytail: additive-when-present).
+  // Additive-when-present: existing callers and tests deepStrictEqual the two-field shape.
   const out = { destroyed: gone.size, kept };
   if (capConflict) out.capConflict = capConflict;
-  if (disputed.length) out.mismatches = disputed;
+  if (held.length) { out.mismatches = held.map(({ id, kind }) => ({ id, kind })); out.heldBytes = heldBytes; }
+  if (rowless.length) out.rowless = rowless.map(({ id, dueAt }) => ({ id, dueAt }));
   return out;
 }
-
 // storeBytes (0i) -> the bin's size budget: BIN_BUDGET_STORE_MULTIPLE x the
 // measured store (never the disk — V2). No measured store (absent/zero/
 // malformed) = Infinity = the cap layer inert, horizon-only: the pre-0i

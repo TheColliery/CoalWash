@@ -352,3 +352,33 @@ test('29ax: the plugin README is a dist document: built from plugin-src/, and ch
     assert.ok(!checkDist(dist).some((line) => /orphan/.test(line) && /README/.test(line)), 'the README is accounted for, never an orphan');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('29ax F512-9: a missing plugin document source is refused by name before the old dist is removed', (t) => {
+  const dist = scratchDistFor(t);
+  buildDist(dist);
+  const fx = fixtureSources(t);
+  fs.rmSync(path.join(fx, 'plugin-src', 'README.md'));
+  assert.throws(() => buildDist(dist, fx), (e) => e.message.includes(path.join('plugin-src', 'README.md')) && /refuses/.test(e.message), 'the error names the file');
+  assert.ok(fs.existsSync(path.join(dist, 'README.md')), 'the old dist is left in place');
+});
+
+test('29ax M15: checkDist names a README source that has gone missing', (t) => {
+  const dist = scratchDistFor(t);
+  buildDist(dist);
+  const fx = fixtureSources(t);
+  fs.rmSync(path.join(fx, 'plugin-src', 'README.md'));
+  assert.ok(checkDist(dist, fx).includes('missing in source: ' + path.join('plugin-src', 'README.md')));
+});
+
+test('29ax M13: a junction at the plugin document source folder is refused by name, and the old dist is left in place', (t) => {
+  const dist = scratchDistFor(t);
+  buildDist(dist);
+  const fx = fixtureSources(t);
+  const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-readme-junction-')));
+  t.after(() => fs.rmSync(other, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(other, 'README.md'), 'a real file, reached through a junction\n');
+  fs.rmSync(path.join(fx, 'plugin-src'), { recursive: true, force: true });
+  fs.symlinkSync(other, path.join(fx, 'plugin-src'), 'junction');
+  assert.throws(() => buildDist(dist, fx), /link/i, 'a link above the document source is refused, never followed');
+  assert.ok(fs.existsSync(path.join(dist, 'README.md')), 'the old dist is left in place');
+});

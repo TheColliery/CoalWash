@@ -142,8 +142,11 @@ function assertNoLinks(root, rel) {
 export function buildDist(distRoot = dist, srcRoot = repo) {
   for (const rel of DIST_ITEMS) assertNoLinks(srcRoot, rel);
   for (const d of DIST_DOCS) assertNoLinks(srcRoot, d.src); // before the old dist is removed: a refused build leaves plugin/ as it was
+  for (const d of DIST_DOCS) { // 29ax F512-9: refuse BEFORE the old dist is removed, and name the file
+    if (!fs.existsSync(path.join(srcRoot, d.src))) throw new Error(d.src + ": the plugin document is missing from the source tree; the build refuses and leaves plugin/ as it was");
+  }
   fs.rmSync(distRoot, { recursive: true, force: true });
-  for (const d of DIST_DOCS) { // a missing source throws here: the build fails loud, never a dist without its README
+  for (const d of DIST_DOCS) { // the copy: never a dist without its README
     fs.mkdirSync(distRoot, { recursive: true });
     fs.copyFileSync(path.join(srcRoot, d.src), path.join(distRoot, d.dst));
   }

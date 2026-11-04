@@ -1017,19 +1017,169 @@ test('W6 (29ax): a sweep that destroys a genuine row saves the disputed rows exa
   } finally { clean(proj); }
 });
 
-test('W7 (29ax): a held size-mismatched file counts its real bytes against the cap, so the genuine copy oldest in the cap yields', () => {
+test('W7 (29ax, flipped by 513 F512-1): a held size-mismatched file weighs nothing, so four genuine copies all survive a budget their real total would overrun', () => {
   const proj = sandbox();
   try {
     const now = Date.now();
     const held = recordBinItem(proj, FAT_BIN_NAME, { content: 'h'.repeat(5000), original: 'h.md', now: now - 3600000 });
-    const a = recordBinItem(proj, FAT_BIN_NAME, { content: 'a'.repeat(1000), original: 'a.md', now: now - 3 * W29_DAY_MS });
-    const b = recordBinItem(proj, FAT_BIN_NAME, { content: 'b'.repeat(1000), original: 'b.md', now: now - 5 * W29_DAY_MS });
+    const ids = [3, 5, 7, 9].map((d) => recordBinItem(proj, FAT_BIN_NAME, { content: 'g'.repeat(1000), original: `g${d}.md`, now: now - d * W29_DAY_MS }));
     w29Write(proj, FAT_BIN_NAME, w29Rows(proj, FAT_BIN_NAME).map((r) => (r.id === held ? { ...r, bytes: 42 } : r)));
-    // budget = 2 x 3000 = 6000 B. The held file's real 5000 B plus the copies' 2000 B is 7000 B, so the cap binds on the REAL total:
-    // the held file is never destroyed, and the oldest copy is what yields.
-    sweepFatBin(proj, { now, storeBytes: 3000 });
+    // budget = 2 x 3000 = 6000 B. The held 5000 B is not counted; the four 1000 B copies (4000 B) fit.
+    const r = sweepFatBin(proj, { now, storeBytes: 3000 });
     assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), held)), 'the held file is never destroyed');
-    assert.ok(!fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), b)), 'the oldest genuine copy yields to the real total');
-    assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), a)), 'the newer genuine copy fits beside the held file');
+    for (const id of ids) assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), id)), `genuine copy ${id} survives: a held row never presses older copies`);
+    assert.strictEqual(r.destroyed, 0);
+  } finally { clean(proj); }
+});
+
+test('29ax F512-3: two rows of one id, one clean and past its horizon, one disputed: the file and BOTH rows survive', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'c'.repeat(500), original: 'c.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { ...w29Rows(proj, FAT_BIN_NAME).find((x) => x.id === id), bytes: 42 }]);
+    const r = sweepFatBin(proj, { now });
+    assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), id)), 'the file survives');
+    assert.strictEqual(w29Rows(proj, FAT_BIN_NAME).filter((x) => x.id === id).length, 2, 'both rows survive');
+    assert.strictEqual(r.destroyed, 0, 'no certificate for an id that is held');
+    assert.deepStrictEqual(r.mismatches, [{ id, kind: 'size' }]);
+  } finally { clean(proj); }
+});
+
+test('29ax F512-4: a control character and a long id reach the death log escaped and cut, never raw', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
+    const ctl = 'a\u001bb';
+    const long = 'b'.repeat(250);
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), w29Ghost(now - 3600000, 'x'), { id: ctl, at: now - 3600000, bytes: 9, original: 'c.md', origin: 'program-cut' }, { id: long, at: now - 3600000, bytes: 9, original: 'l.md', origin: 'program-cut' }]);
+    sweepFatBin(proj, { now });
+    const log = readDeathLog(proj, FAT_BIN_NAME);
+    assert.ok(!/\u001b/.test(log), 'no raw ESC reaches the log');
+    assert.ok(log.includes('a\\u001bb'), 'the control character is written as its escape');
+    assert.ok(log.includes('b'.repeat(200) + '...'), 'the long id is cut to the fixed length');
+    assert.ok(!log.includes('b'.repeat(201)), 'and never written whole');
+  } finally { clean(proj); }
+});
+
+test('29ax M1: a row whose file is a link is never followed: held as missing, the link target untouched', (t) => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const target = path.join(proj, 'target.txt');
+    fs.writeFileSync(target, 'real target bytes\n');
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'x', original: 'x.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
+    const p = path.join(w29BinPath(proj, FAT_BIN_NAME), id);
+    fs.rmSync(p);
+    try { fs.symlinkSync(target, p, 'file'); } catch (e) {
+      if (e && (e.code === 'EPERM' || e.code === 'EACCES')) { t.skip('no privilege to create a file symlink on this host'); return; }
+      throw e;
+    }
+    const r = sweepFatBin(proj, { now });
+    assert.deepStrictEqual(r.mismatches, [{ id, kind: 'missing' }], 'a link is held as missing, never followed');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'real target bytes\n', 'the link target is untouched');
+    assert.ok(fs.lstatSync(p).isSymbolicLink(), 'the link itself is held, not removed');
+  } finally { clean(proj); }
+});
+
+test('29ax M2: a row whose path is a directory is held as missing, and the directory is not removed', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
+    const dirPath = path.join(w29BinPath(proj, FAT_BIN_NAME), 'dirrow');
+    fs.mkdirSync(dirPath, { recursive: true });
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: 'dirrow', at: now - HORIZON_MS.fat - W29_DAY_MS, bytes: 10, original: 'd.md', origin: 'program-cut' }]);
+    const r = sweepFatBin(proj, { now });
+    assert.deepStrictEqual(r.mismatches, [{ id: 'dirrow', kind: 'missing' }], 'a directory is not a regular file: held as missing');
+    assert.ok(fs.statSync(dirPath).isDirectory(), 'the directory is not removed');
+  } finally { clean(proj); }
+});
+
+test('29ax M3: a row whose lstat fails for a reason other than ENOENT is held as unreadable, never read as clean', () => {
+  const proj = sandbox();
+  const id = 'u1';
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id, at: now - 3600000, bytes: 9, original: 'u.md', origin: 'program-cut' }]);
+    // the seam answers EACCES for this one row (this host answers ENOENT for every reserved or over-long name)
+    __testHooks.lstatSync = (p, ...rest) => {
+      if (path.basename(p) === id) { const e = new Error('EACCES: permission denied'); e.code = 'EACCES'; throw e; }
+      return fs.lstatSync(p, ...rest);
+    };
+    let r;
+    try { r = sweepFatBin(proj, { now }); } finally { __testHooks.lstatSync = null; }
+    assert.deepStrictEqual(r.mismatches, [{ id, kind: 'unreadable' }], 'an lstat error other than ENOENT is held as unreadable');
+  } finally { clean(proj); }
+});
+
+test('29ax M7: a sitting names at most twenty held ids, and the rest appear on a later wash', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
+    const ghosts = Array.from({ length: 25 }, (_, i) => ({ id: `p${String(i).padStart(2, '0')}`, at: now - 3600000, bytes: 9, original: 'p.md', origin: 'program-cut' }));
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), ...ghosts]);
+    const r = sweepFatBin(proj, { now });
+    assert.strictEqual(r.mismatches.length, 25, 'all 25 are held');
+    const line = readDeathLog(proj, FAT_BIN_NAME).split('\n').find((l) => l.includes('index-disk mismatch')) || '';
+    assert.strictEqual(line.split('(missing, 0B)').length - 1, 20, 'twenty ids are named');
+    assert.ok(line.includes('+5 more on a later wash'), 'the rest are stated, not dropped');
+  } finally { clean(proj); }
+});
+
+test('29ax M9: a declared size ABOVE the real one is held as size, never read as clean', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'y'.repeat(500), original: 'y.md', now });
+    w29Write(proj, FAT_BIN_NAME, w29Rows(proj, FAT_BIN_NAME).map((r) => (r.id === id ? { ...r, bytes: 999999 } : r)));
+    const r = sweepFatBin(proj, { now });
+    assert.deepStrictEqual(r.mismatches, [{ id, kind: 'size' }]);
+  } finally { clean(proj); }
+});
+
+test('29ax BB-408 (ค): three washes of one held row name it in the death log ONCE, and each result carries the count', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: 'held01', at: now - 3600000, bytes: 9, original: 'h.md', origin: 'program-cut' }]);
+    const results = [1, 2, 3].map(() => sweepFatBin(proj, { now }));
+    const lines = readDeathLog(proj, FAT_BIN_NAME).split('\n').filter((l) => l.includes('index-disk mismatch'));
+    assert.strictEqual(lines.length, 1, 'one line for one held row, however many washes');
+    for (const r of results) assert.deepStrictEqual(r.mismatches, [{ id: 'held01', kind: 'missing' }], 'each result carries the count');
+  } finally { clean(proj); }
+});
+
+test('29ax BB-408 (ข): a blob with no row ages by its name, is named once with its due date, and is not destroyed inside its horizon', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const at = now - 3600000;
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'orphan', original: 'o.md', now: at });
+    w29Write(proj, FAT_BIN_NAME, w29Rows(proj, FAT_BIN_NAME).filter((x) => x.id !== id));
+    const r = sweepFatBin(proj, { now });
+    assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), id)), 'inside its horizon: not destroyed');
+    assert.deepStrictEqual(r.rowless, [{ id, dueAt: at + HORIZON_MS.fat }], 'the result names it with its due date');
+    const hits = () => readDeathLog(proj, FAT_BIN_NAME).split('\n').filter((l) => l.includes(`index-disk no row: ${id} `));
+    assert.strictEqual(hits().length, 1, 'named once');
+    assert.ok(hits()[0].includes(`removed by ${new Date(at + HORIZON_MS.fat).toISOString()} at the latest`), 'with its due date');
+    sweepFatBin(proj, { now });
+    assert.strictEqual(hits().length, 1, 'a second wash does not name it again');
+  } finally { clean(proj); }
+});
+
+test('29ax BB-408 (ข): a blob with no row past its horizon is destroyed as today', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'old orphan', original: 'o.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
+    w29Write(proj, FAT_BIN_NAME, w29Rows(proj, FAT_BIN_NAME).filter((x) => x.id !== id));
+    const r = sweepFatBin(proj, { now });
+    assert.strictEqual(r.destroyed, 1);
+    assert.ok(!fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), id)), 'past its horizon: destroyed, as before');
   } finally { clean(proj); }
 });
