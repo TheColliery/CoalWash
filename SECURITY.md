@@ -10,11 +10,11 @@ Report a security issue in this repo through GitHub's private vulnerability repo
 
 ### 2026-11-05 — a recovery-bin row the index and the disk disagree on was destroyed or dropped; it is now held
 
-**What.** The bin sweep trusted the index. A row whose file was missing, whose declared size differed from the file, or whose file could not be read could be certified destroyed for a file that was never there, could push genuine copies out under the size cap through its declared size, or could be removed from the index with its record.
+**What.** The bin sweep trusted the index. A row whose file was missing, whose declared size differed from the file, or whose file could not be examined could be certified destroyed for a file that was never there, could push genuine copies out under the size cap through its declared size, or could be removed from the index with its record.
 
-**Fixed** in `v1.15.5` (its `CHANGELOG.md` `### Fixed` entry carries the mechanism): such a row is held out of the plan whole. Nothing is deleted or edited, the row stays in the index past its horizon, and the death log names the held ids, twenty at most.
+**Fixed** in `v1.15.5` (its `CHANGELOG.md` `### Fixed` entry carries the mechanism): such a row is held out of the plan whole. Nothing is deleted or edited, the row stays in the index past its horizon, and the death log names each held row once, with its real bytes.
 
-**Not closed, by name.** (1) A real file on disk still weighs against the budget at its real size, so a planted but real file still presses older copies. (2) A blob with no index row keeps today's disk-derived retention: it is listed from the folder, weighed by its size on disk, and dated by its own name.
+**Not closed, by name.** (1) A held file stays on disk and stays held. Its real bytes are named on the mismatch line and count against no budget, so nothing reclaims them. (2) A file with no index row is weighed by its size on disk and destroyed at the date in its own name, as before; the death log names it once, with that date, before it goes.
 
 **Affected versions:** not derived in this unit. The red witnesses were run on the `1.15.4` tree (`48c8d90`), which is the only tree measured here.
 
