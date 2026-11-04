@@ -915,3 +915,121 @@ test('INSPECT 109: a doubt item (a future or unreadable time) weighs nothing in 
     assert.strictEqual(s.destroyed, 0, 'nothing is destroyed: the real copies are within the budget');
   } finally { clean(proj); }
 });
+
+// ---------------------------------------------------------------------------
+// 29ax W1-W6: the bin weighs its rows from the DISK. A row the index and the
+// disk disagree on is reported and held out of retention: neither the row nor
+// its file is deleted or edited, and index.json is not rewritten when nothing
+// was destroyed (fire 510, card BB-407 option (1)).
+const W29_DAY_MS = 86400000;
+const w29BinPath = (proj, name) => path.join(txDirFor(proj), name);
+const w29IndexPath = (proj, name) => path.join(w29BinPath(proj, name), 'index.json');
+const w29Rows = (proj, name) => JSON.parse(fs.readFileSync(w29IndexPath(proj, name), 'utf8'));
+const w29Write = (proj, name, rows) => fs.writeFileSync(w29IndexPath(proj, name), JSON.stringify(rows));
+const w29Ghost = (at, hex, bytes = 10000000) => ({ id: `${at}-${hex}`, at, bytes, original: 'ghost.md', origin: 'program-cut' });
+// The W1 fixture: two genuine copies (3 and 5 days old, 1000 B each) and a phantom
+// row 1 hour old whose declared 10 MB has no file behind it.
+function w29Fixture(proj, now) {
+  const a = recordBinItem(proj, FAT_BIN_NAME, { content: 'a'.repeat(1000), original: 'a.md', now: now - 3 * W29_DAY_MS });
+  const b = recordBinItem(proj, FAT_BIN_NAME, { content: 'b'.repeat(1000), original: 'b.md', now: now - 5 * W29_DAY_MS });
+  w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), w29Ghost(now - 3600000, 'aaaaaaaaaaaa')]);
+  return { a, b };
+}
+
+test('W1 (29ax): a phantom row weighs nothing, so two genuine copies survive a budget only the phantom overruns', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const { a, b } = w29Fixture(proj, now);
+    // budget = 2 x 5000 = 10000 B: the 2000 B of genuine copies fit; the phantom's declared 10 MB does not.
+    sweepFatBin(proj, { now, storeBytes: 5000 });
+    assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), a)), 'the newer genuine copy survives');
+    assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), b)), 'the older genuine copy survives');
+  } finally { clean(proj); }
+});
+
+test('W2 (29ax): a size-mismatched row past its horizon is held: file and row intact, the mismatch in the return and the death log', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'c'.repeat(500), original: 'c.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
+    w29Write(proj, FAT_BIN_NAME, w29Rows(proj, FAT_BIN_NAME).map((r) => (r.id === id ? { ...r, bytes: 42 } : r)));
+    const r = sweepFatBin(proj, { now });
+    assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), id)), 'the file is not destroyed');
+    assert.ok(w29Rows(proj, FAT_BIN_NAME).some((x) => x.id === id && x.bytes === 42), 'the row stays exactly as written');
+    assert.deepStrictEqual(r.mismatches, [{ id, kind: 'size' }], 'the mismatch rides the sweep return');
+    const log = readDeathLog(proj, FAT_BIN_NAME);
+    assert.ok(log.includes('index-disk mismatch') && log.includes(id), 'the death log names the held row');
+    assert.ok(!log.includes(`destroyed ${id}`), 'no destroyed certificate for a held row');
+  } finally { clean(proj); }
+});
+
+test('W3 (29ax): a sweep that destroys nothing leaves index.json byte-identical, for the phantom and the size-mismatch fixtures', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    w29Fixture(proj, now);
+    fs.writeFileSync(w29IndexPath(proj, FAT_BIN_NAME), JSON.stringify(w29Rows(proj, FAT_BIN_NAME), null, 2)); // pretty-printed: a rewrite is visible in the bytes
+    const before = fs.readFileSync(w29IndexPath(proj, FAT_BIN_NAME));
+    sweepFatBin(proj, { now, storeBytes: 5000 });
+    assert.ok(fs.readFileSync(w29IndexPath(proj, FAT_BIN_NAME)).equals(before), 'phantom fixture: index bytes unchanged');
+  } finally { clean(proj); }
+  const proj2 = sandbox();
+  try {
+    const now = Date.now();
+    const id = recordBinItem(proj2, FAT_BIN_NAME, { content: 'c'.repeat(500), original: 'c.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
+    w29Write(proj2, FAT_BIN_NAME, w29Rows(proj2, FAT_BIN_NAME).map((r) => (r.id === id ? { ...r, bytes: 42 } : r)));
+    fs.writeFileSync(w29IndexPath(proj2, FAT_BIN_NAME), JSON.stringify(w29Rows(proj2, FAT_BIN_NAME), null, 2));
+    const before = fs.readFileSync(w29IndexPath(proj2, FAT_BIN_NAME));
+    sweepFatBin(proj2, { now });
+    assert.ok(fs.readFileSync(w29IndexPath(proj2, FAT_BIN_NAME)).equals(before), 'size fixture: index bytes unchanged');
+  } finally { clean(proj2); }
+});
+
+test('W4 (29ax): a phantom row past its horizon gets no destroyed certificate, stays in the index, and is reported missing', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'g'.repeat(100), original: 'g.md', now });
+    const ghost = w29Ghost(now - HORIZON_MS.fat - W29_DAY_MS, 'bbbbbbbbbbbb', 1000);
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), ghost]);
+    const r = sweepFatBin(proj, { now });
+    assert.ok(!readDeathLog(proj, FAT_BIN_NAME).includes(`destroyed ${ghost.id}`), 'no destroyed certificate for a file that was never there');
+    assert.ok(w29Rows(proj, FAT_BIN_NAME).some((x) => x.id === ghost.id), 'the row stays');
+    assert.deepStrictEqual(r.mismatches, [{ id: ghost.id, kind: 'missing' }], 'the missing row is reported');
+  } finally { clean(proj); }
+});
+
+test('W6 (29ax): a sweep that destroys a genuine row saves the disputed rows exactly as they were written', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const gone = recordBinItem(proj, FAT_BIN_NAME, { content: 'x'.repeat(100), original: 'x.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
+    const sized = recordBinItem(proj, FAT_BIN_NAME, { content: 's'.repeat(300), original: 's.md', now });
+    w29Write(proj, FAT_BIN_NAME, [
+      ...w29Rows(proj, FAT_BIN_NAME).map((r) => (r.id === sized ? { ...r, bytes: 7 } : r)),
+      w29Ghost(now - 3600000, 'cccccccccccc', 500),
+    ]);
+    const want = w29Rows(proj, FAT_BIN_NAME).filter((r) => r.id !== gone);
+    sweepFatBin(proj, { now });
+    assert.ok(!fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), gone)), 'the genuine row is destroyed');
+    assert.deepStrictEqual(w29Rows(proj, FAT_BIN_NAME), want, 'the disputed rows are saved as they were written');
+  } finally { clean(proj); }
+});
+
+test('W7 (29ax): a held size-mismatched file counts its real bytes against the cap, so the genuine copy oldest in the cap yields', () => {
+  const proj = sandbox();
+  try {
+    const now = Date.now();
+    const held = recordBinItem(proj, FAT_BIN_NAME, { content: 'h'.repeat(5000), original: 'h.md', now: now - 3600000 });
+    const a = recordBinItem(proj, FAT_BIN_NAME, { content: 'a'.repeat(1000), original: 'a.md', now: now - 3 * W29_DAY_MS });
+    const b = recordBinItem(proj, FAT_BIN_NAME, { content: 'b'.repeat(1000), original: 'b.md', now: now - 5 * W29_DAY_MS });
+    w29Write(proj, FAT_BIN_NAME, w29Rows(proj, FAT_BIN_NAME).map((r) => (r.id === held ? { ...r, bytes: 42 } : r)));
+    // budget = 2 x 3000 = 6000 B. The held file's real 5000 B plus the copies' 2000 B is 7000 B, so the cap binds on the REAL total:
+    // the held file is never destroyed, and the oldest copy is what yields.
+    sweepFatBin(proj, { now, storeBytes: 3000 });
+    assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), held)), 'the held file is never destroyed');
+    assert.ok(!fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), b)), 'the oldest genuine copy yields to the real total');
+    assert.ok(fs.existsSync(path.join(w29BinPath(proj, FAT_BIN_NAME), a)), 'the newer genuine copy fits beside the held file');
+  } finally { clean(proj); }
+});

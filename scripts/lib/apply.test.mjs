@@ -4558,7 +4558,7 @@ test('fire 119: a transaction robbed of its PROJECT lock stops before its next w
   try {
     write(a, 'alpha\nkeep\n');
     write(b, 'beta\n');
-    assert.ok(recordBinItem(proj, FAT_BIN_NAME, { content: 'an older cut', original: a }), 'a bin item, so the preflight sweep reaches its seam');
+    assert.ok(recordBinItem(proj, FAT_BIN_NAME, { content: 'an older cut', original: a, now: Date.now() - (HORIZON_MS.fat + 86400000) }), 'a bin item PAST its horizon: the preflight sweep destroys it, and only a sweep that destroys saves the index (29ax), so the seam is reached');
     let thief = null;
     let shot = null;
     tailHooks.beforeIndexSave = () => {
@@ -4590,7 +4590,7 @@ test('fire 119: a transaction robbed of its GLOBAL lock stops before its next wr
   const skip = (p) => p.startsWith(fatBin) || p === txLockOf(proj);
   try {
     write(g, 'global content');
-    assert.ok(recordBinItem(proj, FAT_BIN_NAME, { content: 'an older cut', original: g }));
+    assert.ok(recordBinItem(proj, FAT_BIN_NAME, { content: 'an older cut', original: g, now: Date.now() - (HORIZON_MS.fat + 86400000) })); // past its horizon: destroyed, so the sweep saves (29ax)
     let thief = null;
     let shot = null;
     tailHooks.beforeIndexSave = () => {
@@ -5286,4 +5286,27 @@ test('F470-f writeDurable creates its temp with 0600 by default (the seam is the
     writeDurable(path.join(dir, 'snap.json'), 'x');
     assert.deepStrictEqual(modes, [0o600], `the temp is opened with 0600 by default: ${JSON.stringify(modes)}`);
   } finally { fs.openSync = realOpen; fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('W5 (29ax): applyPlan reports an index-disk mismatch as a counts-only line that carries no row id', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const now = Date.now();
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'g'.repeat(100), original: 'g.md', now });
+    const idxPath = path.join(txDirFor(proj), FAT_BIN_NAME, 'index.json');
+    const ghostId = `${now - 3600000}-dddddddddddd`;
+    const rows = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
+    rows.push({ id: ghostId, at: now - 3600000, bytes: 100, original: 'ghost.md', origin: 'program-cut' });
+    fs.writeFileSync(idxPath, JSON.stringify(rows));
+    const f1 = path.join(store, 'f1.md');
+    write(f1, 'plain prose\n');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'still plain prose\n' }]), { home });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.ok(Array.isArray(r.binMismatches), 'the receipt field exists');
+    assert.strictEqual(r.binMismatches.length, 1, 'exactly the disagreeing bin reports');
+    assert.ok(/the index and the disk disagree on 1 rows/.test(r.binMismatches[0]), 'the count is stated');
+    assert.ok(!r.binMismatches.join('\n').includes(ghostId), 'no row id in the line');
+    assert.ok(fs.existsSync(path.join(txDirFor(proj), FAT_BIN_NAME, 'index.json')), 'the index file is untouched');
+  } finally { clean(proj, home); }
 });

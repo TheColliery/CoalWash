@@ -1523,6 +1523,10 @@ export function applyPlan(plan, opts = {}) {
       const binConflicts = binSweeps
         .filter(([, r]) => r && r.capConflict)
         .map(([name, r]) => `retention: ${name} over budget (${r.capConflict.keptBytes}B kept > ${r.capConflict.budgetBytes}B budget) — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor holds and byte pressure may not break it; the bin exceeds its cap until items age past the floor`);
+      // 29ax: the index and the disk disagree on some rows. Counts only, never an id (the ids are in the death log).
+      const binMismatches = binSweeps
+        .filter(([, r]) => r && Array.isArray(r.mismatches) && r.mismatches.length)
+        .map(([name, r]) => `retention: ${name}: the index and the disk disagree on ${r.mismatches.length} rows; nothing deleted or edited, the bin is weighed from the disk; see the death log`);
 
       // ---- snapshot BEFORE the first mutation, then the completion marker ----
       // 15b fire 56 (census row 3): `snap-<now>` is a FRESH name, so it is created NON-recursively under the tx dir (made
@@ -1880,7 +1884,7 @@ export function applyPlan(plan, opts = {}) {
         try { markFullClean(home, projectRoot, now, plan.sessionId, [...removedFrom]); } catch { /* never un-commits */ }
       }
 
-      return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts };
+      return { ok: true, applied: actionable.length, snapshotDir: snapDir, flagged, deadLinks, deadLinkLine: deadLinkLine(deadLinks), binConflicts, binMismatches };
     })(); } finally {
       leftLocks = [[txLockPath, lockLeftNote(txLockPath, lock.release(), LOCK_STALE_MS)], ...(globalLock ? [[globalLockPath(home), lockLeftNote(globalLockPath(home), globalLock.release(), LOCK_STALE_MS)]] : []), ...binLockNotes.map((note) => [path.join(projectRoot, '.claude', 'coalwash'), note])].filter(([, note]) => note); // 29k F452-B: a bin-lock note is named by the bin folder that holds the lock; its own text names the lock file
       lockLeft = leftLocks.map(([, note]) => note).join(' ') || null;

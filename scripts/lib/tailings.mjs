@@ -133,6 +133,7 @@ export function isBareId(id) {
 // what it holds; this only adds what it is missing. Only names in recordBinItem's own id shape count, and only plain
 // files, so index.json, its temps, .gitignore and the lock are never listed.
 const BLOB_ID = /^\d+-[0-9a-f]{12}$/;
+const MISMATCH_IDS_SHOWN = 20; // 29ax: the death-log line names at most this many held ids, then `+M more`
 // E1 t173: a copy's bytes go to a temp in this shape first (BLOB_ID never matches it, so loadIndex never lists one); the id
 // name is a hard link made only after the temp is whole and synced. A temp a killed writer left behind is removed by the
 // next sweep (removeStaleTemps below).
@@ -461,6 +462,19 @@ function sweepBinAt(dir, horizonMs, now, budgetBytes = Infinity) {
 function emptySweep(e) {
   return { destroyed: 0, kept: 0, ...(e && e.lockLeft ? { lockLeft: e.lockLeft } : {}) };
 }
+// 29ax: what a row's file is ON DISK. `missing` = ENOENT or not a regular file (a link included: never followed);
+// `unreadable` = any other lstat error; `size` = a regular file whose declared bytes differ from its real size.
+// A clean row (a regular file whose bytes are equal, or not finite on a legacy row) carries its real size.
+function diskShape(dir, row) {
+  let st;
+  try { st = fs.lstatSync(path.join(dir, row.id)); } catch (e) {
+    return { kind: e && e.code === 'ENOENT' ? 'missing' : 'unreadable', size: 0 };
+  }
+  if (!st.isFile()) return { kind: 'missing', size: 0 };
+  const declared = Number(row.bytes);
+  if (Number.isFinite(declared) && declared !== st.size) return { kind: 'size', size: st.size };
+  return { kind: null, size: st.size };
+}
 function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   const temps = removeStaleTemps(dir); // E1 t173: inside the lock, which a live writer holds while its temp exists
   if (temps.length) {
@@ -468,19 +482,31 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   }
   const index = loadIndex(dir); // re-read INSIDE the lock: the peek above may be stale by now
   if (!index.length) return { destroyed: 0, kept: 0 };
-  // Legacy index entries (pre-0i) carry no bytes — weigh them by a one-time
-  // stat so they participate in the size cap instead of escaping it forever;
-  // an unstattable item stays weightless (keep-on-doubt, retention.mjs's own
-  // rule for weightless items).
-  for (const item of index) {
-    if (!Number.isFinite(Number(item.bytes))) {
-      try { item.bytes = fs.statSync(path.join(dir, item.id)).size; } catch { /* weightless -> never size-evicted */ }
+  // 29ax: the index and the disk can disagree (a row whose file is gone, a declared size that is not the file's). The bin
+  // is weighed from what is ON DISK. A disputed row never reaches the plan, its bytes are never counted, and it is neither
+  // destroyed nor edited. A clean row goes to the plan as a COPY carrying its real size, so a legacy row's missing `bytes`
+  // is no longer written back: the index is saved only when something was destroyed (below).
+  const copies = [];
+  const disputed = [];
+  let disputedBytes = 0;
+  for (const row of index) {
+    const shape = diskShape(dir, row);
+    if (shape.kind) {
+      disputed.push({ id: row.id, kind: shape.kind });
+      if (shape.kind === 'size') disputedBytes += shape.size;
+      continue;
     }
+    copies.push({ ...row, bytes: shape.size });
   }
   if (typeof __testHooks.beforeSweepPlan === 'function') __testHooks.beforeSweepPlan(dir); // 29k F452-B2: a fault seam inside the locked section (beforeIndexSave's twin)
-  const { keep, destroy, reasons, capConflict } = retentionPlan(index, now, { horizonMs, budgetBytes });
-  const survivors = [...keep];
+  const planBudget = Number.isFinite(budgetBytes) ? Math.max(0, budgetBytes - disputedBytes) : budgetBytes;
+  const plan = retentionPlan(copies, now, { horizonMs, budgetBytes: planBudget });
+  const { destroy, reasons } = plan;
+  let capConflict = plan.capConflict;
+  if (capConflict) capConflict = { budgetBytes: capConflict.budgetBytes + disputedBytes, keptBytes: capConflict.keptBytes + disputedBytes };
   const cert = [];
+  // CWE-117 (below): a certificate is one line, and its id/original come out of index.json, which a cloned repo can plant.
+  const oneLine = (v) => String(v).replace(/[\r\n]/g, ' ');
   const gone = new Set(); // ids whose blob this pass verified destroyed
   for (const item of destroy) {
     const p = path.join(dir, item.id);
@@ -496,13 +522,12 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
       const rule = reasons.get(item) || 'horizon';
       const orig = (typeof item.original === 'string' && item.original) ? item.original : '-';
       // CWK-137 / CWE-117: `id` and `original` come out of index.json, which a cloned
-      // repo can plant, so CR and LF are neutralized before they reach a line-oriented
+      // repo can plant, so CR and LF are neutralized (oneLine, above) before they reach a line-oriented
       // log -- one certificate is one line, never a forged second one.
-      const oneLine = (v) => String(v).replace(/[\r\n]/g, ' ');
       cert.push(`${new Date(now).toISOString()} destroyed ${oneLine(item.id)} (age ${ageDays}d, rule ${rule}) original ${oneLine(orig)}`);
       gone.add(item.id);
     } else {
-      survivors.push(item); // unverifiable death -> never claimed, kept for the next pass
+      // unverifiable death -> never claimed; the row stays in the index (the save keeps every row not destroyed)
     }
   }
   // The unsatisfiable-cap audit line (retention.mjs capConflict): the floor +
@@ -513,20 +538,34 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   if (capConflict) {
     cert.push(`${new Date(now).toISOString()} cap-conflict kept ${capConflict.keptBytes}B > budget ${capConflict.budgetBytes}B — the ${Math.round(TIER1_KEEP_ALL_MS / 3600000)}h keep-all floor (+ the newest-copy anchor) exceeds the cap; bin over budget this run, nothing young destroyed`);
   }
+  // 29ax: the held rows are named by count and by a bounded id list, one line; nothing about them is deleted or edited.
+  if (disputed.length) {
+    const shown = disputed.slice(0, MISMATCH_IDS_SHOWN).map((d) => oneLine(d.id)).join(', ');
+    const more = disputed.length > MISMATCH_IDS_SHOWN ? `, +${disputed.length - MISMATCH_IDS_SHOWN} more` : '';
+    const kindCount = (k) => disputed.filter((d) => d.kind === k).length;
+    cert.push(`${new Date(now).toISOString()} index-disk mismatch: kept ${disputed.length} rows (missing ${kindCount('missing')}, size ${kindCount('size')}, unreadable ${kindCount('unreadable')}), nothing deleted or edited: ${shown}${more}`);
+  }
   if (cert.length) {
     try { fs.mkdirSync(dir, { recursive: true }); appendOwnLog(path.join(dir, DEATH_LOG_NAME), cert.join('\n') + '\n'); } catch { /* the certificate is a record, not a gate */ }
   }
-  if (typeof __testHooks.beforeIndexSave === 'function') __testHooks.beforeIndexSave(dir);
-  // P95-1: a sweep stalled past BIN_LOCK_STALE_MS may have been robbed, and the thief may have saved a new row. Saving
-  // `survivors`, built from the index loaded before the theft, would drop that row, so a sweep that no longer owns the
-  // lock saves what is on disk now, minus what it destroyed.
-  const saved = lock && lock.owns && !lock.owns() ? loadIndex(dir).filter((i) => !gone.has(i.id)) : survivors;
-  saveIndex(dir, saved);
-  // capConflict only present when live: existing callers/tests deepStrictEqual
-  // the two-field shape, and an always-null third field would churn every one
+  // 29ax: index.json is rewritten only when a row was destroyed. Otherwise it stays byte-identical, so a sweep that found
+  // nothing to remove leaves the bin's own manifest exactly as it was written.
+  let kept = index.length - gone.size;
+  if (gone.size) {
+    if (typeof __testHooks.beforeIndexSave === 'function') __testHooks.beforeIndexSave(dir);
+    // P95-1: a sweep stalled past BIN_LOCK_STALE_MS may have been robbed, and the thief may have saved a new row. Saving
+    // the index loaded before the theft would drop that row, so a sweep that no longer owns the lock saves what is on disk
+    // now, minus what it destroyed.
+    const saved = lock && lock.owns && !lock.owns() ? loadIndex(dir).filter((i) => !gone.has(i.id)) : index.filter((i) => !gone.has(i.id));
+    saveIndex(dir, saved);
+    kept = saved.length;
+  }
+  // capConflict / mismatches only present when live: existing callers/tests deepStrictEqual
+  // the two-field shape, and an always-null field would churn every one
   // for no information (ponytail: additive-when-present).
-  const out = { destroyed: gone.size, kept: saved.length };
+  const out = { destroyed: gone.size, kept };
   if (capConflict) out.capConflict = capConflict;
+  if (disputed.length) out.mismatches = disputed;
   return out;
 }
 

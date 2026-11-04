@@ -1104,6 +1104,7 @@ export function runRetier({
       deadLinks: r.deadLinks || [],
       deadLinkLine: r.deadLinkLine || null,
       binConflicts: r.binConflicts || [],
+      binMismatches: r.binMismatches || [], // 29ax: the same thread as binConflicts (counts-only, no renderer yet)
       stores: over.map(({ st, p }) => ({
         label: st.label,
         movedLines: p.hop1.movedLines.length,
