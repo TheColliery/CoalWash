@@ -2,6 +2,20 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.5] - 2026-11-05
+
+Hold a bin row the disk disagrees with; document install paths
+
+### Fixed
+
+- A recovery-bin row whose file is missing, whose declared size differs from the file, or which cannot be read is held out of the sweep whole. Nothing is deleted or edited, and the death log names the count and up to twenty ids. Before, such a row could be certified destroyed for a file that was never there, could evict genuine copies through its declared size, or could be dropped from the index (`scripts/lib/tailings.mjs`, the bin sweep; `scripts/lib/apply.mjs`, the preflight; test: `scripts/lib/tailings.test.mjs`).
+- A size-disputed file counts at its real size against the bin's budget.
+
+### Changed
+
+- `plugin/README.md` is new. It is the plugin's own README, built from `plugin-src/README.md` by `scripts/build-plugin.mjs`.
+- The README's Install section names the install paths measured on 2026-11-05. `npx skills add` installs the skill text only; `apm install` lands the skill, the commands and the hook entries, and its hooks were not run. The plugin install is the path for a working tool.
+
 ## [1.15.4] - 2026-11-01
 
 Escape keep and archive text in output and tighten copy file modes
