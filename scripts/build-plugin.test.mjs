@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildDist, checkDist, DIST_ITEMS, DEV_ONLY_LIBS } from './build-plugin.mjs';
+import { buildDist, checkDist, DIST_ITEMS, DIST_DOCS, DEV_ONLY_LIBS } from './build-plugin.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -244,6 +244,10 @@ function fixtureSources(t) {
     const src = path.join(repoRoot, rel);
     if (fs.existsSync(src)) fs.cpSync(src, path.join(root, rel), { recursive: true });
   }
+  for (const d of DIST_DOCS) { // 29ax: a document source the build copies (plugin-src/README.md), fixtured the same way
+    fs.mkdirSync(path.dirname(path.join(root, d.src)), { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, d.src), path.join(root, d.src));
+  }
   return root;
 }
 
@@ -330,4 +334,21 @@ test('CWK2-079: a junction at a parent folder inside plugin/ is named by checkDi
   if (!tryLink(t, path.join(dist, 'scripts-real'), path.join(dist, 'scripts'), 'junction')) return;
   const out = checkDist(dist, clean);
   assert.ok(out.some((l) => l.startsWith('link in plugin/') && l.endsWith('scripts')), `named: ${JSON.stringify(out)}`);
+});
+
+test('29ax: the plugin README is a dist document: built from plugin-src/, and checkDist fails when it is missing or stale', () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-readme-29ax-')));
+  try {
+    const dist = path.join(root, 'plugin');
+    buildDist(dist);
+    const shipped = path.join(dist, 'README.md');
+    assert.ok(fs.existsSync(shipped), 'plugin/README.md is built from plugin-src/README.md');
+    assert.deepStrictEqual(checkDist(dist), [], 'a fresh dist, README included, is in sync');
+    fs.rmSync(shipped);
+    assert.ok(checkDist(dist).includes('missing in plugin/: README.md'), 'a missing README fails the check');
+    buildDist(dist);
+    fs.writeFileSync(shipped, 'stale\n');
+    assert.ok(checkDist(dist).includes('stale in plugin/: README.md'), 'a stale README fails the check');
+    assert.ok(!checkDist(dist).some((line) => /orphan/.test(line) && /README/.test(line)), 'the README is accounted for, never an orphan');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

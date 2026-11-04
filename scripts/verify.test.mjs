@@ -116,7 +116,7 @@ function copyGateTree(prefix) {
     for (const rel of [
       '.claude-plugin', '.github', 'LICENSE', 'NOTICE', 'commands', 'hooks',
       'plugin.json', 'hooks.json', 'assets', // the AG route's root manifest, hook table and logo (DIST_ITEMS)
-      'platform-configs', 'plugin', 'scripts', 'skills',
+      'platform-configs', 'plugin', 'plugin-src', 'scripts', 'skills', // 29ax: the README source the dist copies (DIST_DOCS)
       // The config-key drift gate NAMES its ship-text surfaces rather than
       // existsSync-filtering them, so an absent one is REPORTED as unreadable
       // instead of silently shrinking the scan. That is the property worth

@@ -36,6 +36,10 @@ export const DIST_ITEMS = [
   path.join('scripts', 'lib'),
 ];
 
+// 29ax: the plugin's README is WRITTEN in plugin-src/ and copied to the dist root. A DIST_ITEM copies a path to the SAME path, so a
+// file whose source and dist names differ gets its own mapping here, and every check below reads this list too.
+export const DIST_DOCS = [{ src: path.join('plugin-src', 'README.md'), dst: 'README.md' }];
+
 const isTest = (p) => /\.test\.[cm]?js$/.test(p);
 
 // LANDED IN SOURCE, DELIBERATELY NOT SHIPPED — the class-A ULTRA at-rest reduce engine.
@@ -136,8 +140,13 @@ function assertNoLinks(root, rel) {
 
 // srcRoot is the seam the witnesses use: a fixture copy of the sources, never the real repo (a link planted in the real tree is the bug).
 export function buildDist(distRoot = dist, srcRoot = repo) {
-  for (const rel of DIST_ITEMS) assertNoLinks(srcRoot, rel); // before the old dist is removed: a refused build leaves plugin/ as it was
+  for (const rel of DIST_ITEMS) assertNoLinks(srcRoot, rel);
+  for (const d of DIST_DOCS) assertNoLinks(srcRoot, d.src); // before the old dist is removed: a refused build leaves plugin/ as it was
   fs.rmSync(distRoot, { recursive: true, force: true });
+  for (const d of DIST_DOCS) { // a missing source throws here: the build fails loud, never a dist without its README
+    fs.mkdirSync(distRoot, { recursive: true });
+    fs.copyFileSync(path.join(srcRoot, d.src), path.join(distRoot, d.dst));
+  }
   for (const rel of DIST_ITEMS) {
     const src = path.join(srcRoot, rel);
     const dst = path.join(distRoot, rel);
@@ -193,6 +202,13 @@ export function checkDist(distRoot = dist, srcRoot = repo) {
     namedLink(root, link);
     return true;
   };
+  for (const d of DIST_DOCS) {
+    const src = path.join(srcRoot, d.src);
+    const dst = path.join(distRoot, d.dst);
+    if (!fs.existsSync(src)) out.push(`missing in source: ${d.src}`);
+    else if (!fs.existsSync(dst)) out.push(`missing in plugin/: ${d.dst}`);
+    else if (!contentEquals(src, dst)) out.push(`stale in plugin/: ${d.dst}`);
+  }
   for (const item of DIST_ITEMS) {
     const srcLinked = linkAboveItem(srcRoot, item);
     for (const rel of srcLinked ? [] : filesUnder(srcRoot, item)) {
@@ -242,7 +258,7 @@ export function checkDist(distRoot = dist, srcRoot = repo) {
   // So state the invariant GENERALLY instead of enumerating cases: every entry in the
   // dist is either covered by a DIST_ITEM (filesUnder already byte-checks those) or an
   // ANCESTOR directory on the way to one. Anything else is an orphan, whatever its depth.
-  const underItem = (rel) => DIST_ITEMS.some((it) => rel === it || rel.startsWith(it + path.sep));
+  const underItem = (rel) => DIST_ITEMS.some((it) => rel === it || rel.startsWith(it + path.sep)) || DIST_DOCS.some((d) => rel === d.dst);
   const ancestorOfItem = (rel) => DIST_ITEMS.some((it) => it.startsWith(rel + path.sep));
   const sweepUnaccounted = (rel) => {
     const abs = path.join(distRoot, rel);
