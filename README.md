@@ -106,6 +106,22 @@ claude plugin marketplace add TheColliery/CoalWash
 claude plugin install coalwash@coalwash
 ```
 
+**skills.sh** — skill text only, no engine, no hooks:
+
+```bash
+npx skills add TheColliery/CoalWash/plugin
+```
+
+Measured 2026-11-05 on Windows with `skills` 1.7.6 (`--skill '*' --agent claude-code --copy -y`), one run: 3 files installed, all 3 byte-identical to the reference `plugin/skills`. These are the instructions. The engine in `plugin/scripts/` is not among them, so this route gives you the skill text, not a working engine and not the hooks. For a working tool, use the plugin install above. The bare `TheColliery/CoalWash` form gave the same counts in the same run.
+
+**APM** — skills, commands and hook entries; the hooks were not run:
+
+```bash
+apm install TheColliery/CoalWash/plugin --target claude
+```
+
+Measured 2026-11-05 on Windows with `apm-cli` 0.35.0 from PyPI, one run. It landed 1 skill, 0 agents and 2 commands, with all 3 skill files byte-identical to the reference. It wrote 2 hook sets with 5 entries into `.claude/settings.json` and left `${CLAUDE_PLUGIN_ROOT}` unexpanded. Those hooks were not run under APM. CoalWash's hooks use the exec form (`"command": "node"`, the script path in `args`), as CoalMine's do. CoalMine's run on 2026-11-04 (WSL Ubuntu, Claude Code 2.1.318) met Claude Code's refusal, "Hook command references ${CLAUDE_PLUGIN_ROOT} but the hook is not associated with a plugin". CoalWash's hooks may meet the same refusal; this run did not check. APM also warned that the dependency is unpinned. The bare `TheColliery/CoalWash` form gave the same counts in the same run. For the hooks, use the plugin install above.
+
 **Other agents** (Cursor · Codex · Gemini CLI · Cline · Copilot) — file-copy: copy `skills/coalwash/` (skill + references) and `scripts/lib/` (the engine) into your platform's skill directory, keeping the relative layout (`skills/coalwash/SKILL.md` resolves the engine at `../../scripts/lib`). The gauge hook runs on Claude Code and on the Antigravity route below; elsewhere run `/coalwash` manually. No API keys, no network, no `npm install`.
 
 **Antigravity (CoalWash 1.15.4, measured 2026-11-01 on agy 1.4.12, headless, Windows).** Three install routes were measured. `agy plugin install https://github.com/TheColliery/CoalWash` and `agy plugin install <clone>` both install the plugin as `coalwash (enabled, 1.15.4)` with one skill and one hook set, and that hook set loads. A copy of the repository placed in a project as `.agents/plugins/coalwash` loads the same hook set, but `agy plugin list` does not show it. A GitHub-link install copies the whole repository tree, not only the plugin, plus a `.git/` folder (214 files, about 8 MB at 1.15.4). On each route, the session-start gauge reads that session's rule files (`GEMINI.md` and `AGENTS.md`, and the global rule files) into its own state under `~/.gemini`; in a test fixture the always-loaded footprint matched the expected 3,974 bytes. The gauge tells the agent nothing on Antigravity: no band line and no ask reach the model. The write guard takes a snapshot of a project `GEMINI.md` at an `edit_file` attempt. In these headless runs agy denied the write itself, so the measurement shows the snapshot, which equals the pre-run file, and not a completed edit. On the Antigravity route, the Quick pass and the gauge's crash recovery act only inside the project folder, never in Claude Code's memory store or `~/.gemini`; a crash journal that reaches Claude Code's store is left for a Claude Code session. That path is covered by hermetic tests and was not measured end to end on Antigravity: agy's headless agent cannot run a shell command. Not on Antigravity: the forced or OBESE Quick pass and the wizard ask. The Stop handler delivers no directive, and agy logs no hook name at turn end, so whether the Stop hook fires on Antigravity is not measured.
