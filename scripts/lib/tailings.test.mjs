@@ -1141,7 +1141,7 @@ test('29ax M9: a declared size ABOVE the real one is held as size, never read as
   } finally { clean(proj); }
 });
 
-test('29ax BB-408 (ค): three washes of one held row name it in the death log ONCE, and each result carries the count', () => {
+test('29ax: a held row is named in the death log once across three washes, and each result carries the count', () => {
   const proj = sandbox();
   try {
     const now = Date.now();
@@ -1154,7 +1154,7 @@ test('29ax BB-408 (ค): three washes of one held row name it in the death log O
   } finally { clean(proj); }
 });
 
-test('29ax BB-408 (ข): a blob with no row ages by its name, is named once with its due date, and is not destroyed inside its horizon', () => {
+test('29ax: a row-less blob ages by its name, is named once with its due date, and is not destroyed inside its horizon', () => {
   const proj = sandbox();
   try {
     const now = Date.now();
@@ -1172,7 +1172,7 @@ test('29ax BB-408 (ข): a blob with no row ages by its name, is named once with
   } finally { clean(proj); }
 });
 
-test('29ax BB-408 (ข): a blob with no row past its horizon is destroyed as today', () => {
+test('29ax: a row-less blob past its horizon is destroyed as before', () => {
   const proj = sandbox();
   try {
     const now = Date.now();
