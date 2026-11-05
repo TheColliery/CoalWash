@@ -459,7 +459,7 @@ export const MAX_DOC_BYTES = 4 * 1024 * 1024;
 // O_NONBLOCK makes open() return at once on a FIFO swapped in after the lstat (the
 // path-vs-fd gap); fstat then rejects it. Windows has no O_NONBLOCK (and a repo cannot
 // plant a FIFO there), so it degrades to a plain read-only open.
-const REPO_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0);
+export const REPO_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0);
 
 // { kind: 'file' | 'dir' } or { why, code? }, decided WITHOUT opening the path.
 // `why` names the refusal so a caller that REPORTS it can say which one it was:
@@ -504,6 +504,16 @@ export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
   let fd;
   try {
     fd = fs.openSync(file, REPO_READ_FLAGS);
+    if (root != null) {
+      // The path was judged before the open, and the open can be overtaken: prove the handle is the entry the path names NOW,
+      // inside the root and the same inode. A filesystem that reports no inode id keeps the containment check alone.
+      const rootPhys = canonicalOrNull(root);
+      const pPhys = canonicalOrNull(file);
+      if (!rootPhys || !pPhys || !pathWithin(pPhys, rootPhys)) return { why: 'changed' };
+      const hs = fs.fstatSync(fd, { bigint: true });
+      const ps = fs.statSync(file, { bigint: true });
+      if (hs.ino && ps.ino && (hs.dev !== ps.dev || hs.ino !== ps.ino)) return { why: 'changed' };
+    }
     const st = fs.fstatSync(fd);
     if (!st.isFile()) return { why: st.isDirectory() ? 'directory' : 'not-regular' };
     if (st.size > maxBytes && !prefixOnly) return { why: 'over-bound', size: st.size };

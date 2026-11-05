@@ -83,7 +83,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 // findProjectRoot/physicalDir: the room's ONE root resolver — the stray-state
 // detector re-uses it rather than hand-rolling a second walk.
-import { claudeBaseDir, findProjectRoot, physicalDir, readRepoFileBounded, MAX_DOC_BYTES, MAX_CONFIG_BYTES } from './config-load.mjs';
+import { claudeBaseDir, findProjectRoot, physicalDir, readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES, MAX_CONFIG_BYTES } from './config-load.mjs';
 import { parseJsonc } from './jsonc.mjs';
 // task #13 (OS-citizen state): the per-project state path RIDES the CC memory
 // dir, so we reuse the SAME adapter discovery computes (ccMemoryDir/ccProjectSlug)
@@ -1042,7 +1042,10 @@ function projKey(projectRoot) {
 // the capacity adapter's P2 file.
 function readStateFile(p) {
   try {
-    let raw = fs.readFileSync(p, 'utf8');
+    // Kind-gated and bounded: a special file at a fallback state name cannot block the read (the fallback path is project-named).
+    const o = repoReadOutcome(p, null, MAX_CONFIG_BYTES);
+    if (!o.buf) return null;
+    let raw = o.buf.toString('utf8');
     if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
     const parsed = parseJsonc(raw);
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;

@@ -52,7 +52,7 @@ import path from 'node:path';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { ensureSelfIgnore, acquireLock, trackedInOwnFolder, lockLeftNote, withLockLeft } from './apply.mjs';
 import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir, openPlainFile } from './repo-fs.mjs';
+import { ownSandboxDir, openPlainFile, appendOwnLog } from './repo-fs.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
 import { escapeRawControls } from './receipt.mjs'; // 29ax F512-4: the one escaper a certificate field uses (receipt.mjs imports nothing back)
 
@@ -421,17 +421,6 @@ export function binItemOutcome(projectRoot, name, id) {
 // that cannot be verified gone is NOT reported destroyed and stays in the
 // index (never a false "destroyed" — the broom asymmetry: leftover dust
 // waits for the next pass, that is the safe direction).
-// CWK-137: append to a log we own, never THROUGH a link a cloned repo planted at its
-// name (appendFileSync follows one: the certificate line landed in the link's target,
-// e.g. ~/.bashrc, carrying index.json's attacker-chosen `original`). The entry must be
-// a plain single-link regular file, and the handle must BE that entry: openPlainFile
-// opens first and then checks the path and the handle together (CodeQL #43/#44's shape,
-// fire 10: an lstat before the open left a window for a name swapped in between).
-function appendOwnLog(file, text) {
-  const o = openPlainFile(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
-  if (o.fd === undefined) throw new Error(`${file} is not a plain file, or changed under the append (${o.why})`);
-  try { fs.writeSync(o.fd, text); } finally { fs.closeSync(o.fd); }
-}
 
 // CWK-120 row 4: the sweep is the SECOND writer of index.json, a read-modify-write (`loadIndex` ... `saveIndex(survivors)`)
 // exactly like recordBinItem's, so it takes the SAME bin lock. Without it a concurrent recordBinItem could commit its row

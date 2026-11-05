@@ -62,6 +62,7 @@ import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
 import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
+import { appendOwnLog } from './repo-fs.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
 import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS } from './apply.mjs';
 import { ownSandboxDir, fileModeOr600 } from './repo-fs.mjs';
@@ -471,7 +472,7 @@ export function buildIndexRow({ sessionId, projectSlug, transcriptBuf, totalByte
 export function appendIndexRow(archiveDir, row) {
   try {
     fs.mkdirSync(archiveDir, { recursive: true });
-    fs.appendFileSync(path.join(archiveDir, ESTATE_INDEX_NAME), JSON.stringify(row) + '\n', { encoding: 'utf8', mode: 0o600 }); // a new index is owner-only; an existing file keeps its mode
+    appendOwnLog(path.join(archiveDir, ESTATE_INDEX_NAME), JSON.stringify(row) + '\n'); // through a handle proved to be the index entry; a new index is owner-only
     return true;
   } catch { return false; }
 }
@@ -480,7 +481,7 @@ function appendDeathCert(archiveDir, slug, line) {
   try {
     const dir = path.join(archiveDir, slug);
     fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(path.join(dir, DEATH_LOG_NAME), line + '\n', { encoding: 'utf8', mode: 0o600 }); // the sibling record takes the same owner-only mode
+    appendOwnLog(path.join(dir, DEATH_LOG_NAME), line + '\n'); // the same proved append; a new record is owner-only
   } catch { /* the certificate is a record, not a gate (tailings.mjs's own rule) */ }
 }
 

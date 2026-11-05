@@ -2532,7 +2532,9 @@ test('RUNG-5 §1.1: the create-undo delete BANKS the bytes into the fat bin befo
 
 test('RUNG-5 §1.1: a create-undo that CANNOT be banked refuses instead of destroying — partial, journal kept', () => {
   const { proj, store } = sandbox();
-  const origRead = fs.readFileSync;
+  // The bank's read is the bounded, kind-gated read, which judges the entry with lstat before it opens it. The pin check (openSync)
+  // is not touched, so the refusal is the bank's own and is counted as one.
+  const origLstat = fs.lstatSync;
   const created = path.join(store, 'unbankable.md');
   try {
     write(created, 'bytes that must not vanish\n');
@@ -2547,17 +2549,17 @@ test('RUNG-5 §1.1: a create-undo that CANNOT be banked refuses instead of destr
     }));
     // Make ONLY this file unreadable (the bank's input); everything else — the
     // journal, the manifest — delegates to the real read.
-    fs.readFileSync = (p, ...rest) => {
+    fs.lstatSync = (p, ...rest) => {
       if (String(p) === created) { const e = new Error('EACCES: permission denied'); e.code = 'EACCES'; throw e; }
-      return origRead.call(fs, p, ...rest);
+      return origLstat.call(fs, p, ...rest);
     };
     const r = recoverDangling(proj);
-    fs.readFileSync = origRead;
+    fs.lstatSync = origLstat;
     assert.strictEqual(r.recovered, 'partial', 'an un-bankable create is refused, not destroyed');
     assert.ok(r.refusedOutOfRoot >= 1, 'counted, so the report is honest');
     assert.strictEqual(fs.existsSync(created), true, 'the file survives — an un-undone create is a mixed state a human can fix; an unrecoverable delete is not');
     assert.strictEqual(fs.existsSync(path.join(txDir, 'journal.json')), true, 'the journal is kept for that human');
-  } finally { fs.readFileSync = origRead; clean(proj); }
+  } finally { fs.lstatSync = origLstat; clean(proj); }
 });
 
 // ---------------------------------------------------------------------------

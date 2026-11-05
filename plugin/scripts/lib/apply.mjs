@@ -61,7 +61,7 @@ import { gitEnv } from './git-env.mjs'; // the room's one GIT_*-stripping helper
 import { checkFidelity, inventoryDropKeys, readFrontmatter, frontmatterBlockParse } from './fidelity-gate.mjs';
 // findProjectRoot: the room's ONE trusted-anchor idiom (cli.mjs/recoverDangling
 // derive projectRoot from cwd through it, never from untrusted plan/journal data).
-import { claudeBaseDir, projectRootFor, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
+import { claudeBaseDir, projectRootFor, touchesClaudeBase, canonicalOrNull, volumeCaseFolds, readRepoFileBounded, repoReadOutcome, REPO_READ_FLAGS, MAX_CONFIG_BYTES, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir, openPlainFile, ensureCatchAllIgnore, fileModeOr600 } from './repo-fs.mjs';
 // #57(d): the ONE cloud-placeholder read-poison sniff, shared with the estate
 // WARM path (one helper, called at both trust points — not a second copy). A
@@ -346,7 +346,8 @@ export function restoreFile(target, buf, snapPath, roots) {
   // a target that already holds the copy bytes is left alone: no rename, so a file held open cannot fail a restore it never needed.
   let cur = null;
   try { cur = fs.lstatSync(target); } catch { cur = null; }
-  if (cur && cur.isFile() && cur.size === buf.length && fs.readFileSync(target).equals(buf)) return;
+  const same = cur && cur.isFile() && cur.size === buf.length ? repoReadOutcome(target, null, buf.length).buf : null;
+  if (same && same.equals(buf)) return;
   let mode = fileModeOr600(snapPath);
   try { const st = fs.lstatSync(target); if (st.isFile()) mode = st.mode & 0o777; } catch { /* absent: the snapshot copy mode */ }
   writeDurable(target, buf, mode);
@@ -647,12 +648,14 @@ const pinKey = (k) => unquote(String(k).trim()).trim().toLowerCase() === 'pinned
 // monotone widening, see its own comment above). The common case for
 // messy/malformed content is still the gentler per-file incapacity refusal
 // below, not a whole-plan abort.
-function pinVerdict(file) {
+export function pinVerdict(file) {
   try {
-    const fd = fs.openSync(file, 'r');
+    // REPO_READ_FLAGS: a FIFO at the pin path returns at once, and the fstat below refuses it (the catch is fail-closed).
+    const fd = fs.openSync(file, REPO_READ_FLAGS);
     let head;
     let truncated;
     try {
+      if (!fs.fstatSync(fd).isFile()) throw new Error('pin path is not a regular file'); // a special file reads nothing; the catch refuses it
       const buf = Buffer.alloc(PIN_READ_BYTES);
       const n = fs.readSync(fd, buf, 0, PIN_READ_BYTES, 0);
       head = buf.toString('utf8', 0, n);
@@ -2261,7 +2264,7 @@ function recoverDanglingHeld(projectRoot, opts, held) {
         // a file it is about to remove, so it goes into the bin exactly as it
         // sits on disk. A directory here still throws EISDIR -> null -> refuse.
         let body = null;
-        try { body = fs.readFileSync(p); } catch { body = null; }
+        body = repoReadOutcome(p, null, Number.MAX_SAFE_INTEGER).buf || null; // a FIFO or device is refused by the kind gate, a directory as before
         // `now` is the run's single reading, never recordBinItem's per-call
         // Date.now() default — see the const at the top of this function.
         if (body === null || !recordBinItem(projectRoot, FAT_BIN_NAME, { content: body, original: p, origin: 'program-cut', now, onLockLeft: (n) => held.binNotes.push(n) })) { refused++; continue; }

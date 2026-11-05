@@ -177,11 +177,20 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
   const projPhys = physicalOrNull(projectRoot);
   const roots = [homePhys, projPhys].filter(Boolean);
   const stores = [];
+  const skipped = []; // a store refused by a named rule, reported on the returned array's `skipped` property
 
   const addStore = (label, dir) => {
     const phys = physicalOrNull(dir);
     if (!phys || !containedIn(phys, roots)) return; // fail-closed
     const indexPath = path.join(phys, 'MEMORY.md');
+    // The index name is both read and rewritten, so a link at that name must resolve to an index of THIS store, or the store is
+    // skipped with the reason. A name that does not resolve at all is no index, and the read below says so.
+    let slot = null;
+    try { slot = fs.realpathSync.native(indexPath); } catch { /* absent or dangling: no index, handled below */ }
+    if (slot !== null && (path.dirname(slot) !== phys || path.basename(slot).toLowerCase() !== 'memory.md')) {
+      skipped.push({ label, reason: `the MEMORY.md name resolves to ${path.basename(slot)}, not this store's index: nothing in the store is rewritten` });
+      return;
+    }
     const indexText = readOrNull(indexPath, phys);
     if (indexText === null) return; // no index = not a store
     const topics = [];
@@ -227,8 +236,11 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
   addStore('main', ccMemoryDir(projectRoot, home));
   const agentBase = path.join(projectRoot, '.claude', 'agent-memory');
   let roles = [];
-  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { /* none */ }
+  // A directory junction reports as a symbolic link, so it is judged by what it resolves to; containment is still checked in addStore.
+  const isDirAt = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
+  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory() || (d.isSymbolicLink() && isDirAt(path.join(agentBase, d.name)))).map((d) => d.name).sort(); } catch { /* none */ }
   for (const role of roles) addStore(`agent:${role}`, path.join(agentBase, role));
+  stores.skipped = skipped;
   return stores;
 }
 
@@ -1083,7 +1095,12 @@ export function runRetier({
       const robbedRows = stolen('the dig-index rows', `the transaction committed and the top-anchor survival probe passed; the ${gzWritten.length} archive copy(ies) stay in ${archiveDir}, but their ${digRows.length} dig-index row(s) were not appended (estate-restore reads the archive itself, so every demoted topic stays restorable)`);
       if (robbedRows) return robbedRows;
     }
-    if (indexEnabled) for (const row of digRows) { if (appendIndexRow(archiveDir, row)) rows++; }
+    let refusedRows = 0;
+    if (indexEnabled) for (const row of digRows) { if (appendIndexRow(archiveDir, row)) rows++; else refusedRows++; }
+    if (refusedRows) {
+      // A refused row is not a success: the archive copies stay restorable through estate-restore, but the index is short, and the caller must see it.
+      return { ok: false, env, error: `${refusedRows} dig-index row(s) were refused by the archive index (a link or a special file holds its name, or the write failed): the transaction committed and the ${gzWritten.length} archive copy(ies) stay in ${archiveDir}, restorable by estate-restore` };
+    }
 
     return {
       ok: true,

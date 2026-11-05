@@ -244,9 +244,9 @@ export function ensureCatchAllIgnore(dir) {
 // file or a second name) · 'changed' (the handle is not the entry the caller vetted) · 'unverifiable'. NAMED RESIDUALS: with
 // O_CREAT in `flags`, a link followed at the open creates its (empty) target before the refusal, which the linker could have
 // created itself; and a directory COMPONENT swapped for a junction is a different shape (ownSandboxDir's).
-export function openPlainFile(file, flags, expect = null) {
+export function openPlainFile(file, flags, expect = null, mode = undefined) {
   let fd;
-  try { fd = fs.openSync(file, flags); } catch (e) { return { why: 'unopenable', code: e && e.code }; }
+  try { fd = fs.openSync(file, flags, mode); } catch (e) { return { why: 'unopenable', code: e && e.code }; }
   const refuse = (why) => { try { fs.closeSync(fd); } catch { /* already closed */ } return { why }; };
   try {
     const onPath = fs.lstatSync(file, { bigint: true });
@@ -260,6 +260,15 @@ export function openPlainFile(file, flags, expect = null) {
   } catch {
     return refuse('changed'); // the name vanished (or could not be inspected) between the open and the check
   }
+}
+
+// Append `text` to a log this tool owns. The entry must be a plain single-link regular file and the handle must BE that entry:
+// openPlainFile opens first and then checks the path and the handle together, so a link or a name swapped in between is refused
+// before any byte is written. A log created here is owner-only (a log that already exists keeps its own mode). Throws when refused.
+export function appendOwnLog(file, text) {
+  const o = openPlainFile(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), null, 0o600);
+  if (o.fd === undefined) throw new Error(`${file} is not a plain file, or changed under the append (${o.why})`);
+  try { fs.writeSync(o.fd, text); } finally { fs.closeSync(o.fd); }
 }
 
 // Write `content` to `target` inside `root`, or throw RepoWriteRefused.
