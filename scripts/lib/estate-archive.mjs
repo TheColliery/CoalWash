@@ -504,7 +504,7 @@ function appendDeathCert(archiveDir, slug, line) {
 // dir itself, not the index, so recovery never depends on the row).
 // opts.gzip is injectable for tests (default zlib.gzipSync). opts.lockState is the caller's lock state() (fires 119 and 122,
 // the fence below); its `lockFile` names the lock in a refusal.
-export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder, lockState = () => ({ state: 'own' }), lockFile = 'the global lock' } = {}) {
+export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder, lockState = () => ({ state: 'own' }), lockFile = 'the global lock', bounds = RESTORE_BOUNDS } = {}) {
   const destBase = path.join(archiveDir, slug);
   // Write-side containment (loss class #57's git sibling, GHSA-2hvf-7c8p-28fx:
   // the SOURCE enumeration is realpath-contained, but the DESTINATION
@@ -560,10 +560,10 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       writeDurable(dest, gz); // H4: fsync the .gz CONTENT (this tier keeps no snapshot)
       written.push(dest);
-      const back = zlib.gunzipSync(fs.readFileSync(dest));
+      const back = zlib.gunzipSync(fs.readFileSync(dest), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
       if (!back.equals(buf)) { return fail(`verify mismatch: ${f.rel} — original kept`); }
     } catch (e) { return fail(`archive failed: ${f.rel}: ${e.message} — original kept`); }
-    originals.push({ path: f.path, rel: f.rel, gz: dest });
+    originals.push({ path: f.path, rel: f.rel, gz: dest, inflated: buf.length });
   }
 
   // External-writer guard over the WHOLE listing->delete window (applyPlan's
@@ -599,11 +599,19 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // drop the partial archive, keep every original.
   for (const o of originals) {
     let ok = false;
-    try { ok = zlib.gunzipSync(fs.readFileSync(o.gz)).equals(fs.readFileSync(o.path)); } catch { ok = false; }
+    try { ok = zlib.gunzipSync(fs.readFileSync(o.gz), { maxOutputLength: o.inflated + 1 }).equals(fs.readFileSync(o.path)); } catch { ok = false; }
     if (!ok) {
       return fail(`archive no longer verifies before delete: ${o.rel} (removed/corrupted since it was written — a co-writer on the archive volume?) — session skipped, originals kept`);
     }
   }
+
+  // THE RESTORE BOUNDS, read on the sizes just written and verified (the same predicate restoreSession refuses on). A session that restore
+  // could not return is removed as a partial archive and every original stays; nothing is deleted that the tool could not bring back.
+  let boundWhy = null;
+  try {
+    boundWhy = restoreBoundReason(originals.map((o) => ({ gzBytes: fs.statSync(o.gz).size, inflatedBytes: o.inflated })), bounds);
+  } catch (e) { return fail(`archive size unreadable: ${e.message} — session skipped, originals kept`); }
+  if (boundWhy) return fail(`restore could not return this session (${boundWhy}) — archive removed, every original kept`);
 
   // H4 DURABILITY: fsync every archived .gz's DIRECTORY ENTRY before deleting the
   // originals — a power-loss in the write->unlink window must not lose the SOLE
@@ -721,7 +729,7 @@ export function ultraBillLine(scan) {
 // appended per archived session. Takes the GLOBAL CoalWash lock (the archive
 // index is a cross-project shared file); lock held elsewhere -> deferred,
 // nothing touched (`deferred: true`, applyPlan's own contract).
-export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), now = Date.now(), estate, currentSessionId = null, gzip = zlib.gzipSync } = {}) {
+export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), now = Date.now(), estate, currentSessionId = null, gzip = zlib.gzipSync, bounds = RESTORE_BOUNDS } = {}) {
   // Platform gate (armor #2): a non-Claude-Code home has no CC session estate to
   // touch — conservative no-op BEFORE the lock, nothing mutated (mirrors
   // discoverClassB / estateUltraScan). ok:true = "correctly did nothing".
@@ -766,7 +774,7 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
         continue;
       }
       const cold = sess.band === 'cold';
-      const r = archiveSession(sess, { slug: c.slug, archiveDir, now, cold, gzip, lockState: lock.state, lockFile: globalLockPath(home) });
+      const r = archiveSession(sess, { slug: c.slug, archiveDir, now, cold, gzip, lockState: lock.state, lockFile: globalLockPath(home), bounds });
       // fire 119: a robbed session stops the whole run, so no later session starts under a lock this run no longer holds.
       if (r.robbed) { res.ok = false; res.robbed = r.robbed; res.lockLost = r.lockLost; res.error = r.reason; break; }
       if (!r.ok) { res.failed.push({ id: sess.id, reason: r.reason }); continue; }
@@ -869,6 +877,27 @@ function matchTombstones(text, tombstones) {
   return hits;
 }
 
+// A file is scanned in windows of this many bytes, so no text is ever built from more than one window at a time.
+export const TOMBSTONE_WINDOW_BYTES = 8 * 1024 * 1024;
+// Scan a buffer for tombstone anchors window by window. Windows overlap by enough bytes that any anchor no longer than the overlap lies
+// whole inside one window; the last window always reaches the end of the buffer, so every byte is covered. Returns { hits, windows }.
+export function scanBufferForTombstones(buf, tombstones, windowBytes = TOMBSTONE_WINDOW_BYTES) {
+  const anchors = tombstones && Array.isArray(tombstones.anchors) ? tombstones.anchors : [];
+  const longest = anchors.reduce((n, a) => Math.max(n, a.textLc ? a.textLc.length : 0), 0);
+  const overlap = 3 * longest + 4; // a UTF-16 unit is at most three UTF-8 bytes; the +4 covers a surrogate pair's four bytes
+  const size = Math.max(windowBytes, 2 * overlap + 1);
+  const step = size - overlap;
+  const found = new Map();
+  let windows = 0;
+  for (let start = 0; ; start += step) {
+    const end = Math.min(buf.length, start + size);
+    windows++;
+    for (const h of matchTombstones(buf.toString('utf8', start, end), tombstones)) found.set(h.anchor, h);
+    if (end >= buf.length) break;
+  }
+  return { hits: [...found.values()], windows };
+}
+
 // Case-insensitive substring match over sessionId / projectSlug /
 // firstUserLine / topEntities. Reads the index only — never a transcript. When
 // `tombstones` is provided (#58), a matching row is ANNOTATED with a
@@ -942,8 +971,33 @@ export const RESTORE_CEIL_BYTES = 1024 * 1024 * 1024;
 // several compressible files is not refused for the sum of floors it never needed. A session of ordinary size never meets it.
 export const RESTORE_SESSION_CEIL_BYTES = 4 * 1024 * 1024 * 1024;
 export const RESTORE_MAX_GZ_BYTES = 256 * 1024 * 1024;
+// The restore bounds in one object. restoreSession refuses on them, and archiveSession asks restoreBoundReason before it deletes, so the two
+// sides read one set of numbers. The `bounds` option of both functions is the test seam; the default is this object.
+export const RESTORE_BOUNDS = Object.freeze({
+  maxGzBytes: RESTORE_MAX_GZ_BYTES,
+  floorBytes: RESTORE_FLOOR_BYTES,
+  maxRatio: RESTORE_MAX_RATIO,
+  ceilBytes: RESTORE_CEIL_BYTES,
+  sessionCeilBytes: RESTORE_SESSION_CEIL_BYTES,
+});
+export function restoreInflateBoundWith(gzBytes, b = RESTORE_BOUNDS) {
+  return Math.min(b.ceilBytes, Math.max(b.floorBytes, gzBytes * b.maxRatio));
+}
 export function restoreInflateBound(gzBytes) {
-  return Math.min(RESTORE_CEIL_BYTES, Math.max(RESTORE_FLOOR_BYTES, gzBytes * RESTORE_MAX_RATIO));
+  return restoreInflateBoundWith(gzBytes, RESTORE_BOUNDS);
+}
+// The one predicate. files: [{ gzBytes, inflatedBytes }] for the whole session. Returns null when a restore of these files is in bounds,
+// otherwise the reason, naming the bound and the number that broke it. Restore's own refusals are the same three checks.
+export function restoreBoundReason(files, b = RESTORE_BOUNDS) {
+  let total = 0;
+  for (const f of files) {
+    if (f.gzBytes > b.maxGzBytes) return `a compressed file is ${f.gzBytes} bytes, over the ${b.maxGzBytes}-byte compressed bound`;
+    const fileBound = restoreInflateBoundWith(f.gzBytes, b);
+    if (f.inflatedBytes > fileBound) return `a file inflates to ${f.inflatedBytes} bytes, over its ${fileBound}-byte inflate bound`;
+    total += f.inflatedBytes;
+  }
+  if (total > b.sessionCeilBytes) return `the session inflates to ${total} bytes in all, over the ${b.sessionCeilBytes}-byte session bound`;
+  return null;
 }
 
 // One compressed archive file read through ONE handle (R15, CodeQL #47/#50): open, judge the handle, read what it reported and nothing more.
@@ -976,7 +1030,8 @@ function readArchiveHandle(gzPath, bound) {
 // CC's live tree unless an explicit --to points there (the default tmpdir
 // guarantees it). Scans the archive dir itself (not the index), so a session
 // archived without an index row still restores.
-export function restoreSession(sessionId, { archiveDir, to = null, tombstones, sessionCeilBytes = RESTORE_SESSION_CEIL_BYTES } = {}) { // sessionCeilBytes: the test seam for the session bound
+export function restoreSession(sessionId, { archiveDir, to = null, tombstones, sessionCeilBytes, bounds = RESTORE_BOUNDS, tombstoneWindowBytes = TOMBSTONE_WINDOW_BYTES } = {}) { // sessionCeilBytes and bounds: the test seams for the bounds
+  const B = sessionCeilBytes === undefined ? bounds : { ...bounds, sessionCeilBytes };
   if (!isBareId(sessionId)) return { ok: false, error: `not a bare session id: '${sessionId}'` };
   let slugs;
   try { slugs = fs.readdirSync(archiveDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch {
@@ -1021,9 +1076,10 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
   const wantTombstoneScan = tombstones && Array.isArray(tombstones.anchors) && tombstones.anchors.length;
   // The session bound is sessionCeilBytes, fixed before the loop. Every file's inflate is capped at what the session has left, and every
   // inflated byte is taken from that remainder, so combinedText (the same bytes, plus a newline per file) is bounded by the same budget.
-  const sessionBound = sessionCeilBytes;
+  const sessionBound = B.sessionCeilBytes;
   let remaining = sessionBound;
-  let combinedText = '';
+  const tombFound = new Map(); // anchor text -> hit, collected across every window of every file; no concatenated text is ever built
+  let tombBytes = 0;
   for (const s of sources) {
     try {
       // CWK-162 B3: every directory component BELOW the destination root must be a real directory. A link planted at <to>/<sid>
@@ -1038,12 +1094,12 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
       // R15 (CodeQL #47/#50 js/file-system-race; supersedes R14 NIT 3's after-the-fact length check): the archive is OPENED first, its kind and size
       // are judged on the HANDLE, and only that many bytes (plus one probe byte) are read through it. The path is looked up once, so what is
       // bounded is what is read, with no window between a stat and a read.
-      const got = readArchiveHandle(s.gzPath, RESTORE_MAX_GZ_BYTES);
+      const got = readArchiveHandle(s.gzPath, B.maxGzBytes);
       if (got.notFile) return { ok: false, error: `restore refused on ${s.rel}: the archive entry is not a regular file`, dir, files };
-      if (got.over !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is ${got.over} bytes, over the ${RESTORE_MAX_GZ_BYTES}-byte bound`, dir, files };
+      if (got.over !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is ${got.over} bytes, over the ${B.maxGzBytes}-byte bound`, dir, files };
       if (got.grew !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is longer than the ${got.grew} bytes its handle reported (it grew after its size was read)`, dir, files };
       const gz = got.buf;
-      const fileBound = restoreInflateBound(gz.length);
+      const fileBound = restoreInflateBoundWith(gz.length, B);
       if (remaining <= 0) return { ok: false, error: `restore refused on ${s.rel}: the session has reached its ${sessionBound}-byte session bound`, dir, files };
       let buf;
       try { buf = zlib.gunzipSync(gz, { maxOutputLength: Math.min(fileBound, remaining) }); } catch (e) {
@@ -1066,9 +1122,14 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
       writeDurable(dest, buf, fileModeOr600(dest)); // 29n F470-f: a restored file keeps its own mode, 0600 when it is new. MED: recovery write matches the forward path's durability (this tier keeps no snapshot)
       fsyncDirBestEffort(path.dirname(dest));
       files.push({ rel: s.rel, bytes: buf.length });
-      if (wantTombstoneScan) combinedText += `${buf.toString('utf8')}\n`;
+      if (wantTombstoneScan) {
+        const scan = scanBufferForTombstones(buf, tombstones, tombstoneWindowBytes);
+        tombBytes += buf.length;
+        for (const h of scan.hits) tombFound.set(h.anchor, h);
+      }
     } catch (e) { return { ok: false, error: `restore failed on ${s.rel}: ${e.message}`, dir, files }; }
   }
-  const laterRemoved = wantTombstoneScan ? matchTombstones(combinedText, tombstones) : [];
-  return { ok: true, dir, files, ...(laterRemoved.length ? { laterRemoved } : {}) };
+  const laterRemoved = wantTombstoneScan ? [...tombFound.values()] : [];
+  // The scan result says what it covered: every byte of every restored file, in windows, with none skipped.
+  return { ok: true, dir, files, ...(laterRemoved.length ? { laterRemoved } : {}), ...(wantTombstoneScan ? { tombstoneScan: { bytes: tombBytes, complete: true } } : {}) };
 }

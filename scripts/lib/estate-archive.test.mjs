@@ -1409,3 +1409,138 @@ test('fire 599 restore: two compressible entries that each pass the per-file bou
   assert.strictEqual(r.files.length, 2, 'both entries restore');
   assert.ok(r.files.every((f) => f.bytes === 40 * 1024 * 1024), 'each restores whole');
 });
+
+// 29bt fire 604: the archive side and the restore side read one set of bounds. Every test runs in a sandbox root; the bounds are lowered
+// through the seams, and no test builds a gigabyte fixture.
+function f604Root(tag) { return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `cwf604-${tag}-`))); }
+function f604Session(root, id, bufs) {
+  const dir = path.join(root, 'projects', id);
+  fs.mkdirSync(dir, { recursive: true });
+  const files = bufs.map((buf, i) => {
+    const name = i === 0 ? `${id}.jsonl` : `${id}.${i}.jsonl`;
+    const p = path.join(dir, name);
+    fs.writeFileSync(p, buf);
+    const st = fs.statSync(p);
+    return { path: p, rel: name, bytes: st.size, mtimeMs: st.mtimeMs };
+  });
+  return { id, files, bytes: files.reduce((n, f) => n + f.bytes, 0), newestMtimeMs: Math.max(...files.map((f) => f.mtimeMs)) };
+}
+function f604ListGz(dir) {
+  const out = [];
+  const walk = (d) => { if (!fs.existsSync(d)) return; for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (e.name.endsWith('.gz')) out.push(p); } };
+  walk(dir);
+  return out;
+}
+
+test('fire 604 archive: a session whose compressed copy is past the restore bound keeps every original and leaves no archive', () => {
+  const root = f604Root('a');
+  try {
+    const sess = f604Session(root, 'sess604a', [Buffer.alloc(200000, 'a')]);
+    const archiveDir = path.join(root, 'archive');
+    const r = EA.archiveSession(sess, { slug: 'slug', archiveDir, bounds: { ...EA.RESTORE_BOUNDS, maxGzBytes: 10 } });
+    assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
+    assert.match(String(r.reason), /compressed bound/, String(r.reason));
+    assert.ok(sess.files.every((f) => fs.existsSync(f.path)), 'every original stays');
+    assert.deepStrictEqual(f604ListGz(archiveDir), [], 'no archive copy remains');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('fire 604 archive: a session past the inflate bound, or past the session bound, is refused and nothing is deleted', () => {
+  const root = f604Root('b');
+  try {
+    const archiveDir = path.join(root, 'archive');
+    const one = f604Session(root, 'sess604b', [Buffer.alloc(5000, 'b')]);
+    const r1 = EA.archiveSession(one, { slug: 'slug', archiveDir, bounds: { ...EA.RESTORE_BOUNDS, floorBytes: 1, maxRatio: 1, ceilBytes: 1 } });
+    assert.strictEqual(r1.ok, false, JSON.stringify(r1).slice(0, 200));
+    assert.match(String(r1.reason), /inflates to/, String(r1.reason));
+    assert.ok(one.files.every((f) => fs.existsSync(f.path)), 'inflate refusal: every original stays');
+    const two = f604Session(root, 'sess604c', [Buffer.alloc(40, 'c'), Buffer.alloc(40, 'd')]);
+    const r2 = EA.archiveSession(two, { slug: 'slug', archiveDir, bounds: { ...EA.RESTORE_BOUNDS, sessionCeilBytes: 60 } });
+    assert.strictEqual(r2.ok, false, JSON.stringify(r2).slice(0, 200));
+    assert.match(String(r2.reason), /session bound/, String(r2.reason));
+    assert.ok(two.files.every((f) => fs.existsSync(f.path)), 'session refusal: every original stays');
+    assert.deepStrictEqual(f604ListGz(archiveDir), [], 'no archive copy remains for either session');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('fire 604 archive: an in-bound session archives, deletes its originals, and restores whole', () => {
+  const root = f604Root('c');
+  try {
+    const archiveDir = path.join(root, 'archive');
+    const sess = f604Session(root, 'sess604d', [Buffer.from('one\n'), Buffer.from('two\n')]);
+    const r = EA.archiveSession(sess, { slug: 'slug', archiveDir });
+    assert.strictEqual(r.ok, true, String(r.reason));
+    assert.ok(sess.files.every((f) => !fs.existsSync(f.path)), 'the originals are deleted');
+    const back = EA.restoreSession('sess604d', { archiveDir, to: path.join(root, 'to') });
+    assert.strictEqual(back.ok, true, String(back.error));
+    assert.strictEqual(fs.readFileSync(path.join(back.dir, 'sess604d.jsonl'), 'utf8'), 'one\n');
+    assert.strictEqual(fs.readFileSync(path.join(back.dir, 'sess604d.1.jsonl'), 'utf8'), 'two\n');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('fire 604 drift pin: the archive side and the restore side refuse the same sessions, for one table of sizes', () => {
+  const B = { maxGzBytes: 1e9, floorBytes: 1000, maxRatio: 2, ceilBytes: 5000, sessionCeilBytes: 3000 };
+  const cases = [[500], [2000], [900, 900, 900], [1000, 1000, 1000, 1000], [3000], [800, 800, 800, 1]];
+  cases.forEach((sizes, i) => {
+    const root = f604Root(`d${i}`);
+    try {
+      const sid = `sess604e${i}`;
+      const bufs = sizes.map((n) => Buffer.alloc(n, 'e'));
+      const predicted = EA.restoreBoundReason(bufs.map((b) => ({ gzBytes: zlib.gzipSync(b).length, inflatedBytes: b.length })), B);
+      const sess = f604Session(root, sid, bufs);
+      const archiveDir = path.join(root, 'archive');
+      const ar = EA.archiveSession(sess, { slug: 'slug', archiveDir, bounds: B });
+      assert.strictEqual(ar.ok, predicted === null, `archive side for [${sizes}]: predicted ${predicted}; got ${JSON.stringify(ar).slice(0, 160)}`);
+      const archive2 = path.join(root, 'archive2');
+      bufs.forEach((b, k) => {
+        const name = k === 0 ? `${sid}.jsonl.gz` : `${sid}.${k}.jsonl.gz`;
+        fs.mkdirSync(path.join(archive2, 'slug'), { recursive: true });
+        fs.writeFileSync(path.join(archive2, 'slug', name), zlib.gzipSync(b));
+      });
+      const rs = EA.restoreSession(sid, { archiveDir: archive2, to: path.join(root, 'to'), bounds: B });
+      assert.strictEqual(rs.ok, predicted === null, `restore side for [${sizes}]: predicted ${predicted}; got ${JSON.stringify(rs).slice(0, 160)}`);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+test('fire 604 tombstones: an anchor that crosses a window boundary is found, and the file is scanned in windows', () => {
+  const anchor = 'ZZ-TOMB-ANCHOR-ZZ';
+  const ts = { anchors: [{ text: anchor, textLc: anchor.toLowerCase(), target: 'tgt', date: '2026-01-01' }] };
+  const buf = Buffer.from('x'.repeat(110) + anchor + 'y'.repeat(300));
+  const r = EA.scanBufferForTombstones(buf, ts, 100);
+  assert.ok(r.windows > 1, `the file was scanned in more than one window: ${r.windows}`);
+  assert.ok(r.hits.some((h) => h.anchor === anchor), 'the anchor across the boundary is found: ' + JSON.stringify(r.hits));
+});
+
+test('fire 604 tombstones: a restore reports the scan it covered, byte for byte', () => {
+  const root = f604Root('e');
+  try {
+    const archiveDir = path.join(root, 'archive');
+    const body = 'head ' + 'x'.repeat(200) + ' ZZ-TOMB-ANCHOR-ZZ tail\n';
+    const sess = f604Session(root, 'sess604f', [Buffer.from(body)]);
+    assert.strictEqual(EA.archiveSession(sess, { slug: 'slug', archiveDir }).ok, true);
+    const anchor = 'ZZ-TOMB-ANCHOR-ZZ';
+    const ts = { anchors: [{ text: anchor, textLc: anchor.toLowerCase(), target: 'tgt', date: '2026-01-01' }] };
+    const back = EA.restoreSession('sess604f', { archiveDir, to: path.join(root, 'to'), tombstones: ts, tombstoneWindowBytes: 64 });
+    assert.strictEqual(back.ok, true, String(back.error));
+    assert.ok((back.laterRemoved || []).some((h) => h.anchor === anchor), 'the restore finds the anchor: ' + JSON.stringify(back.laterRemoved));
+    assert.strictEqual(back.tombstoneScan.bytes, Buffer.byteLength(body), 'the scan covered every byte');
+    assert.strictEqual(back.tombstoneScan.complete, true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// 29bt fire 604: the refusal reaches the run report with its reason, and the session stays on disk.
+test('fire 604 run: a session the restore could not return is reported as failed with its bound, and it stays on disk', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-bound', 40);
+    const res = runEstate({ projectRoot: proj, home, estate: estateCfg(), bounds: { ...EA.RESTORE_BOUNDS, maxGzBytes: 10 } });
+    assert.strictEqual(res.archived.length, 0, 'nothing was archived');
+    const f = res.failed.find((x) => x.id === 'sess-bound');
+    assert.ok(f, 'the session is in the failed list: ' + JSON.stringify(res.failed));
+    assert.match(String(f.reason), /compressed bound/, String(f.reason));
+    assert.match(EA.runEstateReport(res), /compressed bound/, 'the printed report says why');
+    const still = classifySessions({ projectRoot: proj, home, estate: estateCfg() }).sessions.some((s) => s.id === 'sess-bound');
+    assert.ok(still, 'the session is still on disk');
+  } finally { clean(home, proj); }
+});
