@@ -533,6 +533,10 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   const fail = (reason) => stolen(`removing the partial archive (after: ${reason})`, notDeleted()) || (cleanupPartial(), { ok: false, reason });
   let transcriptBuf = null;
   const originals = [];
+  // What the listing already proves: at the largest compressed size a restore takes, these sizes still could not come back, so nothing is read
+  // or gzipped. The check after the copies decides the rest.
+  const listedWhy = restoreBoundReason(sess.files.map((f) => ({ gzBytes: bounds.maxGzBytes, inflatedBytes: f.bytes })), bounds);
+  if (listedWhy) return fail(`restore could not return this session (${listedWhy}) — nothing copied, every original kept`);
 
   for (const f of sess.files) {
     // #57(d) cloud-placeholder read poison: sniff the dehydrated stub from
@@ -605,13 +609,13 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     }
   }
 
-  // THE RESTORE BOUNDS, read on the sizes just written and verified (the same predicate restoreSession refuses on). A session that restore
+  // THE RESTORE BOUNDS, read on the sizes just written and verified (the numbers restoreSession refuses on). A session that restore
   // could not return is removed as a partial archive and every original stays; nothing is deleted that the tool could not bring back.
   let boundWhy = null;
   try {
     boundWhy = restoreBoundReason(originals.map((o) => ({ gzBytes: fs.statSync(o.gz).size, inflatedBytes: o.inflated })), bounds);
   } catch (e) { return fail(`archive size unreadable: ${e.message} — session skipped, originals kept`); }
-  if (boundWhy) return fail(`restore could not return this session (${boundWhy}) — archive removed, every original kept`);
+  if (boundWhy) return fail(`restore could not return this session (${boundWhy}) — its copy removed, every original kept`);
 
   // H4 DURABILITY: fsync every archived .gz's DIRECTORY ENTRY before deleting the
   // originals — a power-loss in the write->unlink window must not lose the SOLE
@@ -1133,5 +1137,5 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
   }
   const laterRemoved = wantTombstoneScan ? [...tombFound.values()] : [];
   // The scan result says what it covered: every byte of every restored file, in windows, with none skipped.
-  return { ok: true, dir, files, ...(laterRemoved.length ? { laterRemoved } : {}), ...(wantTombstoneScan ? { tombstoneScan: { bytes: tombBytes, complete: true } } : {}) };
+  return { ok: true, dir, files, ...(laterRemoved.length ? { laterRemoved } : {}), ...(wantTombstoneScan ? { tombstoneScan: { bytes: tombBytes } } : {}) };
 }

@@ -52,7 +52,7 @@ import { tokensEst } from './caliper.mjs';
 import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS, restoreFile, writeDurable } from './apply.mjs';
-import { resolveArchiveDir, appendIndexRow, restoreBoundReason } from './estate-archive.mjs';
+import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { escapeRawControls } from './receipt.mjs'; // the printed store label goes through the room's one escaper
 
@@ -969,10 +969,6 @@ export function runRetier({
           gzWritten.push(dest);
           const back = zlib.gunzipSync(fs.readFileSync(dest), { maxOutputLength: buf.length + 1 }); // bounded by the topic's own length
           if (!back.equals(buf)) throw new Error('verify mismatch');
-          // The restore bounds on this one copy: estate-restore reads the topic back through restoreSession, which refuses past them.
-          // A topic that could not come back keeps its original in the live tree (the catch below removes this copy).
-          const boundWhy = restoreBoundReason([{ gzBytes: gz.length, inflatedBytes: buf.length }]);
-          if (boundWhy) throw new Error(`the restore could not return this topic: ${boundWhy}`);
         } catch (e) {
           try { fs.rmSync(dest, { force: true }); } catch {}
           const gi = gzWritten.indexOf(dest);

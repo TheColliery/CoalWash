@@ -1481,7 +1481,7 @@ test('fire 604 archive: an in-bound session archives, deletes its originals, and
 test('fire 604 drift pin: the archive side and the restore side refuse the same sessions, for one table of sizes', () => {
   const B = { maxGzBytes: 1e9, floorBytes: 1000, maxRatio: 2, ceilBytes: 5000, sessionCeilBytes: 3000 };
   // The last row is the exact ceiling followed by an empty file: the empty file is the transcript (sid.jsonl), which restore reads last.
-  const cases = [[500], [2000], [900, 900, 900], [1000, 1000, 1000, 1000], [3000], [800, 800, 800, 1], [0, 1000, 1000, 1000]];
+  const cases = [[500], [2000], [900, 900, 900], [1000, 1000, 1000, 1000], [3000], [800, 800, 800, 1], [0, 1000, 1000, 1000], [1, 1000, 1000, 1000]];
   cases.forEach((sizes, i) => {
     const root = f604Root(`d${i}`);
     try {
@@ -1509,8 +1509,6 @@ test('fire 604 drift pin: the archive side and the restore side refuse the same 
 });
 
 test('fire 604 tombstones: an anchor that crosses a window boundary is found, and the file is scanned in windows', () => {
-  const anchor = 'ZZ-TOMB-ANCHOR-ZZ';
-  const ts = { anchors: [{ text: anchor, textLc: anchor.toLowerCase(), target: 'tgt', date: '2026-01-01' }] };
   // A six-byte anchor gives an overlap of 22 bytes, so 100-byte windows start at 0, 78, 156, 234 and 312. The first anchor starts at byte 95
   // and crosses the end of window 0; the second sits wholly inside window 2 and in no other window.
   const tsw = { anchors: [{ text: 'ZZ-TAB', textLc: 'zz-tab', target: 't', date: 'd' }, { text: 'QQ-TBB', textLc: 'qq-tbb', target: 't', date: 'd' }] };
@@ -1534,7 +1532,6 @@ test('fire 604 tombstones: a restore reports the scan it covered, byte for byte'
     assert.strictEqual(back.ok, true, String(back.error));
     assert.ok((back.laterRemoved || []).some((h) => h.anchor === anchor), 'the restore finds the anchor: ' + JSON.stringify(back.laterRemoved));
     assert.strictEqual(back.tombstoneScan.bytes, Buffer.byteLength(body), 'the scan covered every byte');
-    assert.strictEqual(back.tombstoneScan.complete, true);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -1575,5 +1572,56 @@ test('fire 606 labels: two long anchors sharing their first 77 characters are bo
     const back = EA.restoreSession('sess606a', { archiveDir, to: path.join(root, 'to'), tombstones: ts });
     assert.strictEqual(back.ok, true, String(back.error));
     assert.strictEqual((back.laterRemoved || []).length, 2, 'the restore reports both anchors: ' + JSON.stringify(back.laterRemoved));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// the legs the drift pin did not hold. The exact compressed size on both sides, a multi-byte anchor at every window edge,
+// a copy longer than its original, and a session the listing alone rules out.
+test('bounds: the archive and the restore agree at the exact compressed size', () => {
+  const root = f604Root('g');
+  try {
+    const buf = Buffer.alloc(3000, 'g');
+    const gzLen = zlib.gzipSync(buf).length;
+    for (const [maxGzBytes, want] of [[gzLen, true], [gzLen - 1, false]]) {
+      const B = { ...EA.RESTORE_BOUNDS, maxGzBytes };
+      const sid = `sess608g${maxGzBytes}`;
+      const sess = f604Session(root, sid, [buf]);
+      assert.strictEqual(EA.archiveSession(sess, { slug: 'slug', archiveDir: path.join(root, `a${maxGzBytes}`), bounds: B }).ok, want, `archive side at ${maxGzBytes}`);
+      const arch2 = path.join(root, `b${maxGzBytes}`);
+      fs.mkdirSync(path.join(arch2, 'slug'), { recursive: true });
+      fs.writeFileSync(path.join(arch2, 'slug', `${sid}.jsonl.gz`), zlib.gzipSync(buf));
+      assert.strictEqual(EA.restoreSession(sid, { archiveDir: arch2, to: path.join(root, `to${maxGzBytes}`), bounds: B }).ok, want, `restore side at ${maxGzBytes}`);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('tombstones: a three-byte anchor is found at every offset, in a window it outgrows', () => {
+  const text = String.fromCharCode(0x6f22).repeat(20); // 20 UTF-16 units, 60 UTF-8 bytes
+  const ts = { anchors: [{ text, textLc: text, target: 't', date: 'd' }] };
+  for (let off = 0; off < 200; off++) {
+    const buf = Buffer.concat([Buffer.alloc(off, 0x2e), Buffer.from(text), Buffer.alloc(200, 0x2e)]);
+    assert.strictEqual(EA.scanBufferForTombstones(buf, ts, 16).hits.length, 1, `offset ${off}`);
+  }
+});
+
+test('archive: a copy that inflates past its original is refused by the bounded verify', () => {
+  const root = f604Root('i');
+  try {
+    const sess = f604Session(root, 'sess608i', [Buffer.alloc(1000, 'i')]);
+    const r = EA.archiveSession(sess, { slug: 'slug', archiveDir: path.join(root, 'archive'), gzip: (b) => zlib.gzipSync(Buffer.concat([b, b])) });
+    assert.strictEqual(r.ok, false);
+    assert.match(String(r.reason), /archive failed/, String(r.reason)); // an unbounded gunzip reads the whole copy and reports a mismatch instead
+    assert.ok(sess.files.every((f) => fs.existsSync(f.path)), 'the original stays');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('archive: a session the listing alone rules out is refused before any gzip', () => {
+  const root = f604Root('h');
+  try {
+    const sess = f604Session(root, 'sess608h', [Buffer.alloc(5000, 'h')]);
+    const r = EA.archiveSession(sess, { slug: 'slug', archiveDir: path.join(root, 'archive'), bounds: { ...EA.RESTORE_BOUNDS, floorBytes: 100, ceilBytes: 100 }, gzip: () => { throw new Error('gzip ran'); } });
+    assert.strictEqual(r.ok, false);
+    assert.match(String(r.reason), /inflates to/, String(r.reason));
+    assert.ok(sess.files.every((f) => fs.existsSync(f.path)), 'the original stays');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
