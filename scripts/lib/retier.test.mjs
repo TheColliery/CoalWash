@@ -1627,3 +1627,28 @@ test('D6 retier: an AG-only home is refused with the platform flag, and nothing 
     assert.deepStrictEqual(fs.readdirSync(home), [], 'an AG-only home gains nothing');
   } finally { clean(home, proj); }
 });
+
+test('29bi: a link at the archive destination is replaced by the archive write, and the other name keeps its bytes', (t) => {
+  const { home, proj } = sandbox();
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-bi-arch-')));
+  const realWrite = fs.writeFileSync;
+  const realRename = fs.renameSync;
+  try {
+    const other = path.join(outDir, 'other.gz');
+    write(other, 'other bytes');
+    const probe = path.join(outDir, 'probe.gz');
+    try { fs.linkSync(other, probe); fs.rmSync(probe); } catch (e) {
+      if (e && ['EPERM', 'EACCES', 'EXDEV', 'ENOSYS'].includes(e.code)) { t.skip('no hard links on this volume'); return; }
+      throw e;
+    }
+    seedMainStore(home, proj);
+    // Plant a hard link at the first archive destination, through whichever write the archive uses (a plain write on the old code, a rename on the new one).
+    let planted = false;
+    const plant = (p) => { if (!planted && String(p).endsWith('.gz')) { planted = true; fs.linkSync(other, p); } };
+    fs.writeFileSync = function patched(p, ...rest) { plant(p); return realWrite.call(fs, p, ...rest); };
+    fs.renameSync = function patched(from, to, ...rest) { plant(to); return realRename.call(fs, from, to, ...rest); };
+    try { runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) }); } finally { fs.writeFileSync = realWrite; fs.renameSync = realRename; }
+    assert.ok(planted, 'an archive copy was written');
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'other bytes', 'the other name keeps its bytes');
+  } finally { clean(home, proj, outDir); }
+});
