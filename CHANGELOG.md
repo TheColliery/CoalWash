@@ -2,6 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.9] - 2026-11-05
+
+The printed restore command can no longer run a repository's script or empty your file
+
+### Security
+
+- The write-guard advisory's restore line names the installed `cli.mjs` by its full path, so following it in a cloned repository no longer runs that repository's copy.
+- The restore line writes to `<file>.restored`, not to the file itself, so a restore that fails leaves your file as it was.
+- A snapshot name that begins with `-`, or a file path holding `%`, gets no ready-made restore line; the advisory names the command to run with the snapshot name instead.
+- The file and snapshot names in the advisory are escaped where they are printed, so a control character in a name cannot start a fake line.
+- `configure`'s global-setting hint escapes its key and value the same way.
+
 ## [1.15.8] - 2026-11-05
 
 A control character in a name can no longer forge a line in a report
