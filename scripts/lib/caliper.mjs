@@ -1195,6 +1195,23 @@ function dropOldRootEntry(projectRoot, home) {
   } catch { /* fail-silent — migration is best-effort, never blocks a write */ }
 }
 
+// Two project paths can fold to one slug, so the slug path alone does not say whose record it is. A record is THIS project's when
+// the root it recorded (saveState stamps `projectRoot`) names the same folder; a record another project wrote is treated as absent.
+// A record with no recorded root is accepted: records written before the stamp existed never carried one, and dropping them
+// would strand a user's lean floor. Both sides go through the realpath helper, so a project reached through a link keeps its own
+// record; a side that cannot be resolved (a moved or deleted project) compares as path.resolve. Never keyed on the platform.
+function sameFolder(a, b) {
+  const pa = physicalOrNull(a);
+  const pb = physicalOrNull(b);
+  if (pa !== null && pb !== null) return pa === pb;
+  return path.resolve(a) === path.resolve(b);
+}
+function ownedRecord(rec, projectRoot) {
+  if (!rec) return null;
+  if (typeof rec.projectRoot !== 'string') return rec;
+  return sameFolder(rec.projectRoot, projectRoot) ? rec : null;
+}
+
 // Load THIS project's flat state (the SCHEMA-migrated view): the new per-project
 // file if present, else the old-root entry (LOCATION fallback), else {}. Always
 // returns the migrated view so every reader — the read-only CLI + Stop paths
@@ -1204,8 +1221,10 @@ export function loadState(projectRoot, home = os.homedir()) {
   // Read the ACTIVE path first, then the coal/ fallback: under the never-create
   // guard a project whose slug dir did not exist yet wrote to coal/, and the slug
   // dir can appear later (CC's first real session) — reading both keeps that
-  // state (the lean-floor baseline) from stranding on the location flip.
-  const fresh = readStateFile(statePath(projectRoot, home)) || readStateFile(stateFallbackPath(projectRoot, home));
+  // state (the lean-floor baseline) from stranding on the location flip. A record
+  // another project wrote into either path is skipped, and the next source tried.
+  const fresh = ownedRecord(readStateFile(statePath(projectRoot, home)), projectRoot)
+    || ownedRecord(readStateFile(stateFallbackPath(projectRoot, home)), projectRoot);
   const proj = fresh || readOldRootEntry(projectRoot, home) || {};
   return migrateProjSchema(proj);
 }

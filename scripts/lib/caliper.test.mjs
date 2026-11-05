@@ -3070,3 +3070,100 @@ test('F415-4 AG capacity: discoverCapacity with platform antigravity reads no Cl
     assert.strictEqual(ag.discovered, false);
   } finally { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(proj, { recursive: true, force: true }); }
 });
+
+// ---------------------------------------------------------------------------
+// Record identity: a state record another project wrote into this slug dir is not this project's.
+// ---------------------------------------------------------------------------
+
+test('record identity: a state record whose recorded root is another project is absent, so no floor and no verdict are read', () => {
+  const { home, proj } = sandbox();
+  const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-foreign-')));
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: other, leanFloorTokens: 9000, lastVerdict: { band: 'FULL', storeTotalBytes: 10 } });
+    const st = loadState(proj, home);
+    assert.strictEqual(st.leanFloorTokens, undefined, 'the colliding project\'s floor is not read');
+    assert.strictEqual(st.lastVerdict, undefined, 'the colliding project\'s verdict is not read');
+  } finally { clean(home, proj, other); }
+});
+
+test('record identity: the bin-budget read ignores a colliding project\'s smaller storeTotalBytes', () => {
+  const { home, proj } = sandbox();
+  const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-foreign2-')));
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: other, lastVerdict: { band: 'OBESE', storeTotalBytes: 10 } });
+    // apply.mjs reads its bin budget as this expression over loadState: a foreign record must give 0, never 10.
+    const budget = Number(loadState(proj, home)?.lastVerdict?.storeTotalBytes) || 0;
+    assert.strictEqual(budget, 0, 'another project does not lower this project\'s bin budget');
+  } finally { clean(home, proj, other); }
+});
+
+test('record identity: an own state record is returned whole', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: proj, leanFloorTokens: 4321 });
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 4321);
+  } finally { clean(home, proj); }
+});
+
+test('record identity: a state record with no recorded root is accepted whole, since old records never carried one', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { leanFloorTokens: 4321 });
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 4321, 'an old record keeps the user\'s lean floor');
+  } finally { clean(home, proj); }
+});
+
+test('record identity: an own state record reached through a junction to the project is returned whole', (t) => {
+  const { home, proj } = sandbox();
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-jnp-'));
+  try {
+    const link = path.join(parent, 'link');
+    try { fs.symlinkSync(proj, link, 'junction'); } catch (e) {
+      if (e && (e.code === 'EPERM' || e.code === 'EACCES')) { t.skip('no privilege to create a junction on this host'); return; }
+      throw e;
+    }
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: link, leanFloorTokens: 777 });
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 777, 'the junction names this project, so the record is its own');
+  } finally { clean(home, proj, parent); }
+});
+
+test('record identity: an own state record whose root is spelled in another case is returned whole on a volume that folds case', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    fs.writeFileSync(path.join(proj, 'CaseProbe.tmp'), 'x');
+    if (!fs.existsSync(path.join(proj, 'caseprobe.tmp'))) { t.skip('this volume does not fold case, so the spelling cannot differ'); return; }
+    const base = path.basename(proj);
+    const flipped = base === base.toUpperCase() ? base.toLowerCase() : base.toUpperCase();
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: path.join(path.dirname(proj), flipped), leanFloorTokens: 555 });
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 555, 'the same folder under another case is still this project\'s');
+  } finally { clean(home, proj); }
+});
+
+test('record identity: an own record whose recorded root no longer exists is returned whole, comparing the same literal path', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: proj, leanFloorTokens: 888 });
+    fs.rmSync(proj, { recursive: true, force: true });
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 888, 'a deleted project still reads its own record');
+  } finally { clean(home, proj); }
+});
+
+test('record identity: a foreign record at the slug path and a foreign record at the coal fallback are both absent', () => {
+  const { home, proj } = sandbox();
+  const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-foreign3-')));
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: other, leanFloorTokens: 9000 });
+    const fb = stateFallbackPath(proj, home);
+    fs.mkdirSync(path.dirname(fb), { recursive: true });
+    fs.writeFileSync(fb, JSON.stringify({ projectRoot: other, leanFloorTokens: 8000, stateSchema: STATE_SCHEMA }), 'utf8');
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, undefined, 'the fallback is checked too: no foreign floor is read from either path');
+  } finally { clean(home, proj, other); }
+});
