@@ -429,6 +429,19 @@ test('F-R32-3: --global IS honoured, so the warning fires on the PROJECT path on
   assert.match(r.stdout, /Successfully updated configuration/);
 });
 
+// A value the hint prints is printed only when a shell reads it as one plain word; otherwise the hint names the value above.
+test('CWK-137 D3 hint: a value a shell would read is not printed in the --global hint', (t) => {
+  const sb = sandbox(t);
+  const dest = path.join(sb.home, 'x$(touch PWNED)');
+  const r = run(sb, ['--estate.archiveDir', dest]);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = r.stdout + r.stderr;
+  const hint = out.split('\n').find((l) => l.includes('node scripts/configure.mjs --global --estate.archiveDir'));
+  assert.ok(hint, out);
+  assert.ok(!hint.includes('$(touch'), 'the hint prints no value a shell would read: ' + hint);
+  assert.ok(hint.includes('<the value above>'), 'the hint points at the value above instead: ' + hint);
+});
+
 // CWK-137 D3: `estate.archiveDir` is read from the GLOBAL layer only, so a PROJECT write of it is ignored by every reader. The
 // F-R32-3 machinery above already notices (it compares the written value with the loader's own merged read); what it said
 // about WHY was the consent-clamp story ("safer-value-wins"), which is false for this key: nothing here is safer or weaker, the

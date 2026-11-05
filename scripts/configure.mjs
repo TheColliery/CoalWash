@@ -81,6 +81,7 @@ import { fileURLToPath } from 'node:url';
 import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig } from './lib/config-schema.mjs';
 import { parseJsonc } from './lib/jsonc.mjs';
 import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig, findProjectRoot, repoReadOutcome, MAX_CONFIG_BYTES, GLOBAL_ONLY_KEYS, PROJECT_BOUNDED_KEYS } from './lib/config-load.mjs';
+import { plainShellArg } from './lib/ask.mjs';
 import { writeRepoFile, RepoWriteRefused } from './lib/repo-fs.mjs';
 import { escapeRawControls } from './lib/receipt.mjs';
 
@@ -614,8 +615,10 @@ function main() {
         console.warn('  config and its bytes are indistinguishable from yours.');
       }
       console.warn(`  To make this take effect, set it on the GLOBAL layer instead:`);
-      const shownValue = typeof c.wrote === 'string' ? c.wrote : JSON.stringify(c.wrote);
-      console.warn(`      node scripts/configure.mjs --global --${escapeRawControls(String(c.key))} ${escapeRawControls(String(shownValue))}`);
+      // The hint is meant to be copied into a shell, so the value prints only when a shell reads it as one plain word (ask.mjs plainShellArg).
+      const rawValue = typeof c.wrote === 'string' ? c.wrote : JSON.stringify(c.wrote);
+      const hintValue = plainShellArg(String(rawValue)) ? `"${rawValue}"` : '<the value above>';
+      console.warn(`      node scripts/configure.mjs --global --${escapeRawControls(String(c.key))} ${hintValue}`);
     }
   }
 }

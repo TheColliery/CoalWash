@@ -10,7 +10,7 @@
 //   node scripts/lib/cli.mjs gauge [--json]
 //   node scripts/lib/cli.mjs restore <id>
 //   node scripts/lib/cli.mjs writeguard-list
-//   node scripts/lib/cli.mjs writeguard-restore <snapName>
+//   node scripts/lib/cli.mjs writeguard-restore <snapName> [--out <file>]
 //   node scripts/lib/cli.mjs anchor-diff <path> [--json]
 //   node scripts/lib/cli.mjs estate [--json]
 //   node scripts/lib/cli.mjs dig-gauge <path...> [--json] [--session <id>]
@@ -55,8 +55,10 @@
 // writeguard-list / writeguard-restore <snapName> (0p — the airbag undo door,
 // same restore-by-reference law as the bins): list = metadata only (name ·
 // session · bytes · path), the agent POINTS at a snapshot, never reproduces
-// bytes; restore = CODE prints the byte-exact ORIGINAL to stdout (pipeable:
-// `... writeguard-restore <snapName> > MEMORY.md`). An AI re-authoring a
+// bytes; restore = CODE prints the byte-exact ORIGINAL to stdout, or with --out
+// <file> creates that file and writes the verified original into it (wx: an
+// existing name, a dangling link included, refuses and nothing is written).
+// An AI re-authoring a
 // "recovery" from memory is the ADD-01 hallucination-twin; undo is trustworthy
 // only because the bytes are the REAL bytes, model-untouched.
 //
@@ -298,7 +300,7 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   return refused ? { found: false, id, refused } : { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> [--platform antigravity] | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>] | config-status [--json]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> [--platform antigravity] [--out <file>] | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>] | config-status [--json]';
 
 // UMB-133 — the READ-ONLY report for BOTH holes: was the config actually read
 // from a LEGACY path, and is there a `.coalwash.json` sitting somewhere this
@@ -517,10 +519,14 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'writeguard-restore') {
-    // The snapshot name is the first argument that is not a flag and not the value of --platform (29g fire 412: the flag may come first).
-    const name = args.slice(1).find((a, i, arr) => !a.startsWith('--') && arr[i - 1] !== '--platform');
+    // The snapshot name is the first argument that is not a flag and not the value of --platform or --out (29g fire 412: the flag may come first).
+    const name = args.slice(1).find((a, i, arr) => !a.startsWith('--') && arr[i - 1] !== '--platform' && arr[i - 1] !== '--out');
     const rootOpts = rootOptsFor(args);
     if (!rootOpts) { console.error(PLATFORM_USAGE); process.exitCode = 1; return; }
+    // --out <file>: the file this command CREATES, after the bytes verify. A missing value, or another flag in its place, is a usage error.
+    const outGiven = args.includes('--out');
+    const outPath = outGiven ? argAfter(args, '--out') : null;
+    if (outGiven && (!outPath || outPath.startsWith('--'))) { console.error(USAGE); process.exitCode = 1; return; }
     if (!name) { console.error(USAGE); process.exitCode = 1; return; }
     try {
       const projectRoot = projectRootFor(process.cwd(), os.homedir(), rootOpts);
@@ -540,8 +546,23 @@ function main() {
         process.exitCode = 1;
         return;
       }
-      process.stdout.write(r.content); // the byte-exact ORIGINAL — code-moved, model-untouched
-      console.error(`[CoalWash] restored write-guard snapshot ${escapeRawControls(String(r.name))} (${r.bytes} bytes, session ${escapeRawControls(String(r.session))}) — byte-exact original on stdout; redirect it to the file, never re-type it`);
+      if (outPath) {
+        // wx creates only: it follows no link, a dangling one included, so a name already taken refuses and nothing is written.
+        try {
+          fs.writeFileSync(outPath, r.content, { flag: 'wx', mode: 0o600 });
+        } catch (e) {
+          const shown = escapeRawControls(String(outPath));
+          console.error(e && e.code === 'EEXIST'
+            ? `writeguard-restore: ${shown} already exists — refusing to overwrite it; nothing was written`
+            : `writeguard-restore: could not write ${shown}: ${escapeRawControls(String(e && e.code ? e.code : e.message))}`);
+          process.exitCode = 1;
+          return;
+        }
+        console.error(`[CoalWash] restored write-guard snapshot ${escapeRawControls(String(r.name))} (${r.bytes} bytes, session ${escapeRawControls(String(r.session))}) — byte-exact original written to ${escapeRawControls(String(outPath))}`);
+      } else {
+        process.stdout.write(r.content); // the byte-exact ORIGINAL — code-moved, model-untouched
+        console.error(`[CoalWash] restored write-guard snapshot ${escapeRawControls(String(r.name))} (${r.bytes} bytes, session ${escapeRawControls(String(r.session))}) — byte-exact original on stdout; use --out <file>.restored, then replace the file with it; never re-type it`);
+      }
     } catch (e) {
       console.error(`writeguard-restore failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;

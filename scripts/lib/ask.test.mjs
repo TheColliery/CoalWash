@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { escapeRawControls } from './receipt.mjs';
 import { ANSWER_FIRST_REMINDER, forceAuto, obeseAutoQuick, wizardEscalation, externalizeAdvisory, seatbeltAdvisory, digGaugeOffer } from './ask.mjs';
 
@@ -393,9 +393,9 @@ test('CWK-162 A6: plain names keep the ready-made line, in any script (control: 
   const snap = '/p/.claude/coalwash/writeguard/s/snap-abc';
   for (const f of ['/p/MEMORY.md', 'C:\\proj\\notes file.md', '/proj/rules/my-rule_v2.1.md', '/proj/\u0e01\u0e0e/\u0e04\u0e27\u0e32\u0e21\u0e08\u0e33.md', '/proj/r\u00e4gler/\u00fcber.md']) {
     const r = seatbeltAdvisory({ file: f, classes: ['links'], snapshotPath: snap });
-    // The redirect now targets a sibling file: the old assertion (a redirect onto the working file) is the defect this fire removes,
+    // The redirect now targets a sibling file: the old assertion (a redirect onto the working file) is the defect this change removes,
     // so the proven-wrong line changes here, in this commit, with the reason it changed.
-    assert.ok(restoreCommands(r).some((c) => c.includes(`> "${f}.restored"`)), `the one-liner for ${JSON.stringify(f)}: ${r}`);
+    assert.ok(restoreCommands(r).some((c) => c.includes(`--out "${f}.restored"`)), `the one-liner for ${JSON.stringify(f)}: ${r}`);
   }
 });
 
@@ -411,7 +411,7 @@ test('CWK-162 A6: a snapshot file name that is shell syntax also removes the rea
 // ---------------------------------------------------------------------------
 const INSTALLED_CLI = fileURLToPath(new URL('./cli.mjs', import.meta.url));
 const SNAP = '/p/.claude/coalwash/writeguard/s/snap-abc';
-const BASH_PRESENT = spawnSync('bash', ['-c', 'exit 0']).status === 0;
+const BASH_PRESENT = spawnSync('bash', ['-c', 'exit 0'], { timeout: 30000 }).status === 0;
 function clean(...dirs) { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); }
 
 test('printed restore command: names the installed cli.mjs by absolute path, and that file exists', () => {
@@ -429,8 +429,8 @@ test('printed restore command: never redirects onto the working file itself', ()
   const cmds = restoreCommands(r);
   assert.ok(cmds.length >= 1, r);
   for (const cmd of cmds) {
-    assert.ok(cmd.includes('> "/p/MEMORY.md.restored"'), 'the redirect targets a sibling file: ' + cmd);
-    assert.ok(!cmd.includes('> "/p/MEMORY.md"'), 'no redirect onto the working file: ' + cmd);
+    assert.ok(cmd.includes('--out "/p/MEMORY.md.restored"'), 'the CLI writes a sibling file: ' + cmd);
+    assert.ok(!cmd.includes('--out "/p/MEMORY.md"') && !cmd.includes('> "/p/MEMORY.md"'), 'nothing writes onto the working file: ' + cmd);
   }
 });
 
@@ -450,7 +450,7 @@ test('printed restore command: a snapshot name with a space sits inside double q
   const r = seatbeltAdvisory({ file: '/p/MEMORY.md', classes: ['links'], snapshotPath: '/p/.claude/coalwash/writeguard/s/my snap-abc' });
   const cmds = restoreCommands(r);
   assert.ok(cmds.length >= 1, r);
-  for (const cmd of cmds) assert.ok(cmd.includes('writeguard-restore "my snap-abc" > "'), 'the name is quoted: ' + cmd);
+  for (const cmd of cmds) assert.ok(cmd.includes('writeguard-restore "my snap-abc" --out "'), 'the name is quoted: ' + cmd);
 });
 
 test('printed restore command: a file name holding a line feed prints escaped, never raw, in the placeholder and oversize forms', () => {
@@ -492,7 +492,30 @@ test('printed restore command: run through a real shell against a missing snapsh
     assert.ok(cmds.length >= 1, 'a ready-made command exists to run: ' + r);
     const cmd = cmds[0].slice(1, -1);
     const res = spawnSync('bash', ['-c', cmd], { cwd: dir, env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, TMP: home, TEMP: home }, encoding: 'utf8', timeout: 120000 });
-    assert.match(res.stderr || '', /not found/, 'the printed command reached the restore CLI: ' + res.stderr);
+    assert.match(res.stderr || '', /writeguard-restore: snapshot '.*' not found/, 'the printed command reached the restore CLI: ' + res.stderr);
     assert.strictEqual(fs.readFileSync(file, 'utf8'), bytes, 'the working file keeps its bytes');
+    assert.ok(!fs.existsSync(file + '.restored'), 'a failed run creates no restored file');
   } finally { clean(dir, home); }
+});
+
+test('printed restore command: names the --out flag, never a shell redirect, and waits on success before replacing the file', () => {
+  const r = seatbeltAdvisory({ file: '/p/MEMORY.md', classes: ['links'], snapshotPath: SNAP });
+  const cmds = restoreCommands(r);
+  assert.ok(cmds.length >= 1, r);
+  for (const cmd of cmds) assert.ok(!cmd.includes(' > '), 'no shell redirect in the printed command: ' + cmd);
+  assert.ok(r.includes('then, only if it succeeded, replace the file with it'), 'the next step waits on success: ' + r);
+});
+
+test('printed restore command: an install path a shell would read gets no runnable command', async () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwg-paren-')));
+  try {
+    const lib = path.join(dir, 'a (b)');
+    fs.mkdirSync(lib);
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    for (const f of ['ask.mjs', 'receipt.mjs']) fs.copyFileSync(path.join(here, f), path.join(lib, f));
+    const m = await import(pathToFileURL(path.join(lib, 'ask.mjs')).href);
+    const r = m.seatbeltAdvisory({ file: '/p/MEMORY.md', classes: ['links'], snapshotPath: SNAP });
+    assert.strictEqual(restoreCommands(r).length, 0, r);
+    assert.ok(r.includes("beside the plugin's scripts/lib"), r);
+  } finally { clean(dir); }
 });

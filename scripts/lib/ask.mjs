@@ -176,12 +176,18 @@ export function wizardEscalation(opts) {
 // code copies the bytes, never the agent). `classes` = the fidelity-gate drop
 // types present; `oversize` = the file exceeded the diff cap (snapshot stands,
 // diff skipped).
+// The one plain-argument rule for a double-quoted shell word: letters of any script, digits, marks, space and . _ , @ + = : ~ / \ -.
+// % is not plain (cmd.exe expands it inside double quotes), and a trailing backslash would escape the closing quote. configure.mjs
+// uses the same rule for the value it prints in a copy-paste hint.
+const PLAIN_SHELL_ARG = /^[\p{L}\p{M}\p{N} _.,@+=:~\/\\-]+$/u;
+export function plainShellArg(s) {
+  return PLAIN_SHELL_ARG.test(s) && !s.endsWith('\\');
+}
+
 export function seatbeltAdvisory(opts) {
   const { file, classes, snapshotPath, oversize } = opts || {};
-  // A plain argument, for a double-quoted shell word: letters of any script, digits, marks, space and . _ , @ + = : ~ / \ -.
-  // % is not plain (cmd.exe expands it inside double quotes), and a name that begins with - would be read as a flag.
-  const PLAIN_SHELL_ARG = /^[\p{L}\p{M}\p{N} _.,@+=:~\/\\-]+$/u;
-  const plainArg = (s) => PLAIN_SHELL_ARG.test(s) && !s.endsWith('\\');
+  const plainArg = plainShellArg;
+  // A name that begins with - would be read as a flag, so it is never a plain name.
   const plainName = (s) => plainArg(s) && !s.startsWith('-');
   const f = typeof file === 'string' && file ? file : '(unknown file)';
   const snap = typeof snapshotPath === 'string' && snapshotPath ? snapshotPath : '';
@@ -194,8 +200,10 @@ export function seatbeltAdvisory(opts) {
   const shownFile = escapeRawControls(f);
   const shownSnap = escapeRawControls(snap);
   const readyMade = plainArg(CLI) && plainName(snapName) && plainArg(f);
+  // The CLI creates the --out file only after it has verified the bytes, and refuses a name already taken, so the printed line
+  // never takes a shell redirect. A failed restore writes nothing, which is why the next step waits on success.
   const restoreCmd = readyMade
-    ? ` (or \`node "${CLI}" writeguard-restore "${snapName}" > "${shownFile}.restored"\`, then replace the file with that output; run it from bash or cmd, because Windows PowerShell 5.1's \`>\` re-encodes the bytes)`
+    ? ` (or \`node "${CLI}" writeguard-restore "${snapName}" --out "${shownFile}.restored"\`, then, only if it succeeded, replace the file with it)`
     : (plainArg(CLI)
       ? ` (no ready-made command, because a shell would read part of this file's path or the snapshot name: \`node "${CLI}" writeguard-restore <the snapshot file name above>\` prints the original to stdout)`
       : ' (no ready-made command, because a shell would read part of this file\'s path or the snapshot name: the write-guard CLI is cli.mjs beside the plugin\'s scripts/lib, run as writeguard-restore with the snapshot file name above; it prints the original to stdout)');

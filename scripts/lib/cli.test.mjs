@@ -100,6 +100,115 @@ test('0p writeguard-restore via CLI: a snapshot that IS listed but fails integri
   } finally { clean(home, proj); }
 });
 
+// The restore CLI writes the file itself, with wx (create only, follows no link), and only after the bytes verified.
+test('writeguard-restore --out: writes the verified original to the named new file, byte-exact, owner-only where the volume keeps modes', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const orig = '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n';
+    fs.writeFileSync(gov, orig, 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const out = path.join(proj, 'MEMORY.md.restored');
+    const probe = path.join(proj, 'mode-probe');
+    fs.writeFileSync(probe, 'p');
+    fs.chmodSync(probe, 0o600);
+    const modesKept = (fs.statSync(probe).mode & 0o777) === 0o600;
+    fs.rmSync(probe);
+    const r = run(proj, home, ['writeguard-restore', path.basename(snap), '--out', out]);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout, '', 'nothing on stdout when --out names the file');
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), orig, 'the file holds the byte-exact original');
+    assert.ok(r.stderr.includes(out) || r.stderr.includes('written'), 'the success line names the written file: ' + r.stderr);
+    if (!modesKept) { t.skip('POSIX modes are not kept on this volume, so the 0600 mode cannot be read here'); return; }
+    assert.strictEqual(fs.statSync(out).mode & 0o777, 0o600, 'the restored file is owner-only');
+  } finally { clean(home, proj); }
+});
+
+test('writeguard-restore --out: a name already taken is refused, and that file keeps its bytes', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n', 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const out = path.join(proj, 'MEMORY.md.restored');
+    fs.writeFileSync(out, 'MINE, not the snapshot');
+    const r = run(proj, home, ['writeguard-restore', path.basename(snap), '--out', out]);
+    assert.strictEqual(r.status, 1, r.stderr);
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), 'MINE, not the snapshot', 'the taken file keeps its bytes');
+    assert.match(r.stderr, /already exists/, r.stderr);
+  } finally { clean(home, proj); }
+});
+
+test('writeguard-restore --out: a dangling link at the name is refused and nothing is created behind it', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n', 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const target = path.join(proj, 'nowhere');
+    const out = path.join(proj, 'MEMORY.md.restored');
+    try { fs.symlinkSync(target, out); } catch (e) {
+      if (e && ['EPERM', 'EACCES', 'ENOSYS'].includes(e.code)) { t.skip('no file symlinks on this host'); return; }
+      throw e;
+    }
+    const r = run(proj, home, ['writeguard-restore', path.basename(snap), '--out', out]);
+    assert.strictEqual(r.status, 1, r.stderr);
+    assert.ok(!fs.existsSync(target), 'nothing is created behind the link');
+    assert.ok(fs.lstatSync(out).isSymbolicLink(), 'the link itself is untouched');
+  } finally { clean(home, proj); }
+});
+
+test('writeguard-restore --out: a snapshot failing integrity verification creates no file', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n', 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    fs.writeFileSync(snap, 'TAMPERED — no longer what the sidecar attests', 'utf8');
+    const out = path.join(proj, 'MEMORY.md.restored');
+    const r = run(proj, home, ['writeguard-restore', path.basename(snap), '--out', out]);
+    assert.strictEqual(r.status, 1, r.stderr);
+    assert.ok(!fs.existsSync(out), 'no file is created for unverified bytes');
+  } finally { clean(home, proj); }
+});
+
+test('writeguard-restore --out with no value is a usage error that names the flag', () => {
+  const { home, proj } = sandbox();
+  try {
+    const r = run(proj, home, ['writeguard-restore', 'no-such-snap', '--out']);
+    assert.strictEqual(r.status, 1, r.stderr);
+    assert.match(r.stderr, /usage: .*writeguard-restore .*--out/, r.stderr);
+  } finally { clean(home, proj); }
+});
+
+test('writeguard-restore: the snapshot name is found when --out comes before it', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const orig = '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n';
+    fs.writeFileSync(gov, orig, 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const out = path.join(proj, 'MEMORY.md.restored');
+    const r = run(proj, home, ['writeguard-restore', '--out', out, path.basename(snap)]);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), orig, 'the named snapshot was restored');
+  } finally { clean(home, proj); }
+});
+
+test('writeguard-restore without --out: stdout is still the original, and the hint names the --out form', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const orig = '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n';
+    fs.writeFileSync(gov, orig, 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const r = run(proj, home, ['writeguard-restore', path.basename(snap)]);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout, orig);
+    assert.ok(r.stderr.includes('--out <file>.restored, then replace the file with it; never re-type it'), r.stderr);
+  } finally { clean(home, proj); }
+});
+
 // ---------------------------------------------------------------------------
 // UMB-133 — config-status: the user-pulled report for both holes. hole (2)'s
 // migration notice lives HERE, deliberately never on SessionStart (see
