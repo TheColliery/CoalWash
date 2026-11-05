@@ -511,7 +511,7 @@ function main() {
       const rows = listWriteguard(projectRootFor(process.cwd(), os.homedir(), rootOpts), { home: os.homedir() });
       if (!rows.length) { console.log('[CoalWash] no write-guard snapshots this session.'); return; }
       // Metadata ONLY — the agent points at a snapshot, never reproduces bytes.
-      for (const r of rows) console.log(`${r.name}\t${r.bytes} bytes\tsession ${r.session}\t${r.snapshotPath}`);
+      for (const r of rows) console.log(`${escapeRawControls(String(r.name))}\t${r.bytes} bytes\tsession ${escapeRawControls(String(r.session))}\t${escapeRawControls(String(r.snapshotPath))}`);
     } catch (e) {
       console.error(`writeguard-list failed: ${e.message}`);
       process.exitCode = 1;
@@ -541,7 +541,7 @@ function main() {
         return;
       }
       process.stdout.write(r.content); // the byte-exact ORIGINAL — code-moved, model-untouched
-      console.error(`[CoalWash] restored write-guard snapshot ${r.name} (${r.bytes} bytes, session ${r.session}) — byte-exact original on stdout; redirect it to the file, never re-type it`);
+      console.error(`[CoalWash] restored write-guard snapshot ${escapeRawControls(String(r.name))} (${r.bytes} bytes, session ${escapeRawControls(String(r.session))}) — byte-exact original on stdout; redirect it to the file, never re-type it`);
     } catch (e) {
       console.error(`writeguard-restore failed: ${e.message}`);
       process.exitCode = 1;

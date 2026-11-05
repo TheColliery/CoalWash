@@ -21,6 +21,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { claudeBaseDir, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
+import { escapeRawControls } from './receipt.mjs';
 
 // Read-budget cap for the two OPTIONAL content sniffs below (topic hint +
 // orphan cwd) — a multi-MB transcript is never read in full for either; both
@@ -508,7 +509,7 @@ export function estateReport({ projectRoot = process.cwd(), home = os.homedir(),
     lines.push(`  WARN: the derived reclaim horizon (${horizon.horizonDays}d) is small — sessions may read reclaimable soon after they go idle`);
   }
   for (const c of horizon.candidateKeys) {
-    lines.push(`  NOTE: an unbound retention-shaped key was found and is NOT used — "${c.key}": ${JSON.stringify(c.value)} (${c.source})`);
+    lines.push(`  NOTE: an unbound retention-shaped key was found and is NOT used — "${escapeRawControls(String(c.key))}": ${JSON.stringify(c.value)} (${c.source})`);
   }
   if (horizon.transitionJustLost) {
     lines.push('  WARN: cleanupPeriodDays resolved on the prior run and does not resolve now — possible rename/removal; the estate horizon fell back to a conservative constant');

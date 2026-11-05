@@ -471,7 +471,7 @@ export function buildIndexRow({ sessionId, projectSlug, transcriptBuf, totalByte
 export function appendIndexRow(archiveDir, row) {
   try {
     fs.mkdirSync(archiveDir, { recursive: true });
-    fs.appendFileSync(path.join(archiveDir, ESTATE_INDEX_NAME), JSON.stringify(row) + '\n', 'utf8');
+    fs.appendFileSync(path.join(archiveDir, ESTATE_INDEX_NAME), JSON.stringify(row) + '\n', { encoding: 'utf8', mode: 0o600 }); // a new index is owner-only; an existing file keeps its mode
     return true;
   } catch { return false; }
 }
@@ -480,7 +480,7 @@ function appendDeathCert(archiveDir, slug, line) {
   try {
     const dir = path.join(archiveDir, slug);
     fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(path.join(dir, DEATH_LOG_NAME), line + '\n', 'utf8');
+    fs.appendFileSync(path.join(dir, DEATH_LOG_NAME), line + '\n', { encoding: 'utf8', mode: 0o600 }); // the sibling record takes the same owner-only mode
   } catch { /* the certificate is a record, not a gate (tailings.mjs's own rule) */ }
 }
 
@@ -899,7 +899,7 @@ export function searchLines(rows, { hasDeathLog = false } = {}) {
   return rows.map((r) => {
     // 29n F470-a: every index-derived field is escaped before it is printed (a cloned repo's index reaches this line).
     const show = (v) => escapeRawControls(String(v));
-    let line = `${show(r.sessionId)}  ${r.projectSlug ? show(r.projectSlug) : '?'}  ${r.startISO ? show(r.startISO) : '?'}..${r.endISO ? show(r.endISO) : '?'}  ${mb(r.bytes)}  ${r.msgCount ?? '?'} msg${r.cold ? '  [cold-deleted]' : ''}\n    ${escapeRawControls(String(r.firstUserLine || '').slice(0, 160)) || '(no first user line)'}`;
+    let line = `${show(r.sessionId)}  ${r.projectSlug ? show(r.projectSlug) : '?'}  ${r.startISO ? show(r.startISO) : '?'}..${r.endISO ? show(r.endISO) : '?'}  ${mb(r.bytes)}  ${Number.isFinite(r.msgCount) ? r.msgCount : show(r.msgCount ?? '?')} msg${r.cold ? '  [cold-deleted]' : ''}\n    ${escapeRawControls(String(r.firstUserLine || '').slice(0, 160)) || '(no first user line)'}`;
     if (Array.isArray(r.laterRemoved) && r.laterRemoved.length) line += `\n    ${tombstoneSignal(r.laterRemoved, hasDeathLog)}`;
     return line;
   }).join('\n');

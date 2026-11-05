@@ -82,6 +82,7 @@ import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig } from './li
 import { parseJsonc } from './lib/jsonc.mjs';
 import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig, findProjectRoot, repoReadOutcome, MAX_CONFIG_BYTES, GLOBAL_ONLY_KEYS, PROJECT_BOUNDED_KEYS } from './lib/config-load.mjs';
 import { writeRepoFile, RepoWriteRefused } from './lib/repo-fs.mjs';
+import { escapeRawControls } from './lib/receipt.mjs';
 
 // Prototype-pollution guard. `parseJsonc` already drops these at PARSE (so a
 // poisoned file on disk cannot reach us), and the flag map is built from the
@@ -462,7 +463,7 @@ function main() {
   if (!errors.length) errors.push(...validateConfig(next));
 
   if (errors.length) {
-    for (const e of errors) console.error(`Error: ${e}`);
+    for (const e of errors) console.error(`Error: ${escapeRawControls(String(e))}`);
     console.error('Nothing was written.');
     process.exitCode = 1;
     return;

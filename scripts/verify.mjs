@@ -427,7 +427,7 @@ try {
       ok(`every path this repo points at from ${surfaces.length} ship-text surface(s) (${findings.checked} in-scope citations) resolves to a TRACKED file — sections and symbols are NOT checked, see scripts/pointer-check.mjs`);
     }
     for (const f of findings) {
-      if (f.level === 'SKIP') console.log('  --   ' + f.msg);
+      if (f.level === 'SKIP') console.log('  --   ' + escapeControls(f.msg));
       else fail(f.msg);
     }
   }

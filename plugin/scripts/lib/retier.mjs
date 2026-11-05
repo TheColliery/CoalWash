@@ -54,6 +54,7 @@ import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs
 import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS, restoreFile, writeDurable } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
+import { escapeRawControls } from './receipt.mjs'; // the printed store label goes through the room's one escaper
 
 export const OVERFLOW_BASENAME = 'retier-overflow.md';
 const OVERFLOW_POINTER = `- [RE-TIER overflow](${OVERFLOW_BASENAME}) — index lines demoted by the envelope (lossless; move a line back to re-promote it)`;
@@ -726,7 +727,7 @@ export function retierScanLines(scan) {
   const itemsOver = scan.stores.reduce((n, s) => n + (s.band === 'over-arm' ? s.plannedLineDemotions + s.plannedTopicDemotions : 0), 0);
   lines.push(`[CoalWash] RE-TIER scan — ${scan.stores.length} store(s), ${scan.overArm} over-arm · envelope target ~${e.targetTokens} tok (arm ~${e.armAt} / disarm ~${e.disarmAt} / fill ~${e.fillCeiling}, ~est) · items over: ${itemsOver} · planned demotions: ${totLines} line(s) + ${totTopics} topic file(s) · verdict: ${scan.verdict}`);
   for (const s of scan.stores) {
-    lines.push(`  ${s.label}: index ~${s.indexTokens} tok = ${s.band}${s.band === 'over-arm' ? ` -> demote ${s.plannedLineDemotions} line(s) + ${s.plannedTopicDemotions} unreferenced topic(s)${s.shortfall ? ' (still over after demotion — the gated wash is the next lever, never auto-condense)' : ''}` : ''}`);
+    lines.push(`  ${escapeRawControls(String(s.label))}: index ~${s.indexTokens} tok = ${s.band}${s.band === 'over-arm' ? ` -> demote ${s.plannedLineDemotions} line(s) + ${s.plannedTopicDemotions} unreferenced topic(s)${s.shortfall ? ' (still over after demotion — the gated wash is the next lever, never auto-condense)' : ''}` : ''}`);
     if (s.anchorLine) lines.push(`  ${s.anchorLine}`);
   }
   for (const f of scan.flags.slice(0, CLAIM_FLAG_CAP)) {
@@ -1156,7 +1157,7 @@ function retierReportBody(res) {
   const arch = res.stores.reduce((n, s) => n + s.topicsArchived, 0);
   lines.push(`[CoalWash] RE-TIER — ${res.stores.length} store(s) re-tiered: ${moved} index line(s) demoted (lossless) + ${arch} unreferenced topic(s) archived byte-exact · nothing summarized, nothing deleted`);
   for (const s of res.stores) {
-    lines.push(`  ${s.label}: index ~${s.indexTokensBefore} -> ~${s.indexTokensAfter} tok${s.shortfall ? ' (still over fill — the gated wash is the next lever)' : ''} · ${s.topicsArchived} topic(s) -> archive`);
+    lines.push(`  ${escapeRawControls(String(s.label))}: index ~${s.indexTokensBefore} -> ~${s.indexTokensAfter} tok${s.shortfall ? ' (still over fill — the gated wash is the next lever)' : ''} · ${s.topicsArchived} topic(s) -> archive`);
   }
   lines.push(`  undo: snapshot ${res.snapshotDir} · archived topics restore via cli.mjs estate-restore <retier-id> (${res.indexRows} dig row(s) appended)`);
   for (const k of res.kept) lines.push(`  KEPT ${k.path}: ${k.reason}`);
