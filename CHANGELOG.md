@@ -8,10 +8,10 @@ A planted link at a log, index or pin name is refused
 
 ### Security
 
-- A link or hard link at the estate archive index or a death-log name is refused: the row is not written into the file the link points at. A refused row fails the run and names how many rows were refused; the archive copies stay restorable.
+- A link or hard link at the estate archive index or a death-log name is refused: the row is not written into the file the link points at. A refused row is reported, and the archive copy stays restorable: an estate run lists that session as failed, and a RE-TIER run fails and names how many rows were refused.
 - A bounded read inside a folder proves the file it opened is the entry its path names inside that folder. A file swapped in between the check and the open is refused, not read. On a volume that reports no file identity, only the containment check applies.
 - Reading a pin never blocks on a named pipe, and a named pipe is refused.
-- A restore stops at a session total: the smaller of 4 GiB and 64 times the session's compressed size, never less than 64 MiB. A session that reaches it stops with `restore refused on <file>: the session has reached its <N>-byte session bound`, and the files it already wrote stay.
+- A restore stops at a session total: the smaller of 4 GiB and 64 times the session's compressed size, never less than 64 MiB. A file that would pass it stops the restore with `restore refused on <file>: it would pass the <N>-byte session bound (...)`; a restore that starts with the bound already spent stops with `... has reached its <N>-byte session bound`. The files it already wrote stay.
 - RE-TIER prints each store it skipped and why, one line each. A store whose `MEMORY.md` name resolves to some other file is skipped, and nothing in it is rewritten.
 - The approved-drop list the anchor diff reads has a 64 MiB decoded-byte budget. When it is cut, the report says so: a candidate may then be listed although an approval for it exists beyond the cut.
 
