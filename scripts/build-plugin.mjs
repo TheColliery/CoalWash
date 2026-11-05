@@ -176,7 +176,7 @@ export function buildDist(distRoot = dist, srcRoot = repo) {
 // every DIST_ITEM is text (.json/.md/.mjs/.js) — never a binary asset.
 // 29bs fire 590 §4: one bounded, kind-gated read for every compare and every checkout read the gate makes. It is LOCAL, not config-load's
 // repoReadOutcome, on purpose: this file is loaded by the gate (verify.mjs), and a static lib import here would put that lib on the gate's
-// linking path (node/runtime.md §1). The bound is config-load's MAX_DOC_BYTES, held equal by a test. A link, a non-regular entry (a FIFO
+// linking path (node/runtime.md §1). The bound is a copy of config-load's MAX_DOC_BYTES (4 MiB); no test pins the two equal, so a change to one must be made to both by hand. A link, a non-regular entry (a FIFO
 // would block a plain read; a device reads forever) and an over-bound file are REFUSED with a reason; an absent file is { absent: true }.
 export const DIST_READ_MAX = 4 * 1024 * 1024;
 export function readDistFile(file) {

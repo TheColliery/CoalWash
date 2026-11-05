@@ -2,6 +2,24 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.10] - 2026-11-06
+
+A planted link at a log, index or pin name is refused
+
+### Security
+
+- A link or hard link at the estate archive index or a death-log name is refused: the row is not written into the file the link points at. A refused row fails the run and names how many rows were refused; the archive copies stay restorable.
+- A bounded read inside a folder proves the file it opened is the entry its path names inside that folder. A file swapped in between the check and the open is refused, not read. On a volume that reports no file identity, only the containment check applies.
+- Reading a pin never blocks on a named pipe, and a named pipe is refused.
+- A restore stops at a session total: the smaller of 4 GiB and 64 times the session's compressed size, never less than 64 MiB. A session that reaches it stops with `restore refused on <file>: the session has reached its <N>-byte session bound`, and the files it already wrote stay.
+- RE-TIER prints each store it skipped and why, one line each. A store whose `MEMORY.md` name resolves to some other file is skipped, and nothing in it is rewritten.
+- The approved-drop list the anchor diff reads has a 64 MiB decoded-byte budget. When it is cut, the report says so: a candidate may then be listed although an approval for it exists beyond the cut.
+
+**Contributor-facing:**
+
+- The link check spends one 8 MiB expansion budget for the whole run. A document whose links or headings are past it fails by name, instead of being checked against a cut reading.
+- The dist compare and the checkout reads refuse a link, a non-regular entry or a file over 4 MiB, with the reason, and never report a match.
+
 ## [1.15.9] - 2026-11-05
 
 The restore line can no longer run repo code or empty your file
