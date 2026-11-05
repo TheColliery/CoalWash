@@ -415,3 +415,15 @@ test('fire 590 dist compare: a FIFO at the dist README is refused by kind and ne
     assert.ok(out.some((l) => l.includes('README.md') && /not-regular/.test(l)), 'a FIFO is refused by kind, never read: ' + JSON.stringify(out.slice(0, 3)));
   } finally { fs.rmSync(fx, { recursive: true, force: true }); fs.rmSync(dist, { recursive: true, force: true }); }
 });
+
+// 29bs fire 599 item 3: a read that comes back short is refused as changed; short bytes are never compared as a match.
+test('fire 599 dist read: a read that comes back short is refused as changed, never a match', (t) => {
+  const dir = scratchDist();
+  try {
+    const f = path.join(dir, 'x.md');
+    fs.writeFileSync(f, 'hello world\n');
+    t.mock.method(fs, 'readSync', () => 0);
+    const o = BP590.readDistFile(f);
+    assert.strictEqual(o.why, 'changed', JSON.stringify(o));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

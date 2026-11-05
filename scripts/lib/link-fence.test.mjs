@@ -14,13 +14,16 @@ import { collectStores } from './retier.mjs';
 function tmp(prefix) { return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix))); }
 function clean(...dirs) { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); }
 
-test('appendIndexRow: a hard link at the index name is refused, and the file it links keeps its bytes', () => {
+test('appendIndexRow: a hard link at the index name is refused, and the file it links keeps its bytes', (t) => {
   const archive = tmp('cwg-idx-hl-');
   const outside = tmp('cwg-idx-out-');
   try {
     const target = path.join(outside, 'elsewhere.txt');
     fs.writeFileSync(target, 'before\n');
-    fs.linkSync(target, path.join(archive, 'index.jsonl'));
+    try { fs.linkSync(target, path.join(archive, 'index.jsonl')); } catch (e) {
+      if (e && ['EPERM', 'EACCES', 'EXDEV', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'].includes(e.code)) { t.skip('no hard link can be made on this host'); return; }
+      throw e;
+    }
     assert.strictEqual(appendIndexRow(archive, { sessionId: 'x' }), false, 'the row is refused, not written through the link');
     assert.strictEqual(fs.readFileSync(target, 'utf8'), 'before\n', 'the linked file is unchanged');
   } finally { clean(archive, outside); }
@@ -114,7 +117,7 @@ test('collectStores: a linked role folder (directory junction) is not admitted, 
     fs.writeFileSync(indexFile, '# index\n');
     const alias = path.join(proj, '.claude', 'agent-memory', 'role-alias');
     try { fs.symlinkSync(real, alias, 'junction'); } catch (e) {
-      if (e && ['EPERM', 'EACCES', 'ENOSYS'].includes(e.code)) { t.skip('no directory junction can be made on this host'); return; }
+      if (e && ['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'].includes(e.code)) { t.skip('no directory junction can be made on this host'); return; }
       throw e;
     }
     const stores = collectStores({ projectRoot: proj, home });
@@ -131,7 +134,7 @@ test('collectStores: an index slot that links to a non-index file in the store i
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'topic.md'), '# topic\n');
     try { fs.symlinkSync(path.join(dir, 'topic.md'), path.join(dir, 'MEMORY.md'), 'file'); } catch (e) {
-      if (e && ['EPERM', 'EACCES', 'ENOSYS'].includes(e.code)) { t.skip('no file symlinks on this host, so a linked index slot cannot be made here'); return; }
+      if (e && ['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'].includes(e.code)) { t.skip('no file symlinks on this host, so a linked index slot cannot be made here'); return; }
       throw e;
     }
     const stores = collectStores({ projectRoot: proj, home });
@@ -147,7 +150,7 @@ test('appendIndexRow: a dangling junction at the index name is refused and nothi
   try {
     const target = path.join(outside, 'nowhere');
     try { fs.symlinkSync(target, path.join(archive, 'index.jsonl'), 'junction'); } catch (e) {
-      if (e && ['EPERM', 'EACCES', 'ENOSYS'].includes(e.code)) { t.skip('no link can be made on this host'); return; }
+      if (e && ['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'].includes(e.code)) { t.skip('no link can be made on this host'); return; }
       throw e;
     }
     assert.strictEqual(appendIndexRow(archive, { sessionId: 'x' }), false);

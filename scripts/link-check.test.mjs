@@ -410,7 +410,8 @@ test('fire 590 heading: a heading whose code span is past the run budget is a na
   try {
     const r = checkLinks({ root, files: ['index.md'], tracked: null, expansionMax: 50 });
     assert.ok(r.findings.some((f) => f.file === 'a.md' && /expansion budget/.test(f.msg)), 'the document whose heading was cut is named: ' + JSON.stringify(r.findings));
-    assert.ok(((r.expansion || {}).spent || 0) <= 50, 'the run spends no more than its budget');
+    assert.ok(r.expansion, 'the run reports its expansion accounting');
+    assert.ok(r.expansion.spent <= 50, 'the run spends no more than its budget');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

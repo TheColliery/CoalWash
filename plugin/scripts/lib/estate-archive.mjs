@@ -938,8 +938,8 @@ export const RESTORE_FLOOR_BYTES = 64 * 1024 * 1024;
 export const RESTORE_MAX_RATIO = 64;
 export const RESTORE_CEIL_BYTES = 1024 * 1024 * 1024;
 // 29bs fire 590 §3: the whole session's inflated bytes, not only one file's. A session of many files each under RESTORE_CEIL_BYTES
-// could otherwise inflate without end. The session bound is min(this, max(RESTORE_FLOOR_BYTES, sum of compressed sizes * RESTORE_MAX_RATIO)),
-// so the 4 GiB ceiling is 4x the 1 GiB per-file ceiling and a session of ordinary size never meets it.
+// could otherwise inflate without end. The session bound is this constant; the per-file floor is not added to it, so a session of
+// several compressible files is not refused for the sum of floors it never needed. A session of ordinary size never meets it.
 export const RESTORE_SESSION_CEIL_BYTES = 4 * 1024 * 1024 * 1024;
 export const RESTORE_MAX_GZ_BYTES = 256 * 1024 * 1024;
 export function restoreInflateBound(gzBytes) {
@@ -1019,12 +1019,9 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
   // dig-index search is a compact-row best-effort; restore pulls real bytes, so
   // the anchor match here is thorough. One-shot recovery path, never a hot loop.
   const wantTombstoneScan = tombstones && Array.isArray(tombstones.anchors) && tombstones.anchors.length;
-  // 29bs fire 590 §3: the session bound is fixed BEFORE the loop, from the compressed sizes the sources report. Every file's inflate is
-  // capped at what the session has left, and every inflated byte is taken from that remainder, so combinedText (the same bytes, plus a
-  // newline per file) is bounded by the same budget. A stat that fails sizes as 0: the per-file read refuses what it cannot open.
-  let sumGz = 0;
-  for (const s of sources) { try { sumGz += fs.statSync(s.gzPath).size; } catch { /* refused by the per-file read below */ } }
-  const sessionBound = Math.min(sessionCeilBytes, Math.max(RESTORE_FLOOR_BYTES, sumGz * RESTORE_MAX_RATIO));
+  // The session bound is sessionCeilBytes, fixed before the loop. Every file's inflate is capped at what the session has left, and every
+  // inflated byte is taken from that remainder, so combinedText (the same bytes, plus a newline per file) is bounded by the same budget.
+  const sessionBound = sessionCeilBytes;
   let remaining = sessionBound;
   let combinedText = '';
   for (const s of sources) {

@@ -1396,3 +1396,16 @@ test('fire 590 restore: an ordinary multi-file session restores whole under the 
   assert.strictEqual(r.ok, true, JSON.stringify(r));
   assert.strictEqual(r.files.length, 3, 'all three files restore');
 });
+
+// 29bs fire 599: the session bound is the session ceiling, not the per-file floor added to the sum. Two compressible entries that each
+// pass the per-file bound restore whole when their inflated sum passes 64 MiB (real sizes: 40 MiB each, compressed to tens of KB).
+test('fire 599 restore: two compressible entries that each pass the per-file bound restore whole when their sum passes 64 MiB', (t) => {
+  const forty = Buffer.alloc(40 * 1024 * 1024, 'a');
+  const arch = c7Archive({ [`${SID_F590}/one.jsonl`]: forty, [`${SID_F590}/two.jsonl`]: forty });
+  const to = c7Dir('f599');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const r = restoreSession(SID_F590, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, true, String(r.error || JSON.stringify(r).slice(0, 200)));
+  assert.strictEqual(r.files.length, 2, 'both entries restore');
+  assert.ok(r.files.every((f) => f.bytes === 40 * 1024 * 1024), 'each restores whole');
+});

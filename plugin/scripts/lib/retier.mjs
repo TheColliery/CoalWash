@@ -841,6 +841,12 @@ export function runRetier({
     return { ok: false, refused: true, platform: 'unknown', reason: `no action — ${UNKNOWN_PLATFORM_FLAG}`, env };
   }
   const stores = collectStores({ projectRoot, home });
+  // A store skipped at its index name is not in the census: its references would be missing, so a topic elsewhere could read as
+  // unreferenced and move. The run is refused before any plan is made.
+  if (stores.skipped && stores.skipped.length) {
+    const named = stores.skipped.map((s) => `${show(s.label)}: ${show(s.reason)}`).join('; ');
+    return { ok: false, refused: true, env, kept: [], error: `${stores.skipped.length} store(s) skipped at their index name (${named}): the census would miss their references, so nothing was changed` };
+  }
   const allTextConcat = stores.map((s) => [s.indexText, ...s.topics.map((t) => t.text)].join('\n')).join('\n');
   const plans = stores.map((st) => ({ st, p: planStore(st, env, allTextConcat) }));
   const over = plans.filter(({ p }) => p.band === 'over-arm');

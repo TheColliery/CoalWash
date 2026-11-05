@@ -208,7 +208,8 @@ export function readDistFile(file) {
       if (n === 0) break;
       got += n;
     }
-    return { buf: buf.subarray(0, got) };
+    if (got !== want) return { why: 'changed' }; // the file shrank under the read: a short byte string is never compared as a match
+    return { buf };
   } catch { return { why: 'unreadable' }; } finally { fs.closeSync(fd); }
 }
 
