@@ -1723,7 +1723,26 @@ test('fire 599: a store skipped at its index name refuses the run before any top
     }
     const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home), now });
     assert.strictEqual(res.ok, false, runRetierReport(res));
-    assert.match(String(res.error), /skipped at their index name/, String(res.error));
+    assert.match(String(res.reason), /skipped at their index name/, String(res.reason));
+    const printed = runRetierReport(res); // fire 602: the report prints the reason, never "undefined"
+    assert.match(printed, /skipped at their index name/, printed);
+    assert.doesNotMatch(printed, /undefined/, printed);
     assert.ok(fs.existsSync(path.join(dir, 'zeta-old.md')), 'no topic moved: zeta-old.md is still in the main store');
   } finally { clean(home, proj); }
+});
+
+// 29bs fire 602: a refused result for a skipped store prints its reason, never "undefined". Built by hand, as the printed-fields test builds
+// its scan, so it runs on this box; the real return is pinned by the fire 599 test (a symlink leg, skipped here).
+test('fire 602: a refused result for a skipped store prints its reason, never undefined', () => {
+  const res = {
+    ok: false,
+    refused: true,
+    env: {},
+    kept: [],
+    reason: "1 store(s) skipped at their index name (agent:role-slot: the MEMORY.md name resolves to topic.md, not this store's index): the census would miss their references, so nothing was changed",
+  };
+  const printed = runRetierReport(res);
+  assert.match(printed, /agent:role-slot/, printed);
+  assert.match(printed, /skipped at their index name/, printed);
+  assert.doesNotMatch(printed, /undefined/, printed);
 });

@@ -845,7 +845,7 @@ export function runRetier({
   // unreferenced and move. The run is refused before any plan is made.
   if (stores.skipped && stores.skipped.length) {
     const named = stores.skipped.map((s) => `${show(s.label)}: ${show(s.reason)}`).join('; ');
-    return { ok: false, refused: true, env, kept: [], error: `${stores.skipped.length} store(s) skipped at their index name (${named}): the census would miss their references, so nothing was changed` };
+    return { ok: false, refused: true, env, kept: [], reason: `${stores.skipped.length} store(s) skipped at their index name (${named}): the census would miss their references, so nothing was changed` };
   }
   const allTextConcat = stores.map((s) => [s.indexText, ...s.topics.map((t) => t.text)].join('\n')).join('\n');
   const plans = stores.map((st) => ({ st, p: planStore(st, env, allTextConcat) }));
