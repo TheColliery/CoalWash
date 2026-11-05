@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { searchLines, appendIndexRow } from './estate-archive.mjs';
 import { retierScanLines, runRetierReport } from './retier.mjs';
 import { deadLinkLine } from './apply.mjs';
+import { runEstateReport } from './estate-archive.mjs';
 import { projectConfigPath } from './config-load.mjs';
 
 const BIDI = String.fromCharCode(0x202e);
@@ -50,7 +51,7 @@ test('printed fields: writeguard-list prints a snapshot name escaped, the stored
     fs.mkdirSync(sdir, { recursive: true });
     const name = 'a' + BIDI + 'b.md';
     try { fs.writeFileSync(path.join(sdir, name), 'snapshot'); } catch { t.skip('this volume refuses a right-to-left override in a file name'); return; }
-    const r = spawnSync(process.execPath, [CLI, 'writeguard-list'], { cwd: proj, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', timeout: 120000 });
+    const r = spawnSync(process.execPath, [CLI, 'writeguard-list'], { cwd: proj, env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, TMP: home, TEMP: home }, encoding: 'utf8', timeout: 120000 });
     assert.ok(!r.stdout.includes(BIDI), 'the raw override must not reach stdout: ' + JSON.stringify(r.stdout));
     assert.ok(r.stdout.includes('a' + ESCAPED + 'b.md'), 'the name is escaped on its line: ' + JSON.stringify(r.stdout));
     assert.ok(fs.readdirSync(sdir).includes(name), 'the stored name is untouched');
@@ -82,13 +83,14 @@ test('printed fields: the RE-TIER report prints a store label, a kept file and a
   const out = runRetierReport({
     ok: true,
     stores: [{ label: 'store' + BIDI + 'x', movedLines: 0, topicsArchived: 0, indexTokensBefore: 1, indexTokensAfter: 1, shortfall: false }],
-    snapshotDir: 'snap', indexRows: 0,
+    snapshotDir: 'snap' + BIDI, indexRows: 0,
     kept: [{ path: name, reason: 'why' + BIDI }],
     flagged: [{ path: name, reason: 'why' }],
   });
   assert.ok(!out.includes(BIDI), 'the raw override must not reach the report');
   assert.ok(out.includes('store' + ESCAPED + 'x'), 'the store label is escaped');
   assert.ok(out.includes('KEPT a' + ESCAPED + 'b.md'), 'the kept file is escaped');
+  assert.ok(out.includes('snap' + ESCAPED), 'the undo line snapshot folder is escaped');
   assert.ok(out.includes('FLAGGED a' + ESCAPED + 'b.md'), 'the flagged file is escaped');
 });
 
@@ -117,16 +119,17 @@ test('printed fields: the dead-link advisory prints a topic name escaped', () =>
 });
 
 test('printed fields: a project config with a control character at a parse error prints it escaped, never raw', (t) => {
-  const proj = tmp('cwg-cfg-');
+  const proj = tmp('cwg-cfg' + BIDI + '-');
   const home = tmp('cwg-cfghome-');
   try {
     fs.mkdirSync(path.join(proj, '.git'));
     const cfg = projectConfigPath(proj, home);
     fs.mkdirSync(path.dirname(cfg), { recursive: true });
     fs.writeFileSync(cfg, '{"coalwashMode": x\u001b[31mFORG', 'utf8');
-    const r = spawnSync(process.execPath, [path.join(here, '..', 'configure.mjs'), '--coalwashMode', 'auto'], { cwd: proj, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', timeout: 120000 });
+    const r = spawnSync(process.execPath, [path.join(here, '..', 'configure.mjs'), '--coalwashMode', 'auto'], { cwd: proj, env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, TMP: home, TEMP: home }, encoding: 'utf8', timeout: 120000 });
     assert.strictEqual(r.status, 1, 'a parse error exits non-zero: ' + r.stderr);
     assert.ok(!r.stderr.includes('\u001b'), 'no raw escape character on stderr: ' + JSON.stringify(r.stderr));
+    assert.ok(!r.stderr.includes(BIDI), 'the config path prints escaped, never raw: ' + JSON.stringify(r.stderr));
     assert.ok(r.stderr.includes('\\u001b'), 'the escape is printed as text: ' + JSON.stringify(r.stderr));
   } finally { clean(proj, home); }
 });
@@ -140,9 +143,19 @@ test('printed fields: writeguard-restore prints the snapshot name escaped on std
     fs.mkdirSync(sdir, { recursive: true });
     const name = 'a' + BIDI + 'b.md';
     try { fs.writeFileSync(path.join(sdir, name), 'snapshot'); } catch { t.skip('this volume refuses a right-to-left override in a file name'); return; }
-    const r = spawnSync(process.execPath, [CLI, 'writeguard-restore', name], { cwd: proj, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', timeout: 120000 });
+    const r = spawnSync(process.execPath, [CLI, 'writeguard-restore', name], { cwd: proj, env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, TMP: home, TEMP: home }, encoding: 'utf8', timeout: 120000 });
     assert.ok(!r.stderr.includes(BIDI), 'the raw override must not reach stderr: ' + JSON.stringify(r.stderr));
     assert.ok(r.stderr.includes('a' + ESCAPED + 'b.md'), 'the name is escaped on stderr: ' + JSON.stringify(r.stderr));
     assert.ok(fs.readdirSync(sdir).includes(name), 'the stored name is untouched');
+    const missing = 'z' + BIDI + 'y.md';
+    const r2 = spawnSync(process.execPath, [CLI, 'writeguard-restore', missing], { cwd: proj, env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, TMP: home, TEMP: home }, encoding: 'utf8', timeout: 120000 });
+    assert.ok(!r2.stderr.includes(BIDI), 'the not-found name is not raw on stderr: ' + JSON.stringify(r2.stderr));
+    assert.ok(r2.stderr.includes('z' + ESCAPED + 'y.md'), 'the not-found name is escaped: ' + JSON.stringify(r2.stderr));
   } finally { clean(proj, home); }
+});
+
+test('printed fields: the estate run report prints a session id, a reason and a left file name escaped', () => {
+  const out = runEstateReport({ ok: true, archived: [{ id: 's' + BIDI, bytes: 0, files: 0, unpruned: ['n' + BIDI + '.txt'] }], failed: [{ id: 'f' + BIDI, reason: 'why' + BIDI }], activeSkipped: 0, bytesFreed: 0, indexRows: 0, archiveDir: 'a', coldListed: [], cfg: {} });
+  assert.ok(!out.includes(BIDI), 'the raw override must not reach the report');
+  assert.ok(out.includes('n' + ESCAPED + '.txt'), 'the left file name is escaped');
 });

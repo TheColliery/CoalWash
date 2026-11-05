@@ -536,7 +536,7 @@ function main() {
         const existed = listWriteguard(projectRoot, { home: os.homedir() }).some((row) => row.name === name);
         console.error(existed
           ? `writeguard-restore: snapshot '${escapeRawControls(String(name))}' exists but FAILED integrity verification (tampered, or unreadable) — refusing to serve unverified bytes`
-          : `writeguard-restore: snapshot '${name}' not found`);
+          : `writeguard-restore: snapshot '${escapeRawControls(String(name))}' not found`);
         process.exitCode = 1;
         return;
       }

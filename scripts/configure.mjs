@@ -387,7 +387,7 @@ function main() {
   // state where those two can disagree is REMOVED — a failed read never reaches
   // the write at all.
   if (readErr && readErr.code !== 'ENOENT' && readErr.code !== 'ENOTDIR') {
-    console.error(`Error: ${cfgPath} exists but could not be read (${readErr.code || 'UNKNOWN'}). Nothing was written — an unreadable config is not an absent one, and rebuilding it from defaults would destroy every key it holds.`);
+    console.error(`Error: ${escapeRawControls(String(cfgPath))} exists but could not be read (${readErr.code || 'UNKNOWN'}). Nothing was written — an unreadable config is not an absent one, and rebuilding it from defaults would destroy every key it holds.`);
     process.exitCode = 1;
     return;
   }
@@ -405,13 +405,13 @@ function main() {
       // write there, and this tool's whole contract below is "invalid input
       // changes nothing on disk". So: report, leave the file byte-identical,
       // exit non-zero.
-      console.error(`Error: ${cfgPath} is not valid JSON/JSONC (${escapeRawControls(String(e.message))}). Nothing was written — fix or remove the file and re-run.`);
+      console.error(`Error: ${escapeRawControls(String(cfgPath))} is not valid JSON/JSONC (${escapeRawControls(String(e.message))}). Nothing was written — fix or remove the file and re-run.`);
       process.exitCode = 1;
       return;
     }
   }
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
-    console.error(`Error: ${cfgPath} does not hold a JSON object. Nothing was written.`);
+    console.error(`Error: ${escapeRawControls(String(cfgPath))} does not hold a JSON object. Nothing was written.`);
     process.exitCode = 1;
     return;
   }
@@ -541,9 +541,9 @@ function main() {
         outside: `${f} leads outside the project: make it a real folder inside the project (or remove it) and re-run.`,
         escape: `${f} is outside the project; run configure.mjs from inside the project whose config it should change.`,
       }[e.kind] || `Replace the link or file at ${f} with a real folder (or remove it) and re-run.`;
-      console.error(`[refused] ${writePath}: ${escapeRawControls(String(e.message))} -- nothing was written. ${advice}`);
+      console.error(`[refused] ${escapeRawControls(String(writePath))}: ${escapeRawControls(String(e.message))} -- nothing was written. ${escapeRawControls(String(advice))}`);
     } else if (e instanceof RepoWriteRefused) {
-      console.error(`[refused] ${writePath}: ${escapeRawControls(String(e.message))} -- nothing was written. Replace it with a regular file inside the project (or remove it) and re-run.`);
+      console.error(`[refused] ${escapeRawControls(String(writePath))}: ${escapeRawControls(String(e.message))} -- nothing was written. Replace it with a regular file inside the project (or remove it) and re-run.`);
     } else {
       console.error(`Error: Failed to write to config file: ${escapeRawControls(String(e.message))}`);
     }
@@ -587,9 +587,9 @@ function main() {
     }
 
     if (clamped.length) {
-      console.log(`Wrote ${writePath} — but see the warning below.`);
+      console.log(`Wrote ${escapeRawControls(String(writePath))} — but see the warning below.`);
     } else {
-      console.log(`Successfully updated configuration in: ${writePath}`);
+      console.log(`Successfully updated configuration in: ${escapeRawControls(String(writePath))}`);
     }
     console.log(JSON.stringify(next, null, 2));
     for (const c of clamped) {

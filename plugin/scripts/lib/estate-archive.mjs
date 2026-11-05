@@ -807,7 +807,7 @@ export function runEstateReport(res) {
   // #56: a session whose <sid>/ still held un-enumerated files was archived +
   // its container LEFT in place (never rm -rf'd) — surface the survivors.
   for (const a of res.archived) {
-    if (a.unpruned && a.unpruned.length) lines.push(`  KEPT-IN-PLACE ${escapeRawControls(String(a.id))}: ${a.unpruned.length} un-enumerated file(s) under <sid>/ left intact (not archived — appeared post-listing / walk-capped): ${a.unpruned.slice(0, 5).join(', ')}${a.unpruned.length > 5 ? ', …' : ''}`);
+    if (a.unpruned && a.unpruned.length) lines.push(`  KEPT-IN-PLACE ${escapeRawControls(String(a.id))}: ${a.unpruned.length} un-enumerated file(s) under <sid>/ left intact (not archived — appeared post-listing / walk-capped): ${a.unpruned.slice(0, 5).map((n) => escapeRawControls(String(n))).join(', ')}${a.unpruned.length > 5 ? ', …' : ''}`);
   }
   if (res.coldListed.length) {
     const coldBytes = res.coldListed.reduce((n, s) => n + s.bytes, 0);

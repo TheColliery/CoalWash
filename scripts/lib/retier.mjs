@@ -719,7 +719,7 @@ export function retierScan({ projectRoot = process.cwd(), home = os.homedir(), r
   };
 }
 
-const show = (v) => escapeRawControls(String(v)); // every value the RE-TIER report prints goes through the escaper at its line
+const show = (v) => escapeRawControls(String(v)); // a name or a reason the RE-TIER report prints goes through the escaper at its line
 export function retierScanLines(scan) {
   const e = scan.env;
   const lines = [];
@@ -1160,7 +1160,7 @@ function retierReportBody(res) {
   for (const s of res.stores) {
     lines.push(`  ${escapeRawControls(String(s.label))}: index ~${s.indexTokensBefore} -> ~${s.indexTokensAfter} tok${s.shortfall ? ' (still over fill — the gated wash is the next lever)' : ''} · ${s.topicsArchived} topic(s) -> archive`);
   }
-  lines.push(`  undo: snapshot ${res.snapshotDir} · archived topics restore via cli.mjs estate-restore <retier-id> (${res.indexRows} dig row(s) appended)`);
+  lines.push(`  undo: snapshot ${show(res.snapshotDir)} · archived topics restore via cli.mjs estate-restore <retier-id> (${res.indexRows} dig row(s) appended)`);
   for (const k of res.kept) lines.push(`  KEPT ${show(k.path)}: ${show(k.reason)}`);
   // WAVE-16 finding 2: render applyPlan's per-file refusals here too — the
   // same reason KEPT is rendered above (a per-file exclusion the operator
