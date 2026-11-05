@@ -140,7 +140,7 @@ test('collectStores: an index slot that links to a non-index file in the store i
   } finally { clean(proj, home); }
 });
 
-// 29bs fire 595 F592-5: Windows creates an entry at a dangling link's target through O_CREAT, so the log name is looked at first.
+// 29bs fire 595:Windows creates an entry at a dangling link's target through O_CREAT, so the log name is looked at first.
 test('appendIndexRow: a dangling junction at the index name is refused and nothing appears at its target', (t) => {
   const archive = tmp('cwg-idx-dj-');
   const outside = tmp('cwg-idx-djo-');

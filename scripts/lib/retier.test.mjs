@@ -1687,7 +1687,7 @@ test('fire 593: a refused dig row after the commit returns the committed facts, 
   } finally { clean(home, proj); }
 });
 
-// 29bs fire 595 F592-4: a store the scan skipped at its index name reaches the scan result (skips on a host with no file symlinks).
+// 29bs fire 595:a store the scan skipped at its index name reaches the scan result (skips on a host with no file symlinks).
 test('a store skipped at its index name reaches the scan result', (t) => {
   const { home, proj } = sandbox();
   try {

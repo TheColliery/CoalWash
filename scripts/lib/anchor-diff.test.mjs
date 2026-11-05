@@ -285,7 +285,7 @@ test('fire 590 approved list: a store under the budget is unchanged and not mark
   } finally { fs.rmSync(proj, { recursive: true, force: true }); }
 });
 
-// 29bs fire 595 F592-4: the cut note of the printed report is pinned by a test, not by a reader.
+// 29bs fire 595:the cut note of the printed report is pinned by a test, not by a reader.
 test('fire 590 anchor report: a cut approved list is named, and an uncut one is not', () => {
   const report = { file: '/p/MEMORY.md', snapshotPath: '/s/snap', approvedCount: 2, approvedCut: true, candidates: [{ type: 'link', value: 'x' }] };
   assert.match(AD590.anchorDiffLine(report), /cut at its/);

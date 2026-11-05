@@ -197,7 +197,7 @@ const UNMASK_MAX_CHARS = 1 << 20;
 export const LINK_RUN_EXPANSION_MAX = 1 << 23;
 // unmask(s, spans, budget?): a span that does not fit stays as its placeholder character and counts in budget.refused. The budget
 // object is { left, refused }; with none given, each call gets its own (the 29n per-call bound, unchanged). A refusal is never silent.
-export function unmask(s, spans, budget = null) { // exported for the 29n F470-d witness (the export is a test seam, no behaviour change)
+export function unmask(s, spans, budget = null) { // exported for the 29n witness (the export is a test seam, no behaviour change)
   const b = budget || { left: UNMASK_MAX_CHARS, refused: 0 };
   let out = '';
   for (const ch of s) {

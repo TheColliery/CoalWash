@@ -156,8 +156,8 @@ export function approvedSinceBudget(projectRoot, physTarget, sinceAt, maxBytes =
   return { texts, cut };
 }
 
-// The array form (29n F470-b witness and any caller that wants only the texts): the budget applies, the cut flag is not returned.
-export function approvedSince(projectRoot, physTarget, sinceAt) { // exported for the 29n F470-b witness (a seam, no behaviour change)
+// The array form (29n witness and any caller that wants only the texts): the budget applies, the cut flag is not returned.
+export function approvedSince(projectRoot, physTarget, sinceAt) { // exported for the 29n witness (a seam, no behaviour change)
   return approvedSinceBudget(projectRoot, physTarget, sinceAt).texts;
 }
 
