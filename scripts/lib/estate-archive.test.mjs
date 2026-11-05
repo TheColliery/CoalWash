@@ -1480,7 +1480,8 @@ test('fire 604 archive: an in-bound session archives, deletes its originals, and
 
 test('fire 604 drift pin: the archive side and the restore side refuse the same sessions, for one table of sizes', () => {
   const B = { maxGzBytes: 1e9, floorBytes: 1000, maxRatio: 2, ceilBytes: 5000, sessionCeilBytes: 3000 };
-  const cases = [[500], [2000], [900, 900, 900], [1000, 1000, 1000, 1000], [3000], [800, 800, 800, 1]];
+  // The last row is the exact ceiling followed by an empty file: the empty file is the transcript (sid.jsonl), which restore reads last.
+  const cases = [[500], [2000], [900, 900, 900], [1000, 1000, 1000, 1000], [3000], [800, 800, 800, 1], [0, 1000, 1000, 1000]];
   cases.forEach((sizes, i) => {
     const root = f604Root(`d${i}`);
     try {
@@ -1499,6 +1500,10 @@ test('fire 604 drift pin: the archive side and the restore side refuse the same 
       });
       const rs = EA.restoreSession(sid, { archiveDir: archive2, to: path.join(root, 'to'), bounds: B });
       assert.strictEqual(rs.ok, predicted === null, `restore side for [${sizes}]: predicted ${predicted}; got ${JSON.stringify(rs).slice(0, 160)}`);
+      if (predicted === null) bufs.forEach((b, k) => { // an accepted session comes back whole, empty files included
+        const name = k === 0 ? `${sid}.jsonl` : `${sid}.${k}.jsonl`;
+        assert.ok(fs.readFileSync(path.join(rs.dir, name)).equals(b), `round trip whole: ${name}`);
+      });
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 });
@@ -1506,10 +1511,14 @@ test('fire 604 drift pin: the archive side and the restore side refuse the same 
 test('fire 604 tombstones: an anchor that crosses a window boundary is found, and the file is scanned in windows', () => {
   const anchor = 'ZZ-TOMB-ANCHOR-ZZ';
   const ts = { anchors: [{ text: anchor, textLc: anchor.toLowerCase(), target: 'tgt', date: '2026-01-01' }] };
-  const buf = Buffer.from('x'.repeat(110) + anchor + 'y'.repeat(300));
-  const r = EA.scanBufferForTombstones(buf, ts, 100);
-  assert.ok(r.windows > 1, `the file was scanned in more than one window: ${r.windows}`);
-  assert.ok(r.hits.some((h) => h.anchor === anchor), 'the anchor across the boundary is found: ' + JSON.stringify(r.hits));
+  // A six-byte anchor gives an overlap of 22 bytes, so 100-byte windows start at 0, 78, 156, 234 and 312. The first anchor starts at byte 95
+  // and crosses the end of window 0; the second sits wholly inside window 2 and in no other window.
+  const tsw = { anchors: [{ text: 'ZZ-TAB', textLc: 'zz-tab', target: 't', date: 'd' }, { text: 'QQ-TBB', textLc: 'qq-tbb', target: 't', date: 'd' }] };
+  const bufw = Buffer.from('x'.repeat(95) + 'ZZ-TAB' + 'y'.repeat(99) + 'QQ-TBB' + 'z'.repeat(150));
+  const rw = EA.scanBufferForTombstones(bufw, tsw, 100);
+  assert.strictEqual(rw.windows, 5, `five windows: ${rw.windows}`);
+  const labels = rw.hits.map((h) => h.anchor).sort();
+  assert.deepStrictEqual(labels, ['QQ-TBB', 'ZZ-TAB'], 'both anchors found: ' + JSON.stringify(labels));
 });
 
 test('fire 604 tombstones: a restore reports the scan it covered, byte for byte', () => {
@@ -1543,4 +1552,28 @@ test('fire 604 run: a session the restore could not return is reported as failed
     const still = classifySessions({ projectRoot: proj, home, estate: estateCfg() }).sessions.some((s) => s.id === 'sess-bound');
     assert.ok(still, 'the session is still on disk');
   } finally { clean(home, proj); }
+});
+
+// 29bt fire 606: two long anchors that share their first 77 characters have the same printed label. Both must be reported, from the scan
+// and from a restore.
+test('fire 606 labels: two long anchors sharing their first 77 characters are both reported, by the scan and by a restore', () => {
+  const head = 'P'.repeat(77);
+  const a = head + 'AAA-END';
+  const b = head + 'BBB-END';
+  const ts = { anchors: [
+    { text: a, textLc: a.toLowerCase(), target: 'ta', date: 'd1' },
+    { text: b, textLc: b.toLowerCase(), target: 'tb', date: 'd2' },
+  ] };
+  const buf = Buffer.from(a + ' ' + b);
+  const r = EA.scanBufferForTombstones(buf, ts);
+  assert.strictEqual(r.hits.length, 2, 'the scan reports both anchors: ' + JSON.stringify(r.hits.map((h) => h.anchor)));
+  const root = f604Root('f');
+  try {
+    const archiveDir = path.join(root, 'archive');
+    const sess = f604Session(root, 'sess606a', [Buffer.from(a + ' ' + b + '\n')]);
+    assert.strictEqual(EA.archiveSession(sess, { slug: 'slug', archiveDir }).ok, true);
+    const back = EA.restoreSession('sess606a', { archiveDir, to: path.join(root, 'to'), tombstones: ts });
+    assert.strictEqual(back.ok, true, String(back.error));
+    assert.strictEqual((back.laterRemoved || []).length, 2, 'the restore reports both anchors: ' + JSON.stringify(back.laterRemoved));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

@@ -871,7 +871,8 @@ function matchTombstones(text, tombstones) {
   const hits = [];
   for (const a of anchors) {
     if (a.textLc && hay.includes(a.textLc)) {
-      hits.push({ anchor: a.text.length > 80 ? `${a.text.slice(0, 77)}...` : a.text, target: a.target, date: a.date });
+      // identity keys the maps that collect hits: two anchors can share their printed label, never their full text, target and date together
+      hits.push({ anchor: a.text.length > 80 ? `${a.text.slice(0, 77)}...` : a.text, identity: JSON.stringify([a.textLc, a.target, a.date]), target: a.target, date: a.date });
     }
   }
   return hits;
@@ -892,7 +893,7 @@ export function scanBufferForTombstones(buf, tombstones, windowBytes = TOMBSTONE
   for (let start = 0; ; start += step) {
     const end = Math.min(buf.length, start + size);
     windows++;
-    for (const h of matchTombstones(buf.toString('utf8', start, end), tombstones)) found.set(h.anchor, h);
+    for (const h of matchTombstones(buf.toString('utf8', start, end), tombstones)) found.set(h.identity, h);
     if (end >= buf.length) break;
   }
   return { hits: [...found.values()], windows };
@@ -1078,7 +1079,7 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
   // inflated byte is taken from that remainder, so the bytes restored in one session are bounded by the same budget.
   const sessionBound = B.sessionCeilBytes;
   let remaining = sessionBound;
-  const tombFound = new Map(); // anchor text -> hit, collected across every window of every file; no concatenated text is ever built
+  const tombFound = new Map(); // anchor identity -> hit, collected across every window of every file; no concatenated text is ever built
   let tombBytes = 0;
   for (const s of sources) {
     try {
@@ -1100,9 +1101,9 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
       if (got.grew !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is longer than the ${got.grew} bytes its handle reported (it grew after its size was read)`, dir, files };
       const gz = got.buf;
       const fileBound = restoreInflateBoundWith(gz.length, B);
-      if (remaining <= 0) return { ok: false, error: `restore refused on ${s.rel}: the session has reached its ${sessionBound}-byte session bound`, dir, files };
       let buf;
-      try { buf = zlib.gunzipSync(gz, { maxOutputLength: Math.min(fileBound, remaining) }); } catch (e) {
+      // zlib refuses a bound of 0, so a session already at its ceiling inflates at most one byte, and the size check below decides
+      try { buf = zlib.gunzipSync(gz, { maxOutputLength: Math.max(1, Math.min(fileBound, remaining)) }); } catch (e) {
         if (e && e.code === 'ERR_BUFFER_TOO_LARGE') {
           return remaining < fileBound
             ? { ok: false, error: `restore refused on ${s.rel}: it would pass the ${sessionBound}-byte session bound (the whole session's inflated bytes; the files already written stay)`, dir, files }
@@ -1110,6 +1111,7 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
         }
         throw e;
       }
+      if (buf.length > remaining) return { ok: false, error: `restore refused on ${s.rel}: it would pass the ${sessionBound}-byte session bound (the whole session's inflated bytes; the files already written stay)`, dir, files };
       remaining -= buf.length;
       const dest = path.join(dir, s.rel);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -1125,7 +1127,7 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
       if (wantTombstoneScan) {
         const scan = scanBufferForTombstones(buf, tombstones, tombstoneWindowBytes);
         tombBytes += buf.length;
-        for (const h of scan.hits) tombFound.set(h.anchor, h);
+        for (const h of scan.hits) tombFound.set(h.identity, h);
       }
     } catch (e) { return { ok: false, error: `restore failed on ${s.rel}: ${e.message}`, dir, files }; }
   }
