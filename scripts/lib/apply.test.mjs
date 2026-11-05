@@ -1910,7 +1910,7 @@ test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mi
   // U7 every durable write renames (the journal included), so a blanket throw
   // would kill the journal write before a step ever ran and this test would stop
   // exercising the mid-apply failure it is named for.
-  // 29bi: the fault hits the FORWARD write only. The rollback's own restore is a rename too (writeDurable), and must be allowed to land.
+  // the fault hits the FORWARD write only. The rollback's own restore is a rename too (writeDurable), and must be allowed to land.
   let thrown = false;
   fs.renameSync = (from, to) => {
     if (to !== f1 || thrown) return origRename(from, to);
@@ -5335,8 +5335,8 @@ test('29ay M24: a row-less blob is counted on its own binMismatches line, with n
 });
 
 // ---------------------------------------------------------------------------
-// 29bi: an undo write replaces whatever sits at its target, a link included, and never writes through one.
-test('29bi restoreFile: a hard link at the target is replaced, and the other name keeps its own bytes', (t) => {
+// an undo write replaces whatever sits at its target, a link included, and never writes through one.
+test('restoreFile: a hard link at the target is replaced, and the other name keeps its own bytes', (t) => {
   const { proj, store } = sandbox();
   try {
     if (!hardlinkCapable()) { t.skip('no hard links on this volume'); return; }
@@ -5352,7 +5352,7 @@ test('29bi restoreFile: a hard link at the target is replaced, and the other nam
   } finally { clean(proj); }
 });
 
-test('29bi restoreFile: a file symlink at the target is replaced, and the file it points at stays byte-identical', (t) => {
+test('restoreFile: a file symlink at the target is replaced, and the file it points at stays byte-identical', (t) => {
   const { proj, store } = sandbox();
   const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-bi-out-')));
   try {
@@ -5374,7 +5374,7 @@ test('29bi restoreFile: a file symlink at the target is replaced, and the file i
   } finally { clean(proj, outDir); }
 });
 
-test('29bi restoreFile: a parent directory swapped for a junction is refused: the call throws and the outside file is untouched', (t) => {
+test('restoreFile: a parent directory swapped for a junction is refused: the call throws and the outside file is untouched', (t) => {
   const { proj, store } = sandbox();
   const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-bi-jn-')));
   try {
@@ -5393,7 +5393,7 @@ test('29bi restoreFile: a parent directory swapped for a junction is refused: th
   } finally { clean(proj, outDir); }
 });
 
-test('29bi restoreFile: a plain target keeps its own mode; a missing target takes the snapshot copy mode', (t) => {
+test('restoreFile: a plain target keeps its own mode; a missing target takes the snapshot copy mode', (t) => {
   const { proj, store } = sandbox();
   try {
     const target = path.join(store, 'mem.md');
@@ -5411,7 +5411,7 @@ test('29bi restoreFile: a plain target keeps its own mode; a missing target take
   } finally { clean(proj); }
 });
 
-test('29bi site 1: an in-run rollback over a hard link at a rewritten file replaces the link, and the other name keeps its bytes', (t) => {
+test('site 1: an in-run rollback over a hard link at a rewritten file replaces the link, and the other name keeps its bytes', (t) => {
   const { proj, store } = sandbox();
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   const f1 = path.join(store, 'f1.md');
@@ -5440,7 +5440,7 @@ test('29bi site 1: an in-run rollback over a hard link at a rewritten file repla
   } finally { clean(proj, home); }
 });
 
-test('29bi site 3: a snapshot rollback over a hard link replaces the link, and the other name keeps its bytes', (t) => {
+test('site 3: a snapshot rollback over a hard link replaces the link, and the other name keeps its bytes', (t) => {
   const { proj, store } = sandbox();
   try {
     if (!hardlinkCapable()) { t.skip('no hard links on this volume'); return; }
@@ -5459,7 +5459,7 @@ test('29bi site 3: a snapshot rollback over a hard link replaces the link, and t
   } finally { clean(proj); }
 });
 
-test('29bi site 2: a recovery over a hard link at a rewritten file replaces the link, and the other name keeps its bytes', (t) => {
+test('site 2: a recovery over a hard link at a rewritten file replaces the link, and the other name keeps its bytes', (t) => {
   const { proj } = sandbox();
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-bi-rec-home-')));
   try {
@@ -5477,7 +5477,7 @@ test('29bi site 2: a recovery over a hard link at a rewritten file replaces the 
   } finally { clean(proj, home); }
 });
 
-test('29bi restoreFile: a parent junction into a sibling folder inside the roots is refused by the literal-folder check', (t) => {
+test('restoreFile: a parent junction into a sibling folder inside the roots is refused by the literal-folder check', (t) => {
   const { proj, store } = sandbox();
   try {
     const sibling = path.join(store, 'sibling');
@@ -5497,7 +5497,7 @@ test('29bi restoreFile: a parent junction into a sibling folder inside the roots
   } finally { clean(proj); }
 });
 
-test('29bi restoreFile: a rename that fails throws and never falls back to an in-place write through a link', (t) => {
+test('restoreFile: a rename that fails throws and never falls back to an in-place write through a link', (t) => {
   const { proj, store } = sandbox();
   try {
     if (!hardlinkCapable()) { t.skip('no hard links on this volume'); return; }
@@ -5520,12 +5520,12 @@ test('29bi restoreFile: a rename that fails throws and never falls back to an in
 });
 
 // ---------------------------------------------------------------------------
-// 534 (INSPECT 533 bounce): the undo restore at sites 2 and 3 must drive through a folder swap and a link at the target.
+// the undo restore at sites 2 and 3 must drive through a folder swap and a link at the target.
 const JUNCTION_SKIP = 'no privilege to create a junction on this host';
 const LINK_SKIP = 'no privilege to create a file symlink on this host';
-test('534 site 2: a folder swapped for a junction to a sibling inside the roots is not restored into the sibling', (t) => {
+test('site 2: a folder swapped for a junction to a sibling inside the roots is not restored into the sibling', (t) => {
   const { proj } = sandbox();
-  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-j2-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-j2-')));
   try {
     const other = path.join(proj, 'other');
     fs.mkdirSync(other);
@@ -5536,11 +5536,12 @@ test('534 site 2: a folder swapped for a junction to a sibling inside the roots 
     danglingTx(proj, [{ target: path.join(sub, 'victim.md'), before: 'SNAPSHOT bytes' }], [proj]);
     const r = recoverDangling(proj, { home });
     assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM bytes', 'the sibling file is untouched');
-    assert.notStrictEqual(r.recovered, 'rolled-back', 'not a clean finish');
+    assert.strictEqual(r.recovered, 'partial', 'not a clean finish');
+    assert.strictEqual(r.restoreFailures, 1, 'exactly one restore failed');
   } finally { clean(proj, home); }
 });
 
-test('534 site 3: a snapshot rollback into a folder swapped for a junction to a sibling inside the roots leaves the sibling untouched', (t) => {
+test('site 3: a snapshot rollback into a folder swapped for a junction to a sibling inside the roots leaves the sibling untouched', (t) => {
   const { proj } = sandbox();
   try {
     const other = path.join(proj, 'other');
@@ -5559,9 +5560,9 @@ test('534 site 3: a snapshot rollback into a folder swapped for a junction to a 
   } finally { clean(proj); }
 });
 
-test('534 site 2: a link at the target to a file inside the roots is replaced, and the file it names is untouched', (t) => {
+test('site 2: a link at the target to a file inside the roots is replaced, and the file it names is untouched', (t) => {
   const { proj } = sandbox();
-  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-l2-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-l2-')));
   try {
     const target = path.join(proj, 'mem.md');
     const inside = path.join(proj, 'inside.md');
@@ -5572,10 +5573,12 @@ test('534 site 2: a link at the target to a file inside the roots is replaced, a
     try { fs.symlinkSync(inside, target, 'file'); } catch (e) { if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip(LINK_SKIP); return; } throw e; }
     recoverDangling(proj, { home });
     assert.strictEqual(fs.readFileSync(inside, 'utf8'), 'INSIDE bytes', 'the file the link names is untouched');
+    assert.ok(!fs.lstatSync(target).isSymbolicLink(), 'the target is a plain file');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'SNAPSHOT bytes', 'the target holds the snapshot bytes');
   } finally { clean(proj, home); }
 });
 
-test('534 site 3: a link at the target to a file inside the roots is replaced, and the file it names is untouched', (t) => {
+test('site 3: a link at the target to a file inside the roots is replaced, and the file it names is untouched', (t) => {
   const { proj } = sandbox();
   try {
     const target = path.join(proj, 'mem.md');
@@ -5588,12 +5591,14 @@ test('534 site 3: a link at the target to a file inside the roots is replaced, a
     try { fs.symlinkSync(inside, target, 'file'); } catch (e) { if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip(LINK_SKIP); return; } throw e; }
     rollbackFromSnapshot(snapDir, [], [fs.realpathSync.native(proj)]);
     assert.strictEqual(fs.readFileSync(inside, 'utf8'), 'INSIDE bytes', 'the file the link names is untouched');
+    assert.ok(!fs.lstatSync(target).isSymbolicLink(), 'the target is a plain file');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'SNAPSHOT bytes', 'the target holds the snapshot bytes');
   } finally { clean(proj); }
 });
 
-test('534 site 2: a copy over the bound counts one failed restore: the target stays and the journal is kept', () => {
+test('site 2: a copy over the bound counts one failed restore: the target stays and the journal is kept', () => {
   const { proj } = sandbox();
-  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-o2-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-o2-')));
   try {
     const target = path.join(proj, 'mem.md');
     write(target, 'AFTER');
@@ -5604,7 +5609,7 @@ test('534 site 2: a copy over the bound counts one failed restore: the target st
   } finally { clean(proj, home); }
 });
 
-test('534 site 3: a copy over the bound counts one failed restore and the target stays', () => {
+test('site 3: a copy over the bound counts one failed restore and the target stays', () => {
   const { proj } = sandbox();
   try {
     const target = path.join(proj, 'mem.md');
@@ -5619,10 +5624,10 @@ test('534 site 3: a copy over the bound counts one failed restore and the target
   } finally { clean(proj); }
 });
 
-test('534 site 2: a copy that is a link out is refused, and the file it names is untouched', (t) => {
+test('site 2: a copy that is a link out is refused, and the file it names is untouched', (t) => {
   const { proj } = sandbox();
-  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-c2-')));
-  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-out-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-c2-')));
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-out-')));
   try {
     const target = path.join(proj, 'mem.md');
     const outside = path.join(outDir, 'outside.md');
@@ -5638,9 +5643,9 @@ test('534 site 2: a copy that is a link out is refused, and the file it names is
   } finally { clean(proj, home, outDir); }
 });
 
-test('534 F533-3: a persistent rename failure on a file whose bytes never changed does not turn the run into a mixed state', () => {
+test('a persistent rename failure on a file whose bytes never changed does not turn the run into a mixed state', () => {
   const { proj, store } = sandbox();
-  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-f3-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-f3-')));
   const f1 = path.join(store, 'f1.md');
   const f2 = path.join(store, 'f2.md');
   write(f1, 'f1 original');
@@ -5666,12 +5671,12 @@ test('534 F533-3: a persistent rename failure on a file whose bytes never change
 });
 
 // ---------------------------------------------------------------------------
-// 535: a link at an undo target that names a file OUTSIDE the roots. The check reads the folder and the literal last name, so the
+// A link at an undo target that names a file OUTSIDE the roots. The check reads the folder and the literal last name, so the
 // link is not followed to the outside file: the restore replaces the link, and the file it named is left alone.
-test('535 site 2: a link at the target to a file OUTSIDE the roots is replaced, and the outside file is byte-identical', (t) => {
+test('site 2: a link at the target to a file OUTSIDE the roots is replaced, and the outside file is byte-identical', (t) => {
   const { proj } = sandbox();
-  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-535-home-')));
-  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-535-out-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-out-')));
   try {
     const target = path.join(proj, 'mem.md');
     const outside = path.join(outDir, 'outside.md');
@@ -5687,9 +5692,9 @@ test('535 site 2: a link at the target to a file OUTSIDE the roots is replaced, 
   } finally { clean(proj, home, outDir); }
 });
 
-test('535 site 3: a link at the target to a file OUTSIDE the roots is replaced, and the outside file is byte-identical', (t) => {
+test('site 3: a link at the target to a file OUTSIDE the roots is replaced, and the outside file is byte-identical', (t) => {
   const { proj } = sandbox();
-  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-535-out3-')));
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-out3-')));
   try {
     const target = path.join(proj, 'mem.md');
     const outside = path.join(outDir, 'outside.md');
@@ -5704,4 +5709,23 @@ test('535 site 3: a link at the target to a file OUTSIDE the roots is replaced, 
     assert.ok(!fs.lstatSync(target).isSymbolicLink(), 'the target is a plain file');
     assert.strictEqual(fs.readFileSync(target, 'utf8'), 'SNAPSHOT bytes', 'the target holds the snapshot bytes');
   } finally { clean(proj, outDir); }
+});
+
+test('restoreFile: a link at the target is replaced even when the file it names already holds the copy bytes', (t) => {
+  const { proj, store } = sandbox();
+  try {
+    const target = path.join(store, 'mem.md');
+    const same = path.join(store, 'same.md');
+    const snap = path.join(store, 'snap.bin');
+    write(same, 'SAME bytes');
+    fs.writeFileSync(snap, 'SAME bytes');
+    try { fs.symlinkSync(same, target, 'file'); } catch (e) {
+      if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip('no privilege to create a file symlink on this host'); return; }
+      throw e;
+    }
+    applyLib.restoreFile(target, Buffer.from('SAME bytes'), snap, [fs.realpathSync.native(store)]);
+    assert.ok(!fs.lstatSync(target).isSymbolicLink(), 'the link is replaced, not left by the early return');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'SAME bytes');
+    assert.strictEqual(fs.readFileSync(same, 'utf8'), 'SAME bytes', 'the file the link named is untouched');
+  } finally { clean(proj); }
 });

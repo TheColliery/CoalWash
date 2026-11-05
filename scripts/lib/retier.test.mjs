@@ -1454,7 +1454,7 @@ test('fire 119: a RE-TIER run robbed of its global lock before an archive copy s
 
 test('fire 119: a RE-TIER run robbed after its archive copies stops before the transaction, keeping the copies', () => {
   const { home, proj } = sandbox();
-  const real = fs.renameSync; // 29bi: the archive copy is a temp and a rename now, so the rename to .gz is the event
+  const real = fs.renameSync; // the archive copy is a temp and a rename now, so the rename to .gz is the event
   try {
     const dir = seedMainStore(home, proj);
     let shot = null;
@@ -1628,7 +1628,7 @@ test('D6 retier: an AG-only home is refused with the platform flag, and nothing 
   } finally { clean(home, proj); }
 });
 
-test('29bi: a link at the archive destination is replaced by the archive write, and the other name keeps its bytes', (t) => {
+test('a link at the archive destination is replaced by the archive write, and the other name keeps its bytes', (t) => {
   const { home, proj } = sandbox();
   const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-bi-arch-')));
   const realWrite = fs.writeFileSync;

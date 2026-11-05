@@ -783,15 +783,14 @@ export function rollbackFromSnapshot(snapshotDir, createdPaths = [], trustedRoot
     try {
       const src = path.join(snapshotDir, m.snap);
       const srcPhys = physicalOrNull(src);
-      // 534 (INSPECT 533, F533-1): the folder is resolved, the last name is not; `lit` is the literal target the restore writes to.
+      // the folder is resolved, the last name is not; `lit` is the literal target the restore writes to.
       const lit = path.resolve(m.original);
       const litFolder = physicalForCreate(path.dirname(lit));
       const dstPhys = litFolder && path.join(litFolder, path.basename(lit));
       if (!snapPhys || !srcPhys || !containedIn(srcPhys, [snapPhys]) || !dstPhys || !containedIn(dstPhys, roots)) { failed++; continue; }
-      // Write to dstPhys — the form that was VALIDATED — not the raw `m.original`.
-      // Same check-one-spelling-act-on-another mismatch as apply.mjs's restore twin;
-      // fixed in the same commit so the two do not drift.
-      // 29bi: the snapshot is read contained and bounded, then restored the forward path's way (a link at the target is replaced).
+      // The write goes to the literal target `lit`, not to `dstPhys`: restoreFile proves the literal folder equals its own
+      // resolution, or refuses. Passing the resolved path back in would follow a link at the file. Do not change this to dstPhys.
+      // the snapshot is read contained and bounded, then restored the forward path's way (a link at the target is replaced).
       const snapOut = repoReadOutcome(src, snapPhys, MAX_DOC_BYTES);
       if (!snapOut.buf) { failed++; continue; }
       restoreFile(lit, snapOut.buf, src, roots);
@@ -944,7 +943,7 @@ export function runRetier({
           const robbedGz = stolen(`the archive copy of ${t.path}`, untouched());
           if (robbedGz) return robbedGz;
           fs.mkdirSync(path.dirname(dest), { recursive: true });
-          writeDurable(dest, gz); // 29bi: a temp then a rename, so a link at dest is replaced and its target untouched; 0600 by default
+          writeDurable(dest, gz); // a temp then a rename, so a link at dest is replaced and its target untouched; 0600 by default
           // 29n F472-2: the archive holds a copy of memory content, owner-only
           gzWritten.push(dest);
           const back = zlib.gunzipSync(fs.readFileSync(dest));

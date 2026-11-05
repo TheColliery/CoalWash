@@ -331,18 +331,18 @@ export function writeDurable(p, data, mode = 0o600) {
   }
   fsyncDirBestEffort(path.dirname(p));
 }
-// 29bi: an undo write puts the snapshot bytes back the way the forward path writes them: a temp beside the target, then a rename
+// an undo write puts the snapshot bytes back the way the forward path writes them: a temp beside the target, then a rename
 // over it. A link at the target is REPLACED, never followed, so the file it points at is never written. The target folder is
 // re-resolved and must equal the literal folder the target names, and sit inside the trusted roots; any refusal THROWS, and the
 // caller counts one failed restore. No in-place fallback: when the rename fails the target is left as it was.
 // Callers pass the LITERAL target (path.resolve of the manifest row): the folder check compares the literal folder with its own
 // resolution, so a folder that resolves elsewhere is refused. A link at the target is replaced. A plain file that already holds
-// the copy bytes is left alone (534, F533-3).
+// the copy bytes is left alone.
 export function restoreFile(target, buf, snapPath, roots) {
   const parent = path.dirname(target);
   const parentPhys = physicalOrNull(parent);
   if (!parentPhys || parentPhys !== parent || !containedIn(parentPhys, roots)) throw new Error(`restore refused: the folder of ${target} does not resolve to itself inside the trusted roots`);
-  // 534 (F533-3): a target that already holds the copy bytes is left alone: no rename, so a file held open cannot fail a restore it never needed.
+  // a target that already holds the copy bytes is left alone: no rename, so a file held open cannot fail a restore it never needed.
   let cur = null;
   try { cur = fs.lstatSync(target); } catch { cur = null; }
   if (cur && cur.isFile() && cur.size === buf.length && fs.readFileSync(target).equals(buf)) return;
@@ -1628,7 +1628,7 @@ export function applyPlan(plan, opts = {}) {
           try {
             const o = repoReadOutcome(path.join(snapDir, m.snap), txDir, MAX_DOC_BYTES);
             if (!o.buf) { failed++; continue; }
-            restoreFile(m.original, o.buf, path.join(snapDir, m.snap), trustedRoots); // 29bi: replaces a link at the target, never writes through it
+            restoreFile(m.original, o.buf, path.join(snapDir, m.snap), trustedRoots); // replaces a link at the target, never writes through it
           } catch { failed++; /* keep restoring the rest */ }
         }
         // A created file the rollback CANNOT remove LINGERS in the store = a mixed
@@ -2169,7 +2169,7 @@ function recoverDanglingHeld(projectRoot, opts, held) {
       // an existing-but-unresolvable segment (the TP-2 hole, fixed in this commit).
       // Containment is unchanged: the resolved path must still sit inside BOTH the
       // caller-trusted roots and the journal's own declared roots.
-      // 534 (INSPECT 533, F533-1): the folder is resolved, the last name is not. `lit` is the literal target the restore writes to,
+      // the folder is resolved, the last name is not. `lit` is the literal target the restore writes to,
       // so its folder check can refuse a folder that resolves elsewhere. `origPhys` is rebuilt from the resolved folder and drives
       // containment, the pin and the replay key.
       const lit = path.resolve(m.original);
@@ -2200,13 +2200,11 @@ function recoverDanglingHeld(projectRoot, opts, held) {
       // partial + journal kept, a human resolves; over-refusal is the safe
       // direction on a destroying door.
       if (fs.existsSync(origPhys) && isPinned(origPhys)) { refusedPinned++; continue; }
-      // Write to origPhys, the form that was VALIDATED — not the raw `m.original`
-      // string. Checking one spelling and acting on another lets the OS re-resolve
-      // the path a second time, so any divergence between them (a symlink, a case
-      // or short-name alias, a race between the check and the write) lands the
-      // write somewhere containment never approved.
+      // The write goes to the literal target `lit`, not to `origPhys`. restoreFile proves the literal folder equals its own
+      // resolution, so `lit` and the checked folder are one spelling, or the write is refused. Passing the resolved path back in
+      // would follow a link at the file: the rename would land where the link points. Do not change this to origPhys.
       try {
-        // 29bi: the snapshot is read contained and bounded, then restored the forward path's way (a link at the target is replaced).
+        // the snapshot is read contained and bounded, then restored the forward path's way (a link at the target is replaced).
         const snapBuf = repoReadOutcome(src, snapPhys, MAX_DOC_BYTES);
         if (!snapBuf.buf) { failed++; continue; }
         restoreFile(lit, snapBuf.buf, src, trustedRoots);
