@@ -8,8 +8,8 @@ A control character in a name can no longer forge a line in a report
 
 ### Security
 
-- The RE-TIER report, the `writeguard-list` rows and its restore line, the message count of an estate search row, the estate report's unbound-key note and the configuration error lines now print a file name, a store label, a key name or an error text through the escaper the other reports use. A name holding a control character, a line break or a right-to-left override prints as escape text on its own line, so a file in a repository or a memory folder cannot start a fake line. The stored name stays raw on disk.
-- A new estate index and its death-log record are created owner-only (mode 0600). An index an earlier version already wrote keeps its mode.
+- The RE-TIER report and scan, the estate run report, the dead-link advisory, the `writeguard-list` rows and its restore line, the message count of an estate search row, the estate report's unbound-key note and the configuration error lines, the parse error included, now print a file name, a store label, a key name or an error text through the escaper the other reports use. A name holding a control character, a line break or a right-to-left override prints as escape text on its own line, so a file in a repository or a memory folder cannot start a fake line. The stored name stays raw on disk.
+- A new estate index and its death-log record are created owner-only (mode 0600). An index an earlier version already wrote keeps its mode: to close it, run `chmod 600` on `index.jsonl` in your archive folder.
 - **Contributor-facing:** the verify skip line escapes its message the same way.
 
 ## [1.15.7] - 2026-11-05
