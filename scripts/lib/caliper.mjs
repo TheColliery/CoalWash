@@ -1201,6 +1201,7 @@ function dropOldRootEntry(projectRoot, home) {
 // would strand a user's lean floor. Both sides go through the realpath helper, so a project reached through a link keeps its own
 // record; a side that cannot be resolved (a moved or deleted project) compares as path.resolve. Never keyed on the platform.
 function sameFolder(a, b) {
+  if (path.resolve(a) === path.resolve(b)) return true;
   const pa = physicalOrNull(a);
   const pb = physicalOrNull(b);
   if (pa !== null && pb !== null) return pa === pb;
@@ -1406,7 +1407,8 @@ export function deadProjectStateFiles(home = os.homedir()) {
 }
 // BOUND (Phoenix #3): a sweep is a readdir plus one small read and one stat per candidate, so it runs at most once per
 // DEAD_SWEEP_EVERY_MS per project -- the stamp rides the state record saveState already holds (zero extra reads on the
-// ordinary write). Version-STABLE bookkeeping, no field's semantics change, so no STATE_SCHEMA bump.
+// ordinary write). Two projects alternating on one slug re-run it at each flip: the stamp lives in the record the other project
+// treats as absent (loadState). Version-STABLE bookkeeping, no field's semantics change, so no STATE_SCHEMA bump.
 const DEAD_SWEEP_EVERY_MS = 24 * 60 * 60 * 1000;
 function sweepDeadProjectStates(home, projectRoot) {
   __testHooks.deadStateSweepCalls++;
@@ -1425,7 +1427,7 @@ function saveState(proj, projectRoot, home) {
   try {
     const p = statePath(projectRoot, home);
     fs.mkdirSync(path.dirname(p), { recursive: true }); // the coalwash/ subdir only — the slug dir must already exist (never-create guard)
-    // `projectRoot` is the stray-detector's key (above). Version-STABLE metadata,
+    // `projectRoot` is the stray-detector's key (above), and since loadState's identity check it is also the record's identity. Version-STABLE metadata,
     // no field's SEMANTICS change → no STATE_SCHEMA bump (this file's own rule).
     const base = (proj && typeof proj === 'object' && !Array.isArray(proj)) ? proj : {};
     // ONE-SHOT, not per-write (Phoenix #3). The stray sweep is a ONE-TIME migration
@@ -1438,7 +1440,7 @@ function saveState(proj, projectRoot, home) {
     // happened — an under-measurement, corrected here): the ONE-SHOT migration write
     // costs 9.4 ms @ N=21 · 14.5 ms @ N=100 · 107.6 ms @ N=1000. Steady state is flat
     // at ~3.2-3.5 ms regardless of N, which is the property that matters: only the
-    // single migration write pays, and only once per project. The flag is
+    // single migration write pays, and only once per project (two projects alternating on one slug pay it at each flip). The flag is
     // version-STABLE bookkeeping — no field's semantics
     // change, so no STATE_SCHEMA bump (this file's own rule).
     const alreadySwept = base.strayPruneDone === true;

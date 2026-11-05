@@ -3087,7 +3087,7 @@ test('record identity: a state record whose recorded root is another project is 
   } finally { clean(home, proj, other); }
 });
 
-test('record identity: the bin-budget read ignores a colliding project\'s smaller storeTotalBytes', () => {
+test('record identity: the read a bin budget is taken from ignores a colliding project\'s smaller storeTotalBytes', () => {
   const { home, proj } = sandbox();
   const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-foreign2-')));
   try {
@@ -3165,5 +3165,18 @@ test('record identity: a foreign record at the slug path and a foreign record at
     fs.mkdirSync(path.dirname(fb), { recursive: true });
     fs.writeFileSync(fb, JSON.stringify({ projectRoot: other, leanFloorTokens: 8000, stateSchema: STATE_SCHEMA }), 'utf8');
     assert.strictEqual(loadState(proj, home).leanFloorTokens, undefined, 'the fallback is checked too: no foreign floor is read from either path');
+  } finally { clean(home, proj, other); }
+});
+
+test('record identity: a foreign record at the slug path does not hide this project\'s own record at the coal fallback', () => {
+  const { home, proj } = sandbox();
+  const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwc-foreign4-')));
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: other, leanFloorTokens: 9000 });
+    const fb = stateFallbackPath(proj, home);
+    fs.mkdirSync(path.dirname(fb), { recursive: true });
+    fs.writeFileSync(fb, JSON.stringify({ projectRoot: proj, leanFloorTokens: 4000, stateSchema: STATE_SCHEMA }), 'utf8');
+    assert.strictEqual(loadState(proj, home).leanFloorTokens, 4000, 'the own record at the fallback is read');
   } finally { clean(home, proj, other); }
 });
