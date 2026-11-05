@@ -5664,3 +5664,44 @@ test('534 F533-3: a persistent rename failure on a file whose bytes never change
     assert.strictEqual(fs.readFileSync(f2, 'utf8'), 'f2 original');
   } finally { clean(proj, home); }
 });
+
+// ---------------------------------------------------------------------------
+// 535: a link at an undo target that names a file OUTSIDE the roots. The check reads the folder and the literal last name, so the
+// link is not followed to the outside file: the restore replaces the link, and the file it named is left alone.
+test('535 site 2: a link at the target to a file OUTSIDE the roots is replaced, and the outside file is byte-identical', (t) => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-535-home-')));
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-535-out-')));
+  try {
+    const target = path.join(proj, 'mem.md');
+    const outside = path.join(outDir, 'outside.md');
+    write(target, 'AFTER');
+    write(outside, 'OUTSIDE bytes');
+    danglingTx(proj, [{ target, before: 'SNAPSHOT bytes' }], [proj]);
+    fs.unlinkSync(target);
+    try { fs.symlinkSync(outside, target, 'file'); } catch (e) { if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip('no privilege to create a file symlink on this host'); return; } throw e; }
+    recoverDangling(proj, { home });
+    assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'OUTSIDE bytes', 'the outside file is byte-identical');
+    assert.ok(!fs.lstatSync(target).isSymbolicLink(), 'the target is a plain file');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'SNAPSHOT bytes', 'the target holds the snapshot bytes');
+  } finally { clean(proj, home, outDir); }
+});
+
+test('535 site 3: a link at the target to a file OUTSIDE the roots is replaced, and the outside file is byte-identical', (t) => {
+  const { proj } = sandbox();
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-535-out3-')));
+  try {
+    const target = path.join(proj, 'mem.md');
+    const outside = path.join(outDir, 'outside.md');
+    write(outside, 'OUTSIDE bytes');
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir);
+    fs.writeFileSync(path.join(snapDir, 's1'), 'SNAPSHOT bytes');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 's1', original: target }]));
+    try { fs.symlinkSync(outside, target, 'file'); } catch (e) { if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip('no privilege to create a file symlink on this host'); return; } throw e; }
+    rollbackFromSnapshot(snapDir, [], [fs.realpathSync.native(proj)]);
+    assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'OUTSIDE bytes', 'the outside file is byte-identical');
+    assert.ok(!fs.lstatSync(target).isSymbolicLink(), 'the target is a plain file');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'SNAPSHOT bytes', 'the target holds the snapshot bytes');
+  } finally { clean(proj, outDir); }
+});
