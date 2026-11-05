@@ -683,8 +683,11 @@ test('fire 126: a keeps lock held by another recorder refuses the record and wri
   try {
     assert.strictEqual(recordKeep(proj, { target: 'base' }).ok, true);
     const before = fs.readFileSync(keepsPath(proj));
-    const held = JSON.stringify({ sessionId: 'other', pid: 1, at: Date.now(), token: 'other:1:1' });
+    // keeps' lock is judged by its mtime against a 5 s window: planted an hour ahead on its row and its mtime, it stays live on any runner.
+    const liveAhead = Date.now() + 60 * 60 * 1000;
+    const held = JSON.stringify({ sessionId: 'other', pid: 1, at: liveAhead, token: 'other:1:1' });
     fs.writeFileSync(`${keepsPath(proj)}.lock`, held);
+    fs.utimesSync(`${keepsPath(proj)}.lock`, liveAhead / 1000, liveAhead / 1000);
     const r = recordKeep(proj, { target: 'blocked' });
     assert.strictEqual(r.ok, false, JSON.stringify(r));
     assert.ok(r.error.includes(`keeps lock: another recorder holds ${keepsPath(proj)}.lock`), r.error);

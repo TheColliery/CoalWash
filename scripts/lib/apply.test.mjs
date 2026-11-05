@@ -1008,7 +1008,12 @@ test('grad6 F1: a bin-stash failure is a VISIBLE flag, never silent — the muta
     write(A, 'plain content, no structured tokens');
     const binDir = path.join(txDirFor(proj), 'fat-bin');
     fs.mkdirSync(binDir, { recursive: true });
-    fs.writeFileSync(path.join(binDir, '.bin.lock'), JSON.stringify({ sessionId: 'other-live-session', pid: 424242, at: Date.now(), token: ['other-live-session', '424242', '0'].join(':') }));  // assembled at runtime: the same bytes, and no secret-shaped literal for the house scan (CWK-174)
+    // acquireLock judges staleness by the lock file's mtime alone, and the bin lock's window is 5 s: planted an hour ahead on
+    // its row and its mtime, the lock reads live for the whole run on any runner, with no wait.
+    const liveAhead = Date.now() + 60 * 60 * 1000;
+    const binLock = path.join(binDir, '.bin.lock');
+    fs.writeFileSync(binLock, JSON.stringify({ sessionId: 'other-live-session', pid: 424242, at: liveAhead, token: ['other-live-session', '424242', '0'].join(':') }));  // assembled at runtime: the same bytes, and no secret-shaped literal for the house scan (CWK-174)
+    fs.utimesSync(binLock, liveAhead / 1000, liveAhead / 1000);
     const r = apply(planFor(proj, store, [{ type: 'delete', path: A }]));
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.strictEqual(fs.existsSync(A), false, 'the delete itself must still succeed even when the bin-stash cannot');
