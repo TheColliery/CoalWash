@@ -4,15 +4,15 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [1.15.9] - 2026-11-05
 
-The printed restore command can no longer run a repository's script or empty your file
+The restore line can no longer run repo code or empty your file
 
 ### Security
 
 - The write-guard advisory's restore line names the installed `cli.mjs` by its full path, so following it in a cloned repository no longer runs that repository's copy.
-- The restore line writes to `<file>.restored`, not to the file itself, so a restore that fails leaves your file as it was.
+- `writeguard-restore` gains `--out <new file>`: it writes the file itself, after the snapshot verifies, owner-only, and refuses a name already taken, so a planted link at that name is not followed. The restore line uses it with `<file>.restored`, so a restore that fails leaves your file as it was.
 - A snapshot name that begins with `-`, or a file path holding `%`, gets no ready-made restore line; the advisory names the command to run with the snapshot name instead.
 - The file and snapshot names in the advisory are escaped where they are printed, so a control character in a name cannot start a fake line.
-- `configure`'s global-setting hint escapes its key and value the same way.
+- `configure`'s global-setting hint prints its value only when a shell would read it as one plain word, in double quotes; otherwise it points at the value printed above. Its key is escaped.
 
 ## [1.15.8] - 2026-11-05
 

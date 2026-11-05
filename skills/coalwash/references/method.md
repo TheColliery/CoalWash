@@ -214,7 +214,7 @@ The wash's fidelity gate protects CoalWash's own knife; the write guard is an **
 
 ```bash
 node [LIB]/cli.mjs writeguard-list                       # name · bytes · session · path (metadata only)
-node [LIB]/cli.mjs writeguard-restore [SNAP_NAME] > [FILE].restored   # byte-exact original -> [FILE].restored, then replace [FILE] with it (bash or cmd: PowerShell 5.1's `>` re-encodes); NEVER re-type it
+node "[LIB]/cli.mjs" writeguard-restore "[SNAP_NAME]" --out "[FILE].restored"   # byte-exact original -> a new file, verified first, a taken name refused; then replace [FILE] with it; NEVER re-type it
 ```
 
 **Never a plain `cp <snapshotPath> <file>`.** That reads correct-looking bytes off disk, but it skips `writeguard-restore`'s own identity check entirely — a snapshot's on-disk bytes can be tampered in place without touching its filename, and `writeguard-restore` refuses to serve exactly that (verified against the sidecar's recorded digest; a raw `cp` has no such check and cannot tell tampered bytes from real ones). Always go through the CLI command above. `writeguard-restore` is `isBareId`-contained (a traversal name is a clean not-found); the bytes go stdout→file, never through the model's context.

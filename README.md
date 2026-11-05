@@ -141,7 +141,7 @@ On Claude Code the plugin ships the three `/coalwash…` commands; a file-copy i
 | `node scripts/lib/cli.mjs gauge` | The one-shot gauge behind `/coalwash:stats` — discover, measure, band verdict, break-even. `--json` for the raw record |
 | `node scripts/lib/cli.mjs restore <id> > recovered.md` | Pulls one binned cut back to stdout, byte-exact — never re-typed from memory, never written back into the store. An item that is a link resolving outside the bin is refused with its own line, which never suggests copying it. Ask the agent to list the bin for the id |
 | `node scripts/lib/cli.mjs writeguard-list` | Lists this session's write-guard (airbag) snapshots — metadata only, no content |
-| `node scripts/lib/cli.mjs writeguard-restore <snapName> > <file>.restored` | Writes one airbag snapshot's byte-exact original to `<file>.restored`; then replace the file with it — a failed run empties the target |
+| `node scripts/lib/cli.mjs writeguard-restore <snapName> --out <file>.restored` | Writes one airbag snapshot's byte-exact original to a new file, after verifying it, and refuses a name already taken; then replace the file with it. Without `--out` it writes to stdout |
 | `node scripts/lib/cli.mjs estate-search <query>` | Searches the ULTRA dig-index of archived transcripts without unpacking them |
 | `node scripts/lib/cli.mjs estate-restore <sessionId>` | Round-trips one archived transcript back byte-exact, into a scratch dir — never the live tree. It bounds what it inflates, with or without `--to`; with `--to <dir>` it also refuses a link under the destination, and a link or a hard-linked file already at a restored file's own path (left in place) |
 
