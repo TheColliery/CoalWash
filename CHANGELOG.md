@@ -2,6 +2,16 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.8] - 2026-11-05
+
+A control character in a name can no longer forge a line in a report
+
+### Security
+
+- The RE-TIER report, the `writeguard-list` rows and its restore line, the message count of an estate search row, the estate report's unbound-key note and the configuration error lines now print a file name, a store label, a key name or an error text through the escaper the other reports use. A name holding a control character, a line break or a right-to-left override prints as escape text on its own line, so a file in a repository or a memory folder cannot start a fake line. The stored name stays raw on disk.
+- A new estate index and its death-log record are created owner-only (mode 0600). An index an earlier version already wrote keeps its mode.
+- **Contributor-facing:** the verify skip line escapes its message the same way.
+
 ## [1.15.7] - 2026-11-05
 
 A project no longer reads another project's state record
