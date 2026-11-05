@@ -335,10 +335,17 @@ export function writeDurable(p, data, mode = 0o600) {
 // over it. A link at the target is REPLACED, never followed, so the file it points at is never written. The target folder is
 // re-resolved and must equal the literal folder the target names, and sit inside the trusted roots; any refusal THROWS, and the
 // caller counts one failed restore. No in-place fallback: when the rename fails the target is left as it was.
+// Callers pass the LITERAL target (path.resolve of the manifest row): the folder check compares the literal folder with its own
+// resolution, so a folder that resolves elsewhere is refused. A link at the target is replaced. A plain file that already holds
+// the copy bytes is left alone (534, F533-3).
 export function restoreFile(target, buf, snapPath, roots) {
   const parent = path.dirname(target);
   const parentPhys = physicalOrNull(parent);
   if (!parentPhys || parentPhys !== parent || !containedIn(parentPhys, roots)) throw new Error(`restore refused: the folder of ${target} does not resolve to itself inside the trusted roots`);
+  // 534 (F533-3): a target that already holds the copy bytes is left alone: no rename, so a file held open cannot fail a restore it never needed.
+  let cur = null;
+  try { cur = fs.lstatSync(target); } catch { cur = null; }
+  if (cur && cur.isFile() && cur.size === buf.length && fs.readFileSync(target).equals(buf)) return;
   let mode = fileModeOr600(snapPath);
   try { const st = fs.lstatSync(target); if (st.isFile()) mode = st.mode & 0o777; } catch { /* absent: the snapshot copy mode */ }
   writeDurable(target, buf, mode);
@@ -2162,7 +2169,12 @@ function recoverDanglingHeld(projectRoot, opts, held) {
       // an existing-but-unresolvable segment (the TP-2 hole, fixed in this commit).
       // Containment is unchanged: the resolved path must still sit inside BOTH the
       // caller-trusted roots and the journal's own declared roots.
-      const origPhys = physicalForCreate(m.original);
+      // 534 (INSPECT 533, F533-1): the folder is resolved, the last name is not. `lit` is the literal target the restore writes to,
+      // so its folder check can refuse a folder that resolves elsewhere. `origPhys` is rebuilt from the resolved folder and drives
+      // containment, the pin and the replay key.
+      const lit = path.resolve(m.original);
+      const litFolder = physicalForCreate(path.dirname(lit));
+      const origPhys = litFolder && path.join(litFolder, path.basename(lit));
       // src must sit inside the snapshot dir; target must sit inside a
       // CALLER-TRUSTED root (the outer gate a poisoned journal can't widen) AND
       // the journal's own declared roots (secondary narrowing).
@@ -2197,7 +2209,7 @@ function recoverDanglingHeld(projectRoot, opts, held) {
         // 29bi: the snapshot is read contained and bounded, then restored the forward path's way (a link at the target is replaced).
         const snapBuf = repoReadOutcome(src, snapPhys, MAX_DOC_BYTES);
         if (!snapBuf.buf) { failed++; continue; }
-        restoreFile(origPhys, snapBuf.buf, src, trustedRoots);
+        restoreFile(lit, snapBuf.buf, src, trustedRoots);
         restored++;
       } catch { failed++; /* restore the rest */ }
     }

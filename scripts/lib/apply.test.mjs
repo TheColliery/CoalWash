@@ -5518,3 +5518,149 @@ test('29bi restoreFile: a rename that fails throws and never falls back to an in
     assert.strictEqual(fs.readFileSync(other, 'utf8'), 'other bytes', 'no write reached the link target');
   } finally { clean(proj); }
 });
+
+// ---------------------------------------------------------------------------
+// 534 (INSPECT 533 bounce): the undo restore at sites 2 and 3 must drive through a folder swap and a link at the target.
+const JUNCTION_SKIP = 'no privilege to create a junction on this host';
+const LINK_SKIP = 'no privilege to create a file symlink on this host';
+test('534 site 2: a folder swapped for a junction to a sibling inside the roots is not restored into the sibling', (t) => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-j2-')));
+  try {
+    const other = path.join(proj, 'other');
+    fs.mkdirSync(other);
+    const victim = path.join(other, 'victim.md');
+    write(victim, 'VICTIM bytes');
+    const sub = path.join(proj, 'sub');
+    try { fs.symlinkSync(other, sub, 'junction'); } catch (e) { if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip(JUNCTION_SKIP); return; } throw e; }
+    danglingTx(proj, [{ target: path.join(sub, 'victim.md'), before: 'SNAPSHOT bytes' }], [proj]);
+    const r = recoverDangling(proj, { home });
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM bytes', 'the sibling file is untouched');
+    assert.notStrictEqual(r.recovered, 'rolled-back', 'not a clean finish');
+  } finally { clean(proj, home); }
+});
+
+test('534 site 3: a snapshot rollback into a folder swapped for a junction to a sibling inside the roots leaves the sibling untouched', (t) => {
+  const { proj } = sandbox();
+  try {
+    const other = path.join(proj, 'other');
+    fs.mkdirSync(other);
+    const victim = path.join(other, 'victim.md');
+    write(victim, 'VICTIM bytes');
+    const sub = path.join(proj, 'sub');
+    try { fs.symlinkSync(other, sub, 'junction'); } catch (e) { if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip(JUNCTION_SKIP); return; } throw e; }
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir);
+    fs.writeFileSync(path.join(snapDir, 's1'), 'SNAPSHOT bytes');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 's1', original: path.join(sub, 'victim.md') }]));
+    const failed = rollbackFromSnapshot(snapDir, [], [fs.realpathSync.native(proj)]);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM bytes', 'the sibling file is untouched');
+    assert.ok(failed >= 1, 'the restore is counted as failed');
+  } finally { clean(proj); }
+});
+
+test('534 site 2: a link at the target to a file inside the roots is replaced, and the file it names is untouched', (t) => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-l2-')));
+  try {
+    const target = path.join(proj, 'mem.md');
+    const inside = path.join(proj, 'inside.md');
+    write(target, 'AFTER');
+    write(inside, 'INSIDE bytes');
+    danglingTx(proj, [{ target, before: 'SNAPSHOT bytes' }], [proj]);
+    fs.unlinkSync(target);
+    try { fs.symlinkSync(inside, target, 'file'); } catch (e) { if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip(LINK_SKIP); return; } throw e; }
+    recoverDangling(proj, { home });
+    assert.strictEqual(fs.readFileSync(inside, 'utf8'), 'INSIDE bytes', 'the file the link names is untouched');
+  } finally { clean(proj, home); }
+});
+
+test('534 site 3: a link at the target to a file inside the roots is replaced, and the file it names is untouched', (t) => {
+  const { proj } = sandbox();
+  try {
+    const target = path.join(proj, 'mem.md');
+    const inside = path.join(proj, 'inside.md');
+    write(inside, 'INSIDE bytes');
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir);
+    fs.writeFileSync(path.join(snapDir, 's1'), 'SNAPSHOT bytes');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 's1', original: target }]));
+    try { fs.symlinkSync(inside, target, 'file'); } catch (e) { if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip(LINK_SKIP); return; } throw e; }
+    rollbackFromSnapshot(snapDir, [], [fs.realpathSync.native(proj)]);
+    assert.strictEqual(fs.readFileSync(inside, 'utf8'), 'INSIDE bytes', 'the file the link names is untouched');
+  } finally { clean(proj); }
+});
+
+test('534 site 2: a copy over the bound counts one failed restore: the target stays and the journal is kept', () => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-o2-')));
+  try {
+    const target = path.join(proj, 'mem.md');
+    write(target, 'AFTER');
+    danglingTx(proj, [{ target, before: 'x'.repeat(4 * 1024 * 1024 + 1) }], [proj]);
+    recoverDangling(proj, { home });
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'AFTER', 'the target is not restored from an over-bound copy');
+    assert.ok(fs.existsSync(path.join(proj, '.claude', 'coalwash', 'journal.json')), 'the journal is kept');
+  } finally { clean(proj, home); }
+});
+
+test('534 site 3: a copy over the bound counts one failed restore and the target stays', () => {
+  const { proj } = sandbox();
+  try {
+    const target = path.join(proj, 'mem.md');
+    write(target, 'AFTER');
+    const snapDir = path.join(proj, 'snap');
+    fs.mkdirSync(snapDir);
+    fs.writeFileSync(path.join(snapDir, 's1'), 'x'.repeat(4 * 1024 * 1024 + 1));
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 's1', original: target }]));
+    const failed = rollbackFromSnapshot(snapDir, [], [fs.realpathSync.native(proj)]);
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'AFTER', 'the target is not restored from an over-bound copy');
+    assert.ok(failed >= 1, 'counted as a failed restore');
+  } finally { clean(proj); }
+});
+
+test('534 site 2: a copy that is a link out is refused, and the file it names is untouched', (t) => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-c2-')));
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-out-')));
+  try {
+    const target = path.join(proj, 'mem.md');
+    const outside = path.join(outDir, 'outside.md');
+    write(target, 'AFTER');
+    write(outside, 'OUTSIDE bytes');
+    danglingTx(proj, [{ target, before: 'SNAPSHOT bytes' }], [proj]);
+    const snapCopy = path.join(proj, '.claude', 'coalwash', 'snap-1', 'f0');
+    fs.unlinkSync(snapCopy);
+    try { fs.symlinkSync(outside, snapCopy, 'file'); } catch (e) { if (e && ['EPERM', 'EACCES'].includes(e.code)) { t.skip(LINK_SKIP); return; } throw e; }
+    recoverDangling(proj, { home });
+    assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'OUTSIDE bytes', 'the file the copy-link names is untouched');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'AFTER', 'the target is not restored from a link out');
+  } finally { clean(proj, home, outDir); }
+});
+
+test('534 F533-3: a persistent rename failure on a file whose bytes never changed does not turn the run into a mixed state', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-534-f3-')));
+  const f1 = path.join(store, 'f1.md');
+  const f2 = path.join(store, 'f2.md');
+  write(f1, 'f1 original');
+  write(f2, 'f2 original');
+  const origRm = fs.rmSync;
+  const origRename = fs.renameSync;
+  fs.rmSync = (p, ...rest) => {
+    if (String(p) === f2) { const e = new Error('ENOENT: no such file or directory'); e.code = 'ENOENT'; throw e; }
+    return origRm.call(fs, p, ...rest);
+  };
+  fs.renameSync = (from, to, ...rest) => {
+    if (String(to) === f2) { const e = new Error('EPERM: operation not permitted'); e.code = 'EPERM'; throw e; }
+    return origRename.call(fs, from, to, ...rest);
+  };
+  let r;
+  try { r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'f1 new' }, { type: 'delete', path: f2 }]), { home }); }
+  finally { fs.rmSync = origRm; fs.renameSync = origRename; }
+  try {
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.rolledBack, true, JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(f2, 'utf8'), 'f2 original');
+  } finally { clean(proj, home); }
+});
