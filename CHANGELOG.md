@@ -2,6 +2,15 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.7] - 2026-11-05
+
+A project no longer reads another project's state record
+
+### Fixed
+
+- Two project paths can fold to one state folder. A project no longer reads the state record another project wrote there: a record that names another project is skipped, so that project's readings no longer set this project's lean floor, band or recovery-bin budget. A project reached through a link or a junction keeps its own record. A record with no project name is still read, as before.
+- The shared record is still overwritten by whichever project saves last, so the other project starts from a fresh floor on its next run.
+
 ## [1.15.6] - 2026-11-05
 
 An undo write replaces a link at its target instead of writing through it
