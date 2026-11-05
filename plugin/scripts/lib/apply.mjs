@@ -51,6 +51,7 @@
 // This is a user-invoked engine module (CLI discipline: fail LOUD via the
 // returned result object), NOT a Phoenix hook — but it still never throws
 // across the API boundary; every path returns { ok, ... }.
+import { escapeRawControls } from './receipt.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -481,7 +482,7 @@ function deadLinkScan(actionable, physRoots, txDir) {
 // verbatim). null when there is nothing to say — silence is the norm.
 export function deadLinkLine(deadLinks) {
   if (!Array.isArray(deadLinks) || !deadLinks.length) return null;
-  const head = deadLinks.slice(0, 5).join(', ');
+  const head = deadLinks.slice(0, 5).map((n) => escapeRawControls(String(n))).join(', ');
   return `advisory: ${deadLinks.length} deleted topic(s) still referenced by surviving files (possible dead [[link]]s): ${head}${deadLinks.length > 5 ? ', …' : ''} — a deliberate delete is fine; recovery door: cli.mjs restore <id>`;
 }
 

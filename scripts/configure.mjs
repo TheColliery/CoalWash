@@ -405,7 +405,7 @@ function main() {
       // write there, and this tool's whole contract below is "invalid input
       // changes nothing on disk". So: report, leave the file byte-identical,
       // exit non-zero.
-      console.error(`Error: ${cfgPath} is not valid JSON/JSONC (${e.message}). Nothing was written — fix or remove the file and re-run.`);
+      console.error(`Error: ${cfgPath} is not valid JSON/JSONC (${escapeRawControls(String(e.message))}). Nothing was written — fix or remove the file and re-run.`);
       process.exitCode = 1;
       return;
     }
@@ -541,11 +541,11 @@ function main() {
         outside: `${f} leads outside the project: make it a real folder inside the project (or remove it) and re-run.`,
         escape: `${f} is outside the project; run configure.mjs from inside the project whose config it should change.`,
       }[e.kind] || `Replace the link or file at ${f} with a real folder (or remove it) and re-run.`;
-      console.error(`[refused] ${writePath}: ${e.message} -- nothing was written. ${advice}`);
+      console.error(`[refused] ${writePath}: ${escapeRawControls(String(e.message))} -- nothing was written. ${advice}`);
     } else if (e instanceof RepoWriteRefused) {
-      console.error(`[refused] ${writePath}: ${e.message} -- nothing was written. Replace it with a regular file inside the project (or remove it) and re-run.`);
+      console.error(`[refused] ${writePath}: ${escapeRawControls(String(e.message))} -- nothing was written. Replace it with a regular file inside the project (or remove it) and re-run.`);
     } else {
-      console.error(`Error: Failed to write to config file: ${e.message}`);
+      console.error(`Error: Failed to write to config file: ${escapeRawControls(String(e.message))}`);
     }
     process.exitCode = 1;
     return;
@@ -583,7 +583,7 @@ function main() {
       // Degrade to a NAMED unknown, never to silence and never to a false
       // success: the write happened, and we simply cannot say which values a
       // reader will honour.
-      console.warn(`Note: the file was written, but the merged config could not be re-read to check which values will actually be honoured (${e.message}).`);
+      console.warn(`Note: the file was written, but the merged config could not be re-read to check which values will actually be honoured (${escapeRawControls(String(e.message))}).`);
     }
 
     if (clamped.length) {

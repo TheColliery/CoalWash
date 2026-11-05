@@ -442,7 +442,7 @@ function main() {
       const g = gauge(gaugeRoot);
       console.log(args.includes('--json') ? JSON.stringify(g, null, 1) : gaugeLine(g));
     } catch (e) {
-      console.error(`gauge failed: ${e.message}`);
+      console.error(`gauge failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'config-status') {
@@ -476,7 +476,7 @@ function main() {
         console.log(lines.length ? lines.join('\n') : '[CoalWash] config: canonical, nothing to report.');
       }
     } catch (e) {
-      console.error(`config-status failed: ${e.message}`);
+      console.error(`config-status failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'restore') {
@@ -501,7 +501,7 @@ function main() {
       process.stdout.write(r.content); // the payload — pipeable, verbatim
       console.error(`[CoalWash] restored ${r.id} from ${r.bin} (${r.bytes} bytes${r.original ? `, cut from ${escapeRawControls(String(r.original))}` : ''}) — content on stdout; nothing was written to the store`);
     } catch (e) {
-      console.error(`restore failed: ${e.message}`);
+      console.error(`restore failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'writeguard-list') {
@@ -513,7 +513,7 @@ function main() {
       // Metadata ONLY — the agent points at a snapshot, never reproduces bytes.
       for (const r of rows) console.log(`${escapeRawControls(String(r.name))}\t${r.bytes} bytes\tsession ${escapeRawControls(String(r.session))}\t${escapeRawControls(String(r.snapshotPath))}`);
     } catch (e) {
-      console.error(`writeguard-list failed: ${e.message}`);
+      console.error(`writeguard-list failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'writeguard-restore') {
@@ -535,7 +535,7 @@ function main() {
         // tell the two apart before choosing the message.
         const existed = listWriteguard(projectRoot, { home: os.homedir() }).some((row) => row.name === name);
         console.error(existed
-          ? `writeguard-restore: snapshot '${name}' exists but FAILED integrity verification (tampered, or unreadable) — refusing to serve unverified bytes`
+          ? `writeguard-restore: snapshot '${escapeRawControls(String(name))}' exists but FAILED integrity verification (tampered, or unreadable) — refusing to serve unverified bytes`
           : `writeguard-restore: snapshot '${name}' not found`);
         process.exitCode = 1;
         return;
@@ -543,7 +543,7 @@ function main() {
       process.stdout.write(r.content); // the byte-exact ORIGINAL — code-moved, model-untouched
       console.error(`[CoalWash] restored write-guard snapshot ${escapeRawControls(String(r.name))} (${r.bytes} bytes, session ${escapeRawControls(String(r.session))}) — byte-exact original on stdout; redirect it to the file, never re-type it`);
     } catch (e) {
-      console.error(`writeguard-restore failed: ${e.message}`);
+      console.error(`writeguard-restore failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'anchor-diff') {
@@ -556,7 +556,7 @@ function main() {
       console.log(report ? (anchorDiffLine(report) || `[CoalWash] ${target}: clean lineage since its oldest snapshot — 0 candidates.`)
         : `[CoalWash] ${target}: no verified CoalWash snapshot on disk for this file yet — nothing to compare.`);
     } catch (e) {
-      console.error(`anchor-diff failed: ${e.message}`);
+      console.error(`anchor-diff failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'estate') {
@@ -572,7 +572,7 @@ function main() {
       writeEstateKeyResolvedState(r.horizon.keyResolvedNow, home);
       console.log(args.includes('--json') ? JSON.stringify(r, null, 1) : r.text);
     } catch (e) {
-      console.error(`estate failed: ${e.message}`);
+      console.error(`estate failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'estate-scan') {
@@ -583,7 +583,7 @@ function main() {
       const scan = estateUltraScan(opts);
       console.log(args.includes('--json') ? JSON.stringify(scan, null, 1) : ultraBillLine(scan));
     } catch (e) {
-      console.error(`estate-scan failed: ${e.message}`);
+      console.error(`estate-scan failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'estate-run') {
@@ -595,7 +595,7 @@ function main() {
       console.log(runEstateReport(res));
       if (!res.ok) process.exitCode = 1; // deferred/lock-held = loud, nothing touched
     } catch (e) {
-      console.error(`estate-run failed: ${e.message}`);
+      console.error(`estate-run failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'estate-search') {
@@ -613,7 +613,7 @@ function main() {
       const rows = searchIndex(query, { archiveDir: resolveArchiveDir(estate, home), tombstones });
       console.log(searchLines(rows, { hasDeathLog: tombstones.hasDeathLog }));
     } catch (e) {
-      console.error(`estate-search failed: ${e.message}`);
+      console.error(`estate-search failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'retier-scan') {
@@ -627,7 +627,7 @@ function main() {
       const scan = retierScan({ projectRoot: findProjectRoot(process.cwd(), home), home, retier: clampedRead(cfg, 'retier') });
       console.log(args.includes('--json') ? JSON.stringify(scan, null, 1) : retierScanLines(scan));
     } catch (e) {
-      console.error(`retier-scan failed: ${e.message}`);
+      console.error(`retier-scan failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'retier-run') {
@@ -645,7 +645,7 @@ function main() {
       console.log(runRetierReport(res));
       if (!res.ok) process.exitCode = 1; // refused/deferred/failed = loud
     } catch (e) {
-      console.error(`retier-run failed: ${e.message}`);
+      console.error(`retier-run failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'estate-restore') {
@@ -669,7 +669,7 @@ function main() {
         console.log(`  ⚠ later-removed? this recovered session matches ${r.laterRemoved.length} gate-adjudicated keep(s): ${named} — VERIFY against the CURRENT live store before treating it as current fact; it may have been deliberately removed/changed (keeps.json${tombstones.hasDeathLog ? ' + the bin death-log' : ''}).`);
       }
     } catch (e) {
-      console.error(`estate-restore failed: ${e.message}`);
+      console.error(`estate-restore failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'dig-gauge') {
@@ -702,7 +702,7 @@ function main() {
         if (surface) console.log(digGaugeOffer(verdict));
       }
     } catch (e) {
-      console.error(`dig-gauge failed: ${e.message}`);
+      console.error(`dig-gauge failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else {

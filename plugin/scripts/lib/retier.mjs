@@ -719,6 +719,7 @@ export function retierScan({ projectRoot = process.cwd(), home = os.homedir(), r
   };
 }
 
+const show = (v) => escapeRawControls(String(v)); // every value the RE-TIER report prints goes through the escaper at its line
 export function retierScanLines(scan) {
   const e = scan.env;
   const lines = [];
@@ -731,8 +732,8 @@ export function retierScanLines(scan) {
     if (s.anchorLine) lines.push(`  ${s.anchorLine}`);
   }
   for (const f of scan.flags.slice(0, CLAIM_FLAG_CAP)) {
-    const parts = f.claims.map((c) => `${c.store}/${c.file}: ${c.value}`).join(' vs ');
-    lines.push(`  #55 cross-store contradiction [${f.key}]: ${parts} — report only, reconcile by hand`);
+    const parts = f.claims.map((c) => `${show(c.store)}/${show(c.file)}: ${show(c.value)}`).join(' vs ');
+    lines.push(`  #55 cross-store contradiction [${show(f.key)}]: ${parts} — report only, reconcile by hand`);
   }
   if (scan.flags.length > CLAIM_FLAG_CAP) lines.push(`  #55: +${scan.flags.length - CLAIM_FLAG_CAP} more (see --json)`);
   return lines.join('\n');
@@ -1148,8 +1149,8 @@ function retierReportBody(res) {
     // OWN per-file refusals (e.g. a bin-stash failure) — real diagnostic
     // context for a failed run, not something the rollback should also
     // erase from the operator's view.
-    const base = `[CoalWash] RE-TIER failed: ${res.error}${res.rolledBack ? ` (rolled back: ${res.rolledBack})` : ''}`;
-    const flaggedLines = (res.flagged || []).map((f) => `\n  FLAGGED ${f.path}: ${f.reason}`).join('');
+    const base = `[CoalWash] RE-TIER failed: ${show(res.error)}${res.rolledBack ? ` (rolled back: ${show(res.rolledBack)})` : ''}`;
+    const flaggedLines = (res.flagged || []).map((f) => `\n  FLAGGED ${show(f.path)}: ${show(f.reason)}`).join('');
     return base + flaggedLines;
   }
   const lines = [];
@@ -1160,11 +1161,11 @@ function retierReportBody(res) {
     lines.push(`  ${escapeRawControls(String(s.label))}: index ~${s.indexTokensBefore} -> ~${s.indexTokensAfter} tok${s.shortfall ? ' (still over fill — the gated wash is the next lever)' : ''} · ${s.topicsArchived} topic(s) -> archive`);
   }
   lines.push(`  undo: snapshot ${res.snapshotDir} · archived topics restore via cli.mjs estate-restore <retier-id> (${res.indexRows} dig row(s) appended)`);
-  for (const k of res.kept) lines.push(`  KEPT ${k.path}: ${k.reason}`);
+  for (const k of res.kept) lines.push(`  KEPT ${show(k.path)}: ${show(k.reason)}`);
   // WAVE-16 finding 2: render applyPlan's per-file refusals here too — the
   // same reason KEPT is rendered above (a per-file exclusion the operator
   // needs to see), never silently dropped now that it is threaded through.
-  for (const f of res.flagged || []) lines.push(`  FLAGGED ${f.path}: ${f.reason}`);
+  for (const f of res.flagged || []) lines.push(`  FLAGGED ${show(f.path)}: ${show(f.reason)}`);
   // grad7 ruling Root D: deadLinkLine is applyPlan's own one-line advisory
   // (already formatted — see apply.mjs's deadLinkLine), mirroring exactly
   // how receipt.mjs already renders it on the main apply path. It was
