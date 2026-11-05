@@ -2,6 +2,17 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.11] - 2026-11-06
+
+An archive keeps any session its restore could not return
+
+### Fixed
+
+- Before an archive deletes a session's originals, it checks the copies it wrote against the limits a restore enforces. A session past any of them stays whole on disk: its partial archive is removed, the run reports the reason, and the session is tried again on the next run.
+- Those limits are the restore's own, in `RESTORE_BOUNDS`: a compressed file of at most 256 MiB (`maxGzBytes`); an inflate of at most the larger of 64 MiB and 64 times the compressed size, and never more than 1 GiB (`floorBytes`, `maxRatio`, `ceilBytes`); and a session total of at most 4 GiB (`sessionCeilBytes`).
+- A restore with tombstones no longer fails on a large session. It scans each restored file in windows of 8 MiB, so a large file no longer builds one oversized text. The match is per file: an anchor split across two restored files is not found.
+- RE-TIER applies the same limits to each topic copy before it removes the topic's original. A topic whose copy a restore could not return is kept.
+
 ## [1.15.10] - 2026-11-06
 
 A link at a log or index name is refused, and a pin read never blocks

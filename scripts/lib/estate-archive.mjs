@@ -1075,7 +1075,7 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
   // the anchor match here is thorough. One-shot recovery path, never a hot loop.
   const wantTombstoneScan = tombstones && Array.isArray(tombstones.anchors) && tombstones.anchors.length;
   // The session bound is sessionCeilBytes, fixed before the loop. Every file's inflate is capped at what the session has left, and every
-  // inflated byte is taken from that remainder, so combinedText (the same bytes, plus a newline per file) is bounded by the same budget.
+  // inflated byte is taken from that remainder, so the bytes restored in one session are bounded by the same budget.
   const sessionBound = B.sessionCeilBytes;
   let remaining = sessionBound;
   const tombFound = new Map(); // anchor text -> hit, collected across every window of every file; no concatenated text is ever built
