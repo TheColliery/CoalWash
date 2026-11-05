@@ -3123,7 +3123,7 @@ test('record identity: an own state record reached through a junction to the pro
   try {
     const link = path.join(parent, 'link');
     try { fs.symlinkSync(proj, link, 'junction'); } catch (e) {
-      if (e && (e.code === 'EPERM' || e.code === 'EACCES')) { t.skip('no privilege to create a junction on this host'); return; }
+      if (e && ['EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP'].includes(e.code)) { t.skip('no privilege or no support for a junction on this host'); return; }
       throw e;
     }
     ccSlugDir(home, proj);
@@ -3135,12 +3135,15 @@ test('record identity: an own state record reached through a junction to the pro
 test('record identity: an own state record whose root is spelled in another case is returned whole on a volume that folds case', (t) => {
   const { home, proj } = sandbox();
   try {
-    fs.writeFileSync(path.join(proj, 'CaseProbe.tmp'), 'x');
-    if (!fs.existsSync(path.join(proj, 'caseprobe.tmp'))) { t.skip('this volume does not fold case, so the spelling cannot differ'); return; }
     const base = path.basename(proj);
     const flipped = base === base.toUpperCase() ? base.toLowerCase() : base.toUpperCase();
+    const spelled = path.join(path.dirname(proj), flipped);
+    // Probe the spelling the test uses: the other-cased path to the project must resolve to this same folder.
+    let sameFolder = false;
+    try { sameFolder = fs.realpathSync.native(spelled) === fs.realpathSync.native(proj); } catch { sameFolder = false; }
+    if (!sameFolder) { t.skip('this volume does not resolve another-cased spelling of the project to the same folder, so the spelling cannot differ'); return; }
     ccSlugDir(home, proj);
-    seedProj(home, proj, { projectRoot: path.join(path.dirname(proj), flipped), leanFloorTokens: 555 });
+    seedProj(home, proj, { projectRoot: spelled, leanFloorTokens: 555 });
     assert.strictEqual(loadState(proj, home).leanFloorTokens, 555, 'the same folder under another case is still this project\'s');
   } finally { clean(home, proj); }
 });
