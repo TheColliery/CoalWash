@@ -401,7 +401,7 @@ test('fire 590 dist compare: a dist README past the bound is a named refusal, no
   } finally { fs.rmSync(fx, { recursive: true, force: true }); fs.rmSync(dist, { recursive: true, force: true }); }
 });
 
-test('fire 590 dist compare: a FIFO at the dist README is refused without blocking (POSIX only; skipped on this host)', (t) => {
+test('fire 590 dist compare: a FIFO at the dist README is refused by kind and never opened for a read that would block (runs where the host can make a FIFO)', (t) => {
   const fx = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-f590-fifo-src-')));
   const dist = scratchDist();
   try {

@@ -242,8 +242,8 @@ export function ensureCatchAllIgnore(dir) {
 //
 // Returns { fd } (the caller closes it) or { why, code? }: 'unopenable' (the open itself failed) · 'not-plain' (a link, a special
 // file or a second name) · 'changed' (the handle is not the entry the caller vetted) · 'unverifiable'. NAMED RESIDUALS: with
-// O_CREAT in `flags`, a link followed at the open creates its (empty) target before the refusal, which the linker could have
-// created itself; and a directory COMPONENT swapped for a junction is a different shape (ownSandboxDir's).
+// O_CREAT in `flags`, a link followed at the open creates its (empty) target before the refusal, and a cloned repository can plant
+// that link (appendOwnLog looks at the name before it opens); and a directory COMPONENT swapped for a junction is a different shape (ownSandboxDir's).
 export function openPlainFile(file, flags, expect = null, mode = undefined) {
   let fd;
   try { fd = fs.openSync(file, flags, mode); } catch (e) { return { why: 'unopenable', code: e && e.code }; }
@@ -266,9 +266,13 @@ export function openPlainFile(file, flags, expect = null, mode = undefined) {
 // openPlainFile opens first and then checks the path and the handle together, so a link or a name swapped in between is refused
 // before any byte is written. A log created here is owner-only (a log that already exists keeps its own mode). Throws when refused.
 export function appendOwnLog(file, text) {
+  // Windows follows a dangling link through O_CREAT, so the name is looked at first: anything but a plain file refuses before the open.
+  let present = null;
+  try { present = fs.lstatSync(file); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+  if (present && !present.isFile()) throw new Error(`${file} is not a plain file (not-plain)`);
   const o = openPlainFile(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), null, 0o600);
   if (o.fd === undefined) throw new Error(`${file} is not a plain file, or changed under the append (${o.why})`);
-  try { fs.writeSync(o.fd, text); } finally { fs.closeSync(o.fd); }
+  try { fs.writeFileSync(o.fd, text); } finally { fs.closeSync(o.fd); }
 }
 
 // Write `content` to `target` inside `root`, or throw RepoWriteRefused.

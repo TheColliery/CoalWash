@@ -139,3 +139,18 @@ test('collectStores: an index slot that links to a non-index file in the store i
     assert.ok(stores.skipped && stores.skipped.some((s) => s.label === 'agent:role-slot' && s.reason), 'the skip names its reason');
   } finally { clean(proj, home); }
 });
+
+// 29bs fire 595 F592-5: Windows creates an entry at a dangling link's target through O_CREAT, so the log name is looked at first.
+test('appendIndexRow: a dangling junction at the index name is refused and nothing appears at its target', (t) => {
+  const archive = tmp('cwg-idx-dj-');
+  const outside = tmp('cwg-idx-djo-');
+  try {
+    const target = path.join(outside, 'nowhere');
+    try { fs.symlinkSync(target, path.join(archive, 'index.jsonl'), 'junction'); } catch (e) {
+      if (e && ['EPERM', 'EACCES', 'ENOSYS'].includes(e.code)) { t.skip('no link can be made on this host'); return; }
+      throw e;
+    }
+    assert.strictEqual(appendIndexRow(archive, { sessionId: 'x' }), false);
+    assert.ok(!fs.existsSync(target), 'nothing appears at the link target');
+  } finally { clean(archive, outside); }
+});

@@ -1686,3 +1686,18 @@ test('fire 593: a refused dig row after the commit returns the committed facts, 
     assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'OUTSIDE-BEFORE\n', 'the linked file kept its bytes');
   } finally { clean(home, proj); }
 });
+
+// 29bs fire 595 F592-4: a store the scan skipped at its index name reaches the scan result (skips on a host with no file symlinks).
+test('a store skipped at its index name reaches the scan result', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = path.join(proj, '.claude', 'agent-memory', 'role-slot');
+    write(path.join(dir, 'topic.md'), '# topic\n');
+    try { fs.symlinkSync(path.join(dir, 'topic.md'), path.join(dir, 'MEMORY.md'), 'file'); } catch (e) {
+      if (e && ['EPERM', 'EACCES', 'ENOSYS'].includes(e.code)) { t.skip('no file symlinks on this host'); return; }
+      throw e;
+    }
+    const scan = retierScan({ projectRoot: proj, home, retier: R });
+    assert.ok(scan.skipped.some((s) => s.label === 'agent:role-slot' && s.reason), JSON.stringify(scan.skipped));
+  } finally { clean(home, proj); }
+});
