@@ -1657,3 +1657,32 @@ test('a link at the archive destination is replaced by the archive write, and th
     assert.strictEqual(fs.readFileSync(other, 'utf8'), 'other bytes', 'the other name keeps its bytes');
   } finally { clean(home, proj, outDir); }
 });
+
+// 29bs fire 593 item 4: a dig row refused AFTER the commit is ok:false, and the result still carries the committed facts (snapshot, archive,
+// kept list). The linked file keeps its bytes. A real RE-TIER run: the archive index name is a hard link to an outside file, so the
+// refusal is the real appendIndexRow refusal, not a seam.
+test('fire 593: a refused dig row after the commit returns the committed facts, and the linked file keeps its bytes', () => {
+  const { home, proj } = sandbox();
+  const now = Date.now();
+  try {
+    const dir = memDir(home, proj);
+    const zetaBody = '# zeta\n\n' + Array(25).fill('- [[zeta-secret]] a unique anchor that lives ONLY in this topic').join('\n') + '\n';
+    write(path.join(dir, 'MEMORY.md'), bigIndex());
+    write(path.join(dir, 'alpha-topic.md'), 'ALPHA-KEEP referenced\n');
+    write(path.join(dir, 'zeta-old.md'), zetaBody);
+    const archiveDir = estateCfg(home).archiveDir;
+    fs.mkdirSync(archiveDir, { recursive: true });
+    const outside = path.join(home, 'outside.txt');
+    fs.writeFileSync(outside, 'OUTSIDE-BEFORE\n');
+    fs.linkSync(outside, path.join(archiveDir, ESTATE_INDEX_NAME));
+    const res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home, { indexEnabled: true }), now });
+    assert.strictEqual(res.ok, false, runRetierReport(res));
+    assert.match(String(res.error), /dig-index row\(s\) were refused/, 'the refusal is named: ' + res.error);
+    assert.ok(res.snapshotDir && fs.existsSync(res.snapshotDir), 'the committed run names a snapshot that exists: ' + res.snapshotDir);
+    assert.strictEqual(res.archiveDir, archiveDir, 'the archive is returned');
+    assert.strictEqual(res.indexRows, 0, 'no row landed');
+    assert.ok(Array.isArray(res.kept), 'the kept list is returned');
+    assert.ok(Array.isArray(res.stores), 'the stores are returned');
+    assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'OUTSIDE-BEFORE\n', 'the linked file kept its bytes');
+  } finally { clean(home, proj); }
+});

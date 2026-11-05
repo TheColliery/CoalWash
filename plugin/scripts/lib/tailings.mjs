@@ -52,7 +52,7 @@ import path from 'node:path';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { ensureSelfIgnore, acquireLock, trackedInOwnFolder, lockLeftNote, withLockLeft } from './apply.mjs';
 import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir, openPlainFile, appendOwnLog } from './repo-fs.mjs';
+import { ownSandboxDir, appendOwnLog } from './repo-fs.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
 import { escapeRawControls } from './receipt.mjs'; // 29ax F512-4: the one escaper a certificate field uses (receipt.mjs imports nothing back)
 

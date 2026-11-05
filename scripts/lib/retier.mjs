@@ -236,7 +236,7 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
   addStore('main', ccMemoryDir(projectRoot, home));
   const agentBase = path.join(projectRoot, '.claude', 'agent-memory');
   let roles = [];
-  // A directory junction reports as a symbolic link, so it is judged by what it resolves to; containment is still checked in addStore.
+  // A role entry reaches addStore only when its directory entry reports a directory. A junction reports as a symbolic link, so it is not a role entry here; addStore resolves the path and checks containment.
   try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { /* none */ }
   for (const role of roles) addStore(`agent:${role}`, path.join(agentBase, role));
   stores.skipped = skipped;
@@ -1098,13 +1098,8 @@ export function runRetier({
     }
     let refusedRows = 0;
     if (indexEnabled) for (const row of digRows) { if (appendIndexRow(archiveDir, row)) rows++; else refusedRows++; }
-    if (refusedRows) {
-      // A refused row is not a success: the archive copies stay restorable through estate-restore, but the index is short, and the caller must see it.
-      return { ok: false, env, error: `${refusedRows} dig-index row(s) were refused by the archive index (a link or a special file holds its name, or the write failed): the transaction committed and the ${gzWritten.length} archive copy(ies) stay in ${archiveDir}, restorable by estate-restore` };
-    }
-
-    return {
-      ok: true,
+    // The committed facts, built ONCE for both returns: a refused dig row is a failure after the commit, so the caller keeps the snapshot, the kept list and the archive names.
+    const committed = {
       env,
       snapshotDir: r.snapshotDir,
       archiveDir,
@@ -1140,6 +1135,9 @@ export function runRetier({
         shortfall: p.hop1.shortfall,
       })),
     };
+    // A refused row is not a success: the archive copies stay restorable through estate-restore, but the index is short, and the caller must see it.
+    if (refusedRows) return { ...committed, ok: false, error: `${refusedRows} dig-index row(s) were refused by the archive index (a link or a special file holds its name, or the write failed): ${afterCommit(`${refusedRows} of ${digRows.length} dig-index row(s) were refused`)}; estate-restore still reads the archive itself` };
+    return { ok: true, ...committed };
   })(); } catch (e) { thrown = e; } finally {
     rel = lock.release();
   }

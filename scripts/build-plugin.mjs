@@ -179,29 +179,37 @@ export function buildDist(distRoot = dist, srcRoot = repo) {
 // linking path (node/runtime.md §1). The bound is a copy of config-load's MAX_DOC_BYTES (4 MiB); no test pins the two equal, so a change to one must be made to both by hand. A link, a non-regular entry (a FIFO
 // would block a plain read; a device reads forever) and an over-bound file are REFUSED with a reason; an absent file is { absent: true }.
 export const DIST_READ_MAX = 4 * 1024 * 1024;
+// Open FIRST (non-blocking, and no-follow where the platform has it), then judge the HANDLE by fstat and the PATH by lstat after the open;
+// the two must be the same dev+ino, so a path swapped between the judgement and the read is refused. Shape: link-check.mjs readDocBounded.
+const DIST_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0);
 export function readDistFile(file) {
-  let lst;
-  try { lst = fs.lstatSync(file); } catch (e) {
-    return e && (e.code === 'ENOENT' || e.code === 'ENOTDIR') ? { absent: true } : { why: 'unreadable' };
-  }
-  if (lst.isSymbolicLink()) return { why: 'link' };
-  if (!lst.isFile()) return { why: 'not-regular' };
-  if (lst.size > DIST_READ_MAX) return { why: `over the ${DIST_READ_MAX}-byte bound` };
   let fd;
+  try { fd = fs.openSync(file, DIST_READ_FLAGS); } catch (e) {
+    const code = e && e.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { absent: true };
+    if (code === 'ELOOP') return { why: 'link' }; // O_NOFOLLOW refused a link at the open (POSIX)
+    let kind = null;
+    try { const l = fs.lstatSync(file); kind = l.isSymbolicLink() ? 'link' : (!l.isFile() ? 'not-regular' : null); } catch { kind = null; }
+    return { why: kind || 'unreadable' };
+  }
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0)); // O_NONBLOCK: a FIFO swapped in cannot hang the open
-    const st = fs.fstatSync(fd);
+    const st = fs.fstatSync(fd, { bigint: true });
     if (!st.isFile()) return { why: 'not-regular' };
-    if (st.size > DIST_READ_MAX) return { why: `over the ${DIST_READ_MAX}-byte bound` };
-    const buf = Buffer.alloc(st.size);
+    const onPath = fs.lstatSync(file, { bigint: true });
+    if (onPath.isSymbolicLink()) return { why: 'link' };
+    if (!onPath.isFile()) return { why: 'not-regular' };
+    if (st.dev !== onPath.dev || st.ino !== onPath.ino) return { why: 'changed' };
+    if (st.size > BigInt(DIST_READ_MAX)) return { why: `over the ${DIST_READ_MAX}-byte bound` };
+    const want = Number(st.size);
+    const buf = Buffer.alloc(want);
     let got = 0;
-    while (got < st.size) {
-      const n = fs.readSync(fd, buf, got, st.size - got, got);
+    while (got < want) {
+      const n = fs.readSync(fd, buf, got, want - got, got);
       if (n === 0) break;
       got += n;
     }
     return { buf: buf.subarray(0, got) };
-  } catch { return { why: 'unreadable' }; } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } } }
+  } catch { return { why: 'unreadable' }; } finally { fs.closeSync(fd); }
 }
 
 // { same } | { refused: <reason>, side: 'a' | 'b' } | { absent: true }. A refusal is never a match and never a stale verdict.
