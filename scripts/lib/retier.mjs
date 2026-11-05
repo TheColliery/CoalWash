@@ -49,9 +49,9 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
 import { tokensEst } from './caliper.mjs';
-import { readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
-import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS } from './apply.mjs';
+import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS, restoreFile, writeDurable } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 
@@ -788,7 +788,10 @@ export function rollbackFromSnapshot(snapshotDir, createdPaths = [], trustedRoot
       // Write to dstPhys — the form that was VALIDATED — not the raw `m.original`.
       // Same check-one-spelling-act-on-another mismatch as apply.mjs's restore twin;
       // fixed in the same commit so the two do not drift.
-      fs.copyFileSync(src, dstPhys);
+      // 29bi: the snapshot is read contained and bounded, then restored the forward path's way (a link at the target is replaced).
+      const snapOut = repoReadOutcome(src, snapPhys, MAX_DOC_BYTES);
+      if (!snapOut.buf) { failed++; continue; }
+      restoreFile(dstPhys, snapOut.buf, src, roots);
     } catch { failed++; }
   }
   for (const p of createdPaths) {
@@ -938,7 +941,7 @@ export function runRetier({
           const robbedGz = stolen(`the archive copy of ${t.path}`, untouched());
           if (robbedGz) return robbedGz;
           fs.mkdirSync(path.dirname(dest), { recursive: true });
-          fs.writeFileSync(dest, gz, { mode: 0o600 }); // 29n F472-2: the archive holds a copy of memory content, owner-only
+          writeDurable(dest, gz); // 29bi: a temp then a rename, so a link at dest is replaced and its target untouched; 0600 by default // 29n F472-2: the archive holds a copy of memory content, owner-only
           gzWritten.push(dest);
           const back = zlib.gunzipSync(fs.readFileSync(dest));
           if (!back.equals(buf)) throw new Error('verify mismatch');

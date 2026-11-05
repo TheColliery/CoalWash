@@ -1,3 +1,5 @@
+import * as applyLib from './apply.mjs';
+import { rollbackFromSnapshot } from './retier.mjs';
 import { test, after } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
@@ -1908,8 +1910,11 @@ test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mi
   // U7 every durable write renames (the journal included), so a blanket throw
   // would kill the journal write before a step ever ran and this test would stop
   // exercising the mid-apply failure it is named for.
+  // 29bi: the fault hits the FORWARD write only. The rollback's own restore is a rename too (writeDurable), and must be allowed to land.
+  let thrown = false;
   fs.renameSync = (from, to) => {
-    if (to !== f1) return origRename(from, to);
+    if (to !== f1 || thrown) return origRename(from, to);
+    thrown = true;
     const e = new Error('EXDEV: cross-device link not permitted');
     e.code = 'EXDEV';
     throw e;
@@ -5327,4 +5332,189 @@ test('29ay M24: a row-less blob is counted on its own binMismatches line, with n
     assert.ok(/1 blobs have no row/.test(r.binMismatches[0]), 'the count is stated');
     assert.ok(!r.binMismatches.join('\n').includes(id), 'no id in the line');
   } finally { clean(proj, home); }
+});
+
+// ---------------------------------------------------------------------------
+// 29bi: an undo write replaces whatever sits at its target, a link included, and never writes through one.
+test('29bi restoreFile: a hard link at the target is replaced, and the other name keeps its own bytes', (t) => {
+  const { proj, store } = sandbox();
+  try {
+    if (!hardlinkCapable()) { t.skip('no hard links on this volume'); return; }
+    const target = path.join(store, 'mem.md');
+    const other = path.join(store, 'other.md');
+    const snap = path.join(store, 'snap.bin');
+    write(other, 'other bytes');
+    fs.linkSync(other, target);
+    fs.writeFileSync(snap, 'snapshot bytes');
+    applyLib.restoreFile(target, Buffer.from('snapshot bytes'), snap, [fs.realpathSync.native(store)]);
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'snapshot bytes', 'the target holds the snapshot bytes');
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'other bytes', 'the other name keeps its own bytes');
+  } finally { clean(proj); }
+});
+
+test('29bi restoreFile: a file symlink at the target is replaced, and the file it points at stays byte-identical', (t) => {
+  const { proj, store } = sandbox();
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-bi-out-')));
+  try {
+    const target = path.join(store, 'mem.md');
+    const outside = path.join(outDir, 'outside.md');
+    const snap = path.join(store, 'snap.bin');
+    write(outside, 'outside bytes');
+    fs.writeFileSync(snap, 'snapshot bytes');
+    fs.chmodSync(snap, 0o604);
+    try { fs.symlinkSync(outside, target, 'file'); } catch (e) {
+      if (e && (e.code === 'EPERM' || e.code === 'EACCES')) { t.skip('no privilege to create a file symlink on this host'); return; }
+      throw e;
+    }
+    applyLib.restoreFile(target, Buffer.from('snapshot bytes'), snap, [fs.realpathSync.native(store)]);
+    assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'outside bytes', 'the link target is untouched');
+    if ((fs.statSync(snap).mode & 0o777) === 0o604) assert.strictEqual(fs.statSync(target).mode & 0o777, 0o604, 'the restored file takes the snapshot copy mode, never the link target mode (a probe skips it where POSIX modes are not kept)');
+    assert.ok(!fs.lstatSync(target).isSymbolicLink(), 'the target is now a plain file');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'snapshot bytes');
+  } finally { clean(proj, outDir); }
+});
+
+test('29bi restoreFile: a parent directory swapped for a junction is refused: the call throws and the outside file is untouched', (t) => {
+  const { proj, store } = sandbox();
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-bi-jn-')));
+  try {
+    const victim = path.join(outDir, 'victim.md');
+    const snap = path.join(store, 'snap.bin');
+    write(victim, 'victim bytes');
+    fs.writeFileSync(snap, 'snapshot bytes');
+    const parent = path.join(store, 'sub');
+    try { fs.symlinkSync(outDir, parent, 'junction'); } catch (e) {
+      if (e && (e.code === 'EPERM' || e.code === 'EACCES')) { t.skip('no privilege to create a junction on this host'); return; }
+      throw e;
+    }
+    const target = path.join(parent, 'victim.md');
+    assert.throws(() => applyLib.restoreFile(target, Buffer.from('snapshot bytes'), snap, [fs.realpathSync.native(store)]), (e) => !(e instanceof TypeError)); // a missing helper is a TypeError, never a pass
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'victim bytes', 'the outside file is untouched');
+  } finally { clean(proj, outDir); }
+});
+
+test('29bi restoreFile: a plain target keeps its own mode; a missing target takes the snapshot copy mode', (t) => {
+  const { proj, store } = sandbox();
+  try {
+    const target = path.join(store, 'mem.md');
+    const snap = path.join(store, 'snap.bin');
+    write(target, 'old');
+    fs.chmodSync(target, 0o640);
+    fs.writeFileSync(snap, 'snapshot bytes');
+    fs.chmodSync(snap, 0o604);
+    if (((fs.statSync(target).mode) & 0o777) !== 0o640) { t.skip('this host keeps no POSIX mode'); return; }
+    applyLib.restoreFile(target, Buffer.from('snapshot bytes'), snap, [fs.realpathSync.native(store)]);
+    assert.strictEqual(fs.statSync(target).mode & 0o777, 0o640, 'the plain file keeps its own mode');
+    const gone = path.join(store, 'gone.md');
+    applyLib.restoreFile(gone, Buffer.from('snapshot bytes'), snap, [fs.realpathSync.native(store)]);
+    assert.strictEqual(fs.statSync(gone).mode & 0o777, 0o604, 'a missing target takes the snapshot copy mode');
+  } finally { clean(proj); }
+});
+
+test('29bi site 1: an in-run rollback over a hard link at a rewritten file replaces the link, and the other name keeps its bytes', (t) => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  const f1 = path.join(store, 'f1.md');
+  const f2 = path.join(store, 'f2.md');
+  const other = path.join(store, 'other.md');
+  try {
+    if (!hardlinkCapable()) { t.skip('no hard links on this volume'); return; }
+    write(f1, 'f1 original');
+    write(f2, 'f2 original');
+    write(other, 'other bytes');
+    const origRm = fs.rmSync;
+    fs.rmSync = (p, ...rest) => {
+      if (String(p) === f2) {
+        // after f1 was rewritten, a link takes its place, so the rollback meets a link at its target
+        fs.unlinkSync(f1);
+        fs.linkSync(other, f1);
+        const e = new Error('ENOENT: no such file or directory'); e.code = 'ENOENT'; throw e;
+      }
+      return origRm.call(fs, p, ...rest);
+    };
+    let r;
+    try { r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'f1 new' }, { type: 'delete', path: f2 }]), { home }); } finally { fs.rmSync = origRm; }
+    assert.strictEqual(r.ok, false, 'the run fails and rolls back');
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'other bytes', 'the other name keeps its bytes');
+    assert.strictEqual(fs.readFileSync(f1, 'utf8'), 'f1 original', 'the rollback restored f1');
+  } finally { clean(proj, home); }
+});
+
+test('29bi site 3: a snapshot rollback over a hard link replaces the link, and the other name keeps its bytes', (t) => {
+  const { proj, store } = sandbox();
+  try {
+    if (!hardlinkCapable()) { t.skip('no hard links on this volume'); return; }
+    const snapDir = path.join(store, 'snap');
+    fs.mkdirSync(snapDir);
+    const target = path.join(store, 'mem.md');
+    const other = path.join(store, 'other.md');
+    write(other, 'other bytes');
+    fs.linkSync(other, target);
+    fs.writeFileSync(path.join(snapDir, 's1'), 'snapshot bytes');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify([{ snap: 's1', original: target }]));
+    const failed = rollbackFromSnapshot(snapDir, [], [fs.realpathSync.native(store)]);
+    assert.strictEqual(failed, 0, 'the restore succeeds');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'snapshot bytes');
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'other bytes', 'the other name keeps its bytes');
+  } finally { clean(proj); }
+});
+
+test('29bi site 2: a recovery over a hard link at a rewritten file replaces the link, and the other name keeps its bytes', (t) => {
+  const { proj } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-bi-rec-home-')));
+  try {
+    if (!hardlinkCapable()) { t.skip('no hard links on this volume'); return; }
+    const target = path.join(proj, 'mem.md');
+    const other = path.join(proj, 'other.md');
+    write(target, 'AFTER');
+    danglingTx(proj, [{ target, before: 'BEFORE' }], [proj]);
+    write(other, 'other bytes');
+    fs.unlinkSync(target);
+    fs.linkSync(other, target);
+    recoverDangling(proj, { home });
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'other bytes', 'the other name keeps its bytes');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'BEFORE', 'the recovery put the snapshot bytes back');
+  } finally { clean(proj, home); }
+});
+
+test('29bi restoreFile: a parent junction into a sibling folder inside the roots is refused by the literal-folder check', (t) => {
+  const { proj, store } = sandbox();
+  try {
+    const sibling = path.join(store, 'sibling');
+    fs.mkdirSync(sibling);
+    const victim = path.join(sibling, 'victim.md');
+    const snap = path.join(store, 'snap.bin');
+    write(victim, 'victim bytes');
+    fs.writeFileSync(snap, 'snapshot bytes');
+    const parent = path.join(store, 'alias');
+    try { fs.symlinkSync(sibling, parent, 'junction'); } catch (e) {
+      if (e && (e.code === 'EPERM' || e.code === 'EACCES')) { t.skip('no privilege to create a junction on this host'); return; }
+      throw e;
+    }
+    const target = path.join(parent, 'victim.md');
+    assert.throws(() => applyLib.restoreFile(target, Buffer.from('snapshot bytes'), snap, [fs.realpathSync.native(store)]), (e) => !(e instanceof TypeError));
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'victim bytes', 'the sibling file is untouched');
+  } finally { clean(proj); }
+});
+
+test('29bi restoreFile: a rename that fails throws and never falls back to an in-place write through a link', (t) => {
+  const { proj, store } = sandbox();
+  try {
+    if (!hardlinkCapable()) { t.skip('no hard links on this volume'); return; }
+    const target = path.join(store, 'mem.md');
+    const other = path.join(store, 'other.md');
+    const snap = path.join(store, 'snap.bin');
+    write(other, 'other bytes');
+    fs.linkSync(other, target);
+    fs.writeFileSync(snap, 'snapshot bytes');
+    const origRename = fs.renameSync;
+    fs.renameSync = (from, to, ...rest) => {
+      if (String(to) === target) { const e = new Error('EPERM: operation not permitted'); e.code = 'EPERM'; throw e; }
+      return origRename.call(fs, from, to, ...rest);
+    };
+    try {
+      assert.throws(() => applyLib.restoreFile(target, Buffer.from('snapshot bytes'), snap, [fs.realpathSync.native(store)]), (e) => !(e instanceof TypeError));
+    } finally { fs.renameSync = origRename; }
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'other bytes', 'no write reached the link target');
+  } finally { clean(proj); }
 });

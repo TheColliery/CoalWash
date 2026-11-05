@@ -1454,24 +1454,24 @@ test('fire 119: a RE-TIER run robbed of its global lock before an archive copy s
 
 test('fire 119: a RE-TIER run robbed after its archive copies stops before the transaction, keeping the copies', () => {
   const { home, proj } = sandbox();
-  const real = fs.writeFileSync;
+  const real = fs.renameSync; // 29bi: the archive copy is a temp and a rename now, so the rename to .gz is the event
   try {
     const dir = seedMainStore(home, proj);
     let shot = null;
-    fs.writeFileSync = function patched(p, ...rest) {
-      const out = real.call(fs, p, ...rest);
-      if (!shot && String(p).endsWith('.gz')) { stealAt(globalLockPath(home)); shot = treeOf([home, proj]); }
+    fs.renameSync = function patched(from, to, ...rest) {
+      const out = real.call(fs, from, to, ...rest);
+      if (!shot && String(to).endsWith('.gz')) { stealAt(globalLockPath(home)); shot = treeOf([home, proj]); }
       return out;
     };
     let res;
-    try { res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) }); } finally { fs.writeFileSync = real; }
+    try { res = runRetier({ projectRoot: proj, home, retier: R, estate: estateCfg(home) }); } finally { fs.renameSync = real; }
     assert.ok(shot, 'the theft happened after an archive copy was written');
     assert.strictEqual(res.robbed, 'global', runRetierReport(res));
     assert.ok(res.error.includes('stopped before the transaction'), res.error);
     assert.deepStrictEqual(treeOf([home, proj]), shot, 'nothing written or removed after the theft');
     assert.strictEqual(fs.existsSync(path.join(dir, 'zeta-old.md')), true, 'the topic stays');
     assert.strictEqual(gzOf(home).length, 1, 'its archive copy stays');
-  } finally { fs.writeFileSync = real; clean(home, proj); }
+  } finally { fs.renameSync = real; clean(home, proj); }
 });
 
 test('fire 119: when the transaction under RE-TIER is robbed after its deletes, RE-TIER keeps the archive copies (a deleted topic is never left without its copy)', () => {

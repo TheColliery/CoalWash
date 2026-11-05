@@ -331,6 +331,18 @@ export function writeDurable(p, data, mode = 0o600) {
   }
   fsyncDirBestEffort(path.dirname(p));
 }
+// 29bi: an undo write puts the snapshot bytes back the way the forward path writes them: a temp beside the target, then a rename
+// over it. A link at the target is REPLACED, never followed, so the file it points at is never written. The target folder is
+// re-resolved and must equal the literal folder the target names, and sit inside the trusted roots; any refusal THROWS, and the
+// caller counts one failed restore. No in-place fallback: when the rename fails the target is left as it was.
+export function restoreFile(target, buf, snapPath, roots) {
+  const parent = path.dirname(target);
+  const parentPhys = physicalOrNull(parent);
+  if (!parentPhys || parentPhys !== parent || !containedIn(parentPhys, roots)) throw new Error(`restore refused: the folder of ${target} does not resolve to itself inside the trusted roots`);
+  let mode = fileModeOr600(snapPath);
+  try { const st = fs.lstatSync(target); if (st.isFile()) mode = st.mode & 0o777; } catch { /* absent: the snapshot copy mode */ }
+  writeDurable(target, buf, mode);
+}
 export function fsyncDirBestEffort(dir) {
   // POSIX: makes the rename itself durable. Windows: opening a dir fd throws —
   // best-effort by design (honest ceiling, documented above).
@@ -1609,7 +1621,7 @@ export function applyPlan(plan, opts = {}) {
           try {
             const o = repoReadOutcome(path.join(snapDir, m.snap), txDir, MAX_DOC_BYTES);
             if (!o.buf) { failed++; continue; }
-            fs.writeFileSync(m.original, o.buf);
+            restoreFile(m.original, o.buf, path.join(snapDir, m.snap), trustedRoots); // 29bi: replaces a link at the target, never writes through it
           } catch { failed++; /* keep restoring the rest */ }
         }
         // A created file the rollback CANNOT remove LINGERS in the store = a mixed
@@ -2181,7 +2193,13 @@ function recoverDanglingHeld(projectRoot, opts, held) {
       // the path a second time, so any divergence between them (a symlink, a case
       // or short-name alias, a race between the check and the write) lands the
       // write somewhere containment never approved.
-      try { fs.copyFileSync(src, origPhys); restored++; } catch { failed++; /* restore the rest */ }
+      try {
+        // 29bi: the snapshot is read contained and bounded, then restored the forward path's way (a link at the target is replaced).
+        const snapBuf = repoReadOutcome(src, snapPhys, MAX_DOC_BYTES);
+        if (!snapBuf.buf) { failed++; continue; }
+        restoreFile(origPhys, snapBuf.buf, src, trustedRoots);
+        restored++;
+      } catch { failed++; /* restore the rest */ }
     }
     // creates the interrupted run added are removed — REGARDLESS of the journal's
     // step.status. A crash BETWEEN atomicWrite and the writeJournal that would
