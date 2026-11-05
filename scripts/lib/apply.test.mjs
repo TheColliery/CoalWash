@@ -5373,9 +5373,36 @@ test('restoreFile: a file symlink at the target is replaced, and the file it poi
     }
     applyLib.restoreFile(target, Buffer.from('snapshot bytes'), snap, [fs.realpathSync.native(store)]);
     assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'outside bytes', 'the link target is untouched');
-    if ((fs.statSync(snap).mode & 0o777) === 0o604) assert.strictEqual(fs.statSync(target).mode & 0o777, 0o604, 'the restored file takes the snapshot copy mode, never the link target mode (a probe skips it where POSIX modes are not kept)');
     assert.ok(!fs.lstatSync(target).isSymbolicLink(), 'the target is now a plain file');
     assert.strictEqual(fs.readFileSync(target, 'utf8'), 'snapshot bytes');
+  } finally { clean(proj, outDir); }
+});
+
+// The mode check is its own test: it needs two host capabilities (a file symlink, and POSIX modes kept on the volume), so
+// each is probed and a missing one is a visible t.skip naming it. The mode assertion is never behind a silent `if`.
+test('restoreFile: a restore over a file symlink takes the snapshot copy\'s mode, never the link target\'s', (t) => {
+  const { proj, store } = sandbox();
+  const outDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-bi-mode-')));
+  try {
+    const target = path.join(store, 'mem.md');
+    const outside = path.join(outDir, 'outside.md');
+    const snap = path.join(store, 'snap.bin');
+    write(outside, 'outside bytes');
+    fs.chmodSync(outside, 0o600);
+    fs.writeFileSync(snap, 'snapshot bytes');
+    fs.chmodSync(snap, 0o604);
+    try { fs.symlinkSync(outside, target, 'file'); } catch (e) {
+      if (e && (e.code === 'EPERM' || e.code === 'EACCES')) { t.skip('no privilege to create a file symlink on this host'); return; }
+      throw e;
+    }
+    const probe = path.join(store, 'mode-probe.bin');
+    fs.writeFileSync(probe, 'probe');
+    fs.chmodSync(probe, 0o604);
+    if ((fs.statSync(probe).mode & 0o777) !== 0o604) { t.skip('POSIX modes are not kept on this volume, so the restored mode cannot be read here'); return; }
+    applyLib.restoreFile(target, Buffer.from('snapshot bytes'), snap, [fs.realpathSync.native(store)]);
+    assert.ok(!fs.lstatSync(target).isSymbolicLink(), 'the target is now a plain file');
+    assert.strictEqual(fs.statSync(target).mode & 0o777, 0o604, 'the restored file takes the snapshot copy mode 0604, not the link target mode 0600');
+    assert.strictEqual(fs.statSync(outside).mode & 0o777, 0o600, 'the link target mode is untouched');
   } finally { clean(proj, outDir); }
 });
 
