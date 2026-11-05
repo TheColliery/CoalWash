@@ -192,13 +192,20 @@ function maskInline(line) {
 // 29n F470-d (T-D row 51): one stored span can be referenced many times, so the expansion has a bound. Past UNMASK_MAX_CHARS a
 // further reference stays as its placeholder character (visible and unmatched), never an unbounded copy of the span.
 const UNMASK_MAX_CHARS = 1 << 20;
-export function unmask(s, spans) { // exported for the 29n F470-d witness (the export is a test seam, no behaviour change)
+// 29bs fire 590 §1: ONE expansion budget for the whole run (every document, every link destination and heading), in characters.
+// A bound that holds per item and not for the whole still lets many items add up to any size, so the sum is bounded here too.
+export const LINK_RUN_EXPANSION_MAX = 1 << 23;
+// unmask(s, spans, budget?): a span that does not fit stays as its placeholder character and counts in budget.refused. The budget
+// object is { left, refused }; with none given, each call gets its own (the 29n per-call bound, unchanged). A refusal is never silent.
+export function unmask(s, spans, budget = null) { // exported for the 29n F470-d witness (the export is a test seam, no behaviour change)
+  const b = budget || { left: UNMASK_MAX_CHARS, refused: 0 };
   let out = '';
   for (const ch of s) {
     const cp = ch.codePointAt(0);
     if (cp >= CODE_BASE && cp < CODE_BASE + spans.length) {
       const span = spans[cp - CODE_BASE];
-      out += out.length + span.length > UNMASK_MAX_CHARS ? ch : span;
+      if (out.length + span.length > UNMASK_MAX_CHARS || span.length > b.left) { b.refused++; out += ch; }
+      else { b.left -= span.length; out += span; }
     }
     else if (cp >= ESC_BASE && cp < ESC_BASE + 0x80) out += String.fromCharCode(cp - ESC_BASE);
     else out += ch;
@@ -255,7 +262,7 @@ const LINK_DEST = String.raw`(<[^<>\n]*>|(?:[^()\s]|\([^()\s]*\))*)`;
 const LINK_TITLE = String.raw`(?:\s+(?:"[^"]*"|'[^']*'|\([^()]*\)))?`;
 const INLINE_LINK = new RegExp(String.raw`(!?)\[` + LINK_TEXT + String.raw`\]\(\s*` + LINK_DEST + LINK_TITLE + String.raw`\s*\)`, 'g');
 
-function renderInline(raw) {
+function renderInline(raw, budget = null) {
   const { masked, spans } = maskInline(raw);
   let t = masked.replace(INLINE_LINK, (m, bang, text) => text);
   t = t.replace(/<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*)>/g, '$1');     // autolink (unmeasured): its URL is its text
@@ -271,16 +278,16 @@ function renderInline(raw) {
   t = t.replace(/<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?\/?>/g, '');       // raw HTML tag: removed, inner text stays
   t = stripUnderscoreEmphasis(t);
   t = decodeEntities(t);                                                   // after emphasis: a decoded `_` is literal
-  return unmask(t, spans);
+  return unmask(t, spans, budget);
 }
 
 const SLUG_DROP = /[^\p{Alphabetic}\p{M}\p{Nd}\p{Pc}\p{Join_Control} -]/gu;
 
 // THE slug function (CWK-098). Takes the heading's raw Markdown source, returns the base slug
 // before the occurrence counter.
-export function slugifyHeading(rawHeading) {
+export function slugifyHeading(rawHeading, budget = null) {
   let lower = '';
-  for (const ch of renderInline(String(rawHeading))) lower += ch.toLowerCase();
+  for (const ch of renderInline(String(rawHeading), budget)) lower += ch.toLowerCase();
   return lower.replace(SLUG_DROP, '').replace(/ /g, '-');
 }
 
@@ -324,16 +331,22 @@ function proseLines(text) {
   return out;
 }
 
-export function headingAnchors(text) {
+// 29bs fire 590 §1: opts.budget is the run's shared expansion budget (else each heading gets its own). opts.cutLines receives the
+// line of every heading whose expansion was refused, and such a heading adds NO anchor: its slug would be built from cut text.
+export function headingAnchors(text, opts = {}) {
   const counter = new HeadingAnchors();
   const linkable = new Set();
-  for (const { line } of proseLines(text)) {
+  for (const { n, line } of proseLines(text)) {
     const m = /^ {0,3}#{1,6}(?:[ \t]+(.*?))?[ \t]*$/.exec(line);
     if (!m) continue;
     let content = m[1] || '';
     if (/^#+$/.test(content)) content = '';
     else content = content.replace(/[ \t]+#+$/, '');
-    const anchor = counter.next(slugifyHeading(content));
+    const b = opts.budget || { left: UNMASK_MAX_CHARS, refused: 0 };
+    const refusedBefore = b.refused;
+    const slug = slugifyHeading(content, b);
+    if (b.refused > refusedBefore) { if (opts.cutLines) opts.cutLines.push(n); continue; }
+    const anchor = counter.next(slug);
     if (anchor !== '') linkable.add(anchor);
   }
   return linkable;
@@ -342,14 +355,14 @@ export function headingAnchors(text) {
 const REF_DEF = /^ {0,3}\[(?!\^)[^\]]+\]:[ \t]*(<[^<>\n]*>|\S+)/; // `[^1]: …` is a GFM footnote, not a link
 const HTML_REF = /<(?:a|img)\b[^>]*?\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 
-export function extractLinks(text) {
+export function extractLinks(text, budget = null) {
   const links = [];
   for (const { n, line } of proseLines(text)) {
     const { masked, spans } = maskInline(line);
-    for (const m of masked.matchAll(INLINE_LINK)) links.push({ line: n, dest: unmask(m[3], spans) });
+    for (const m of masked.matchAll(INLINE_LINK)) links.push({ line: n, dest: unmask(m[3], spans, budget) });
     const def = REF_DEF.exec(masked);
-    if (def) links.push({ line: n, dest: unmask(def[1], spans) });
-    for (const m of masked.matchAll(HTML_REF)) links.push({ line: n, dest: unmask(m[1] ?? m[2], spans) });
+    if (def) links.push({ line: n, dest: unmask(def[1], spans, budget) });
+    for (const m of masked.matchAll(HTML_REF)) links.push({ line: n, dest: unmask(m[1] ?? m[2], spans, budget) });
   }
   return links;
 }
@@ -380,8 +393,15 @@ const MARKDOWN = /\.(md|markdown)$/i;
 
 // root: absolute repo root. files: repo-relative POSIX paths to scan. tracked: Set of
 // repo-relative tracked paths, or null for existence-only.
-export function checkLinks({ root, files, tracked }) {
+// A diagnostic prints a link destination or a fragment, which the document chose: a bounded line, whatever its size.
+const LINK_DIAG_MAX = 200;
+const clip = (s) => (s.length > LINK_DIAG_MAX ? `${s.slice(0, LINK_DIAG_MAX)}...[${s.length} chars]` : s);
+
+// expansionMax: the run's expansion budget in characters (a test seam; the gate uses LINK_RUN_EXPANSION_MAX).
+export function checkLinks({ root, files, tracked, expansionMax = LINK_RUN_EXPANSION_MAX }) {
   const findings = [];
+  const budget = { left: expansionMax, refused: 0 }; // one budget for the whole run, shared by every document and heading
+  const cutDocs = new Set(); // a document whose headings were cut: its anchors are incomplete, and its cut is the FAIL that names it
   let checked = 0;
   let external = 0;
   const trackedDirs = new Set();
@@ -394,7 +414,12 @@ export function checkLinks({ root, files, tracked }) {
   const anchorCache = new Map();
   const anchorsOf = (rel) => {
     if (!anchorCache.has(rel)) {
-      try { anchorCache.set(rel, headingAnchors(readDocBounded(path.join(root, rel)))); } catch { anchorCache.set(rel, null); }
+      const cutLines = [];
+      try { anchorCache.set(rel, headingAnchors(readDocBounded(path.join(root, rel)), { budget, cutLines })); } catch { anchorCache.set(rel, null); }
+      if (cutLines.length) {
+        cutDocs.add(rel);
+        findings.push({ file: rel, line: cutLines[0], msg: `${cutLines.length} heading(s) past this run's expansion budget (the first at line ${cutLines[0]}): their anchors are not recorded, so this document is not fully checked` });
+      }
     }
     return anchorCache.get(rel);
   };
@@ -404,8 +429,11 @@ export function checkLinks({ root, files, tracked }) {
       findings.push({ file, line: 0, msg: `cannot read this file (${e.code || e.message}${e.detail ? `: ${e.detail}` : ''})` });
       continue;
     }
-    for (const { line, dest } of extractLinks(text)) {
-      const at = (msg) => findings.push({ file, line, msg: `link \`${dest}\` — ${msg}` });
+    const refusedBefore = budget.refused;
+    const links = extractLinks(text, budget);
+    if (budget.refused > refusedBefore) findings.push({ file, line: 0, msg: `${budget.refused - refusedBefore} link destination(s) past this run's expansion budget: this document is not fully checked` });
+    for (const { line, dest } of links) {
+      const at = (msg) => findings.push({ file, line, msg: `link \`${clip(dest)}\` — ${msg}` });
       let d = dest.trim();
       if (d.startsWith('<') && d.endsWith('>')) d = d.slice(1, -1);
       if (d === '') continue; // an empty destination is the current document
@@ -445,13 +473,14 @@ export function checkLinks({ root, files, tracked }) {
       if (MARKDOWN.test(rel)) {
         const anchors = anchorsOf(rel);
         if (!anchors) { at('its target cannot be read for headings'); continue; }
-        if (!fragmentMatches(fragment, anchors)) at(`no heading in ${rel} renders the anchor #${fragment}`);
+        if (cutDocs.has(rel)) continue; // the cut is the FAIL for that document; its anchor set is incomplete, so no verdict here
+        if (!fragmentMatches(fragment, anchors)) at(`no heading in ${rel} renders the anchor #${clip(fragment)}`);
       } else if (!LINE_ANCHOR.test(fragment)) {
-        at(`#${fragment} is not a line anchor, and ${rel} is not Markdown`);
+        at(`#${clip(fragment)} is not a line anchor, and ${rel} is not Markdown`);
       }
     }
   }
-  return { findings, checked, external, files: files.length };
+  return { findings, checked, external, files: files.length, expansion: { max: expansionMax, spent: expansionMax - budget.left } };
 }
 
 function main(argv) {

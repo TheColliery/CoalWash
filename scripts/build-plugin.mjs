@@ -174,9 +174,46 @@ export function buildDist(distRoot = dist, srcRoot = repo) {
 // difference (anything beyond the choice of line ending) still differs
 // after normalization and is still caught. Safe here specifically because
 // every DIST_ITEM is text (.json/.md/.mjs/.js) — never a binary asset.
+// 29bs fire 590 §4: one bounded, kind-gated read for every compare and every checkout read the gate makes. It is LOCAL, not config-load's
+// repoReadOutcome, on purpose: this file is loaded by the gate (verify.mjs), and a static lib import here would put that lib on the gate's
+// linking path (node/runtime.md §1). The bound is config-load's MAX_DOC_BYTES, held equal by a test. A link, a non-regular entry (a FIFO
+// would block a plain read; a device reads forever) and an over-bound file are REFUSED with a reason; an absent file is { absent: true }.
+export const DIST_READ_MAX = 4 * 1024 * 1024;
+export function readDistFile(file) {
+  let lst;
+  try { lst = fs.lstatSync(file); } catch (e) {
+    return e && (e.code === 'ENOENT' || e.code === 'ENOTDIR') ? { absent: true } : { why: 'unreadable' };
+  }
+  if (lst.isSymbolicLink()) return { why: 'link' };
+  if (!lst.isFile()) return { why: 'not-regular' };
+  if (lst.size > DIST_READ_MAX) return { why: `over the ${DIST_READ_MAX}-byte bound` };
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0)); // O_NONBLOCK: a FIFO swapped in cannot hang the open
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { why: 'not-regular' };
+    if (st.size > DIST_READ_MAX) return { why: `over the ${DIST_READ_MAX}-byte bound` };
+    const buf = Buffer.alloc(st.size);
+    let got = 0;
+    while (got < st.size) {
+      const n = fs.readSync(fd, buf, got, st.size - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    return { buf: buf.subarray(0, got) };
+  } catch { return { why: 'unreadable' }; } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } } }
+}
+
+// { same } | { refused: <reason>, side: 'a' | 'b' } | { absent: true }. A refusal is never a match and never a stale verdict.
+// side 'a' is pathA (the source), 'b' is pathB (the plugin/ copy).
 function contentEquals(pathA, pathB) {
+  const a = readDistFile(pathA);
+  const b = readDistFile(pathB);
+  if (a.why) return { refused: a.why, side: 'a' };
+  if (b.why) return { refused: b.why, side: 'b' };
+  if (a.absent || b.absent) return { absent: true };
   const norm = (buf) => buf.toString('utf8').replace(/\r\n/g, '\n');
-  return norm(fs.readFileSync(pathA)) === norm(fs.readFileSync(pathB));
+  return { same: norm(a.buf) === norm(b.buf) };
 }
 
 // Every source file under DIST_ITEMS must exist in distRoot AND match in
@@ -210,14 +247,24 @@ export function checkDist(distRoot = dist, srcRoot = repo) {
     const dst = path.join(distRoot, d.dst);
     if (!fs.existsSync(src)) out.push(`missing in source: ${d.src}`);
     else if (!fs.existsSync(dst)) out.push(`missing in plugin/: ${d.dst}`);
-    else if (!contentEquals(src, dst)) out.push(`stale in plugin/: ${d.dst}`);
+    else {
+      const c = contentEquals(src, dst);
+      if (c.refused) out.push(`cannot compare ${d.dst}: ${c.refused} on the ${c.side === 'a' ? 'source' : 'plugin/'} side (a refused read is never a match)`);
+      else if (c.absent) out.push(`cannot compare ${d.dst}: a side went absent during the check`);
+      else if (!c.same) out.push(`stale in plugin/: ${d.dst}`);
+    }
   }
   for (const item of DIST_ITEMS) {
     const srcLinked = linkAboveItem(srcRoot, item);
     for (const rel of srcLinked ? [] : filesUnder(srcRoot, item)) {
       const d = path.join(distRoot, rel);
       if (!fs.existsSync(d)) out.push(`missing in plugin/: ${rel}`);
-      else if (!contentEquals(path.join(srcRoot, rel), d)) out.push(`stale in plugin/: ${rel}`);
+      else {
+        const c = contentEquals(path.join(srcRoot, rel), d);
+        if (c.refused) out.push(`cannot compare ${rel}: ${c.refused} on the ${c.side === 'a' ? 'source' : 'plugin/'} side (a refused read is never a match)`);
+        else if (c.absent) out.push(`cannot compare ${rel}: a side went absent during the check`);
+        else if (!c.same) out.push(`stale in plugin/: ${rel}`);
+      }
     }
     const distLinked = linkAboveItem(distRoot, item);
     for (const rel of distLinked ? [] : filesUnder(distRoot, item)) {

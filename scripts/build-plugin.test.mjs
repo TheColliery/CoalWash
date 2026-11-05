@@ -382,3 +382,36 @@ test('29ax M13: a junction at the plugin document source folder is refused by na
   assert.throws(() => buildDist(dist, fx), /link/i, 'a link above the document source is refused, never followed');
   assert.ok(fs.existsSync(path.join(dist, 'README.md')), 'the old dist is left in place');
 });
+
+// 29bs fire 590 §4: the dist compare reads both sides through one bounded, kind-gated read. A file past the bound is refused by name
+// (never compared, never a false match), and an absent file keeps its meaning. The witness is on this box's real README path, so the
+// over-bound leg runs everywhere, while the FIFO leg needs a POSIX host and skips here.
+import * as BP590 from './build-plugin.mjs'; // namespace import: a missing export fails its own test, not the file
+test('fire 590 dist compare: a dist README past the bound is a named refusal, not a stale or matching verdict', () => {
+  const fx = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-f590-src-')));
+  const dist = scratchDist();
+  try {
+    fs.mkdirSync(path.join(fx, 'plugin-src'), { recursive: true });
+    fs.writeFileSync(path.join(fx, 'plugin-src', 'README.md'), 'small source\n');
+    const over = 4 * 1024 * 1024 + 1;
+    fs.writeFileSync(path.join(dist, 'README.md'), Buffer.alloc(over, 'a'));
+    const out = BP590.checkDist(dist, fx);
+    assert.ok(!out.includes('stale in plugin/: README.md'), 'an over-bound copy is not called stale by a compare that never read it: ' + JSON.stringify(out.slice(0, 3)));
+    assert.ok(out.some((l) => l.includes('README.md') && /bound/.test(l)), 'the refusal is named with its reason: ' + JSON.stringify(out.slice(0, 3)));
+  } finally { fs.rmSync(fx, { recursive: true, force: true }); fs.rmSync(dist, { recursive: true, force: true }); }
+});
+
+test('fire 590 dist compare: a FIFO at the dist README is refused without blocking (POSIX only; skipped on this host)', (t) => {
+  const fx = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-f590-fifo-src-')));
+  const dist = scratchDist();
+  try {
+    fs.mkdirSync(path.join(fx, 'plugin-src'), { recursive: true });
+    fs.writeFileSync(path.join(fx, 'plugin-src', 'README.md'), 'small source\n');
+    const fifo = path.join(dist, 'README.md');
+    const made = spawnSync('mkfifo', [fifo], { timeout: 10000 });
+    const isFifo = made.status === 0 && fs.existsSync(fifo) && fs.lstatSync(fifo).isFIFO();
+    if (!isFifo) { t.skip('no real FIFO can be made on this host'); return; }
+    const out = BP590.checkDist(dist, fx);
+    assert.ok(out.some((l) => l.includes('README.md') && /not-regular/.test(l)), 'a FIFO is refused by kind, never read: ' + JSON.stringify(out.slice(0, 3)));
+  } finally { fs.rmSync(fx, { recursive: true, force: true }); fs.rmSync(dist, { recursive: true, force: true }); }
+});

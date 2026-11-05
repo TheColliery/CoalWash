@@ -237,8 +237,7 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
   const agentBase = path.join(projectRoot, '.claude', 'agent-memory');
   let roles = [];
   // A directory junction reports as a symbolic link, so it is judged by what it resolves to; containment is still checked in addStore.
-  const isDirAt = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
-  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory() || (d.isSymbolicLink() && isDirAt(path.join(agentBase, d.name)))).map((d) => d.name).sort(); } catch { /* none */ }
+  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { /* none */ }
   for (const role of roles) addStore(`agent:${role}`, path.join(agentBase, role));
   stores.skipped = skipped;
   return stores;
@@ -725,6 +724,7 @@ export function retierScan({ projectRoot = process.cwd(), home = os.homedir(), r
   return {
     env,
     stores: out,
+    skipped: stores.skipped || [], // a store refused by a named rule: printed by retierScanLines, one line each
     flags,
     overArm,
     verdict: overArm ? `over-arm: ${overArm} store(s)` : 'no action (no store over the arm line)',
@@ -743,6 +743,7 @@ export function retierScanLines(scan) {
     lines.push(`  ${escapeRawControls(String(s.label))}: index ~${s.indexTokens} tok = ${s.band}${s.band === 'over-arm' ? ` -> demote ${s.plannedLineDemotions} line(s) + ${s.plannedTopicDemotions} unreferenced topic(s)${s.shortfall ? ' (still over after demotion — the gated wash is the next lever, never auto-condense)' : ''}` : ''}`);
     if (s.anchorLine) lines.push(`  ${s.anchorLine}`);
   }
+  for (const s of scan.skipped || []) lines.push(`  skipped ${show(s.label)}: ${show(s.reason)}`);
   for (const f of scan.flags.slice(0, CLAIM_FLAG_CAP)) {
     const parts = f.claims.map((c) => `${show(c.store)}/${show(c.file)}: ${show(c.value)}`).join(' vs ');
     lines.push(`  #55 cross-store contradiction [${show(f.key)}]: ${parts} — report only, reconcile by hand`);

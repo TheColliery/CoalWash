@@ -32,6 +32,16 @@ const escapeOne = (ch) => {
 const escapeControls = (m) => String(m).replace(CONTROL_CLASS, escapeOne);
 const ok = (m) => console.log(`  ok   ${escapeControls(m)}`);
 const fail = (m) => { console.log(`  FAIL ${escapeControls(m)}`); fails++; };
+// 29bs fire 590 §4: every checkout read goes through build-plugin's one bounded, kind-gated read. Loaded in a try, so a broken build-plugin is
+// a named FAIL and never a gate that dies before its first line. An absent file throws as the plain read did; a refused one throws its reason.
+let readCheckout = null;
+try { ({ readDistFile: readCheckout } = await import(pathToFileURL(path.join(repo, 'scripts', 'build-plugin.mjs')).href)); } catch (e) { fail(`build-plugin (checkout read): ${e.message}`); }
+function checkoutText(file) {
+  if (!readCheckout) throw new Error('the bounded checkout read is unavailable');
+  const o = readCheckout(file);
+  if (o.buf) return o.buf.toString('utf8');
+  throw new Error(o.absent ? `ENOENT: ${file}` : `refused (${o.why}): ${file}`);
+}
 // Every git spawn in this gate carries a deadline (CWK2-061 / N165-1): an unbounded wait is a hung gate, never a verdict.
 const GIT_SPAWN_TIMEOUT_MS = 60000;
 
@@ -85,7 +95,7 @@ for (const [label, p] of [
 
 console.log('skill frontmatter:');
 try {
-  const skill = fs.readFileSync(path.join(repo, 'skills', 'coalwash', 'SKILL.md'), 'utf8');
+  const skill = checkoutText(path.join(repo, 'skills', 'coalwash', 'SKILL.md'));
   const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(skill);
   if (!fm) fail('SKILL.md has no frontmatter block');
   else if (/^name:\s*coalwash\s*$/m.test(fm[1])) ok("SKILL.md frontmatter name = 'coalwash'");
@@ -133,7 +143,7 @@ try {
 } catch (e) { fail(`description target scan: ${e.message}`); }
 for (const [label, p, isSkill] of descTargets) {
   try {
-    const text = fs.readFileSync(p, 'utf8');
+    const text = checkoutText(p);
     const len = (frontmatterField(text, 'description') || '').length + (frontmatterField(text, 'when_to_use') || '').length;
     if (isSkill && len === 0) fail(`${label}: frontmatter description missing/unparsed`);
     else if (len > DESC_CAP) fail(`${label}: description+when_to_use ${len} chars exceeds the ${DESC_CAP}-char cap`);
@@ -148,7 +158,7 @@ for (const [label, p, isSkill] of descTargets) {
 // 0 chars and pass — that's the exact hole the exemplar's first draft had.
 console.log('plugin.json description cap:');
 try {
-  let pjText = fs.readFileSync(path.join(repo, '.claude-plugin', 'plugin.json'), 'utf8');
+  let pjText = checkoutText(path.join(repo, '.claude-plugin', 'plugin.json'));
   if (pjText.charCodeAt(0) === 0xFEFF) pjText = pjText.slice(1);
   const pj = JSON.parse(pjText);
   if (typeof pj.description !== 'string') fail(`.claude-plugin/plugin.json: description is not a string (${pj.description === undefined ? 'missing' : typeof pj.description})`);
@@ -159,11 +169,11 @@ try {
 
 console.log('version pins (.github issue templates):');
 try {
-  const pj = JSON.parse(fs.readFileSync(path.join(repo, '.claude-plugin', 'plugin.json'), 'utf8'));
+  const pj = JSON.parse(checkoutText(path.join(repo, '.claude-plugin', 'plugin.json')));
   const tplDir = path.join(repo, '.github', 'ISSUE_TEMPLATE');
   let pins = 0;
   for (const name of fs.readdirSync(tplDir)) {
-    const text = fs.readFileSync(path.join(tplDir, name), 'utf8');
+    const text = checkoutText(path.join(tplDir, name));
     for (const line of text.split(/\r?\n/)) {
       if (!line.includes('version-pin:')) continue;
       pins++;
@@ -176,19 +186,19 @@ try {
 
 console.log('plugin manifest:');
 try {
-  const pj = JSON.parse(fs.readFileSync(path.join(repo, '.claude-plugin', 'plugin.json'), 'utf8'));
+  const pj = JSON.parse(checkoutText(path.join(repo, '.claude-plugin', 'plugin.json')));
   if (pj.name === 'coalwash') ok("plugin.json name = 'coalwash'"); else fail(`plugin.json name = '${pj.name}' (want 'coalwash')`);
   if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(pj.version || '')) ok(`plugin.json version '${pj.version}' is semver (pre-release accepted)`);
   else fail(`plugin.json version '${pj.version}' not semver`);
   if (pj.license === 'Apache-2.0') ok('plugin.json license = Apache-2.0'); else fail(`plugin.json license = '${pj.license}' (series license is Apache-2.0)`);
-  const hj = fs.readFileSync(path.join(repo, 'hooks', 'hooks.json'), 'utf8');
+  const hj = checkoutText(path.join(repo, 'hooks', 'hooks.json'));
   if (hj.includes('${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js')) ok('hooks.json wires SessionStart via ${CLAUDE_PLUGIN_ROOT}/hooks');
   else fail('hooks.json does not wire ${CLAUDE_PLUGIN_ROOT}/hooks/coalwash-conductor.js');
 } catch (e) { fail(`plugin manifest: ${e.message}`); }
 
 console.log('marketplace.json:');
 try {
-  const mj = JSON.parse(fs.readFileSync(path.join(repo, '.claude-plugin', 'marketplace.json'), 'utf8'));
+  const mj = JSON.parse(checkoutText(path.join(repo, '.claude-plugin', 'marketplace.json')));
   if (mj.plugins?.[0]?.source === './plugin') ok('marketplace.json points at ./plugin');
   else fail(`marketplace.json plugins[0].source = '${mj.plugins?.[0]?.source}' (want './plugin')`);
   if (mj.plugins?.[0]?.version === undefined) ok('marketplace entry carries no version (plugin.json is the SSoT)');
@@ -246,7 +256,7 @@ try {
     schema: CONFIG_SCHEMA,
     retiredKeys: RETIRED_KEYS,
     mdFiles, hookFiles, builderFiles,
-    read: (p) => fs.readFileSync(path.join(repo, p), 'utf8'),
+    read: (p) => checkoutText(path.join(repo, p)), // a refused read throws its reason (config-keys names it); an absent file throws as the plain read did
   });
   for (const x of r.findings) { if (x.level === 'FAIL') fail(x.msg); }
   const skips = r.findings.filter((x) => x.level === 'SKIP');
@@ -329,7 +339,14 @@ try {
       }
       return out;
     };
-    const readOrNull = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } };
+    // 29bs fire 590 §4: an absent surface keeps its meaning (null); a refused read (a link, a FIFO, an over-bound file) is a NAMED FAIL.
+    const readOrNull = (p) => {
+      if (!readCheckout) { fail(`cannot read ${path.relative(repo, p)}: the bounded checkout read is unavailable`); return null; }
+      const o = readCheckout(p);
+      if (o.buf) return o.buf.toString('utf8');
+      if (!o.absent) fail(`cannot read ${path.relative(repo, p)}: ${o.why} (a refused checkout read is named, never compared)`);
+      return null;
+    };
     const surfaces = [];
     for (const f of [...walkMd(path.join(repo, 'skills')), ...walkMd(path.join(repo, 'commands'))]) {
       surfaces.push({ label: rel(f), text: readOrNull(f) });

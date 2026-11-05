@@ -254,3 +254,33 @@ test('F470-b a bin row listed twice is decoded once', () => {
     assert.strictEqual(texts.length, 1, `one decode per record: ${JSON.stringify(texts)}`);
   } finally { fs.rmSync(proj, { recursive: true, force: true }); }
 });
+
+// 29bs fire 590 §2: the approved list has a cumulative decoded-byte budget. Past it decoding stops, nothing more is retained, and the
+// list says it was cut. A cut list can only make candidates look unapproved, never fewer: a missing approval is a false alarm, never a silenced one.
+import * as AD590 from './anchor-diff.mjs'; // namespace import: a missing export fails its own test, not the file
+
+test('fire 590 approved list: records past the decoded-byte budget are not retained, and the list is marked cut', () => {
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'anc-f590-')));
+  try {
+    const orig = path.join(proj, 'memory', 'a.md');
+    const blob = 'b'.repeat(1000);
+    for (let i = 0; i < 5; i++) f470Record(proj, f470Fat, { content: blob, original: orig, now: Date.now() });
+    const r = AD590.approvedSinceBudget(proj, orig, 0, 2500);
+    const retained = r.texts.reduce((n, t) => n + Buffer.byteLength(t), 0);
+    assert.strictEqual(r.texts.length, 2, `two 1000-byte records fit a 2500-byte budget: ${r.texts.length}`);
+    assert.ok(retained <= 2500, `the retained text stays under the budget: ${retained}`);
+    assert.strictEqual(r.cut, true, 'the approved list says it was cut');
+  } finally { fs.rmSync(proj, { recursive: true, force: true }); }
+});
+
+test('fire 590 approved list: a store under the budget is unchanged and not marked cut', () => {
+  const proj = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'anc-f590-small-')));
+  try {
+    const orig = path.join(proj, 'memory', 'a.md');
+    f470Record(proj, f470Fat, { content: 'alpha', original: orig, now: Date.now() });
+    f470Record(proj, f470Fat, { content: 'beta', original: orig, now: Date.now() });
+    const r = AD590.approvedSinceBudget(proj, orig, 0);
+    assert.strictEqual(r.texts.length, 2, 'both records are retained');
+    assert.strictEqual(r.cut, false, 'nothing was cut');
+  } finally { fs.rmSync(proj, { recursive: true, force: true }); }
+});

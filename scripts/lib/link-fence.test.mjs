@@ -104,20 +104,22 @@ test('pinVerdict: a FIFO at the pin path returns at once, fail-closed', async (t
   } finally { clean(dir); }
 });
 
-test('collectStores: a store reached through a directory junction is admitted under its alias', (t) => {
+test('collectStores: a linked role folder (directory junction) is not admitted, and nothing in it is rewritten', (t) => {
   const proj = tmp('cwg-junc-proj-');
   const home = tmp('cwg-junc-home-');
   try {
     const real = path.join(proj, '.claude', 'agent-memory', 'role-real');
     fs.mkdirSync(real, { recursive: true });
-    fs.writeFileSync(path.join(real, 'MEMORY.md'), '# index\n');
+    const indexFile = path.join(real, 'MEMORY.md');
+    fs.writeFileSync(indexFile, '# index\n');
     const alias = path.join(proj, '.claude', 'agent-memory', 'role-alias');
     try { fs.symlinkSync(real, alias, 'junction'); } catch (e) {
       if (e && ['EPERM', 'EACCES', 'ENOSYS'].includes(e.code)) { t.skip('no directory junction can be made on this host'); return; }
       throw e;
     }
     const stores = collectStores({ projectRoot: proj, home });
-    assert.ok(stores.some((s) => s.label === 'agent:role-alias'), 'the junctioned store is admitted: ' + stores.map((s) => s.label).join(','));
+    assert.ok(!stores.some((s) => s.label === 'agent:role-alias'), 'a linked role folder is not admitted: ' + stores.map((s) => s.label).join(','));
+    assert.strictEqual(fs.readFileSync(indexFile, 'utf8'), '# index\n', 'nothing in the linked folder is rewritten');
   } finally { clean(proj, home); }
 });
 

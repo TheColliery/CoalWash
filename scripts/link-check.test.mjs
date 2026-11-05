@@ -392,3 +392,56 @@ test('F470-d one stored span cannot expand past the output bound (many reference
   const out = f470Unmask(masked, [span]);
   assert.ok(out.length < 2 * 1024 * 1024, `the expansion is bounded, not ${out.length} chars`);
 });
+
+// 29bs fire 590 §1: one expansion budget for the whole run. A span past it stays its placeholder and the document it cut is a named FAIL.
+function lcRoot(files) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwg-lc-')));
+  for (const [rel, text] of Object.entries(files)) {
+    const p = path.join(root, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, text);
+  }
+  return root;
+}
+
+test('fire 590 heading: a heading whose code span is past the run budget is a named FAIL for its file, and adds no anchor from cut text', () => {
+  const code = 'x'.repeat(100); // unbounded, the full anchor is title-xxx...; past the run budget it is shortened to title-
+  const root = lcRoot({ 'a.md': '## Title `' + code + '`\n', 'index.md': '[t](a.md#title-' + code + ')\n' });
+  try {
+    const r = checkLinks({ root, files: ['index.md'], tracked: null, expansionMax: 50 });
+    assert.ok(r.findings.some((f) => f.file === 'a.md' && /expansion budget/.test(f.msg)), 'the document whose heading was cut is named: ' + JSON.stringify(r.findings));
+    assert.ok(((r.expansion || {}).spent || 0) <= 50, 'the run spends no more than its budget');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('fire 590 aggregate: documents each under the per-call bound, past the run budget in sum: one FAIL, and the spend stays at the budget', () => {
+  const span = 'y'.repeat(300);
+  const files = {};
+  let index = '';
+  for (let i = 0; i < 4; i++) {
+    files[`d${i}.md`] = '## `' + span + '`\n';
+    index += `[h${i}](d${i}.md#${span})\n`;
+  }
+  files['index.md'] = index;
+  const root = lcRoot(files);
+  try {
+    const r = checkLinks({ root, files: ['index.md'], tracked: null, expansionMax: 1000 });
+    assert.strictEqual(r.findings.length, 1, 'one FAIL for the run: ' + JSON.stringify(r.findings.map((f) => f.file + ': ' + f.msg)));
+    assert.strictEqual(r.findings[0].file, 'd3.md', 'the document the budget ran out in is named');
+    assert.ok(r.expansion.spent <= 1000, 'the spend stays at or under the budget: ' + r.expansion.spent);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('fire 590: a large normal document still passes with the default run budget', () => {
+  let md = '';
+  let index = '';
+  for (let i = 0; i < 2000; i++) {
+    md += `## Section ${i} with \`code${i}\`\n\n`;
+    index += `[s${i}](big.md#section-${i}-with-code${i})\n`;
+  }
+  const root = lcRoot({ 'big.md': md, 'index.md': index });
+  try {
+    const r = checkLinks({ root, files: ['index.md'], tracked: null });
+    assert.strictEqual(r.findings.length, 0, 'no finding on a normal document: ' + JSON.stringify(r.findings.slice(0, 3)));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

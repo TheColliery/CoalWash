@@ -42,6 +42,24 @@ test('printed fields: a retier store label with a right-to-left override prints 
   assert.ok(out.includes('store' + ESCAPED + 'x'), 'the store label is escaped on its line');
 });
 
+test('printed fields: a store collectStores skipped prints as one escaped line with its reason', () => {
+  // A control character cannot be put in a folder name on Windows, so the skip entry is built directly: the printed line is what is pinned.
+  const scan = {
+    env: { targetTokens: 1, armAt: 1, disarmAt: 1, fillCeiling: 1 },
+    overArm: 0,
+    flags: [],
+    stores: [],
+    skipped: [{ label: 'agent:a' + BIDI + 'b\nc', reason: 'the MEMORY.md name resolves to x' + '\u0007' + 'y, not this store' }],
+  };
+  const out = String(retierScanLines(scan));
+  assert.ok(!out.includes(BIDI), 'the raw override must not reach the printed line');
+  assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f]/.test(out), 'no raw control character reaches the printed output');
+  const line = out.split('\n').find((l) => l.includes('agent:a' + ESCAPED + 'b'));
+  assert.ok(line, 'the skipped store prints as one line with its label escaped');
+  assert.ok(line.includes('resolves to x'), 'the same line carries the reason');
+  assert.strictEqual(out.split('\n').filter((l) => l.includes('agent:a' + ESCAPED)).length, 1, 'one line per skipped store');
+});
+
 test('printed fields: writeguard-list prints a snapshot name escaped, the stored name stays raw', (t) => {
   const proj = tmp('cwg-pf-');
   const home = tmp('cwg-home-');

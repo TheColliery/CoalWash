@@ -1366,3 +1366,33 @@ test('F472-1 the shared keep-name renderer escapes a line break and a bidi contr
   assert.ok(!/[\r\n]/.test(named), `no raw line break from a keep: ${JSON.stringify(named)}`);
   assert.ok(!named.includes(String.fromCharCode(0x202e)), 'no raw bidi control from a keep');
 });
+
+// 29bs fire 590 §3: a restore has a SESSION budget as well as a per-file one: min(RESTORE_SESSION_CEIL_BYTES, max(RESTORE_FLOOR_BYTES,
+// sum of the compressed sizes * RESTORE_MAX_RATIO)). Past it the restore stops, names the session bound, and keeps the files already written.
+const SID_F590 = 'f5900590-bbbb-cccc-dddd-eeeeeeeeeeee';
+test('fire 590 restore: the session ceiling is exported at 4 GiB beside the per-file floor of 64 MiB', () => {
+  assert.strictEqual(EA.RESTORE_SESSION_CEIL_BYTES, 4 * 1024 * 1024 * 1024, 'the session ceiling is 4 GiB');
+  assert.strictEqual(C7_FLOOR, 64 * 1024 * 1024, 'the per-file floor is 64 MiB');
+});
+
+test('fire 590 restore: a session whose inflated files pass the session bound is refused by name, and the files already written stay', (t) => {
+  const big = Buffer.alloc(1024 * 1024, 'a'); // 1 MiB inflated, compresses to a few hundred bytes
+  const arch = c7Archive({ [`${SID_F590}/one.jsonl`]: big, [`${SID_F590}/two.jsonl`]: big, [`${SID_F590}/three.jsonl`]: big });
+  const to = c7Dir('f590');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const r = restoreSession(SID_F590, { archiveDir: arch, to, sessionCeilBytes: 1.5 * 1024 * 1024 }); // the seam: a 1.5 MiB session bound
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /session bound/, 'the refusal names the session bound: ' + r.error);
+  assert.strictEqual(r.files.length, 1, 'one 1 MiB file fits 1.5 MiB, the second does not: ' + r.files.length);
+  assert.ok(fs.existsSync(path.join(to, r.files[0].rel)), 'the file already written stays');
+});
+
+test('fire 590 restore: an ordinary multi-file session restores whole under the default session budget', (t) => {
+  const big = Buffer.alloc(1024 * 1024, 'b');
+  const arch = c7Archive({ [`${SID_F590}/one.jsonl`]: big, [`${SID_F590}/two.jsonl`]: big, [`${SID_F590}/three.jsonl`]: big });
+  const to = c7Dir('f590-ok');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const r = restoreSession(SID_F590, { archiveDir: arch, to });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(r.files.length, 3, 'all three files restore');
+});

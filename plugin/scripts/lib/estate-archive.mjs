@@ -937,6 +937,10 @@ function isBareId(id) {
 export const RESTORE_FLOOR_BYTES = 64 * 1024 * 1024;
 export const RESTORE_MAX_RATIO = 64;
 export const RESTORE_CEIL_BYTES = 1024 * 1024 * 1024;
+// 29bs fire 590 §3: the whole session's inflated bytes, not only one file's. A session of many files each under RESTORE_CEIL_BYTES
+// could otherwise inflate without end. The session bound is min(this, max(RESTORE_FLOOR_BYTES, sum of compressed sizes * RESTORE_MAX_RATIO)),
+// so the 4 GiB ceiling is 4x the 1 GiB per-file ceiling and a session of ordinary size never meets it.
+export const RESTORE_SESSION_CEIL_BYTES = 4 * 1024 * 1024 * 1024;
 export const RESTORE_MAX_GZ_BYTES = 256 * 1024 * 1024;
 export function restoreInflateBound(gzBytes) {
   return Math.min(RESTORE_CEIL_BYTES, Math.max(RESTORE_FLOOR_BYTES, gzBytes * RESTORE_MAX_RATIO));
@@ -972,7 +976,7 @@ function readArchiveHandle(gzPath, bound) {
 // CC's live tree unless an explicit --to points there (the default tmpdir
 // guarantees it). Scans the archive dir itself (not the index), so a session
 // archived without an index row still restores.
-export function restoreSession(sessionId, { archiveDir, to = null, tombstones } = {}) {
+export function restoreSession(sessionId, { archiveDir, to = null, tombstones, sessionCeilBytes = RESTORE_SESSION_CEIL_BYTES } = {}) { // sessionCeilBytes: the test seam for the session bound
   if (!isBareId(sessionId)) return { ok: false, error: `not a bare session id: '${sessionId}'` };
   let slugs;
   try { slugs = fs.readdirSync(archiveDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch {
@@ -1015,6 +1019,13 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones } 
   // dig-index search is a compact-row best-effort; restore pulls real bytes, so
   // the anchor match here is thorough. One-shot recovery path, never a hot loop.
   const wantTombstoneScan = tombstones && Array.isArray(tombstones.anchors) && tombstones.anchors.length;
+  // 29bs fire 590 §3: the session bound is fixed BEFORE the loop, from the compressed sizes the sources report. Every file's inflate is
+  // capped at what the session has left, and every inflated byte is taken from that remainder, so combinedText (the same bytes, plus a
+  // newline per file) is bounded by the same budget. A stat that fails sizes as 0: the per-file read refuses what it cannot open.
+  let sumGz = 0;
+  for (const s of sources) { try { sumGz += fs.statSync(s.gzPath).size; } catch { /* refused by the per-file read below */ } }
+  const sessionBound = Math.min(sessionCeilBytes, Math.max(RESTORE_FLOOR_BYTES, sumGz * RESTORE_MAX_RATIO));
+  let remaining = sessionBound;
   let combinedText = '';
   for (const s of sources) {
     try {
@@ -1035,11 +1046,18 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones } 
       if (got.over !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is ${got.over} bytes, over the ${RESTORE_MAX_GZ_BYTES}-byte bound`, dir, files };
       if (got.grew !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is longer than the ${got.grew} bytes its handle reported (it grew after its size was read)`, dir, files };
       const gz = got.buf;
+      const fileBound = restoreInflateBound(gz.length);
+      if (remaining <= 0) return { ok: false, error: `restore refused on ${s.rel}: the session has reached its ${sessionBound}-byte session bound`, dir, files };
       let buf;
-      try { buf = zlib.gunzipSync(gz, { maxOutputLength: restoreInflateBound(gz.length) }); } catch (e) {
-        if (e && e.code === 'ERR_BUFFER_TOO_LARGE') return { ok: false, error: `restore refused on ${s.rel}: it would inflate past ${restoreInflateBound(gz.length)} bytes for a ${gz.length}-byte archive`, dir, files };
+      try { buf = zlib.gunzipSync(gz, { maxOutputLength: Math.min(fileBound, remaining) }); } catch (e) {
+        if (e && e.code === 'ERR_BUFFER_TOO_LARGE') {
+          return remaining < fileBound
+            ? { ok: false, error: `restore refused on ${s.rel}: it would pass the ${sessionBound}-byte session bound (the whole session's inflated bytes; the files already written stay)`, dir, files }
+            : { ok: false, error: `restore refused on ${s.rel}: it would inflate past ${fileBound} bytes for a ${gz.length}-byte archive`, dir, files };
+        }
         throw e;
       }
+      remaining -= buf.length;
       const dest = path.join(dir, s.rel);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       // fire 67 (PR #18, r4231603560): the FINAL path is checked too. A link already there (a symlink, dangling or not, or a junction) or

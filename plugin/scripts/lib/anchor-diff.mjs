@@ -126,9 +126,17 @@ function oldestAnchor(txDir, physTarget) {
 // Every bin record (fat-bin + store.old) naming `physTarget`, recorded AT OR
 // AFTER `sinceAt` — CW's own approved drops for this file since the anchor.
 // Content via tailings.mjs's own pull-only restoreFromBin (never a fresh read).
-export function approvedSince(projectRoot, physTarget, sinceAt) { // exported for the 29n F470-b witness (a seam, no behaviour change)
+// 29bs fire 590 §2: the cumulative decoded-byte budget of one approved list, named like apply.mjs's STAGED_BYTES_MAX.
+export const APPROVED_BYTES_MAX = 16 * MAX_DOC_BYTES;
+
+// The budgeted form: { texts, cut }. Past maxBytes of decoded content, decoding stops, the record that crosses the budget is dropped
+// un-retained, and cut is set. A cut list can only make candidates look UNAPPROVED, never fewer: a missing approval is a false alarm,
+// and an approval that was never read must never silence a candidate.
+export function approvedSinceBudget(projectRoot, physTarget, sinceAt, maxBytes = APPROVED_BYTES_MAX) {
   const texts = [];
   const decoded = new Set(); // 29n F470-b: one record decodes once, however many times the bin lists it (bin:id is the record)
+  let bytes = 0;
+  let cut = false;
   for (const name of [FAT_BIN_NAME, STORE_OLD_NAME]) {
     for (const item of listBin(projectRoot, name)) {
       if (!item || item.at < sinceAt || !samePath(item.original, physTarget)) continue;
@@ -138,10 +146,19 @@ export function approvedSince(projectRoot, physTarget, sinceAt) { // exported fo
       // restoreFromBin hands back BYTES (G3-3). This is an ANALYSIS path — it
       // scans the text for structured tokens — so it decodes HERE, at the call,
       // which is where that choice belongs and where it is visible.
-      if (content !== null) texts.push(content.toString('utf8'));
+      if (content === null) continue;
+      if (bytes + content.length > maxBytes) { cut = true; break; }
+      bytes += content.length;
+      texts.push(content.toString('utf8'));
     }
+    if (cut) break;
   }
-  return texts;
+  return { texts, cut };
+}
+
+// The array form (29n F470-b witness and any caller that wants only the texts): the budget applies, the cut flag is not returned.
+export function approvedSince(projectRoot, physTarget, sinceAt) { // exported for the 29n F470-b witness (a seam, no behaviour change)
+  return approvedSinceBudget(projectRoot, physTarget, sinceAt).texts;
 }
 
 // The filesystem-driven report. Returns null (fail-silent, rail c) when the
@@ -163,9 +180,9 @@ export function anchorDiff(filePath, { projectRoot, home = os.homedir() } = {}) 
     const anchorText = readRepoFileBounded(anchor.snapFile, txDir, MAX_DOC_BYTES);
     const currentText = readRepoFileBounded(phys, null, MAX_DOC_BYTES);
     if (anchorText === null || currentText === null) return null; // unreadable — fail-silent, never guess
-    const approvedTexts = approvedSince(projectRoot, phys, anchor.at);
-    const { candidates, counts } = computeCandidates({ anchorText, currentText, approvedTexts });
-    return { file: phys, snapshotPath: anchor.snapDir, snapshotAt: anchor.at, approvedCount: approvedTexts.length, candidates, counts };
+    const approved = approvedSinceBudget(projectRoot, phys, anchor.at);
+    const { candidates, counts } = computeCandidates({ anchorText, currentText, approvedTexts: approved.texts });
+    return { file: phys, snapshotPath: anchor.snapDir, snapshotAt: anchor.at, approvedCount: approved.texts.length, approvedCut: approved.cut, candidates, counts };
   } catch {
     return null; // never throw — a read-only advisory must never surface as an error mid-wash
   }
@@ -177,5 +194,6 @@ export function anchorDiff(filePath, { projectRoot, home = os.homedir() } = {}) 
 export function anchorDiffLine(report) {
   if (!report || !report.candidates.length) return '';
   const rel = path.basename(report.file);
-  return `[CoalWash] ${rel}: ${report.candidates.length} structured-token candidate(s) missing since an older generation (snapshot ${path.basename(report.snapshotPath)}) — not in the current file or in ${report.approvedCount} recorded drop(s) since; check the snapshot before re-deriving, never assume lost.`;
+  const cutNote = report.approvedCut ? ` The recorded-drop list was cut at its ${APPROVED_BYTES_MAX}-byte budget, so a candidate may be listed here although an approval for it exists beyond the cut.` : '';
+  return `[CoalWash] ${rel}: ${report.candidates.length} structured-token candidate(s) missing since an older generation (snapshot ${path.basename(report.snapshotPath)}) — not in the current file or in ${report.approvedCount} recorded drop(s) since; check the snapshot before re-deriving, never assume lost.${cutNote}`;
 }
