@@ -519,8 +519,15 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'writeguard-restore') {
-    // The snapshot name is the first argument that is not a flag and not the value of --platform or --out (29g fire 412: the flag may come first).
-    const name = args.slice(1).find((a, i, arr) => !a.startsWith('--') && arr[i - 1] !== '--platform' && arr[i - 1] !== '--out');
+    // The known flags and their values come out first; the first argument left is the snapshot name, so a name beginning -- still restores.
+    const restArgs = args.slice(1);
+    const leftover = [];
+    for (let i = 0; i < restArgs.length; i++) {
+      if (restArgs[i] === '--platform' || restArgs[i] === '--out') { i++; continue; }
+      if (restArgs[i].startsWith('--platform=')) continue;
+      leftover.push(restArgs[i]);
+    }
+    const name = leftover[0];
     const rootOpts = rootOptsFor(args);
     if (!rootOpts) { console.error(PLATFORM_USAGE); process.exitCode = 1; return; }
     // --out <file>: the file this command CREATES, after the bytes verify. A missing value, or another flag in its place, is a usage error.
@@ -540,6 +547,8 @@ function main() {
         // listWriteguard (the same source writeguard-list itself reads) to
         // tell the two apart before choosing the message.
         const existed = listWriteguard(projectRoot, { home: os.homedir() }).some((row) => row.name === name);
+        // A flag-shaped argument that names no snapshot is an unknown flag, not a name: usage, not not-found.
+        if (!existed && name.startsWith('--')) { console.error(USAGE); process.exitCode = 1; return; }
         console.error(existed
           ? `writeguard-restore: snapshot '${escapeRawControls(String(name))}' exists but FAILED integrity verification (tampered, or unreadable) — refusing to serve unverified bytes`
           : `writeguard-restore: snapshot '${escapeRawControls(String(name))}' not found`);
@@ -547,8 +556,11 @@ function main() {
         return;
       }
       if (outPath) {
-        // wx creates only: it follows no link, a dangling one included, so a name already taken refuses and nothing is written.
+        // wx creates only, but Windows follows a dangling reparse point through it, so the name is looked at first: anything there refuses.
+        let free = false;
+        try { fs.lstatSync(outPath); } catch (e) { free = Boolean(e && e.code === 'ENOENT'); }
         try {
+          if (!free) throw Object.assign(new Error('name taken'), { code: 'EEXIST' });
           fs.writeFileSync(outPath, r.content, { flag: 'wx', mode: 0o600 });
         } catch (e) {
           const shown = escapeRawControls(String(outPath));

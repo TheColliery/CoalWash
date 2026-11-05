@@ -101,7 +101,7 @@ test('0p writeguard-restore via CLI: a snapshot that IS listed but fails integri
 });
 
 // The restore CLI writes the file itself, with wx (create only, follows no link), and only after the bytes verified.
-test('writeguard-restore --out: writes the verified original to the named new file, byte-exact, owner-only where the volume keeps modes', (t) => {
+test('writeguard-restore --out: writes the verified original to the named new file, byte-exact', () => {
   const { home, proj } = sandbox();
   try {
     const gov = path.join(proj, 'MEMORY.md');
@@ -109,18 +109,47 @@ test('writeguard-restore --out: writes the verified original to the named new fi
     fs.writeFileSync(gov, orig, 'utf8');
     const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
     const out = path.join(proj, 'MEMORY.md.restored');
+    const r = run(proj, home, ['writeguard-restore', path.basename(snap), '--out', out]);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout, '', 'nothing on stdout when --out names the file');
+    assert.ok(fs.existsSync(out), 'the destination appears: ' + r.stderr);
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), orig, 'the file holds the byte-exact original');
+    assert.ok(r.stderr.includes(out), 'the success line names the written file: ' + r.stderr);
+  } finally { clean(home, proj); }
+});
+
+test('writeguard-restore --out: the restored file is owner-only where the volume keeps modes', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n', 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const out = path.join(proj, 'MEMORY.md.restored');
     const probe = path.join(proj, 'mode-probe');
     fs.writeFileSync(probe, 'p');
     fs.chmodSync(probe, 0o600);
     const modesKept = (fs.statSync(probe).mode & 0o777) === 0o600;
     fs.rmSync(probe);
+    if (!modesKept) { t.skip('POSIX modes are not kept on this volume, so the 0600 mode cannot be read here'); return; }
     const r = run(proj, home, ['writeguard-restore', path.basename(snap), '--out', out]);
     assert.strictEqual(r.status, 0, r.stderr);
-    assert.strictEqual(r.stdout, '', 'nothing on stdout when --out names the file');
-    assert.strictEqual(fs.readFileSync(out, 'utf8'), orig, 'the file holds the byte-exact original');
-    assert.ok(r.stderr.includes(out) || r.stderr.includes('written'), 'the success line names the written file: ' + r.stderr);
-    if (!modesKept) { t.skip('POSIX modes are not kept on this volume, so the 0600 mode cannot be read here'); return; }
     assert.strictEqual(fs.statSync(out).mode & 0o777, 0o600, 'the restored file is owner-only');
+  } finally { clean(home, proj); }
+});
+
+test('writeguard-restore --out: a snapshot whose name begins with -- restores through --out', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, '--notes.md');
+    const orig = '# Notes\n\n[link](https://x.com) dashed name.\n';
+    fs.writeFileSync(gov, orig, 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home, extraBasenames: ['--notes.md'] });
+    const name = path.basename(snap);
+    assert.ok(name.startsWith('--'), 'the premise: the snapshot name begins with -- : ' + name);
+    const out = path.join(proj, 'notes.restored');
+    const r = run(proj, home, ['writeguard-restore', '--out', out, name]);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), orig, 'the named snapshot restored byte-exact');
   } finally { clean(home, proj); }
 });
 
@@ -155,6 +184,25 @@ test('writeguard-restore --out: a dangling link at the name is refused and nothi
     assert.strictEqual(r.status, 1, r.stderr);
     assert.ok(!fs.existsSync(target), 'nothing is created behind the link');
     assert.ok(fs.lstatSync(out).isSymbolicLink(), 'the link itself is untouched');
+  } finally { clean(home, proj); }
+});
+
+test('writeguard-restore --out: a dangling junction at the name is refused and nothing appears at its target', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n', 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const target = path.join(proj, 'nowhere');
+    const out = path.join(proj, 'MEMORY.md.restored');
+    try { fs.symlinkSync(target, out, 'junction'); } catch (e) {
+      if (e && ['EPERM', 'EACCES', 'ENOSYS'].includes(e.code)) { t.skip('no link can be made on this host'); return; }
+      throw e;
+    }
+    const r = run(proj, home, ['writeguard-restore', path.basename(snap), '--out', out]);
+    assert.strictEqual(r.status, 1, r.stderr);
+    assert.match(r.stderr, /already exists/, r.stderr);
+    assert.ok(!fs.existsSync(target), 'nothing appears at the link target');
   } finally { clean(home, proj); }
 });
 

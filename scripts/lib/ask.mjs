@@ -193,8 +193,8 @@ export function seatbeltAdvisory(opts) {
   const snap = typeof snapshotPath === 'string' && snapshotPath ? snapshotPath : '';
   const snapName = snap ? snap.split(/[\\/]/).pop() : '';
   // The installed cli.mjs, by absolute path, so the printed command never runs a copy beside the repository being read. The
-  // redirect goes to a sibling file, never the working file: the shell opens a redirect before node starts, so a failed restore
-  // would empty the file it names.
+  // the CLI writes the --out file itself, after the bytes verify, so no shell redirect is printed and a failed restore cannot empty
+  // a file it names.
   const CLI = fileURLToPath(new URL('./cli.mjs', import.meta.url));
   // Printed values are escaped where they are printed. A ready-made command only ever holds plain values, so it needs no escape.
   const shownFile = escapeRawControls(f);
@@ -207,7 +207,7 @@ export function seatbeltAdvisory(opts) {
     : (plainArg(CLI)
       ? ` (no ready-made command, because a shell would read part of this file's path or the snapshot name: \`node "${CLI}" writeguard-restore <the snapshot file name above>\` prints the original to stdout)`
       : ' (no ready-made command, because a shell would read part of this file\'s path or the snapshot name: the write-guard CLI is cli.mjs beside the plugin\'s scripts/lib, run as writeguard-restore with the snapshot file name above; it prints the original to stdout)');
-  const recover = snap ? ` A byte-exact pre-edit snapshot is at ${shownSnap} — copy it back${restoreCmd} if the drop was a slip; never re-type the lost content, restore the real bytes.` : '';
+  const recover = snap ? ` A byte-exact pre-edit snapshot is at ${shownSnap} — restore it${restoreCmd} if the drop was a slip; never re-type the lost content, restore the real bytes.` : '';
   if (oversize) {
     return `[CoalWash] write-guard (FYI, not an error, not a block): ${shownFile} is a class-B governance/memory file over the diff-size cap — a pre-edit snapshot was taken but the fidelity diff was skipped (file oversize).${recover}`;
   }

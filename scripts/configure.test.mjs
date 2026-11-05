@@ -430,7 +430,7 @@ test('F-R32-3: --global IS honoured, so the warning fires on the PROJECT path on
 });
 
 // A value the hint prints is printed only when a shell reads it as one plain word; otherwise the hint names the value above.
-test('CWK-137 D3 hint: a value a shell would read is not printed in the --global hint', (t) => {
+test('a value a shell would read is not printed in the --global hint', (t) => {
   const sb = sandbox(t);
   const dest = path.join(sb.home, 'x$(touch PWNED)');
   const r = run(sb, ['--estate.archiveDir', dest]);
