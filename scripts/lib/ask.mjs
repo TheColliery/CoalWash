@@ -21,6 +21,9 @@
 // context-injection line. This module only moves STRING-BUILDING out of the
 // hook into tested, reusable, agent-composition-free code.
 
+import { fileURLToPath } from 'node:url';
+import { escapeRawControls } from './receipt.mjs';
+
 export const ANSWER_FIRST_REMINDER =
   "Answer the user's ORIGINAL message for this turn FIRST if you have not already — this ask/directive rides at the END of your response, never before it. Once it resolves, return to (or continue) answering that original message; never treat this as the whole turn.";
 
@@ -175,26 +178,33 @@ export function wizardEscalation(opts) {
 // diff skipped).
 export function seatbeltAdvisory(opts) {
   const { file, classes, snapshotPath, oversize } = opts || {};
-  const PLAIN_SHELL_ARG = /^[\p{L}\p{M}\p{N} _.,@%+=:~\/\\-]+$/u; // CWK-162 A6: see the note below the snapshot name
+  // A plain argument, for a double-quoted shell word: letters of any script, digits, marks, space and . _ , @ + = : ~ / \ -.
+  // % is not plain (cmd.exe expands it inside double quotes), and a name that begins with - would be read as a flag.
+  const PLAIN_SHELL_ARG = /^[\p{L}\p{M}\p{N} _.,@+=:~\/\\-]+$/u;
+  const plainArg = (s) => PLAIN_SHELL_ARG.test(s) && !s.endsWith('\\');
+  const plainName = (s) => plainArg(s) && !s.startsWith('-');
   const f = typeof file === 'string' && file ? file : '(unknown file)';
   const snap = typeof snapshotPath === 'string' && snapshotPath ? snapshotPath : '';
-  // CWK-162 (AI Deep Scan A6): the file name is repo-controlled, and the restore line is text an agent is told to ACT on. A name
-  // such as $(touch PWNED).md inside the double quotes of "${f}" is command substitution. The ready-made redirect line is
-  // therefore emitted only when BOTH the target and the snapshot name are plain (letters of any script, digits, marks, space and
-  // . _ , @ % + = : ~ / \ -) and the path does not end in a backslash (which would escape the closing quote); anything else
-  // gets the verb and a placeholder with NO path interpolated into any command. Unicode letters stay plain on purpose: a Thai or
-  // Japanese file name is inert inside double quotes and is a normal name in this house.
   const snapName = snap ? snap.split(/[\\/]/).pop() : '';
-  const plainArg = (s) => PLAIN_SHELL_ARG.test(s) && !s.endsWith('\\');
-  const restoreCmd = plainArg(f) && plainArg(snapName)
-    ? ` (or \`node scripts/lib/cli.mjs writeguard-restore ${snapName} > "${f}"\`)`
-    : ' (this file\'s path holds characters a shell would interpret, so no ready-made redirect line is given: `node scripts/lib/cli.mjs writeguard-restore <the snapshot file name above>` prints the original to stdout)';
-  const recover = snap ? ` A byte-exact pre-edit snapshot is at ${snap} — copy it back${restoreCmd} if the drop was a slip; never re-type the lost content, restore the real bytes.` : '';
+  // The installed cli.mjs, by absolute path, so the printed command never runs a copy beside the repository being read. The
+  // redirect goes to a sibling file, never the working file: the shell opens a redirect before node starts, so a failed restore
+  // would empty the file it names.
+  const CLI = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+  // Printed values are escaped where they are printed. A ready-made command only ever holds plain values, so it needs no escape.
+  const shownFile = escapeRawControls(f);
+  const shownSnap = escapeRawControls(snap);
+  const readyMade = plainArg(CLI) && plainName(snapName) && plainArg(f);
+  const restoreCmd = readyMade
+    ? ` (or \`node "${CLI}" writeguard-restore "${snapName}" > "${shownFile}.restored"\`, then replace the file with that output; run it from bash or cmd, because Windows PowerShell 5.1's \`>\` re-encodes the bytes)`
+    : (plainArg(CLI)
+      ? ` (no ready-made command, because a shell would read part of this file's path or the snapshot name: \`node "${CLI}" writeguard-restore <the snapshot file name above>\` prints the original to stdout)`
+      : ' (no ready-made command, because a shell would read part of this file\'s path or the snapshot name: the write-guard CLI is cli.mjs beside the plugin\'s scripts/lib, run as writeguard-restore with the snapshot file name above; it prints the original to stdout)');
+  const recover = snap ? ` A byte-exact pre-edit snapshot is at ${shownSnap} — copy it back${restoreCmd} if the drop was a slip; never re-type the lost content, restore the real bytes.` : '';
   if (oversize) {
-    return `[CoalWash] write-guard (FYI, not an error, not a block): ${f} is a class-B governance/memory file over the diff-size cap — a pre-edit snapshot was taken but the fidelity diff was skipped (file oversize).${recover}`;
+    return `[CoalWash] write-guard (FYI, not an error, not a block): ${shownFile} is a class-B governance/memory file over the diff-size cap — a pre-edit snapshot was taken but the fidelity diff was skipped (file oversize).${recover}`;
   }
   const list = Array.isArray(classes) && classes.length ? classes.join(', ') : 'structured tokens';
-  return `[CoalWash] write-guard (FYI, not an error, not a block): after this edit, ${f} no longer contains some ${list} it had at the start of the session — a deliberate cut is fine, this only flags it in case it was a slip.${recover}`;
+  return `[CoalWash] write-guard (FYI, not an error, not a block): after this edit, ${shownFile} no longer contains some ${list} it had at the start of the session — a deliberate cut is fine, this only flags it in case it was a slip.${recover}`;
 }
 
 // The FULL(externalize) advisory — pure information, never an ask (a wash

@@ -614,7 +614,8 @@ function main() {
         console.warn('  config and its bytes are indistinguishable from yours.');
       }
       console.warn(`  To make this take effect, set it on the GLOBAL layer instead:`);
-      console.warn(`      node scripts/configure.mjs --global --${c.key} ${typeof c.wrote === 'string' ? c.wrote : JSON.stringify(c.wrote)}`);
+      const shownValue = typeof c.wrote === 'string' ? c.wrote : JSON.stringify(c.wrote);
+      console.warn(`      node scripts/configure.mjs --global --${escapeRawControls(String(c.key))} ${escapeRawControls(String(shownValue))}`);
     }
   }
 }
