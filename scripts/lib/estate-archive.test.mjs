@@ -1480,7 +1480,7 @@ test('fire 604 archive: an in-bound session archives, deletes its originals, and
 
 test('fire 604 drift pin: the archive side and the restore side refuse the same sessions, for one table of sizes', () => {
   const B = { maxGzBytes: 1e9, floorBytes: 1000, maxRatio: 2, ceilBytes: 5000, sessionCeilBytes: 3000 };
-  // The last row is the exact ceiling followed by an empty file: the empty file is the transcript (sid.jsonl), which restore reads last.
+  // The last two rows reach the exact ceiling and then read the transcript (sid.jsonl) last: an empty one restores whole, a one-byte one is refused.
   const cases = [[500], [2000], [900, 900, 900], [1000, 1000, 1000, 1000], [3000], [800, 800, 800, 1], [0, 1000, 1000, 1000], [1, 1000, 1000, 1000]];
   cases.forEach((sizes, i) => {
     const root = f604Root(`d${i}`);
@@ -1559,7 +1559,7 @@ test('fire 606 labels: two long anchors sharing their first 77 characters are bo
   const b = head + 'BBB-END';
   const ts = { anchors: [
     { text: a, textLc: a.toLowerCase(), target: 'ta', date: 'd1' },
-    { text: b, textLc: b.toLowerCase(), target: 'tb', date: 'd2' },
+    { text: b, textLc: b.toLowerCase(), target: 'ta', date: 'd1' },
   ] };
   const buf = Buffer.from(a + ' ' + b);
   const r = EA.scanBufferForTombstones(buf, ts);
