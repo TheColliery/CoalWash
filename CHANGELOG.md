@@ -2,6 +2,17 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+An undo write replaces a link at its target instead of writing through it
+
+### Security
+
+- An undo write replaces a link at its target instead of writing through it. The whole-run rollback, the crash-recovery restore and RE-TIER's rollback write the restored bytes by a temporary file and a rename, as a forward write does. A link put at a memory file after its snapshot is replaced, and the file the link pointed at is left alone. Before this, the undo wrote through the link.
+- An undo restore refuses when the file's folder no longer resolves to itself inside the approved roots. The refusal counts as a failed restore, not a clean rollback.
+- A rename that fails, for example a file another program holds open on Windows, is a failed restore. There is no in-place fallback.
+- RE-TIER's archive copy is written the same way, so a link at the archive name is replaced and its target is left alone.
+
 ## [1.15.5] - 2026-11-05
 
 Hold a bin row the disk disagrees with; document install paths
