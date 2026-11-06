@@ -57,7 +57,7 @@ import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { escapeRawControls } from './receipt.mjs'; // the printed store label goes through the room's one escaper
 
 export const OVERFLOW_BASENAME = 'retier-overflow.md';
-const OVERFLOW_POINTER = `- [RE-TIER overflow](${OVERFLOW_BASENAME}) — index lines demoted by the envelope (lossless; move a line back to re-promote it)`;
+export const OVERFLOW_POINTER = `- [RE-TIER overflow](${OVERFLOW_BASENAME}) — index lines demoted by the envelope (lossless; move a line back to re-promote it)`;
 const OVERFLOW_HEADER = `# RE-TIER overflow — index lines demoted by the envelope\n\n> Byte-identical lines moved down from MEMORY.md by RE-TIER. Move a line back to re-promote it; nothing here was summarized or deleted.\n\n`;
 const TOP_ANCHOR_N = 20; // the closing-check sample size (the locked spec's N)
 const CLAIM_FLAG_CAP = 20; // report readability cap on #55 flags, never a data cap
@@ -247,12 +247,12 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
 // demotion planning (the deterministic candidate rules)
 // ---------------------------------------------------------------------------
 
-function isPointerLine(line) {
+export function isPointerLine(line) {
   return line.includes(`](${OVERFLOW_BASENAME})`);
 }
 // Demotable index line: non-blank, not a heading, not the overflow pointer,
 // not inside a leading frontmatter block.
-function demotableLineMask(lines) {
+export function demotableLineMask(lines) {
   const mask = new Array(lines.length).fill(true);
   let i = 0;
   if (lines[0] !== undefined && lines[0].trim() === '---') {
@@ -273,7 +273,7 @@ function demotableLineMask(lines) {
 // needed relief, value-neutral (no age judgment — age is shield, never
 // sword). Upgrade path: least-recently-REFERENCED ranking when a recall
 // tracker exists (the spec's own e.g.).
-export function planIndexDemotion(indexText, env) {
+export function planIndexDemotion(indexText, env, counter = null) {
   const text = String(indexText);
   const tokensBefore = tokensEst(text);
   const lines = text.split('\n');
@@ -293,13 +293,31 @@ export function planIndexDemotion(indexText, env) {
     }
     return kept.join('\n');
   };
-  // Greedy fill: measure the REAL assembled text each step (stores are <=
-  // ~25 KB of ASCII; a 25,000-character index of 3-byte Thai text is ~75 KB, so the
-  // O(n^2) re-measure is still cheap at that size and exact; ponytail: replace with
-  // a running estimate if a giant store ever surfaces).
+  // Greedy fill. The token estimate is additive over characters, so the kept lines' ASCII and non-ASCII counts are kept as running totals,
+  // and the assembled text is not built inside the loop: each joint is one ASCII newline, and a pointer line adds its own counts once.
+  // That is exactly what assemble() joins, so the decisions are the same. `counter` (optional) counts the line visits.
+  const charCounts = (s) => { let a = 0; for (let k = 0; k < s.length; k++) if (s.charCodeAt(k) < 128) a++; return [a, s.length - a]; };
+  const pointerCounts = charCounts(OVERFLOW_POINTER);
+  const counts = lines.map(charCounts);
+  let keptAscii = 0;
+  let keptNon = 0;
+  let keptCount = lines.length;
+  for (const [a, n] of counts) { keptAscii += a; keptNon += n; }
+  if (counter) counter.visits = (counter.visits || 0) + lines.length;
+  const assembledTokens = () => {
+    const pointer = moved.size > 0 && !hasPointer;
+    const elements = keptCount + (pointer ? 1 : 0);
+    const ascii = keptAscii + Math.max(0, elements - 1) + (pointer ? pointerCounts[0] : 0);
+    const non = keptNon + (pointer ? pointerCounts[1] : 0);
+    return Math.round(ascii / 4 + non / 1.5);
+  };
   for (const c of cand) {
-    if (tokensEst(assemble()) <= env.fillCeiling) break;
+    if (assembledTokens() <= env.fillCeiling) break;
     moved.add(c.i);
+    keptAscii -= counts[c.i][0];
+    keptNon -= counts[c.i][1];
+    keptCount -= 1;
+    if (counter) counter.visits += 1;
   }
   const indexNew = assemble();
   const movedLines = [...moved].sort((a, b) => a - b).map((i) => lines[i]);

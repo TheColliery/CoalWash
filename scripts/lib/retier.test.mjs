@@ -1746,3 +1746,58 @@ test('fire 602: a refused result for a skipped store prints its reason, never un
   assert.match(printed, /skipped at their index name/, printed);
   assert.doesNotMatch(printed, /undefined/, printed);
 });
+
+// Work at each input's own bound: the greedy demotion keeps a running token count and builds its text once. The reference below is the
+// greedy form it replaces, kept here as the answer key; the work count is the instrument, never a clock.
+import * as RT616 from './retier.mjs';
+import { tokensEst as tokensEst616 } from './caliper.mjs';
+
+function refPlan616(indexText, env) {
+  const text = String(indexText);
+  const tokensBefore = tokensEst616(text);
+  const lines = text.split('\n');
+  const mask = RT616.demotableLineMask(lines);
+  const hasPointer = lines.some(RT616.isPointerLine);
+  const cand = [];
+  for (let i = 0; i < lines.length; i++) if (mask[i]) cand.push({ i, tok: tokensEst616(lines[i]) });
+  cand.sort((a, b) => b.tok - a.tok || a.i - b.i);
+  const moved = new Set();
+  const assemble = () => {
+    const kept = lines.filter((_, i) => !moved.has(i));
+    if (moved.size && !hasPointer) {
+      if (kept.length && kept[kept.length - 1] === '') kept.splice(kept.length - 1, 0, RT616.OVERFLOW_POINTER);
+      else kept.push(RT616.OVERFLOW_POINTER);
+    }
+    return kept.join('\n');
+  };
+  for (const c of cand) {
+    if (tokensEst616(assemble()) <= env.fillCeiling) break;
+    moved.add(c.i);
+  }
+  const indexNew = assemble();
+  const movedLines = [...moved].sort((a, b) => a - b).map((i) => lines[i]);
+  const tokensAfter = tokensEst616(indexNew);
+  return { movedLines, indexNew, tokensBefore, tokensAfter, pointerAdded: moved.size > 0 && !hasPointer, shortfall: tokensAfter > env.fillCeiling };
+}
+
+test('the demotion plan matches the greedy reference on random indexes, with and without a pointer line', () => {
+  let x = 5;
+  const rnd = () => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x; };
+  const pieces = ['', '- [a](a.md) alpha words', '- [b](b.md) béta ünï — text', 'x'.repeat(40), '- [RE-TIER overflow](overflow.md) — pointer', 'plain prose line'];
+  for (let k = 0; k < 400; k++) {
+    const n = rnd() % 25;
+    const lines = [];
+    for (let i = 0; i < n; i++) lines.push(pieces[rnd() % pieces.length] + ' ' + (rnd() % 97));
+    const text = lines.join('\n');
+    const env = { fillCeiling: rnd() % 120 };
+    assert.deepStrictEqual(RT616.planIndexDemotion(text, env), refPlan616(text, env), `index ${JSON.stringify(text).slice(0, 120)} ceiling ${env.fillCeiling}`);
+  }
+});
+
+test('the demotion plan does linear work in its lines, however many lines it moves', () => {
+  const lines = 3000;
+  const text = Array.from({ length: lines }, (_, i) => `- [t${i}](t${i}.md) line ${i} with some words`).join('\n');
+  const c = { visits: 0 };
+  RT616.planIndexDemotion(text, { fillCeiling: 1 }, c);
+  assert.ok(c.visits > 0 && c.visits <= 3 * lines + 10, `line visits: ${c.visits} for ${lines} lines`); // > 0: the counter must have moved
+});
