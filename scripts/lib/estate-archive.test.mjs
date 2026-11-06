@@ -1665,8 +1665,9 @@ test('fire 619 differential: matchTombstones equals the includes() reference hit
 });
 
 test('fire 619 counted: an anchor whose prefix is absent costs no lookup, and a present one stops at its first hit', () => {
-  const text = 'filler text '.repeat(50000);
-  const absent = Array.from({ length: 2000 }, (_, i) => ({ text: `anc-${i}-zz`, textLc: `anc-${i}-zz`, target: 't', date: 'd' }));
+  // 2100 anchors clear the index gate; the one present prefix occurs once, so its bucket is walked
+  const text = 'the filler text ' + 'q'.repeat(100000);
+  const absent = Array.from({ length: 2100 }, (_, i) => ({ text: `anc-${i}-zz`, textLc: `anc-${i}-zz`, target: 't', date: 'd' }));
   const present = { text: 'filler text', textLc: 'filler text', target: 'p', date: 'd' };
   const c = { visits: 0 };
   const hits = mt619(text, { anchors: [...absent, present] }, c);
@@ -1674,4 +1675,14 @@ test('fire 619 counted: an anchor whose prefix is absent costs no lookup, and a 
   assert.strictEqual(hits[0].anchor, 'filler text');
   assert.ok(c.visits > 0, 'the indexed lookup is wired: the counter moved');
   assert.ok(c.visits <= 10, `visits ${c.visits}: 2000 absent anchors must add none, the present one stops at its first position`);
+});
+
+// Under the gate: a window with fewer anchors than the index gate builds no index at all.
+test('a window with fewer anchors than the index gate builds no index', () => {
+  const text = 'the filler text '.repeat(5000);
+  const tomb = { anchors: Array.from({ length: 10 }, (_, i) => ({ text: `anc-${i}`, textLc: `anc-${i}`, target: 't', date: 'd' })) };
+  const c = { positions: 0, visits: 0 };
+  assert.deepStrictEqual(mt619(text, tomb, c), []);
+  assert.strictEqual(c.positions, 0, 'no index was built');
+  assert.strictEqual(c.visits, 0);
 });

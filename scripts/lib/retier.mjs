@@ -53,7 +53,7 @@ import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-lo
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS, restoreFile, writeDurable } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
-import { buildPrefixIndex, countNonOverlapping, PREFIX_K } from './text-index.mjs';
+import { buildPrefixIndex, countNonOverlapping, PREFIX_K, INDEX_MIN_NEEDLES } from './text-index.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { escapeRawControls } from './receipt.mjs'; // the printed store label goes through the room's one escaper
 
@@ -358,12 +358,12 @@ export function planIndexDemotion(indexText, env, counter = null) {
 // it never manufactures a false "unreferenced".
 const DELIM_RE = /[-_\s]+/g;
 const normDelim = (s) => s.replace(DELIM_RE, ' ');
-// fire 619: one folded haystack, counted through the shared prefix index. The index is built on the first
+// One folded haystack, counted through the shared prefix index. The index is built on the first
 // needle long enough to use it, once for this haystack, and every count equals the indexOf loop it replaced.
-function foldedCounter(hay, counter = null) {
+function foldedCounter(hay, counter = null, useIndex = true) {
   let index = null;
   return (needle) => {
-    if (needle.length >= PREFIX_K && !index) index = buildPrefixIndex(hay, PREFIX_K, counter);
+    if (useIndex && needle.length >= PREFIX_K && !index) index = buildPrefixIndex(hay, PREFIX_K, counter);
     return countNonOverlapping(index, hay, needle, counter);
   };
 }
@@ -403,9 +403,9 @@ function wikilinkSpans(hay) {
 // from — bracket-scoped spans for the corpus, or `hay` itself (unchanged
 // old behavior) when the caller has no narrower span to offer. Returns a
 // counter over one needle; the haystacks are indexed once, on first use.
-function countOccurrencesFor(hay, delimHay = hay, counter = null) {
-  const exact = foldedCounter(hay.toLowerCase(), counter);
-  const delim = foldedCounter(normDelim(delimHay.toLowerCase()), counter);
+function countOccurrencesFor(hay, delimHay = hay, counter = null, useIndex = true) {
+  const exact = foldedCounter(hay.toLowerCase(), counter, useIndex);
+  const delim = foldedCounter(normDelim(delimHay.toLowerCase()), counter, useIndex);
   return (needle) => {
     if (!needle) return 0;
     const n2 = needle.toLowerCase();
@@ -450,13 +450,14 @@ export function unreferencedTopics(store, allTextConcat, counter = null) {
   const out = [];
   const wikilinkHay = wikilinkSpans(allTextConcat); // grad10 F6: computed once, not per topic
   const decodedHay = percentDecodeAscii(allTextConcat).toLowerCase(); // grad10 F7a: computed once, not per topic
-  // fire 619: each corpus form is indexed once, on first use, and every topic's needles reuse those indexes
-  const allCount = countOccurrencesFor(allTextConcat, wikilinkHay, counter);
-  const decodedCount = foldedCounter(decodedHay, counter);
+  // Five needles a topic at most on the corpus; below the gate the corpus is read by indexOf, and no index is built.
+  const useIndex = store.topics.length * 5 >= INDEX_MIN_NEEDLES;
+  const allCount = countOccurrencesFor(allTextConcat, wikilinkHay, counter, useIndex);
+  const decodedCount = foldedCounter(decodedHay, counter, useIndex);
   for (const t of store.topics) {
     if (t.basename === OVERFLOW_BASENAME) continue; // the ladder's own tier-2 rung — never cascades itself
     const stem = t.basename.replace(/\.md$/i, '');
-    const ownCount = countOccurrencesFor(t.text, t.text, counter); // own text: unscoped, unaffected by F6/F7
+    const ownCount = countOccurrencesFor(t.text, t.text, counter, false); // own text: unscoped, unaffected by F6/F7; two needles never pay for an index
     const ownBase = ownCount(t.basename);
     const ownStem = ownCount(stem);
     let allBase = allCount(t.basename); // grad10 F6: delimiter leg scoped to [[...]] spans

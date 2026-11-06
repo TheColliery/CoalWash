@@ -369,10 +369,20 @@ test('the eviction compaction keeps the order of the kept items and kills the ev
   }
 });
 
-test('the eviction compaction moves each kept item at most once', () => {
-  const big = Array.from({ length: 200000 }, (_, i) => i);
-  const evicted = new Set(big.filter((v) => v % 2 === 0));
-  const c = { moves: 0 };
-  RET618.compactEvicted(big, evicted, () => {}, c);
-  assert.ok(c.moves > 0 && c.moves <= 200000, `moves: ${c.moves}`);
+test('the eviction compaction writes each kept item at most once, counting the array writes themselves', () => {
+  // A per-item splice shifts every later element with its own array write, so the proxy counts those writes too.
+  const n = 3000;
+  const base = Array.from({ length: n }, (_, i) => i);
+  const evicted = new Set(base.filter((v) => v % 2 === 0));
+  let writes = 0;
+  const keep = new Proxy(base.slice(), {
+    set(target, prop, value) {
+      if (/^\d+$/.test(prop)) writes++;
+      target[prop] = value;
+      return true;
+    },
+  });
+  RET618.compactEvicted(keep, evicted, () => {});
+  assert.strictEqual(keep.length, n / 2);
+  assert.ok(writes > 0 && writes <= n / 2, `element writes: ${writes} for ${n / 2} kept items`);
 });

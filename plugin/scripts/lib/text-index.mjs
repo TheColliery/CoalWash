@@ -9,6 +9,10 @@
 // in 'aaaaa' counts once. A needle shorter than k takes the indexOf loop.
 
 export const PREFIX_K = 4;
+// The index pays only when many needles read one text. Measured on 8 MiB: the build takes 1 to 10 s, a needle by indexOf 2 to 4 ms.
+export const INDEX_MIN_NEEDLES = 2048;
+// A bucket this large costs more to walk than an indexOf loop, so the loop answers.
+const hotBucket = (list, text) => list.length > 4096 && list.length > text.length / 64;
 
 // Build the index. `counter`, when given, accrues `positions`: one per
 // position recorded, so a test can see the build's work.
@@ -42,6 +46,7 @@ export function countNonOverlapping(index, text, needle, counter = null) {
   if (!index || n < index.k) return indexOfCount(text, needle);
   const list = index.get(needle.slice(0, index.k));
   if (!list) return 0;
+  if (hotBucket(list, text)) return indexOfCount(text, needle);
   let count = 0;
   let next = 0; // the first position a match may start at, after the last counted one
   for (const pos of list) {
@@ -60,6 +65,7 @@ export function hasNeedle(index, text, needle, counter = null) {
   if (!index || n < index.k) return text.includes(needle);
   const list = index.get(needle.slice(0, index.k));
   if (!list) return false;
+  if (hotBucket(list, text)) return text.includes(needle);
   for (const pos of list) {
     if (counter) counter.visits = (counter.visits || 0) + 1;
     if (text.startsWith(needle, pos)) return true;

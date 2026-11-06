@@ -76,7 +76,8 @@ test('differential: countNonOverlapping equals the indexOf loop over random text
 });
 
 test('counted: a needle whose prefix never occurs visits no positions, however long the text', () => {
-  const text = 'x'.repeat(200000);
+  // the shared prefix sits in twenty places, so its bucket is under the hot-bucket gate and is walked
+  const text = 'xxxx'.repeat(20) + 'z'.repeat(200000);
   const index = buildPrefixIndex(text, 4);
   const c = { visits: 0 };
   assert.strictEqual(countNonOverlapping(index, text, 'xxxy', c), 0);

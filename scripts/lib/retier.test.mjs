@@ -1756,8 +1756,10 @@ function refPlan616(indexText, env) {
   const text = String(indexText);
   const tokensBefore = tokensEst616(text);
   const lines = text.split('\n');
-  const mask = RT616.demotableLineMask(lines);
-  const hasPointer = lines.some(RT616.isPointerLine);
+  // The pointer rule is stated here literally, not taken from the module: a reference that calls the function under test cannot catch that function's own defect.
+  const pointerText = `](${RT616.OVERFLOW_BASENAME})`;
+  const mask = RT616.demotableLineMask(lines).map((on, i) => on && !lines[i].includes(pointerText));
+  const hasPointer = lines.some((l) => l.includes(pointerText));
   const cand = [];
   for (let i = 0; i < lines.length; i++) if (mask[i]) cand.push({ i, tok: tokensEst616(lines[i]) });
   cand.sort((a, b) => b.tok - a.tok || a.i - b.i);
@@ -1782,12 +1784,16 @@ function refPlan616(indexText, env) {
 
 test('the demotion plan matches the greedy reference on random indexes, with and without a pointer line', () => {
   let x = 5;
-  const rnd = () => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x; };
-  const pieces = ['', '- [a](a.md) alpha words', '- [b](b.md) béta ünï — text', 'x'.repeat(40), '- [RE-TIER overflow](overflow.md) — pointer', 'plain prose line'];
+  // the high bits: the low bits of this generator repeat with the short period of the modulus, and a pointer piece was never drawn
+  const rnd = () => { x = (Math.imul(x, 1103515245) + 12345) & 0x7fffffff; return x >>> 16; };
+  const pieces = ['', '- [a](a.md) alpha words', '- [b](b.md) béta ünï — text', 'x'.repeat(40), `- [RE-TIER overflow](${RT616.OVERFLOW_BASENAME}) — pointer`, 'plain prose line'];
   for (let k = 0; k < 400; k++) {
     const n = rnd() % 25;
     const lines = [];
-    for (let i = 0; i < n; i++) lines.push(pieces[rnd() % pieces.length] + ' ' + (rnd() % 97));
+    for (let i = 0; i < n; i++) {
+      const piece = pieces[rnd() % pieces.length];
+      lines.push(piece === '' ? '' : `${piece} ${rnd() % 97}`); // a blank piece stays blank, so blank lines reach the planner
+    }
     const text = lines.join('\n');
     const env = { fillCeiling: rnd() % 120 };
     assert.deepStrictEqual(RT616.planIndexDemotion(text, env), refPlan616(text, env), `index ${JSON.stringify(text).slice(0, 120)} ceiling ${env.fillCeiling}`);
@@ -1877,7 +1883,7 @@ test('fire 619 differential: unreferencedTopics equals the indexOf reference ove
 });
 
 test('fire 619 counted: unreferencedTopics examines a bounded number of positions, not topics times corpus', () => {
-  const T = 300;
+  const T = 420; // 420 topics x five needles clear the index gate
   const topics = [];
   // each name carries its own 4-character prefix, so a needle walks one position; topics that share a prefix walk them all (fire 619 residual)
   const code = (i) => `q${i.toString(36).padStart(3, '0')}`;
@@ -1887,4 +1893,12 @@ test('fire 619 counted: unreferencedTopics examines a bounded number of position
   unrefTopics619({ topics }, corpus, c);
   assert.ok(c.visits > 0, 'the indexed walk is wired: the counter moved');
   assert.ok(c.visits <= 10 * T, `visits ${c.visits} must stay near one per topic, not corpus length times topics`);
+});
+
+// Under the gate: a store of a few topics builds no index for its corpus.
+test('a store of a few topics builds no index for its corpus', () => {
+  const topics = [{ basename: 'alpha-plan.md', path: '/p/alpha-plan.md', text: 'alpha plan', mtimeMs: 1, pinned: false }];
+  const c = { positions: 0, visits: 0 };
+  unrefTopics619({ topics }, 'some corpus text that mentions alpha plan', c);
+  assert.strictEqual(c.positions, 0, 'no index was built');
 });

@@ -66,7 +66,7 @@ import { appendOwnLog } from './repo-fs.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
 import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS } from './apply.mjs';
 import { ownSandboxDir, fileModeOr600 } from './repo-fs.mjs';
-import { buildPrefixIndex, hasNeedle, PREFIX_K } from './text-index.mjs';
+import { buildPrefixIndex, hasNeedle, PREFIX_K, INDEX_MIN_NEEDLES } from './text-index.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
 // death-log (destroyed cuts). Function-declaration imports used only at CALL
 // time (collectTombstones), so the existing apply<->retier<->estate cycle stays
@@ -873,11 +873,12 @@ export function matchTombstones(text, tombstones, counter = null) {
   const anchors = tombstones && Array.isArray(tombstones.anchors) ? tombstones.anchors : [];
   const hay = String(text || '').toLowerCase();
   if (!anchors.length || !hay) return [];
-  // fire 619: the window is indexed once, on the first anchor long enough to use the index; every anchor shorter than the prefix length takes includes()
+  // The window is indexed once, and only when enough anchors read it to repay the build; an anchor shorter than the prefix length takes includes().
+  const useIndex = anchors.length >= INDEX_MIN_NEEDLES;
   let index = null;
   const hits = [];
   for (const a of anchors) {
-    if (a.textLc && a.textLc.length >= PREFIX_K && !index) index = buildPrefixIndex(hay, PREFIX_K, counter);
+    if (useIndex && a.textLc && a.textLc.length >= PREFIX_K && !index) index = buildPrefixIndex(hay, PREFIX_K, counter);
     if (a.textLc && hasNeedle(index, hay, a.textLc, counter)) {
       // identity keys the maps that collect hits: two anchors can share their printed label, never their full text, target and date together
       hits.push({ anchor: a.text.length > 80 ? `${a.text.slice(0, 77)}...` : a.text, identity: JSON.stringify([a.textLc, a.target, a.date]), target: a.target, date: a.date });

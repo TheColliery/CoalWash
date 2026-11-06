@@ -403,7 +403,7 @@ export function parseNumToken(tok) {
 // the inventory's insertion order, and cross-kind candidates never matched
 // anyway (c.kind !== o.kind), so the FIRST qualifying survivor — the shipped
 // tie-break, pinned by its own control test — is unchanged.
-// fire 619: the candidates of one kind are grouped by their own ulp, and within a group by bucket
+// The candidates of one kind are grouped by their own ulp, and within a group by bucket
 // (floor(value / ulp)). A survivor that is strictly coarser and within its ulp of the drop lies in the drop's own
 // bucket or one of the two beside it, so a drop looks in three buckets per coarser group and confirms each by the
 // exact condition. Ties go to the lowest insertion index, the shipped first-qualifying rule, unchanged.
