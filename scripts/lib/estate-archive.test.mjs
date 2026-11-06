@@ -1686,3 +1686,15 @@ test('a window with fewer anchors than the index gate builds no index', () => {
   assert.strictEqual(c.positions, 0, 'no index was built');
   assert.strictEqual(c.visits, 0);
 });
+
+// At the index gate (2,048 anchors) the indexed tombstone search must return the hits the includes() reference returns, in the same order.
+test('fire 628 at 2048 anchors, matchTombstones returns the hits the includes() reference returns, in the same order', () => {
+  const anchors = [];
+  for (let i = 0; i < 2100; i++) anchors.push({ text: `Anchor ${i}`, textLc: `anchor ${i}`, target: `t${i}`, date: 'd' });
+  const text = ['filler line one', 'the ANCHOR 7 is here', 'and anchor 1500 too', 'anchor 2099', 'nothing matches here'].join('\n');
+  const tomb = { anchors };
+  const got = mt619(text, tomb);
+  const want = refMatch619(text, tomb);
+  assert.ok(want.length >= 3, `the reference finds the planted anchors: ${want.length}`);
+  assert.deepStrictEqual(got, want);
+});

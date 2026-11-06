@@ -1895,6 +1895,21 @@ test('fire 619 counted: unreferencedTopics examines a bounded number of position
   assert.ok(c.visits <= 10 * T, `visits ${c.visits} must stay near one per topic, not corpus length times topics`);
 });
 
+// At the index gate (420 topics x five needles) the indexed count must answer what the per-topic reference answers.
+test('fire 628 at 420 topics, the indexed reference count returns the old per-topic answer, referenced and unreferenced topics alike', () => {
+  const code = (i) => `q${i.toString(36).padStart(3, '0')}`;
+  const topics = [];
+  for (let i = 0; i < 420; i++) topics.push({ basename: `${code(i)}.md`, path: `/p/${code(i)}.md`, text: 'x'.repeat(40), mtimeMs: i % 7, pinned: false });
+  const refs = [];
+  for (let i = 0; i < 420; i += 2) refs.push(`see ${code(i)} for details`);
+  const corpus = [...topics.map((t) => t.text), ...refs].join('\n');
+  const store = { topics };
+  const got = unrefTopics619(store, corpus).map((t) => t.basename);
+  const want = refUnref619(store, corpus).map((t) => t.basename);
+  assert.ok(want.length > 0 && want.length < topics.length, 'both referenced and unreferenced topics are present');
+  assert.deepStrictEqual(got, want);
+});
+
 // Under the gate: a store of a few topics builds no index for its corpus.
 test('a store of a few topics builds no index for its corpus', () => {
   const topics = [{ basename: 'alpha-plan.md', path: '/p/alpha-plan.md', text: 'alpha plan', mtimeMs: 1, pinned: false }];
