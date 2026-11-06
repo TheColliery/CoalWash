@@ -162,8 +162,29 @@ export function fencedLines(text) {
 // the date canonicalization above).
 const LDQUO = String.fromCharCode(0x201c); // left double quotation mark
 const RDQUO = String.fromCharCode(0x201d); // right double quotation mark
-const CURLY_QUOTE_RE = new RegExp(`${LDQUO}([^${RDQUO}\\n]+)${RDQUO}`, 'g');
 const STRAIGHT_QUOTE_RE = /"([^"\n]+)"/g;
+// The bodies of the curly-quoted spans, in order, in one pass. A regex retries a failed open quote over the rest of its line; this scan
+// finds the boundary after each open quote once, and the boundary only moves forward. `counter` (optional) counts the characters
+// examined, so a test can pin linear work with no clock.
+export function curlyQuoteBodies(s, counter = null) {
+  const out = [];
+  let boundary = -1; // the first RDQUO or newline after the open quote in hand, cached while it lies ahead of the scan
+  let i = s.indexOf(LDQUO);
+  while (i !== -1) {
+    if (boundary <= i) {
+      boundary = i + 1;
+      while (boundary < s.length && s[boundary] !== RDQUO && s[boundary] !== '\n') boundary++;
+      if (counter) counter.steps += boundary - i;
+    }
+    if (boundary < s.length && s[boundary] === RDQUO && boundary >= i + 2) {
+      out.push(s.slice(i + 1, boundary));
+      i = s.indexOf(LDQUO, boundary + 1);
+    } else {
+      i = s.indexOf(LDQUO, i + 1);
+    }
+  }
+  return out;
+}
 
 // Numeric tokens likely to be a FACT (a count, a score, a ratio) rather than
 // incidental prose filler. A bare single digit is noise (list markers, "a
@@ -246,7 +267,7 @@ function numberScanList(text) {
   for (const v of matchList(working, COMMA_NUM_RE, 0)) out.push(v.replace(/,/g, ''));
   working = maskOut(working, [COMMA_NUM_RE]);
   for (const re of [MAGNITUDE_RE, PERCENT_RE, RATIO_RE, DECIMAL_RE, INTEGER_RE]) {
-    out.push(...matchList(working, re, 0));
+    for (const v of matchList(working, re, 0)) out.push(v); // a loop, not a spread: a spread of a long list overflows the call stack
     working = maskOut(working, [re]);
   }
   return out;
@@ -277,7 +298,7 @@ function tokenLists(s) {
     versions,
     links,
     codespans: matchList(s, CODESPAN_RE, 1),
-    quotes: [...matchList(s, CURLY_QUOTE_RE, 1), ...matchList(s, STRAIGHT_QUOTE_RE, 1)],
+    quotes: [...curlyQuoteBodies(s), ...matchList(s, STRAIGHT_QUOTE_RE, 1)],
     numbers: numberScanList(s),
   };
 }
@@ -330,6 +351,15 @@ export const __testHooks = {
 //         in thousands -> 1000 · "1.5k" -> 100 · "64.6%" -> 0.1 · a bare
 //         integer's trailing zeros coarsen it ("44000" -> 1000, "44192" -> 1).
 //   sig   significant digits, leading zeros excluded ("0.92" -> 2).
+// The length of the run of zeros at the end of s: what /0*$/ matches, found from the end in one pass. A regex retries each zero in the
+// run and rescans it, so a long run followed by a digit costs its square. `counter` (optional) counts the characters examined.
+export function trailingZeros(s, counter = null) {
+  let j = s.length;
+  while (j > 0 && s[j - 1] === '0') j--;
+  if (counter) counter.steps += s.length - j + 1;
+  return s.length - j;
+}
+
 function parseNumToken(tok) {
   __testHooks.parseNumTokenCalls++;
   const percent = tok.endsWith('%');
@@ -344,7 +374,7 @@ function parseNumToken(tok) {
   } else if (/^\d+(?:\.\d+)?$/.test(body)) {
     const decs = (body.split('.')[1] || '').length;
     value = Number(body);
-    ulp = decs > 0 ? 1 / 10 ** decs : 10 ** /0*$/.exec(body)[0].length;
+    ulp = decs > 0 ? 1 / 10 ** decs : 10 ** trailingZeros(body);
   } else {
     return { kind: 'unknown' };
   }
@@ -450,15 +480,22 @@ const isHexEvidence = (tok) => /[a-f]/.test(tok) && /\d/.test(tok);
 
 // Evidence tokens sitting near a proof-marker: Map token -> the marker string
 // it anchors (first marker seen wins; set semantics downstream).
-export function evidenceAnchors(text) {
+export function evidenceAnchors(text, counter = null) {
   const s = String(text);
   const out = new Map();
   CLAIM_MARKER_RE.lastIndex = 0;
   let m;
+  // Markers come in order, so the line holding the last one is the line of the next one until a newline is passed: its bounds are
+  // looked up once per line, not once per marker. `counter` (optional) counts those lookups, so a test can pin the work with no clock.
+  let lineStart = 0;
+  let lineEnd = -1;
   while ((m = CLAIM_MARKER_RE.exec(s)) !== null) {
-    const lineStart = s.lastIndexOf('\n', m.index) + 1;
-    let lineEnd = s.indexOf('\n', m.index);
-    if (lineEnd === -1) lineEnd = s.length;
+    if (lineEnd === -1 || m.index >= lineEnd) {
+      lineStart = s.lastIndexOf('\n', m.index) + 1;
+      lineEnd = s.indexOf('\n', m.index);
+      if (lineEnd === -1) lineEnd = s.length;
+      if (counter) counter.lineScans = (counter.lineScans || 0) + 1;
+    }
     const from = Math.max(lineStart, m.index - EVIDENCE_WINDOW_CHARS);
     const to = Math.min(lineEnd, m.index + m[0].length + EVIDENCE_WINDOW_CHARS);
     const win = s.slice(from, to);
