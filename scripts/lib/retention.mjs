@@ -126,6 +126,16 @@ const WEEK_MS = 7 * DAY_MS;
 // Slotting is by fixed epoch buckets (floor(at / DAY_MS) days, epoch weeks),
 // deterministic and timezone-free: an item's slot identity never changes as
 // `now` advances, so the survivor of a slot stays the survivor.
+// The evicted items leave `keep` in one pass. The kept items keep their order, and the kills run last index first, as the splice loop ran them.
+// `counter` (optional) counts the items moved, for a test that pins the work.
+export function compactEvicted(keep, evicted, kill, counter = null) {
+  for (let k = keep.length - 1; k >= 0; k--) if (evicted.has(keep[k])) kill(keep[k], 'size-cap');
+  let w = 0;
+  for (let k = 0; k < keep.length; k++) if (!evicted.has(keep[k])) keep[w++] = keep[k];
+  if (counter) counter.moves = (counter.moves || 0) + w;
+  keep.length = w;
+}
+
 export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBytes = Infinity } = {}) {
   const keep = [];
   const destroy = [];
@@ -235,11 +245,7 @@ export function retentionPlan(items, now, { horizonMs = HORIZON_MS.fat, budgetBy
         evicted.add(i);
         total -= weight(i);
       }
-      if (evicted.size) {
-        for (let k = keep.length - 1; k >= 0; k--) {
-          if (evicted.has(keep[k])) { kill(keep[k], 'size-cap'); keep.splice(k, 1); }
-        }
-      }
+      if (evicted.size) compactEvicted(keep, evicted, kill);
       // Every PERMITTED eviction done and still over: the cap and the floor
       // (plus the newest-copy anchor) contradict each other. Prometheus
       // counts bytes it cannot delete and lets a low cap become quietly

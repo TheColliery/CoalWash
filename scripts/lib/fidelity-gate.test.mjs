@@ -1345,10 +1345,10 @@ test('LINE BASIS controls: CRLF and LF blocks are unaffected, and the inventory 
 
 // Work at each input's own bound: the hand scans must give the regex's answers, and their work must stay linear in the input. The counts
 // are the instrument, never a clock. The regex references are kept here as the reference.
-import * as FG615 from './fidelity-gate.mjs';
+import * as FGX from './fidelity-gate.mjs';
 
-function lcg615(seed) { let x = seed; return () => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x; }; }
-function randomOf615(rnd, alphabet, maxLen) {
+function lcgSeed(seed) { let x = seed; return () => { x = (Math.imul(x, 1103515245) + 12345) & 0x7fffffff; return x; }; }
+function randomOf(rnd, alphabet, maxLen) {
   const n = rnd() % (maxLen + 1);
   let s = '';
   for (let i = 0; i < n; i++) s += alphabet[rnd() % alphabet.length];
@@ -1357,36 +1357,56 @@ function randomOf615(rnd, alphabet, maxLen) {
 
 test('the curly-quote bodies match the regex on random lines, and the scan does linear work', () => {
   const REF = /“([^”\n]+)”/g;
-  const rnd = lcg615(7);
+  const rnd = lcgSeed(7);
   for (let k = 0; k < 3000; k++) {
-    const s = randomOf615(rnd, ['“', '”', 'a', ' ', '\n'], 24);
+    const s = randomOf(rnd, ['“', '”', 'a', ' ', '\n'], 24);
     const want = [...s.matchAll(REF)].map((m) => m[1]);
-    assert.deepStrictEqual(FG615.curlyQuoteBodies(s), want, `input ${JSON.stringify(s)}`);
+    assert.deepStrictEqual(FGX.curlyQuoteBodies(s), want, `input ${JSON.stringify(s)}`);
   }
   const big = '“'.repeat(200000);
   const c = { steps: 0 };
-  FG615.curlyQuoteBodies(big, c);
+  FGX.curlyQuoteBodies(big, c);
   assert.ok(c.steps <= 4 * big.length, `linear work: ${c.steps} steps for ${big.length} characters`);
 });
 
 test('the trailing-zero count matches the regex, and the scan does linear work', () => {
-  const rnd = lcg615(11);
+  const rnd = lcgSeed(11);
   const cases = ['', '0', '00', '100', '1000', '0001', '7', '1234500'];
-  for (let k = 0; k < 2000; k++) cases.push(randomOf615(rnd, ['0', '1', '5'], 12));
-  for (const s of cases) assert.strictEqual(FG615.trailingZeros(s), /0*$/.exec(s)[0].length, `input ${JSON.stringify(s)}`);
+  for (let k = 0; k < 2000; k++) cases.push(randomOf(rnd, ['0', '1', '5'], 12));
+  for (const s of cases) assert.strictEqual(FGX.trailingZeros(s), /0*$/.exec(s)[0].length, `input ${JSON.stringify(s)}`);
   const big = '0'.repeat(200000) + '1';
   const c = { steps: 0 };
-  FG615.trailingZeros(big, c);
+  FGX.trailingZeros(big, c);
   assert.ok(c.steps <= 2 * big.length, `linear work: ${c.steps} steps for ${big.length} characters`);
 });
 
 test('the claim-marker scan looks up each line once, however many markers the line holds', () => {
   const c = { lineScans: 0 };
-  FG615.evidenceAnchors('proven '.repeat(50000), c);
+  FGX.evidenceAnchors('proven '.repeat(50000), c);
   assert.strictEqual(c.lineScans, 1, `line lookups: ${c.lineScans}`);
 });
 
 test('a checked number list of 300000 numbers completes without a spread-argument error', () => {
   const nums = Array(300000).fill('12').join(' ');
-  assert.doesNotThrow(() => FG615.checkFidelity(nums, nums));
+  assert.doesNotThrow(() => FGX.checkFidelity(nums, nums));
+});
+
+test('the version, link and bare-URL lists complete on 300000 items each', () => {
+  const v = Array(300000).fill('v1.2').join(' ');
+  const u = Array(300000).fill('http://a.b').join(' ');
+  const a = Array(290000).fill('<http://a.b>').join(' ');
+  for (const t of [v, u, a]) assert.doesNotThrow(() => FGX.inventory(t));
+});
+
+test('the claim-marker scan reads each marker on its own line, the last line with no newline included', () => {
+  const c = { lineScans: 0 };
+  const got = FGX.evidenceAnchors('proven #11 proven #12\nno marker #13\nverified #14 proven #15', c);
+  assert.deepStrictEqual([...got.keys()].sort(), ['#11', '#12', '#14', '#15']);
+  assert.strictEqual(c.lineScans, 2);
+});
+
+test('the gate reaches the hand scans, so a regex cannot come back at the call site', () => {
+  const h = FGX.__testHooks;
+  h.steps = 0; FGX.checkFidelity('“x', '“x'); assert.ok(h.steps > 0, 'curly scan');
+  h.steps = 0; FGX.checkFidelity('1000', '100'); assert.ok(h.steps > 0, 'trailing zeros');
 });

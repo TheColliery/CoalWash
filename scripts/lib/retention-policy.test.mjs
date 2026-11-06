@@ -342,3 +342,37 @@ test('0i size-cap fail direction: weightless (no/zero bytes) and doubt (future a
 test('0i: BIN_BUDGET_STORE_MULTIPLE is a positive, sane placeholder constant', () => {
   assert.ok(Number.isFinite(BIN_BUDGET_STORE_MULTIPLE) && BIN_BUDGET_STORE_MULTIPLE > 0);
 });
+
+// The eviction compaction: its answer is the splice loop it replaced, kept here as the reference. The counter is the instrument.
+import * as RET618 from './retention.mjs';
+
+test('the eviction compaction keeps the order of the kept items and kills the evicted ones in the same order as the splice loop', () => {
+  const refCompact = (keep, evicted, kill) => {
+    for (let k = keep.length - 1; k >= 0; k--) {
+      if (evicted.has(keep[k])) { kill(keep[k], 'size-cap'); keep.splice(k, 1); }
+    }
+  };
+  let x = 3;
+  const rnd = () => { x = (Math.imul(x, 1103515245) + 12345) & 0x7fffffff; return x; };
+  for (let trial = 0; trial < 300; trial++) {
+    const n = rnd() % 40;
+    const keep = Array.from({ length: n }, (_, i) => i * 7 + 1);
+    const evicted = new Set(keep.filter(() => rnd() % 3 === 0));
+    const a = keep.slice();
+    const b = keep.slice();
+    const killsA = [];
+    const killsB = [];
+    refCompact(a, evicted, (v) => killsA.push(v));
+    RET618.compactEvicted(b, evicted, (v) => killsB.push(v));
+    assert.deepStrictEqual(b, a, `kept order, trial ${trial}`);
+    assert.deepStrictEqual(killsB, killsA, `kill order, trial ${trial}`);
+  }
+});
+
+test('the eviction compaction moves each kept item at most once', () => {
+  const big = Array.from({ length: 200000 }, (_, i) => i);
+  const evicted = new Set(big.filter((v) => v % 2 === 0));
+  const c = { moves: 0 };
+  RET618.compactEvicted(big, evicted, () => {}, c);
+  assert.ok(c.moves > 0 && c.moves <= 200000, `moves: ${c.moves}`);
+});

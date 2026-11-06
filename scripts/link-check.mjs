@@ -146,6 +146,8 @@ export function escapeControls(text) {
 const BT = String.fromCharCode(96);
 const ESC_BASE = 0xF0000;   // an escaped ASCII punctuation char, held as a private-use code point
 const CODE_BASE = 0xF1000;  // an inline code span, held as ONE private-use code point (index)
+// The placeholders run from CODE_BASE up to U+10FFFF. A line with more spans than this cannot hold them all: the gate names that document.
+export const LINK_SPAN_CAPACITY = 0x10ffff - CODE_BASE + 1;
 const ESCAPABLE = /[!-\/:-@\[-`{-~]/;
 
 // ---------------------------------------------------------------------------
@@ -155,6 +157,7 @@ const ESCAPABLE = /[!-\/:-@\[-`{-~]/;
 // ---------------------------------------------------------------------------
 function maskInline(line) {
   const spans = [];
+  let overflow = false;
   let out = '';
   for (let i = 0; i < line.length;) {
     const c = line[i];
@@ -179,6 +182,7 @@ function maskInline(line) {
       if (close === -1) { out += line.slice(i, j); i = j; continue; } // no matching run: literal backticks
       let body = line.slice(j, close);
       if (body.length > 2 && body[0] === ' ' && body[body.length - 1] === ' ' && body.trim() !== '') body = body.slice(1, -1);
+      if (spans.length >= LINK_SPAN_CAPACITY) { overflow = true; out += line.slice(i, close + run); i = close + run; continue; } // past the range: literal text, named by the gate
       spans.push(body);
       out += String.fromCodePoint(CODE_BASE + spans.length - 1);
       i = close + run;
@@ -187,7 +191,7 @@ function maskInline(line) {
     out += c;
     i++;
   }
-  return { masked: out, spans };
+  return { masked: out, spans, overflow };
 }
 // 29n F470-d (T-D row 51): one stored span can be referenced many times, so the expansion has a bound. Past UNMASK_MAX_CHARS a
 // further reference stays as its placeholder character (visible and unmatched), never an unbounded copy of the span.
@@ -355,10 +359,11 @@ export function headingAnchors(text, opts = {}) {
 const REF_DEF = /^ {0,3}\[(?!\^)[^\]]+\]:[ \t]*(<[^<>\n]*>|\S+)/; // `[^1]: …` is a GFM footnote, not a link
 const HTML_REF = /<(?:a|img)\b[^>]*?\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 
-export function extractLinks(text, budget = null) {
+export function extractLinks(text, budget = null, report = null) {
   const links = [];
   for (const { n, line } of proseLines(text)) {
-    const { masked, spans } = maskInline(line);
+    const { masked, spans, overflow } = maskInline(line);
+    if (overflow && report) report.overflow = true;
     for (const m of masked.matchAll(INLINE_LINK)) links.push({ line: n, dest: unmask(m[3], spans, budget) });
     const def = REF_DEF.exec(masked);
     if (def) links.push({ line: n, dest: unmask(def[1], spans, budget) });
@@ -430,7 +435,9 @@ export function checkLinks({ root, files, tracked, expansionMax = LINK_RUN_EXPAN
       continue;
     }
     const refusedBefore = budget.refused;
-    const links = extractLinks(text, budget);
+    const report = {};
+    const links = extractLinks(text, budget, report);
+    if (report.overflow) findings.push({ file, line: 0, msg: `more than ${LINK_SPAN_CAPACITY} code spans on one line: this document is not fully checked` });
     if (budget.refused > refusedBefore) findings.push({ file, line: 0, msg: `${budget.refused - refusedBefore} link destination(s) past this run's expansion budget: this document is not fully checked` });
     for (const { line, dest } of links) {
       const at = (msg) => findings.push({ file, line, msg: `link \`${clip(dest)}\` — ${msg}` });

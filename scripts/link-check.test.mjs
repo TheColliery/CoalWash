@@ -446,3 +446,12 @@ test('fire 590: a large normal document still passes with the default run budget
     assert.strictEqual(r.findings.length, 0, 'no finding on a normal document: ' + JSON.stringify(r.findings.slice(0, 3)));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('a line with more code spans than the placeholder range holds is a named finding for its document, not an exception', () => {
+  // The placeholder range runs from U+F1000 to U+10FFFF: 126976 spans. One more than that on one line is past it.
+  const root = lcRoot({ 'doc.md': '`x` '.repeat(126977) + '\n' }); // a space between spans: adjacent runs would merge into one span
+  try {
+    const r = checkLinks({ root, files: ['doc.md'], tracked: null });
+    assert.ok(r.findings.some((f) => f.file === 'doc.md' && /code spans/.test(f.msg)), 'the document is named: ' + JSON.stringify(r.findings.slice(0, 2).map((f) => f.msg)));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

@@ -286,19 +286,19 @@ function numberScanList(text) {
 function tokenLists(s) {
   const versions = matchList(s, VERSION_RE, 0);
   const vMasked = maskOut(s, [VERSION_RE]);
-  versions.push(...matchList(vMasked, V_SHORT_VERSION_RE, 0));
+  for (const v of matchList(vMasked, V_SHORT_VERSION_RE, 0)) versions.push(v);
   const links = matchList(s, MDLINK_DEST_RE, 1);
   let lMasked = maskOut(s, [MDLINK_DEST_RE]);
-  links.push(...matchList(lMasked, AUTOLINK_RE, 1));
+  for (const v of matchList(lMasked, AUTOLINK_RE, 1)) links.push(v);
   lMasked = maskOut(lMasked, [AUTOLINK_RE]);
-  links.push(...matchList(lMasked, BAREURL_RE, 0));
+  for (const v of matchList(lMasked, BAREURL_RE, 0)) links.push(v);
   return {
     wikilinks: matchList(s, WIKILINK_RE, 1).map((v) => v.split('|')[0].trim()),
     dates: [...matchList(s, ISO_DATE_RE, 0), ...matchList(s, DMY_DATE_RE, 0)].map(canonDate),
     versions,
     links,
     codespans: matchList(s, CODESPAN_RE, 1),
-    quotes: [...curlyQuoteBodies(s), ...matchList(s, STRAIGHT_QUOTE_RE, 1)],
+    quotes: [...curlyQuoteBodies(s, __testHooks), ...matchList(s, STRAIGHT_QUOTE_RE, 1)],
     numbers: numberScanList(s),
   };
 }
@@ -336,7 +336,8 @@ export const __testHooks = {
   parseNumTokenCalls: 0,
   evidenceIncludesCalls: 0,
   fileRefMaxSliceLen: 0,
-  reset() { this.parseNumTokenCalls = 0; this.evidenceIncludesCalls = 0; this.fileRefMaxSliceLen = 0; },
+  steps: 0, // characters the hand scans examined, for a test that checks the scans are reached
+  reset() { this.parseNumTokenCalls = 0; this.evidenceIncludesCalls = 0; this.fileRefMaxSliceLen = 0; this.steps = 0; },
 };
 
 // ---------------------------------------------------------------------------
@@ -374,7 +375,7 @@ function parseNumToken(tok) {
   } else if (/^\d+(?:\.\d+)?$/.test(body)) {
     const decs = (body.split('.')[1] || '').length;
     value = Number(body);
-    ulp = decs > 0 ? 1 / 10 ** decs : 10 ** trailingZeros(body);
+    ulp = decs > 0 ? 1 / 10 ** decs : 10 ** trailingZeros(body, __testHooks);
   } else {
     return { kind: 'unknown' };
   }
