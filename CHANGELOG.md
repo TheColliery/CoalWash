@@ -10,10 +10,10 @@ The fidelity check and RE-TIER take much less time on long input
 
 - A long list of numbers, versions, links or URLs no longer crashes the fidelity check with a call-stack error.
 - The fidelity check finds quoted spans, zero runs and claim markers in one pass each, so a long line no longer stalls it.
-- RE-TIER reads the text once for its reference count, where it used to rescan it for each topic. Its index demotion keeps a running token count, instead of rebuilding the index for each move.
-- A restore's tombstone search indexes each window once, instead of scanning it once per anchor.
+- For a corpus of 410 or more topics, RE-TIER reads the text once for its reference count, where it used to rescan it for each topic; a smaller corpus keeps the per-topic scan. Its index demotion keeps a running token count, instead of rebuilding the index for each move.
+- A restore's tombstone search indexes each window once when 2048 or more anchors read it, instead of scanning it once per anchor; with fewer anchors the scan stays one per anchor.
 - The retention sweep removes its evicted entries in one pass.
-- The reference count and the tombstone search still do one more walk for each topic name or anchor that shares its first four characters with another. On a corpus with many such names, the cost grows faster than the text.
+- The index is built only when 2048 names or anchors read one text. Below that, the reference count and the tombstone search scan once per name or anchor, as before. A name or anchor shorter than four characters always takes that scan. A very large run of names sharing a prefix falls back to that scan too.
 
 **Contributor-facing:**
 
