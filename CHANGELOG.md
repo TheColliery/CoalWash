@@ -2,6 +2,23 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.15.12] - 2026-11-06
+
+The fidelity check and RE-TIER take much less time on long input
+
+### Fixed
+
+- A long list of numbers, versions, links or URLs no longer crashes the fidelity check with a call-stack error.
+- The fidelity check finds quoted spans, zero runs and claim markers in one pass each, so a long line no longer stalls it.
+- RE-TIER reads the text once for its reference count, where it used to rescan it for each topic. Its index demotion keeps a running token count, instead of rebuilding the index for each move.
+- A restore's tombstone search indexes each window once, instead of scanning it once per anchor.
+- The retention sweep removes its evicted entries in one pass.
+- The reference count and the tombstone search still do one more walk for each topic name or anchor that shares its first four characters with another. On a corpus with many such names, the cost grows faster than the text.
+
+**Contributor-facing:**
+
+- The link check holds its code-span placeholders in a fixed range of 126976 code points (`LINK_SPAN_CAPACITY`). A line with more spans than that names its document as not fully checked, instead of raising an exception.
+
 ## [1.15.11] - 2026-11-06
 
 An archive keeps any session its restore could not return
