@@ -1625,3 +1625,53 @@ test('archive: a session the listing alone rules out is refused before any gzip'
     assert.ok(sess.files.every((f) => fs.existsSync(f.path)), 'the original stays');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// ── fire 619: the indexed tombstone search (text-index.mjs) ────────────────
+// The reference below is the pre-619 matchTombstones: an includes() per anchor
+// over the lowered window. The differential holds the indexed version to it,
+// hit for hit and in the same order.
+import { matchTombstones as mt619 } from './estate-archive.mjs';
+
+function refMatch619(text, tombstones) {
+  const anchors = tombstones && Array.isArray(tombstones.anchors) ? tombstones.anchors : [];
+  const hay = String(text || '').toLowerCase();
+  if (!anchors.length || !hay) return [];
+  const hits = [];
+  for (const a of anchors) {
+    if (a.textLc && hay.includes(a.textLc)) {
+      hits.push({ anchor: a.text.length > 80 ? `${a.text.slice(0, 77)}...` : a.text, identity: JSON.stringify([a.textLc, a.target, a.date]), target: a.target, date: a.date });
+    }
+  }
+  return hits;
+}
+
+test('fire 619 differential: matchTombstones equals the includes() reference hit for hit, in order, short and long anchors alike', () => {
+  let seed = 619;
+  const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) | 0; return (seed >>> 8) / 16777216; };
+  const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const pieces = ['aaaa', 'aaa', 'ab', 'the plan', 'anc-1-zz', 'x', 'é', ' ', 'the-plan', 'aaaaa', 'zzzz', 'bb bb'];
+  for (let round = 0; round < 200; round++) {
+    const anchors = [];
+    const n = Math.floor(rnd() * 8);
+    for (let i = 0; i < n; i++) {
+      const textLc = Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(pieces)).join('').toLowerCase();
+      anchors.push({ text: textLc.toUpperCase(), textLc, target: `t${i}`, date: `d${i % 2}` });
+    }
+    if (rnd() < 0.2) anchors.push({ text: '', textLc: '', target: 'empty', date: 'd' });
+    const text = Array.from({ length: 1 + Math.floor(rnd() * 20) }, () => pick(pieces)).join(pick(['', ' ', '\n']));
+    const tomb = { anchors };
+    assert.deepStrictEqual(mt619(text, tomb), refMatch619(text, tomb), `round ${round} text=${JSON.stringify(text)}`);
+  }
+});
+
+test('fire 619 counted: an anchor whose prefix is absent costs no lookup, and a present one stops at its first hit', () => {
+  const text = 'filler text '.repeat(50000);
+  const absent = Array.from({ length: 2000 }, (_, i) => ({ text: `anc-${i}-zz`, textLc: `anc-${i}-zz`, target: 't', date: 'd' }));
+  const present = { text: 'filler text', textLc: 'filler text', target: 'p', date: 'd' };
+  const c = { visits: 0 };
+  const hits = mt619(text, { anchors: [...absent, present] }, c);
+  assert.strictEqual(hits.length, 1);
+  assert.strictEqual(hits[0].anchor, 'filler text');
+  assert.ok(c.visits > 0, 'the indexed lookup is wired: the counter moved');
+  assert.ok(c.visits <= 10, `visits ${c.visits}: 2000 absent anchors must add none, the present one stops at its first position`);
+});

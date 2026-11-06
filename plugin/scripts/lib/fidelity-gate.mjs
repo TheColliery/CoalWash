@@ -361,7 +361,7 @@ export function trailingZeros(s, counter = null) {
   return s.length - j;
 }
 
-function parseNumToken(tok) {
+export function parseNumToken(tok) {
   __testHooks.parseNumTokenCalls++;
   const percent = tok.endsWith('%');
   const body = percent ? tok.slice(0, -1) : tok;
@@ -403,20 +403,42 @@ function parseNumToken(tok) {
 // the inventory's insertion order, and cross-kind candidates never matched
 // anyway (c.kind !== o.kind), so the FIRST qualifying survivor — the shipped
 // tie-break, pinned by its own control test — is unchanged.
-function roundedSurvivor(origTok, candsByKind) {
+// fire 619: the candidates of one kind are grouped by their own ulp, and within a group by bucket
+// (floor(value / ulp)). A survivor that is strictly coarser and within its ulp of the drop lies in the drop's own
+// bucket or one of the two beside it, so a drop looks in three buckets per coarser group and confirms each by the
+// exact condition. Ties go to the lowest insertion index, the shipped first-qualifying rule, unchanged.
+export function roundedSurvivor(origTok, candsByKind, counter = null) {
   const o = parseNumToken(origTok);
   if ((o.kind !== 'percent' && o.kind !== 'plain') || o.sig < 2) return null;
-  for (const c of candsByKind[o.kind]) {
-    if (!(c.ulp > o.ulp)) continue; // must be strictly coarser
-    if (Math.abs(o.value - c.value) < c.ulp) return c.tok;
+  let best = null;
+  for (const [ulp, buckets] of candsByKind[o.kind]) {
+    if (!(ulp > o.ulp)) continue; // must be strictly coarser
+    const b = Math.floor(o.value / ulp);
+    for (let d = -1; d <= 1; d++) {
+      const list = buckets.get(b + d);
+      if (!list) continue;
+      for (const c of list) {
+        if (counter) counter.visits = (counter.visits || 0) + 1;
+        if (Math.abs(o.value - c.value) < ulp && (best === null || c.idx < best.idx)) best = c;
+      }
+    }
   }
-  return null;
+  return best === null ? null : best.tok;
 }
-function parseSurvivorCands(nextTokens) {
-  const byKind = { percent: [], plain: [] };
+export function parseSurvivorCands(nextTokens) {
+  const byKind = { percent: new Map(), plain: new Map() }; // kind -> Map(ulp -> Map(bucket -> [{ value, idx, tok }]))
+  let idx = 0;
   for (const tok of nextTokens) {
     const c = parseNumToken(tok);
-    if (c.kind === 'percent' || c.kind === 'plain') byKind[c.kind].push({ tok, value: c.value, ulp: c.ulp });
+    idx++;
+    if (c.kind !== 'percent' && c.kind !== 'plain') continue;
+    let buckets = byKind[c.kind].get(c.ulp);
+    if (!buckets) { buckets = new Map(); byKind[c.kind].set(c.ulp, buckets); }
+    const b = Math.floor(c.value / c.ulp);
+    let list = buckets.get(b);
+    if (!list) { list = []; buckets.set(b, list); }
+    // the earliest candidate of a value is the only one that can win for it, so a repeat is never stored
+    if (!list.some((e) => e.value === c.value)) list.push({ value: c.value, idx, tok });
   }
   return byKind;
 }

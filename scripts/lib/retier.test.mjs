@@ -1801,3 +1801,90 @@ test('the demotion plan does linear work in its lines, however many lines it mov
   RT616.planIndexDemotion(text, { fillCeiling: 1 }, c);
   assert.ok(c.visits > 0 && c.visits <= 3 * lines + 10, `line visits: ${c.visits} for ${lines} lines`); // > 0: the counter must have moved
 });
+
+// ── fire 619: the indexed reference count (text-index.mjs) ─────────────────
+// The reference below is the pre-619 unreferencedTopics, copied whole: an
+// indexOf loop per needle over the full corpus. The differential holds the
+// indexed version to it, output for output.
+import { unreferencedTopics as unrefTopics619 } from './retier.mjs';
+
+function refRuns619(h, n2) {
+  let n = 0;
+  let i = h.indexOf(n2);
+  while (i !== -1) { n++; i = h.indexOf(n2, i + n2.length); }
+  return n;
+}
+const REF_DELIM_619 = /[-_\s]+/g;
+const refNorm619 = (s) => s.replace(REF_DELIM_619, ' ');
+function refCountOcc619(hay, needle, delimHay = hay) {
+  if (!needle) return 0;
+  const h = hay.toLowerCase();
+  const n2 = needle.toLowerCase();
+  return Math.max(refRuns619(h, n2), refRuns619(refNorm619(delimHay.toLowerCase()), refNorm619(n2)));
+}
+const REF_WIKI_619 = /\[\[([^[\]]*)\]\]/g;
+function refWiki619(hay) {
+  let out = '';
+  let m;
+  REF_WIKI_619.lastIndex = 0;
+  while ((m = REF_WIKI_619.exec(hay))) out += `${m[1]}\n`;
+  return out;
+}
+function refDecode619(s) {
+  return s.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+function refUnref619(store, all) {
+  const out = [];
+  const wiki = refWiki619(all);
+  const decoded = refDecode619(all).toLowerCase();
+  for (const t of store.topics) {
+    const stem = t.basename.replace(/\.md$/i, '');
+    const ownBase = refCountOcc619(t.text, t.basename);
+    const ownStem = refCountOcc619(t.text, stem);
+    let allBase = refCountOcc619(all, t.basename, wiki);
+    let allStem = refCountOcc619(all, stem, wiki);
+    allBase = Math.max(allBase, refRuns619(decoded, t.basename.toLowerCase()));
+    allStem = Math.max(allStem, refRuns619(decoded, stem.toLowerCase()));
+    const singular = stem.length > 1 && stem.endsWith('s') ? stem.slice(0, -1) : null;
+    if (singular) allStem = Math.max(allStem, refCountOcc619(all, singular, wiki));
+    if (allBase > ownBase || allStem > ownStem) continue;
+    out.push(t);
+  }
+  out.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.basename < b.basename ? -1 : 1));
+  return out;
+}
+
+test('fire 619 differential: unreferencedTopics equals the indexOf reference over random topics and corpora, overlaps and folded forms included', () => {
+  let seed = 619;
+  const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) | 0; return (seed >>> 8) / 16777216; };
+  const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const names = ['aaa', 'a-b', 'a_b', 'ab', 'the-plan', 'guidelines', 'x%2Dy', 'topic-name', 'aaaa', 'ab c'];
+  const bits = ['aaa', 'aaaaa', ' ', '-', '_', '[[', ']]', 'the plan', 'guideline', '%2D', 'topic name', 'a', 'b', ' x ', 'topic-name', 'the-plan'];
+  for (let round = 0; round < 120; round++) {
+    const topics = [];
+    const count = 1 + Math.floor(rnd() * 6);
+    for (let i = 0; i < count; i++) {
+      const base = `${pick(names)}${pick(['', 's', 'x'])}.md`;
+      const text = Array.from({ length: 1 + Math.floor(rnd() * 8) }, () => pick(bits)).join(' ');
+      topics.push({ basename: base, path: `/p/${base}`, text, mtimeMs: Math.floor(rnd() * 5), pinned: false });
+    }
+    const corpus = Array.from({ length: 2 + Math.floor(rnd() * 14) }, () => pick(bits)).join(pick([' ', '', '\n']));
+    const store = { topics };
+    const got = unrefTopics619(store, corpus).map((t) => t.basename);
+    const want = refUnref619(store, corpus).map((t) => t.basename);
+    assert.deepStrictEqual(got, want, `round ${round} corpus=${JSON.stringify(corpus)}`);
+  }
+});
+
+test('fire 619 counted: unreferencedTopics examines a bounded number of positions, not topics times corpus', () => {
+  const T = 300;
+  const topics = [];
+  // each name carries its own 4-character prefix, so a needle walks one position; topics that share a prefix walk them all (fire 619 residual)
+  const code = (i) => `q${i.toString(36).padStart(3, '0')}`;
+  for (let i = 0; i < T; i++) topics.push({ basename: `${code(i)}.md`, path: `/p/${code(i)}.md`, text: 'x'.repeat(1000) + ` ref ${code(i)}`, mtimeMs: i, pinned: false });
+  const corpus = topics.map((t) => t.text).join('\n');
+  const c = { visits: 0 };
+  unrefTopics619({ topics }, corpus, c);
+  assert.ok(c.visits > 0, 'the indexed walk is wired: the counter moved');
+  assert.ok(c.visits <= 10 * T, `visits ${c.visits} must stay near one per topic, not corpus length times topics`);
+});

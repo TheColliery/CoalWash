@@ -1410,3 +1410,50 @@ test('the gate reaches the hand scans, so a regex cannot come back at the call s
   h.steps = 0; FGX.checkFidelity('“x', '“x'); assert.ok(h.steps > 0, 'curly scan');
   h.steps = 0; FGX.checkFidelity('1000', '100'); assert.ok(h.steps > 0, 'trailing zeros');
 });
+
+// ── fire 619: the grouped survivor search (roundedSurvivor, #36 note) ───────
+// The reference below is the pre-619 loop: first qualifying survivor of the
+// same kind in insertion order. The differential holds the grouped search to
+// it on mixed precision, percent and plain, with ties.
+import { roundedSurvivor as rsv619, parseSurvivorCands as psc619, parseNumToken as pnt619 } from './fidelity-gate.mjs';
+
+function refSurvivor619(orig, nextTokens) {
+  const o = pnt619(orig);
+  if ((o.kind !== 'percent' && o.kind !== 'plain') || o.sig < 2) return null;
+  for (const tok of nextTokens) {
+    const c = pnt619(tok);
+    if (c.kind !== o.kind) continue;
+    if (!(c.ulp > o.ulp)) continue;
+    if (Math.abs(o.value - c.value) < c.ulp) return tok;
+  }
+  return null;
+}
+
+test('fire 619 differential: roundedSurvivor equals the insertion-order loop over mixed precision, percent and plain, with ties', () => {
+  const pool = ['12', '12.3', '12.30', '12.34', '12.345', '1.2k', '1.23k', '12%', '12.3%', '12.34%', '1200', '1.2', '0.5', '2', '2.5',
+    '3.14', '3.1', '43k', '44k', '44.2k', '12.35', '1.25k', '125', '130', '100', '1000', '0.01', '0.010', '7.25%', '7%', '7.3%', '7.30%', '2.50', '2.55', '1.5'];
+  let seed = 619;
+  const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) | 0; return (seed >>> 8) / 16777216; };
+  const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  for (let round = 0; round < 300; round++) {
+    const nextTokens = Array.from({ length: 1 + Math.floor(rnd() * 60) }, () => pick(pool));
+    const byKind = psc619(nextTokens);
+    for (const orig of pool) {
+      assert.strictEqual(rsv619(orig, byKind), refSurvivor619(orig, nextTokens), `round ${round} orig=${orig} next=${JSON.stringify(nextTokens)}`);
+    }
+  }
+});
+
+test('fire 619 counted: a drop visits a bounded number of candidates, the same at 1000 survivors and at 100000', () => {
+  // integers that are not multiples of ten: all one ulp group (1), so only that group's three buckets around 2.5 are looked in
+  const surv = (n) => { const out = []; for (let v = 1; out.length < n; v++) if (v % 10 !== 0) out.push(String(v)); return out; };
+  const small = psc619(surv(1000));
+  const big = psc619(surv(100000));
+  const cs = { visits: 0 };
+  const cb = { visits: 0 };
+  assert.strictEqual(rsv619('2.5', small, cs), '2');
+  assert.strictEqual(rsv619('2.5', big, cb), '2');
+  assert.ok(cb.visits > 0, 'the bucket walk is wired: the counter moved');
+  assert.ok(cb.visits <= 3, `visits ${cb.visits}: only the three buckets around 2.5 are examined`);
+  assert.strictEqual(cb.visits, cs.visits, 'the survivors that are far away never cost a visit');
+});

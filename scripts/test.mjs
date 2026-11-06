@@ -48,6 +48,7 @@ const TESTS = [
   'scripts/lib/estate.test.mjs',
   'scripts/lib/estate-archive.test.mjs',
   'scripts/lib/retier.test.mjs',
+  'scripts/lib/text-index.test.mjs', // 619: the shared prefix index behind exact substring counting (retier, estate-archive, fidelity-gate)
   'scripts/lib/gate-liveness.test.mjs',
   'scripts/lib/twin-pin.test.mjs',
   'scripts/lib/fixture-canonical.test.mjs',

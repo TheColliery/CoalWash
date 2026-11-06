@@ -66,6 +66,7 @@ import { appendOwnLog } from './repo-fs.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
 import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS } from './apply.mjs';
 import { ownSandboxDir, fileModeOr600 } from './repo-fs.mjs';
+import { buildPrefixIndex, hasNeedle, PREFIX_K } from './text-index.mjs';
 // #58 tombstone registry: keeps.json anchors (the adjudicated spans) + the bin
 // death-log (destroyed cuts). Function-declaration imports used only at CALL
 // time (collectTombstones), so the existing apply<->retier<->estate cycle stays
@@ -868,13 +869,16 @@ export function collectTombstones({ projectRoot = process.cwd(), home = os.homed
 // Which tombstone anchors appear (case-insensitive substring) in `text`. Empty
 // registry / text -> []. The caller attaches this as an advisory `laterRemoved`
 // note, never a block. Long anchors are truncated for one-line display.
-function matchTombstones(text, tombstones) {
+export function matchTombstones(text, tombstones, counter = null) {
   const anchors = tombstones && Array.isArray(tombstones.anchors) ? tombstones.anchors : [];
   const hay = String(text || '').toLowerCase();
   if (!anchors.length || !hay) return [];
+  // fire 619: the window is indexed once, on the first anchor long enough to use the index; every anchor shorter than the prefix length takes includes()
+  let index = null;
   const hits = [];
   for (const a of anchors) {
-    if (a.textLc && hay.includes(a.textLc)) {
+    if (a.textLc && a.textLc.length >= PREFIX_K && !index) index = buildPrefixIndex(hay, PREFIX_K, counter);
+    if (a.textLc && hasNeedle(index, hay, a.textLc, counter)) {
       // identity keys the maps that collect hits: two anchors can share their printed label, never their full text, target and date together
       hits.push({ anchor: a.text.length > 80 ? `${a.text.slice(0, 77)}...` : a.text, identity: JSON.stringify([a.textLc, a.target, a.date]), target: a.target, date: a.date });
     }
@@ -886,7 +890,7 @@ function matchTombstones(text, tombstones) {
 export const TOMBSTONE_WINDOW_BYTES = 8 * 1024 * 1024;
 // Scan a buffer for tombstone anchors window by window. Windows overlap by enough bytes that any anchor no longer than the overlap lies
 // whole inside one window; the last window always reaches the end of the buffer, so every byte is covered. Returns { hits, windows }.
-export function scanBufferForTombstones(buf, tombstones, windowBytes = TOMBSTONE_WINDOW_BYTES) {
+export function scanBufferForTombstones(buf, tombstones, windowBytes = TOMBSTONE_WINDOW_BYTES, counter = null) {
   const anchors = tombstones && Array.isArray(tombstones.anchors) ? tombstones.anchors : [];
   const longest = anchors.reduce((n, a) => Math.max(n, a.textLc ? a.textLc.length : 0), 0);
   const overlap = 3 * longest + 4; // a UTF-16 unit is at most three UTF-8 bytes; the +4 covers a surrogate pair's four bytes
@@ -897,7 +901,7 @@ export function scanBufferForTombstones(buf, tombstones, windowBytes = TOMBSTONE
   for (let start = 0; ; start += step) {
     const end = Math.min(buf.length, start + size);
     windows++;
-    for (const h of matchTombstones(buf.toString('utf8', start, end), tombstones)) found.set(h.identity, h);
+    for (const h of matchTombstones(buf.toString('utf8', start, end), tombstones, counter)) found.set(h.identity, h);
     if (end >= buf.length) break;
   }
   return { hits: [...found.values()], windows };

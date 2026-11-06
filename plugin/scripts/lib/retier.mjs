@@ -53,6 +53,7 @@ import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-lo
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS, restoreFile, writeDurable } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
+import { buildPrefixIndex, countNonOverlapping, PREFIX_K } from './text-index.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
 import { escapeRawControls } from './receipt.mjs'; // the printed store label goes through the room's one escaper
 
@@ -357,11 +358,14 @@ export function planIndexDemotion(indexText, env, counter = null) {
 // it never manufactures a false "unreferenced".
 const DELIM_RE = /[-_\s]+/g;
 const normDelim = (s) => s.replace(DELIM_RE, ' ');
-function countRuns(h, n2) {
-  let n = 0;
-  let i = h.indexOf(n2);
-  while (i !== -1) { n++; i = h.indexOf(n2, i + n2.length); }
-  return n;
+// fire 619: one folded haystack, counted through the shared prefix index. The index is built on the first
+// needle long enough to use it, once for this haystack, and every count equals the indexOf loop it replaced.
+function foldedCounter(hay, counter = null) {
+  let index = null;
+  return (needle) => {
+    if (needle.length >= PREFIX_K && !index) index = buildPrefixIndex(hay, PREFIX_K, counter);
+    return countNonOverlapping(index, hay, needle, counter);
+  };
 }
 // grad10 F6 [MEDIUM, opposite-polarity — introduced by grad9's own F4 fix]:
 // the delimiter fold above was scoped to the WHOLE corpus. A stem that
@@ -388,21 +392,25 @@ function wikilinkSpans(hay) {
   while ((m = WIKILINK_RE.exec(hay))) out += `${m[1]}\n`;
   return out;
 }
-function countOccurrences(hay, needle, delimHay = hay) {
-  if (!needle) return 0;
-  const h = hay.toLowerCase();
-  const n2 = needle.toLowerCase();
-  // BOTH counted, never short-circuited: a topic's own text commonly
-  // contains its own EXACT hyphenated stem (e.g. a self-titled header),
-  // which would make an exact-count>0 early-return miss a delimiter-variant
-  // reference living ELSEWHERE (the wikilink in an index line) — the two
-  // counts are of DIFFERENT occurrences and neither substitutes for the
-  // other. max(), not sum(): still monotone-widening (never below the old
-  // exact-only count), never double-counts one real occurrence twice.
-  // `delimHay` is the NARROWER haystack the delimiter-normalized leg reads
-  // from — bracket-scoped spans for the corpus, or `hay` itself (unchanged
-  // old behavior) when the caller has no narrower span to offer.
-  return Math.max(countRuns(h, n2), countRuns(normDelim(delimHay.toLowerCase()), normDelim(n2)));
+// BOTH legs counted, never short-circuited: a topic's own text commonly
+// contains its own EXACT hyphenated stem (e.g. a self-titled header),
+// which would make an exact-count>0 early-return miss a delimiter-variant
+// reference living ELSEWHERE (the wikilink in an index line) — the two
+// counts are of DIFFERENT occurrences and neither substitutes for the
+// other. max(), not sum(): still monotone-widening (never below the old
+// exact-only count), never double-counts one real occurrence twice.
+// `delimHay` is the NARROWER haystack the delimiter-normalized leg reads
+// from — bracket-scoped spans for the corpus, or `hay` itself (unchanged
+// old behavior) when the caller has no narrower span to offer. Returns a
+// counter over one needle; the haystacks are indexed once, on first use.
+function countOccurrencesFor(hay, delimHay = hay, counter = null) {
+  const exact = foldedCounter(hay.toLowerCase(), counter);
+  const delim = foldedCounter(normDelim(delimHay.toLowerCase()), counter);
+  return (needle) => {
+    if (!needle) return 0;
+    const n2 = needle.toLowerCase();
+    return Math.max(exact(n2), delim(normDelim(n2)));
+  };
 }
 
 // grad10 F7a [MEDIUM, content-loss] percent-encoding: a markdown link target
@@ -438,26 +446,30 @@ function englishSingular(stem) {
 // stem matching prose) keeps the file in place — the safe fail direction.
 // ponytail: substring reference test; upgrade path = real link-graph
 // resolution if FP-keeps ever matter.
-export function unreferencedTopics(store, allTextConcat) {
+export function unreferencedTopics(store, allTextConcat, counter = null) {
   const out = [];
   const wikilinkHay = wikilinkSpans(allTextConcat); // grad10 F6: computed once, not per topic
   const decodedHay = percentDecodeAscii(allTextConcat).toLowerCase(); // grad10 F7a: computed once, not per topic
+  // fire 619: each corpus form is indexed once, on first use, and every topic's needles reuse those indexes
+  const allCount = countOccurrencesFor(allTextConcat, wikilinkHay, counter);
+  const decodedCount = foldedCounter(decodedHay, counter);
   for (const t of store.topics) {
     if (t.basename === OVERFLOW_BASENAME) continue; // the ladder's own tier-2 rung — never cascades itself
     const stem = t.basename.replace(/\.md$/i, '');
-    const ownBase = countOccurrences(t.text, t.basename); // own text: unscoped, unaffected by F6/F7
-    const ownStem = countOccurrences(t.text, stem);
-    let allBase = countOccurrences(allTextConcat, t.basename, wikilinkHay); // grad10 F6: delimiter leg scoped to [[...]] spans
-    let allStem = countOccurrences(allTextConcat, stem, wikilinkHay);
+    const ownCount = countOccurrencesFor(t.text, t.text, counter); // own text: unscoped, unaffected by F6/F7
+    const ownBase = ownCount(t.basename);
+    const ownStem = ownCount(stem);
+    let allBase = allCount(t.basename); // grad10 F6: delimiter leg scoped to [[...]] spans
+    let allStem = allCount(stem);
     // grad10 F7a: also try the percent-decoded corpus, exact-only (no delimiter
     // fold — decoding already produced the real hyphen/underscore/space).
-    allBase = Math.max(allBase, countRuns(decodedHay, t.basename.toLowerCase()));
-    allStem = Math.max(allStem, countRuns(decodedHay, stem.toLowerCase()));
+    allBase = Math.max(allBase, decodedCount(t.basename.toLowerCase()));
+    allStem = Math.max(allStem, decodedCount(stem.toLowerCase()));
     // grad10 F7b: also try the stem's English singular as an additional
     // reference candidate (basename is skipped — the ".md" extension already
     // breaks the "ends in s" test, so it never applies there).
     const singular = englishSingular(stem);
-    if (singular) allStem = Math.max(allStem, countOccurrences(allTextConcat, singular, wikilinkHay));
+    if (singular) allStem = Math.max(allStem, allCount(singular));
     if (allBase > ownBase || allStem > ownStem) continue; // referenced elsewhere (case-insensitive) -> stays
     out.push(t);
   }
