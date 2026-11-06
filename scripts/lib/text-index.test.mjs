@@ -95,3 +95,13 @@ test('counted: the walk is bounded by the positions of one prefix, not by the te
   assert.strictEqual(countNonOverlapping(index, text, 'needle here', c), 1);
   assert.ok(c.visits <= 2, `only the one 'need' position is examined, got ${c.visits}`);
 });
+
+test('counted: a bucket past the hot gate takes the indexOf loop, and the answers are the same', () => {
+  const text = 'x'.repeat(200000);
+  const index = buildPrefixIndex(text, 4);
+  const c = { visits: 0 };
+  assert.strictEqual(countNonOverlapping(index, text, 'xxxxy', c), 0);
+  assert.strictEqual(hasNeedle(index, text, 'xxxxy', c), false);
+  assert.strictEqual(countNonOverlapping(index, text, 'xxxx', c), 50000);
+  assert.strictEqual(c.visits, 0, 'the bucket was not walked');
+});
