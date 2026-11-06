@@ -24,6 +24,41 @@ const USAGE = 'usage: node scripts/release-notes.mjs            (derive mode: th
   + '  example: node scripts/release-notes.mjs --check --repo CoalBoard\n'
   + '  exit 0 done · 1 refused or a failed check · 64 usage error';
 
+// The CHANGELOG is the tag's own file, so it is read only as a regular file (a link or a device in its place is refused by name) and only under a byte
+// bound (ours: 8 MiB, twenty times the longest CHANGELOG of the flock). The file is OPENED first and every check reads the open descriptor: a stat of
+// the name before the open leaves a window in which the entry can be swapped between the check and the read. The open itself refuses a link where the
+// platform can (O_NOFOLLOW) and never waits on a pipe (O_NONBLOCK). After the open, the descriptor must be the file the name names NOW (CoalLedger's
+// CodeQL #29 hardening, brought into the canon 2026-11-07): a name that is a link is refused with the link message, on every platform, and a name that
+// holds another file (a different dev or ino, the open followed a link the name no longer holds, or the entry was swapped) is refused before any read.
+// Both checks can only refuse, never pick another file. shortcut: a filesystem that reports ino 0 gives both sides 0 and cannot tell files apart there.
+const MAX_CHANGELOG_BYTES = 8388608;
+const OPEN_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
+function readChangelog() {
+  const name = 'CHANGELOG.md';
+  const notRegular = 'is not a regular file (a link or a device is refused, never followed)';
+  const refuse = (why) => { throw new Error(`${name} ${why}`); };
+  let fd;
+  try { fd = fs.openSync(name, OPEN_FLAGS); } catch (e) { if (e && e.code === 'ELOOP') refuse(notRegular); throw e; }
+  try {
+    const open = fs.fstatSync(fd, { bigint: true });
+    const named = fs.lstatSync(name, { bigint: true });
+    if (!open.isFile() || named.isSymbolicLink()) refuse(notRegular);
+    if (named.dev !== open.dev || named.ino !== open.ino) refuse('changed between the check and the read: refused, never read');
+    if (open.size > MAX_CHANGELOG_BYTES) refuse(`is ${open.size} bytes, past the byte bound of ${MAX_CHANGELOG_BYTES}: refused before it is read`);
+    return fs.readFileSync(fd, 'utf8');
+  } finally { fs.closeSync(fd); }
+}
+
+// A release file is written to a new temporary name beside it and renamed into place (node/runtime.md section 5): the rename replaces the directory entry,
+// so a link or a second name already standing there is replaced, never written through.
+function writeOutput(name, text) {
+  const tmp = `${name}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, text, { flag: 'wx' });
+    fs.renameSync(tmp, name);
+  } finally { fs.rmSync(tmp, { force: true }); }
+}
+
 function repoName(args) {
   const at = args.indexOf('--repo');
   if (at !== -1) return args[at + 1] || '';
@@ -43,7 +78,7 @@ function check(args) {
   const repo = repoName(args);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(repo)) { console.error('release-notes --check: cannot tell the repository name; pass --repo <name>'); process.exitCode = 1; return; }
   let changelog;
-  try { changelog = fs.readFileSync('CHANGELOG.md', 'utf8'); } catch (e) { console.error('release-notes --check: could not read CHANGELOG.md: ' + e.message); process.exitCode = 1; return; }
+  try { changelog = readChangelog(); } catch (e) { console.error('release-notes --check: could not read CHANGELOG.md: ' + e.message); process.exitCode = 1; return; }
   const version = /^##\s*\[([^\]]+)\]/m.exec(changelog)?.[1] ?? '';
   try {
     const { summary } = extractChangelogEntry(changelog, version);
@@ -93,7 +128,7 @@ function main() {
 
   let changelog;
   try {
-    changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+    changelog = readChangelog();
   } catch (e) {
     console.error(`release-notes: could not read CHANGELOG.md: ${e.message}`);
     process.exitCode = 1;
@@ -104,10 +139,10 @@ function main() {
     const { summary, lead, sectionsBody } = extractChangelogEntry(changelog, tagVersion, { previousStable: prev.slice(1) });
     // A pre-release is never Latest, even when the repo has no Latest yet.
     const latestFlag = launch ? 'false' : makeLatestFlag(tagVersion, latest);
-    fs.writeFileSync('release-title.txt', buildReleaseTitle(tagVersion, summary));
-    fs.writeFileSync('release-body.md', buildReleaseBody(summary, sectionsBody, lead));
-    fs.writeFileSync('release-latest.txt', latestFlag);
-    fs.writeFileSync('release-prerelease.txt', launch ? 'true' : 'false');
+    writeOutput('release-title.txt', buildReleaseTitle(tagVersion, summary));
+    writeOutput('release-body.md', buildReleaseBody(summary, sectionsBody, lead));
+    writeOutput('release-latest.txt', latestFlag);
+    writeOutput('release-prerelease.txt', launch ? 'true' : 'false');
     console.log(`release-notes: derived the Release title + body for ${ref} from CHANGELOG.md's [${tagVersion}] entry`);
     console.log(prev ? `release-notes: the entry is followed by the previous stable tag's heading [${prev.slice(1)}]` : 'release-notes: no previous stable tag -- the heading-continuity check is skipped');
     console.log(`release-notes: make_latest=${latestFlag} (current Latest: ${latest || 'none'})`);
