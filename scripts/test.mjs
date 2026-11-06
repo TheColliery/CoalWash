@@ -48,6 +48,7 @@ const TESTS = [
   'scripts/lib/estate.test.mjs',
   'scripts/lib/estate-archive.test.mjs',
   'scripts/lib/retier.test.mjs',
+  'scripts/lib/writeguard-slot.test.mjs', // 655: a snapshot in a -N slot is listed and restored
   'scripts/lib/restore-argv-shell.test.mjs', // 653: the restore door never runs a planted name as a shell substitution
   'scripts/lib/shipped-command-slots.test.mjs', // 653: no shipped command span carries an id or name placeholder
   'scripts/lib/text-index.test.mjs', // 619: the shared prefix index behind exact substring counting (retier, estate-archive, fidelity-gate)

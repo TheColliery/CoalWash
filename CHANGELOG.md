@@ -2,6 +2,19 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+Restore commands take a recovery id or snapshot name from a file, and a planted name is never listed or run
+
+### Security
+
+- CoalWash lists, prints and restores a recovery-bin id or a write-guard snapshot name only in the shape CoalWash itself writes. A name planted in a cloned or unpacked repository is never listed and never reaches a command line. The shipped instructions no longer put an id, a snapshot name, a folder, a file list or file content on a shell line.
+
+### Added
+
+- The `--from <file>` form of `restore`, `writeguard-restore`, `dig-gauge` and `anchor-diff`, and `estate-restore --to-file <file>`. Each reads one value from a file (a list of paths for `dig-gauge`). A file is bounded in size: 512 bytes for one value, 64 KiB for a list. A link is refused. The typed forms still work.
+- Bins and snapshots written by earlier releases, including the six-character bin id form, still list and restore.
+
 ## [1.15.12] - 2026-11-06
 
 The fidelity check and RE-TIER take much less time on long input

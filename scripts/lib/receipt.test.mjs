@@ -40,7 +40,7 @@ test('a failing gate is loud and names the block', () => {
 
 test('wikilink-orphan advisory rides the receipt as ONE optional line — absent by default', () => {
   assert.ok(!buildReceipt(BASE).includes('advisory'), 'no advisory field -> no advisory line');
-  const line = 'advisory: 1 deleted topic(s) still referenced by surviving files (possible dead [[link]]s): gone.md — a deliberate delete is fine; recovery door: cli.mjs restore <id>';
+  const line = 'advisory: 1 deleted topic(s) still referenced by surviving files (possible dead [[link]]s): gone.md — a deliberate delete is fine; recovery door: cli.mjs restore --from <a file holding the id>';
   const r = buildReceipt({ ...BASE, deadLinkLine: line });
   assert.ok(r.includes(line), 'the applyPlan-built line lands verbatim');
 });

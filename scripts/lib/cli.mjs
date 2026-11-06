@@ -13,9 +13,9 @@
 //   node scripts/lib/cli.mjs writeguard-restore <snapName> | writeguard-restore --from <file> [--out <file>]
 //   node scripts/lib/cli.mjs anchor-diff <path> | anchor-diff --from <file> [--json]
 //   node scripts/lib/cli.mjs estate [--json]
-//   node scripts/lib/cli.mjs dig-gauge <path...> [--json] [--session <id>]
+//   node scripts/lib/cli.mjs dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>]
 //
-// dig-gauge <path...> (ULTRA trigger #2 — dig-gauge.mjs, the PRE-READ
+// dig-gauge <path...> or dig-gauge --from <file> (ULTRA trigger #2 — dig-gauge.mjs, the PRE-READ
 // tollgate): an agent about to DIG old history passes the candidate paths a
 // search already found; dig-gauge stats them (fs.stat BYTES, NEVER a content
 // read → ~est tok at 4 chars/tok) and verdicts CLEAR/CRUSHING against the
@@ -31,7 +31,7 @@
 // slug dirs (best-effort), and prints a heuristic ~est reclaimable figure.
 // Never deletes/archives/edits anything — P2/P3 are future, separate work.
 //
-// anchor-diff <path> (loss class #54 — generational-compounding, ADVISORY
+// anchor-diff <path> or anchor-diff --from <file> (loss class #54 — generational-compounding, ADVISORY
 // ONLY): diffs the file's OLDEST verified CoalWash snapshot against its
 // current content + every recorded bin drop since, and reports structured-
 // token CANDIDATES missing from both — see anchor-diff.mjs's own doc comment.
@@ -43,16 +43,16 @@
 // breakEven. Output: the terse one-line gauge (default) or the full JSON
 // (--json).
 //
-// restore <id> (0h — the 0-token human recovery door, pull-only): looks the
+// restore <id> or restore --from <file> (0h — the 0-token human recovery door, pull-only): looks the
 // id up in BOTH bins (fat first, then the wizard bin store.old), prints the
-// item's CONTENT to stdout (pipeable: `... restore <id> > recovered.md`)
+// item's CONTENT to stdout (pipeable: `... restore --from <file> > recovered.md`, the id in the one-line file)
 // and ONE summary line (id · bin · bytes · source file) to stderr — the
 // classic data/diagnostics split, so redirection captures pure content. It
 // NEVER writes to the store: re-inserting recovered content is the human's
 // (or a gated plan's) decision, never this command's — a write here would
 // be a mutation outside applyPlan's gates.
 //
-// writeguard-list / writeguard-restore <snapName> (0p — the airbag undo door,
+// writeguard-list / writeguard-restore <snapName> or writeguard-restore --from <file> (0p — the airbag undo door,
 // same restore-by-reference law as the bins): list = metadata only (name ·
 // session · bytes · path), the agent POINTS at a snapshot, never reproduces
 // bytes; restore = CODE prints the byte-exact ORIGINAL to stdout, or with --out

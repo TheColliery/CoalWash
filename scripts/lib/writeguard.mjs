@@ -382,7 +382,7 @@ function isBareId(id) {
 // outside [A-Za-z0-9_.-] turned to a hyphen (at most 80), then `--` and the sha256 hex of the full path, then an optional
 // `-N` slot suffix. Held where a name is listed and where it is restored, so a planted name never reaches a shell line
 // (653: a name with a command substitution is not a snapshot, and is never listed).
-export const SNAP_NAME_SHAPE = /^[A-Za-z0-9_.-]{1,80}--[0-9a-f]{64}(?:-d+)?$/;
+export const SNAP_NAME_SHAPE = /^[A-Za-z0-9_.-]{1,80}--[0-9a-f]{64}(?:-\d+)?$/;
 
 // PULL-ONLY listing — METADATA ONLY, never content (the 0p recovery-by-
 // reference law): the agent POINTS at a snapshot by this metadata (name /

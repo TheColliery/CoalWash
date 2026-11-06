@@ -205,8 +205,8 @@ export function seatbeltAdvisory(opts) {
   const restoreCmd = readyMade
     ? ` (or \`node "${CLI}" writeguard-restore "${snapName}" --out "${shownFile}.restored"\`, then, only if it succeeded, replace the file with it)`
     : (plainArg(CLI)
-      ? ` (no ready-made command, because a shell would read part of this file's path or the snapshot name: \`node "${CLI}" writeguard-restore <the snapshot file name above>\` prints the original to stdout)`
-      : ' (no ready-made command, because a shell would read part of this file\'s path or the snapshot name: the write-guard CLI is cli.mjs beside the plugin\'s scripts/lib, run as writeguard-restore with the snapshot file name above; it prints the original to stdout)');
+      ? ` (no ready-made command, because a shell would read part of this file's path or the snapshot name: write the snapshot file name above to a one-line file with your own file tool, then \`node "${CLI}" writeguard-restore --from <that file> --out <a new file>\` writes the original to that new file, verified first)`
+      : ' (no ready-made command, because a shell would read part of this file\'s path or the snapshot name: the write-guard CLI is cli.mjs beside the plugin\'s scripts/lib, write the snapshot file name above to a one-line file with your own file tool, then run writeguard-restore --from <that file> --out <a new file> from the cli.mjs beside the plugin scripts/lib folder; it writes the original to that new file, verified first)');
   const recover = snap ? ` A byte-exact pre-edit snapshot is at ${shownSnap} — restore it${restoreCmd} if the drop was a slip; never re-type the lost content, restore the real bytes.` : '';
   if (oversize) {
     return `[CoalWash] write-guard (FYI, not an error, not a block): ${shownFile} is a class-B governance/memory file over the diff-size cap — a pre-edit snapshot was taken but the fidelity diff was skipped (file oversize).${recover}`;

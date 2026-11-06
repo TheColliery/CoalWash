@@ -484,7 +484,7 @@ function deadLinkScan(actionable, physRoots, txDir) {
 export function deadLinkLine(deadLinks) {
   if (!Array.isArray(deadLinks) || !deadLinks.length) return null;
   const head = deadLinks.slice(0, 5).map((n) => escapeRawControls(String(n))).join(', ');
-  return `advisory: ${deadLinks.length} deleted topic(s) still referenced by surviving files (possible dead [[link]]s): ${head}${deadLinks.length > 5 ? ', …' : ''} — a deliberate delete is fine; recovery door: cli.mjs restore <id>`;
+  return `advisory: ${deadLinks.length} deleted topic(s) still referenced by surviving files (possible dead [[link]]s): ${head}${deadLinks.length > 5 ? ', …' : ''} — a deliberate delete is fine; recovery door: cli.mjs restore --from <a file holding the id>`;
 }
 
 // Routes through THE canonicalization primitive (config-load canonicalOrNull):

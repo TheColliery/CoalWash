@@ -384,7 +384,7 @@ test('CWK-162 A6: a guarded file whose name is shell syntax gets NO path interpo
       assert.ok(!cmd.includes(f), `the path is interpolated into a command for ${JSON.stringify(f)}: ${cmd}`);
       assert.ok(!/\s>\s/.test(cmd), `no redirect target for ${JSON.stringify(f)}: ${cmd}`);
     }
-    assert.ok(r.includes('writeguard-restore <the snapshot file name above>'), `the placeholder form for ${JSON.stringify(f)}`);
+    assert.ok(r.includes('writeguard-restore --from <that file>'), `the placeholder form for ${JSON.stringify(f)}`);
     assert.ok(r.includes(snap), 'the snapshot pointer stays');
   }
 });
@@ -402,7 +402,7 @@ test('CWK-162 A6: plain names keep the ready-made line, in any script (control: 
 test('CWK-162 A6: a snapshot file name that is shell syntax also removes the ready-made line', () => {
   const r = seatbeltAdvisory({ file: '/p/MEMORY.md', classes: ['links'], snapshotPath: '/p/.claude/coalwash/writeguard/s/snap-$(id)' });
   for (const cmd of restoreCommands(r)) assert.ok(!cmd.includes('$(id)') && !/\s>\s/.test(cmd), cmd);
-  assert.ok(r.includes('writeguard-restore <the snapshot file name above>'));
+  assert.ok(r.includes('writeguard-restore --from <that file>'));
 });
 
 // ---------------------------------------------------------------------------
@@ -437,13 +437,13 @@ test('printed restore command: never redirects onto the working file itself', ()
 test('printed restore command: a snapshot name beginning with two dashes gets no ready-made line', () => {
   const r = seatbeltAdvisory({ file: '/p/MEMORY.md', classes: ['links'], snapshotPath: '/p/.claude/coalwash/writeguard/s/--force' });
   for (const cmd of restoreCommands(r)) assert.ok(!cmd.includes('--force'), 'the flag-shaped name is not printed: ' + cmd);
-  assert.ok(r.includes('writeguard-restore <the snapshot file name above>'), 'the placeholder form stays: ' + r);
+  assert.ok(r.includes('writeguard-restore --from <that file>'), 'the placeholder form stays: ' + r);
 });
 
 test('printed restore command: a file path holding a percent sign gets no ready-made line', () => {
   const r = seatbeltAdvisory({ file: '/p/50%/MEMORY.md', classes: ['links'], snapshotPath: SNAP });
   for (const cmd of restoreCommands(r)) assert.ok(!cmd.includes('50%'), 'the percent path is not printed: ' + cmd);
-  assert.ok(r.includes('writeguard-restore <the snapshot file name above>'), 'the placeholder form stays: ' + r);
+  assert.ok(r.includes('writeguard-restore --from <that file>'), 'the placeholder form stays: ' + r);
 });
 
 test('printed restore command: a snapshot name with a space sits inside double quotes', () => {
@@ -462,7 +462,7 @@ test('printed restore command: a file name holding a line feed prints escaped, n
   // assertion moved from "no command at all" to "every command is the placeholder, with the file in none of them": the old wording
   // counted the placeholder as a ready-made line, which it is not.
   for (const cmd of restoreCommands(placeholder)) {
-    assert.ok(cmd.includes('<the snapshot file name above>'), 'a file with a line feed gets only the placeholder: ' + cmd);
+    assert.ok(cmd.includes('--from <that file>'), 'a file with a line feed gets only the placeholder: ' + cmd);
     assert.ok(!cmd.includes('\n') && !cmd.includes(file), 'the file is in no printed command: ' + cmd);
   }
   const oversize = seatbeltAdvisory({ file, oversize: true, snapshotPath: SNAP });

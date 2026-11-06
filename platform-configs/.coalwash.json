@@ -102,7 +102,7 @@
   // indexEnabled: append a dig-index row per archived session (searchable via
   //   `cli.mjs estate-search <query>`; local file, never pushed anywhere).
   // digCrush: ULTRA trigger #2 — the dig-gauge PRE-READ tollgate. An agent runs
-  //   `cli.mjs dig-gauge <candidates>` BEFORE a raw transcript dig (report-only,
+  //   `cli.mjs dig-gauge --from [FILE]` BEFORE a raw transcript dig (report-only,
   //   never blocks). KNEE-GROUNDED priors (not %-of-window): the byte/4 ~est
   //   under-counts a real Read ~1.7x (CC #20223), and long-context degradation
   //   has an ABSOLUTE knee ~32-100k tok (NoLiMa/Chroma). CRUSHING if ANY holds:
