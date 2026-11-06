@@ -8,10 +8,10 @@
 // ride this instead of hand-assembled inline snippets.
 //
 //   node scripts/lib/cli.mjs gauge [--json]
-//   node scripts/lib/cli.mjs restore <id>
+//   node scripts/lib/cli.mjs restore <id> | restore --from <file>
 //   node scripts/lib/cli.mjs writeguard-list
-//   node scripts/lib/cli.mjs writeguard-restore <snapName> [--out <file>]
-//   node scripts/lib/cli.mjs anchor-diff <path> [--json]
+//   node scripts/lib/cli.mjs writeguard-restore <snapName> | writeguard-restore --from <file> [--out <file>]
+//   node scripts/lib/cli.mjs anchor-diff <path> | anchor-diff --from <file> [--json]
 //   node scripts/lib/cli.mjs estate [--json]
 //   node scripts/lib/cli.mjs dig-gauge <path...> [--json] [--session <id>]
 //
@@ -82,8 +82,8 @@ import {
 import { envelopeFor } from './retier.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, binItemOutcome } from './tailings.mjs';
-import { listWriteguard, readWriteguardSnapshot } from './writeguard.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, binItemOutcome, BIN_ID_SHAPE } from './tailings.mjs';
+import { listWriteguard, readWriteguardSnapshot, SNAP_NAME_SHAPE } from './writeguard.mjs';
 import { loadMergedConfig, loadMergedConfigReport, globalConfigPath, findProjectRoot, projectRootFor, projectConfigResolution, discoverIgnoredConfigs, PROJECT_BOUNDED_KEYS } from './config-load.mjs';
 import { clampedRead } from './config-schema.mjs';
 import { anchorDiff, anchorDiffLine } from './anchor-diff.mjs';
@@ -300,7 +300,31 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
   return refused ? { found: false, id, refused } : { found: false, id };
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> [--platform antigravity] [--out <file>] | anchor-diff <path> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir>] | retier-scan [--json] | retier-run | dig-gauge <path...> [--json] [--session <id>] | config-status [--json]';
+// 653: the restore doors and the path lists take their values from a file the agent wrote with its own file tool, never from
+// a shell line: the shell expands a command substitution in a name before node starts, so a value that reaches the line can run.
+// A file is read only when it is a regular file under its bound (a link is refused by lstat), holds one line of printable
+// text, and, for a name, holds the shape the engine writes. A list (dig-gauge) holds one path per line under its own bound.
+const FROM_FILE_MAX = 512;
+const FROM_LIST_MAX = 64 * 1024;
+function fromFileRead(file, max) {
+  if (!file) throw new Error('--from needs a file');
+  const st = fs.lstatSync(file);
+  if (!st.isFile() || st.size > max) throw new Error(`${file} is not a plain file of at most ${max} bytes; nothing was read`);
+  return fs.readFileSync(file, 'utf8');
+}
+function lineFromFile(file, shape) {
+  const text = fromFileRead(file, FROM_FILE_MAX).replace(/\r?\n$/, '');
+  if (!text || /[\r\n\x00-\x1f\x7f]/.test(text)) throw new Error(`${file} must hold one line of printable text; nothing was read`);
+  if (shape && !shape.test(text)) throw new Error(`${file} does not hold a name in the shape CoalWash writes; nothing was read`);
+  return text;
+}
+function linesFromFile(file) {
+  const out = fromFileRead(file, FROM_LIST_MAX).split(/\r?\n/).filter((l) => l.length > 0);
+  if (out.some((l) => /[\x00-\x1f\x7f]/.test(l))) throw new Error(`${file} holds a line with a control character; nothing was read`);
+  return out;
+}
+
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | restore --from <file> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> | writeguard-restore --from <file> [--platform antigravity] [--out <file>] | anchor-diff <path> | anchor-diff --from <file> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir> | --to-file <file>] | retier-scan [--json] | retier-run | dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>] | config-status [--json]';
 
 // UMB-133 — the READ-ONLY report for BOTH holes: was the config actually read
 // from a LEGACY path, and is there a `.coalwash.json` sitting somewhere this
@@ -482,7 +506,10 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'restore') {
-    const id = args[1];
+    let id = args[1];
+    if (args.includes('--from')) { // 653: the id comes from a file the agent wrote, never from the shell line
+      try { id = lineFromFile(argAfter(args, '--from'), BIN_ID_SHAPE); } catch (e) { console.error(`restore: ${escapeRawControls(String(e.message))}`); process.exitCode = 1; return; }
+    }
     if (!id) {
       console.error(USAGE);
       process.exitCode = 1;
@@ -523,11 +550,14 @@ function main() {
     const restArgs = args.slice(1);
     const leftover = [];
     for (let i = 0; i < restArgs.length; i++) {
-      if (restArgs[i] === '--platform' || restArgs[i] === '--out') { i++; continue; }
+      if (restArgs[i] === '--platform' || restArgs[i] === '--out' || restArgs[i] === '--from') { i++; continue; }
       if (restArgs[i].startsWith('--platform=')) continue;
       leftover.push(restArgs[i]);
     }
-    const name = leftover[0];
+    let name = leftover[0];
+    if (args.includes('--from')) { // 653: the name comes from a file the agent wrote, never from the shell line
+      try { name = lineFromFile(argAfter(args, '--from'), SNAP_NAME_SHAPE); } catch (e) { console.error(`writeguard-restore: ${escapeRawControls(String(e.message))}`); process.exitCode = 1; return; }
+    }
     const rootOpts = rootOptsFor(args);
     if (!rootOpts) { console.error(PLATFORM_USAGE); process.exitCode = 1; return; }
     // --out <file>: the file this command CREATES, after the bytes verify. A missing value, or another flag in its place, is a usage error.
@@ -580,7 +610,10 @@ function main() {
       process.exitCode = 1;
     }
   } else if (cmd === 'anchor-diff') {
-    const target = args[1];
+    let target = args[1];
+    if (args.includes('--from')) { // 653: the path comes from a file the agent wrote, never from the shell line
+      try { target = lineFromFile(argAfter(args, '--from'), null); } catch (e) { console.error(`anchor-diff: ${escapeRawControls(String(e.message))}`); process.exitCode = 1; return; }
+    }
     if (!target) { console.error(USAGE); process.exitCode = 1; return; }
     try {
       const projectRoot = findProjectRoot(process.cwd(), os.homedir());
@@ -691,9 +724,11 @@ function main() {
       const hint = archiveDirHint(opts);
       if (hint) console.error(hint);
       const tombstones = collectTombstones({ projectRoot, home });
-      const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: argAfter(args, '--to'), tombstones });
+      let toValue = argAfter(args, '--to');
+      if (args.includes('--to-file')) toValue = lineFromFile(argAfter(args, '--to-file'), null); // 653: the folder comes from a file the agent wrote
+      const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: toValue, tombstones });
       if (!r.ok) { console.error(`estate-restore: ${r.error}`); process.exitCode = 1; return; }
-      console.log(`[CoalWash] restored ${r.files.length} file(s) of session ${sessionId} to ${r.dir} — byte-exact originals; nothing written into the live CC tree${argAfter(args, '--to') ? ' beyond your --to choice' : ''}`);
+      console.log(`[CoalWash] restored ${r.files.length} file(s) of session ${sessionId} to ${r.dir} — byte-exact originals; nothing written into the live CC tree${toValue ? ' beyond your --to choice' : ''}`);
       for (const f of r.files) console.log(`  ${escapeRawControls(String(f.rel))} (${f.bytes} bytes)`); // 29n F472-1: the archive manifest's path is data
       // #58 deletion-unaware time-travel restore: label recovered content that
       // overlaps an adjudicated/cut tombstone — advisory, the restore stands.
@@ -715,11 +750,15 @@ function main() {
     // own dedup flag only, and only on a CRUSHING+armed surface — a CLEAR dig
     // writes nothing); every other subcommand's gauge/read stays state-clean.
     const session = argAfter(args, '--session');
-    const paths = [];
-    for (let i = 1; i < args.length; i++) {
-      if (args[i] === '--json') continue;
-      if (args[i] === '--session') { i++; continue; } // skip the flag AND its value
-      paths.push(args[i]);
+    let paths = [];
+    if (args.includes('--from')) { // 653: the candidate paths come from a file the agent wrote, one per line, never from the shell line
+      try { paths = linesFromFile(argAfter(args, '--from')); } catch (e) { console.error(`dig-gauge: ${escapeRawControls(String(e.message))}`); process.exitCode = 1; return; }
+    } else {
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === '--json') continue;
+        if (args[i] === '--session') { i++; continue; } // skip the flag AND its value
+        paths.push(args[i]);
+      }
     }
     if (!paths.length) { console.error(USAGE); process.exitCode = 1; return; }
     try {

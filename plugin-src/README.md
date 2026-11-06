@@ -42,7 +42,7 @@ Memory content is read only by your own session's model, the same as any memory 
 3. **Find and restore an archived transcript.** From the plugin's `scripts/lib/` folder, `node cli.mjs estate-search <query>` searches the archive's index without unpacking anything. `node cli.mjs estate-restore <sessionId>` writes the transcript back byte for byte into a scratch folder, never into the live tree.
 4. **Check a project.** Run `/coalwash:stats`. It shows the band, the certain fat, the break-even numbers when the band is OBESE or FULL, the Memory-BMI ratio, and the count of kept and cut items.
 
-Every cut lands in a recovery bin. To pull one item back by its id, run `node <plugin>/scripts/lib/cli.mjs restore <id>` from your project's folder. The command looks in that project's bins and writes the content to stdout, so redirect it to a file.
+Every cut lands in a recovery bin. To pull one item back by its id, write the id from the listing into a one-line file with your own file tool, then run `node <plugin>/scripts/lib/cli.mjs restore --from [FILE]` from your project's folder. The command looks in that project's bins and writes the content to stdout, so redirect it to a file.
 
 ## Report a problem
 

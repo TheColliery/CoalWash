@@ -241,25 +241,25 @@ test('E2-4 keeps KEPT null: the user\'s GLOBAL keeps file is read even when it r
 
 test('E2-4 bin item (simulated file link): restore refuses an item whose realpath is outside the bin', (t) => {
   const s = sandbox(t, 'binitem');
-  const item = path.join(s.own, FAT_BIN_NAME, 'abc123');
+  const item = path.join(s.own, FAT_BIN_NAME, '1700000000009-dddddddddddd');
   fs.mkdirSync(path.dirname(item));
   fs.writeFileSync(item, SECRET);
   fakeRealpath(t, item, s.secret);
-  assert.equal(restoreFromBin(s.project, FAT_BIN_NAME, 'abc123'), null);
-  const r = restore({ id: 'abc123', cwd: s.project, home: s.home });
+  assert.equal(restoreFromBin(s.project, FAT_BIN_NAME, '1700000000009-dddddddddddd'), null);
+  const r = restore({ id: '1700000000009-dddddddddddd', cwd: s.project, home: s.home });
   assert.equal(r.found, false, JSON.stringify({ ...r, content: undefined }));
   assert.equal(r.refused && r.refused.why, 'outside-root', 'the reason the CLI keys its no-copy line on');
 });
 
 test('E2-4 bin item (the E2 dry witness): a bin item that is a FILE symlink out of the project is never restored', (t) => {
   const s = sandbox(t, 'binfile');
-  const item = path.join(s.own, FAT_BIN_NAME, 'abc123');
+  const item = path.join(s.own, FAT_BIN_NAME, '1700000000009-dddddddddddd');
   fs.mkdirSync(path.dirname(item));
   if (!fileLink(s.secret, item)) { t.skip('this volume cannot make a file symlink (CI ubuntu/macOS legs run it; the simulated leg runs everywhere)'); return; }
-  assert.equal(restoreFromBin(s.project, FAT_BIN_NAME, 'abc123'), null);
+  assert.equal(restoreFromBin(s.project, FAT_BIN_NAME, '1700000000009-dddddddddddd'), null);
   const env = { ...process.env, HOME: s.home, USERPROFILE: s.home, NODE_OPTIONS: '--max-old-space-size=2048' };
   delete env.NODE_TEST_CONTEXT;
-  const c = spawnSync(process.execPath, [path.join(HERE, 'cli.mjs'), 'restore', 'abc123'],
+  const c = spawnSync(process.execPath, [path.join(HERE, 'cli.mjs'), 'restore', '1700000000009-dddddddddddd'],
     { cwd: s.project, env, encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL', windowsHide: true });
   assert.equal(c.status, 1, `stderr: ${c.stderr}`);
   assert.doesNotMatch(`${c.stdout}${c.stderr}`, LEAK_RE);
@@ -270,7 +270,7 @@ test('E2-4 bin item (the E2 dry witness): a bin item that is a FILE symlink out 
 test('E2-4 bin index (simulated file link): an index.json whose realpath is outside the bin lists nothing', (t) => {
   const s = sandbox(t, 'binidx');
   const idx = path.join(s.own, FAT_BIN_NAME, BIN_INDEX);
-  writeJson(idx, [{ id: 'abc123', at: 1, original: 'x', origin: 'program-cut' }]);
+  writeJson(idx, [{ id: '1700000000009-dddddddddddd', at: 1, original: 'x', origin: 'program-cut' }]);
   fakeRealpath(t, idx, s.secret);
   assert.deepEqual(listBin(s.project, FAT_BIN_NAME), []);
 });
@@ -420,7 +420,7 @@ function cliRestore(s, id) {
     { cwd: s.project, env, encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL', windowsHide: true });
 }
 function assertFolderRefusal(s, label) {
-  for (const id of ['abc123', 'nosuchid']) {
+  for (const id of ['1700000000009-dddddddddddd', '1700000000010-eeeeeeeeeeee']) {
     const r = restore({ id, cwd: s.project, home: s.home });
     assert.equal(r.found, false, `${label} ${id}`);
     assert.equal(r.refused && r.refused.why, 'refused-folder', `${label} ${id}: ${JSON.stringify({ ...r, content: undefined })}`);
@@ -437,9 +437,9 @@ test('R46-1 bin folder: a fat-bin planted as a directory link out of the project
   const s = sandbox(t, 'binlinkdir');
   const out = path.join(s.outside, 'bin');
   fs.mkdirSync(out);
-  fs.writeFileSync(path.join(out, 'abc123'), SECRET);
+  fs.writeFileSync(path.join(out, '1700000000009-dddddddddddd'), SECRET);
   if (!dirLink(out, path.join(s.own, FAT_BIN_NAME))) { t.skip('this volume cannot make a directory link'); return; }
-  assert.equal(binItemOutcome(s.project, FAT_BIN_NAME, 'abc123').why, 'refused-folder');
+  assert.equal(binItemOutcome(s.project, FAT_BIN_NAME, '1700000000009-dddddddddddd').why, 'refused-folder');
   assertFolderRefusal(s, 'fat-bin linked');
 });
 
@@ -447,7 +447,7 @@ test('R46-1 bin folder: .claude/coalwash itself planted as a directory link is r
   const s = sandbox(t, 'ownlinkdir');
   const out = path.join(s.outside, 'cw');
   fs.mkdirSync(path.join(out, FAT_BIN_NAME), { recursive: true });
-  fs.writeFileSync(path.join(out, FAT_BIN_NAME, 'abc123'), SECRET);
+  fs.writeFileSync(path.join(out, FAT_BIN_NAME, '1700000000009-dddddddddddd'), SECRET);
   fs.rmSync(s.own, { recursive: true, force: true });
   if (!dirLink(out, s.own)) { t.skip('this volume cannot make a directory link'); return; }
   assertFolderRefusal(s, '.claude/coalwash linked');

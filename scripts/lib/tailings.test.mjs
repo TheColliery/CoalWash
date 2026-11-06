@@ -8,7 +8,7 @@ import {
   FAT_BIN_NAME, STORE_OLD_NAME,
   recordBinItem, listBin, restoreFromBin,
   sweepFatBin, sweepStoreOld, readDeathLog, breadcrumb,
-  __testHooks,
+  __testHooks, BIN_ID_SHAPE,
 } from './tailings.mjs';
 import { txDirFor } from './apply.mjs';
 import { TIER1_KEEP_ALL_MS, HORIZON_MS } from './retention.mjs';
@@ -302,8 +302,8 @@ test('listBin: PULL-ONLY — never called by anything automatically; a corrupt i
     assert.doesNotThrow(() => listBin(proj, FAT_BIN_NAME));
     assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), []);
 
-    fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify(['garbage', 42, { noId: true }, { id: 'ok', at: 1 }]), 'utf8');
-    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [{ id: 'ok', at: 1 }], 'malformed entries are filtered, never crash the read');
+    fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify(['garbage', 42, { noId: true }, { id: '1700000000001-aaaaaaaaaaaa', at: 1 }]), 'utf8');
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME), [{ id: '1700000000001-aaaaaaaaaaaa', at: 1 }], 'malformed entries are filtered, never crash the read');
   } finally { clean(proj); }
 });
 
@@ -1046,7 +1046,7 @@ test('29ax F512-3: two rows of one id, one clean and past its horizon, one dispu
   } finally { clean(proj); }
 });
 
-test('29ax F512-4: a control character and a long id reach the death log escaped and cut, never raw', () => {
+test('29ax F512-4: a control-character or over-long id never reaches the listing or the death log', () => {
   const proj = sandbox();
   try {
     const now = Date.now();
@@ -1057,8 +1057,8 @@ test('29ax F512-4: a control character and a long id reach the death log escaped
     sweepFatBin(proj, { now });
     const log = readDeathLog(proj, FAT_BIN_NAME);
     assert.ok(!/\u001b/.test(log), 'no raw ESC reaches the log');
-    assert.ok(log.includes('a\\u001bb'), 'the control character is written as its escape');
-    assert.ok(log.includes('b'.repeat(200) + '...'), 'the long id is cut to the fixed length');
+    assert.ok(!log.includes('a\\u001bb'), 'the control-character id is refused at the index and never written');
+    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME).filter((r) => !BIN_ID_SHAPE.test(r.id)), [], 'neither a control-character id nor an over-long one is listed');
     assert.ok(!log.includes('b'.repeat(201)), 'and never written whole');
   } finally { clean(proj); }
 });
@@ -1088,18 +1088,18 @@ test('29ax M2: a row whose path is a directory is held as missing, and the direc
   try {
     const now = Date.now();
     recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
-    const dirPath = path.join(w29BinPath(proj, FAT_BIN_NAME), 'dirrow');
+    const dirPath = path.join(w29BinPath(proj, FAT_BIN_NAME), '1700000000002-bbbbbbbbbbbb');
     fs.mkdirSync(dirPath, { recursive: true });
-    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: 'dirrow', at: now - HORIZON_MS.fat - W29_DAY_MS, bytes: 10, original: 'd.md', origin: 'program-cut' }]);
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: '1700000000002-bbbbbbbbbbbb', at: now - HORIZON_MS.fat - W29_DAY_MS, bytes: 10, original: 'd.md', origin: 'program-cut' }]);
     const r = sweepFatBin(proj, { now });
-    assert.deepStrictEqual(r.mismatches, [{ id: 'dirrow', kind: 'missing' }], 'a directory is not a regular file: held as missing');
+    assert.deepStrictEqual(r.mismatches, [{ id: '1700000000002-bbbbbbbbbbbb', kind: 'missing' }], 'a directory is not a regular file: held as missing');
     assert.ok(fs.statSync(dirPath).isDirectory(), 'the directory is not removed');
   } finally { clean(proj); }
 });
 
 test('29ax M3: a row whose lstat fails for a reason other than ENOENT is held as unreadable, never read as clean', () => {
   const proj = sandbox();
-  const id = 'u1';
+  const id = '1700000000003-cccccccccccc';
   try {
     const now = Date.now();
     recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
@@ -1120,7 +1120,7 @@ test('29ax M7: a sitting names at most twenty held ids, and the rest appear on a
   try {
     const now = Date.now();
     recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
-    const ghosts = Array.from({ length: 25 }, (_, i) => ({ id: `p${String(i).padStart(2, '0')}`, at: now - 3600000, bytes: 9, original: 'p.md', origin: 'program-cut' }));
+    const ghosts = Array.from({ length: 25 }, (_, i) => ({ id: `${1700000000100 + i}-${String(i).padStart(12, '0')}`, at: now - 3600000, bytes: 9, original: 'p.md', origin: 'program-cut' }));
     w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), ...ghosts]);
     const r = sweepFatBin(proj, { now });
     assert.strictEqual(r.mismatches.length, 25, 'all 25 are held');
@@ -1146,11 +1146,11 @@ test('29ax: a held row is named in the death log once across three washes, and e
   try {
     const now = Date.now();
     recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
-    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: 'held01', at: now - 3600000, bytes: 9, original: 'h.md', origin: 'program-cut' }]);
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: '1700000000004-dddddddddddd', at: now - 3600000, bytes: 9, original: 'h.md', origin: 'program-cut' }]);
     const results = [1, 2, 3].map(() => sweepFatBin(proj, { now }));
     const lines = readDeathLog(proj, FAT_BIN_NAME).split('\n').filter((l) => l.includes('index-disk mismatch'));
     assert.strictEqual(lines.length, 1, 'one line for one held row, however many washes');
-    for (const r of results) assert.deepStrictEqual(r.mismatches, [{ id: 'held01', kind: 'missing' }], 'each result carries the count');
+    for (const r of results) assert.deepStrictEqual(r.mismatches, [{ id: '1700000000004-dddddddddddd', kind: 'missing' }], 'each result carries the count');
   } finally { clean(proj); }
 });
 
@@ -1234,11 +1234,11 @@ test('29ay F515-4: a held id that appears in the words of a held line is named b
   try {
     const now = Date.now();
     recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
-    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: 'x1', at: now - 3600000, bytes: 9, original: 'x.md', origin: 'program-cut' }]);
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: '1-kep', at: now - 3600000, bytes: 9, original: 'x.md', origin: 'program-cut' }]);
     sweepFatBin(proj, { now });
-    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: 'kept', at: now - 3600000, bytes: 9, original: 'k.md', origin: 'program-cut' }]);
+    w29Write(proj, FAT_BIN_NAME, [...w29Rows(proj, FAT_BIN_NAME), { id: '1-kept', at: now - 3600000, bytes: 9, original: 'k.md', origin: 'program-cut' }]);
     sweepFatBin(proj, { now });
-    assert.ok(readDeathLog(proj, FAT_BIN_NAME).includes('kept (missing, 0B)'), 'named by its own token, not by the word kept in the first line');
+    assert.ok(readDeathLog(proj, FAT_BIN_NAME).includes('1-kept (missing, 0B)'), 'named by its own token, not by the word kept in the first line');
   } finally { clean(proj); }
 });
 

@@ -60,7 +60,7 @@ test('printed fields: a store collectStores skipped prints as one escaped line w
   assert.strictEqual(out.split('\n').filter((l) => l.includes('agent:a' + ESCAPED)).length, 1, 'one line per skipped store');
 });
 
-test('printed fields: writeguard-list prints a snapshot name escaped, the stored name stays raw', (t) => {
+test('printed fields: writeguard-list prints only the names the writer makes; a hostile name is never printed and stays stored', (t) => {
   const proj = tmp('cwg-pf-');
   const home = tmp('cwg-home-');
   try {
@@ -69,9 +69,12 @@ test('printed fields: writeguard-list prints a snapshot name escaped, the stored
     fs.mkdirSync(sdir, { recursive: true });
     const name = 'a' + BIDI + 'b.md';
     try { fs.writeFileSync(path.join(sdir, name), 'snapshot'); } catch { t.skip('this volume refuses a right-to-left override in a file name'); return; }
+    const valid = 'ok--' + 'a'.repeat(64); // the shape snapName writes: its name is printed as it is
+    fs.writeFileSync(path.join(sdir, valid), 'snapshot');
     const r = spawnSync(process.execPath, [CLI, 'writeguard-list'], { cwd: proj, env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, TMP: home, TEMP: home }, encoding: 'utf8', timeout: 120000 });
     assert.ok(!r.stdout.includes(BIDI), 'the raw override must not reach stdout: ' + JSON.stringify(r.stdout));
-    assert.ok(r.stdout.includes('a' + ESCAPED + 'b.md'), 'the name is escaped on its line: ' + JSON.stringify(r.stdout));
+    assert.ok(!r.stdout.includes('ab.md'), 'a name outside the writer\'s shape is not listed: ' + JSON.stringify(r.stdout));
+    assert.ok(r.stdout.includes(valid), 'a name in the writer\'s shape is printed as it is: ' + JSON.stringify(r.stdout));
     assert.ok(fs.readdirSync(sdir).includes(name), 'the stored name is untouched');
   } finally { clean(proj, home); }
 });

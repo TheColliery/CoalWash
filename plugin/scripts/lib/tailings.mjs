@@ -133,9 +133,13 @@ export function isBareId(id) {
 // time its id carries, its size by stat, and no original (that was only in the row). The index file stays the record of
 // what it holds; this only adds what it is missing. Only names in recordBinItem's own id shape count, and only plain
 // files, so index.json, its temps, .gitignore and the lock are never listed.
-const BLOB_ID = /^\d+-[0-9a-f]{12}$/;
+// The shape every bin id takes. The current writer makes `${now}-${12 hex}`; the earlier one made `${now}-${up to six base36}`
+// (its Math.random().toString(36).slice(2, 8)), and bins written by it are still on disk. Both are digits, one hyphen, then
+// letters and digits: no shell character can appear in a value of this shape, so a planted id can never reach a shell line.
+// Held wherever a bin id is loaded, listed or restored (loadIndex's index rows and blobs, binItemOutcome's id).
+export const BIN_ID_SHAPE = /^\d+-(?:[0-9a-f]{12}|[0-9a-z]{1,6})$/;
 const MISMATCH_IDS_SHOWN = 20; // 29ax: the death-log line names at most this many held ids, then `+M more`
-// E1 t173: a copy's bytes go to a temp in this shape first (BLOB_ID never matches it, so loadIndex never lists one); the id
+// E1 t173: a copy's bytes go to a temp in this shape first (BIN_ID_SHAPE never matches it, so loadIndex never lists one); the id
 // name is a hard link made only after the temp is whole and synced. A temp a killed writer left behind is removed by the
 // next sweep (removeStaleTemps below).
 const BLOB_TEMP = /^\d+-[0-9a-f]{12}\.[0-9a-f]{12}\.part$/;
@@ -189,12 +193,12 @@ function loadIndex(dir) {
   try {
     // CWK-137: bounded. E2-4: contained to the bin dir ITSELF (`dir` is binDir's ownSandboxDir answer).
     const parsed = JSON.parse(readRepoFileBounded(path.join(dir, INDEX_NAME), dir, MAX_DOC_BYTES));
-    if (Array.isArray(parsed)) index = parsed.filter((i) => i && isBareId(i.id));
+    if (Array.isArray(parsed)) index = parsed.filter((i) => i && isBareId(i.id) && BIN_ID_SHAPE.test(i.id)); // 653: a planted id never lists
   } catch { /* no index (or an unreadable one): the blobs below are still listed */ }
   try {
     const named = new Set(index.map((i) => i.id));
     for (const f of fs.readdirSync(dir)) {
-      if (!BLOB_ID.test(f) || named.has(f)) continue;
+      if (!BIN_ID_SHAPE.test(f) || named.has(f)) continue;
       let st;
       try { st = fs.lstatSync(path.join(dir, f)); } catch { continue; }
       if (!st.isFile()) continue;
@@ -406,7 +410,7 @@ export function restoreFromBin(projectRoot, name, id) {
 // from repoReadOutcome. A caller that REPORTS to a human (the CLI restore) uses this so
 // a real item is never told it does not exist.
 export function binItemOutcome(projectRoot, name, id) {
-  if (!isBareId(id)) return { why: 'absent' };
+  if (!isBareId(id) || !BIN_ID_SHAPE.test(id)) return { why: 'absent' }; // 653: the shape a bin id takes, checked before any path is built
   // E2-4: contained to the bin dir ITSELF -- an item planted as a link that resolves anywhere else is `outside-root`.
   try { const dir = binDir(projectRoot, name); return repoReadOutcome(path.join(dir, id), dir, MAX_DOC_BYTES); }
   // R46-1: binDir refused the bin folder itself (a link, or not a plain directory): `refused-folder`, so the CLI never says

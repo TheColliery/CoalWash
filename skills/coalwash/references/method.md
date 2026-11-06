@@ -49,7 +49,8 @@ node --input-type=module -e "
 import { pathToFileURL } from 'node:url';
 const { verifyParcelCandidates, compareParcelToAdapter } = await import(pathToFileURL('[LIB]/parcel.mjs').href);
 const { discoverClassB } = await import(pathToFileURL('[LIB]/class-b.mjs').href);
-const cands = [PARCEL_CANDIDATES]; // [{ path, sample }] from YOUR context
+// [{ path, sample }] as a JSON array, written to [FILE] with your own file tool: a sample is file text, so it never goes on this line
+const cands = JSON.parse((await import('node:fs')).readFileSync('[FILE]', 'utf8'));
 const v = verifyParcelCandidates(cands, { home: '[HOME]', projectRoot: '[PROJECT_ROOT]' });
 const d = compareParcelToAdapter(v.verified, discoverClassB({ projectRoot: '[PROJECT_ROOT]', home: '[HOME]' }).entries);
 console.log(JSON.stringify({ verified: v.verified.length, rejected: v.rejected, drift: d.onlyInParcel, notSeen: d.onlyInAdapter }, null, 1));
@@ -192,10 +193,10 @@ console.log(JSON.stringify(listBin('[PROJECT_ROOT]', FAT_BIN_NAME), null, 1));
 Each entry is `{id, at, bytes, original, origin}` — render one line per item (id · date · original path · origin) for the human/agent to pick from; an entry reconciled from a copy whose row was lost has `original` and `origin` `null`, so show its original path as unknown. Then restore exactly ONE id with the dedicated CLI (searches both bins, fat first, and reports which held it):
 
 ```bash
-node [LIB]/cli.mjs restore [ITEM_ID] > recovered.md
+node [LIB]/cli.mjs restore --from [FILE] > recovered.md
 ```
 
-(Equivalently: `node scripts/lib/cli.mjs restore <id>` from the repo/plugin root.) The item's CONTENT lands on **stdout** — redirect it to a file as above and the recovered bytes never enter the model's context at all; the ONE summary line (id · bin · bytes · source file) rides **stderr**, so the metadata list plus that line are the only things that ever cost tokens. A traversal-shaped or unknown id is a clean not-found, exit 1. The restore never writes to the store — re-inserting recovered content is a deliberate, gated decision.
+(Equivalently: `node scripts/lib/cli.mjs restore --from [FILE]` from the repo/plugin root. The id goes into [FILE] first: a one-line file you write with your own file tool, copied from the printed list. Never put an id from the list on the command line: a name the listing prints can carry shell text, and the shell runs it before node starts.) The item's CONTENT lands on **stdout** — redirect it to a file as above and the recovered bytes never enter the model's context at all; the ONE summary line (id · bin · bytes · source file) rides **stderr**, so the metadata list plus that line are the only things that ever cost tokens. A traversal-shaped or unknown id is a clean not-found, exit 1. The restore never writes to the store — re-inserting recovered content is a deliberate, gated decision.
 
 ## 8b. The write-path guard — seatbelt + airbag (0p, `scripts/lib/writeguard.mjs`)
 
@@ -214,7 +215,7 @@ The wash's fidelity gate protects CoalWash's own knife; the write guard is an **
 
 ```bash
 node [LIB]/cli.mjs writeguard-list                       # name · bytes · session · path (metadata only)
-node "[LIB]/cli.mjs" writeguard-restore "[SNAP_NAME]" --out "[FILE].restored"   # byte-exact original -> a new file, verified first, a taken name refused; then replace [FILE] with it; NEVER re-type it
+node "[LIB]/cli.mjs" writeguard-restore --from [FILE] --out "[FILE].restored"   # byte-exact original -> a new file, verified first, a taken name refused; [FILE] holds the snapshot name, one line, written with your own file tool from the listing; then replace the file you wrote the original to with it; NEVER re-type it
 ```
 
 **Never a plain `cp <snapshotPath> <file>`.** That reads correct-looking bytes off disk, but it skips `writeguard-restore`'s own identity check entirely — a snapshot's on-disk bytes can be tampered in place without touching its filename, and `writeguard-restore` refuses to serve exactly that (verified against the sidecar's recorded digest; a raw `cp` has no such check and cannot tell tampered bytes from real ones). Always go through the CLI command above. `writeguard-restore` is `isBareId`-contained (a traversal name is a clean not-found); the bytes go stdout→file, or with `--out <new file>` into a new file the CLI creates itself after the bytes verify; never through the model's context.
@@ -266,7 +267,8 @@ Clone-side FIRST act (before ANY read of the store) — the handshake; on `refus
 node --input-type=module -e "
 import { pathToFileURL } from 'node:url';
 const { wizardHandshake } = await import(pathToFileURL('[LIB]/wizard.mjs').href);
-console.log(JSON.stringify(wizardHandshake({ contract: [CONTRACT_JSON] })));
+// the contract, written to [FILE] as JSON with your own file tool
+console.log(JSON.stringify(wizardHandshake({ contract: JSON.parse((await import('node:fs')).readFileSync('[FILE]', 'utf8')) })));
 "
 ```
 
@@ -315,7 +317,7 @@ Class-A at-rest = a closed session's files under `~/.claude/projects/<slug>/` (t
 node [LIB]/cli.mjs estate-scan [--session <your session id, if known>]   # the bill — sessions per band, MB now -> ~MB after (~est 10:1), archive dir named; print VERBATIM, only AFTER the ULTRA choice
 node [LIB]/cli.mjs estate-run  [--session <your session id, if known>]   # the consented run; print its report VERBATIM. Lock held elsewhere -> deferred, nothing touched
 node [LIB]/cli.mjs estate-search <query>                                 # dig: case-insensitive match over sessionId/slug/firstUserLine/topEntities in the local index
-node [LIB]/cli.mjs estate-restore <sessionId> [--to <dir>]               # byte-exact decompress to a scratch dir it prints (never the live tree unless --to says so; a link under --to refuses the restore, and each inflate is bounded, see the restore bounds below)
+node [LIB]/cli.mjs estate-restore <sessionId> [--to-file [FILE]]               # byte-exact decompress to a scratch dir it prints (never the live tree unless --to-file says so; [FILE] holds that folder, one line, written with your own file tool; a link under the folder refuses the restore, and each inflate is bounded, see the restore bounds below)
 ```
 
 **The dig-index** (`<archiveDir>/index.jsonl`, one code-generated row per archived session): `{sessionId, projectSlug, startISO, endISO, bytes, msgCount, firstUserLine (≤200 chars), topEntities (top ~10 uppercase-start tokens by frequency, deterministic), archivedAt, cold?}`. Local file under CoalWash's own namespace — a dig aid, never folded into any pushed report (§9b metrics-only law). `estate.indexEnabled: false` skips rows (restore still works — it scans the archive dir, not the index).
@@ -347,7 +349,7 @@ CC session-dir stamps (verified vs live `~/.claude/projects/<slug>/` 2026-07-16)
 The tollgate between a search and the first Read. An agent deliberately digging old history gets BURIED by the document pile — so run the gauge BEFORE reading any candidate. A search returns a hit-list of PATHS; dig-gauge stats those paths (`fs.stat` BYTES, `~est` tok at 4 chars/tok) and verdicts them — **ZERO file content enters context** (metadata only; the zero-read invariant is a pinned structural test).
 
 ```bash
-node [LIB]/cli.mjs dig-gauge <candidate path...> [--session <your session id, if known>]   # CLEAR / CRUSHING + numbers; on CRUSHING, offers ULTRA once per session. --json for the rail
+node [LIB]/cli.mjs dig-gauge --from [FILE] [--session <your session id, if known>]   # CLEAR / CRUSHING + numbers; on CRUSHING, offers ULTRA once per session. [FILE] holds the candidate paths, one per line, written with your own file tool: a repository can name a file with shell text, so no path goes on this line. --json for the rail
 ```
 
 **Thresholds (config `estate.digCrush`, clamped priors — CRUSHING if ANY one holds):**

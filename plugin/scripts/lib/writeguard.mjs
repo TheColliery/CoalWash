@@ -378,6 +378,11 @@ export function seatbeltCheck(projectRoot, sessionId, touchedPath, { home } = {}
 function isBareId(id) {
   return typeof id === 'string' && !!id && id !== '.' && id !== '..' && path.basename(id) === id;
 }
+// The shape a snapshot name takes, as snapName() and resolveSnapPath() write it: the file's basename with every character
+// outside [A-Za-z0-9_.-] turned to a hyphen (at most 80), then `--` and the sha256 hex of the full path, then an optional
+// `-N` slot suffix. Held where a name is listed and where it is restored, so a planted name never reaches a shell line
+// (653: a name with a command substitution is not a snapshot, and is never listed).
+export const SNAP_NAME_SHAPE = /^[A-Za-z0-9_.-]{1,80}--[0-9a-f]{64}(?:-d+)?$/;
 
 // PULL-ONLY listing — METADATA ONLY, never content (the 0p recovery-by-
 // reference law): the agent POINTS at a snapshot by this metadata (name /
@@ -395,6 +400,7 @@ export function listWriteguard(projectRoot, { home: _home } = {}) {
       let st; try { st = fs.lstatSync(sdir); } catch { continue; }
       if (!st.isDirectory()) continue;
       for (const name of fs.readdirSync(sdir)) {
+        if (!SNAP_NAME_SHAPE.test(name)) continue; // 653: only a name in the shape snapName writes is a snapshot; a sidecar, a temp or a planted name is not
         if (name === '.gitignore' || name.endsWith('.origpath')) continue; // sidecars are identity metadata, never a listable/restorable snapshot
         try {
           const p = path.join(sdir, name);
@@ -470,7 +476,7 @@ function verifyBlobIntegrity(snapPath, root) {
 // non-bare id, a miss, or every candidate failing verification (fail
 // closed — a human pressing restore gets a refusal, never unverified bytes).
 export function readWriteguardSnapshot(projectRoot, snapName, { home } = {}) {
-  if (!isBareId(snapName)) return null;
+  if (!isBareId(snapName) || !SNAP_NAME_SHAPE.test(snapName)) return null;
   const rows = listWriteguard(projectRoot, { home }).filter((r) => r.name === snapName);
   if (!rows.length) return null;
   rows.sort((a, b) => b.mtimeMs - a.mtimeMs);
