@@ -149,6 +149,9 @@ async function main() {
     console.log(`${r.status} ${r.name || r.file}: ${r.reason}`);
     if (r.stdout || r.stderr) console.error(`--- ${r.name || r.file} (${r.status}) ---\n${r.stdout ?? ''}${r.stderr ?? ''}`);
   }
+  // 661: every skipped test gets its own SKIPPED line before the summary, as the canon's main() prints them (a skip is never silent).
+  const { skippedLines } = wave;
+  for (const line of skippedLines(run.results)) console.log(line);
   const summary = wave.summarize(results, TESTS.length);
   console.log(summary.line);
   process.exitCode = summary.red ? 1 : 0;

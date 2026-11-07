@@ -240,4 +240,24 @@ test('verify-release-shape.mjs: a published title or body that gained a LEADING 
   assert.equal(body.status, 1, body.stdout + body.stderr); assert.match(body.stderr, /BODY MISMATCH/);
   const ok = run(dir, JSON.stringify({ name: 'v1.0.0 - a fix', body: 'A fix.\n' }));
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  // 17b (CoalLedger t142, CoalMine t148, CoalWash E1): trimEnd() also forgave trailing spaces and tabs; only the one newline is tolerated
+  const space = run(dir, JSON.stringify({ name: 'v1.0.0 - a fix ', body: 'A fix.' }));
+  assert.equal(space.status, 1, space.stdout + space.stderr); assert.match(space.stderr, /TITLE MISMATCH/);
+  const tab = run(dir, JSON.stringify({ name: 'v1.0.0 - a fix', body: 'A fix.\t\n' }));
+  assert.equal(tab.status, 1, tab.stdout + tab.stderr); assert.match(tab.stderr, /BODY MISMATCH/);
+  const two = run(dir, JSON.stringify({ name: 'v1.0.0 - a fix', body: 'A fix.\n\n' }));
+  assert.equal(two.status, 1, two.stdout + two.stderr); assert.match(two.stderr, /BODY MISMATCH/);
+});
+
+// order 2026-11-07b (4), UMB3-180: the published name is the API's text, so a newline in it must not forge a line of the mismatch log (CWE-117).
+test('verify-release-shape.mjs: a published title holding a newline is printed escaped on the mismatch line, never as a second log line -- RED before 2026-11-07b', () => {
+  const dir = scratch();
+  fs.writeFileSync(path.join(dir, 'release-title.txt'), 'v1.0.0 - a fix\n');
+  fs.writeFileSync(path.join(dir, 'release-body.md'), 'A fix.\n');
+  const forged = 'verify-release-shape: published title + body match the derived CHANGELOG-sourced text, byte for byte';
+  const res = run(dir, JSON.stringify({ name: 'v1.0.0 - a fix\n' + forged + '\nx', body: 'A fix.' }));
+  assert.equal(res.status, 1, res.stdout + res.stderr);
+  const lines = res.stderr.split(/\r?\n/);
+  assert.equal(lines.includes(forged), false, 'the forged line never stands alone in the log');
+  assert.ok(lines.some((l) => l.startsWith('verify-release-shape: TITLE MISMATCH -- intended "v1.0.0 - a fix", published "v1.0.0 - a fix\\n' + forged + '\\nx"')), res.stderr);
 });

@@ -347,11 +347,13 @@ test('the command line: --help prints usage and exits 0, a missing clock or an u
   assert.match(unknown.stderr, /unknown argument/);
 });
 
-test('the command line: a serial run over real files prints one summary line on stdout and exits 0; a vacuous file makes it exit 1 and print its FAIL-style line', () => {
+// 2026-11-07b changed this test's line count, by design: a green run with a skipped test now prints that test's SKIPPED line before the one summary line.
+test('the command line: a serial run over real files prints its SKIPPED lines and one summary line, last, on stdout and exits 0; a vacuous file makes it exit 1 and print its FAIL-style line', () => {
   const green = cli(['--heap-mb', '512', '--file-timeout-ms', '20000', '--deadline-ms', '60000', '--serial', '--', ...fx('pass', 'skip')]);
   assert.equal(green.status, 0, green.stdout + green.stderr);
-  assert.equal(green.stdout.trim().split('\n').length, 1);
-  assert.match(green.stdout.trim(), /^wave-run: 2 files · pass 1 · fail 0 · vacuous 0 · skipped 1 · not-run 0 · reconciled 2 of 2 — GREEN$/);
+  const lines = green.stdout.trim().split(/\r?\n/);
+  assert.deepEqual(lines.slice(0, -1), ['SKIPPED skip.fixture.mjs: "platform leg"']);
+  assert.match(lines.at(-1), /^wave-run: 2 files · pass 1 · fail 0 · vacuous 0 · skipped 1 · not-run 0 · reconciled 2 of 2 — GREEN$/);
   const red = cli(['--heap-mb', '512', '--file-timeout-ms', '20000', '--deadline-ms', '60000', '--serial', '--', ...fx('pass', 'exit0-before')]);
   assert.equal(red.status, 1);
   assert.match(red.stdout, /^VACUOUS .*exit0-before\.fixture\.mjs: /m);
@@ -386,6 +388,26 @@ const MANY = 300;
 fs.writeFileSync(path.join(SANDBOX, 'many.fixture.mjs'), "import { test } from 'node:test';" + String.fromCharCode(10) + 'for (let i = 0; i < ' + MANY + "; i++) test('t' + i, () => {});" + String.fromCharCode(10));
 // a hang BEFORE the first test: --test-timeout never applies to it, only a clock on the file itself can end it
 fs.writeFileSync(path.join(SANDBOX, 'hang-top.fixture.mjs'), "import { test } from 'node:test';" + String.fromCharCode(10) + 'setInterval(() => {}, 1000);' + String.fromCharCode(10) + 'await new Promise(() => {});' + String.fromCharCode(10));
+
+// THE FILE CLOCK OF A TEST IS SIZED FROM A MEASURED SOLO RUN, NEVER A FIXED NUMBER (the class behind c5199ed and the CoalWorks chief's 25a flake, 2026-10-25). The clock is the wall clock of EVERY file
+// the run starts, so a fixed figure also kills the PASSING file whenever a loaded runner takes longer than it to start a node child (CoalWash PR #23, run 38774701714: [FAIL, FAIL] where [FAIL, PASS] was
+// expected; the chief's 25a run: the same shape under load, n = 1). Four times the measured solo run of the passing file plus a second, never below 2,000 ms, kills the hang and leaves the passing file four
+// times its own start to spare. Every test that hands wave-run a file clock takes it from here.
+const sizedFileClock = (soloMs) => Math.max(2000, soloMs * 4 + 1000);
+// The limits that go with a file clock (2026-11-02a (b), CoalLedger CI run 41331643210): node's --test-timeout at twice the clock, never the fixed 20 s, so under load the
+// sized clock cannot pass it and leave Node 22 to cancel the hang by the wrong clock; the whole-run deadline four clocks and 20 s.
+const clockedLimits = (clock) => ({ ...LIMITS, fileTimeoutMs: clock * 2, deadlineMs: clock * 4 + 20000, fileClockMs: clock });
+// A loaded runner stood in for: a preload that makes EVERY node of the tree (the runner's children included) sleep before it runs, handed on NODE_OPTIONS, which the runner carries into each child.
+const SLOW_START_MS = 2500;
+fs.writeFileSync(path.join(SANDBOX, 'slow-start.preload.mjs'), 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ' + SLOW_START_MS + ');' + String.fromCharCode(10));
+const SLOW_START_ENV = { NODE_OPTIONS: '--import ' + pathToFileURL(path.join(SANDBOX, 'slow-start.preload.mjs')).href };
+// A solo command-line run of the passing file under `extra`, timed: the measurement a command-line test sizes its clock from.
+const soloCliMs = (extra) => {
+  const t0 = Date.now();
+  const solo = cli(['--heap-mb', '512', '--file-timeout-ms', '20000', '--deadline-ms', '60000', '--serial', '--', ...fx('pass')], extra);
+  assert.equal(solo.status, 0, 'the solo run of the passing file must pass: ' + solo.stdout + solo.stderr);
+  return Date.now() - t0;
+};
 const STDOUT_SYNC_URL = pathToFileURL(path.join(HERE, 'stdout-sync.mjs')).href;
 
 test('the simulation is faithful: with no preload a force-exited file of 300 tests loses the end of its TAP and reads VACUOUS (the control for the fix below)', () => {
@@ -417,14 +439,14 @@ test('the stdout preload is silent and harmless: with stdout a pipe, a file or n
   const out = path.join(SANDBOX, 'preload-out.txt');
   const fd = fs.openSync(out, 'w+'); // read back through this descriptor, never through the path again
   try {
-    const piped = spawnSync(process.execPath, ['--import', STDOUT_SYNC_URL, '-e', "process.stdout.write('hello'); process.stderr.write('')"], { encoding: 'utf8', timeout: 30000 });
+    const piped = spawnSync(process.execPath, ['--import', STDOUT_SYNC_URL, '-e', "process.stdout.write('hello'); process.stderr.write('')"], { encoding: 'utf8', timeout: 30000, env: sandboxEnv() });
     assert.equal(piped.status, 0);
     assert.equal(piped.stdout, 'hello');
     assert.equal(piped.stderr, '');
-    const toFile = spawnSync(process.execPath, ['--import', STDOUT_SYNC_URL, '-e', "process.stdout.write('hello')"], { stdio: ['ignore', fd, 'pipe'], encoding: 'utf8', timeout: 30000 });
+    const toFile = spawnSync(process.execPath, ['--import', STDOUT_SYNC_URL, '-e', "process.stdout.write('hello')"], { stdio: ['ignore', fd, 'pipe'], encoding: 'utf8', timeout: 30000, env: sandboxEnv() });
     assert.equal(toFile.status, 0);
     assert.equal(toFile.stderr, '');
-    const none = spawnSync(process.execPath, ['--import', STDOUT_SYNC_URL, '-e', '1'], { stdio: 'ignore', timeout: 30000 });
+    const none = spawnSync(process.execPath, ['--import', STDOUT_SYNC_URL, '-e', '1'], { stdio: 'ignore', timeout: 30000, env: sandboxEnv() });
     assert.equal(none.status, 0);
     const got = Buffer.alloc(16);
     assert.equal(got.toString('utf8', 0, fs.readSync(fd, got, 0, got.length, 0)), 'hello', 'the output of the child reached the file');
@@ -464,11 +486,25 @@ test('the file clock: a file that hangs before its first test is killed at the c
   const t0 = Date.now();
   const solo = await runWaves({ files: fx('pass'), cwd: SANDBOX, env: SANDBOX_ENV, ...LIMITS, serial: true, read: scripted('BREATHE') });
   assert.deepEqual(solo.results.map((x) => x.status), [STATUS.PASS]);
-  const clock = Math.max(2000, (Date.now() - t0) * 4 + 1000);
-  const r = await runWaves({ files: fx('hang-top', 'pass'), cwd: SANDBOX, env: SANDBOX_ENV, ...LIMITS, deadlineMs: clock * 4 + 20000, fileClockMs: clock, serial: true, read: scripted('BREATHE') });
+  const clock = sizedFileClock(Date.now() - t0);
+  const r = await runWaves({ files: fx('hang-top', 'pass'), cwd: SANDBOX, env: SANDBOX_ENV, ...clockedLimits(clock), serial: true, read: scripted('BREATHE') });
   assert.deepEqual(r.results.map((x) => x.status), [STATUS.FAIL, STATUS.PASS]);
   assert.match(r.results[0].reason, /file clock/);
   assert.equal(r.exitCode, 1);
+});
+
+// 2026-11-02a (b): a test that hands the runner a file clock also hands node's --test-timeout at twice it, so the clock is what ends a hang on every node version
+// (Node 22 cancels a top-level-await hang at --test-timeout, Node 24 lets it run to the clock). Read from this file's own text; the names are built so this test does not match itself.
+test('every test here that hands the runner a file clock hands it a test timeout of twice the clock, through one helper -- RED before 2026-11-02a (b)', () => {
+  const lines = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split(/\r?\n/);
+  const viaObject = new RegExp('fileClock' + 'Ms: clock\\b');
+  const viaFlag = new RegExp("'--file-clock" + "-ms', String\\(clock\\)");
+  const bad = [];
+  lines.forEach((l, i) => {
+    if (viaObject.test(l) && !l.includes('clocked' + 'Limits = ')) bad.push(i + 1);
+    if (viaFlag.test(l) && !l.includes("'--file-timeout-ms', String(clock" + ' * 2)')) bad.push(i + 1);
+  });
+  assert.deepEqual(bad, [], 'lines that hand a file clock without its test timeout');
 });
 
 test('the file clock is optional but never loose: a value that is not a positive whole number is refused, and without it the whole-run deadline still ends a hang', async () => {
@@ -491,10 +527,29 @@ test('the command line: --file-clock-ms is accepted, shown in the usage, and kil
   const bad = cli(['--file-clock-ms', 'soon']);
   assert.equal(bad.status, 64);
   assert.match(bad.stderr, /--file-clock-ms needs a whole number/);
-  const r = cli(['--heap-mb', '512', '--file-timeout-ms', '20000', '--deadline-ms', '40000', '--file-clock-ms', '2000', '--serial', '--', ...fx('hang-top', 'pass')]);
+  const clock = sizedFileClock(soloCliMs());
+  const r = cli(['--heap-mb', '512', '--file-timeout-ms', String(clock * 2), '--deadline-ms', String(clock * 4 + 20000), '--file-clock-ms', String(clock), '--serial', '--', ...fx('hang-top', 'pass')]);
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /^FAIL .*hang-top\.fixture\.mjs: killed at the file clock/m);
   assert.match(r.stdout, /pass 1 · fail 1 \(hang-top\.fixture\.mjs\) · vacuous 0 · skipped 0 · not-run 0 · reconciled 2 of 2 — RED$/m);
+});
+
+// The CoalWorks chief's 25a flake, made deterministic (RED before this fix: the command-line test above hard-coded --file-clock-ms 2000, and under this slow start it read [FAIL, FAIL]). First the
+// witness that the slow start reaches the runner's children: a fixed 2,000 ms clock under a 2,500 ms node start kills the PASSING file too. Then the sized clock, measured under the same slow start,
+// kills the hang and lets the passing file through.
+test('the command line under a slow node start: a fixed 2,000 ms file clock kills the passing file too (the flake), a clock sized from a solo run under the same load does not -- RED before the fix', () => {
+  const fixed = cli(['--heap-mb', '512', '--file-timeout-ms', '20000', '--deadline-ms', '40000', '--file-clock-ms', '2000', '--serial', '--', ...fx('hang-top', 'pass')], SLOW_START_ENV);
+  assert.equal(fixed.status, 1, fixed.stdout + fixed.stderr);
+  assert.match(fixed.stdout, /^FAIL .*pass\.fixture\.mjs: killed at the file clock \(2000 ms\)/m, 'the slow start did not reach the children, so this witness proves nothing: ' + fixed.stdout);
+  const clock = sizedFileClock(soloCliMs(SLOW_START_ENV));
+  // --file-timeout-ms (node's --test-timeout) sits ABOVE the sized clock here: under this slow start the clock runs past 20 s, and Node 22.23 cancels a file hung in a
+  // top-level await at --test-timeout ("not ok ...; cancelled 1", verify-landing run 40180296253 on all three runners) where Node 24.22 lets it hang until the file clock,
+  // so with the test timeout below the clock the hang's REASON depended on the node version. The clock must be the first thing that ends the hang on every version.
+  const sized = cli(['--heap-mb', '512', '--file-timeout-ms', String(clock * 2), '--deadline-ms', String(clock * 4 + 20000), '--file-clock-ms', String(clock), '--serial', '--', ...fx('hang-top', 'pass')], SLOW_START_ENV);
+  assert.equal(sized.status, 1, sized.stdout + sized.stderr);
+  assert.match(sized.stdout, /^FAIL .*hang-top\.fixture\.mjs: killed at the file clock/m);
+  assert.doesNotMatch(sized.stdout, /^FAIL .*pass\.fixture\.mjs/m, sized.stdout);
+  assert.match(sized.stdout, /pass 1 · fail 1 \(hang-top\.fixture\.mjs\) · vacuous 0 · skipped 0 · not-run 0 · reconciled 2 of 2 — RED$/m);
 });
 
 // ---- item 11 of order 09f (2026-10-09): the three defects the flock's first POSIX runs found --------------------------------------------------------
@@ -551,4 +606,49 @@ test('display fails closed: a file outside the folder, and a path that cannot be
   } finally {
     fs.rmSync(outside, { recursive: true, force: true });
   }
+});
+
+// CWK2-050 (17b): a file under a real folder named `..cfg` is INSIDE the root; the lexical startsWith('..') read it as outside and printed the absolute path. The test is on the first segment.
+test('display: a test file under a folder whose name starts with two dots is shown relative to the root, not as an absolute path -- RED before 17b', async () => {
+  const dotty = path.join(SANDBOX, '..cfg');
+  fs.mkdirSync(dotty, { recursive: true });
+  fs.copyFileSync(path.join(SANDBOX, 'pass.fixture.mjs'), path.join(dotty, 'pass.fixture.mjs'));
+  const r = await runWaves({ files: [path.join(dotty, 'pass.fixture.mjs')], cwd: SANDBOX, env: SANDBOX_ENV, ...LIMITS, serial: true, read: scripted('BREATHE') });
+  assert.equal(r.results[0].status, STATUS.PASS);
+  assert.equal(r.results[0].name, '..cfg/pass.fixture.mjs');
+});
+
+// order 2026-11-07b (3): a skipped test is NAMED, never only counted. A room's link legs skip on a box without symlink rights, and a count alone left a reader unable to
+// tell which leg did not run (CANNOT-TELL in CoalGob and CoalTipple).
+test('classifyFile: every top-level skipped test is named in `skipped`, in an all-skipped file and beside a real pass; a file with none has an empty list -- RED before 2026-11-07b', () => {
+  const skipTap = tap(['# Subtest: platform leg', 'ok 1 - platform leg # SKIP no symlink here', '1..1', '# tests 1', '# suites 0', '# pass 0', '# fail 0', '# cancelled 0', '# skipped 1', '# todo 0']);
+  assert.deepEqual(classifyFile({ file: 'a.test.mjs', code: 0, signal: null, stdout: skipTap }).skipped, ['platform leg']);
+  const mixedTap = tap(['# Subtest: runs', 'ok 1 - runs', '# Subtest: link leg', 'ok 2 - link leg # SKIP no symlink here', '1..2', '# tests 2', '# suites 0', '# pass 1', '# fail 0', '# cancelled 0', '# skipped 1', '# todo 0']);
+  const mixed = classifyFile({ file: 'a.test.mjs', code: 0, signal: null, stdout: mixedTap });
+  assert.equal(mixed.status, STATUS.PASS);
+  assert.deepEqual(mixed.skipped, ['link leg']);
+  assert.deepEqual(classifyFile({ file: 'a.test.mjs', code: 0, signal: null, stdout: REAL_PASS }).skipped, []);
+  // a `# TODO` is a known gap that ran, never a skipped test
+  const todoTap = tap(['# Subtest: runs', 'ok 1 - runs', '# Subtest: a gap', 'not ok 2 - a gap # TODO later', '1..2', '# tests 2', '# suites 0', '# pass 1', '# fail 0', '# cancelled 0', '# skipped 0', '# todo 1']);
+  assert.deepEqual(classifyFile({ file: 'a.test.mjs', code: 0, signal: null, stdout: todoTap }).skipped, []);
+});
+
+test('skippedLines: one line per skipped test, the name as a JSON string, so a newline in a test name cannot forge a second line (CWE-117) -- RED before 2026-11-07b', async () => {
+  const { skippedLines } = await import('./wave-run.mjs');
+  assert.equal(typeof skippedLines, 'function', 'wave-run.mjs exports skippedLines');
+  const lines = skippedLines([
+    { name: 'a.test.mjs', skipped: ['leg one', 'leg\nwave-run: 1 file · pass 1 — GREEN'] },
+    { name: 'b.test.mjs', skipped: [] },
+    { file: 'c.test.mjs' },
+  ]);
+  assert.deepEqual(lines, ['SKIPPED a.test.mjs: "leg one"', 'SKIPPED a.test.mjs: "leg\\nwave-run: 1 file · pass 1 — GREEN"']);
+  for (const l of lines) assert.equal(/[\r\n]/.test(l), false, 'no line carries a raw line break');
+});
+
+test('the command line: a skipped leg beside a real pass prints its SKIPPED line, and the summary line stays the last line and unchanged -- RED before 2026-11-07b', () => {
+  const r = cli(['--heap-mb', '512', '--file-timeout-ms', '20000', '--deadline-ms', '60000', '--serial', '--', ...fx('pass', 'mixed')]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const lines = r.stdout.trim().split(/\r?\n/);
+  assert.deepEqual(lines.slice(0, -1), ['SKIPPED mixed.fixture.mjs: "platform leg"']);
+  assert.match(lines.at(-1), /^wave-run: 2 files · pass 2 · fail 0 · vacuous 0 · skipped 0 · not-run 0 · reconciled 2 of 2 — GREEN$/);
 });

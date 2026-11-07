@@ -4,8 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WF_DIR = path.join(repo, '.github', 'workflows');
@@ -76,6 +77,25 @@ test('CWK-154 (1): dependabot-auto-merge.yml passes the PR URL through env, neve
 
 test('CWK-154 (3): .gitignore names .coalboard/', () => {
   assert.match(read(path.join(repo, '.gitignore')), /^\.coalboard\/\s*$/m);
+});
+
+// 661: the runner names every skipped test on its own SKIPPED line, before the summary line, as the canon's own main() does. The
+// order is pinned in the runner's source, and the line itself is produced by a real run of a fixture holding one skipped test.
+test('661: the suite runner prints a SKIPPED line for each skipped test, before its summary line', async () => {
+  const src = read(path.join(repo, 'scripts', 'test.mjs'));
+  const at = src.indexOf('skippedLines(run.results)');
+  const summaryAt = src.indexOf('console.log(summary.line)');
+  assert.ok(at > 0, 'the runner prints skippedLines(run.results)');
+  assert.ok(summaryAt > at, 'the SKIPPED lines are printed before the summary line');
+  assert.match(src, /const \{ skippedLines \} = wave;/, 'the runner takes skippedLines from the wave runner it loaded');
+  const wave = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'wave-run.mjs')).href);
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw661-skip-')));
+  try {
+    fs.writeFileSync(path.join(dir, 'skip.fixture.mjs'), "import { test } from 'node:test';\ntest('platform leg', { skip: 'no symlink here' }, () => {});\n", 'utf8');
+    const run = await wave.runWaves({ files: ['skip.fixture.mjs'], cwd: dir, env: process.env, heapMb: 512, fileTimeoutMs: 60000, deadlineMs: 120000 });
+    const lines = wave.skippedLines(run.results);
+    assert.ok(lines.some((l) => l.startsWith('SKIPPED ') && l.endsWith(': "platform leg"')), `one SKIPPED line names the skipped test: ${JSON.stringify(lines)}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // 09a: the suite runs through the canon wave runner, so the clocks are the room's numbers in scripts/lib/test-plan.mjs, handed to runWaves
