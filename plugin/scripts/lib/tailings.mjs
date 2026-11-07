@@ -137,7 +137,7 @@ export function isBareId(id) {
 // (its Math.random().toString(36).slice(2, 8)), and bins written by it are still on disk. Both are digits, one hyphen, then
 // letters and digits: no shell character can appear in a value of this shape, so a planted id can never reach a shell line.
 // Held wherever a bin id is loaded, listed or restored (loadIndex's index rows and blobs, binItemOutcome's id).
-export const BIN_ID_SHAPE = /^\d+-(?:[0-9a-f]{12}|[0-9a-z]{1,6})$/;
+export const BIN_ID_SHAPE = /^\d{1,16}-(?:[0-9a-f]{12}|[0-9a-z]{1,6})$/; // Date.now() is 13 digits until the year 2286
 const MISMATCH_IDS_SHOWN = 20; // 29ax: the death-log line names at most this many held ids, then `+M more`
 // E1 t173: a copy's bytes go to a temp in this shape first (BIN_ID_SHAPE never matches it, so loadIndex never lists one); the id
 // name is a hard link made only after the temp is whole and synced. A temp a killed writer left behind is removed by the

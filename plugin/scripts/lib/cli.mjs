@@ -80,6 +80,7 @@ import {
   loadState, armDigGauge, discoverCapacity, setStateNamespace,
 } from './caliper.mjs';
 import { envelopeFor } from './retier.mjs';
+import { openPlainFile } from './repo-fs.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, binItemOutcome, BIN_ID_SHAPE } from './tailings.mjs';
@@ -308,17 +309,28 @@ const FROM_FILE_MAX = 512;
 const FROM_LIST_MAX = 64 * 1024;
 function fromFileRead(file, max) {
   if (!file) throw new Error('--from needs a file');
-  const st = fs.lstatSync(file);
-  if (!st.isFile() || st.size > max) throw new Error(`${file} is not a plain file of at most ${max} bytes; nothing was read`);
-  return fs.readFileSync(file, 'utf8');
+  // Open first, then check the handle, and read through it: a link or a name swapped in after a path-only check cannot send the read elsewhere (F656-8).
+  const opened = openPlainFile(file, 'r');
+  if (opened.why) throw new Error(`${file} is not a plain file (${opened.why}); nothing was read`);
+  try {
+    const st = fs.fstatSync(opened.fd);
+    if (!st.isFile() || st.size > max) throw new Error(`${file} is not a plain file of at most ${max} bytes; nothing was read`);
+    const buf = Buffer.alloc(max + 1);
+    const n = fs.readSync(opened.fd, buf, 0, max + 1, 0);
+    if (n > max) throw new Error(`${file} is not a plain file of at most ${max} bytes; nothing was read`);
+    const text = buf.subarray(0, n).toString('utf8');
+    return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text; // node/runtime.md §8: a file another tool wrote may open with a byte order mark
+  } finally {
+    fs.closeSync(opened.fd);
+  }
 }
-function lineFromFile(file, shape) {
+export function lineFromFile(file, shape) {
   const text = fromFileRead(file, FROM_FILE_MAX).replace(/\r?\n$/, '');
   if (!text || /[\r\n\x00-\x1f\x7f]/.test(text)) throw new Error(`${file} must hold one line of printable text; nothing was read`);
   if (shape && !shape.test(text)) throw new Error(`${file} does not hold a name in the shape CoalWash writes; nothing was read`);
   return text;
 }
-function linesFromFile(file) {
+export function linesFromFile(file) {
   const out = fromFileRead(file, FROM_LIST_MAX).split(/\r?\n/).filter((l) => l.length > 0);
   if (out.some((l) => /[\x00-\x1f\x7f]/.test(l))) throw new Error(`${file} holds a line with a control character; nothing was read`);
   return out;

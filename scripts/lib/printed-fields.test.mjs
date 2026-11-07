@@ -76,6 +76,13 @@ test('printed fields: writeguard-list prints only the names the writer makes; a 
     assert.ok(!r.stdout.includes('ab.md'), 'a name outside the writer\'s shape is not listed: ' + JSON.stringify(r.stdout));
     assert.ok(r.stdout.includes(valid), 'a name in the writer\'s shape is printed as it is: ' + JSON.stringify(r.stdout));
     assert.ok(fs.readdirSync(sdir).includes(name), 'the stored name is untouched');
+    // F656-9: a session FOLDER name is not shape-checked, and cli.mjs prints it through escapeRawControls; the raw override must not reach stdout.
+    const bidiSession = path.join(proj, '.claude', 'coalwash', 'writeguard', 's' + BIDI + 't');
+    fs.mkdirSync(bidiSession, { recursive: true });
+    try { fs.writeFileSync(path.join(bidiSession, valid), 'snapshot'); } catch { t.skip('this volume refuses a right-to-left override in a folder name'); return; }
+    const r2 = spawnSync(process.execPath, [CLI, 'writeguard-list'], { cwd: proj, env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, TMP: home, TEMP: home }, encoding: 'utf8', timeout: 120000 });
+    assert.ok(!r2.stdout.includes(BIDI), 'the raw override in a session folder name must not reach stdout: ' + JSON.stringify(r2.stdout));
+    assert.ok(r2.stdout.includes('s' + ESCAPED + 't'), 'the session folder name prints escaped: ' + JSON.stringify(r2.stdout));
   } finally { clean(proj, home); }
 });
 

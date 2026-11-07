@@ -1058,7 +1058,9 @@ test('29ax F512-4: a control-character or over-long id never reaches the listing
     const log = readDeathLog(proj, FAT_BIN_NAME);
     assert.ok(!/\u001b/.test(log), 'no raw ESC reaches the log');
     assert.ok(!log.includes('a\\u001bb'), 'the control-character id is refused at the index and never written');
-    assert.deepStrictEqual(listBin(proj, FAT_BIN_NAME).filter((r) => !BIN_ID_SHAPE.test(r.id)), [], 'neither a control-character id nor an over-long one is listed');
+    const ids = listBin(proj, FAT_BIN_NAME).map((r) => r.id);
+    assert.ok(!ids.includes(ctl) && !ids.includes(long), 'neither a control-character id nor an over-long one is listed');
+    assert.ok(!BIN_ID_SHAPE.test('1'.repeat(250) + '-abc'), 'an id longer than the writer makes is outside the shape');
     assert.ok(!log.includes('b'.repeat(201)), 'and never written whole');
   } finally { clean(proj); }
 });
@@ -1190,7 +1192,7 @@ test('29ay F515-1: a planted name with an out-of-range date gives its blob no du
     const now = Date.now();
     const old = recordBinItem(proj, FAT_BIN_NAME, { content: 'old copy', original: 'o.md', now: now - HORIZON_MS.fat - W29_DAY_MS });
     recordBinItem(proj, FAT_BIN_NAME, { content: 'g', original: 'g.md', now });
-    const planted = '99999999999999999-aaaaaaaaaaaa';
+    const planted = '9999999999999999-aaaaaaaaaaaa'; // 16 digits: the longest id the shape admits (F656-5), still past the Date range
     fs.writeFileSync(path.join(w29BinPath(proj, FAT_BIN_NAME), planted), 'planted');
     let r;
     assert.doesNotThrow(() => { r = sweepFatBin(proj, { now }); }, 'a planted name cannot throw out of the sweep');

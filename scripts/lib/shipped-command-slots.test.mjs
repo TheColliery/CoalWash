@@ -16,21 +16,21 @@ const REPO = path.resolve(here, '..', '..');
 const ALLOW = new Map([
   ['[LIB]', 'the installed plugin folder: the user\'s plugin cache, which a repository does not write'],
   ['<plugin>', 'the installed plugin folder, the same place as [LIB], named in the README prose'],
-  ['[PROJECT_ROOT]', 'the project folder the agent runs from, taken from its own working directory'],
   ['[FILE]', 'a path the agent chooses for a file it writes or reads itself; the file holds the value, never the shell line'],
   ['<query>', 'the user\'s own search term'],
   ['<sessionId>', 'read from the global archive index, which no repository writes (since 1.9.0)'],
   ['<your session id, if known>', 'the agent\'s own session id, from its own context'],
-  ['[HOME]', 'the user\'s home folder, from the agent\'s own environment'],
-  ['[FILES]', 'a file count the engine printed; the billing functions coerce it with Number(), so text takes no effect'],
-  ['[TOTAL_BYTES]', 'a byte total the engine printed; coerced with Number() by the billing functions'],
-  ['[FAT_TOKENS_OR_NULL]', 'a token estimate the engine printed, or null; billLine keeps only a finite number'],
+  ['[FILES]', 'a file count the engine itself computed and printed as a number; no outsider text reaches it'],
+  ['[TOTAL_BYTES]', 'a byte total the engine itself computed and printed as a number; no outsider text reaches it'],
+  ['[FAT_TOKENS_OR_NULL]', 'a token estimate the engine itself computed and printed as a number, or null; no outsider text reaches it'],
   ['<path>', 'a folder the user names in the request for configure.mjs (the archive folder), never a file name a repository wrote'],
   ['<flags>', 'configure flags the user asks for; keys and values come from the config schema'],
 ]);
 
-const PLACEHOLDER = /<[A-Za-z][^<>\n]{0,80}>|\[[A-Za-z][A-Za-z_]*\]/g;
-const COMMAND = /cli\.mjs|\bnode\b/;
+// A slot is an angle-bracket name, a bracketed name (hyphens and spaces included), a shell variable, or a brace name.
+const PLACEHOLDER = /<[A-Za-z][^<>\n]{0,80}>|\[[A-Za-z][\w -]*\]|\$\{?[A-Za-z_]\w*\}?|\{[A-Za-z_][\w-]*\}/g;
+// A span is a command span when it runs node or cli.mjs, or names one of the restore doors or the two readers (a bare span such as `restore <id>` counts).
+const COMMAND = /cli\.mjs|\bnode\b|\b(?:restore|writeguard-restore|estate-restore|dig-gauge|anchor-diff)\b/;
 
 // Command spans of one document: each fenced block that runs node or cli.mjs (whole, since a node -e snippet spans its
 // lines), and each inline code span that does. Returns { line, text }, the line being where the span starts.
@@ -62,7 +62,9 @@ function scanText(text, file) {
   const findings = [];
   for (const span of commandSpans(text)) {
     for (const m of span.text.matchAll(PLACEHOLDER)) {
-      if (!ALLOW.has(m[0])) findings.push({ file, line: span.line, token: m[0] });
+      // <path> is allowed only where configure.mjs is the command: the archive folder it names is the user's own choice.
+      const allowed = ALLOW.has(m[0]) && (m[0] !== '<path>' || /configure\.mjs/.test(span.text));
+      if (!allowed) findings.push({ file, line: span.line, token: m[0] });
     }
   }
   return findings;
@@ -109,6 +111,24 @@ test('the slot scan flags an id or name placeholder in a shell line (dirty fixtu
   const dirty = ['```bash', 'node [LIB]/cli.mjs restore <id> > recovered.md', '```', '', '`node [LIB]/cli.mjs writeguard-restore "[SNAP_NAME]"`'].join('\n');
   const found = scanText(dirty, 'fixture').map((x) => x.token);
   assert.deepStrictEqual(found.sort(), ['<id>', '[SNAP_NAME]']);
+});
+
+test('the slot scan flags a restore value written as a shell variable, a brace, a hyphenated name or a span with no node (dirty fixture)', () => {
+  const cases = [
+    ['```bash\nnode [LIB]/cli.mjs restore $ID\n```', '$ID'],
+    ['```bash\nnode [LIB]/cli.mjs restore {id}\n```', '{id}'],
+    ['```bash\nnode [LIB]/cli.mjs restore [ITEM-ID]\n```', '[ITEM-ID]'],
+    ['Run `restore <id>` to bring it back.', '<id>'],
+  ];
+  for (const [doc, token] of cases) {
+    assert.deepStrictEqual(scanText(doc, 'fixture').map((x) => x.token), [token], `the slot ${token} in ${JSON.stringify(doc)}`);
+  }
+});
+
+test('a <path> slot is allowed only in a span that runs configure.mjs (dirty fixture)', () => {
+  assert.deepStrictEqual(scanText('```bash\nnode [LIB]/cli.mjs anchor-diff <path>\n```', 'fixture').map((x) => x.token), ['<path>']);
+  assert.deepStrictEqual(scanText('```bash\nnode [LIB]/cli.mjs dig-gauge <path>\n```', 'fixture').map((x) => x.token), ['<path>']);
+  assert.deepStrictEqual(scanText('```bash\nnode [LIB]/configure.mjs <path>\n```', 'fixture'), []);
 });
 
 test('the slot scan passes a restore line that takes its value from a file (clean fixture)', () => {

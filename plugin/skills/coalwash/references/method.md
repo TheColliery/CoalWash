@@ -47,12 +47,14 @@ Build candidates from your OWN context observation — `[{ path, sample }]` wher
 ```bash
 node --input-type=module -e "
 import { pathToFileURL } from 'node:url';
+const HOME = (await import('node:os')).homedir();
+const ROOT = (await import(pathToFileURL('[LIB]/config-load.mjs').href)).findProjectRoot(process.cwd(), HOME);
 const { verifyParcelCandidates, compareParcelToAdapter } = await import(pathToFileURL('[LIB]/parcel.mjs').href);
 const { discoverClassB } = await import(pathToFileURL('[LIB]/class-b.mjs').href);
 // [{ path, sample }] as a JSON array, written to [FILE] with your own file tool: a sample is file text, so it never goes on this line
 const cands = JSON.parse((await import('node:fs')).readFileSync('[FILE]', 'utf8'));
-const v = verifyParcelCandidates(cands, { home: '[HOME]', projectRoot: '[PROJECT_ROOT]' });
-const d = compareParcelToAdapter(v.verified, discoverClassB({ projectRoot: '[PROJECT_ROOT]', home: '[HOME]' }).entries);
+const v = verifyParcelCandidates(cands, { home: HOME, projectRoot: ROOT });
+const d = compareParcelToAdapter(v.verified, discoverClassB({ projectRoot: ROOT, home: HOME }).entries);
 console.log(JSON.stringify({ verified: v.verified.length, rejected: v.rejected, drift: d.onlyInParcel, notSeen: d.onlyInAdapter }, null, 1));
 "
 ```
@@ -185,8 +187,10 @@ Both share ONE destruction law (`retention.mjs`, a pure function — hermetic-te
 ```bash
 node --input-type=module -e "
 import { pathToFileURL } from 'node:url';
+const HOME = (await import('node:os')).homedir();
+const ROOT = (await import(pathToFileURL('[LIB]/config-load.mjs').href)).findProjectRoot(process.cwd(), HOME);
 const { listBin, FAT_BIN_NAME } = await import(pathToFileURL('[LIB]/tailings.mjs').href);
-console.log(JSON.stringify(listBin('[PROJECT_ROOT]', FAT_BIN_NAME), null, 1));
+console.log(JSON.stringify(listBin(ROOT, FAT_BIN_NAME), null, 1));
 "
 ```
 
@@ -229,8 +233,10 @@ Step 1, the neutral scan (measurement only — never calls `bandVerdict`, so no 
 ```bash
 node --input-type=module -e "
 import { pathToFileURL } from 'node:url';
+const HOME = (await import('node:os')).homedir();
+const ROOT = (await import(pathToFileURL('[LIB]/config-load.mjs').href)).findProjectRoot(process.cwd(), HOME);
 const { neutralScan } = await import(pathToFileURL('[LIB]/wizard.mjs').href);
-console.log(JSON.stringify(neutralScan({ projectRoot: '[PROJECT_ROOT]' }), null, 1));
+console.log(JSON.stringify(neutralScan({ projectRoot: ROOT }), null, 1));
 "
 ```
 
@@ -256,8 +262,10 @@ Main-side — build the contract and embed its JSON verbatim in the spawn prompt
 ```bash
 node --input-type=module -e "
 import { pathToFileURL } from 'node:url';
+const HOME = (await import('node:os')).homedir();
+const ROOT = (await import(pathToFileURL('[LIB]/config-load.mjs').href)).findProjectRoot(process.cwd(), HOME);
 const { wizardContract } = await import(pathToFileURL('[LIB]/wizard.mjs').href);
-console.log(JSON.stringify(wizardContract({ projectRoot: '[PROJECT_ROOT]' })));
+console.log(JSON.stringify(wizardContract({ projectRoot: ROOT })));
 "
 ```
 
@@ -285,8 +293,10 @@ The ③ agent block's bill and the hand-off verdict both need the MANUAL tier's 
 ```bash
 node --input-type=module -e "
 import { pathToFileURL } from 'node:url';
+const HOME = (await import('node:os')).homedir();
+const ROOT = (await import(pathToFileURL('[LIB]/config-load.mjs').href)).findProjectRoot(process.cwd(), HOME);
 const { manualTierCounts, handoffVerdict, estimateBill, billLine } = await import(pathToFileURL('[LIB]/wizard.mjs').href);
-const m = manualTierCounts({ projectRoot: '[PROJECT_ROOT]' });
+const m = manualTierCounts({ projectRoot: ROOT });
 const bill = estimateBill({ files: m.files, totalBytes: m.totalBytes, heavy: false });
 console.log(billLine({ files: m.files, fatTokens: null, bill }));
 console.log('handoff: ' + handoffVerdict({ manualTierTok: m.tokensEst, fileCount: m.files }));
