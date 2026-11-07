@@ -2,7 +2,7 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.16.0] - 2026-11-07
 
 Restore commands take a recovery id or snapshot name from a file, and a planted name with shell text is never listed or run
 
