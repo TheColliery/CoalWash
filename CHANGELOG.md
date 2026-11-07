@@ -4,16 +4,16 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [Unreleased]
 
-Restore commands take a recovery id or snapshot name from a file, and a planted name is never listed or run
+Restore commands take a recovery id or snapshot name from a file, and a planted name with shell text is never listed or run
 
 ### Security
 
-- CoalWash lists, prints and restores a recovery-bin id or a write-guard snapshot name only in the shape CoalWash itself writes. A name planted in a cloned or unpacked repository is never listed and never reaches a command line. The shipped instructions no longer put an id, a snapshot name, a folder, a file list or file content on a shell line.
+- CoalWash lists, prints and restores a recovery-bin id or a write-guard snapshot name only in the shape CoalWash itself writes, which holds no shell character. A name planted in a cloned or unpacked repository outside that shape is never listed, so no listed name can carry shell text onto a command line. The shipped instructions no longer put a recovery id, a snapshot name, a restore folder, a list of paths to measure or sampled file content on a shell line; each goes in a file the agent writes. A planted entry in that shape is still listed, as before.
 
 ### Added
 
 - The `--from <file>` form of `restore`, `writeguard-restore`, `dig-gauge` and `anchor-diff`, and `estate-restore --to-file <file>`. Each reads one value from a file (a list of paths for `dig-gauge`). A file is bounded in size: 512 bytes for one value, 64 KiB for a list. A link is refused. The typed forms still work.
-- Bins and snapshots written by earlier releases, including the six-character bin id form, still list and restore.
+- Bins and snapshots written by earlier releases, including the earlier bin id form of up to six characters, still list and restore.
 
 ## [1.15.12] - 2026-11-06
 

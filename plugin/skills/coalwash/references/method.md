@@ -196,7 +196,7 @@ Each entry is `{id, at, bytes, original, origin}` — render one line per item (
 node [LIB]/cli.mjs restore --from [FILE] > recovered.md
 ```
 
-(Equivalently: `node scripts/lib/cli.mjs restore --from [FILE]` from the repo/plugin root. The id goes into [FILE] first: a one-line file you write with your own file tool, copied from the printed list. Never put an id from the list on the command line: a name the listing prints can carry shell text, and the shell runs it before node starts.) The item's CONTENT lands on **stdout** — redirect it to a file as above and the recovered bytes never enter the model's context at all; the ONE summary line (id · bin · bytes · source file) rides **stderr**, so the metadata list plus that line are the only things that ever cost tokens. A traversal-shaped or unknown id is a clean not-found, exit 1. The restore never writes to the store — re-inserting recovered content is a deliberate, gated decision.
+(Equivalently: `node scripts/lib/cli.mjs restore --from [FILE]` from the repo/plugin root. The id goes into [FILE] first: a one-line file you write with your own file tool, copied from the printed list. Never put an id from the list on the command line: a name the listing prints can carry shell text, and the shell runs it before node starts.) The item's CONTENT lands on **stdout** — redirect it to a file as above and the recovered bytes never enter the model's context at all; the ONE summary line (id · bin · bytes · source file) rides **stderr**, so the metadata list plus that line are the only things that ever cost tokens. An id outside the shape CoalWash writes is refused with its own line, and an unknown id is a clean not-found; both exit 1. The restore never writes to the store — re-inserting recovered content is a deliberate, gated decision.
 
 ## 8b. The write-path guard — seatbelt + airbag (0p, `scripts/lib/writeguard.mjs`)
 
@@ -215,7 +215,7 @@ The wash's fidelity gate protects CoalWash's own knife; the write guard is an **
 
 ```bash
 node [LIB]/cli.mjs writeguard-list                       # name · bytes · session · path (metadata only)
-node "[LIB]/cli.mjs" writeguard-restore --from [FILE] --out "[FILE].restored"   # byte-exact original -> a new file, verified first, a taken name refused; [FILE] holds the snapshot name, one line, written with your own file tool from the listing; then replace the file you wrote the original to with it; NEVER re-type it
+node "[LIB]/cli.mjs" writeguard-restore --from [FILE] --out "[FILE].restored"   # [FILE] holds the snapshot name, one line, written with your own file tool from the listing; the byte-exact original goes to the new file [FILE].restored, verified first, a taken name refused; then replace the guarded file the snapshot was taken of with [FILE].restored; NEVER re-type it
 ```
 
 **Never a plain `cp <snapshotPath> <file>`.** That reads correct-looking bytes off disk, but it skips `writeguard-restore`'s own identity check entirely — a snapshot's on-disk bytes can be tampered in place without touching its filename, and `writeguard-restore` refuses to serve exactly that (verified against the sidecar's recorded digest; a raw `cp` has no such check and cannot tell tampered bytes from real ones). Always go through the CLI command above. `writeguard-restore` is `isBareId`-contained (a traversal name is a clean not-found); the bytes go stdout→file, or with `--out <new file>` into a new file the CLI creates itself after the bytes verify; never through the model's context.
