@@ -395,7 +395,7 @@ export function classifySessions({ projectRoot = process.cwd(), home = os.homedi
 // filter AND by construction. A plain-string content is a final answer (kept).
 // This split is INDEX/SEARCH ONLY — treatment stays whole-file byte-identity
 // (§10); a record is never cut, only under-weighted in the searchable index.
-function messageText(obj) {
+export function messageText(obj) {
   const c = obj && obj.message && obj.message.content;
   if (typeof c === 'string') return c; // a plain-string message = final answer text
   if (Array.isArray(c)) {

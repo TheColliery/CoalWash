@@ -48,7 +48,7 @@ const GIT_SPAWN_TIMEOUT_MS = 60000;
 const LIBS = [
   'class-b.mjs', 'caliper.mjs', 'fidelity-gate.mjs', 'apply.mjs', 'keeps.mjs', 'receipt.mjs',
   'retention.mjs', 'cli.mjs', 'ask.mjs', 'tailings.mjs', 'broom.mjs', 'wizard.mjs', 'parcel.mjs', 'writeguard.mjs',
-  'anchor-diff.mjs', 'estate.mjs', 'estate-archive.mjs', 'retier.mjs', 'dig-gauge.mjs',
+  'anchor-diff.mjs', 'estate.mjs', 'estate-archive.mjs', 'estate-evidence.mjs', 'retier.mjs', 'dig-gauge.mjs',
   'config-schema.mjs', 'config-load.mjs', 'jsonc.mjs', 'repo-fs.mjs', 'git-env.mjs', 'text-index.mjs',
 ];
 

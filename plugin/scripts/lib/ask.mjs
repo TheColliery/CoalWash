@@ -146,7 +146,13 @@ export function obeseAutoQuick(opts) {
 // statement is that the muscle is UNMEASURED, not that it is muscle.
 // `cause: 'capacity-unmeasured'` selects it; absent/anything else keeps the
 // pre-CWK-081 text byte-for-byte, so every existing caller and pin is unmoved.
+// T-DREAM-1 (NF1): the ambient ask carries one plain sentence about the estate read, on both return branches. No measured number and
+// no read here: the hook stays estate-free, and the wizard's Full bill carries the measured line.
+const ESTATE_SENTENCE = "The Full run will also read this project's archived transcript sessions; their path and size are shown before it starts.";
 export function wizardEscalation(opts) {
+  return `${wizardEscalationText(opts)} ${ESTATE_SENTENCE}`;
+}
+function wizardEscalationText(opts) {
   const { fatTokens, breakEven, reorg, spawns, cause, hardCeilingTokens, capacitySource } = opts || {};
   const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
   const payback = paybackLine(breakEven, 'wizard');

@@ -94,6 +94,24 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 // one surfacing is the violation.)
 const HUMAN_ONLY = ['explode.mjs', 'detonate.mjs'];
 
+// 670 (NF3, design section 5 rail 6): a class-A READER moves transcript text into a session's context; a REDUCER rewrites the estate.
+// Both must never be auto-reachable, and each failure names its kind.
+const READERS = ['estate-evidence.mjs'];
+
+// Every class-A violation in an auto-reachable set, each tagged with its kind.
+function reachViolations(reached) {
+  return [
+    ...HUMAN_ONLY.filter((n) => reached.includes(n)).map((name) => ({ name, kind: 'reducer' })),
+    ...READERS.filter((n) => reached.includes(n)).map((name) => ({ name, kind: 'reader' })),
+  ];
+}
+
+function violationMessage(v) {
+  return v.kind === 'reader'
+    ? `${v.name} is a class-A READER of transcript text: it moves transcript text into a session's context, so it must never run from an auto entry point.`
+    : `${v.name} is a class-A REDUCER over the at-rest transcript estate and must never fire without a human.`;
+}
+
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'plugin', 'work', '.claude', '.agents', 'scratchpad']);
 
 // A nested git worktree or clone (its root holds a `.git` ENTRY — a FILE holding a
@@ -249,7 +267,7 @@ test('every invocation-declaring artifact is of a RECOGNISED kind (an unknown ki
 
 test('class-A is NEVER auto-invoked: the engine is unreachable from every auto entry point of every recognised kind', () => {
   const reached = [...autoClosure()].map((f) => path.basename(f));
-  const violations = HUMAN_ONLY.filter((n) => reached.includes(n));
+  const violations = reachViolations(reached).map(violationMessage);
   assert.deepStrictEqual(
     violations, [],
     `the class-A engine became reachable from an AUTO entry point: ${violations.join(', ')}.\n` +
@@ -291,4 +309,16 @@ test('the nested-worktree skip cuts BOTH ways: a nested checkout is excluded, an
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
+});
+
+// 670 (NF3, design section 5 rail 6): the reach pin names WHICH kind tripped. A class-A REDUCER (explode, detonate) rewrites the estate;
+// a class-A READER (estate-evidence) moves transcript text into a session's context. Each failure says which kind it is.
+test('reach pin: a reducer and a reader reachable from an auto entry point are each named by their kind (dirty fixtures)', () => {
+  const reducer = reachViolations(['detonate.mjs']);
+  assert.deepStrictEqual(reducer.map((v) => v.kind), ['reducer']);
+  const reader = reachViolations(['conductor.js', 'estate-evidence.mjs']);
+  assert.deepStrictEqual(reader.map((v) => v.kind), ['reader']);
+  assert.match(violationMessage(reader[0]), /class-A READER of transcript text/);
+  assert.match(violationMessage(reducer[0]), /class-A REDUCER/);
+  assert.deepStrictEqual(reachViolations(['conductor.js']), [], 'a clean closure has no violation');
 });

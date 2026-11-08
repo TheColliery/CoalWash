@@ -74,7 +74,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recoverDangling } from './apply.mjs';
-import { discoverClassB } from './class-b.mjs';
+import { discoverClassB, ccProjectSlug } from './class-b.mjs';
 import {
   measureEntries, readBudgetFor, gaugeVerdict,
   loadState, armDigGauge, discoverCapacity, setStateNamespace,
@@ -83,6 +83,7 @@ import { envelopeFor } from './retier.mjs';
 import { openPlainFile } from './repo-fs.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
+import { runLookup, renderFrame, billLine, countNeedles } from './estate-evidence.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, binItemOutcome, BIN_ID_SHAPE } from './tailings.mjs';
 import { listWriteguard, readWriteguardSnapshot, SNAP_NAME_SHAPE } from './writeguard.mjs';
 import { loadMergedConfig, loadMergedConfigReport, globalConfigPath, findProjectRoot, projectRootFor, projectConfigResolution, discoverIgnoredConfigs, PROJECT_BOUNDED_KEYS } from './config-load.mjs';
@@ -336,7 +337,7 @@ export function linesFromFile(file) {
   return out;
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | restore --from <file> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> | writeguard-restore --from <file> [--platform antigravity] [--out <file>] | anchor-diff <path> | anchor-diff --from <file> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir> | --to-file <file>] | retier-scan [--json] | retier-run | dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>] | config-status [--json]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | restore --from <file> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> | writeguard-restore --from <file> [--platform antigravity] [--out <file>] | anchor-diff <path> | anchor-diff --from <file> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir> | --to-file <file>] | retier-scan [--json] | retier-run | dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>] | estate-evidence --flags <file> [--bill] | config-status [--json]';
 
 // UMB-133 — the READ-ONLY report for BOTH holes: was the config actually read
 // from a LEGACY path, and is there a `.coalwash.json` sitting somewhere this
@@ -392,6 +393,17 @@ function rootOptsFor(args) {
 }
 // 29i (ruling 2): RE-TIER and ULTRA act on Claude Code's store and do not run on Antigravity. Given the flag they are refused by name
 // (exit 1) and never run; an invalid value is the usage error of rootOptsFor. Returns true when the command must stop.
+// T-DREAM-1 (ORDER 29dm): the flags file the wizard's door reads, a bounded JSON array of { file, range, text }. The text is data.
+const EVIDENCE_FLAGS_MAX = 256 * 1024;
+function parseEvidenceFlags(text) {
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { throw new Error('the flags file is not JSON'); }
+  if (!Array.isArray(parsed)) throw new Error('the flags file must hold a JSON array of { file, range, text }');
+  return parsed.map((f) => {
+    if (!f || typeof f.file !== 'string' || typeof f.range !== 'string' || typeof f.text !== 'string') throw new Error('each flag needs string file, range and text');
+    return { file: f.file, range: f.range, text: f.text };
+  });
+}
 function refusedOnAg(args, cmd) {
   const rootOpts = rootOptsFor(args);
   if (rootOpts === null) { console.error(PLATFORM_USAGE); process.exitCode = 1; return true; }
@@ -692,6 +704,28 @@ function main() {
       console.log(searchLines(rows, { hasDeathLog: tombstones.hasDeathLog }));
     } catch (e) {
       console.error(`estate-search failed: ${escapeRawControls(String(e.message))}`);
+      process.exitCode = 1;
+    }
+  } else if (cmd === 'estate-evidence') {
+    // T-DREAM-1 (ORDER 29dm): the flagged claims' transcript evidence, read-only, this project's archived sessions only. --bill reads the index, never a transcript.
+    if (refusedOnAg(args, 'estate-evidence')) return;
+    const flagsPath = argAfter(args, '--flags');
+    if (!flagsPath) { console.error(USAGE); process.exitCode = 1; return; }
+    try {
+      const flags = parseEvidenceFlags(fromFileRead(flagsPath, EVIDENCE_FLAGS_MAX));
+      const { projectRoot, home, estate } = estateOpts(args);
+      const archiveDir = resolveArchiveDir(estate, home);
+      const slug = ccProjectSlug(projectRoot);
+      if (args.includes('--bill')) {
+        console.log(billLine({ archiveDir, slug, needleCount: countNeedles(flags), flagCount: flags.length }));
+        return;
+      }
+      runLookup({ archiveDir, slug, flags }).then((r) => console.log(renderFrame(r))).catch((e) => {
+        console.error(`estate-evidence failed: ${escapeRawControls(String(e.message))}`);
+        process.exitCode = 1;
+      });
+    } catch (e) {
+      console.error(`estate-evidence failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
   } else if (cmd === 'retier-scan') {
