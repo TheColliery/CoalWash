@@ -44,7 +44,7 @@ function sandboxProject() {
   const proj = path.join(root, 'proj');
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   fs.mkdirSync(path.join(proj, '.git'), { recursive: true });
-  const env = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: home, USERPROFILE: home, NODE_OPTIONS: '--max-old-space-size=2048' };
+  const env = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: home, USERPROFILE: home, TEMP: root, TMP: root, TMPDIR: root, NODE_OPTIONS: '--max-old-space-size=2048' };
   return { root, home, proj, env };
 }
 
@@ -155,7 +155,11 @@ test('echo (674 item 6): a flag of 60 characters or more is labelled when a line
     const archiveDir = makeArchive(root, [{ slug, sessionId: 'echo-1', endISO: '2026-11-01T10:00:00Z', lines: [record('assistant', text(long + ' confirmed by the owner'))] }]);
     const longFrame = renderFrame(await runLookup({ archiveDir, slug, flags: [flag(long)] }));
     assert.ok(longFrame.includes('echo of the note'), longFrame);
-    const shortFrame = renderFrame(await runLookup({ archiveDir, slug, flags: [flag('the note said 9.4 ms')] }));
+    // The short flag names a value the archive holds, so it has a hit: the label check below can then fail (CR2).
+    // A verbatim part of the archive line, so the label rule runs against a repeated head (under the mutant the label would appear).
+    const shortRun = await runLookup({ archiveDir, slug, flags: [flag('release 1.2.3 and we keep it')] });
+    assert.ok(shortRun.flags[0].hitNeedles.includes('1.2.3'), `the short flag has a hit: ${JSON.stringify(shortRun.flags[0].hitNeedles)}`);
+    const shortFrame = renderFrame(shortRun);
     assert.ok(!shortFrame.includes('echo of the note'), 'a flag under 60 characters is never labelled');
   } finally { rm(root); }
 });

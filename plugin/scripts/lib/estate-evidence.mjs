@@ -40,6 +40,8 @@ export const MEASURED = Object.freeze({
 
 const MIB = 1024 * 1024;
 const esc = (s) => escapeRawControls(String(s === undefined || s === null ? '' : s));
+// A fresh copy, so a stored snippet never pins the whole source message through a V8 sliced string (CR6).
+const detach = (s) => Buffer.from(s, 'utf8').toString('utf8');
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // ---- needle extraction (design section 2) -------------------------------------------------------------------------------------------
@@ -60,19 +62,13 @@ export function extractNeedles(body) {
     else if (v.length >= 6) add('quoted', v);
   }
   for (const m of s.matchAll(/\b\d{4}-\d{2}-\d{2}\b/g)) add('date', m[0]);
-  for (const m of s.matchAll(/~\/[\w./-]+|(?:[\w.-]+[\\/])+[\w.-]*\.[A-Za-z0-9]{1,8}\b/g)) add('path', m[0]);
+  // The left boundary starts a match only at a token's start: without it the scan restarts inside a long word and goes quadratic (CR7).
+  for (const m of s.matchAll(/(?<![\w.\\/~-])(?:~\/[\w./-]+|(?:[\w.-]+[\\/])+[\w.-]*\.[A-Za-z0-9]{1,8}\b)/g)) add('path', m[0]);
   for (const m of s.matchAll(/\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/g)) add('identifier', m[0]);
   for (const m of s.matchAll(/\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?\b/g)) add('identifier', m[0]);
   for (const m of s.matchAll(/\b[A-Z]{2,6}-\d+\b/g)) add('ticket', m[0]);
-  for (const m of s.matchAll(/\b\d[\d,]*(?:\.\d+)?\s?(?:characters|chars|bytes|tokens|tok|ms|MiB|MB|KiB|KB|GiB|%|s)\b/g)) add('number', m[0]);
+  for (const m of s.matchAll(/\b(?<![\d,.])\d[\d,]*(?:\.\d+)?\s?(?:characters|chars|bytes|tokens|tok|ms|MiB|MB|KiB|KB|GiB|%|s)\b/g)) add('number', m[0]);
   return found;
-}
-
-// Distinct needles across the flags, capped at NEEDLE_CAP (the bill and the lookup count the same way).
-export function countNeedles(flags) {
-  const seen = new Set();
-  for (const f of flags || []) for (const n of extractNeedles(f.text)) seen.add(n.text.toLowerCase());
-  return Math.min(seen.size, LIMITS.NEEDLE_CAP);
 }
 
 // ---- the index and the stages ------------------------------------------------------------------------------------------------------
@@ -162,27 +158,37 @@ function examine(s, row, ctx) {
 async function readSession(file, row, ctx) {
   const counter = { raw: 0 };
   const pending = [];
+  const hitNeedles = new Map(); // flagIdx -> every needle matched, kept even past the stored-hit cap (CR6)
+  const kept = new Map(); // flagIdx -> stored hit records for this session
   const limits = { perSession: ctx.caps.perSessionRawBytes, perRun: ctx.caps.perRunRawBytes, runRawBefore: ctx.runRaw };
   const lines = jsonlLines(file, ctx.caps.lineRawBytes, counter, limits);
   try {
     for await (const line of lines) {
       if (line.stop) return { stop: line.stop, raw: counter.raw };
       if (line.overflow) ctx.out.linesSkipped++;
-      else if (line.buf && line.buf.length) pending.push(...examine(line.buf.toString('utf8'), row, ctx));
+      else if (line.buf && line.buf.length) {
+        for (const h of examine(line.buf.toString('utf8'), row, ctx)) {
+          if (!hitNeedles.has(h.flagIdx)) hitNeedles.set(h.flagIdx, []);
+          for (const n of h.needles) if (!hitNeedles.get(h.flagIdx).includes(n)) hitNeedles.get(h.flagIdx).push(n);
+          const n = kept.get(h.flagIdx) || 0;
+          if (n < LIMITS.LINES_PER_SESSION) { kept.set(h.flagIdx, n + 1); pending.push({ ...h, snippet: detach(h.snippet) }); }
+        }
+      }
       if (counter.raw > ctx.caps.perSessionRawBytes) return { stop: 'session-cap', raw: counter.raw };
       if (ctx.runRaw + counter.raw > ctx.caps.perRunRawBytes) return { stop: 'run-cap', raw: counter.raw };
     }
   } catch {
     return { stop: 'unreadable', raw: counter.raw };
   }
-  return { raw: counter.raw, hits: pending };
+  return { raw: counter.raw, hits: pending, hitNeedles };
 }
 
 // Admits a read session's hits into each flag: at most SESSIONS_PER_FLAG sessions and LINES_PER_SESSION lines per session per flag.
-function admit(ctx, hits) {
+function admit(ctx, hits, hitNeedles) {
+  for (const [flagIdx, needles] of hitNeedles) for (const n of needles) if (!ctx.out.flags[flagIdx].hitNeedles.includes(n)) ctx.out.flags[flagIdx].hitNeedles.push(n);
+  ctx.out.hitRecordsKept += hits.length;
   for (const h of hits) {
     const st = ctx.flagState[h.flagIdx];
-    for (const n of h.needles) if (!ctx.out.flags[h.flagIdx].hitNeedles.includes(n)) ctx.out.flags[h.flagIdx].hitNeedles.push(n);
     if (!st.sessions.has(h.sessionId)) {
       if (st.sessions.size >= LIMITS.SESSIONS_PER_FLAG) continue;
       st.sessions.set(h.sessionId, 0);
@@ -241,6 +247,7 @@ export async function runLookup({ archiveDir, slug, flags = [], caps = {} }) {
     notSearched,
     sessionsInScope: 0,
     rawBytesRead: 0,
+    hitRecordsKept: 0,
   };
   flags.forEach((f, i) => { out.flags[i].needles = entries.filter((e) => e.flagIdxs.includes(i)).map((e) => e.text); });
   const matcher = entries.length ? new RegExp(entries.map((e) => escapeRe(e.text)).join('|'), 'i') : null;
@@ -286,11 +293,11 @@ export async function runLookup({ archiveDir, slug, flags = [], caps = {} }) {
     if (contained !== 'ok') { out.skipped.push({ sessionId: row.sessionId, reason: contained }); continue; }
     const res = await readSession(file, row, ctx);
     out.rawBytesRead += res.raw ?? 0;
+    ctx.runRaw += res.raw ?? 0; // charged on every stop, so an aborted read counts toward the run cap (CR4, L3)
     if (res.stop === 'run-cap') { out.stopped = 'run-cap'; out.notReached = ordered.length - idx; break; }
     if (res.stop) { out.skipped.push({ sessionId: row.sessionId, reason: res.stop }); continue; }
-    ctx.runRaw += res.raw;
     out.readIds.push(row.sessionId);
-    admit(ctx, res.hits);
+    admit(ctx, res.hits, res.hitNeedles);
   }
   return out;
 }
@@ -329,7 +336,7 @@ function highestRate() {
   return Math.max(...Object.values(MEASURED.secondsPerRawMiB));
 }
 
-// N and B are summed from this project's index rows; S is B times the measured rate at this run's needle count; T is the design's worst
+// N and B are summed from this project's index rows; S is the bytes in scope (at most the per-run cap) times the highest measured rate; T is the design's worst
 // case per flag. Nothing here opens a session file.
 export function billLine({ archiveDir, slug }) {
   const rows = readIndex(archiveDir).filter((r) => r.projectSlug === slug && !r.retier);

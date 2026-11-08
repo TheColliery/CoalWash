@@ -337,7 +337,7 @@ export function linesFromFile(file) {
   return out;
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | restore --from <file> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> | writeguard-restore --from <file> [--platform antigravity] [--out <file>] | anchor-diff <path> | anchor-diff --from <file> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir> | --to-file <file>] | retier-scan [--json] | retier-run | dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>] | estate-evidence --flags <file> [--bill] | config-status [--json]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | restore --from <file> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> | writeguard-restore --from <file> [--platform antigravity] [--out <file>] | anchor-diff <path> | anchor-diff --from <file> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir> | --to-file <file>] | retier-scan [--json] | retier-run | dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>] | estate-evidence --flags <file> | estate-evidence --bill | config-status [--json]';
 
 // UMB-133 — the READ-ONLY report for BOTH holes: was the config actually read
 // from a LEGACY path, and is there a `.coalwash.json` sitting somewhere this

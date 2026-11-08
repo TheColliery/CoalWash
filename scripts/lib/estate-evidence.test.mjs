@@ -235,7 +235,7 @@ function sandboxProject() {
   const proj = path.join(root, 'proj');
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   fs.mkdirSync(path.join(proj, '.git'), { recursive: true });
-  const env = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: home, USERPROFILE: home, NODE_OPTIONS: '--max-old-space-size=2048' };
+  const env = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: home, USERPROFILE: home, TEMP: root, TMP: root, TMPDIR: root, NODE_OPTIONS: '--max-old-space-size=2048' };
   return { root, home, proj, env };
 }
 
