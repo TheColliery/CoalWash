@@ -83,7 +83,7 @@ import { envelopeFor } from './retier.mjs';
 import { openPlainFile } from './repo-fs.mjs';
 import { digGauge, digGaugeLine } from './dig-gauge.mjs';
 import { digGaugeOffer } from './ask.mjs';
-import { runLookup, renderFrame, billLine, countNeedles } from './estate-evidence.mjs';
+import { runLookup, renderFrame, billLine } from './estate-evidence.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, binItemOutcome, BIN_ID_SHAPE } from './tailings.mjs';
 import { listWriteguard, readWriteguardSnapshot, SNAP_NAME_SHAPE } from './writeguard.mjs';
 import { loadMergedConfig, loadMergedConfigReport, globalConfigPath, findProjectRoot, projectRootFor, projectConfigResolution, discoverIgnoredConfigs, PROJECT_BOUNDED_KEYS } from './config-load.mjs';
@@ -709,17 +709,14 @@ function main() {
   } else if (cmd === 'estate-evidence') {
     // T-DREAM-1 (ORDER 29dm): the flagged claims' transcript evidence, read-only, this project's archived sessions only. --bill reads the index, never a transcript.
     if (refusedOnAg(args, 'estate-evidence')) return;
-    const flagsPath = argAfter(args, '--flags');
-    if (!flagsPath) { console.error(USAGE); process.exitCode = 1; return; }
     try {
-      const flags = parseEvidenceFlags(fromFileRead(flagsPath, EVIDENCE_FLAGS_MAX));
       const { projectRoot, home, estate } = estateOpts(args);
       const archiveDir = resolveArchiveDir(estate, home);
       const slug = ccProjectSlug(projectRoot);
-      if (args.includes('--bill')) {
-        console.log(billLine({ archiveDir, slug, needleCount: countNeedles(flags), flagCount: flags.length }));
-        return;
-      }
+      if (args.includes('--bill')) { console.log(billLine({ archiveDir, slug })); return; } // no flags needed: the bill is for the Full run's start
+      const flagsPath = argAfter(args, '--flags');
+      if (!flagsPath) { console.error(USAGE); process.exitCode = 1; return; }
+      const flags = parseEvidenceFlags(fromFileRead(flagsPath, EVIDENCE_FLAGS_MAX));
       runLookup({ archiveDir, slug, flags }).then((r) => console.log(renderFrame(r))).catch((e) => {
         console.error(`estate-evidence failed: ${escapeRawControls(String(e.message))}`);
         process.exitCode = 1;

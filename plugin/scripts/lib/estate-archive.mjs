@@ -962,7 +962,7 @@ function tombstoneSignal(hits, hasDeathLog) {
 
 // Bare-name allowlist — tailings.mjs's F1 rule verbatim: a session id is a flat
 // program-generated name; any traversal shape is a clean not-found.
-function isBareId(id) {
+export function isBareId(id) {
   return typeof id === 'string' && !!id && id !== '.' && id !== '..' && path.basename(id) === id;
 }
 

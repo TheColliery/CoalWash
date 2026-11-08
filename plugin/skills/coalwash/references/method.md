@@ -255,7 +255,7 @@ console.log(billLine({ files: [FILES], fatTokens: [FAT_TOKENS_OR_NULL], bill }))
 
 Print `billLine`'s output VERBATIM — like `ask.mjs`'s templates, this is program-built text; never paraphrase or re-word it. `MINUTES_PER_PARTITION`/`TOKEN_RATE_PER_KB` (the bill's rate constants) are reasoned placeholders, not measured — never present the resulting band as a precise quote. `PARTITION_FILES`/`PARTITION_KB` (150 / 500) are the real, already-shipped partition threshold from §2, reused here as the billing unit.
 
-The Full bill also prints the estate lookup line, beside `billLine`: `node [LIB]/cli.mjs estate-evidence --flags [FILE] --bill` (it reads the index only, opens no session file). Print it VERBATIM; it states worst-case seconds as an estimate at the measured rate, never as a bound.
+The Full bill also prints the estate lookup line, beside `billLine`: `node [LIB]/cli.mjs estate-evidence --bill` (no flags file; it reads the index only, opens no session file). Print it VERBATIM; it states the seconds as an estimate at the highest measured rate, never as a bound.
 
 ### 9b. Background clone — contract, handshake, structural coordination, logbook
 

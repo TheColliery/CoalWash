@@ -51,6 +51,7 @@ const TESTS = [
   'scripts/lib/writeguard-slot.test.mjs', // 655: a snapshot in a -N slot is listed and restored
   'scripts/lib/from-file-bom.test.mjs', // 656 F656-4: the --from and --to-file readers strip a leading byte order mark
   'scripts/lib/estate-evidence.test.mjs', // 670 (T-DREAM-1): the estate evidence lookup, read-only, project-scoped, capped
+  'scripts/lib/estate-evidence-674.test.mjs', // 674 (INSPECT 673): the bill with no flags, the line counts, scope, the caps while streaming, RE-TIER rows, the mutant kills
   'scripts/lib/restore-argv-shell.test.mjs', // 653: the restore door never runs a planted name as a shell substitution
   'scripts/lib/shipped-command-slots.test.mjs', // 653: no shipped command span carries an id or name placeholder
   'scripts/lib/text-index.test.mjs', // 619: the shared prefix index behind exact substring counting (retier, estate-archive, fidelity-gate)
