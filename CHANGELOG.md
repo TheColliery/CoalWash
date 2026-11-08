@@ -2,6 +2,17 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+A Full run can check a flagged note against this project's archived transcript sessions for the dates, paths, versions, ids and numbers the note names
+
+### Added
+
+- In a Full run, when the outsider flags a note as superseded, done-point-in-time or a contradiction, the insider can see lines from this project's archived transcript sessions that name the note's dates, paths, versions, ids, tickets, quoted strings or numbers. The lookup only reads: it works on archived sessions of this project only, is capped at 3 sessions per flag, 2 lines per session, 240 characters a snippet, 50 searched needles per run, 256 MiB per session and 512 MiB per run, and each line is shown inside a marked frame and never copied into memory.
+- A transcript line only points to a source the insider then checks at source. It never decides a keep or a cut, and finding nothing is not evidence against the note.
+- The ambient escalation ask now says that a Full run also reads this project's archived transcript sessions. The wizard bill shows their path and size first (`cli.mjs estate-evidence --bill`).
+- New door: `cli.mjs estate-evidence --flags <file> [--bill]`, where `<file>` is a JSON array of flagged ranges.
+
 ## [1.16.0] - 2026-11-07
 
 Restore commands take a recovery id or snapshot name from a file, and a planted name with shell text is never listed or run

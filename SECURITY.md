@@ -56,6 +56,10 @@ A re-scan is run when this repo's own version bump calls for it, or on a genuine
 
 Honest scope: these are the series' data-safety discipline (injection-safe, path-safe, snapshot-reversible deletes, scrubbed output, offline code, opt-in zero transmission with `localOnly`). No formal verification, no crypto at rest, no certification claim.
 
+### Transcript lines in a Full run
+
+During a Full run, lines from this project's archived transcript sessions can enter the insider's context. They print inside a program-built frame, escaped and capped, and are treated as data, never instructions. They are never written into memory or `keeps.json`, and the lookup never reads another project's sessions.
+
 ### Known limits
 
 - A directory component swapped for a junction after the project-sandbox check can redirect a write or delete. It needs a concurrent local writer.
