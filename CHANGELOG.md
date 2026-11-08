@@ -2,6 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+The estate evidence lookup no longer hangs or holds too much memory
+
+### Fixed
+
+- A flagged note with a very long unbroken token no longer makes the estate evidence lookup hang: the path and number patterns start only at a token's start.
+- The lookup keeps at most `LIMITS.LINES_PER_SESSION` (2) matching lines per session for each flag, each with its own copy of the snippet, so a common value no longer fills memory on a large session.
+- A session the lookup stops reading part way (over the per-session cap, or unreadable) now counts toward the per-run cap.
+- The door's synopsis now lists `--bill` as its own form, `estate-evidence --bill`. The 1.17.0 entry's `estate-evidence --flags <file> [--bill]` reads as though `--bill` needs a flags file; the corrected form is here, and the 1.17.0 entry is not edited.
+- `PRIVACY.md` now names the archived transcript read of a Full run.
+
 ## [1.17.0] - 2026-11-09
 
 A Full run can check a flagged note against archived transcripts
