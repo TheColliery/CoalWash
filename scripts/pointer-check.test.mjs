@@ -427,8 +427,9 @@ test('NON-LOCAL-079: an extensionless citation under a gitignored root is checke
 
 // ---------------------------------------------------------------- CHECK-IGNORE CLASSIFIER (CWK2-060)
 // A pipe error is keyed on error.code (EPIPE on POSIX, EOF on Windows), never on error.message.
-// The pair that matters: a pipe code beside git's own integer exit other than 0 or 1 is git answering,
-// so the exit is the verdict. Every other pairing stays "failed to spawn" (fail-closed).
+// STATUS FIRST (CWK2-060 shape, conformed to CoalFace 888fa04): a null status is the spawn failure; an integer
+// status other than 0 or 1 is git's own answer whatever error sits beside it; 0 or 1 with an error is a partial
+// answer (the stdin write may have failed); 0 or 1 alone is clean. Every pairing stays fail-closed.
 const spawnError = (code, message) => Object.assign(new Error(message), { code });
 const PIPE_MESSAGE = 'write EPIPE';
 
@@ -449,11 +450,33 @@ test('CWK2-060: a pipe error with no stderr names the status with no dangling se
   assert.deepStrictEqual(r, { ok: false, failure: 'exited 128' });
 });
 
-test('CWK2-060 FAIL-CLOSED: a pipe error beside exit 0 or 1 stays "failed to spawn" (git may not have read all its input)', () => {
+test('CWK2-060 PARTIAL: a pipe error beside exit 0 or 1 is a partial answer, never "failed to spawn" and never clean (EPIPE)', () => {
   for (const status of [0, 1]) {
     const r = classifyCheckIgnoreResult({ error: spawnError('EPIPE', PIPE_MESSAGE), status, stderr: '', stdout: '' });
-    assert.deepStrictEqual(r, { ok: false, failure: `failed to spawn: ${PIPE_MESSAGE}` }, `status ${status}`);
+    assert.deepStrictEqual(r, { ok: false, failure: `exited ${status} but the stdin write failed (${PIPE_MESSAGE}) — the answer may be partial` }, `status ${status}`);
   }
+});
+
+test('CWK2-060 PARTIAL: a pipe error beside exit 0 or 1 is a partial answer (EOF, Windows)', () => {
+  for (const status of [0, 1]) {
+    const r = classifyCheckIgnoreResult({ error: spawnError('EOF', 'spawnSync git EOF'), status, stderr: '', stdout: '' });
+    assert.deepStrictEqual(r, { ok: false, failure: `exited ${status} but the stdin write failed (spawnSync git EOF) — the answer may be partial` }, `status ${status}`);
+  }
+});
+
+test('CWK2-060 STATUS FIRST: a null status with a pipe error and a signal names the spawn failure and the signal', () => {
+  const r = classifyCheckIgnoreResult({ error: spawnError('EPIPE', PIPE_MESSAGE), signal: 'SIGPIPE', status: null, stderr: '', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: `failed to spawn (signal SIGPIPE): ${PIPE_MESSAGE}` });
+});
+
+test('CWK2-060 STATUS FIRST: a null status with no error and no signal names the unrecognized shape', () => {
+  const r = classifyCheckIgnoreResult({ status: null, stderr: '', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'failed to spawn: no status and no error (unrecognized shape)' });
+});
+
+test('CWK2-060 STATUS FIRST: an undefined status with a signal and no error names the signal and the unrecognized shape', () => {
+  const r = classifyCheckIgnoreResult({ signal: 'SIGTERM', stderr: '', stdout: '' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'failed to spawn (signal SIGTERM): no status and no error (unrecognized shape)' });
 });
 
 test('CWK2-060 FAIL-CLOSED: a pipe error beside no integer status stays "failed to spawn"', () => {
@@ -461,15 +484,19 @@ test('CWK2-060 FAIL-CLOSED: a pipe error beside no integer status stays "failed 
   assert.deepStrictEqual(r, { ok: false, failure: `failed to spawn: ${PIPE_MESSAGE}` });
 });
 
-test('CWK2-060 FAIL-CLOSED: a non-pipe spawn error (ENOENT) beside exit 128 stays "failed to spawn"', () => {
+test('CWK2-060 STATUS FIRST: a non-pipe spawn error (ENOENT) beside exit 128 names git\'s exit, status first (changed: was "failed to spawn")', () => {
   const r = classifyCheckIgnoreResult({ error: spawnError('ENOENT', 'spawnSync git ENOENT'), status: 128,
     stderr: 'fatal: stale', stdout: '' });
-  assert.deepStrictEqual(r, { ok: false, failure: 'failed to spawn: spawnSync git ENOENT' });
+  assert.deepStrictEqual(r, { ok: false, failure: 'exited 128 — fatal: stale' });
 });
 
-test('CWK2-061: the classifier keys on error.code, never error.message (a non-pipe code with a pipe message stays fail-closed)', () => {
-  const r = classifyCheckIgnoreResult({ error: spawnError('ENOENT', 'write EPIPE'), status: 128, stderr: 'fatal: x', stdout: '' });
-  assert.deepStrictEqual(r, { ok: false, failure: 'failed to spawn: write EPIPE' });
+test('CWK2-061 (rewritten): an error beside exit 0 or 1 is never clean, whatever its code (a non-pipe code with a pipe message)', () => {
+  for (const status of [0, 1]) {
+    const r = classifyCheckIgnoreResult({ error: spawnError('ENOENT', 'write EPIPE'), status, stderr: '', stdout: '' });
+    assert.strictEqual(r.ok, false, `status ${status} must not read clean`);
+    assert.match(r.failure, /the answer may be partial$/, `status ${status}: ${r.failure}`);
+    assert.ok(!/failed to spawn/.test(r.failure), `status ${status} is an answer that may be partial, not a spawn failure: ${r.failure}`);
+  }
 });
 
 test('CWK2-060: an exit 128 with no spawn error names the exit and its first stderr line (unchanged)', () => {

@@ -326,24 +326,29 @@ export function deriveIgnoredRoots({
   return { cited, probed, ignored, artefacts, homesPresent };
 }
 
-// The verdict on one `git check-ignore -v --stdin` run. ok: stdout is the answer. Not ok: `failure` is the
-// reason, printed after "git check-ignore --stdin " by the caller.
-// THE PIPE RACE (CWK2-060; class source CoalHearth 6f39694). A core.bare=true repository makes git refuse at
-// once with 128, before it reads stdin. An input past the pipe buffer then fails its write in spawnSync: EPIPE
-// on POSIX, EOF on Windows, beside git's REAL status. The child answered, so its exit is the verdict. Only that
-// pairing (a pipe code beside an integer status other than 0 or 1) is read that way. A pipe error beside 0 or 1
-// may mean git never saw all its input, and a non-pipe error beside any status is a real spawn failure: both
-// stay fail-closed. Keyed on error.code, never error.message (node/runtime.md §7).
-const STDIN_CLOSED_CODES = new Set(['EPIPE', 'EOF']);
+// The verdict on one `git check-ignore -v --stdin` run, STATUS FIRST (the shape of CoalFace's classifier,
+// scripts/lib/pointer-check.mjs:200 at 888fa04). ok: stdout is the answer. Not ok: `failure` is the reason, printed
+// after "git check-ignore --stdin " by the caller (the room names the field `failure`, CoalFace names it `message`,
+// and the caller supplies the prefix here, so no prefix is written in this file).
+// Order: a null status is the spawn failure, naming the signal when there is one; an integer status other than 0
+// or 1 is git's own answer whatever error sits beside it; 0 or 1 with an error is a PARTIAL answer; 0 or 1 alone is clean.
+// THE PIPE RACE (CWK2-060; class source CoalHearth 6f39694). A core.bare=true repository makes git refuse at once
+// with 128, before it reads stdin. An input past the pipe buffer then fails its write in spawnSync: EPIPE on POSIX,
+// EOF on Windows, beside git's REAL status, so the exit is the verdict. A pipe error beside 0 or 1 may mean git
+// never saw all its input, so it is a partial answer. Keyed on status and error presence, never error.message
+// (node/runtime.md §7).
 export function classifyCheckIgnoreResult(ci) {
-  const childExitedFirst = Boolean(ci.error) && STDIN_CLOSED_CODES.has(ci.error.code)
-    && Number.isInteger(ci.status) && ci.status !== 0 && ci.status !== 1;
-  if (ci.error && !childExitedFirst) {
-    return { ok: false, failure: `failed to spawn: ${ci.error.message}` };
+  if (ci.status === null || ci.status === undefined) {
+    const signalNote = ci.signal ? ` (signal ${ci.signal})` : '';
+    const detail = ci.error ? ci.error.message : 'no status and no error (unrecognized shape)';
+    return { ok: false, failure: `failed to spawn${signalNote}: ${detail}` };
   }
   if (ci.status !== 0 && ci.status !== 1) {
     const why = String(ci.stderr || '').split('\n')[0].trim();
     return { ok: false, failure: `exited ${ci.status}${why ? ` — ${why}` : ''}` };
+  }
+  if (ci.error) {
+    return { ok: false, failure: `exited ${ci.status} but the stdin write failed (${ci.error.message}) — the answer may be partial` };
   }
   return { ok: true, stdout: ci.stdout };
 }
