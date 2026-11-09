@@ -63,7 +63,8 @@ export function extractNeedles(body) {
   }
   for (const m of s.matchAll(/\b\d{4}-\d{2}-\d{2}\b/g)) add('date', m[0]);
   // The left boundary starts a match only at a token's start: without it the scan restarts inside a long word and goes quadratic (CR7).
-  for (const m of s.matchAll(/(?<![\w.\\/~-])(?:~\/[\w./-]+|(?:[\w.-]+[\\/])+[\w.-]*\.[A-Za-z0-9]{1,8}\b)/g)) add('path', m[0]);
+  // The optional root (a drive letter, then up to two separators) starts the match; the boundary still stops a start inside a token (684 N1).
+  for (const m of s.matchAll(/(?<![\w.\\/~-])(?:~\/[\w./-]+|(?:[A-Za-z]:)?[\\/]{0,2}(?:[\w.-]+[\\/])+[\w.-]*\.[A-Za-z0-9]{1,8}\b)/g)) add('path', m[0]);
   for (const m of s.matchAll(/\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/g)) add('identifier', m[0]);
   for (const m of s.matchAll(/\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?\b/g)) add('identifier', m[0]);
   for (const m of s.matchAll(/\b[A-Z]{2,6}-\d+\b/g)) add('ticket', m[0]);

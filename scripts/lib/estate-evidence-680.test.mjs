@@ -8,7 +8,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { runLookup, LIMITS } from './estate-evidence.mjs';
+import { runLookup, extractNeedles, LIMITS } from './estate-evidence.mjs';
 
 const MODULE_URL = pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), 'estate-evidence.mjs')).href;
 const tmpRoot = () => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-evid680-')));
@@ -16,8 +16,13 @@ const rm = (p) => fs.rmSync(p, { recursive: true, force: true });
 
 // CR7: extraction in a child process with a deadline. At the quadratic pattern the scan outlives the deadline and the child is killed.
 function extractInChild(bodyExpr) {
+  const root = tmpRoot(); // a temp root per call, removed after: HOME, USERPROFILE and TEMP of the child all point inside it (684 N2)
+  try {
+    const home = path.join(root, 'home');
+    fs.mkdirSync(home);
   const code = `import { extractNeedles } from ${JSON.stringify(MODULE_URL)}; const t = ${bodyExpr}; const t0 = Date.now(); extractNeedles(t); console.log(String(Date.now() - t0));`;
-  return spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL', env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, NODE_OPTIONS: '--max-old-space-size=2048' } });
+    return spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL', env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: home, USERPROFILE: home, TEMP: root, TMP: root, TMPDIR: root, NODE_OPTIONS: '--max-old-space-size=2048' } });
+  } finally { rm(root); }
 }
 
 test('long token (680 CR7): a 200,000-character unbroken word token is scanned without a quadratic blow-up', () => {
@@ -67,4 +72,26 @@ test('stored hits (680 CR6): a session where every line matches keeps at most LI
     assert.strictEqual(r.hitRecordsKept, LIMITS.LINES_PER_SESSION, `stored hit records: ${r.hitRecordsKept}`);
     assert.deepStrictEqual(r.flags[0].hitNeedles, ['9.4 ms'], 'the needle still counts as matched');
   } finally { rm(root); }
+});
+
+test('long token (684): a 200,000-character run of "/" is scanned without a quadratic blow-up', () => {
+  const r = extractInChild("'/'.repeat(200000)");
+  assert.strictEqual(r.error, undefined, `the child timed out or failed: ${r.error && r.error.code}`);
+  assert.strictEqual(r.status, 0, r.stderr);
+  console.log(`684 timing, 200,000 "/" characters: ${r.stdout.trim()} ms`);
+});
+
+test('long token (684): a 200,000-character run of "a:" is scanned without a quadratic blow-up', () => {
+  const r = extractInChild("'a:'.repeat(100000)");
+  assert.strictEqual(r.error, undefined, `the child timed out or failed: ${r.error && r.error.code}`);
+  assert.strictEqual(r.status, 0, r.stderr);
+  console.log(`684 timing, 200,000 characters of "a:": ${r.stdout.trim()} ms`);
+});
+
+test('path shapes (684 N1): absolute, drive, Git Bash and UNC paths outside quotes each yield a path needle', () => {
+  const shapes = ['/home/u/notes/a.md', '/etc/app/config.json', 'C:\\Users\\u\\notes\\a.md', '/c/Users/u/notes/a.md', '\\\\server\\share\\a.md'];
+  for (const sh of shapes) {
+    const paths = extractNeedles(`see ${sh} now`).filter((n) => n.kind === 'path').map((n) => n.text);
+    assert.ok(paths.includes(sh), `${sh} yields a path needle: ${JSON.stringify(paths)}`);
+  }
 });
