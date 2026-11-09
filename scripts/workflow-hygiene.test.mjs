@@ -92,9 +92,19 @@ test('661: the suite runner prints a SKIPPED line for each skipped test, before 
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw661-skip-')));
   try {
     fs.writeFileSync(path.join(dir, 'skip.fixture.mjs'), "import { test } from 'node:test';\ntest('platform leg', { skip: 'no symlink here' }, () => {});\n", 'utf8');
-    const run = await wave.runWaves({ files: ['skip.fixture.mjs'], cwd: dir, env: process.env, heapMb: 512, fileTimeoutMs: 60000, deadlineMs: 120000 });
+    // 688 item 1: the child reports the temp and home folders it resolved, so the test can prove which environment ran it.
+    fs.writeFileSync(path.join(dir, 'env.fixture.mjs'), "import fs from 'node:fs';\nimport os from 'node:os';\nimport { test } from 'node:test';\ntest('env probe', () => {\n  fs.writeFileSync('env-probe.json', JSON.stringify({ tmpdir: os.tmpdir(), home: os.homedir(), TEMP: process.env.TEMP || '', TMP: process.env.TMP || '', TMPDIR: process.env.TMPDIR || '', USERPROFILE: process.env.USERPROFILE || '', HOME: process.env.HOME || '' }), 'utf8');\n});\n", 'utf8');
+    // 688 item 1: the child gets the sandbox shape of wave-run.test.mjs's sandboxEnv, never the real HOME, USERPROFILE or TEMP.
+    const sandbox = { ...process.env, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir };
+    const run = await wave.runWaves({ files: ['skip.fixture.mjs', 'env.fixture.mjs'], cwd: dir, env: sandbox, heapMb: 512, fileTimeoutMs: 60000, deadlineMs: 120000 });
     const lines = wave.skippedLines(run.results);
     assert.ok(lines.some((l) => l.startsWith('SKIPPED ') && l.endsWith(': "platform leg"')), `one SKIPPED line names the skipped test: ${JSON.stringify(lines)}`);
+    const probe = JSON.parse(fs.readFileSync(path.join(dir, 'env-probe.json'), 'utf8'));
+    const within = (p) => { const rel = path.relative(dir, path.resolve(p)); return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)); };
+    for (const k of ['tmpdir', 'home', 'TEMP', 'TMP', 'TMPDIR', 'USERPROFILE', 'HOME']) {
+      const v = probe[k];
+      assert.ok(v && within(v), `the child's ${k} resolves inside the test folder (${dir}), got: ${v}`);
+    }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
