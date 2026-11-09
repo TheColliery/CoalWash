@@ -2,7 +2,7 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.17.1] - 2026-11-09
 
 The estate evidence lookup no longer hangs or holds too much memory
 
