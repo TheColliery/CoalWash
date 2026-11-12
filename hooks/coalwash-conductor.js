@@ -470,6 +470,8 @@ async function handleSessionStart(input, opts = {}) {
 async function handleStop(input, opts = {}) {
   // opts.emit receives the block reason. Default writes CC's structured block object, byte-for-byte as before.
   const emit = opts.emit || ((reason) => process.stdout.write(JSON.stringify({ decision: 'block', reason })));
+  // 701: the user-facing channel (hooks-safety §4) for a return nobody can answer. Default writes the systemMessage object.
+  const emitSystem = opts.emitSystem || ((message) => process.stdout.write(JSON.stringify({ systemMessage: message })));
   if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
   const [{ loadMergedConfig, projectRootFor }, { clampedRead, envelopeForConfig }, caliper, ask, classB] = await Promise.all([
     import(lib('config-load.mjs')),
@@ -646,6 +648,19 @@ async function handleStop(input, opts = {}) {
       spawns,
     });
     caliper.markQuickTried(home, projectRoot, now);
+  } else if (crossing.band === 'OBESE' && proj.returnAsk === true) {
+    // 701 (BB-469): a store found back at the content it had before the last wash is ASKED about, never washed again by itself, `auto` included.
+    // A condition gate on a write (hooks-safety §9): THIS hook decides presence, from the platform's attended flag, and emits the decided instruction.
+    if (process.env.CLAUDE_CODE_SESSION_ATTENDED === '1') {
+      reason = ask.returnAsk({ fatTokens, breakEven });
+    } else {
+      caliper.consumeCrossing(home, projectRoot, now); // said once
+      let note = ask.returnUnattended({ fatTokens });
+      const language = clampedRead(cfg, 'language');
+      if (language !== 'auto') note += `\n[CoalWash] (language=${language} — deliver user-facing prose in that language; keep technical terms, commands, paths, numbers, and units verbatim)`;
+      emitSystem(note);
+      return;
+    }
   } else {
     // case (d) — OBESE (the only other band sanitizeCrossing admits) — 0d
     // "OBESE AUTO-QUICK, NO ASK" + F3: UNCONDITIONAL standing-consent

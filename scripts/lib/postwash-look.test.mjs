@@ -59,22 +59,39 @@ function makeCase(name) {
   return c;
 }
 
-// The real conductor, spawned as the platform spawns it.
-function runHook(c, event, { stopActive = false } = {}) {
-  const payload = { session_id: `cwpw-${c.name}`, hook_event_name: event, cwd: c.proj, transcript_path: path.join(c.base, 'transcript.jsonl') };
-  if (event === 'SessionStart') payload.source = 'startup';
-  if (event === 'Stop') payload.stop_hook_active = stopActive;
-  const env = {
+// Every child gets an explicit env, never the real one: PATH and SystemRoot only, plus the sandbox.
+function childEnv(c) {
+  return {
     PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
     HOME: c.home, USERPROFILE: c.home, TEMP: ROOT, TMP: ROOT, TMPDIR: ROOT,
     CLAUDE_PROJECT_DIR: c.proj, CLAUDE_PLUGIN_ROOT: path.join(ROOT, 'plugin'), CLAUDE_PLUGIN_DATA: path.join(ROOT, 'pdata'),
     NODE_OPTIONS: '--max-old-space-size=2048',
   };
+}
+// Every file of a directory as "relative path:size", sorted; a missing folder lists as empty.
+function treeOf(dir) {
+  const out = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else out.push(`${path.relative(dir, p)}:${fs.statSync(p).size}`);
+    }
+  };
+  if (fs.existsSync(dir)) walk(dir);
+  return out.sort();
+}
+// The real conductor, spawned as the platform spawns it. The attended flag is set only when asked for.
+function runHook(c, event, { stopActive = false, attended = false } = {}) {
+  const payload = { session_id: `cwpw-${c.name}`, hook_event_name: event, cwd: c.proj, transcript_path: path.join(c.base, 'transcript.jsonl') };
+  if (event === 'SessionStart') payload.source = 'startup';
+  if (event === 'Stop') payload.stop_hook_active = stopActive;
+  const env = { ...childEnv(c), ...(attended ? { CLAUDE_CODE_SESSION_ATTENDED: '1' } : {}) };
   const r = spawnSync(process.execPath, [HOOK], { input: JSON.stringify(payload), cwd: c.proj, env, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', windowsHide: true });
   const out = (r.stdout || '').trim();
   let json = null;
   if (out) { try { json = JSON.parse(out); } catch { json = null; } }
-  return { status: r.status, out, nudge: !!(json && json.decision === 'block'), reason: json && json.reason ? String(json.reason) : '' };
+  return { status: r.status, out, nudge: !!(json && json.decision === 'block'), reason: json && json.reason ? String(json.reason) : '', system: json && json.systemMessage ? String(json.systemMessage) : '' };
 }
 
 const opts = (c) => ({ projectRoot: c.proj, home: c.home, now: Date.now() });
@@ -103,9 +120,17 @@ test('witness: a copy of the pre-wash file brought back from outside re-arms the
   const cont = runHook(c, 'Stop', { stopActive: true });
   assert.strictEqual(cont.out, '', 'the Stop continuation after a wash stays silent (stop_hook_active)');
   fs.writeFileSync(c.mem, MEM_ORIG); // a sync client or a backup writes the pre-wash bytes back
-  const look = runHook(c, 'Stop');
-  t.diagnostic(`re-armed nudge after the outside copy: ${look.reason.slice(0, 600)}`);
-  assert.ok(look.nudge, `the returned copy must be seen at the next look; got stdout: ${look.out.slice(0, 200)}`);
+  const tx = path.join(c.proj, '.claude', 'coalwash');
+  const memBefore = fs.readFileSync(c.mem, 'utf8');
+  const snapsBefore = treeOf(tx);
+  const look = runHook(c, 'Stop', { attended: true });
+  t.diagnostic(`return ask after the outside copy: ${look.reason.slice(0, 600)}`);
+  assert.strictEqual(look.nudge, true, `the returned copy must be asked about at an attended look; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, /wash again/, 'the ask names the wash-again answer');
+  assert.match(look.reason, /leave it/, 'the ask names the leave-it answer');
+  assert.match(look.reason, /return-leave/, 'the leave-it answer is the return-leave verb');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), memBefore, 'the look washes nothing: the store bytes are unchanged');
+  assert.deepStrictEqual(treeOf(tx), snapsBefore, 'the look writes no snapshot: the snapshot folder is listed and unchanged');
 });
 
 test('control (a): the bin door restore followed by the hand write-back stays silent', () => {
@@ -310,4 +335,56 @@ test('702 (p): a FULL crossing armed after an unanswered return clears the retur
   const s = stateNow(c);
   assert.notStrictEqual(calNs.sanitizeCrossing(s.lastCrossing), null, 'precondition: the FULL crossing armed');
   assert.strictEqual(s.returnAsk, undefined, 'a crossing that is not the return clears the return mark');
+});
+
+// ---- 701 (BB-469): a return is ASKED about when attended, announced and never washed when not, and the room's own undo closes the episode ----
+const CLI_PATH = path.resolve(HERE, 'cli.mjs');
+
+test('701 (j): unattended, a return emits no block, a systemMessage saying nothing was washed, and the store is unchanged', () => {
+  const c = makeCase('unattended-j');
+  const look = returnFlow(c, MEM_ORIG);
+  assert.strictEqual(look.nudge, false, `an unattended return must not hold the stop; got: ${look.out.slice(0, 200)}`);
+  assert.match(look.system, /Nothing was washed/, `the user is told nothing was washed; systemMessage: ${look.system}`);
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_ORIG, 'the store is unchanged');
+  assert.strictEqual(runHook(c, 'Stop').out, '', 'the crossing is consumed, so the line is said once');
+});
+
+test('701 (k): return-leave answers "leave it", exits 0, and the next attended look is silent', () => {
+  const c = makeCase('leave-k');
+  returnFlow(c, MEM_ORIG);
+  assert.strictEqual(stateNow(c).returnAsk, true, 'precondition: a return is pending');
+  const r = spawnSync(process.execPath, [CLI_PATH, 'return-leave'], { cwd: c.proj, env: childEnv(c), encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', windowsHide: true });
+  assert.strictEqual(r.status, 0, `return-leave must exit 0; stderr: ${String(r.stderr).slice(0, 300)}`);
+  const s = stateNow(c);
+  assert.strictEqual(s.returnAsk, undefined, 'the return mark is cleared');
+  assert.strictEqual(s.postWash, undefined, 'the wash episode is cleared');
+  assert.strictEqual(runHook(c, 'Stop', { attended: true }).out, '', 'the next attended look is silent');
+});
+
+test('701 (m): a first crossing by growth keeps the auto-Quick text, unchanged', () => {
+  const c = makeCase('growth-m');
+  const grown = MEM_ORIG + Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}\n${dupLines(i + DUP_N)}\n`).join('');
+  const look = returnFlow(c, grown);
+  assert.ok(look.nudge, 'growth nudges, as today');
+  assert.match(look.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'the growth nudge keeps the auto-Quick text');
+});
+
+test('701 (F703-1): a bin-door undo closes the episode, so later growth is never a return', () => {
+  const c = makeCase('undo-f703');
+  fs.writeFileSync(path.join(c.proj, 'CLAUDE.md'), '# fixture project\n\n@memory/MEMORY.md\n@memory/other-note.md\n');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  const removed = Array.from({ length: DUP_N }, (_, i) => dupLines(i) + '\n').join('');
+  const rec = recordBinItem(c.proj, FAT_BIN_NAME, { content: Buffer.from(removed), original: c.mem, origin: 'program-cut', now: Date.now() });
+  const id = (rec && rec.id) || (listBin(c.proj, FAT_BIN_NAME)[0] || {}).id;
+  assert.ok(id, 'the removed lines are in the fat bin under an id');
+  const r = restore({ id, cwd: c.proj, home: c.home });
+  assert.strictEqual(r.found, true, JSON.stringify(r));
+  fs.writeFileSync(c.mem, MEM_ORIG); // the user writes the pre-wash file back by hand: its bytes match the washed file's pre-wash hash
+  fs.writeFileSync(c.other, Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}\n${dupLines(i + DUP_N)}\n`).join(''));
+  const look = runHook(c, 'Stop');
+  assert.ok(look.nudge, 'growth in another file re-arms and nudges, as today');
+  assert.match(look.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'growth gets the auto-Quick text, not the return ask');
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'growth after an undo is not a return, so no ask is marked');
 });

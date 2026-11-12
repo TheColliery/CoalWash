@@ -77,7 +77,7 @@ import { recoverDangling } from './apply.mjs';
 import { discoverClassB, ccProjectSlug } from './class-b.mjs';
 import {
   measureEntries, readBudgetFor, gaugeVerdict,
-  loadState, armDigGauge, discoverCapacity, setStateNamespace, acknowledgeRestore,
+  loadState, armDigGauge, discoverCapacity, setStateNamespace, acknowledgeRestore, answerReturnLeave,
 } from './caliper.mjs';
 import { envelopeFor } from './retier.mjs';
 import { openPlainFile } from './repo-fs.mjs';
@@ -342,7 +342,7 @@ export function linesFromFile(file) {
   return out;
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | restore --from <file> | writeguard-list [--platform antigravity] | writeguard-restore <snapName> | writeguard-restore --from <file> [--platform antigravity] [--out <file>] | anchor-diff <path> | anchor-diff --from <file> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir> | --to-file <file>] | retier-scan [--json] | retier-run | dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>] | estate-evidence --flags <file> | estate-evidence --bill | config-status [--json]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | restore --from <file> | return-leave | writeguard-list [--platform antigravity] | writeguard-restore <snapName> | writeguard-restore --from <file> [--platform antigravity] [--out <file>] | anchor-diff <path> | anchor-diff --from <file> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir> | --to-file <file>] | retier-scan [--json] | retier-run | dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>] | estate-evidence --flags <file> | estate-evidence --bill | config-status [--json]';
 
 // UMB-133 — the READ-ONLY report for BOTH holes: was the config actually read
 // from a LEGACY path, and is there a `.coalwash.json` sitting somewhere this
@@ -534,6 +534,13 @@ function main() {
       console.error(`config-status failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
     }
+  } else if (cmd === 'return-leave') {
+    // 701 (BB-469): "leave it" for a pending return ask, answered in the project folder. With no return pending nothing changes.
+    const home = os.homedir();
+    const projectRoot = findProjectRoot(process.cwd(), home);
+    if (!loadState(projectRoot, home).returnAsk) { console.error('[CoalWash] no return is pending in this project; nothing changed'); return; }
+    if (answerReturnLeave(home, projectRoot)) console.error('[CoalWash] return left as it is: this store is not asked about again until it grows');
+    else { console.error('return-leave: not answered (the current fat reading is not finite), so nothing was changed'); process.exitCode = 1; }
   } else if (cmd === 'restore') {
     let id = args[1];
     if (args.includes('--from')) { // 653: the id comes from a file the agent wrote, never from the shell line

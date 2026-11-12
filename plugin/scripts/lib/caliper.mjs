@@ -1799,8 +1799,11 @@ export function acknowledgeRestore(home, projectRoot, bytes) {
     const n = Number(bytes);
     if (!Number.isFinite(n) || n <= 0) return false;
     const proj = loadState(projectRoot, home);
-    if (proj.lastObeseFat == null || !Number.isFinite(Number(proj.lastObeseFat))) return false;
-    proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
+    // 701 (F703-1): the room's own undo closes the wash episode. A return is decided against the pre-wash hashes,
+    // so a bin undo that left them standing would turn later growth into a return.
+    delete proj.postWash;
+    delete proj.returnAsk;
+    if (proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat))) proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
     return saveState(proj, projectRoot, home);
   } catch { return false; }
 }

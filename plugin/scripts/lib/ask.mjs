@@ -119,6 +119,22 @@ export function obeseAutoQuick(opts) {
   return `[CoalWash] memory crossed the OBESE ceiling (fat ~${fat} tok) — the configured exercise is quick.${payback} standing config authorizes the free mechanical Quick pass NOW, no ask — run it (stage-only; every cut is snapshot-backed and revertible), then push ONLY the one-line result (receipt.mjs's oneLineResult — no full receipt block, no narration). ALWAYS push that line, even when the pass cut nothing: a silent run is indistinguishable from no run at all. Render its prose in the user's language; keep the numbers and the unit \`tok\` verbatim. This fires once per crossing, not per session — and a NEW crossing arms on each new lump of fat, never on a timer and never on an unchanged plateau. ${ANSWER_FIRST_REMINDER}`;
 }
 
+// 701 (BB-469): a store found back at the content it had before the last wash.
+// An ATTENDED session is asked once, and nothing is washed before the answer
+// (auto included). The answers are "wash again" or "leave it" (the return-leave verb).
+export function returnAsk(opts) {
+  const { fatTokens, breakEven } = opts || {};
+  const fat = Number.isFinite(fatTokens) ? Math.round(fatTokens) : 0;
+  const payback = paybackLine(breakEven, 'quick');
+  const CLI = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+  return `[CoalWash] the store came back to the content it had before the last wash (fat ~${fat} tok).${payback} Nothing was washed, and nothing will be washed until the user answers. Ask the user ONE question through your question tool, in the user's language: the store is back at its pre-wash content, so wash it again now? Offer exactly two options: "wash again" (run an ordinary wash per the coalwash skill, with its snapshot and gates) / "leave it" (run node ${CLI} return-leave from the project folder, then say nothing more). Keep the numbers and the unit \`tok\` verbatim. ${ANSWER_FIRST_REMINDER}`;
+}
+// 701: the same return, when no user can answer. It states what happened and is said once (the crossing is consumed).
+export function returnUnattended(opts) {
+  const fat = Number.isFinite(opts && opts.fatTokens) ? Math.round(opts.fatTokens) : 0;
+  return `[CoalWash] the store came back to the content it had before the last wash (fat ~${fat} tok). Nothing was washed. It is not asked about again until it grows.`;
+}
+
 // The wizard-escalation ask (queue 0f, "AUTHORITATIVE 3-FLOW" — SUPERSEDES
 // 0e "THE OBESE LOOP": same mechanism, trigger band relocated OBESE->FULL):
 // fires when a FULL force-run has already tried Quick this episode
