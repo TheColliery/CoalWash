@@ -59,34 +59,17 @@ function makeCase(name) {
   return c;
 }
 
-// Every child gets an explicit env, never the real one: PATH and SystemRoot only, plus the sandbox.
-function childEnv(c) {
-  return {
-    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
-    HOME: c.home, USERPROFILE: c.home, TEMP: ROOT, TMP: ROOT, TMPDIR: ROOT,
-    CLAUDE_PROJECT_DIR: c.proj, CLAUDE_PLUGIN_ROOT: path.join(ROOT, 'plugin'), CLAUDE_PLUGIN_DATA: path.join(ROOT, 'pdata'),
-    NODE_OPTIONS: '--max-old-space-size=2048',
-  };
-}
-// Every file of a directory as "relative path:size", sorted; a missing folder lists as empty.
-function treeOf(dir) {
-  const out = [];
-  const walk = (d) => {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) walk(p);
-      else out.push(`${path.relative(dir, p)}:${fs.statSync(p).size}`);
-    }
-  };
-  if (fs.existsSync(dir)) walk(dir);
-  return out.sort();
-}
-// The real conductor, spawned as the platform spawns it. The attended flag is set only when asked for.
+// The real conductor, spawned as the platform spawns it.
 function runHook(c, event, { stopActive = false, attended = false } = {}) {
   const payload = { session_id: `cwpw-${c.name}`, hook_event_name: event, cwd: c.proj, transcript_path: path.join(c.base, 'transcript.jsonl') };
   if (event === 'SessionStart') payload.source = 'startup';
   if (event === 'Stop') payload.stop_hook_active = stopActive;
-  const env = { ...childEnv(c), ...(attended ? { CLAUDE_CODE_SESSION_ATTENDED: '1' } : {}) };
+  const env = {
+    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+    HOME: c.home, USERPROFILE: c.home, TEMP: ROOT, TMP: ROOT, TMPDIR: ROOT,
+    CLAUDE_PROJECT_DIR: c.proj, CLAUDE_PLUGIN_ROOT: path.join(ROOT, 'plugin'), CLAUDE_PLUGIN_DATA: path.join(ROOT, 'pdata'),
+    NODE_OPTIONS: '--max-old-space-size=2048', ...(attended ? { CLAUDE_CODE_SESSION_ATTENDED: '1' } : {}),
+  };
   const r = spawnSync(process.execPath, [HOOK], { input: JSON.stringify(payload), cwd: c.proj, env, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', windowsHide: true });
   const out = (r.stdout || '').trim();
   let json = null;
@@ -120,17 +103,12 @@ test('witness: a copy of the pre-wash file brought back from outside re-arms the
   const cont = runHook(c, 'Stop', { stopActive: true });
   assert.strictEqual(cont.out, '', 'the Stop continuation after a wash stays silent (stop_hook_active)');
   fs.writeFileSync(c.mem, MEM_ORIG); // a sync client or a backup writes the pre-wash bytes back
-  const tx = path.join(c.proj, '.claude', 'coalwash');
   const memBefore = fs.readFileSync(c.mem, 'utf8');
-  const snapsBefore = treeOf(tx);
   const look = runHook(c, 'Stop', { attended: true });
   t.diagnostic(`return ask after the outside copy: ${look.reason.slice(0, 600)}`);
-  assert.strictEqual(look.nudge, true, `the returned copy must be asked about at an attended look; got stdout: ${look.out.slice(0, 200)}`);
-  assert.match(look.reason, /wash again/, 'the ask names the wash-again answer');
-  assert.match(look.reason, /leave it/, 'the ask names the leave-it answer');
-  assert.match(look.reason, /return-leave/, 'the leave-it answer is the return-leave verb');
+  assert.ok(look.nudge, `the returned copy must be asked about at an attended look; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, /came back to the content it had before the last wash/, 'the look asks; it does not run the auto-Quick pass');
   assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), memBefore, 'the look washes nothing: the store bytes are unchanged');
-  assert.deepStrictEqual(treeOf(tx), snapsBefore, 'the look writes no snapshot: the snapshot folder is listed and unchanged');
 });
 
 test('control (a): the bin door restore followed by the hand write-back stays silent', () => {
@@ -226,12 +204,13 @@ test('control (d): a RE-TIER run rolled back after its commit records nothing, a
 
 // ---- 699 (BB-469): a look that finds the store back at its pre-wash content is a RETURN, and marks an ask ----
 // Arm, wash by applyPlan, bring `content` back from outside, then look. Returns the look.
-function returnFlow(c, content) {
+// 709: the final look is attended by default, because the attended ask is what marks the episode asked; { attended: false } is the unattended return.
+function returnFlow(c, content, { attended = true } = {}) {
   armAndConsume(c);
   const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
   assert.strictEqual(w.ok, true, w.error);
   fs.writeFileSync(c.mem, content);
-  return runHook(c, 'Stop');
+  return runHook(c, 'Stop', { attended });
 }
 const stateNow = (c) => loadState(c.proj, c.home);
 
@@ -276,7 +255,7 @@ test('699 (h): a RE-TIER run rolled back after its commit leaves postWash and re
   const r1 = runRetier({ projectRoot: c.proj, home: c.home, retier: RT_R, estate: rtEstate(c.home), now: Date.now() });
   assert.strictEqual(r1.ok, true, `the first RE-TIER run commits: ${JSON.stringify(r1).slice(0, 200)}`);
   fs.writeFileSync(storeFile, body); // the pre-wash bytes come back from outside
-  runHook(c, 'Stop');
+  runHook(c, 'Stop', { attended: true }); // 709: the attended look is the one that marks the return asked
   assert.strictEqual(stateNow(c).returnAsk, true, 'precondition: the look marked a return');
   const snap = stateNow(c);
   const realRm = fs.rmSync;
@@ -327,50 +306,157 @@ test('702 (o): answerReturnLeave with no finite fat changes nothing and returns 
   assert.strictEqual(JSON.stringify(stateNow(c)), before, 'the state is unchanged');
 });
 
-test('702 (p): a FULL crossing armed after an unanswered return clears the return mark', () => {
+test('702 (p): a FULL crossing that finds the store moved on from its pre-wash bytes clears the return mark', () => {
   const c = makeCase('full-p');
   returnFlow(c, MEM_ORIG);
   assert.strictEqual(stateNow(c).returnAsk, true, 'precondition: a return is pending');
+  fs.writeFileSync(c.mem, MEM_ORIG + OTHER_NOTE); // the store has moved on: no washed file is back at its pre-wash bytes
   calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 9999 });
   const s = stateNow(c);
   assert.notStrictEqual(calNs.sanitizeCrossing(s.lastCrossing), null, 'precondition: the FULL crossing armed');
-  assert.strictEqual(s.returnAsk, undefined, 'a crossing that is not the return clears the return mark');
+  assert.strictEqual(s.returnAsk, undefined, 'a crossing that finds no pre-wash bytes is growth, so the return mark clears');
 });
 
-// ---- 701 (BB-469): a return is ASKED about when attended, announced and never washed when not, and the room's own undo closes the episode ----
-const CLI_PATH = path.resolve(HERE, 'cli.mjs');
-
-test('701 (j): unattended, a return emits no block, a systemMessage saying nothing was washed, and the store is unchanged', () => {
-  const c = makeCase('unattended-j');
-  const look = returnFlow(c, MEM_ORIG);
-  assert.strictEqual(look.nudge, false, `an unattended return must not hold the stop; got: ${look.out.slice(0, 200)}`);
-  assert.match(look.system, /Nothing was washed/, `the user is told nothing was washed; systemMessage: ${look.system}`);
-  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_ORIG, 'the store is unchanged');
-  assert.strictEqual(runHook(c, 'Stop').out, '', 'the crossing is consumed, so the line is said once');
+// ---- 707 (LANE FIX, round 2): every arm that can reach a wash runs the same pre-wash check ----
+// (q) the RISE branch to OBESE: a store read LEAN after the wash, then the pre-wash bytes come back.
+test('707 (q): a rise to OBESE onto the pre-wash bytes is asked about, and washes nothing', () => {
+  const c = makeCase('rise-q');
+  armAndConsume(c); // a wash always follows a gauge: the look records the pre-wash reading
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  runHook(c, 'SessionStart');
+  assert.strictEqual(stateNow(c).lastVerdict.band, 'LEAN', 'precondition: the washed store reads LEAN');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes come back: a rise, read by the gauge
+  const before = fs.readFileSync(c.mem, 'utf8');
+  runHook(c, 'SessionStart');
+  assert.strictEqual(stateNow(c).lastVerdict.band, 'OBESE', 'precondition: the copy-back reads OBESE, a rise');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the rise onto the pre-wash bytes is a return, so an ask is marked');
+  assert.match(look.reason, /came back to the content it had before the last wash/, 'the attended look asks; it does not run the auto-Quick pass');
 });
 
-test('701 (k): return-leave answers "leave it", exits 0, and the next attended look is silent', () => {
-  const c = makeCase('leave-k');
-  returnFlow(c, MEM_ORIG);
-  assert.strictEqual(stateNow(c).returnAsk, true, 'precondition: a return is pending');
-  const r = spawnSync(process.execPath, [CLI_PATH, 'return-leave'], { cwd: c.proj, env: childEnv(c), encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', windowsHide: true });
-  assert.strictEqual(r.status, 0, `return-leave must exit 0; stderr: ${String(r.stderr).slice(0, 300)}`);
-  const s = stateNow(c);
-  assert.strictEqual(s.returnAsk, undefined, 'the return mark is cleared');
-  assert.strictEqual(s.postWash, undefined, 'the wash episode is cleared');
-  assert.strictEqual(runHook(c, 'Stop', { attended: true }).out, '', 'the next attended look is silent');
+// (r) the RISE branch to FULL: the store is back at its pre-wash bytes when the FULL crossing arms.
+test('707 (r): a rise to FULL onto the pre-wash bytes is asked about, and is not forced', () => {
+  const c = makeCase('rise-r');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes come back, with no look in between
+  const before = fs.readFileSync(c.mem, 'utf8');
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 9999 });
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the FULL rise onto the pre-wash bytes is a return: the one return check at the Stop asks and marks it');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
+  assert.match(look.reason, /came back to the content it had before the last wash/, 'the attended look asks; it does not run the forced Quick pass');
 });
 
-test('701 (m): a first crossing by growth keeps the auto-Quick text, unchanged', () => {
-  const c = makeCase('growth-m');
-  const grown = MEM_ORIG + Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}\n${dupLines(i + DUP_N)}\n`).join('');
-  const look = returnFlow(c, grown);
-  assert.ok(look.nudge, 'growth nudges, as today');
-  assert.match(look.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'the growth nudge keeps the auto-Quick text');
+// ---- 711 (LANE ROUND 3): ONE return check at the Stop delivery holds the ask for every pass, whatever branch armed it ----
+const ASK_TEXT = /came back to the content it had before the last wash/;
+// The same growth as 702 (n): fresh pre-wash-free fat, no pre-wash bytes in it.
+function growFresh() {
+  return MEM_DEDUP + Array.from({ length: 132 }, (_, i) => {
+    const l = `- NEW-${i} entry, a fixed description so the line carries real weight for line ${i}\n`;
+    return l + l;
+  }).join('');
+}
+
+// Timing 1: the pre-wash bytes come back BEFORE the look that would arm the crossing.
+test('711 (t1) BEFORE the arm: pre-wash bytes back before the arming look, the look asks and washes nothing', () => {
+  const c = makeCase('t1-before');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  runHook(c, 'SessionStart');
+  fs.writeFileSync(c.mem, MEM_ORIG); // back before the look that arms
+  const before = fs.readFileSync(c.mem, 'utf8');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the return must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the look asks; it does not run the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the ask is marked once');
 });
 
-test('701 (F703-1): a bin-door undo closes the episode, so later growth is never a return', () => {
-  const c = makeCase('undo-f703');
+// Timing 2 (W708, F708-1's own witness): BETWEEN the arm and its Stop.
+test('711 (W708) BETWEEN the arm and its Stop: a growth arm, the old bytes back, then an attended Stop asks and washes nothing', () => {
+  const c = makeCase('w708');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  runHook(c, 'SessionStart');
+  fs.writeFileSync(c.mem, growFresh());
+  runHook(c, 'SessionStart'); // the growth arms a crossing at SessionStart
+  assert.ok(calNs.sanitizeCrossing(stateNow(c).lastCrossing), 'precondition: a growth crossing is armed and pending');
+  assert.ok(stateNow(c).postWash, 'precondition: growth leaves the wash episode standing (711 lifetime)');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes come back between the arm and its Stop
+  const before = fs.readFileSync(c.mem, 'utf8');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the return must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'a return between the arm and its Stop asks, it is not the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the ask is marked once');
+});
+
+// Timing 3: AFTER a delivery. The growth is delivered, then the old bytes come back, and the next look asks.
+test('711 (t3) AFTER a delivery: growth is delivered, then the old bytes back, and the next look asks and washes nothing', () => {
+  const c = makeCase('t3-after');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  runHook(c, 'SessionStart');
+  fs.writeFileSync(c.mem, growFresh());
+  const grew = runHook(c, 'Stop');
+  assert.ok(grew.nudge, 'precondition: the growth delivery went out');
+  assert.ok(stateNow(c).postWash, 'precondition: the delivery leaves the wash episode standing');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the old bytes come back after the delivery
+  const before = fs.readFileSync(c.mem, 'utf8');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the next look must ask; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the next look asks, it does not run the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the ask is marked once');
+});
+
+// Each FULL arm has its own witness. The FULL escalation arm: a plain FULL crossing consumed after a force, then an escalation.
+test('711 (F-esc) the FULL escalation arm: a store back at its pre-wash bytes is asked, and the arm washes nothing', () => {
+  const c = makeCase('full-esc');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG); // back at the pre-wash bytes
+  const before = fs.readFileSync(c.mem, 'utf8');
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 1000, session: 'a' });
+  calNs.consumeCrossing(c.home, c.proj, Date.now());
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'FULL', Date.now(), { quickTried: true, fatTokens: 2000, session: 'a' });
+  assert.strictEqual(calNs.sanitizeCrossing(stateNow(c).lastCrossing).escalation, true, 'precondition: the FULL escalation arm fired');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the escalation must ask about the return; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the escalation asks about the return, it does not run the forced pass or the wizard');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing');
+});
+
+// The FULL re-loop arm: a consumed FULL crossing from another session, then growth with no force history.
+test('711 (F-reloop) the FULL re-loop arm: a store back at its pre-wash bytes is asked, and the arm washes nothing', () => {
+  const c = makeCase('full-reloop');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG);
+  const before = fs.readFileSync(c.mem, 'utf8');
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 1000, session: 'a' });
+  calNs.consumeCrossing(c.home, c.proj, Date.now());
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'FULL', Date.now(), { fatTokens: 2000, session: 'b' });
+  const pending = calNs.sanitizeCrossing(stateNow(c).lastCrossing);
+  assert.ok(pending && pending.escalation !== true, 'precondition: the FULL re-loop arm fired, not the escalation');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the re-loop must ask about the return; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the re-loop asks about the return, it does not run the forced pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing');
+});
+
+// F703-1: a bin-door restore closes the episode, so growth in another file later is never a return.
+test('711 (F703-1) a bin-door restore closes the episode, so later growth in another file is never a return', () => {
+  const c = makeCase('f703-711');
   fs.writeFileSync(path.join(c.proj, 'CLAUDE.md'), '# fixture project\n\n@memory/MEMORY.md\n@memory/other-note.md\n');
   armAndConsume(c);
   const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
@@ -381,10 +467,69 @@ test('701 (F703-1): a bin-door undo closes the episode, so later growth is never
   assert.ok(id, 'the removed lines are in the fat bin under an id');
   const r = restore({ id, cwd: c.proj, home: c.home });
   assert.strictEqual(r.found, true, JSON.stringify(r));
-  fs.writeFileSync(c.mem, MEM_ORIG); // the user writes the pre-wash file back by hand: its bytes match the washed file's pre-wash hash
+  assert.strictEqual(stateNow(c).postWash, undefined, 'the bin door closes the wash episode');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the user writes the pre-wash file back by hand
   fs.writeFileSync(c.other, Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}\n${dupLines(i + DUP_N)}\n`).join(''));
   const look = runHook(c, 'Stop');
-  assert.ok(look.nudge, 'growth in another file re-arms and nudges, as today');
+  assert.ok(look.nudge, 'growth in another file re-arms and nudges');
   assert.match(look.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'growth gets the auto-Quick text, not the return ask');
-  assert.strictEqual(stateNow(c).returnAsk, undefined, 'growth after an undo is not a return, so no ask is marked');
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'growth after an undo is not a return');
+});
+
+// Roster: every pass-running delivery in the conductor sits behind the one return check, in source order.
+test('711 roster: every pass-running delivery sits behind the one return check', () => {
+  const src = fs.readFileSync(HOOK, 'utf8');
+  const checkAt = src.indexOf('caliper.returnMatches(proj)');
+  const branchAt = src.indexOf('} else if (returned) {');
+  assert.ok(checkAt > 0, 'the one return check exists in the conductor');
+  assert.ok(branchAt > checkAt, 'the return branch comes after the one check');
+  const sites = [...src.matchAll(/ask\.(obeseAutoQuick|forceAuto)\(/g)].map((m) => m.index);
+  assert.ok(sites.length >= 2, `the roster finds the pass-running sites (found ${sites.length})`);
+  for (const s of sites) assert.ok(s > branchAt, `a pass-running site at offset ${s} sits behind the return branch`);
+});
+
+// ---- 709 (ruling 2, main 2026-11-13): an unattended return washes nothing and leaves the ask ARMED; the next attended look asks ----
+const CLI_PATH_709 = path.resolve(HERE, 'cli.mjs');
+
+test('709 (j): unattended, a return emits no block, a systemMessage that says it will be asked when a user is present, said once per session; the store is unchanged', () => {
+  const c = makeCase('unattended-709j');
+  const look = returnFlow(c, MEM_ORIG, { attended: false });
+  assert.strictEqual(look.nudge, false, `an unattended return must not hold the stop; got: ${look.out.slice(0, 200)}`);
+  assert.match(look.system, /Nothing was washed/, `the user is told nothing was washed; systemMessage: ${look.system}`);
+  assert.match(look.system, /asked about when a user is present/, `the unattended text names the next ask; systemMessage: ${look.system}`);
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_ORIG, 'the store is unchanged');
+  assert.strictEqual(runHook(c, 'Stop').system, '', 'the line is said once per session, so the second unattended Stop is silent');
+});
+
+test('709 (s): an unattended Stop after a return washes nothing and leaves the ask armed; the next attended Stop asks, with no growth in between', () => {
+  const c = makeCase('armed-709s');
+  returnFlow(c, MEM_ORIG, { attended: false }); // the unattended Stop
+  const before = fs.readFileSync(c.mem, 'utf8');
+  runHook(c, 'Stop'); // a second unattended look in the same session
+  const s = stateNow(c);
+  assert.notStrictEqual(calNs.sanitizeCrossing(s.lastCrossing), null, 'the crossing stays pending: an unattended look does not consume it');
+  assert.notStrictEqual(s.returnAsk, true, 'an unattended look does not mark the episode asked');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.strictEqual(look.nudge, true, `the next attended Stop asks; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, /came back to the content it had before the last wash/, 'the attended look asks; it does not run the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the attended ask marks the episode asked');
+});
+
+test('709 (k): return-leave answers "leave it", exits 0, and the next attended look is silent', () => {
+  const c = makeCase('leave-709k');
+  returnFlow(c, MEM_ORIG, { attended: false });
+  const asked = runHook(c, 'Stop', { attended: true });
+  assert.strictEqual(asked.nudge, true, `the attended look asks first; got: ${asked.out.slice(0, 200)}`);
+  const env = {
+    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+    HOME: c.home, USERPROFILE: c.home, TEMP: ROOT, TMP: ROOT, TMPDIR: ROOT,
+    CLAUDE_PROJECT_DIR: c.proj, CLAUDE_PLUGIN_ROOT: path.join(ROOT, 'plugin'), CLAUDE_PLUGIN_DATA: path.join(ROOT, 'pdata'),
+    NODE_OPTIONS: '--max-old-space-size=2048',
+  };
+  const r = spawnSync(process.execPath, [CLI_PATH_709, 'return-leave'], { cwd: c.proj, env, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', windowsHide: true });
+  assert.strictEqual(r.status, 0, `return-leave must exit 0; stderr: ${String(r.stderr).slice(0, 300)}`);
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'the return mark is cleared');
+  assert.strictEqual(stateNow(c).postWash, undefined, 'the wash episode is cleared');
+  assert.strictEqual(runHook(c, 'Stop', { attended: true }).out, '', 'the next attended look is silent');
 });

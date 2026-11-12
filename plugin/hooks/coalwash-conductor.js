@@ -470,7 +470,7 @@ async function handleSessionStart(input, opts = {}) {
 async function handleStop(input, opts = {}) {
   // opts.emit receives the block reason. Default writes CC's structured block object, byte-for-byte as before.
   const emit = opts.emit || ((reason) => process.stdout.write(JSON.stringify({ decision: 'block', reason })));
-  // 701: the user-facing channel (hooks-safety §4) for a return nobody can answer. Default writes the systemMessage object.
+  // 707: the user-facing channel for a return nobody can answer (hooks-safety §4). Default writes the systemMessage object.
   const emitSystem = opts.emitSystem || ((message) => process.stdout.write(JSON.stringify({ systemMessage: message })));
   if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
   const [{ loadMergedConfig, projectRootFor }, { clampedRead, envelopeForConfig }, caliper, ask, classB] = await Promise.all([
@@ -558,8 +558,20 @@ async function handleStop(input, opts = {}) {
         crossing = caliper.sanitizeCrossing(proj.lastCrossing);
       }
     }
-    if (!crossing) return; // still nothing pending -> silent (Phoenix #13)
   }
+  // 711 (F708-1): THE ONE RETURN CHECK, read-only, before any delivery that could run a pass. A washed file back at its
+  // pre-wash bytes is a return, whichever branch armed the crossing and whenever the bytes came back. A return with no
+  // crossing pending arms one here, so it reaches the same delivery below. Growth leaves postWash standing.
+  let returned = false;
+  if (proj.postWash && proj.returnAsk !== true && caliper.returnMatches(proj)) {
+    if (!crossing) {
+      caliper.armReturn(home, projectRoot, now, input && input.session_id);
+      proj = caliper.loadState(projectRoot, home);
+      crossing = caliper.sanitizeCrossing(proj.lastCrossing);
+    }
+    returned = !!crossing;
+  }
+  if (!crossing) return; // still nothing pending -> silent (Phoenix #13)
 
   const fatTokens = Number.isFinite(lastVerdict.fatTokens) ? Math.round(lastVerdict.fatTokens) : 0;
   const breakEven = {
@@ -618,11 +630,30 @@ async function handleStop(input, opts = {}) {
     // invariant's forbidden "wash harder on muscle" move), the INELIGIBLE side
     // is a two-button consent. reason==='externalize' is still checked FIRST,
     // so this branch remains the only route either can take.
+  } else if (returned) {
+    // 707 (BB-469, LANE FIX): a store found back at the content it had before the last wash is ASKED about, never
+    // washed by itself, on EVERY band: the OBESE auto-Quick, the FULL force and the wizard ask below all run a pass
+    // the return must not reach. This hook decides presence from the platform's attended flag and emits the decided
+    // instruction. Unattended: one systemMessage saying nothing was washed, once per session; the crossing stays armed.
+    if (process.env.CLAUDE_CODE_SESSION_ATTENDED === '1') {
+      caliper.markReturnAsked(home, projectRoot); // the attended ask is the one question: the mark stands until growth or a new wash clears it
+      reason = ask.returnAsk({ fatTokens, breakEven });
+    } else {
+      // 709 (ruling 2): unattended, nothing is washed and the ask stays ARMED for the next attended look, growth or not. The crossing is
+      // not consumed and returnAsk is not set. The line is said once per session, keyed by session_id in project state.
+      if (caliper.returnSaidThisSession(home, projectRoot, input && input.session_id)) return;
+      caliper.markReturnSaid(home, projectRoot, input && input.session_id);
+      let note = ask.returnUnattended({ fatTokens });
+      const language = clampedRead(cfg, 'language');
+      if (language !== 'auto') note += `\n[CoalWash] (language=${language} — deliver user-facing prose in that language; keep technical terms, commands, paths, numbers, and units verbatim)`;
+      emitSystem(note);
+      return;
+    }
   } else if (crossing.band === 'FULL' && crossing.escalation) {
     // case (c) — 0f "AUTHORITATIVE 3-FLOW": a force-run already tried Quick
     // this episode and the store is STILL over FULL — only the wizard's
-    // semantic tier can help now; this IS a real ask, the ONE ask site in
-    // the whole system (0d: OBESE is auto-Quick-silent, it never asks).
+    // semantic tier can help now; this IS a real ask. The other ask site is the
+    // return branch above (0d: a plain OBESE crossing is auto-Quick-silent and never asks).
     // Checked BEFORE the force branch below so an armed escalation crossing
     // can never be re-swallowed into another silent force-Quick loop.
     reason = ask.wizardEscalation({ fatTokens, breakEven, reorg, spawns });
@@ -648,19 +679,6 @@ async function handleStop(input, opts = {}) {
       spawns,
     });
     caliper.markQuickTried(home, projectRoot, now);
-  } else if (crossing.band === 'OBESE' && proj.returnAsk === true) {
-    // 701 (BB-469): a store found back at the content it had before the last wash is ASKED about, never washed again by itself, `auto` included.
-    // A condition gate on a write (hooks-safety §9): THIS hook decides presence, from the platform's attended flag, and emits the decided instruction.
-    if (process.env.CLAUDE_CODE_SESSION_ATTENDED === '1') {
-      reason = ask.returnAsk({ fatTokens, breakEven });
-    } else {
-      caliper.consumeCrossing(home, projectRoot, now); // said once
-      let note = ask.returnUnattended({ fatTokens });
-      const language = clampedRead(cfg, 'language');
-      if (language !== 'auto') note += `\n[CoalWash] (language=${language} — deliver user-facing prose in that language; keep technical terms, commands, paths, numbers, and units verbatim)`;
-      emitSystem(note);
-      return;
-    }
   } else {
     // case (d) — OBESE (the only other band sanitizeCrossing admits) — 0d
     // "OBESE AUTO-QUICK, NO ASK" + F3: UNCONDITIONAL standing-consent

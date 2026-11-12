@@ -65,7 +65,7 @@ function spawnBillLine(spawns) {
 
 // (0m note: the old `ceilingAsk` ทำ/later template died with the forceMode
 // knob — force at FULL is unconditional now, so no "suppressed/disarmed
-// FULL" state exists to ask about, and OBESE never asks by ruling. The
+// FULL" state exists to ask about, and a plain OBESE crossing never asks by ruling (a return is asked; see returnAsk). The
 // wizard-escalation template below is the ONE surviving ask.)
 
 // The FULL force directive — UNCONDITIONAL (0m "FORCE = THE FREE TIER, NO
@@ -104,7 +104,7 @@ export function forceAuto(opts) {
 // ask is REMOVED, main-adjudicated per the thrice-reconfirmed 0f ruling
 // "OBESE never asks, no matter what"): standing config IS the consent (the
 // same "config is a valid consent form" shape as rot-canary's
-// autoFixMode), so no ask fires on this band, ever. Unlike FULL's force,
+// autoFixMode), so no ask fires on this band for a plain crossing (a store back at its pre-wash content is asked; see returnAsk). Unlike FULL's force,
 // this needs no break-even proof: Quick is free/mechanical, so there is no
 // "is it worth paying for" question to prove. Safety claim (honest form,
 // never "cuts nothing wrong"): reversible-by-construction (snapshot +
@@ -129,10 +129,10 @@ export function returnAsk(opts) {
   const CLI = fileURLToPath(new URL('./cli.mjs', import.meta.url));
   return `[CoalWash] the store came back to the content it had before the last wash (fat ~${fat} tok).${payback} Nothing was washed, and nothing will be washed until the user answers. Ask the user ONE question through your question tool, in the user's language: the store is back at its pre-wash content, so wash it again now? Offer exactly two options: "wash again" (run an ordinary wash per the coalwash skill, with its snapshot and gates) / "leave it" (run node ${CLI} return-leave from the project folder, then say nothing more). Keep the numbers and the unit \`tok\` verbatim. ${ANSWER_FIRST_REMINDER}`;
 }
-// 701: the same return, when no user can answer. It states what happened and is said once (the crossing is consumed).
+// 701: the same return, when no user can answer. It states what happened and is said once per session (the crossing stays armed).
 export function returnUnattended(opts) {
   const fat = Number.isFinite(opts && opts.fatTokens) ? Math.round(opts.fatTokens) : 0;
-  return `[CoalWash] the store came back to the content it had before the last wash (fat ~${fat} tok). Nothing was washed. It is not asked about again until it grows.`;
+  return `[CoalWash] the store came back to the content it had before the last wash (fat ~${fat} tok). Nothing was washed. It will be asked about when a user is present, and this line is not repeated this session.`;
 }
 
 // The wizard-escalation ask (queue 0f, "AUTHORITATIVE 3-FLOW" — SUPERSEDES
@@ -141,8 +141,8 @@ export function returnUnattended(opts) {
 // (quickTried) and the store is STILL over the FULL capacity ceiling.
 // Mechanical cutting is exhausted; only the wizard's semantic tier (the
 // zero-context outsider) can judge what remains, so this IS a real
-// two-button ask — the ONE site the ask survives for (0d: OBESE is
-// auto-Quick-silent, it never asks). Frequency is gated by fat GROWTH, never
+// two-button ask — one of two sites the ask survives for (the other is returnAsk; 0d: a plain OBESE crossing is
+// auto-Quick-silent and never asks). Frequency is gated by fat GROWTH, never
 // a clock (caliper.recordCrossing's own lastEscalationFat check) — every
 // firing rides a genuinely NEW fat lump, never a re-nag of the same
 // unchanged plateau.
