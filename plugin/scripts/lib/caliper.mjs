@@ -1111,7 +1111,7 @@ export const FULL_CLEAN_FILES_CAP = 12;
 // i.e. it asks rather than claims. Their ADDITION is not a STATE_SCHEMA bump:
 // no EXISTING field's meaning changed, per this file's own rule above and the
 // `lastObeseFat` precedent.
-export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt']);
+export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt', 'postWash', 'returnAsk']);
 // VERSION-STABLE — PRESERVED across a schema bump AND across the location move:
 // the project's real footprint BASELINE + history. Must survive a reinstall/
 // upgrade, or every version bump false-FULLs the store until the next clean. NOT
@@ -1721,6 +1721,90 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now(), { sc
   return saveState(proj, projectRoot, home);
 }
 
+// 29fd (fire 694): a committed wash records its POST-WASH reading. Without it the
+// next Stop compares the disk against the pre-wash bytes, so a copy of the
+// pre-wash file brought back from outside (sync client, backup) shows delta 0,
+// and the OBESE watermark still holds the pre-wash fat, so nothing re-arms.
+// Called only from applyPlan's commit (apply.mjs): the Stop continuation a wash
+// runs in returns at stop_hook_active (conductor), so nothing else reads the
+// store after the cut. A rolled-back or torn run never reaches that commit and
+// records nothing. Any failure is a silent no-op (Phoenix #4).
+function currentFileHash(file) {
+  try { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { return null; }
+}
+export function recordPostWash(home, projectRoot, preHashes = {}) {
+  try {
+    const proj = loadState(projectRoot, home);
+    const lv = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : null;
+    const paths = lv && Array.isArray(lv.alwaysLoadedPaths) ? lv.alwaysLoadedPaths : null;
+    const preBytes = lv ? Number(lv.alwaysLoadedBytes) : NaN;
+    if (!paths || !paths.length || !Number.isFinite(preBytes)) return false;
+    const postBytes = statOnlyFootprintBytes(paths);
+    lv.alwaysLoadedBytes = Math.round(postBytes);
+    // The watermark only ever LOWERS here (a wash removes text); a rise is never recorded.
+    const hasWatermark = proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat));
+    const preFat = hasWatermark ? Math.round(Number(proj.lastObeseFat)) : null;
+    if (hasWatermark) {
+      const removedBytes = Math.max(0, preBytes - postBytes);
+      const cutTokens = tokensEstFromBytes(removedBytes);
+      proj.lastObeseFat = Math.max(0, Math.round(Number(proj.lastObeseFat) - cutTokens));
+    }
+    // 699: the episode this commit made. Its preFat is the level a later look must come back to for a RETURN.
+    proj.postWash = { at: Date.now(), preFat, postFat: hasWatermark ? proj.lastObeseFat : null, preHashes: { ...preHashes } };
+    delete proj.returnAsk; // a new wash replaces any pending return
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
+}
+
+// 29fd fire 696 (F695-1): RE-TIER rolls back AFTER applyPlan commits, and that
+// rollback puts back the FILES only. RE-TIER reads these two fields before the
+// commit and restores them on its own rollback branches; a robbed run that
+// committed keeps its reading, because its store did change. Fail-silent.
+export function postWashSnapshot(home, projectRoot) {
+  try {
+    const proj = loadState(projectRoot, home);
+    return { lastObeseFat: proj.lastObeseFat ?? null, alwaysLoadedBytes: proj.lastVerdict ? (proj.lastVerdict.alwaysLoadedBytes ?? null) : null, postWash: proj.postWash ?? null, returnAsk: proj.returnAsk ?? null };
+  } catch { return null; }
+}
+export function restorePostWashSnapshot(home, projectRoot, snap) {
+  try {
+    if (!snap) return false;
+    const proj = loadState(projectRoot, home);
+    if (snap.lastObeseFat == null) delete proj.lastObeseFat; else proj.lastObeseFat = snap.lastObeseFat;
+    if (snap.postWash == null) delete proj.postWash; else proj.postWash = snap.postWash;
+    if (snap.returnAsk == null) delete proj.returnAsk; else proj.returnAsk = snap.returnAsk;
+    if (snap.alwaysLoadedBytes != null && proj.lastVerdict && typeof proj.lastVerdict === "object") proj.lastVerdict.alwaysLoadedBytes = snap.alwaysLoadedBytes;
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
+}
+// 699 (BB-469): "leave it" answered for a pending return. The current fat becomes the plateau, the crossing is consumed, and the return and wash marks clear: the next look is silent, and growth past +500 re-arms as today.
+export function answerReturnLeave(home, projectRoot) {
+  try {
+    const proj = loadState(projectRoot, home);
+    const fat = proj.lastVerdict ? Number(proj.lastVerdict.fatTokens) : NaN;
+    if (!Number.isFinite(fat)) return false; // 702 (F700-3): change nothing without a finite fat
+    proj.lastObeseFat = Math.round(fat);
+    if (proj.lastCrossing && typeof proj.lastCrossing === "object") proj.lastCrossing = { ...proj.lastCrossing, consumed: true };
+    delete proj.returnAsk;
+    delete proj.postWash;
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
+}
+// 29fd (fire 694): the bin door (cli.mjs restore) hands an item's bytes back for
+// the user to write. Those bytes are text the wash removed coming home, so the
+// OBESE watermark rises by the same amount: the restore returns to an
+// acknowledged plateau and does not re-arm the nudge. Fail-silent like recordPostWash.
+export function acknowledgeRestore(home, projectRoot, bytes) {
+  try {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return false;
+    const proj = loadState(projectRoot, home);
+    if (proj.lastObeseFat == null || !Number.isFinite(Number(proj.lastObeseFat))) return false;
+    proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
+}
+
 // 0d/0f (MEMORY.md "AUTHORITATIVE 3-FLOW" — supersedes 0e "THE OBESE LOOP"):
 // mark that a mechanical Quick pass was auto-triggered this episode — from
 // EITHER the OBESE auto-Quick directive (queue 0d) or a FULL force-run
@@ -1917,6 +2001,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     delete proj.externalizeSession;
     delete proj.externalizeAt;
   } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {
+    delete proj.returnAsk; // 702 (F700-2): an arm that is not the return clears the mark
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     // OBESE RE-LOOP watermark (see the branch at the end): stamp the fat level
     // this sweep was armed at, so the re-arm below needs GENUINE new inflow and
@@ -1941,6 +2026,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     proj.lastCrossing && proj.lastCrossing.consumed === true && !proj.lastCrossing.escalation &&
     fatTokens > (proj.lastEscalationFat ?? -1)
   ) {
+    delete proj.returnAsk; // 702 (F700-2): an arm that is not the return clears the mark
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false, escalation: true });
     proj.lastEscalationFat = fatTokens;
   } else if (
@@ -1978,6 +2064,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     fatTokens > (proj.lastEscalationFat ?? -1) &&
     (quickTried || proj.lastCrossing.session !== session)
   ) {
+    delete proj.returnAsk; // 702 (F700-2): an arm that is not the return clears the mark
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
   } else if (
     // OBESE RE-LOOP on new fat inflow (USER 2026-07-25). BEFORE: OBESE armed
@@ -2013,6 +2100,11 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
   ) {
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     proj.lastObeseFat = fatTokens;
+    // 702 (F700-1): a RETURN is a washed file back at its own pre-wash bytes, judged by content hash, never by a fat level.
+    // Growth clears the mark and retires the episode, so later growth reads as today.
+    const pre = (proj.postWash && proj.postWash.preHashes && typeof proj.postWash.preHashes === "object") ? proj.postWash.preHashes : {};
+    if (Object.keys(pre).some((f) => currentFileHash(f) === pre[f])) proj.returnAsk = true;
+    else { delete proj.returnAsk; delete proj.postWash; }
   }
   return saveState(proj, projectRoot, home);
 }

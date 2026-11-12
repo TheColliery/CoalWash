@@ -77,7 +77,7 @@ import { recoverDangling } from './apply.mjs';
 import { discoverClassB, ccProjectSlug } from './class-b.mjs';
 import {
   measureEntries, readBudgetFor, gaugeVerdict,
-  loadState, armDigGauge, discoverCapacity, setStateNamespace,
+  loadState, armDigGauge, discoverCapacity, setStateNamespace, acknowledgeRestore,
 } from './caliper.mjs';
 import { envelopeFor } from './retier.mjs';
 import { openPlainFile } from './repo-fs.mjs';
@@ -277,7 +277,8 @@ export function gaugeLine(g) {
   return `[CoalWash] ${g.verdict.band} — always-loaded ~${Math.round(g.measure.alwaysLoaded.tokensEst)} tok/session (~est) · ${bmi}${capBit}${recovered}${leftLock}`;
 }
 
-// The 0-token human recovery lookup (importable, pure read): searches BOTH
+// The 0-token human recovery lookup (importable; reads the bins, and on a find
+// acknowledges the restored bytes in the state file, 29fd): searches BOTH
 // bins — fat first (the high-churn producer), then the wizard bin
 // (store.old) — and returns the item's content + metadata, or found:false.
 // restoreFromBin's own null-vs-empty distinction carries through: a genuinely
@@ -293,6 +294,10 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
     const r = binItemOutcome(projectRoot, bin, id);
     if (r.buf) {
       const item = listBin(projectRoot, bin).find((i) => i && i.id === id) || {};
+      // 29fd: the handed-back bytes are the wash's own removed text coming home,
+      // so the OBESE watermark rises by them (caliper acknowledgeRestore). This
+      // makes the lookup write the state file: its "pure read" wording is gone.
+      acknowledgeRestore(home, projectRoot, r.buf.length);
       return { found: true, bin, id, original: item.original || null, bytes: r.buf.length, content: r.buf };
     }
     // CWK-137: an item that is THERE but refused (over the read bound, not a regular

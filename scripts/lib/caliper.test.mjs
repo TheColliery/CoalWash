@@ -1902,7 +1902,7 @@ test('rc.2 SCHEMA (f): a FRESH install (no state file) → loadState is {} and w
 });
 
 test('rc.2 SCHEMA (e): the reset-list constant matches the fields actually cleared (the mechanism a future ruling extends)', () => {
-  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt']);
+  assert.deepStrictEqual([...SCHEMA_RESET_FIELDS], ['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt', 'postWash', 'returnAsk']);
   // STATE_SCHEMA stays 1 even though the OBESE re-loop (2026-07-25) added
   // `lastObeseFat` to the list, and CWK-081 (2026-09-10) added the four
   // episode fields after it — plus `fullCleanFiles`, the Full clean
