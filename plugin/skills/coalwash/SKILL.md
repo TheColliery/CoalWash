@@ -24,8 +24,8 @@ Background for the sections above: see the end of this file
 | Band | Trigger | Behavior |
 |---|---|---|
 | LEAN | Fat-hysteresis disarmed (certain fat under `FAT_ARM_TOKENS`/`FAT_REARM_TOKENS`, 500/200 tok) and the capacity wall un-hit | Silent — a run would no-op (prohibition #14). |
-| OBESE | Fat-hysteresis armed (certain fat ≥ 500 tok, until it falls back to 200 tok), but washing does not yet pay for itself | Auto-runs the mechanical Quick pass under standing config, **no ask** (prohibition #15) — pushes `oneLineResult` every time, including a zero cut. Re-arms on each genuinely new wave of certain fat past the hysteresis mark (not a clock), so a store that keeps accreting garbage keeps getting swept; an unchanged plateau stays silent. The wizard door lives at FULL only. |
-| FULL | Fat-hysteresis armed AND **BOTH** break-evens hold — cutting the certain fat pays, AND reorganizing the RE-TIER envelope's demotable muscle pays too (`economic`, latched per episode) — OR the capacity wall is hit (`absolute-cap` / `externalize`) | `economic`/`absolute-cap`: **force-runs the mechanical Quick pass**, numbers SHOWN every fire (both break-even proofs), every cut snapshot-backed. Still over FULL after that Quick ran this episode → **ONE run/later wizard ask** (re-armed only once certain fat grows past the last-flagged level). `externalize` (~all muscle): reachable only after a Full (semantic) pass has genuinely removed something this episode — before that, this same crossing takes the Full-tier consent (`wizardEscalation`) instead. Once eligible: pure information (prohibition #31); content moved by hand leaves the always-loaded set with no report line. |
+| OBESE | Fat-hysteresis armed (certain fat ≥ 500 tok, until it falls back to 200 tok), but washing does not yet pay for itself | Auto-runs the mechanical Quick pass under standing config, **no ask** (prohibition #15), except a return: a store found back at its pre-wash content is asked about instead (see Asks) — pushes `oneLineResult` every time, including a zero cut. Re-arms on each genuinely new wave of certain fat past the hysteresis mark (not a clock), so a store that keeps accreting garbage keeps getting swept; an unchanged plateau stays silent. The wizard door lives at FULL only. |
+| FULL | Fat-hysteresis armed AND **BOTH** break-evens hold — cutting the certain fat pays, AND reorganizing the RE-TIER envelope's demotable muscle pays too (`economic`, latched per episode) — OR the capacity wall is hit (`absolute-cap` / `externalize`) | `economic`/`absolute-cap`: **force-runs the mechanical Quick pass** (not on a return: see Asks), numbers SHOWN every fire (both break-even proofs), every cut snapshot-backed. Still over FULL after that Quick ran this episode → **ONE run/later wizard ask** (re-armed only once certain fat grows past the last-flagged level). `externalize` (~all muscle): reachable only after a Full (semantic) pass has genuinely removed something this episode — before that, this same crossing takes the Full-tier consent (`wizardEscalation`) instead. Once eligible: pure information (prohibition #31); content moved by hand leaves the always-loaded set with no report line. |
 
 ## The run pipeline (every `/coalwash` run — ordered; mechanics in method)
 0. **Preflight (code):** `recoverDangling` (a dangling prior run rolls back FIRST — **or does not**: `recovered: 'partial'`, or `'none'` carrying an `error`, means UNRESOLVED, journal + snapshot deliberately kept for a human → report that line and STOP; a new run writes its own journal at the same path and would overwrite it) → gauge (method §0). Manual run on a LEAN store → "LEAN — nothing to clean", stop. **This LEAN-stop fires when the pipeline itself is entered** (an ambient nudge, or the wizard's own "start" press) — it never gates the wizard's numberless entry MENU, which stays openable on any band, LEAN included (`neutralScan` never calls this). **Parcel drift-check (method §0b, DELIVERED files only — content the platform never loads is invisible to this check):** report ONE drift line only when the adapter missed a surface the parcel shows, else silent; an unknown platform → propose your parcel-observed candidates → code verifies → the HUMAN confirms before any measurement is trusted; still never auto-delete.
@@ -43,6 +43,7 @@ Advisory nets for every OTHER hand editing a class-B governance/memory file (mai
 | # | Gate | Trigger |
 |---|---|---|
 | 1 | `wizardEscalation` ask (below) | FULL, still over after this episode's forced Quick |
+| 1b | Return ask: wash again or leave it (Asks: return) | attended session, a washed file back at its pre-wash content, any band |
 | 2 | Wizard entry choice (1–4) | manual `/coalwash` |
 | 3 | Background toggle | wizard choice 2/4, spawn-capable, not `localOnly` |
 | 4 | Wizard bill start/cancel — this IS the Full-tier separate consent for wizard-tier runs | after the choice + toggle |
@@ -52,7 +53,7 @@ Advisory nets for every OTHER hand editing a class-B governance/memory file (mai
 | 8 | `estate.deleteCold: true` config | before ULTRA's COLD archive-then-delete |
 | 9 | CoalFace hand-off offer (ONCE) | choice-4 ③ past both size ∧ count gates, and CoalFace installed |
 | 10 | dig-gauge CRUSHING → ULTRA offer (ONCE) | before a raw transcript dig |
-**Standing consent — NOT a gate, no ask:** `obeseAutoQuick` (OBESE, no ask) · `forceAuto` (every FULL crossing, no off switch) · `externalizeAdvisory` (information only, never asks or forces — reachable only after a Full pass has genuinely removed something this episode; before that the crossing takes the Full-tier consent instead).
+**Standing consent — NOT a gate, no ask:** `obeseAutoQuick` (OBESE, no ask except a return) · `forceAuto` (every FULL crossing, no off switch, no pass on a return) · `externalizeAdvisory` (information only, never asks or forces — reachable only after a Full pass has genuinely removed something this episode; before that the crossing takes the Full-tier consent instead).
 
 ## Prohibitions ledger (count this, not prose)
 | # | Prohibition | Lane |
@@ -71,7 +72,7 @@ Advisory nets for every OTHER hand editing a class-B governance/memory file (mai
 | 12 | Under `localOnly`, never spawn a content-bearing sub | FULL TIER |
 | 13 | Output stays plain — never box-art, never progress narration | ALL |
 | 14 | At LEAN, never offer a run | ALL |
-| 15 | At OBESE, never ask | AMBIENT |
+| 15 | At OBESE, never ask, except the return ask (Asks: return) | AMBIENT |
 | 16 | Never auto-delete on unknown-platform parcel candidates | ALL |
 | 17 | Never include a delete action in a Quick-tier plan | ALL |
 | 18 | Never auto-accept an outsider flag | FULL TIER |
@@ -119,8 +120,9 @@ Advisory nets for every OTHER hand editing a class-B governance/memory file (mai
 ## Asks (Stop hook — CODE-built templates, `ask.mjs`)
 - **SessionStart only MEASURES** (caches the verdict + arms/clears the once-per-crossing edge); the **`Stop` hook is the sole delivery surface** — a `{decision:'block', reason}` blocking channel (rot-canary's), enforced, not an ignorable context line.
 - **Answer-first, always:** answer the user's actual message for this turn FIRST; the ask/directive rides at the END of your response, never preempts the prompt (once it resolves, return to that answer).
-- **`obeseAutoQuick`** — the OBESE default, NO ask (standing config): run Quick NOW, push `oneLineResult` only; marks the episode "Quick tried"; re-arms on the next genuinely new wave of fat past a growth watermark, not on an unchanged plateau.
-- **`wizardEscalation`** — the **ONE ask site in the system** (Consent ledger #1; prohibition #33). OBESE never reaches it.
+- **Return ask** — a washed file back at its pre-wash content, on any band. The Stop checks this once, before any pass: nothing is washed while it stands. Attended: ask ONE question, "wash again" (an ordinary wash) or "leave it" (`node [LIB]/cli.mjs return-leave`), and keep the open ask until the user answers. Unattended: one line per session saying nothing was washed; the ask stays armed for the next attended look, grown or not. Only the answer closes it.
+- **`obeseAutoQuick`** — the OBESE default, NO ask (standing config; a return asks instead): run Quick NOW, push `oneLineResult` only; marks the episode "Quick tried"; re-arms on the next genuinely new wave of fat past a growth watermark, not on an unchanged plateau.
+- **`wizardEscalation`** — the wizard ask site (Consent ledger #1; prohibition #33). OBESE never reaches it, and no pass runs ahead of a return ask.
 - **`forceAuto`** — every FULL crossing (`economic` and `absolute-cap`) force-runs Quick under the same standing consent, **non-optional, NO off switch** (the only full stop is `coalwashMode: off`); numbers shown every fire (prohibition #30).
 - **`externalizeAdvisory`** — reachable only after a Full pass has genuinely removed something this episode; before that the crossing takes `wizardEscalation` (cause `capacity-unmeasured`) instead. Once eligible, FULL(externalize) is pure information (prohibition #31 — a wash cannot shrink muscle); content moved by hand leaves the always-loaded set with no report line (method's Externalize section).
 - A crossing is **consumed the instant it surfaces** (prohibition #32 — post-force the receipt is FULL's surfacing).

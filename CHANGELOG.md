@@ -8,13 +8,13 @@ A store found back at its pre-wash content is asked about, not washed
 
 ### Changed
 
-- When a look finds the store back at the content it had before the last wash (a sync client or a backup put the old copy back), CoalWash asks you one question: wash again, or leave it. It never washes that store again by itself, under `auto` included. Growth that brings no pre-wash content back still takes the usual path.
-- With no user present, CoalWash washes nothing for such a store and says so in one line; it does not ask again until the store grows.
-- New command: `cli.mjs return-leave` answers "leave it".
+- When a washed file is back at the content it had before the last wash (a sync client or a backup put the old copy back), CoalWash asks you one question at the next Stop, on every band: wash again, or leave it. No pass runs before the answer, and CoalWash never washes that store again by itself, under `auto` included. Growth that brings no pre-wash content back still takes the usual path.
+- With no user present, CoalWash washes nothing for such a store and says so in one line, once per session. The ask stays open: the next attended look asks, grown or not.
+- New command: `cli.mjs return-leave` answers "leave it". The store is then not asked about again until it grows.
 
 ### Fixed
 
-- A copy of a washed file brought back from outside is now seen at the next look, instead of being taken for growth.
+- A copy of a washed file brought back from outside is now seen at the next Stop, instead of being taken for growth.
 - A RE-TIER run rolled back after its commit no longer leaves a return mark or a post-wash record behind.
 
 ## [1.17.1] - 2026-11-09
