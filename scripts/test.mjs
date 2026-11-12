@@ -25,6 +25,7 @@ const TESTS = [
   'scripts/lib/config-load.test.mjs',
   'scripts/lib/class-b.test.mjs',
   'scripts/lib/caliper.test.mjs',
+  'scripts/lib/postwash-look.test.mjs',
   'scripts/lib/printed-fields.test.mjs',
   'scripts/lib/fidelity-gate.test.mjs',
   'scripts/lib/apply.test.mjs',

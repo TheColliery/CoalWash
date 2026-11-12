@@ -89,7 +89,7 @@ import { TIER1_KEEP_ALL_MS } from './retention.mjs'; // the keep-all floor, for 
 // from the session gauge's cached verdict (caliper state; zero new I/O
 // beyond one small state read). caliper imports only config-load/jsonc, so
 // this adds no module cycle.
-import { loadState, markFullClean } from './caliper.mjs';
+import { loadState, markFullClean, recordPostWash } from './caliper.mjs';
 // Wikilink-orphan advisory (the git filter-branch cross-reference lesson):
 // ONE reference-detection implementation, shared with RE-TIER — never
 // duplicated. NOTE the same deliberate module-cycle shape as keeps.mjs/
@@ -1719,6 +1719,9 @@ export function applyPlan(plan, opts = {}) {
       journal.status = 'committed';
       writeJournal(journal);
       committed = true;
+      // 29fd: the only place a wash records its post-wash reading (caliper
+      // recordPostWash). A rolled-back or torn run never reaches this line.
+      recordPostWash(home, projectRoot);
       fence('removing the committed journal', `every step landed and the commit record was written; the committed journal stays on disk unless another run has since written its own over it (the next recoverDangling clears a committed one), and the post-commit housekeeping (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped; the snapshot ${snapDir} still holds every original`);
       try { fs.rmSync(journalPath, { force: true }); } catch {}
       fence('the post-commit snapshot retention');

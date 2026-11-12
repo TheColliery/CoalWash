@@ -1721,6 +1721,48 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now(), { sc
   return saveState(proj, projectRoot, home);
 }
 
+// 29fd (fire 694): a committed wash records its POST-WASH reading. Without it the
+// next Stop compares the disk against the pre-wash bytes, so a copy of the
+// pre-wash file brought back from outside (sync client, backup) shows delta 0,
+// and the OBESE watermark still holds the pre-wash fat, so nothing re-arms.
+// Called only from applyPlan's commit (apply.mjs): the Stop continuation a wash
+// runs in returns at stop_hook_active (conductor), so nothing else reads the
+// store after the cut. A rolled-back or torn run never reaches that commit and
+// records nothing. Any failure is a silent no-op (Phoenix #4).
+export function recordPostWash(home, projectRoot) {
+  try {
+    const proj = loadState(projectRoot, home);
+    const lv = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : null;
+    const paths = lv && Array.isArray(lv.alwaysLoadedPaths) ? lv.alwaysLoadedPaths : null;
+    const preBytes = lv ? Number(lv.alwaysLoadedBytes) : NaN;
+    if (!paths || !paths.length || !Number.isFinite(preBytes)) return false;
+    const postBytes = statOnlyFootprintBytes(paths);
+    lv.alwaysLoadedBytes = Math.round(postBytes);
+    // The watermark only ever LOWERS here (a wash removes text); a rise is never recorded.
+    if (proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat))) {
+      const removedBytes = Math.max(0, preBytes - postBytes);
+      const cutTokens = tokensEstFromBytes(removedBytes);
+      proj.lastObeseFat = Math.max(0, Math.round(Number(proj.lastObeseFat) - cutTokens));
+    }
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
+}
+
+// 29fd (fire 694): the bin door (cli.mjs restore) hands an item's bytes back for
+// the user to write. Those bytes are text the wash removed coming home, so the
+// OBESE watermark rises by the same amount: the restore returns to an
+// acknowledged plateau and does not re-arm the nudge. Fail-silent like recordPostWash.
+export function acknowledgeRestore(home, projectRoot, bytes) {
+  try {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return false;
+    const proj = loadState(projectRoot, home);
+    if (proj.lastObeseFat == null || !Number.isFinite(Number(proj.lastObeseFat))) return false;
+    proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
+}
+
 // 0d/0f (MEMORY.md "AUTHORITATIVE 3-FLOW" — supersedes 0e "THE OBESE LOOP"):
 // mark that a mechanical Quick pass was auto-triggered this episode — from
 // EITHER the OBESE auto-Quick directive (queue 0d) or a FULL force-run
