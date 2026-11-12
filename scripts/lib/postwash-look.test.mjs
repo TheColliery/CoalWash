@@ -10,6 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { applyPlan, recoverDangling, __testHooks } from './apply.mjs';
+import { runRetier } from './retier.mjs';
 import { loadState } from './caliper.mjs';
 import { restore } from './cli.mjs';
 import { listBin, recordBinItem, FAT_BIN_NAME } from './tailings.mjs';
@@ -149,4 +150,49 @@ test('control (c): a torn run recovered by recoverDangling records nothing', () 
   assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_ORIG, 'recovery returns the store to its pre-run bytes');
   assert.deepStrictEqual(stateOf(c), before, 'a torn run writes no post-wash reading');
   assert.strictEqual(runHook(c, 'Stop').out, '', 'and the next look stays silent');
+});
+
+// control (d), 697: RE-TIER is the one applyPlan caller that can roll back AFTER
+// the commit. Drives the real runRetier: the store is an agent-memory index that
+// CLAUDE.md imports, so the gauge measures it. The post-commit top-anchor probe is
+// made to miss at the fs layer: once the committed journal is removed, opening the
+// store for reading throws ENOENT, so the probe finds no store text and rolls back.
+const RT_R = { targetTokens: 500, armPct: 20, disarmPct: 10, headroomPct: 10 };
+const rtEstate = (home) => ({ compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: path.join(home, 'archive'), indexEnabled: true });
+
+test('control (d): a RE-TIER run rolled back after its commit records nothing, and the next look emits nothing', () => {
+  const c = makeCase('control-d');
+  const storeDir = path.join(c.proj, '.claude', 'agent-memory', 'main');
+  const storeFile = path.join(storeDir, 'MEMORY.md');
+  const body = '# Memory\n\n' + Array.from({ length: DUP_N }, (_, i) => `${dupLines(i)} [[dup-anchor]]\n${dupLines(i)} [[dup-anchor]]\n`).join('');
+  fs.mkdirSync(storeDir, { recursive: true });
+  fs.writeFileSync(storeFile, body);
+  fs.writeFileSync(path.join(c.proj, 'CLAUDE.md'), '# fixture project\n\n@.claude/agent-memory/main/MEMORY.md\n');
+  armAndConsume(c);
+  const before = stateOf(c);
+  const preFile = fs.readFileSync(storeFile, 'utf8');
+  const measured = (loadState(c.proj, c.home).lastVerdict.alwaysLoadedPaths || []).map((p) => path.resolve(p));
+  assert.ok(measured.includes(path.resolve(storeFile)), 'precondition: the gauge measured the store file (non-vacuity)');
+  const realRm = fs.rmSync;
+  const realOpen = fs.openSync;
+  let committed = false;
+  fs.rmSync = (p, ...rest) => { if (String(p).endsWith('journal.json')) committed = true; return realRm(p, ...rest); };
+  fs.openSync = (p, flags, ...rest) => {
+    // a read-only open: a string flag 'r'/'rs', or a numeric flag with no write bit (repo-fs opens with O_RDONLY | O_NOFOLLOW)
+    const writeBits = fs.constants.O_WRONLY | fs.constants.O_RDWR;
+    const readOnly = flags === undefined || flags === 'r' || flags === 'rs' || (typeof flags === 'number' && (flags & writeBits) === 0);
+    if (committed && String(p).startsWith(storeDir) && readOnly) {
+      const e = new Error('ENOENT: injected post-commit loss of the store index'); e.code = 'ENOENT'; throw e;
+    }
+    return realOpen(p, flags, ...rest);
+  };
+  let res;
+  try {
+    res = runRetier({ projectRoot: c.proj, home: c.home, retier: RT_R, estate: rtEstate(c.home), now: Date.now() });
+  } finally { fs.rmSync = realRm; fs.openSync = realOpen; }
+  assert.strictEqual(res.ok, false, `the injected probe miss must fail the RE-TIER run: ${JSON.stringify(res).slice(0, 300)}`);
+  assert.match(String(res.error || ''), /probe/, 'the failure is the post-commit top-anchor probe');
+  assert.strictEqual(fs.readFileSync(storeFile, 'utf8'), preFile, 'the rollback restores the store bytes');
+  assert.deepStrictEqual(stateOf(c), before, 'a RE-TIER run rolled back after its commit records no post-wash reading');
+  assert.strictEqual(runHook(c, 'Stop').out, '', 'and the next look emits nothing');
 });

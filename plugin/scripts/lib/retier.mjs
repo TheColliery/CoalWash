@@ -48,7 +48,7 @@ import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
 import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
-import { tokensEst } from './caliper.mjs';
+import { tokensEst, postWashSnapshot, restorePostWashSnapshot } from './caliper.mjs';
 import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS, restoreFile, writeDurable } from './apply.mjs';
@@ -1060,6 +1060,8 @@ export function runRetier({
     // findProjectRoot(cwd)); the plan field is ignored by applyPlan.
     const robbedTx = stolen('the transaction', untouched());
     if (robbedTx) return robbedTx;
+    // 29fd fire 696 (F695-1): read BEFORE the commit records its reading, so a rollback below can put these back.
+    const washSnap = postWashSnapshot(home, projectRoot);
     const r = applyPlan({ projectRoot, roots, actions, sessionId, origin: 'wizard-cut', approvedDrops }, { home, now, projectRoot });
     // A robbed transaction may already have deleted topics, so their archive copies stay (removing them would leave no copy).
     if (!r.ok) {
@@ -1097,6 +1099,7 @@ export function runRetier({
       const robbedThrow = stolen('the rollback', afterCommit(`the top-anchor survival probe threw (${e.message})`));
       if (robbedThrow) return robbedThrow;
       const failed = rollbackFromSnapshot(r.snapshotDir, createdPaths, roots);
+      restorePostWashSnapshot(home, projectRoot, washSnap); // 29fd 696: a rolled-back run records nothing
       rmGz();
       return {
         ok: false,
@@ -1116,6 +1119,7 @@ export function runRetier({
       const robbedMiss = stolen('the rollback', afterCommit(`the top-anchor survival probe missed ${misses.length} of ${anchors.length} anchor(s)`));
       if (robbedMiss) return { ...robbedMiss, anchorMisses: misses };
       const failed = rollbackFromSnapshot(r.snapshotDir, createdPaths, roots);
+      restorePostWashSnapshot(home, projectRoot, washSnap); // 29fd 696: a rolled-back run records nothing
       rmGz();
       return {
         ok: false,

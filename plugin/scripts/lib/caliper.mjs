@@ -1748,6 +1748,25 @@ export function recordPostWash(home, projectRoot) {
   } catch { return false; }
 }
 
+// 29fd fire 696 (F695-1): RE-TIER rolls back AFTER applyPlan commits, and that
+// rollback puts back the FILES only. RE-TIER reads these two fields before the
+// commit and restores them on its own rollback branches; a robbed run that
+// committed keeps its reading, because its store did change. Fail-silent.
+export function postWashSnapshot(home, projectRoot) {
+  try {
+    const proj = loadState(projectRoot, home);
+    return { lastObeseFat: proj.lastObeseFat ?? null, alwaysLoadedBytes: proj.lastVerdict ? (proj.lastVerdict.alwaysLoadedBytes ?? null) : null };
+  } catch { return null; }
+}
+export function restorePostWashSnapshot(home, projectRoot, snap) {
+  try {
+    if (!snap) return false;
+    const proj = loadState(projectRoot, home);
+    if (snap.lastObeseFat == null) delete proj.lastObeseFat; else proj.lastObeseFat = snap.lastObeseFat;
+    if (snap.alwaysLoadedBytes != null && proj.lastVerdict && typeof proj.lastVerdict === "object") proj.lastVerdict.alwaysLoadedBytes = snap.alwaysLoadedBytes;
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
+}
 // 29fd (fire 694): the bin door (cli.mjs restore) hands an item's bytes back for
 // the user to write. Those bytes are text the wash removed coming home, so the
 // OBESE watermark rises by the same amount: the restore returns to an
