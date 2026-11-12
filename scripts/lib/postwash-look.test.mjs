@@ -275,3 +275,39 @@ test('699 (h): a RE-TIER run rolled back after its commit leaves postWash and re
   assert.deepStrictEqual(after.postWash, snap.postWash, 'the rolled-back commit leaves the wash episode as it was');
   assert.strictEqual(after.returnAsk, snap.returnAsk, 'the rolled-back commit leaves the return mark as it was');
 });
+
+// ---- 702 (F700-1..3): a RETURN is the washed files' own pre-wash bytes coming back, never a fat level ----
+test('702 (n) W700: new fat that brings no pre-wash bytes back is growth, not a return', () => {
+  const c = makeCase('new-n');
+  const fresh = MEM_DEDUP + Array.from({ length: 132 }, (_, i) => {
+    const l = `- NEW-${i} entry, a fixed description so the line carries real weight for line ${i}\n`;
+    return l + l;
+  }).join('');
+  const look = returnFlow(c, fresh);
+  assert.ok(look.nudge, 'the new fat re-arms and nudges, as today (non-vacuity)');
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'no pre-wash bytes came back, so this is growth and no ask is marked');
+});
+
+test('702 (o): answerReturnLeave with no finite fat changes nothing and returns false', () => {
+  const c = makeCase('nonfinite-o');
+  returnFlow(c, MEM_ORIG);
+  assert.strictEqual(stateNow(c).returnAsk, true, 'precondition: a return is pending');
+  const sp = calNs.statePath(c.proj, c.home);
+  const j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  delete j.lastVerdict.fatTokens;
+  fs.writeFileSync(sp, JSON.stringify(j));
+  assert.strictEqual(stateNow(c).lastVerdict.fatTokens, undefined, 'precondition: the fat is not finite');
+  const before = JSON.stringify(stateNow(c));
+  assert.strictEqual(calNs.answerReturnLeave(c.home, c.proj), false, 'refuses to act without a finite fat');
+  assert.strictEqual(JSON.stringify(stateNow(c)), before, 'the state is unchanged');
+});
+
+test('702 (p): a FULL crossing armed after an unanswered return clears the return mark', () => {
+  const c = makeCase('full-p');
+  returnFlow(c, MEM_ORIG);
+  assert.strictEqual(stateNow(c).returnAsk, true, 'precondition: a return is pending');
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 9999 });
+  const s = stateNow(c);
+  assert.notStrictEqual(calNs.sanitizeCrossing(s.lastCrossing), null, 'precondition: the FULL crossing armed');
+  assert.strictEqual(s.returnAsk, undefined, 'a crossing that is not the return clears the return mark');
+});

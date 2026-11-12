@@ -1729,7 +1729,10 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now(), { sc
 // runs in returns at stop_hook_active (conductor), so nothing else reads the
 // store after the cut. A rolled-back or torn run never reaches that commit and
 // records nothing. Any failure is a silent no-op (Phoenix #4).
-export function recordPostWash(home, projectRoot) {
+function currentFileHash(file) {
+  try { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { return null; }
+}
+export function recordPostWash(home, projectRoot, preHashes = {}) {
   try {
     const proj = loadState(projectRoot, home);
     const lv = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : null;
@@ -1747,7 +1750,7 @@ export function recordPostWash(home, projectRoot) {
       proj.lastObeseFat = Math.max(0, Math.round(Number(proj.lastObeseFat) - cutTokens));
     }
     // 699: the episode this commit made. Its preFat is the level a later look must come back to for a RETURN.
-    proj.postWash = { at: Date.now(), preFat, postFat: hasWatermark ? proj.lastObeseFat : null };
+    proj.postWash = { at: Date.now(), preFat, postFat: hasWatermark ? proj.lastObeseFat : null, preHashes: { ...preHashes } };
     delete proj.returnAsk; // a new wash replaces any pending return
     return saveState(proj, projectRoot, home);
   } catch { return false; }
@@ -1779,7 +1782,8 @@ export function answerReturnLeave(home, projectRoot) {
   try {
     const proj = loadState(projectRoot, home);
     const fat = proj.lastVerdict ? Number(proj.lastVerdict.fatTokens) : NaN;
-    if (Number.isFinite(fat)) proj.lastObeseFat = Math.round(fat);
+    if (!Number.isFinite(fat)) return false; // 702 (F700-3): change nothing without a finite fat
+    proj.lastObeseFat = Math.round(fat);
     if (proj.lastCrossing && typeof proj.lastCrossing === "object") proj.lastCrossing = { ...proj.lastCrossing, consumed: true };
     delete proj.returnAsk;
     delete proj.postWash;
@@ -1997,6 +2001,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     delete proj.externalizeSession;
     delete proj.externalizeAt;
   } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {
+    delete proj.returnAsk; // 702 (F700-2): an arm that is not the return clears the mark
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     // OBESE RE-LOOP watermark (see the branch at the end): stamp the fat level
     // this sweep was armed at, so the re-arm below needs GENUINE new inflow and
@@ -2021,6 +2026,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     proj.lastCrossing && proj.lastCrossing.consumed === true && !proj.lastCrossing.escalation &&
     fatTokens > (proj.lastEscalationFat ?? -1)
   ) {
+    delete proj.returnAsk; // 702 (F700-2): an arm that is not the return clears the mark
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false, escalation: true });
     proj.lastEscalationFat = fatTokens;
   } else if (
@@ -2058,6 +2064,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     fatTokens > (proj.lastEscalationFat ?? -1) &&
     (quickTried || proj.lastCrossing.session !== session)
   ) {
+    delete proj.returnAsk; // 702 (F700-2): an arm that is not the return clears the mark
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
   } else if (
     // OBESE RE-LOOP on new fat inflow (USER 2026-07-25). BEFORE: OBESE armed
@@ -2093,10 +2100,11 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
   ) {
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     proj.lastObeseFat = fatTokens;
-    // 699 (BB-469): back at (or under) the pre-wash level is a RETURN, not growth: mark it for an ask.
-    const pw = proj.postWash;
-    if (pw && Number.isFinite(Number(pw.preFat)) && fatTokens <= Number(pw.preFat) + REGAUGE_DELTA_TOKENS) proj.returnAsk = true;
-    else delete proj.returnAsk;
+    // 702 (F700-1): a RETURN is a washed file back at its own pre-wash bytes, judged by content hash, never by a fat level.
+    // Growth clears the mark and retires the episode, so later growth reads as today.
+    const pre = (proj.postWash && proj.postWash.preHashes && typeof proj.postWash.preHashes === "object") ? proj.postWash.preHashes : {};
+    if (Object.keys(pre).some((f) => currentFileHash(f) === pre[f])) proj.returnAsk = true;
+    else { delete proj.returnAsk; delete proj.postWash; }
   }
   return saveState(proj, projectRoot, home);
 }
