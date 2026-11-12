@@ -2,6 +2,21 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+A store found back at its pre-wash content is asked about, not washed
+
+### Changed
+
+- When a look finds the store back at the content it had before the last wash (a sync client or a backup put the old copy back), CoalWash asks you one question: wash again, or leave it. It never washes that store again by itself, under `auto` included. Growth that brings no pre-wash content back still takes the usual path.
+- With no user present, CoalWash washes nothing for such a store and says so in one line; it does not ask again until the store grows.
+- New command: `cli.mjs return-leave` answers "leave it".
+
+### Fixed
+
+- A copy of a washed file brought back from outside is now seen at the next look, instead of being taken for growth.
+- A RE-TIER run rolled back after its commit no longer leaves a return mark or a post-wash record behind.
+
 ## [1.17.1] - 2026-11-09
 
 The estate evidence lookup no longer hangs or holds too much memory
