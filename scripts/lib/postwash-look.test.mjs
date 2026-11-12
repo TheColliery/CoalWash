@@ -60,7 +60,7 @@ function makeCase(name) {
 }
 
 // The real conductor, spawned as the platform spawns it.
-function runHook(c, event, { stopActive = false } = {}) {
+function runHook(c, event, { stopActive = false, attended = false } = {}) {
   const payload = { session_id: `cwpw-${c.name}`, hook_event_name: event, cwd: c.proj, transcript_path: path.join(c.base, 'transcript.jsonl') };
   if (event === 'SessionStart') payload.source = 'startup';
   if (event === 'Stop') payload.stop_hook_active = stopActive;
@@ -68,7 +68,7 @@ function runHook(c, event, { stopActive = false } = {}) {
     PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
     HOME: c.home, USERPROFILE: c.home, TEMP: ROOT, TMP: ROOT, TMPDIR: ROOT,
     CLAUDE_PROJECT_DIR: c.proj, CLAUDE_PLUGIN_ROOT: path.join(ROOT, 'plugin'), CLAUDE_PLUGIN_DATA: path.join(ROOT, 'pdata'),
-    NODE_OPTIONS: '--max-old-space-size=2048',
+    NODE_OPTIONS: '--max-old-space-size=2048', ...(attended ? { CLAUDE_CODE_SESSION_ATTENDED: '1' } : {}),
   };
   const r = spawnSync(process.execPath, [HOOK], { input: JSON.stringify(payload), cwd: c.proj, env, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', windowsHide: true });
   const out = (r.stdout || '').trim();
@@ -103,9 +103,12 @@ test('witness: a copy of the pre-wash file brought back from outside re-arms the
   const cont = runHook(c, 'Stop', { stopActive: true });
   assert.strictEqual(cont.out, '', 'the Stop continuation after a wash stays silent (stop_hook_active)');
   fs.writeFileSync(c.mem, MEM_ORIG); // a sync client or a backup writes the pre-wash bytes back
-  const look = runHook(c, 'Stop');
-  t.diagnostic(`re-armed nudge after the outside copy: ${look.reason.slice(0, 600)}`);
-  assert.ok(look.nudge, `the returned copy must be seen at the next look; got stdout: ${look.out.slice(0, 200)}`);
+  const memBefore = fs.readFileSync(c.mem, 'utf8');
+  const look = runHook(c, 'Stop', { attended: true });
+  t.diagnostic(`return ask after the outside copy: ${look.reason.slice(0, 600)}`);
+  assert.ok(look.nudge, `the returned copy must be asked about at an attended look; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, /came back to the content it had before the last wash/, 'the look asks; it does not run the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), memBefore, 'the look washes nothing: the store bytes are unchanged');
 });
 
 test('control (a): the bin door restore followed by the hand write-back stays silent', () => {
@@ -302,12 +305,47 @@ test('702 (o): answerReturnLeave with no finite fat changes nothing and returns 
   assert.strictEqual(JSON.stringify(stateNow(c)), before, 'the state is unchanged');
 });
 
-test('702 (p): a FULL crossing armed after an unanswered return clears the return mark', () => {
+test('702 (p): a FULL crossing that finds the store moved on from its pre-wash bytes clears the return mark', () => {
   const c = makeCase('full-p');
   returnFlow(c, MEM_ORIG);
   assert.strictEqual(stateNow(c).returnAsk, true, 'precondition: a return is pending');
+  fs.writeFileSync(c.mem, MEM_ORIG + OTHER_NOTE); // the store has moved on: no washed file is back at its pre-wash bytes
   calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 9999 });
   const s = stateNow(c);
   assert.notStrictEqual(calNs.sanitizeCrossing(s.lastCrossing), null, 'precondition: the FULL crossing armed');
-  assert.strictEqual(s.returnAsk, undefined, 'a crossing that is not the return clears the return mark');
+  assert.strictEqual(s.returnAsk, undefined, 'a crossing that finds no pre-wash bytes is growth, so the return mark clears');
+});
+
+// ---- 707 (LANE FIX, round 2): every arm that can reach a wash runs the same pre-wash check ----
+// (q) the RISE branch to OBESE: a store read LEAN after the wash, then the pre-wash bytes come back.
+test('707 (q): a rise to OBESE onto the pre-wash bytes is asked about, and washes nothing', () => {
+  const c = makeCase('rise-q');
+  armAndConsume(c); // a wash always follows a gauge: the look records the pre-wash reading
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  runHook(c, 'SessionStart');
+  assert.strictEqual(stateNow(c).lastVerdict.band, 'LEAN', 'precondition: the washed store reads LEAN');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes come back: a rise, read by the gauge
+  const before = fs.readFileSync(c.mem, 'utf8');
+  runHook(c, 'SessionStart');
+  assert.strictEqual(stateNow(c).lastVerdict.band, 'OBESE', 'precondition: the copy-back reads OBESE, a rise');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the rise onto the pre-wash bytes is a return, so an ask is marked');
+  assert.match(look.reason, /came back to the content it had before the last wash/, 'the attended look asks; it does not run the auto-Quick pass');
+});
+
+// (r) the RISE branch to FULL: the store is back at its pre-wash bytes when the FULL crossing arms.
+test('707 (r): a rise to FULL onto the pre-wash bytes is asked about, and is not forced', () => {
+  const c = makeCase('rise-r');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes come back, with no look in between
+  const before = fs.readFileSync(c.mem, 'utf8');
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 9999 });
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the FULL rise onto the pre-wash bytes is a return, so an ask is marked');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
+  assert.match(look.reason, /came back to the content it had before the last wash/, 'the attended look asks; it does not run the forced Quick pass');
 });

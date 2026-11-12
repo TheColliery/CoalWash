@@ -470,6 +470,8 @@ async function handleSessionStart(input, opts = {}) {
 async function handleStop(input, opts = {}) {
   // opts.emit receives the block reason. Default writes CC's structured block object, byte-for-byte as before.
   const emit = opts.emit || ((reason) => process.stdout.write(JSON.stringify({ decision: 'block', reason })));
+  // 707: the user-facing channel for a return nobody can answer (hooks-safety §4). Default writes the systemMessage object.
+  const emitSystem = opts.emitSystem || ((message) => process.stdout.write(JSON.stringify({ systemMessage: message })));
   if (input && input.stop_hook_active) return; // avoid the block-decision retrigger loop
   const [{ loadMergedConfig, projectRootFor }, { clampedRead, envelopeForConfig }, caliper, ask, classB] = await Promise.all([
     import(lib('config-load.mjs')),
@@ -616,6 +618,21 @@ async function handleStop(input, opts = {}) {
     // invariant's forbidden "wash harder on muscle" move), the INELIGIBLE side
     // is a two-button consent. reason==='externalize' is still checked FIRST,
     // so this branch remains the only route either can take.
+  } else if (proj.returnAsk === true) {
+    // 707 (BB-469, LANE FIX): a store found back at the content it had before the last wash is ASKED about, never
+    // washed by itself, on EVERY band: the OBESE auto-Quick, the FULL force and the wizard ask below all run a pass
+    // the return must not reach. This hook decides presence from the platform's attended flag and emits the decided
+    // instruction. Unattended: one systemMessage saying nothing was washed; the crossing is consumed (said once).
+    if (process.env.CLAUDE_CODE_SESSION_ATTENDED === '1') {
+      reason = ask.returnAsk({ fatTokens, breakEven });
+    } else {
+      caliper.consumeCrossing(home, projectRoot, now); // said once
+      let note = ask.returnUnattended({ fatTokens });
+      const language = clampedRead(cfg, 'language');
+      if (language !== 'auto') note += `\n[CoalWash] (language=${language} — deliver user-facing prose in that language; keep technical terms, commands, paths, numbers, and units verbatim)`;
+      emitSystem(note);
+      return;
+    }
   } else if (crossing.band === 'FULL' && crossing.escalation) {
     // case (c) — 0f "AUTHORITATIVE 3-FLOW": a force-run already tried Quick
     // this episode and the store is STILL over FULL — only the wizard's

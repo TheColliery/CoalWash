@@ -1732,6 +1732,14 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now(), { sc
 function currentFileHash(file) {
   try { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { return null; }
 }
+// 707 (F700-1, LANE FIX): a RETURN is a washed file back at its own pre-wash bytes, judged by content hash. EVERY arm
+// that can reach a wash runs this (the rise, the FULL escalation, the FULL re-loop, the OBESE re-loop), never a fat level.
+// A match marks the return; no match is growth, which clears the mark and retires the episode.
+function markReturn(proj) {
+  const pre = (proj.postWash && proj.postWash.preHashes && typeof proj.postWash.preHashes === "object") ? proj.postWash.preHashes : {};
+  if (Object.keys(pre).some((f) => currentFileHash(f) === pre[f])) proj.returnAsk = true;
+  else { delete proj.returnAsk; delete proj.postWash; }
+}
 export function recordPostWash(home, projectRoot, preHashes = {}) {
   try {
     const proj = loadState(projectRoot, home);
@@ -2001,7 +2009,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     delete proj.externalizeSession;
     delete proj.externalizeAt;
   } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {
-    delete proj.returnAsk; // 702 (F700-2): an arm that is not the return clears the mark
+    markReturn(proj); // 707: an arm that finds the washed bytes back is the return; one that does not clears the mark
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     // OBESE RE-LOOP watermark (see the branch at the end): stamp the fat level
     // this sweep was armed at, so the re-arm below needs GENUINE new inflow and
@@ -2026,7 +2034,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     proj.lastCrossing && proj.lastCrossing.consumed === true && !proj.lastCrossing.escalation &&
     fatTokens > (proj.lastEscalationFat ?? -1)
   ) {
-    delete proj.returnAsk; // 702 (F700-2): an arm that is not the return clears the mark
+    markReturn(proj); // 707: an arm that finds the washed bytes back is the return; one that does not clears the mark
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false, escalation: true });
     proj.lastEscalationFat = fatTokens;
   } else if (
@@ -2064,7 +2072,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     fatTokens > (proj.lastEscalationFat ?? -1) &&
     (quickTried || proj.lastCrossing.session !== session)
   ) {
-    delete proj.returnAsk; // 702 (F700-2): an arm that is not the return clears the mark
+    markReturn(proj); // 707: an arm that finds the washed bytes back is the return; one that does not clears the mark
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
   } else if (
     // OBESE RE-LOOP on new fat inflow (USER 2026-07-25). BEFORE: OBESE armed
@@ -2100,11 +2108,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
   ) {
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     proj.lastObeseFat = fatTokens;
-    // 702 (F700-1): a RETURN is a washed file back at its own pre-wash bytes, judged by content hash, never by a fat level.
-    // Growth clears the mark and retires the episode, so later growth reads as today.
-    const pre = (proj.postWash && proj.postWash.preHashes && typeof proj.postWash.preHashes === "object") ? proj.postWash.preHashes : {};
-    if (Object.keys(pre).some((f) => currentFileHash(f) === pre[f])) proj.returnAsk = true;
-    else { delete proj.returnAsk; delete proj.postWash; }
+    markReturn(proj); // 707: the same content-hash check as every other arm
   }
   return saveState(proj, projectRoot, home);
 }
