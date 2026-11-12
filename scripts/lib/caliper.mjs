@@ -1111,7 +1111,7 @@ export const FULL_CLEAN_FILES_CAP = 12;
 // i.e. it asks rather than claims. Their ADDITION is not a STATE_SCHEMA bump:
 // no EXISTING field's meaning changed, per this file's own rule above and the
 // `lastObeseFat` precedent.
-export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt']);
+export const SCHEMA_RESET_FIELDS = Object.freeze(['lastCrossing', 'quickTried', 'quickTriedAt', 'lastEscalationFat', 'lastObeseFat', 'lastVerdict', 'fullCleanAt', 'fullCleanSession', 'fullCleanFiles', 'externalizeSession', 'externalizeAt', 'postWash', 'returnAsk']);
 // VERSION-STABLE — PRESERVED across a schema bump AND across the location move:
 // the project's real footprint BASELINE + history. Must survive a reinstall/
 // upgrade, or every version bump false-FULLs the store until the next clean. NOT
@@ -1739,11 +1739,16 @@ export function recordPostWash(home, projectRoot) {
     const postBytes = statOnlyFootprintBytes(paths);
     lv.alwaysLoadedBytes = Math.round(postBytes);
     // The watermark only ever LOWERS here (a wash removes text); a rise is never recorded.
-    if (proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat))) {
+    const hasWatermark = proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat));
+    const preFat = hasWatermark ? Math.round(Number(proj.lastObeseFat)) : null;
+    if (hasWatermark) {
       const removedBytes = Math.max(0, preBytes - postBytes);
       const cutTokens = tokensEstFromBytes(removedBytes);
       proj.lastObeseFat = Math.max(0, Math.round(Number(proj.lastObeseFat) - cutTokens));
     }
+    // 699: the episode this commit made. Its preFat is the level a later look must come back to for a RETURN.
+    proj.postWash = { at: Date.now(), preFat, postFat: hasWatermark ? proj.lastObeseFat : null };
+    delete proj.returnAsk; // a new wash replaces any pending return
     return saveState(proj, projectRoot, home);
   } catch { return false; }
 }
@@ -1755,7 +1760,7 @@ export function recordPostWash(home, projectRoot) {
 export function postWashSnapshot(home, projectRoot) {
   try {
     const proj = loadState(projectRoot, home);
-    return { lastObeseFat: proj.lastObeseFat ?? null, alwaysLoadedBytes: proj.lastVerdict ? (proj.lastVerdict.alwaysLoadedBytes ?? null) : null };
+    return { lastObeseFat: proj.lastObeseFat ?? null, alwaysLoadedBytes: proj.lastVerdict ? (proj.lastVerdict.alwaysLoadedBytes ?? null) : null, postWash: proj.postWash ?? null, returnAsk: proj.returnAsk ?? null };
   } catch { return null; }
 }
 export function restorePostWashSnapshot(home, projectRoot, snap) {
@@ -1763,7 +1768,21 @@ export function restorePostWashSnapshot(home, projectRoot, snap) {
     if (!snap) return false;
     const proj = loadState(projectRoot, home);
     if (snap.lastObeseFat == null) delete proj.lastObeseFat; else proj.lastObeseFat = snap.lastObeseFat;
+    if (snap.postWash == null) delete proj.postWash; else proj.postWash = snap.postWash;
+    if (snap.returnAsk == null) delete proj.returnAsk; else proj.returnAsk = snap.returnAsk;
     if (snap.alwaysLoadedBytes != null && proj.lastVerdict && typeof proj.lastVerdict === "object") proj.lastVerdict.alwaysLoadedBytes = snap.alwaysLoadedBytes;
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
+}
+// 699 (BB-469): "leave it" answered for a pending return. The current fat becomes the plateau, the crossing is consumed, and the return and wash marks clear: the next look is silent, and growth past +500 re-arms as today.
+export function answerReturnLeave(home, projectRoot) {
+  try {
+    const proj = loadState(projectRoot, home);
+    const fat = proj.lastVerdict ? Number(proj.lastVerdict.fatTokens) : NaN;
+    if (Number.isFinite(fat)) proj.lastObeseFat = Math.round(fat);
+    if (proj.lastCrossing && typeof proj.lastCrossing === "object") proj.lastCrossing = { ...proj.lastCrossing, consumed: true };
+    delete proj.returnAsk;
+    delete proj.postWash;
     return saveState(proj, projectRoot, home);
   } catch { return false; }
 }
@@ -2074,6 +2093,10 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
   ) {
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     proj.lastObeseFat = fatTokens;
+    // 699 (BB-469): back at (or under) the pre-wash level is a RETURN, not growth: mark it for an ask.
+    const pw = proj.postWash;
+    if (pw && Number.isFinite(Number(pw.preFat)) && fatTokens <= Number(pw.preFat) + REGAUGE_DELTA_TOKENS) proj.returnAsk = true;
+    else delete proj.returnAsk;
   }
   return saveState(proj, projectRoot, home);
 }

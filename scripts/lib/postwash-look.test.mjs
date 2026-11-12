@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { applyPlan, recoverDangling, __testHooks } from './apply.mjs';
 import { runRetier } from './retier.mjs';
 import { loadState } from './caliper.mjs';
+// a namespace import, so a missing 699 export fails only its own tests, never the whole file
+import * as calNs from './caliper.mjs';
 import { restore } from './cli.mjs';
 import { listBin, recordBinItem, FAT_BIN_NAME } from './tailings.mjs';
 import { ccProjectSlug } from './class-b.mjs';
@@ -195,4 +197,81 @@ test('control (d): a RE-TIER run rolled back after its commit records nothing, a
   assert.strictEqual(fs.readFileSync(storeFile, 'utf8'), preFile, 'the rollback restores the store bytes');
   assert.deepStrictEqual(stateOf(c), before, 'a RE-TIER run rolled back after its commit records no post-wash reading');
   assert.strictEqual(runHook(c, 'Stop').out, '', 'and the next look emits nothing');
+});
+
+// ---- 699 (BB-469): a look that finds the store back at its pre-wash content is a RETURN, and marks an ask ----
+// Arm, wash by applyPlan, bring `content` back from outside, then look. Returns the look.
+function returnFlow(c, content) {
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, content);
+  return runHook(c, 'Stop');
+}
+const stateNow = (c) => loadState(c.proj, c.home);
+
+test('699 (e): a look that finds the store back at its pre-wash content marks the crossing for an ask', () => {
+  const c = makeCase('return-e');
+  returnFlow(c, MEM_ORIG);
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the look at the pre-wash level is a return, so an ask is marked');
+});
+
+test('699 (f): growth past the pre-wash level re-arms with no ask marked', () => {
+  const c = makeCase('growth-f');
+  const grown = MEM_ORIG + Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}
+${dupLines(i + DUP_N)}
+`).join('');
+  const look = returnFlow(c, grown);
+  assert.ok(look.nudge, 'growth past the level re-arms and nudges, as today'); // the re-arm is consumed by the same look, so the nudge is the evidence
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'growth is not a return, so no ask is marked');
+});
+
+test('699 (g): answering "leave it" consumes the crossing, and the next look emits nothing', () => {
+  const c = makeCase('leave-g');
+  returnFlow(c, MEM_ORIG);
+  assert.strictEqual(stateNow(c).returnAsk, true, 'precondition: a return is pending');
+  assert.strictEqual(typeof calNs.answerReturnLeave, 'function', 'the leave answer is exported');
+  calNs.answerReturnLeave(c.home, c.proj);
+  const s = stateNow(c);
+  assert.strictEqual(s.returnAsk, undefined, 'the return mark is cleared');
+  assert.strictEqual(s.postWash, undefined, 'the wash episode is cleared');
+  assert.strictEqual(calNs.sanitizeCrossing(s.lastCrossing), null, 'no live crossing remains');
+  assert.strictEqual(runHook(c, 'Stop').out, '', 'the next look is silent');
+});
+
+test('699 (h): a RE-TIER run rolled back after its commit leaves postWash and returnAsk unchanged', () => {
+  const c = makeCase('rollback-h');
+  const storeDir = path.join(c.proj, '.claude', 'agent-memory', 'main');
+  const storeFile = path.join(storeDir, 'MEMORY.md');
+  const body = '# Memory\n\n' + Array.from({ length: DUP_N }, (_, i) => `${dupLines(i)} [[dup-anchor]]\n${dupLines(i)} [[dup-anchor]]\n`).join('');
+  fs.mkdirSync(storeDir, { recursive: true });
+  fs.writeFileSync(storeFile, body);
+  fs.writeFileSync(path.join(c.proj, 'CLAUDE.md'), '# fixture project\n\n@.claude/agent-memory/main/MEMORY.md\n');
+  armAndConsume(c);
+  const r1 = runRetier({ projectRoot: c.proj, home: c.home, retier: RT_R, estate: rtEstate(c.home), now: Date.now() });
+  assert.strictEqual(r1.ok, true, `the first RE-TIER run commits: ${JSON.stringify(r1).slice(0, 200)}`);
+  fs.writeFileSync(storeFile, body); // the pre-wash bytes come back from outside
+  runHook(c, 'Stop');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'precondition: the look marked a return');
+  const snap = stateNow(c);
+  const realRm = fs.rmSync;
+  const realOpen = fs.openSync;
+  let committed = false;
+  fs.rmSync = (p, ...rest) => { if (String(p).endsWith('journal.json')) committed = true; return realRm(p, ...rest); };
+  const writeBits = fs.constants.O_WRONLY | fs.constants.O_RDWR;
+  fs.openSync = (p, flags, ...rest) => {
+    const readOnly = flags === undefined || flags === 'r' || flags === 'rs' || (typeof flags === 'number' && (flags & writeBits) === 0);
+    if (committed && String(p).startsWith(storeDir) && readOnly) {
+      const e = new Error('ENOENT: injected post-commit loss of the store index'); e.code = 'ENOENT'; throw e;
+    }
+    return realOpen(p, flags, ...rest);
+  };
+  let r2;
+  try {
+    r2 = runRetier({ projectRoot: c.proj, home: c.home, retier: RT_R, estate: rtEstate(c.home), now: Date.now() });
+  } finally { fs.rmSync = realRm; fs.openSync = realOpen; }
+  assert.strictEqual(r2.ok, false, 'the injected probe miss rolls the second run back');
+  const after = stateNow(c);
+  assert.deepStrictEqual(after.postWash, snap.postWash, 'the rolled-back commit leaves the wash episode as it was');
+  assert.strictEqual(after.returnAsk, snap.returnAsk, 'the rolled-back commit leaves the return mark as it was');
 });
