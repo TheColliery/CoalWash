@@ -558,8 +558,20 @@ async function handleStop(input, opts = {}) {
         crossing = caliper.sanitizeCrossing(proj.lastCrossing);
       }
     }
-    if (!crossing) return; // still nothing pending -> silent (Phoenix #13)
   }
+  // 711 (F708-1): THE ONE RETURN CHECK, read-only, before any delivery that could run a pass. A washed file back at its
+  // pre-wash bytes is a return, whichever branch armed the crossing and whenever the bytes came back. A return with no
+  // crossing pending arms one here, so it reaches the same delivery below. Growth leaves postWash standing.
+  let returned = false;
+  if (proj.postWash && proj.returnAsk !== true && caliper.returnMatches(proj)) {
+    if (!crossing) {
+      caliper.armReturn(home, projectRoot, now, input && input.session_id);
+      proj = caliper.loadState(projectRoot, home);
+      crossing = caliper.sanitizeCrossing(proj.lastCrossing);
+    }
+    returned = !!crossing;
+  }
+  if (!crossing) return; // still nothing pending -> silent (Phoenix #13)
 
   const fatTokens = Number.isFinite(lastVerdict.fatTokens) ? Math.round(lastVerdict.fatTokens) : 0;
   const breakEven = {
@@ -618,11 +630,12 @@ async function handleStop(input, opts = {}) {
     // invariant's forbidden "wash harder on muscle" move), the INELIGIBLE side
     // is a two-button consent. reason==='externalize' is still checked FIRST,
     // so this branch remains the only route either can take.
-  } else if (proj.returnAsk === true) {
+  } else if (returned) {
     // 707 (BB-469, LANE FIX): a store found back at the content it had before the last wash is ASKED about, never
     // washed by itself, on EVERY band: the OBESE auto-Quick, the FULL force and the wizard ask below all run a pass
     // the return must not reach. This hook decides presence from the platform's attended flag and emits the decided
     // instruction. Unattended: one systemMessage saying nothing was washed; the crossing is consumed (said once).
+    caliper.markReturnAsked(home, projectRoot); // said once: the mark stands until growth or a new wash clears it
     if (process.env.CLAUDE_CODE_SESSION_ATTENDED === '1') {
       reason = ask.returnAsk({ fatTokens, breakEven });
     } else {

@@ -1732,13 +1732,31 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now(), { sc
 function currentFileHash(file) {
   try { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { return null; }
 }
-// 707 (F700-1, LANE FIX): a RETURN is a washed file back at its own pre-wash bytes, judged by content hash. EVERY arm
-// that can reach a wash runs this (the rise, the FULL escalation, the FULL re-loop, the OBESE re-loop), never a fat level.
-// A match marks the return; no match is growth, which clears the mark and retires the episode.
-function markReturn(proj) {
-  const pre = (proj.postWash && proj.postWash.preHashes && typeof proj.postWash.preHashes === "object") ? proj.postWash.preHashes : {};
-  if (Object.keys(pre).some((f) => currentFileHash(f) === pre[f])) proj.returnAsk = true;
-  else { delete proj.returnAsk; delete proj.postWash; }
+// 711 (F708-1): THE ONE RETURN CHECK, read-only. A RETURN is a washed file back at its own pre-wash bytes, judged by content
+// hash. The conductor's Stop runs it once, before any delivery that could run a pass. The arms never judge a return, and
+// they never drop the episode: growth leaves postWash standing, so bytes that come back later still read as a return.
+export function returnMatches(proj) {
+  const pre = (proj && proj.postWash && proj.postWash.preHashes && typeof proj.postWash.preHashes === "object") ? proj.postWash.preHashes : {};
+  return Object.keys(pre).some((f) => currentFileHash(f) === pre[f]);
+}
+// 711: a return that finds no crossing pending is armed here, so the Stop delivery is the same path as any crossing. Only an
+// OBESE or FULL band can deliver a pass or an ask; a LEAN store arms nothing and stays silent.
+export function armReturn(home, projectRoot, now = Date.now(), session) {
+  try {
+    const proj = loadState(projectRoot, home);
+    const band = proj.lastVerdict && proj.lastVerdict.band;
+    if (band !== 'OBESE' && band !== 'FULL') return false;
+    proj.lastCrossing = session !== undefined ? { band, at: now, consumed: false, session } : { band, at: now, consumed: false };
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
+}
+// 711: the delivery asked (or said) once; the mark stays until growth or a new wash clears it.
+export function markReturnAsked(home, projectRoot) {
+  try {
+    const proj = loadState(projectRoot, home);
+    proj.returnAsk = true;
+    return saveState(proj, projectRoot, home);
+  } catch { return false; }
 }
 export function recordPostWash(home, projectRoot, preHashes = {}) {
   try {
@@ -1802,13 +1820,23 @@ export function answerReturnLeave(home, projectRoot) {
 // the user to write. Those bytes are text the wash removed coming home, so the
 // OBESE watermark rises by the same amount: the restore returns to an
 // acknowledged plateau and does not re-arm the nudge. Fail-silent like recordPostWash.
-export function acknowledgeRestore(home, projectRoot, bytes) {
+export function acknowledgeRestore(home, projectRoot, bytes, original = null) {
   try {
     const n = Number(bytes);
     if (!Number.isFinite(n) || n <= 0) return false;
     const proj = loadState(projectRoot, home);
-    if (proj.lastObeseFat == null || !Number.isFinite(Number(proj.lastObeseFat))) return false;
-    proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
+    // 711 (F703-1): the bin door hands back the wash's own text, so the restored file leaves the episode. An episode with no
+    // washed file left is closed, so later growth is never read as a return.
+    if (proj.postWash && proj.postWash.preHashes && original) {
+      const want = path.resolve(String(original));
+      const pre = { ...proj.postWash.preHashes };
+      for (const k of Object.keys(pre)) if (path.resolve(k) === want) delete pre[k];
+      if (Object.keys(pre).length) proj.postWash = { ...proj.postWash, preHashes: pre };
+      else { delete proj.postWash; delete proj.returnAsk; }
+    }
+    if (proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat))) {
+      proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
+    }
     return saveState(proj, projectRoot, home);
   } catch { return false; }
 }
@@ -2009,7 +2037,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     delete proj.externalizeSession;
     delete proj.externalizeAt;
   } else if ((BAND_RANK[newBand] ?? 0) > (BAND_RANK[prevBand] ?? 0)) {
-    markReturn(proj); // 707: an arm that finds the washed bytes back is the return; one that does not clears the mark
+    delete proj.returnAsk; // 711: a new arm clears a standing mark; the one return check runs at the Stop delivery
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     // OBESE RE-LOOP watermark (see the branch at the end): stamp the fat level
     // this sweep was armed at, so the re-arm below needs GENUINE new inflow and
@@ -2034,7 +2062,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     proj.lastCrossing && proj.lastCrossing.consumed === true && !proj.lastCrossing.escalation &&
     fatTokens > (proj.lastEscalationFat ?? -1)
   ) {
-    markReturn(proj); // 707: an arm that finds the washed bytes back is the return; one that does not clears the mark
+    delete proj.returnAsk; // 711: a new arm clears a standing mark; the one return check runs at the Stop delivery
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false, escalation: true });
     proj.lastEscalationFat = fatTokens;
   } else if (
@@ -2072,7 +2100,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
     fatTokens > (proj.lastEscalationFat ?? -1) &&
     (quickTried || proj.lastCrossing.session !== session)
   ) {
-    markReturn(proj); // 707: an arm that finds the washed bytes back is the return; one that does not clears the mark
+    delete proj.returnAsk; // 711: a new arm clears a standing mark; the one return check runs at the Stop delivery
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
   } else if (
     // OBESE RE-LOOP on new fat inflow (USER 2026-07-25). BEFORE: OBESE armed
@@ -2108,7 +2136,7 @@ export function recordCrossing(home, projectRoot, newBand, prevBand, now = Date.
   ) {
     proj.lastCrossing = withSession({ band: newBand, at: now, consumed: false });
     proj.lastObeseFat = fatTokens;
-    markReturn(proj); // 707: the same content-hash check as every other arm
+    delete proj.returnAsk; // 711: a new arm clears a standing mark; the one return check runs at the Stop delivery
   }
   return saveState(proj, projectRoot, home);
 }

@@ -297,7 +297,7 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
       // 29fd: the handed-back bytes are the wash's own removed text coming home,
       // so the OBESE watermark rises by them (caliper acknowledgeRestore). This
       // makes the lookup write the state file: its "pure read" wording is gone.
-      acknowledgeRestore(home, projectRoot, r.buf.length);
+      acknowledgeRestore(home, projectRoot, r.buf.length, item.original || null);
       return { found: true, bin, id, original: item.original || null, bytes: r.buf.length, content: r.buf };
     }
     // CWK-137: an item that is THERE but refused (over the read bound, not a regular

@@ -344,8 +344,145 @@ test('707 (r): a rise to FULL onto the pre-wash bytes is asked about, and is not
   fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes come back, with no look in between
   const before = fs.readFileSync(c.mem, 'utf8');
   calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 9999 });
-  assert.strictEqual(stateNow(c).returnAsk, true, 'the FULL rise onto the pre-wash bytes is a return, so an ask is marked');
   const look = runHook(c, 'Stop', { attended: true });
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the FULL rise onto the pre-wash bytes is a return: the one return check at the Stop asks and marks it');
   assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
   assert.match(look.reason, /came back to the content it had before the last wash/, 'the attended look asks; it does not run the forced Quick pass');
+});
+
+// ---- 711 (LANE ROUND 3): ONE return check at the Stop delivery holds the ask for every pass, whatever branch armed it ----
+const ASK_TEXT = /came back to the content it had before the last wash/;
+// The same growth as 702 (n): fresh pre-wash-free fat, no pre-wash bytes in it.
+function growFresh() {
+  return MEM_DEDUP + Array.from({ length: 132 }, (_, i) => {
+    const l = `- NEW-${i} entry, a fixed description so the line carries real weight for line ${i}\n`;
+    return l + l;
+  }).join('');
+}
+
+// Timing 1: the pre-wash bytes come back BEFORE the look that would arm the crossing.
+test('711 (t1) BEFORE the arm: pre-wash bytes back before the arming look, the look asks and washes nothing', () => {
+  const c = makeCase('t1-before');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  runHook(c, 'SessionStart');
+  fs.writeFileSync(c.mem, MEM_ORIG); // back before the look that arms
+  const before = fs.readFileSync(c.mem, 'utf8');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the return must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the look asks; it does not run the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the ask is marked once');
+});
+
+// Timing 2 (W708, F708-1's own witness): BETWEEN the arm and its Stop.
+test('711 (W708) BETWEEN the arm and its Stop: a growth arm, the old bytes back, then an attended Stop asks and washes nothing', () => {
+  const c = makeCase('w708');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  runHook(c, 'SessionStart');
+  fs.writeFileSync(c.mem, growFresh());
+  runHook(c, 'SessionStart'); // the growth arms a crossing at SessionStart
+  assert.ok(calNs.sanitizeCrossing(stateNow(c).lastCrossing), 'precondition: a growth crossing is armed and pending');
+  assert.ok(stateNow(c).postWash, 'precondition: growth leaves the wash episode standing (711 lifetime)');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes come back between the arm and its Stop
+  const before = fs.readFileSync(c.mem, 'utf8');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the return must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'a return between the arm and its Stop asks, it is not the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the ask is marked once');
+});
+
+// Timing 3: AFTER a delivery. The growth is delivered, then the old bytes come back, and the next look asks.
+test('711 (t3) AFTER a delivery: growth is delivered, then the old bytes back, and the next look asks and washes nothing', () => {
+  const c = makeCase('t3-after');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  runHook(c, 'SessionStart');
+  fs.writeFileSync(c.mem, growFresh());
+  const grew = runHook(c, 'Stop');
+  assert.ok(grew.nudge, 'precondition: the growth delivery went out');
+  assert.ok(stateNow(c).postWash, 'precondition: the delivery leaves the wash episode standing');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the old bytes come back after the delivery
+  const before = fs.readFileSync(c.mem, 'utf8');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the next look must ask; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the next look asks, it does not run the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing');
+  assert.strictEqual(stateNow(c).returnAsk, true, 'the ask is marked once');
+});
+
+// Each FULL arm has its own witness. The FULL escalation arm: a plain FULL crossing consumed after a force, then an escalation.
+test('711 (F-esc) the FULL escalation arm: a store back at its pre-wash bytes is asked, and the arm washes nothing', () => {
+  const c = makeCase('full-esc');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG); // back at the pre-wash bytes
+  const before = fs.readFileSync(c.mem, 'utf8');
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 1000, session: 'a' });
+  calNs.consumeCrossing(c.home, c.proj, Date.now());
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'FULL', Date.now(), { quickTried: true, fatTokens: 2000, session: 'a' });
+  assert.strictEqual(calNs.sanitizeCrossing(stateNow(c).lastCrossing).escalation, true, 'precondition: the FULL escalation arm fired');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the escalation must ask about the return; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the escalation asks about the return, it does not run the forced pass or the wizard');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing');
+});
+
+// The FULL re-loop arm: a consumed FULL crossing from another session, then growth with no force history.
+test('711 (F-reloop) the FULL re-loop arm: a store back at its pre-wash bytes is asked, and the arm washes nothing', () => {
+  const c = makeCase('full-reloop');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG);
+  const before = fs.readFileSync(c.mem, 'utf8');
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 1000, session: 'a' });
+  calNs.consumeCrossing(c.home, c.proj, Date.now());
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'FULL', Date.now(), { fatTokens: 2000, session: 'b' });
+  const pending = calNs.sanitizeCrossing(stateNow(c).lastCrossing);
+  assert.ok(pending && pending.escalation !== true, 'precondition: the FULL re-loop arm fired, not the escalation');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the re-loop must ask about the return; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the re-loop asks about the return, it does not run the forced pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing');
+});
+
+// F703-1: a bin-door restore closes the episode, so growth in another file later is never a return.
+test('711 (F703-1) a bin-door restore closes the episode, so later growth in another file is never a return', () => {
+  const c = makeCase('f703-711');
+  fs.writeFileSync(path.join(c.proj, 'CLAUDE.md'), '# fixture project\n\n@memory/MEMORY.md\n@memory/other-note.md\n');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  const removed = Array.from({ length: DUP_N }, (_, i) => dupLines(i) + '\n').join('');
+  const rec = recordBinItem(c.proj, FAT_BIN_NAME, { content: Buffer.from(removed), original: c.mem, origin: 'program-cut', now: Date.now() });
+  const id = (rec && rec.id) || (listBin(c.proj, FAT_BIN_NAME)[0] || {}).id;
+  assert.ok(id, 'the removed lines are in the fat bin under an id');
+  const r = restore({ id, cwd: c.proj, home: c.home });
+  assert.strictEqual(r.found, true, JSON.stringify(r));
+  assert.strictEqual(stateNow(c).postWash, undefined, 'the bin door closes the wash episode');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the user writes the pre-wash file back by hand
+  fs.writeFileSync(c.other, Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}\n${dupLines(i + DUP_N)}\n`).join(''));
+  const look = runHook(c, 'Stop');
+  assert.ok(look.nudge, 'growth in another file re-arms and nudges');
+  assert.match(look.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'growth gets the auto-Quick text, not the return ask');
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'growth after an undo is not a return');
+});
+
+// Roster: every pass-running delivery in the conductor sits behind the one return check, in source order.
+test('711 roster: every pass-running delivery sits behind the one return check', () => {
+  const src = fs.readFileSync(HOOK, 'utf8');
+  const checkAt = src.indexOf('caliper.returnMatches(proj)');
+  const branchAt = src.indexOf('} else if (returned) {');
+  assert.ok(checkAt > 0, 'the one return check exists in the conductor');
+  assert.ok(branchAt > checkAt, 'the return branch comes after the one check');
+  const sites = [...src.matchAll(/ask\.(obeseAutoQuick|forceAuto)\(/g)].map((m) => m.index);
+  assert.ok(sites.length >= 2, `the roster finds the pass-running sites (found ${sites.length})`);
+  for (const s of sites) assert.ok(s > branchAt, `a pass-running site at offset ${s} sits behind the return branch`);
 });
