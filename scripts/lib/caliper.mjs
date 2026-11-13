@@ -1759,7 +1759,8 @@ function removedKeys(preCounts, postCounts) {
   return { keys: out, untracked: Math.max(0, all.length - REMOVED_LINE_CAP) };
 }
 // 711/717: THE ONE RETURN CHECK, read-only. The conductor's Stop runs it once, before any delivery that could run a pass. The
-// arms never judge a return, and they never drop the episode. Growth that brings none of the removed text back is not a return.
+// arms only arm a crossing; deciding whether a return happened is this check's, and no arm drops the episode. Growth that
+// brings none of the removed text back is not a return.
 export function returnMatches(proj) {
   const removed = (proj && proj.postWash && proj.postWash.removed && typeof proj.postWash.removed === "object") ? proj.postWash.removed : {};
   for (const file of Object.keys(removed)) {

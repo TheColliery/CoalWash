@@ -134,8 +134,8 @@ export const CONFIG_SCHEMA = [
 // UNDO, not pre-approval; the receipt is the surfacing, so no-silent-branch
 // holds). The only full stop is `coalwashMode: off` — the skill's own power
 // switch, a whole-skill choice, never a force veto. A LEGACY config still
-// carrying a retired key is read-TOLERATED and ignored: never a validation
-// error, never warning noise (clampedRead has no spec for it, so no consumer
+// carrying a retired key is read-TOLERATED and ignored: validation accepts it
+// and prints nothing about it (clampedRead has no spec for it, so no consumer
 // can ever read it). Do NOT re-add an off switch.
 export const RETIRED_KEYS = Object.freeze(['forceMode']);
 
