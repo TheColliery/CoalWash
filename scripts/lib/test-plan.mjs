@@ -7,6 +7,8 @@
 // Since 09b every roster file runs under the canon runner: the 09a direct run of wave-run.test.mjs is gone (the canon's recorder child sets its own
 // NODE_OPTIONS, K3), so this file holds only the numbers, the floor and, since fire 63, the tests' teardown removal (removeTree).
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 // BASIS, measured on this box, Node 24.19, 2026-10-09, 48 files through runWaves (scratchpad/09a/measure-waves.out; re-derive: that script, or the wave
 // events of a run): the slowest file 78.3 s (apply.test.mjs) with up to three files running on a box already 73.6% busy; the whole run 333 s wall.
@@ -37,7 +39,20 @@ export const GIT_LINGER_MAX_MS = 7639; // the longest the real git.exe outlived 
 export const TEARDOWN_BUDGET_MS = 30000; // about 4x GIT_LINGER_MAX_MS, and well inside the per-test clock
 export const TEARDOWN_POLL_MS = 100;
 const HELD = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY']);
+// 733 (29ft fix unit b): the root removeTree may delete under is read ONCE, at load, from the real temp folder, never from the argument.
+const TEMP_ROOT = fs.realpathSync.native(os.tmpdir());
+// Throws EREFUSED unless dir resolves strictly under TEMP_ROOT; false when dir is already gone (nothing to delete).
+export function assertUnderTempRoot(dir) {
+  let real;
+  try { real = fs.realpathSync.native(dir); } catch (e) { if (e && e.code === 'ENOENT') return false; throw e; }
+  const rel = path.relative(TEMP_ROOT, real);
+  if (!rel || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) {
+    throw Object.assign(new Error(`removeTree refuses ${dir}: it is not under the temp root ${TEMP_ROOT}`), { code: 'EREFUSED' });
+  }
+  return true;
+}
 export function removeTree(dir, { budgetMs = TEARDOWN_BUDGET_MS, pollMs = TEARDOWN_POLL_MS } = {}) {
+  if (!assertUnderTempRoot(dir)) return;
   const until = Date.now() + budgetMs;
   for (;;) {
     try { fs.rmSync(dir, { recursive: true, force: true }); return; } catch (e) {

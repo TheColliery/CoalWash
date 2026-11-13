@@ -427,3 +427,16 @@ test('fire 599 dist read: a read that comes back short is refused as changed, ne
     assert.strictEqual(o.why, 'changed', JSON.stringify(o));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// 733 (29ft fix unit b): buildDist refuses a distRoot that is neither plugin/ nor under the temp folder, before any delete. fs.rmSync is
+// stubbed to throw a sentinel, so a missing guard stops at the sentinel and nothing is removed or copied.
+test('733: buildDist refuses a dist root outside plugin/ and the temp folder, and never reaches the delete', () => {
+  const outside = path.join(repoRoot, 'scripts'); // real, not plugin/, not under the temp folder
+  const real = fs.rmSync;
+  let calls = 0;
+  try {
+    fs.rmSync = () => { calls++; throw Object.assign(new Error('REACHED the delete'), { code: 'EREACHED' }); };
+    assert.throws(() => buildDist(outside), { code: 'EREFUSED' });
+    assert.strictEqual(calls, 0, 'the delete is never called on a refused root');
+  } finally { fs.rmSync = real; }
+});

@@ -111,3 +111,16 @@ test('the room numbers are finite and nest (test < file < run), and every roster
   assert.match(runner, /runWaves\(\{ files: TESTS, /, 'the whole roster goes to the wave runner');
   assert.ok(runner.includes("'scripts/lib/wave-run.test.mjs'"), 'wave-run.test.mjs is on the roster');
 });
+
+// 733 (29ft fix unit b): removeTree refuses a target outside the temp root it owns, BEFORE any delete. fs.rmSync is stubbed to throw a
+// sentinel, so a missing guard is caught by the sentinel and nothing real is ever removed.
+test('733: removeTree refuses a path outside the temp root, and never reaches the delete', () => {
+  const outside = path.dirname(fileURLToPath(import.meta.url)); // this repo's scripts/lib: real, and not under the temp folder
+  const real = fs.rmSync;
+  let calls = 0;
+  try {
+    fs.rmSync = () => { calls++; throw Object.assign(new Error('REACHED the delete'), { code: 'EREACHED' }); };
+    assert.throws(() => removeTree(outside), { code: 'EREFUSED' });
+    assert.equal(calls, 0, 'the delete is never called on a refused path');
+  } finally { fs.rmSync = real; }
+});

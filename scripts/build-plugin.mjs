@@ -14,11 +14,29 @@
 // UNWIRED class-A engine (see UNWIRED_ENGINE below).
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dist = path.join(repo, 'plugin');
+
+// 733 (29ft fix unit b): buildDist deletes distRoot, so distRoot must be the real plugin/ dir or a test copy under the real temp
+// folder. Both roots come from this file (the repo path and os.tmpdir() at load), never from the argument.
+const realOrJoined = (p) => {
+  try { return fs.realpathSync.native(p); } catch (e) {
+    if (e && e.code === 'ENOENT') return path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p));
+    throw e;
+  }
+};
+const TEMP_ROOT = fs.realpathSync.native(os.tmpdir());
+export function assertDistRoot(distRoot) {
+  const real = realOrJoined(path.resolve(distRoot));
+  if (real === realOrJoined(dist)) return;
+  const rel = path.relative(TEMP_ROOT, real);
+  if (rel && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel)) return;
+  throw Object.assign(new Error(`buildDist refuses ${distRoot}: it is neither plugin/ nor under the temp root ${TEMP_ROOT}`), { code: 'EREFUSED' });
+}
 
 // EXACTLY what a plugin loads, on either route — nothing the marketplace clone
 // carries that a user does not need. The root plugin.json, hooks.json and
@@ -140,6 +158,8 @@ function assertNoLinks(root, rel) {
 
 // srcRoot is the seam the witnesses use: a fixture copy of the sources, never the real repo (a link planted in the real tree is the bug).
 export function buildDist(distRoot = dist, srcRoot = repo) {
+  assertDistRoot(distRoot); // before any read or delete
+
   for (const rel of DIST_ITEMS) assertNoLinks(srcRoot, rel);
   for (const d of DIST_DOCS) assertNoLinks(srcRoot, d.src); // before the old dist is removed: a refused build leaves plugin/ as it was
   for (const d of DIST_DOCS) { // 29ax F512-9: refuse BEFORE the old dist is removed, and name the file
