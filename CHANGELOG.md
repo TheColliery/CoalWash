@@ -12,7 +12,7 @@ The nudge quotes the store's current fat, not the last reading
 
 ### Fixed
 
-- A pending nudge quotes the store's fat as it is now. Before, it quoted the reading from the last measurement, so after removed text went back in and out again it could report fat the store no longer had, and a store that had gone lean could still get a directive. A lean store now clears the crossing and gets no directive. — test: `scripts/lib/postwash-look.test.mjs`
+- A pending nudge quotes the store's fat as it is now: Stop re-measures it when its files changed in size past a set threshold. Before, it quoted the reading from the last measurement, so after removed text went back in and out again it could report fat the store no longer had, and a store that had gone lean could still get a directive. A lean store now clears the crossing and gets no directive. — test: `scripts/lib/postwash-look.test.mjs`
 
 ## [1.18.0] - 2026-11-13
 
