@@ -60,8 +60,8 @@ function makeCase(name) {
 }
 
 // The real conductor, spawned as the platform spawns it.
-function runHook(c, event, { stopActive = false, attended = false } = {}) {
-  const payload = { session_id: `cwpw-${c.name}`, hook_event_name: event, cwd: c.proj, transcript_path: path.join(c.base, 'transcript.jsonl') };
+function runHook(c, event, { stopActive = false, attended = false, session = null } = {}) {
+  const payload = { session_id: session || `cwpw-${c.name}`, hook_event_name: event, cwd: c.proj, transcript_path: path.join(c.base, 'transcript.jsonl') };
   if (event === 'SessionStart') payload.source = 'startup';
   if (event === 'Stop') payload.stop_hook_active = stopActive;
   const env = {
@@ -222,7 +222,8 @@ test('699 (e): a look that finds the store back at its pre-wash content marks th
 
 test('699 (f): growth past the pre-wash level re-arms with no ask marked', () => {
   const c = makeCase('growth-f');
-  const grown = MEM_ORIG + Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}
+  // growth with none of the removed text back (717 row 4): the pre-wash copies stay out, so this is not a return
+  const grown = MEM_DEDUP + Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}
 ${dupLines(i + DUP_N)}
 `).join('');
   const look = returnFlow(c, grown);
@@ -532,4 +533,151 @@ test('709 (k): return-leave answers "leave it", exits 0, and the next attended l
   assert.strictEqual(stateNow(c).returnAsk, undefined, 'the return mark is cleared');
   assert.strictEqual(stateNow(c).postWash, undefined, 'the wash episode is cleared');
   assert.strictEqual(runHook(c, 'Stop', { attended: true }).out, '', 'the next attended look is silent');
+});
+
+// ---- 717 (BB-474): a store counts as returned when TEXT the last wash removed is back, whatever else changed ----
+// The wash removes the SECOND copy of every DUP line (MEM_ORIG -> MEM_DEDUP): one removed occurrence per DUP line.
+// washThenWrite717: arm, wash, write `content`, then an ATTENDED look (the ask is what the rows judge).
+function washThenWrite717(c, content) {
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, content);
+  return runHook(c, 'Stop', { attended: true });
+}
+
+// Witness 1 (row 2): a restored copy plus one added line is asked about, with the bytes unchanged.
+test('717 witness 1 (row 2): a restored copy with one line added is asked about, and washes nothing', () => {
+  const c = makeCase('w717-1');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG + OTHER_NOTE);
+  const before = fs.readFileSync(c.mem, 'utf8');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the copy with a line added must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the look asks; it does not run the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
+});
+
+// Witness 2 (row 4): a file that merely grew, with none of the removed text back, is NOT asked, and behaves as today.
+test('717 witness 2 (row 4): a file that merely grew, with none of the removed text back, is not asked', () => {
+  const c = makeCase('w717-2');
+  const look = returnFlow(c, growFresh());
+  assert.ok(look.nudge, 'the growth re-arms and nudges, as today');
+  assert.match(look.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'growth keeps the auto-Quick text');
+  assert.doesNotMatch(look.reason, ASK_TEXT, 'no removed text came back, so growth is not a return');
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'no return mark');
+});
+
+test('717 (row 1): the exact old copy back is asked about', () => {
+  const look = washThenWrite717(makeCase('row1'), MEM_ORIG);
+  assert.ok(look.nudge, `the exact copy must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the exact old copy is a return');
+});
+
+test('717 (row 3): only SOME of the removed text back is asked about', () => {
+  const look = washThenWrite717(makeCase('row3'), MEM_DEDUP + Array.from({ length: 5 }, (_, i) => dupLines(i) + '\n').join(''));
+  assert.ok(look.nudge, `some removed text back must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'five removed lines back is a return');
+});
+
+test('717 (row 5): removed text typed back by hand is asked about', () => {
+  const look = washThenWrite717(makeCase('row5'), MEM_DEDUP + dupLines(7) + '\n');
+  assert.ok(look.nudge, `one removed line typed back must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the typed-back removed line is a return');
+});
+
+test('717 (row 6): a removed duplicate whose other copy stayed is not asked while nothing changed, and is asked once its occurrence is back', () => {
+  const c = makeCase('row6');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  const quiet1 = runHook(c, 'Stop', { attended: true });
+  const quiet2 = runHook(c, 'Stop', { attended: true });
+  assert.doesNotMatch(quiet1.reason, ASK_TEXT, 'an untouched store whose duplicate went is not asked about');
+  assert.doesNotMatch(quiet2.reason, ASK_TEXT, 'and it is never asked about on a later look');
+  fs.writeFileSync(c.mem, MEM_DEDUP + dupLines(0) + '\n'); // the removed occurrence itself comes back
+  const back = runHook(c, 'Stop', { attended: true });
+  assert.ok(back.nudge, `the removed occurrence back must be asked about; got stdout: ${back.out.slice(0, 200)}`);
+  assert.match(back.reason, ASK_TEXT, 'the removed occurrence back is a return');
+});
+
+// Row 7: line endings and trailing blanks changed, the text the same: asked. Normalised: CRLF and trailing spaces/tabs per line.
+test('717 (row 7): removed text back with line endings and trailing blanks changed is asked about', () => {
+  const look = washThenWrite717(makeCase('row7'), MEM_ORIG.replace(/\n/g, '  \r\n'));
+  assert.ok(look.nudge, `the same text with other line endings must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the normalised text is the removed text back');
+});
+
+test('717 (row 8): after "leave it" the same return is not asked again, and a later growth is ordinary', () => {
+  const c = makeCase('row8');
+  const first = washThenWrite717(c, MEM_ORIG);
+  assert.match(first.reason, ASK_TEXT, 'precondition: the return was asked');
+  calNs.answerReturnLeave(c.home, c.proj);
+  const again = runHook(c, 'Stop', { attended: true });
+  assert.strictEqual(again.out, '', 'the same copy is not asked about again after leave it');
+  fs.writeFileSync(c.mem, MEM_ORIG + growFresh().slice(MEM_DEDUP.length)); // growth past the leave-it plateau (the 132 new pairs alone sit under it)
+  const grow = runHook(c, 'Stop', { attended: true });
+  assert.ok(grow.nudge, 'later growth nudges, as ordinary growth does');
+  assert.match(grow.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'later growth gets the auto-Quick text');
+  assert.doesNotMatch(grow.reason, ASK_TEXT, 'and it is not a return');
+});
+
+// 720 (F718-1): a dev-era postWash with no `removed` record (the shape before the line rule) reads as no return: it never asks.
+test('720 (F718-1): a dev-era postWash with no removed record never asks', () => {
+  const c = makeCase('dev-era-720');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  const sp = calNs.statePath(c.proj, c.home);
+  const j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  j.postWash = { at: Date.now(), preHashes: { [c.mem]: 'x'.repeat(64) } };
+  fs.writeFileSync(sp, JSON.stringify(j));
+  fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes are back
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.doesNotMatch(look.reason, ASK_TEXT, 'a postWash with no removed record is not a return');
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'no return mark');
+});
+
+// 720 (F718-2): more removed lines than REMOVED_LINE_CAP: the untracked count is recorded beside the keys, not inside them.
+const BIG_N = 1100;
+const BIG_ORIG = '# Memory\n\n' + Array.from({ length: BIG_N }, (_, i) => `${dupLines(i)}\n${dupLines(i)}\n`).join('');
+const BIG_DEDUP = '# Memory\n\n' + Array.from({ length: BIG_N }, (_, i) => `${dupLines(i)}\n`).join('');
+test('720 (F718-2): removed lines past the cap are counted as untracked, beside the keys', () => {
+  const c = makeCase('cap-720');
+  fs.writeFileSync(c.mem, BIG_ORIG);
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [{ type: 'rewrite', path: c.mem, content: BIG_DEDUP, expectedOrig: BIG_ORIG }]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  const pw = stateNow(c).postWash;
+  const key = path.resolve(c.mem);
+  assert.strictEqual(Object.keys(pw.removed[key]).length, calNs.REMOVED_LINE_CAP, 'the kept keys are the cap');
+  assert.strictEqual(pw.untracked[key], BIG_N - calNs.REMOVED_LINE_CAP, 'the untracked count is recorded');
+  assert.ok(Object.keys(pw.removed[key]).every((k) => /^[0-9a-f]{16}$/.test(k)), 'no count lives in the key space');
+});
+
+// ---- 719 row 9: an attended ask left unanswered is paced once per session, asked again at the next session's look, and nothing is washed meanwhile ----
+test('719 (t): an unanswered attended ask is asked once per session, asked again next session, washes nothing, and return-leave closes it', () => {
+  const c = makeCase('row9-719t');
+  returnFlow(c, MEM_ORIG, { attended: false }); // the unattended return: the crossing is armed, nothing asked yet
+  const first = runHook(c, 'Stop', { attended: true, session: 'sess-A' });
+  assert.strictEqual(first.nudge, true, `the first attended look asks; got: ${first.out.slice(0, 200)}`);
+  const memAfterAsk = fs.readFileSync(c.mem, 'utf8');
+  const second = runHook(c, 'Stop', { attended: true, session: 'sess-A' });
+  assert.strictEqual(second.out, '', 'a second attended look in the same session is silent');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), memAfterAsk, 'nothing is washed between the looks');
+  const next = runHook(c, 'Stop', { attended: true, session: 'sess-B' });
+  assert.strictEqual(next.nudge, true, `the next session's attended look asks again, with no growth; got: ${next.out.slice(0, 200)}`);
+  assert.match(next.reason, /came back to the content it had before the last wash/, 'the look asks; it does not run the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_ORIG, 'the store is still at its pre-wash content');
+  const env = {
+    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+    HOME: c.home, USERPROFILE: c.home, TEMP: ROOT, TMP: ROOT, TMPDIR: ROOT,
+    CLAUDE_PROJECT_DIR: c.proj, CLAUDE_PLUGIN_ROOT: path.join(ROOT, 'plugin'), CLAUDE_PLUGIN_DATA: path.join(ROOT, 'pdata'),
+    NODE_OPTIONS: '--max-old-space-size=2048',
+  };
+  const r = spawnSync(process.execPath, [CLI_PATH_709, 'return-leave'], { cwd: c.proj, env, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', windowsHide: true });
+  assert.strictEqual(r.status, 0, `return-leave must exit 0; stderr: ${String(r.stderr).slice(0, 300)}`);
+  assert.strictEqual(runHook(c, 'Stop', { attended: true, session: 'sess-C' }).out, '', 'after return-leave nothing is asked');
 });

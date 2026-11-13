@@ -98,6 +98,7 @@ function projStatePath(home, proj) {
   return path.join(home, '.claude', 'projects', slug, 'coalwash', 'state.json');
 }
 function seedState(home, proj, projState, opts = {}) {
+  // 720: the current stored schema (caliper STATE_SCHEMA = 1).
   const schema = Object.prototype.hasOwnProperty.call(opts, 'stateSchema') ? opts.stateSchema : 1;
   if (schema === undefined) {
     // Pass { stateSchema: undefined } to model a genuinely OLD, PRE-RELOCATION

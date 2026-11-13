@@ -33,7 +33,7 @@
 //   Stop         -> the ENFORCEMENT/delivery channel: an unconsumed
 //                   edge-crossing surfaces as ONE of (per 0d/0f/0g/0m,
 //                   MEMORY.md): the wizard-escalation ask (FULL after a
-//                   force-run's Quick proved insufficient — the SOLE ask
+//                   force-run's Quick proved insufficient — one of two ask sites (the return ask is the other)
 //                   site, 0f), the UNCONDITIONAL FULL force directive (0m —
 //                   economic AND absolute-cap, no proof gate, no off
 //                   switch), the OBESE auto-Quick directive (0d — standing
@@ -563,7 +563,8 @@ async function handleStop(input, opts = {}) {
   // pre-wash bytes is a return, whichever branch armed the crossing and whenever the bytes came back. A return with no
   // crossing pending arms one here, so it reaches the same delivery below. Growth leaves postWash standing.
   let returned = false;
-  if (proj.postWash && proj.returnAsk !== true && caliper.returnMatches(proj)) {
+  // 719 row 9: no `returnAsk` gate here. An asked-but-unanswered return is paced by the session stamp at the delivery, never closed.
+  if (proj.postWash && caliper.returnMatches(proj)) {
     if (!crossing) {
       caliper.armReturn(home, projectRoot, now, input && input.session_id);
       proj = caliper.loadState(projectRoot, home);
@@ -636,7 +637,11 @@ async function handleStop(input, opts = {}) {
     // the return must not reach. This hook decides presence from the platform's attended flag and emits the decided
     // instruction. Unattended: one systemMessage saying nothing was washed, once per session; the crossing stays armed.
     if (process.env.CLAUDE_CODE_SESSION_ATTENDED === '1') {
-      caliper.markReturnAsked(home, projectRoot); // the attended ask is the one question: the mark stands until growth or a new wash clears it
+      // 719 row 9: an unanswered ask is asked again at the next SESSION's look, never at every Stop inside this one. Only the
+      // user's answer closes the episode: return-leave, or a wash.
+      const session = input && input.session_id;
+      if (caliper.returnAskedThisSession(projectRoot, home, session)) return;
+      caliper.markReturnAsked(home, projectRoot, session);
       reason = ask.returnAsk({ fatTokens, breakEven });
     } else {
       // 709 (ruling 2): unattended, nothing is washed and the ask stays ARMED for the next attended look, growth or not. The crossing is
