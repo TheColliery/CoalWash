@@ -38,6 +38,13 @@ test('CWK-154 (2): EVERY job of EVERY workflow declares timeout-minutes (testing
   for (const w of workflows) {
     for (const j of jobsOf(w.text)) {
       const m = j.body.map((l) => /^    timeout-minutes:\s*(\d+)\b/.exec(l)).find(Boolean);
+      // 733: a job that CALLS a reusable workflow (job-level `uses:`) may not carry timeout-minutes: GitHub accepts only name, uses,
+      // with, secrets, strategy, needs, if, concurrency, permissions and cache-mode there (docs.github.com, reusing workflow
+      // configurations, read 2026-11-14). Its clock is the called workflow's own jobs. Such a job is skipped here, and must not try.
+      if (j.body.some((l) => /^    uses:\s*\S/.test(l))) {
+        assert.ok(!m, `${w.file}:${j.name} calls a reusable workflow, where GitHub rejects timeout-minutes`);
+        continue;
+      }
       if (!m) missing.push(`${w.file}:${j.name}`);
       else assert.ok(Number(m[1]) >= 1 && Number(m[1]) <= 60, `${w.file}:${j.name} timeout-minutes ${m[1]} is a real bound (1..60)`);
     }
