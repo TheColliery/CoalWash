@@ -494,7 +494,9 @@ async function handleStop(input, opts = {}) {
   let lastVerdict = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : {};
   let crossing = caliper.sanitizeCrossing(proj.lastCrossing);
 
-  if (!crossing) {
+  // 733 (T8): the stat-gated re-gauge runs whether or not a crossing is pending, so a pending crossing is delivered with the
+  // store's fat as it is now. A fresh LEAN reading clears the crossing (recordCrossing), so a store that went lean gets no directive.
+  {
     // WARP-HOLE (beta.13 item 3, MEMORY.md "WARP-HOLE + WARM COST"): a
     // within-session spike (e.g. a MEMORY.md crystallize write) sits
     // uncaught under the pure-cache read above until the NEXT SessionStart.

@@ -14,7 +14,7 @@ import { runRetier } from './retier.mjs';
 import { loadState } from './caliper.mjs';
 // a namespace import, so a missing 699 export fails only its own tests, never the whole file
 import * as calNs from './caliper.mjs';
-import { restore } from './cli.mjs';
+import { restore, measureOnly } from './cli.mjs';
 import { listBin, recordBinItem, FAT_BIN_NAME } from './tailings.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 
@@ -762,14 +762,43 @@ test('725 (OBESE re-loop): growth past the watermark onto a standing return asks
   assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), grown, 'nothing washed');
 });
 
-// ---- 727 d2: an unattended return keeps the crossing armed; once the removed text goes again, the armed crossing is delivered exactly once ----
-test('727 (d2): an unattended return keeps the crossing armed, and the armed crossing is delivered once the removed text leaves again', () => {
+// ---- 727 d2: an unattended return keeps the crossing armed; once the removed text goes again, nothing is washed (733 T8b pins what is delivered) ----
+test('727 (d2): an unattended return keeps the crossing armed; once the removed text leaves again, nothing is washed', () => {
   const c = makeCase('d2-727');
   returnFlow(c, MEM_ORIG, { attended: false }); // the unattended return: the crossing stays armed, nothing is washed
   assert.ok(calNs.sanitizeCrossing(stateNow(c).lastCrossing), 'precondition: the unattended return leaves the crossing armed, not consumed');
   fs.writeFileSync(c.mem, MEM_DEDUP); // the removed text goes again (the user deletes the restored copy), so the return stops matching
-  const look = runHook(c, 'Stop'); // the crossing is still armed: it is delivered as an ordinary pending crossing
-  assert.strictEqual(look.nudge, true, `the armed crossing is delivered once the return no longer matches; got: ${look.out.slice(0, 200)}`);
-  assert.match(look.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'the ordinary auto-Quick text, as a growth crossing would carry');
-  assert.strictEqual(runHook(c, 'Stop').out, '', 'delivered once: the next look is silent');
+  runHook(c, 'Stop');
+  runHook(c, 'Stop');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_DEDUP, 'no look washes the store');
+});
+
+// ---- 733 T8: a pending crossing is delivered with the store's fat as it is now, never the last reading ----
+const T8_GROWN_N = 160;
+const t8Grown = () => MEM_DEDUP + Array.from({ length: T8_GROWN_N }, (_, i) => `${dupLines(i + DUP_N)}\n${dupLines(i + DUP_N)}\n`).join('');
+const quotedFat = (reason) => { const m = /fat ~(\d+) tok/.exec(reason); return m ? Number(m[1]) : null; };
+
+test('733 (T8a): after the removed text leaves and other fat stands, the delivered fat number equals a fresh gauge of the store', () => {
+  const c = makeCase('t8a-733');
+  returnFlow(c, MEM_ORIG, { attended: false }); // a pending crossing, cached at the restored copy's fat
+  const stale = Math.round(stateNow(c).lastVerdict.fatTokens);
+  fs.writeFileSync(c.mem, t8Grown()); // the restored copy goes, and a smaller lump of new fat stands in its place
+  const fresh = measureOnly({ cwd: c.proj, home: c.home });
+  assert.strictEqual(fresh.verdict.band, 'OBESE', `precondition: the store on disk is still OBESE (${JSON.stringify(fresh.verdict)})`);
+  const freshFat = Math.round(fresh.breakEven.fatTokens);
+  assert.notStrictEqual(freshFat, stale, 'precondition: the fresh reading differs from the cached one');
+  const look = runHook(c, 'Stop');
+  assert.strictEqual(look.nudge, true, `the pending crossing is delivered; got: ${look.out.slice(0, 200)}`);
+  assert.strictEqual(quotedFat(look.reason), freshFat, `the quoted fat is the store as it is now (stale reading was ${stale}): ${look.reason.slice(0, 160)}`);
+});
+
+test('733 (T8b): after the removed text leaves and the store is lean, a fresh gauge clears the crossing and nothing is delivered or washed', () => {
+  const c = makeCase('t8b-733');
+  returnFlow(c, MEM_ORIG, { attended: false });
+  fs.writeFileSync(c.mem, MEM_DEDUP);
+  assert.strictEqual(measureOnly({ cwd: c.proj, home: c.home }).verdict.band, 'LEAN', 'precondition: the store on disk is lean');
+  const look = runHook(c, 'Stop');
+  assert.strictEqual(look.out, '', `a lean store gets no directive; got: ${look.out.slice(0, 200)}`);
+  assert.strictEqual(calNs.sanitizeCrossing(stateNow(c).lastCrossing), null, 'the crossing is cleared by the fresh LEAN reading');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_DEDUP, 'nothing is washed');
 });
