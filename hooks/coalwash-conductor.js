@@ -640,7 +640,9 @@ async function handleStop(input, opts = {}) {
       // 719 row 9: an unanswered ask is asked again at the next SESSION's look, never at every Stop inside this one. Only the
       // user's answer closes the episode: return-leave, or a wash.
       const session = input && input.session_id;
-      if (caliper.returnAskedThisSession(projectRoot, home, session)) return;
+      // 725 (F712-1): the crossing is consumed even when this look stays silent. An unconsumed crossing blocks the OBESE/FULL
+      // re-loop arms (they arm only on a consumed one), so growth in the same session could never re-ask.
+      if (caliper.returnAskedThisSession(projectRoot, home, session)) { caliper.consumeCrossing(home, projectRoot, now); return; }
       caliper.markReturnAsked(home, projectRoot, session);
       reason = ask.returnAsk({ fatTokens, breakEven });
     } else {

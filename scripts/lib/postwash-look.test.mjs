@@ -681,3 +681,82 @@ test('719 (t): an unanswered attended ask is asked once per session, asked again
   assert.strictEqual(r.status, 0, `return-leave must exit 0; stderr: ${String(r.stderr).slice(0, 300)}`);
   assert.strictEqual(runHook(c, 'Stop', { attended: true, session: 'sess-C' }).out, '', 'after return-leave nothing is asked');
 });
+
+// ---- 725 (F712-1): each arm that re-arms a return clears the asked mark, so growth asks again in the same session ----
+// One witness per arm. Each reaches its arm while a return stands (postWash matches), so only that arm's clear can let the
+// next look ask again. A mutant that deletes one clear turns exactly its witness red. The FULL arms are reached at state level
+// (recordCrossing), because a hook-level FULL needs a store above the FULL ceiling; the return they re-arm is the hook's own.
+// The asked mark stays set for this session until an arm clears it.
+test('725 (rise): a rise onto a standing return asks, and the next rise re-asks in the same session', () => {
+  const c = makeCase('725-rise');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  runHook(c, 'SessionStart');
+  assert.strictEqual(stateNow(c).lastVerdict.band, 'LEAN', 'precondition: the washed store reads LEAN');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes back: a rise onto a return
+  const first = runHook(c, 'Stop', { attended: true });
+  assert.match(first.reason, ASK_TEXT, 'the rise asks about the return');
+  assert.strictEqual(runHook(c, 'Stop', { attended: true }).out, '', 'a second Stop in the same session is silent');
+  fs.writeFileSync(c.mem, MEM_DEDUP);
+  runHook(c, 'SessionStart');
+  assert.strictEqual(stateNow(c).lastVerdict.band, 'LEAN', 'precondition: back to LEAN');
+  fs.writeFileSync(c.mem, MEM_ORIG); // the rise re-arms through its own arm
+  const again = runHook(c, 'Stop', { attended: true });
+  assert.match(again.reason, ASK_TEXT, 'the re-armed rise asks again in the same session');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_ORIG, 'nothing washed');
+});
+
+test('725 (FULL escalation): an escalation onto a standing return asks, and the next escalation re-asks in the same session', () => {
+  const c = makeCase('725-esc');
+  const S = `cwpw-${c.name}`;
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG);
+  assert.match(runHook(c, 'Stop', { attended: true }).reason, ASK_TEXT, 'the return is asked');
+  assert.strictEqual(runHook(c, 'Stop', { attended: true }).out, '', 'a second Stop in the same session is silent');
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 1000, session: S });
+  calNs.consumeCrossing(c.home, c.proj, Date.now());
+  calNs.markReturnAsked(c.home, c.proj, S); // the rise above cleared the mark: set it for this session again
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'FULL', Date.now(), { quickTried: true, fatTokens: 2000, session: S });
+  assert.strictEqual(calNs.sanitizeCrossing(stateNow(c).lastCrossing).escalation, true, 'precondition: the FULL escalation arm fired');
+  const again = runHook(c, 'Stop', { attended: true });
+  assert.match(again.reason, ASK_TEXT, 'the escalation re-asks about the return in the same session');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_ORIG, 'nothing washed');
+});
+
+test('725 (FULL re-loop): a FULL re-loop onto a standing return asks, and the next re-loop re-asks in the same session', () => {
+  const c = makeCase('725-reloop');
+  const S = `cwpw-${c.name}`;
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG);
+  assert.match(runHook(c, 'Stop', { attended: true }).reason, ASK_TEXT, 'the return is asked');
+  assert.strictEqual(runHook(c, 'Stop', { attended: true }).out, '', 'a second Stop in the same session is silent');
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'OBESE', Date.now(), { fatTokens: 1000, session: S });
+  calNs.consumeCrossing(c.home, c.proj, Date.now());
+  calNs.markReturnAsked(c.home, c.proj, S);
+  calNs.recordCrossing(c.home, c.proj, 'FULL', 'FULL', Date.now(), { fatTokens: 2000, session: 'sess-other' });
+  const pending = calNs.sanitizeCrossing(stateNow(c).lastCrossing);
+  assert.ok(pending && pending.escalation !== true, 'precondition: the FULL re-loop arm fired, not the escalation');
+  const again = runHook(c, 'Stop', { attended: true });
+  assert.match(again.reason, ASK_TEXT, 'the re-loop re-asks about the return in the same session');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_ORIG, 'nothing washed');
+});
+
+test('725 (OBESE re-loop): growth past the watermark onto a standing return asks, and the next growth re-asks in the same session', () => {
+  const c = makeCase('725-obese');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG);
+  assert.match(runHook(c, 'Stop', { attended: true }).reason, ASK_TEXT, 'the return is asked');
+  assert.strictEqual(runHook(c, 'Stop', { attended: true }).out, '', 'a second Stop in the same session is silent');
+  const grown = MEM_ORIG + growFresh().slice(MEM_DEDUP.length); // the removed copies stay back; new fat grows past the watermark
+  fs.writeFileSync(c.mem, grown);
+  const again = runHook(c, 'Stop', { attended: true });
+  assert.match(again.reason, ASK_TEXT, 'the OBESE re-loop re-asks about the return in the same session');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), grown, 'nothing washed');
+});
