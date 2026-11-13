@@ -2,20 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.18.0] - 2026-11-13
 
-Removed text back in a washed file is asked about, not washed
+removed text back in a washed file is asked about, not washed
 
-### Changed
+Text the last wash removed, back in a washed file, is asked about at the next Stop and is never washed by itself. This does not replay a removal: nothing replays a removal without a run, and the room's own undo (the bin door, `restore`) stays silent. Past 1000 distinct removed lines in one file, the rest are untracked. A structure line (a fence or a heading) shared with new content counts as a return, which fails safe. The estate lane's restore is unmeasured.
+
+### Added
 
 - When text the last wash removed from a washed file is back in it (a sync client or a backup put it back), CoalWash asks you one question at the next Stop, on every band: wash again, or leave it. No pass runs before the answer, and CoalWash never washes that store again by itself, under `auto` included. Growth that brings none of the removed text back still takes the usual path.
-- With no user present, CoalWash washes nothing for such a store and says so in one line, once per session. The ask stays open: the next attended look asks, grown or not.
-- New command: `cli.mjs return-leave` answers "leave it". The store is then not asked about again until it grows.
-
-### Fixed
-
-- Text the last wash removed, brought back from outside, is now seen at the next Stop; before, it was a silent plateau.
-- A RE-TIER run rolled back after its commit no longer leaves a return mark or a post-wash record behind.
+- An attended ask left unanswered is asked again at the next session's look, with nothing washed in between.
+- With no user present, CoalWash washes nothing for such a store and says so in one line, once per session. The ask stays armed for the next attended look, grown or not.
+- New command: `cli.mjs return-leave` answers "leave it". The return is then closed, and the store is not asked about again until it grows.
 
 ## [1.17.1] - 2026-11-09
 
