@@ -19,7 +19,8 @@ import { listBin, recordBinItem, FAT_BIN_NAME } from './tailings.mjs';
 import { ccProjectSlug } from './class-b.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const HOOK = path.resolve(HERE, '..', '..', 'hooks', 'coalwash-conductor.js');
+// CW_TEST_HOOK lets a mutation check point the same witnesses at a temporary copy of the hook (it must sit beside the real hook, so its ../scripts/lib imports resolve). Unset in every real run.
+const HOOK = process.env.CW_TEST_HOOK || path.resolve(HERE, '..', '..', 'hooks', 'coalwash-conductor.js');
 
 // The real temp folder, captured BEFORE the redirect below; cleanup refuses anything outside it.
 const TEMP_BASE = fs.realpathSync.native(os.tmpdir());
@@ -759,4 +760,16 @@ test('725 (OBESE re-loop): growth past the watermark onto a standing return asks
   const again = runHook(c, 'Stop', { attended: true });
   assert.match(again.reason, ASK_TEXT, 'the OBESE re-loop re-asks about the return in the same session');
   assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), grown, 'nothing washed');
+});
+
+// ---- 727 d2: an unattended return keeps the crossing armed; once the removed text goes again, the armed crossing is delivered exactly once ----
+test('727 (d2): an unattended return keeps the crossing armed, and the armed crossing is delivered once the removed text leaves again', () => {
+  const c = makeCase('d2-727');
+  returnFlow(c, MEM_ORIG, { attended: false }); // the unattended return: the crossing stays armed, nothing is washed
+  assert.ok(calNs.sanitizeCrossing(stateNow(c).lastCrossing), 'precondition: the unattended return leaves the crossing armed, not consumed');
+  fs.writeFileSync(c.mem, MEM_DEDUP); // the removed text goes again (the user deletes the restored copy), so the return stops matching
+  const look = runHook(c, 'Stop'); // the crossing is still armed: it is delivered as an ordinary pending crossing
+  assert.strictEqual(look.nudge, true, `the armed crossing is delivered once the return no longer matches; got: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'the ordinary auto-Quick text, as a growth crossing would carry');
+  assert.strictEqual(runHook(c, 'Stop').out, '', 'delivered once: the next look is silent');
 });
