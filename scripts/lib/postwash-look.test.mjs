@@ -576,3 +576,36 @@ test('717 (row 8): after "leave it" the same return is not asked again, and a la
   assert.match(grow.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'later growth gets the auto-Quick text');
   assert.doesNotMatch(grow.reason, ASK_TEXT, 'and it is not a return');
 });
+
+// 720 (F718-1): a dev-era postWash with no `removed` record (the shape before the line rule) reads as no return: it never asks.
+test('720 (F718-1): a dev-era postWash with no removed record never asks', () => {
+  const c = makeCase('dev-era-720');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  const sp = calNs.statePath(c.proj, c.home);
+  const j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  j.postWash = { at: Date.now(), preHashes: { [c.mem]: 'x'.repeat(64) } };
+  fs.writeFileSync(sp, JSON.stringify(j));
+  fs.writeFileSync(c.mem, MEM_ORIG); // the pre-wash bytes are back
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.doesNotMatch(look.reason, ASK_TEXT, 'a postWash with no removed record is not a return');
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'no return mark');
+});
+
+// 720 (F718-2): more removed lines than REMOVED_LINE_CAP: the untracked count is recorded beside the keys, not inside them.
+const BIG_N = 1100;
+const BIG_ORIG = '# Memory\n\n' + Array.from({ length: BIG_N }, (_, i) => `${dupLines(i)}\n${dupLines(i)}\n`).join('');
+const BIG_DEDUP = '# Memory\n\n' + Array.from({ length: BIG_N }, (_, i) => `${dupLines(i)}\n`).join('');
+test('720 (F718-2): removed lines past the cap are counted as untracked, beside the keys', () => {
+  const c = makeCase('cap-720');
+  fs.writeFileSync(c.mem, BIG_ORIG);
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [{ type: 'rewrite', path: c.mem, content: BIG_DEDUP, expectedOrig: BIG_ORIG }]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  const pw = stateNow(c).postWash;
+  const key = path.resolve(c.mem);
+  assert.strictEqual(Object.keys(pw.removed[key]).length, calNs.REMOVED_LINE_CAP, 'the kept keys are the cap');
+  assert.strictEqual(pw.untracked[key], BIG_N - calNs.REMOVED_LINE_CAP, 'the untracked count is recorded');
+  assert.ok(Object.keys(pw.removed[key]).every((k) => /^[0-9a-f]{16}$/.test(k)), 'no count lives in the key space');
+});

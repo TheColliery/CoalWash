@@ -1082,10 +1082,10 @@ function readStateFile(p) {
 // unaffected (neither depends on hardCeilingTokens), and the next
 // SessionStart re-gauges unconditionally and corrects it. No bump: a
 // single-turn cosmetic line, never a decision made on stale data.)
-// 717 (BB-474): 2. postWash changed meaning: the return is judged by the TEXT the last wash removed, per line (postWash.removed),
-// not by whole-file hashes (postWash.preHashes, dropped with preFat and postFat, which no reader used). postWash is in
-// SCHEMA_RESET_FIELDS, so a stale state resets it; an older binary reads no `removed` and so never asks (fails closed).
-export const STATE_SCHEMA = 2;
+// 720 (F718-1): stays 1. postWash never shipped (born after v1.17.1, at edec626), so no released state holds its meaning. It is an
+// additive field read by shape: returnMatches reads only postWash.removed, so a dev-era postWash with no `removed` reads as no
+// return and never asks. A bump would reset eleven fields for every upgrading user for nothing.
+export const STATE_SCHEMA = 1;
 // VERSION-SENSITIVE — reset when the stored schema is stale. Their meaning
 // changed across versions, so a value an older version wrote is not trustworthy
 // now. The crossing/edge state changed at 0m (force-dictator); `lastVerdict` is a
@@ -1750,11 +1750,13 @@ export function lineCounts(text) {
 }
 // 717: the removed text of one washed file: each key whose count the wash LOWERED, mapped to its post-wash count. A return is
 // a count above that value: the removed occurrence itself is back.
+// 720 (F718-2): returns the kept keys and how many removed keys went untracked past the cap. The untracked count is recorded
+// beside the keys (postWash.untracked), never inside the key space.
 function removedKeys(preCounts, postCounts) {
   const out = {};
-  const keys = [...preCounts.keys()].filter((k) => preCounts.get(k) > (postCounts.get(k) || 0)).sort().slice(0, REMOVED_LINE_CAP);
-  for (const k of keys) out[k] = postCounts.get(k) || 0;
-  return out;
+  const all = [...preCounts.keys()].filter((k) => preCounts.get(k) > (postCounts.get(k) || 0)).sort();
+  for (const k of all.slice(0, REMOVED_LINE_CAP)) out[k] = postCounts.get(k) || 0;
+  return { keys: out, untracked: Math.max(0, all.length - REMOVED_LINE_CAP) };
 }
 // 711/717: THE ONE RETURN CHECK, read-only. The conductor's Stop runs it once, before any delivery that could run a pass. The
 // arms never judge a return, and they never drop the episode. Growth that brings none of the removed text back is not a return.
@@ -1805,13 +1807,16 @@ export function recordPostWash(home, projectRoot, preCounts = {}) {
     }
     // 717: the episode this commit made. The removed text of each washed file is what a later look must find back for a RETURN.
     const removed = {};
+    const untracked = {};
     for (const p of Object.keys(preCounts)) {
       let post;
       try { post = lineCounts(fs.readFileSync(p)); } catch { post = new Map(); } // a file the wash deleted left no text behind
-      const keys = removedKeys(preCounts[p], post);
+      const { keys, untracked: n } = removedKeys(preCounts[p], post);
       if (Object.keys(keys).length) removed[path.resolve(p)] = keys;
+      if (n > 0) untracked[path.resolve(p)] = n;
     }
-    proj.postWash = { at: Date.now(), removed };
+    // 720 (F718-2): the untracked count per file, beside the keys; present only where the cap was hit.
+    proj.postWash = Object.keys(untracked).length ? { at: Date.now(), removed, untracked } : { at: Date.now(), removed };
     delete proj.returnAsk; // a new wash replaces any pending return
     return saveState(proj, projectRoot, home);
   } catch { return false; }
@@ -1866,8 +1871,13 @@ export function acknowledgeRestore(home, projectRoot, bytes, original = null) {
       const want = path.resolve(String(original));
       const rem = {};
       for (const k of Object.keys(proj.postWash.removed)) if (path.resolve(k) !== want) rem[k] = proj.postWash.removed[k];
-      if (Object.keys(rem).length) proj.postWash = { ...proj.postWash, removed: rem };
-      else { delete proj.postWash; delete proj.returnAsk; }
+      const unt = {};
+      for (const k of Object.keys(proj.postWash.untracked || {})) if (path.resolve(k) !== want) unt[k] = proj.postWash.untracked[k];
+      if (Object.keys(rem).length) {
+        const next = { ...proj.postWash, removed: rem };
+        if (Object.keys(unt).length) next.untracked = unt; else delete next.untracked;
+        proj.postWash = next;
+      } else { delete proj.postWash; delete proj.returnAsk; }
     }
     if (proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat))) {
       proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
