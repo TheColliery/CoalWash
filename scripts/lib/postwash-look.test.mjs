@@ -762,15 +762,12 @@ test('725 (OBESE re-loop): growth past the watermark onto a standing return asks
   assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), grown, 'nothing washed');
 });
 
-// ---- 727 d2: an unattended return keeps the crossing armed; once the removed text goes again, nothing is washed (733 T8b pins what is delivered) ----
-test('727 (d2): an unattended return keeps the crossing armed; once the removed text leaves again, nothing is washed', () => {
+// ---- 727 d2: an unattended return keeps the crossing armed (733 T8b pins what happens once the removed text goes again) ----
+// F735-6: what follows once the removed text leaves again is 733 (T8b); d2 keeps only the part that can fail.
+test('727 (d2): an unattended return keeps the crossing armed', () => {
   const c = makeCase('d2-727');
   returnFlow(c, MEM_ORIG, { attended: false }); // the unattended return: the crossing stays armed, nothing is washed
-  assert.ok(calNs.sanitizeCrossing(stateNow(c).lastCrossing), 'precondition: the unattended return leaves the crossing armed, not consumed');
-  fs.writeFileSync(c.mem, MEM_DEDUP); // the removed text goes again (the user deletes the restored copy), so the return stops matching
-  runHook(c, 'Stop');
-  runHook(c, 'Stop');
-  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), MEM_DEDUP, 'no look washes the store');
+  assert.ok(calNs.sanitizeCrossing(stateNow(c).lastCrossing), 'the unattended return leaves the crossing armed, not consumed');
 });
 
 // ---- 733 T8: a pending crossing is delivered with the store's fat as it is now, never the last reading ----

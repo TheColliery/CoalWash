@@ -431,7 +431,7 @@ test('fire 599 dist read: a read that comes back short is refused as changed, ne
 // 733 (29ft fix unit b): buildDist refuses a distRoot that is neither plugin/ nor under the temp folder, before any delete. fs.rmSync is
 // stubbed to throw a sentinel, so a missing guard stops at the sentinel and nothing is removed or copied.
 test('733: buildDist refuses a dist root outside plugin/ and the temp folder, and never reaches the delete', () => {
-  const outside = path.join(repoRoot, 'scripts'); // real, not plugin/, not under the temp folder
+  const outside = path.parse(os.tmpdir()).root; // F735-5: the temp folder's drive root is real, not plugin/, and never under the temp folder, wherever the checkout sits
   const real = fs.rmSync;
   let calls = 0;
   try {

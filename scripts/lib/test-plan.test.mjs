@@ -115,7 +115,7 @@ test('the room numbers are finite and nest (test < file < run), and every roster
 // 733 (29ft fix unit b): removeTree refuses a target outside the temp root it owns, BEFORE any delete. fs.rmSync is stubbed to throw a
 // sentinel, so a missing guard is caught by the sentinel and nothing real is ever removed.
 test('733: removeTree refuses a path outside the temp root, and never reaches the delete', () => {
-  const outside = path.dirname(fileURLToPath(import.meta.url)); // this repo's scripts/lib: real, and not under the temp folder
+  const outside = path.parse(os.tmpdir()).root; // F735-5: the temp folder's drive root is real and never under the temp folder, wherever the checkout sits
   const real = fs.rmSync;
   let calls = 0;
   try {
