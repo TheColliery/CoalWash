@@ -24,6 +24,8 @@ node scripts/test.mjs           # zero-dependency test suite (node --test, expli
 
 The tracked git hooks (`.githooks/pre-commit`, `.githooks/pre-push`) run the house secret scan (`node scripts/secret-gate.mjs`) first, then `node scripts/verify.mjs` and then `node scripts/test.mjs`, so every commit and push is scanned for secrets and runs the whole suite. `scripts/test.mjs` runs the enumerated roster through the canon wave runner (`scripts/lib/wave-run.mjs`): one `node --test` child per file with TAP output, the next file admitted only while a fresh live reading of the machine says it can breathe, every child under a 2048 MB heap cap that rides `NODE_OPTIONS` (so a test's own spawns inherit it), a clock per test and per file, and a whole-run deadline that kills the child tree. The room's numbers and its declared-versus-reported test-count floor are in `scripts/lib/test-plan.mjs`. A file that exits 0 before its tests register is VACUOUS, and a file that reports fewer tests than it declares at top level is a FAIL; either turns the run RED. `COALWASH_TEST_CONCURRENCY=1` runs one file at a time; any other value is ignored, because the width is the live reading's. Git hands the variable on to the hooks, e.g. `COALWASH_TEST_CONCURRENCY=1 git commit`; the heap cap is the runner's own and needs no setting.
 
+A pull-request check, `.github/workflows/skill-checks.yml` (NVIDIA SkillEvaluator Tier 1, keyless), runs as an advisory check. It is not a required check: its findings are read by a maintainer and do not block a merge.
+
 ### Development Rules
 
 - **Rebuild the dist after a source change:** edit `hooks/`, `scripts/lib/`, `skills/`, `commands/`, or the manifest, then `node scripts/build-plugin.mjs` to re-sync `plugin/` (verify fails on a stale dist).

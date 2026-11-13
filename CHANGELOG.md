@@ -2,6 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.18.1] - 2026-11-14
+
+The nudge quotes the store's current fat, not the last reading
+
+### Changed
+
+- The skill declares its author in its metadata.
+
+### Fixed
+
+- A pending nudge quotes the store's fat as it is now. Before, it quoted the reading from the last measurement, so after removed text went back in and out again it could report fat the store no longer had, and a store that had gone lean could still get a directive. A lean store now clears the crossing and gets no directive. — test: `scripts/lib/postwash-look.test.mjs`
+
 ## [1.18.0] - 2026-11-13
 
 Removed text back in a washed file is asked about, not washed

@@ -63,7 +63,7 @@ Report ONE line only when `drift` (onlyInParcel) is non-empty — "parcel drift:
 
 ## 1. Quick tier — the mechanical op list (AGENT-RUN — no cutter exists in code)
 
-Mechanical only; each op is definable without judgment — but **every row below is something YOU, the agent, compute and edit by hand.** No code in this engine dedups, collapses whitespace, or rebuilds an index. The only CODE presence in this tier is `mechFatFromText` (`caliper.mjs`, §0 above): it MEASURES exact-duplicate lines and excess blank runs to drive the band verdict, and it never edits a file. Broom.mjs once carried two real text-mutators (an exact-residue sweep, an empty-table strip); both were retired to flag-only 2026-07-24, safety-over-yield — a false auto-cut was judged worse than no auto-cut, and no replacement cutter was built. Compute the new text per file yourself, then gate + apply (below) exactly as if the wizard's insider had proposed it.
+Mechanical only; each op follows a fixed rule — but **every row below is something YOU, the agent, compute and edit by hand.** No code in this engine dedups, collapses whitespace, or rebuilds an index. The only CODE presence in this tier is `mechFatFromText` (`caliper.mjs`, §0 above): it MEASURES exact-duplicate lines and excess blank runs to drive the band verdict, and it never edits a file. Broom.mjs once carried two real text-mutators (an exact-residue sweep, an empty-table strip); both were retired to flag-only 2026-07-24, safety-over-yield — a false auto-cut was judged worse than no auto-cut, and no replacement cutter was built. Compute the new text per file yourself, then gate + apply (below) exactly as if the wizard's insider had proposed it.
 
 | Op | Run by | Definition |
 |---|---|---|
