@@ -114,13 +114,21 @@ test('the room numbers are finite and nest (test < file < run), and every roster
 
 // 733 (29ft fix unit b): removeTree refuses a target outside the temp root it owns, BEFORE any delete. fs.rmSync is stubbed to throw a
 // sentinel, so a missing guard is caught by the sentinel and nothing real is ever removed.
-test('733: removeTree refuses a path outside the temp root, and never reaches the delete', () => {
-  const outside = path.parse(os.tmpdir()).root; // F735-5: the temp folder's drive root is real and never under the temp folder, wherever the checkout sits
-  const real = fs.rmSync;
-  let calls = 0;
-  try {
-    fs.rmSync = () => { calls++; throw Object.assign(new Error('REACHED the delete'), { code: 'EREACHED' }); };
-    assert.throws(() => removeTree(outside), { code: 'EREFUSED' });
-    assert.equal(calls, 0, 'the delete is never called on a refused path');
-  } finally { fs.rmSync = real; }
+// N739-1: the bait is the test's own fresh folder (repo scratchpad/, gitignored) with one marker, never a drive, home or repo root.
+// No stub: the real helper runs, so a regressed guard can at worst delete this bait, and the existence check then fails.
+test('733: removeTree refuses a path outside the temp root, and leaves it untouched', (t) => {
+  const scratch = path.join(ROOM, 'scratchpad');
+  fs.mkdirSync(scratch, { recursive: true });
+  const bait = fs.realpathSync.native(fs.mkdtempSync(path.join(scratch, 'bait-')));
+  t.after(() => {
+    assert.ok(path.dirname(bait) === fs.realpathSync.native(scratch) && path.basename(bait).startsWith('bait-'), `refusing to remove ${bait}`);
+    fs.rmSync(bait, { recursive: true, force: true });
+  });
+  const marker = path.join(bait, 'marker.txt');
+  fs.writeFileSync(marker, 'bait');
+  const rel = path.relative(fs.realpathSync.native(os.tmpdir()), bait);
+  if (!rel.startsWith('..') && !path.isAbsolute(rel)) { t.skip('the checkout sits under the temp folder, so no bait outside the owned root exists here'); return; }
+  assert.throws(() => removeTree(bait), { code: 'EREFUSED' });
+  assert.ok(fs.existsSync(bait), 'the refused folder still exists');
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'bait', 'its marker is untouched');
 });

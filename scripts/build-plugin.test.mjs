@@ -430,13 +430,21 @@ test('fire 599 dist read: a read that comes back short is refused as changed, ne
 
 // 733 (29ft fix unit b): buildDist refuses a distRoot that is neither plugin/ nor under the temp folder, before any delete. fs.rmSync is
 // stubbed to throw a sentinel, so a missing guard stops at the sentinel and nothing is removed or copied.
-test('733: buildDist refuses a dist root outside plugin/ and the temp folder, and never reaches the delete', () => {
-  const outside = path.parse(os.tmpdir()).root; // F735-5: the temp folder's drive root is real, not plugin/, and never under the temp folder, wherever the checkout sits
-  const real = fs.rmSync;
-  let calls = 0;
-  try {
-    fs.rmSync = () => { calls++; throw Object.assign(new Error('REACHED the delete'), { code: 'EREACHED' }); };
-    assert.throws(() => buildDist(outside), { code: 'EREFUSED' });
-    assert.strictEqual(calls, 0, 'the delete is never called on a refused root');
-  } finally { fs.rmSync = real; }
+// N739-1: the bait is the test's own fresh folder (repo scratchpad/, gitignored) with one marker, never a drive, home or repo root.
+// No stub: the real helper runs, so a regressed guard can at worst delete this bait, and the existence check then fails.
+test('733: buildDist refuses a dist root outside plugin/ and the temp folder, and leaves it untouched', (t) => {
+  const scratch = path.join(repoRoot, 'scratchpad');
+  fs.mkdirSync(scratch, { recursive: true });
+  const bait = fs.realpathSync.native(fs.mkdtempSync(path.join(scratch, 'bait-')));
+  t.after(() => {
+    assert.ok(path.dirname(bait) === fs.realpathSync.native(scratch) && path.basename(bait).startsWith('bait-'), `refusing to remove ${bait}`);
+    fs.rmSync(bait, { recursive: true, force: true });
+  });
+  const marker = path.join(bait, 'marker.txt');
+  fs.writeFileSync(marker, 'bait');
+  const rel = path.relative(fs.realpathSync.native(os.tmpdir()), bait);
+  if (!rel.startsWith('..') && !path.isAbsolute(rel)) { t.skip('the checkout sits under the temp folder, so no bait outside the owned root exists here'); return; }
+  assert.throws(() => buildDist(bait), { code: 'EREFUSED' });
+  assert.ok(fs.existsSync(bait), 'the refused folder still exists');
+  assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'bait', 'its marker is untouched');
 });
