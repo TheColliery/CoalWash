@@ -1082,7 +1082,10 @@ function readStateFile(p) {
 // unaffected (neither depends on hardCeilingTokens), and the next
 // SessionStart re-gauges unconditionally and corrects it. No bump: a
 // single-turn cosmetic line, never a decision made on stale data.)
-export const STATE_SCHEMA = 1;
+// 717 (BB-474): 2. postWash changed meaning: the return is judged by the TEXT the last wash removed, per line (postWash.removed),
+// not by whole-file hashes (postWash.preHashes, dropped with preFat and postFat, which no reader used). postWash is in
+// SCHEMA_RESET_FIELDS, so a stale state resets it; an older binary reads no `removed` and so never asks (fails closed).
+export const STATE_SCHEMA = 2;
 // VERSION-SENSITIVE — reset when the stored schema is stale. Their meaning
 // changed across versions, so a value an older version wrote is not trustworthy
 // now. The crossing/edge state changed at 0m (force-dictator); `lastVerdict` is a
@@ -1729,15 +1732,41 @@ export function recordVerdict(home, projectRoot, verdict, now = Date.now(), { sc
 // runs in returns at stop_hook_active (conductor), so nothing else reads the
 // store after the cut. A rolled-back or torn run never reaches that commit and
 // records nothing. Any failure is a silent no-op (Phoenix #4).
-function currentFileHash(file) {
-  try { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { return null; }
+// 717 (BB-474): a RETURN is judged by the TEXT the last wash removed, counted per line, never by a whole-file hash. A line is
+// normalised before it is counted: trailing spaces, tabs and CR are dropped, and a line empty after that is ignored (blank
+// lines carry no removed text). The key is the first 16 hex of sha1 of the normalised line.
+export const REMOVED_LINE_CAP = 1000; // BOUND: distinct removed-line keys kept per washed file; the rest (in key order) are not tracked
+function lineKey(line) { return crypto.createHash("sha1").update(line).digest("hex").slice(0, 16); }
+export function lineCounts(text) {
+  const s = Buffer.isBuffer(text) ? text.toString("utf8") : String(text);
+  const counts = new Map();
+  for (const raw of s.split("\n")) {
+    const line = raw.replace(/[ \t\r]+$/, "");
+    if (!line) continue;
+    const k = lineKey(line);
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  return counts;
 }
-// 711 (F708-1): THE ONE RETURN CHECK, read-only. A RETURN is a washed file back at its own pre-wash bytes, judged by content
-// hash. The conductor's Stop runs it once, before any delivery that could run a pass. The arms never judge a return, and
-// they never drop the episode: growth leaves postWash standing, so bytes that come back later still read as a return.
+// 717: the removed text of one washed file: each key whose count the wash LOWERED, mapped to its post-wash count. A return is
+// a count above that value: the removed occurrence itself is back.
+function removedKeys(preCounts, postCounts) {
+  const out = {};
+  const keys = [...preCounts.keys()].filter((k) => preCounts.get(k) > (postCounts.get(k) || 0)).sort().slice(0, REMOVED_LINE_CAP);
+  for (const k of keys) out[k] = postCounts.get(k) || 0;
+  return out;
+}
+// 711/717: THE ONE RETURN CHECK, read-only. The conductor's Stop runs it once, before any delivery that could run a pass. The
+// arms never judge a return, and they never drop the episode. Growth that brings none of the removed text back is not a return.
 export function returnMatches(proj) {
-  const pre = (proj && proj.postWash && proj.postWash.preHashes && typeof proj.postWash.preHashes === "object") ? proj.postWash.preHashes : {};
-  return Object.keys(pre).some((f) => currentFileHash(f) === pre[f]);
+  const removed = (proj && proj.postWash && proj.postWash.removed && typeof proj.postWash.removed === "object") ? proj.postWash.removed : {};
+  for (const file of Object.keys(removed)) {
+    let cur;
+    try { cur = lineCounts(fs.readFileSync(file)); } catch { continue; }
+    const want = removed[file];
+    for (const k of Object.keys(want)) if ((cur.get(k) || 0) > Number(want[k])) return true;
+  }
+  return false;
 }
 // 711: a return that finds no crossing pending is armed here, so the Stop delivery is the same path as any crossing. Only an
 // OBESE or FULL band can deliver a pass or an ask; a LEAN store arms nothing and stays silent.
@@ -1758,7 +1787,7 @@ export function markReturnAsked(home, projectRoot) {
     return saveState(proj, projectRoot, home);
   } catch { return false; }
 }
-export function recordPostWash(home, projectRoot, preHashes = {}) {
+export function recordPostWash(home, projectRoot, preCounts = {}) {
   try {
     const proj = loadState(projectRoot, home);
     const lv = (proj.lastVerdict && typeof proj.lastVerdict === 'object') ? proj.lastVerdict : null;
@@ -1769,14 +1798,20 @@ export function recordPostWash(home, projectRoot, preHashes = {}) {
     lv.alwaysLoadedBytes = Math.round(postBytes);
     // The watermark only ever LOWERS here (a wash removes text); a rise is never recorded.
     const hasWatermark = proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat));
-    const preFat = hasWatermark ? Math.round(Number(proj.lastObeseFat)) : null;
     if (hasWatermark) {
       const removedBytes = Math.max(0, preBytes - postBytes);
       const cutTokens = tokensEstFromBytes(removedBytes);
       proj.lastObeseFat = Math.max(0, Math.round(Number(proj.lastObeseFat) - cutTokens));
     }
-    // 699: the episode this commit made. Its preFat is the level a later look must come back to for a RETURN.
-    proj.postWash = { at: Date.now(), preFat, postFat: hasWatermark ? proj.lastObeseFat : null, preHashes: { ...preHashes } };
+    // 717: the episode this commit made. The removed text of each washed file is what a later look must find back for a RETURN.
+    const removed = {};
+    for (const p of Object.keys(preCounts)) {
+      let post;
+      try { post = lineCounts(fs.readFileSync(p)); } catch { post = new Map(); } // a file the wash deleted left no text behind
+      const keys = removedKeys(preCounts[p], post);
+      if (Object.keys(keys).length) removed[path.resolve(p)] = keys;
+    }
+    proj.postWash = { at: Date.now(), removed };
     delete proj.returnAsk; // a new wash replaces any pending return
     return saveState(proj, projectRoot, home);
   } catch { return false; }
@@ -1827,11 +1862,11 @@ export function acknowledgeRestore(home, projectRoot, bytes, original = null) {
     const proj = loadState(projectRoot, home);
     // 711 (F703-1): the bin door hands back the wash's own text, so the restored file leaves the episode. An episode with no
     // washed file left is closed, so later growth is never read as a return.
-    if (proj.postWash && proj.postWash.preHashes && original) {
+    if (proj.postWash && proj.postWash.removed && original) {
       const want = path.resolve(String(original));
-      const pre = { ...proj.postWash.preHashes };
-      for (const k of Object.keys(pre)) if (path.resolve(k) === want) delete pre[k];
-      if (Object.keys(pre).length) proj.postWash = { ...proj.postWash, preHashes: pre };
+      const rem = {};
+      for (const k of Object.keys(proj.postWash.removed)) if (path.resolve(k) !== want) rem[k] = proj.postWash.removed[k];
+      if (Object.keys(rem).length) proj.postWash = { ...proj.postWash, removed: rem };
       else { delete proj.postWash; delete proj.returnAsk; }
     }
     if (proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat))) {

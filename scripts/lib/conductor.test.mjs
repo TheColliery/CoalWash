@@ -98,7 +98,8 @@ function projStatePath(home, proj) {
   return path.join(home, '.claude', 'projects', slug, 'coalwash', 'state.json');
 }
 function seedState(home, proj, projState, opts = {}) {
-  const schema = Object.prototype.hasOwnProperty.call(opts, 'stateSchema') ? opts.stateSchema : 1;
+  // 717: the current stored schema (caliper STATE_SCHEMA = 2); a fixture that seeds 1 models a stale state the binary resets.
+  const schema = Object.prototype.hasOwnProperty.call(opts, 'stateSchema') ? opts.stateSchema : 2;
   if (schema === undefined) {
     // Pass { stateSchema: undefined } to model a genuinely OLD, PRE-RELOCATION
     // store at the OLD-ROOT path (no schema) — SessionStart's first loadState
@@ -817,7 +818,7 @@ test('rc.2 cross-version un-strand: an OLD-state store carrying a CONSUMED pre-0
     assertGraceful(r);
     const st = readProjState(home, proj);
     assert.ok(st.lastVerdict, `hook exited 0 but wrote no usable state (raw: ${JSON.stringify(st)})`);
-    assert.strictEqual(st.stateSchema, 1, 'the schema is stamped current at the relocated per-project file');
+    assert.strictEqual(st.stateSchema, 2, 'the schema is stamped current at the relocated per-project file');
     assert.strictEqual(fs.existsSync(path.join(home, '.claude', '.coalwash-state.json')), false, 'the legacy single-file store is drained + removed after the relocation');
     assert.strictEqual(st.leanFloorTokens, 9000, 'legacy floor bytes survive the migration untouched (harmless history — task #4 just stopped READING them)');
     assert.strictEqual(st.lastVerdict.band, 'OBESE', 'the fresh gauge re-measures and lands where the CONTENT says, not where the stranded cache said');

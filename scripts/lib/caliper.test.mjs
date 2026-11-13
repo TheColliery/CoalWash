@@ -1912,7 +1912,9 @@ test('rc.2 SCHEMA (e): the reset-list constant matches the fields actually clear
   // rc-era state simply has no watermark and starts its loop from zero — and,
   // for the CWK-081 four, has no recorded Full clean, so the capacity surface
   // routes to the ASK rather than asserting muscle. Safe direction either way.
-  assert.strictEqual(STATE_SCHEMA, 1);
+  // 717 (BB-474): 2 — postWash changed meaning (the return is judged by the removed TEXT, postWash.removed); the reset list
+  // above already carries postWash, so a stale state resets it on load. This pin moves with the bump.
+  assert.strictEqual(STATE_SCHEMA, 2);
   // every write stamps the schema (round-trip through the public write API)
   const { home, proj } = sandbox();
   try {

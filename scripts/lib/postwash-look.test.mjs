@@ -221,7 +221,8 @@ test('699 (e): a look that finds the store back at its pre-wash content marks th
 
 test('699 (f): growth past the pre-wash level re-arms with no ask marked', () => {
   const c = makeCase('growth-f');
-  const grown = MEM_ORIG + Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}
+  // growth with none of the removed text back (717 row 4): the pre-wash copies stay out, so this is not a return
+  const grown = MEM_DEDUP + Array.from({ length: DUP_N }, (_, i) => `${dupLines(i + DUP_N)}
 ${dupLines(i + DUP_N)}
 `).join('');
   const look = returnFlow(c, grown);
@@ -485,4 +486,93 @@ test('711 roster: every pass-running delivery sits behind the one return check',
   const sites = [...src.matchAll(/ask\.(obeseAutoQuick|forceAuto)\(/g)].map((m) => m.index);
   assert.ok(sites.length >= 2, `the roster finds the pass-running sites (found ${sites.length})`);
   for (const s of sites) assert.ok(s > branchAt, `a pass-running site at offset ${s} sits behind the return branch`);
+});
+
+// ---- 717 (BB-474): a store counts as returned when TEXT the last wash removed is back, whatever else changed ----
+// The wash removes the SECOND copy of every DUP line (MEM_ORIG -> MEM_DEDUP): one removed occurrence per DUP line.
+// washThenWrite717: arm, wash, write `content`, then an ATTENDED look (the ask is what the rows judge).
+function washThenWrite717(c, content) {
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, content);
+  return runHook(c, 'Stop', { attended: true });
+}
+
+// Witness 1 (row 2): a restored copy plus one added line is asked about, with the bytes unchanged.
+test('717 witness 1 (row 2): a restored copy with one line added is asked about, and washes nothing', () => {
+  const c = makeCase('w717-1');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  fs.writeFileSync(c.mem, MEM_ORIG + OTHER_NOTE);
+  const before = fs.readFileSync(c.mem, 'utf8');
+  const look = runHook(c, 'Stop', { attended: true });
+  assert.ok(look.nudge, `the copy with a line added must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the look asks; it does not run the auto-Quick pass');
+  assert.strictEqual(fs.readFileSync(c.mem, 'utf8'), before, 'the look washes nothing: the store bytes are unchanged');
+});
+
+// Witness 2 (row 4): a file that merely grew, with none of the removed text back, is NOT asked, and behaves as today.
+test('717 witness 2 (row 4): a file that merely grew, with none of the removed text back, is not asked', () => {
+  const c = makeCase('w717-2');
+  const look = returnFlow(c, growFresh());
+  assert.ok(look.nudge, 'the growth re-arms and nudges, as today');
+  assert.match(look.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'growth keeps the auto-Quick text');
+  assert.doesNotMatch(look.reason, ASK_TEXT, 'no removed text came back, so growth is not a return');
+  assert.strictEqual(stateNow(c).returnAsk, undefined, 'no return mark');
+});
+
+test('717 (row 1): the exact old copy back is asked about', () => {
+  const look = washThenWrite717(makeCase('row1'), MEM_ORIG);
+  assert.ok(look.nudge, `the exact copy must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the exact old copy is a return');
+});
+
+test('717 (row 3): only SOME of the removed text back is asked about', () => {
+  const look = washThenWrite717(makeCase('row3'), MEM_DEDUP + Array.from({ length: 5 }, (_, i) => dupLines(i) + '\n').join(''));
+  assert.ok(look.nudge, `some removed text back must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'five removed lines back is a return');
+});
+
+test('717 (row 5): removed text typed back by hand is asked about', () => {
+  const look = washThenWrite717(makeCase('row5'), MEM_DEDUP + dupLines(7) + '\n');
+  assert.ok(look.nudge, `one removed line typed back must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the typed-back removed line is a return');
+});
+
+test('717 (row 6): a removed duplicate whose other copy stayed is not asked while nothing changed, and is asked once its occurrence is back', () => {
+  const c = makeCase('row6');
+  armAndConsume(c);
+  const w = applyPlan(plan(c, [dedupAction(c)]), opts(c));
+  assert.strictEqual(w.ok, true, w.error);
+  const quiet1 = runHook(c, 'Stop', { attended: true });
+  const quiet2 = runHook(c, 'Stop', { attended: true });
+  assert.doesNotMatch(quiet1.reason, ASK_TEXT, 'an untouched store whose duplicate went is not asked about');
+  assert.doesNotMatch(quiet2.reason, ASK_TEXT, 'and it is never asked about on a later look');
+  fs.writeFileSync(c.mem, MEM_DEDUP + dupLines(0) + '\n'); // the removed occurrence itself comes back
+  const back = runHook(c, 'Stop', { attended: true });
+  assert.ok(back.nudge, `the removed occurrence back must be asked about; got stdout: ${back.out.slice(0, 200)}`);
+  assert.match(back.reason, ASK_TEXT, 'the removed occurrence back is a return');
+});
+
+// Row 7: line endings and trailing blanks changed, the text the same: asked. Normalised: CRLF and trailing spaces/tabs per line.
+test('717 (row 7): removed text back with line endings and trailing blanks changed is asked about', () => {
+  const look = washThenWrite717(makeCase('row7'), MEM_ORIG.replace(/\n/g, '  \r\n'));
+  assert.ok(look.nudge, `the same text with other line endings must be asked about; got stdout: ${look.out.slice(0, 200)}`);
+  assert.match(look.reason, ASK_TEXT, 'the normalised text is the removed text back');
+});
+
+test('717 (row 8): after "leave it" the same return is not asked again, and a later growth is ordinary', () => {
+  const c = makeCase('row8');
+  const first = washThenWrite717(c, MEM_ORIG);
+  assert.match(first.reason, ASK_TEXT, 'precondition: the return was asked');
+  calNs.answerReturnLeave(c.home, c.proj);
+  const again = runHook(c, 'Stop', { attended: true });
+  assert.strictEqual(again.out, '', 'the same copy is not asked about again after leave it');
+  fs.writeFileSync(c.mem, MEM_ORIG + growFresh().slice(MEM_DEDUP.length)); // growth past the leave-it plateau (the 132 new pairs alone sit under it)
+  const grow = runHook(c, 'Stop', { attended: true });
+  assert.ok(grow.nudge, 'later growth nudges, as ordinary growth does');
+  assert.match(grow.reason, /standing config authorizes the free mechanical Quick pass NOW/, 'later growth gets the auto-Quick text');
+  assert.doesNotMatch(grow.reason, ASK_TEXT, 'and it is not a return');
 });

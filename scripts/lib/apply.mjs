@@ -89,7 +89,7 @@ import { TIER1_KEEP_ALL_MS } from './retention.mjs'; // the keep-all floor, for 
 // from the session gauge's cached verdict (caliper state; zero new I/O
 // beyond one small state read). caliper imports only config-load/jsonc, so
 // this adds no module cycle.
-import { loadState, markFullClean, recordPostWash } from './caliper.mjs';
+import { loadState, markFullClean, recordPostWash, lineCounts } from './caliper.mjs';
 // Wikilink-orphan advisory (the git filter-branch cross-reference lesson):
 // ONE reference-detection implementation, shared with RE-TIER — never
 // duplicated. NOTE the same deliberate module-cycle shape as keeps.mjs/
@@ -1564,20 +1564,20 @@ export function applyPlan(plan, opts = {}) {
         return { ok: false, flagged, error: `snapshot folder: ${snapDir} already exists or cannot be created (${e && e.code}) — refusing before the first snapshot byte; CoalWash writes a snapshot only into a folder it has just created` };
       }
       const manifest = [];
-      const preHashes = {}; // 702: the pre-wash content hash of each washed file, read from its snapshot copy
+      const preCounts = {}; // 717: the pre-wash line counts of each washed file, read from its snapshot copy (caliper lineCounts)
       let n = 0;
       for (const a of actionable) {
         if (a.type === 'create') continue; // nothing to snapshot
         const snapName = `f${n++}`;
         // CWK-137 F-8: the one re-read of a plan target NOT routed through the bounded read, on purpose. It is a kernel-side copy
-        // (no JS buffer holds the bytes), and its result is judged by `verifySnapshot` a few lines below, which reads BOTH sides
+        // (the copy itself is kernel-side; the line counts read below are a second read of that same copy, 717), and its result is judged by `verifySnapshot` a few lines below, which reads BOTH sides
         // bounded at MAX_DOC_BYTES: a target that grew past the staging bound since staging is refused there
         // ("unverifiable: ... over-bound") before any mutation. Routing the copy through a buffered read would only add a second
         // bounded read and replace this copy's durability path. Named in the census as the one RESIDUAL_REREAD member.
         fs.copyFileSync(a.phys, path.join(snapDir, snapName));
         const fd = fs.openSync(path.join(snapDir, snapName), 'r+');
         try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-        preHashes[a.phys] = crypto.createHash('sha256').update(fs.readFileSync(path.join(snapDir, snapName))).digest('hex');
+        preCounts[a.phys] = lineCounts(fs.readFileSync(path.join(snapDir, snapName)));
         manifest.push({ snap: snapName, original: a.phys });
       }
       writeDurable(path.join(snapDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
@@ -1723,7 +1723,7 @@ export function applyPlan(plan, opts = {}) {
       committed = true;
       // 29fd: the only place a wash records its post-wash reading (caliper
       // recordPostWash). A rolled-back or torn run never reaches this line.
-      recordPostWash(home, projectRoot, preHashes);
+      recordPostWash(home, projectRoot, preCounts);
       fence('removing the committed journal', `every step landed and the commit record was written; the committed journal stays on disk unless another run has since written its own over it (the next recoverDangling clears a committed one), and the post-commit housekeeping (old-snapshot retention, the bin recovery copies, the Full-clean record) was skipped; the snapshot ${snapDir} still holds every original`);
       try { fs.rmSync(journalPath, { force: true }); } catch {}
       fence('the post-commit snapshot retention');
