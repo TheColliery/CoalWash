@@ -342,7 +342,7 @@ export function linesFromFile(file) {
   return out;
 }
 
-const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | restore --from <file> | return-leave | writeguard-list [--platform antigravity] | writeguard-restore <snapName> | writeguard-restore --from <file> [--platform antigravity] [--out <file>] | anchor-diff <path> | anchor-diff --from <file> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--to <dir> | --to-file <file>] | retier-scan [--json] | retier-run | dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>] | estate-evidence --flags <file> | estate-evidence --bill | config-status [--json]';
+const USAGE = 'usage: node scripts/lib/cli.mjs gauge [--json] | restore <id> | restore --from <file> | return-leave | writeguard-list [--platform antigravity] | writeguard-restore <snapName> | writeguard-restore --from <file> [--platform antigravity] [--out <file>] | anchor-diff <path> | anchor-diff --from <file> [--json] | estate [--json] | estate-scan [--session <id>] | estate-run [--session <id>] | estate-search <query> | estate-restore <sessionId> [--generation <N>] [--to <dir> | --to-file <file>] | retier-scan [--json] | retier-run | dig-gauge <path...> | dig-gauge --from <file> [--json] [--session <id>] | estate-evidence --flags <file> | estate-evidence --bill | config-status [--json]';
 
 // UMB-133 — the READ-ONLY report for BOTH holes: was the config actually read
 // from a LEGACY path, and is there a `.coalwash.json` sitting somewhere this
@@ -781,9 +781,20 @@ function main() {
       const tombstones = collectTombstones({ projectRoot, home });
       let toValue = argAfter(args, '--to');
       if (args.includes('--to-file')) toValue = lineFromFile(argAfter(args, '--to-file'), null); // 653: the folder comes from a file the agent wrote
-      const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: toValue, tombstones });
+      // 29gt fire 750: --generation N restores an earlier copy a re-archive kept; without it, the newest copy.
+      let generation = null;
+      if (args.includes('--generation')) {
+        const g = argAfter(args, '--generation');
+        if (!g || !/^[1-9][0-9]{0,5}$/.test(g)) { console.error(`estate-restore: --generation takes a whole number from 1 up\n${USAGE}`); process.exitCode = 1; return; }
+        generation = Number(g);
+      }
+      const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: toValue, generation, tombstones });
       if (!r.ok) { console.error(`estate-restore: ${r.error}`); process.exitCode = 1; return; }
-      console.log(`[CoalWash] restored ${r.files.length} file(s) of session ${sessionId} to ${r.dir} — byte-exact originals; nothing written into the live CC tree${toValue ? ' beyond your --to choice' : ''}`);
+      const which = r.generation ? `generation ${r.generation} (an earlier copy, kept when a later archive of this session was not a superset of it)` : 'the newest archived copy';
+      console.log(`[CoalWash] restored ${which} of session ${sessionId}: ${r.files.length} file(s) to ${r.dir} — byte-exact copies of what was archived; nothing written into the live CC tree${toValue ? ' beyond your --to choice' : ''}`);
+      const others = (r.generations || []).filter((n) => n !== r.generation);
+      if (others.length) console.log(`  other copies kept: ${r.generation ? 'the newest (no --generation), ' : ''}generation ${others.join(', ')} — restore one with: cli.mjs estate-restore ${sessionId} --generation <N>`);
+      else if (r.generation) console.log(`  other copies kept: the newest (restore it without --generation)`);
       for (const f of r.files) console.log(`  ${escapeRawControls(String(f.rel))} (${f.bytes} bytes)`); // 29n F472-1: the archive manifest's path is data
       // #58 deletion-unaware time-travel restore: label recovered content that
       // overlaps an adjudicated/cut tombstone — advisory, the restore stands.

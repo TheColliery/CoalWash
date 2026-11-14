@@ -78,6 +78,14 @@ import { escapeRawControls } from './receipt.mjs'; // 29n F470-a: the room's pri
 export const ESTATE_ARCHIVE_DIRNAME = 'estate-archive';
 export const ESTATE_INDEX_NAME = 'index.jsonl';
 const DEATH_LOG_NAME = 'death.log'; // one-flock with tailings.mjs's certificate log
+// 29gt fire 750 (main's ruling: no replace may drop a byte the user once had). A re-archive replaces `<rel>.gz` only when the old
+// copy's bytes are an exact prefix of the new source; otherwise the old copy is kept beside it as `<rel>.gz.gen<N>`, one N per
+// re-archive of the session. The name ends in `.gen<N>`, not `.gz`, so an install older than this layout never collects it as a
+// current copy (its restore matches `*.gz` only) and never writes over it (it writes `<rel>.gz` only).
+const GEN_RE = /\.gz\.gen([1-9][0-9]{0,5})$/;
+// Index rows carry rowSchema 2 from this layout on; a row without it is an older row and reads as before. A re-archive that kept
+// a generation writes `replacedGeneration: N` on its new row, so search can name the row before it as generation N.
+export const ESTATE_ROW_SCHEMA = 2;
 const DAY_MS = 86400000;
 // ~est display ratio for "MB after" on the bill — jsonl compresses ~10:1
 // (blueprint §19's own figure). A display heuristic, never a promise.
@@ -463,7 +471,7 @@ export function buildIndexRow({ sessionId, projectSlug, transcriptBuf, totalByte
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .slice(0, TOP_ENTITIES_MAX)
     .map(([tok]) => tok);
-  const row = { sessionId, projectSlug, startISO, endISO, bytes: totalBytes, msgCount, firstUserLine, topEntities, archivedAt: new Date(now).toISOString() };
+  const row = { sessionId, projectSlug, startISO, endISO, bytes: totalBytes, msgCount, firstUserLine, topEntities, archivedAt: new Date(now).toISOString(), rowSchema: ESTATE_ROW_SCHEMA };
   if (cold) row.cold = true;
   return row;
 }
@@ -534,6 +542,8 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   const fail = (reason) => stolen(`removing the partial archive (after: ${reason})`, notDeleted()) || (cleanupPartial(), { ok: false, reason });
   let transcriptBuf = null;
   const originals = [];
+  let genN = null; // the generation number this re-archive gives every file it keeps (one N per session per run)
+  const kept = [];
   // What the listing already proves: at the largest compressed size a restore takes, these sizes still could not come back, so nothing is read
   // or gzipped. The check after the copies decides the rest.
   const listedWhy = restoreBoundReason(sess.files.map((f) => ({ gzBytes: bounds.maxGzBytes, inflatedBytes: f.bytes })), bounds);
@@ -563,6 +573,23 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       const robbedGz = stolen(`the archive copy of ${f.rel}`, notDeleted());
       if (robbedGz) return robbedGz;
       fs.mkdirSync(path.dirname(dest), { recursive: true });
+      // 29gt fire 750: an earlier archive of this file is replaced only when its bytes are an exact prefix of the new source;
+      // otherwise it is kept as a generation first, written with 'wx' and read back before the new copy goes over it.
+      const prior = priorArchive(dest, buf, bounds);
+      if (prior.refuse) return fail(`${prior.refuse}: ${f.rel} — session skipped, originals kept`);
+      if (prior.keep) {
+        if (genN === null) genN = nextGeneration(destBase, sess.id);
+        const genPath = `${dest}.gen${genN}`;
+        // genPath is dest's own name plus `.gen<N>`, in the folder the containment check above already resolved, so it needs no
+        // second root check. Nothing may already stand at it: a planted link is refused, never followed (Windows' create-new
+        // open follows a dangling reparse point), and so is an unreadable entry.
+        let standing = true;
+        try { fs.lstatSync(genPath); } catch (e) { if (e && e.code === 'ENOENT') standing = false; }
+        if (standing) return fail(`something already stands at the generation name for ${f.rel} — session skipped, originals kept`);
+        writeExclusive(genPath, prior.gz);
+        if (!fs.readFileSync(genPath).equals(prior.gz)) return fail(`the kept generation of ${f.rel} does not read back — session skipped, originals kept`);
+        kept.push({ rel: f.rel, generation: genN });
+      }
       writeDurable(dest, gz); // H4: fsync the .gz CONTENT (this tier keeps no snapshot)
       written.push(dest);
       const back = zlib.gunzipSync(fs.readFileSync(dest), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
@@ -650,13 +677,67 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   }
 
   const row = buildIndexRow({ sessionId: sess.id, projectSlug: slug, transcriptBuf, totalBytes: sess.bytes, now, cold });
+  if (genN !== null) row.replacedGeneration = genN;
   if (cold) {
     const robbedCert = stolen('the death-log record', `${afterDeletes}; the death-log record and the index row were not written`);
     if (robbedCert) return robbedCert;
     const ageDays = Math.round((now - sess.newestMtimeMs) / DAY_MS);
     appendDeathCert(archiveDir, slug, `${new Date(now).toISOString()} destroyed-cold ${sess.id} (age ${ageDays}d, ${sess.files.length} file(s), ${sess.bytes} bytes — archived+verified first)`);
   }
-  return { ok: true, deleted, deleteFailed, unpruned, files: originals.length, bytes: sess.bytes, row };
+  return { ok: true, deleted, deleteFailed, unpruned, files: originals.length, bytes: sess.bytes, row, generation: genN, kept };
+}
+
+// 29gt fire 750. The earlier archive at `dest`, judged against the new source `buf` by CONTENT: the old copy's decompressed bytes
+// must equal the first bytes of the new source (never size, count, mtime or date alone). Returns {} when there is no earlier copy or
+// it is an exact prefix (the replace drops nothing), { keep: true, gz } when it must be kept as a generation, { refuse } when it
+// cannot be judged safely. A copy that will not decompress is KEPT (never judged a prefix): nothing unreadable is ever replaced.
+function priorArchive(dest, buf, bounds) {
+  let st;
+  try { st = fs.lstatSync(dest); } catch (e) { if (e && e.code === 'ENOENT') return {}; return { refuse: `the earlier archive could not be read (${e && e.code})` }; }
+  if (!st.isFile()) return { refuse: 'the earlier archive is not a regular file' };
+  const got = readArchiveHandle(dest, bounds.maxGzBytes);
+  if (got.notFile) return { refuse: 'the earlier archive is not a regular file' };
+  if (got.over !== undefined || got.grew !== undefined) return { refuse: 'the earlier archive is over the restore bound or changed while it was read' };
+  let old;
+  try { old = zlib.gunzipSync(got.buf, { maxOutputLength: Math.max(1, buf.length) }); } catch { return { keep: true, gz: got.buf }; } // longer than the new source, or damaged
+  if (old.length <= buf.length && buf.subarray(0, old.length).equals(old)) return {};
+  return { keep: true, gz: got.buf };
+}
+// The session's kept generations, from the names alone: Map N -> [{ gzPath, rel }] (rel = the archived file's original rel).
+// Files directly in the slug folder named `<sid>.*.gz.gen<N>`, and files under `<sid>/` named `*.gz.gen<N>`.
+function sessionGenerations(slugDir, sessionId) {
+  const gens = new Map();
+  const add = (n, gzPath, rel) => { if (!gens.has(n)) gens.set(n, []); gens.get(n).push({ gzPath, rel }); };
+  let names;
+  try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { return gens; }
+  for (const d of names) {
+    const m = GEN_RE.exec(d.name);
+    if (d.isFile() && m && d.name.startsWith(`${sessionId}.`)) add(Number(m[1]), path.join(slugDir, d.name), d.name.slice(0, m.index));
+    else if (d.isDirectory() && d.name === sessionId) {
+      const walk = (dir, relBase) => {
+        let subs;
+        try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const s of subs) {
+          const p = path.join(dir, s.name);
+          if (s.isDirectory()) { walk(p, path.join(relBase, s.name)); continue; }
+          const g = GEN_RE.exec(s.name);
+          if (s.isFile() && g) add(Number(g[1]), p, path.join(relBase, s.name.slice(0, g.index)));
+        }
+      };
+      walk(path.join(slugDir, d.name), sessionId);
+    }
+  }
+  return gens;
+}
+function nextGeneration(slugDir, sessionId) {
+  const gens = sessionGenerations(slugDir, sessionId);
+  return gens.size ? Math.max(...gens.keys()) + 1 : 1;
+}
+// Create `p` only if it does not exist ('wx'), write and fsync it; an existing file is never written over (EEXIST throws).
+function writeExclusive(p, data) {
+  const fd = fs.openSync(p, 'wx', 0o600);
+  try { fs.writeSync(fd, data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fsyncDirBestEffort(path.dirname(p));
 }
 
 // Remove now-EMPTY directories bottom-up; push the rel path (from `base`) of any
@@ -787,13 +868,13 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       if (s.state !== 'own') {
         res.ok = false; res.robbed = 'global'; res.lockLost = s.state === 'unreadable' ? 'unreadable' : 'stolen';
         res.error = `${lockLostHead(s, { run: 'ULTRA run', file: globalLockPath(home), where: `the index row of session ${sess.id}`, after: 'with no clean-up' })} The session was archived and verified and its originals deleted; its index row was not appended (estate-restore reads the archive itself, so it stays restorable)`;
-        res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned });
+        res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept });
         res.bytesFreed += r.bytes;
         break;
       }
       if (c.cfg.indexEnabled && !appendIndexRow(archiveDir, r.row)) res.failed.push({ id: sess.id, reason: 'index append failed (bytes archived + originals deleted — restore unaffected)' });
       else if (c.cfg.indexEnabled) res.indexRows++;
-      res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned });
+      res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept });
       res.bytesFreed += r.bytes;
     }
     res.budgetReached = res.budgetDeferred > 0;
@@ -821,6 +902,8 @@ export function runEstateReport(res) {
   // #56: a session whose <sid>/ still held un-enumerated files was archived +
   // its container LEFT in place (never rm -rf'd) — surface the survivors.
   for (const a of res.archived) {
+    // 29gt fire 750: a re-archive that found an earlier copy it could not replace without dropping bytes kept that copy.
+    if (Number.isInteger(a.generation)) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived copy was not a prefix of this one, so it was kept as generation ${a.generation} (restore it with: cli.mjs estate-restore ${escapeRawControls(String(a.id))} --generation ${a.generation})`);
     if (a.unpruned && a.unpruned.length) lines.push(`  KEPT-IN-PLACE ${escapeRawControls(String(a.id))}: ${a.unpruned.length} un-enumerated file(s) under <sid>/ left intact (not archived — appeared post-listing / walk-capped): ${a.unpruned.slice(0, 5).map((n) => escapeRawControls(String(n))).join(', ')}${a.unpruned.length > 5 ? ', …' : ''}`);
   }
   if (res.coldListed.length) {
@@ -918,11 +1001,13 @@ export function searchIndex(query, { archiveDir, tombstones } = {}) {
   if (!q) return [];
   let text;
   try { text = fs.readFileSync(path.join(archiveDir, ESTATE_INDEX_NAME), 'utf8'); } catch { return []; }
-  const out = [];
+  const rows = [];
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
-    let row;
-    try { row = JSON.parse(line); } catch { continue; }
+    try { const row = JSON.parse(line); if (row && typeof row === 'object') rows.push(row); } catch { continue; }
+  }
+  const out = [];
+  for (const row of currentRows(rows)) {
     const hay = [row.sessionId, row.projectSlug, row.firstUserLine, ...(Array.isArray(row.topEntities) ? row.topEntities : [])]
       .filter((v) => typeof v === 'string').join(' ').toLowerCase();
     if (hay.includes(q)) {
@@ -934,12 +1019,38 @@ export function searchIndex(query, { archiveDir, tombstones } = {}) {
   return out;
 }
 
+// 29gt fire 750 (the LOW at the index append): an archived session gets one row per archive, so a session archived again had
+// several rows, the earlier ones describing a copy since replaced. One row per session (keyed by sessionId and projectSlug, in file
+// order): the last row is the current copy; an earlier row is kept only when the row after it says it replaced a generation
+// (`replacedGeneration: N`), and is then marked `generation: N`; any other earlier row described a copy that is a prefix of a later
+// one (or an older install's row) and is dropped. RE-TIER's dig rows (`retier: true`) and rows without a string sessionId pass through.
+export function currentRows(rows) {
+  const groups = new Map();
+  const passthrough = [];
+  rows.forEach((row, i) => {
+    if (row.retier === true || typeof row.sessionId !== 'string') { passthrough.push([i, row]); return; }
+    const key = `${row.sessionId}\u0000${typeof row.projectSlug === 'string' ? row.projectSlug : ''}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push([i, row]);
+  });
+  const keep = [...passthrough];
+  for (const g of groups.values()) {
+    for (let k = 0; k < g.length; k++) {
+      const [i, row] = g[k];
+      if (k === g.length - 1) { keep.push([i, row]); continue; }
+      const next = g[k + 1][1].replacedGeneration;
+      if (Number.isInteger(next) && next >= 1) keep.push([i, { ...row, generation: next }]);
+    }
+  }
+  return keep.sort((a, b) => a[0] - b[0]).map(([, row]) => row);
+}
+
 export function searchLines(rows, { hasDeathLog = false } = {}) {
   if (!rows.length) return '[CoalWash] estate-search: no match in the archive index.';
   return rows.map((r) => {
     // 29n F470-a: every index-derived field is escaped before it is printed (a cloned repo's index reaches this line).
     const show = (v) => escapeRawControls(String(v));
-    let line = `${show(r.sessionId)}  ${r.projectSlug ? show(r.projectSlug) : '?'}  ${r.startISO ? show(r.startISO) : '?'}..${r.endISO ? show(r.endISO) : '?'}  ${mb(r.bytes)}  ${Number.isFinite(r.msgCount) ? r.msgCount : show(r.msgCount ?? '?')} msg${r.cold ? '  [cold-deleted]' : ''}\n    ${escapeRawControls(String(r.firstUserLine || '').slice(0, 160)) || '(no first user line)'}`;
+    let line = `${show(r.sessionId)}  ${r.projectSlug ? show(r.projectSlug) : '?'}  ${r.startISO ? show(r.startISO) : '?'}..${r.endISO ? show(r.endISO) : '?'}  ${mb(r.bytes)}  ${Number.isFinite(r.msgCount) ? r.msgCount : show(r.msgCount ?? '?')} msg${r.cold ? '  [cold-deleted]' : ''}${Number.isInteger(r.generation) ? `  [earlier copy: generation ${r.generation} — estate-restore ${show(r.sessionId)} --generation ${r.generation}]` : ''}\n    ${escapeRawControls(String(r.firstUserLine || '').slice(0, 160)) || '(no first user line)'}`;
     if (Array.isArray(r.laterRemoved) && r.laterRemoved.length) line += `\n    ${tombstoneSignal(r.laterRemoved, hasDeathLog)}`;
     return line;
   }).join('\n');
@@ -1040,14 +1151,21 @@ function readArchiveHandle(gzPath, bound) {
 // CC's live tree unless an explicit --to points there (the default tmpdir
 // guarantees it). Scans the archive dir itself (not the index), so a session
 // archived without an index row still restores.
-export function restoreSession(sessionId, { archiveDir, to = null, tombstones, sessionCeilBytes, bounds = RESTORE_BOUNDS, tombstoneWindowBytes = TOMBSTONE_WINDOW_BYTES } = {}) { // sessionCeilBytes and bounds: the test seams for the bounds
+// 29gt fire 750: `generation` (an integer >= 1) restores that kept generation; absent, the newest copy.
+export function restoreSession(sessionId, opts = {}) {
+  return restoreSessionInner(sessionId, opts);
+}
+function restoreSessionInner(sessionId, { archiveDir, to = null, generation = null, tombstones, sessionCeilBytes, bounds = RESTORE_BOUNDS, tombstoneWindowBytes = TOMBSTONE_WINDOW_BYTES } = {}) { // sessionCeilBytes and bounds: the test seams for the bounds
   const B = sessionCeilBytes === undefined ? bounds : { ...bounds, sessionCeilBytes };
   if (!isBareId(sessionId)) return { ok: false, error: `not a bare session id: '${sessionId}'` };
+  if (generation !== null && generation !== undefined && !(Number.isInteger(generation) && generation >= 1)) return { ok: false, error: `--generation takes a whole number from 1 up, not '${generation}'` };
+  const wantGen = generation === null || generation === undefined ? null : generation;
   let slugs;
   try { slugs = fs.readdirSync(archiveDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch {
     return { ok: false, error: `archive dir not readable: ${archiveDir}` };
   }
-  const sources = []; // { gzPath, rel } — rel is the ORIGINAL rel (`.gz` stripped)
+  let sources = []; // { gzPath, rel } — rel is the ORIGINAL rel (`.gz` stripped)
+  let gens = new Map();
   for (const slug of slugs) {
     const slugDir = path.join(archiveDir, slug);
     let names;
@@ -1068,7 +1186,16 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
         collect(path.join(slugDir, d.name), sessionId);
       }
     }
-    if (sources.length) break; // a session id is unique — first slug that has it wins
+    gens = sessionGenerations(slugDir, sessionId); // `*.gz.gen<N>` never matches the `.gz` collection above
+    if (sources.length || gens.size) break; // a session id is unique — first slug that has it wins
+  }
+  const generations = [...gens.keys()].sort((a, b) => a - b);
+  const genList = generations.length ? `earlier copies kept: generation ${generations.join(', ')} — restore one with --generation <N>` : 'no earlier copies are kept';
+  if (wantGen !== null) {
+    if (!gens.has(wantGen)) return { ok: false, error: `generation ${wantGen} of session '${sessionId}' is not in the archive at ${archiveDir} (${genList})` };
+    sources = gens.get(wantGen);
+  } else if (!sources.length && generations.length) {
+    return { ok: false, error: `session '${sessionId}' has no newest archived copy in ${archiveDir}; ${genList}` };
   }
   if (!sources.length) return { ok: false, error: `session '${sessionId}' not found in the archive at ${archiveDir}` };
 
@@ -1142,5 +1269,5 @@ export function restoreSession(sessionId, { archiveDir, to = null, tombstones, s
   }
   const laterRemoved = wantTombstoneScan ? [...tombFound.values()] : [];
   // The scan result says what it covered: every byte of every restored file, in windows, with none skipped.
-  return { ok: true, dir, files, ...(laterRemoved.length ? { laterRemoved } : {}), ...(wantTombstoneScan ? { tombstoneScan: { bytes: tombBytes } } : {}) };
+  return { ok: true, dir, files, generation: wantGen, generations, ...(laterRemoved.length ? { laterRemoved } : {}), ...(wantTombstoneScan ? { tombstoneScan: { bytes: tombBytes } } : {}) };
 }
