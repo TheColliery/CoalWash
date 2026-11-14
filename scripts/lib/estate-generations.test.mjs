@@ -184,6 +184,35 @@ test('(d) estate-search lists one row per session: the newest, plus one marked r
   assert.strictEqual(searchIndex('CW29GT-NEEDLE', { archiveDir: s2.archiveDir }).length, 1, 'search shows one row');
 });
 
+test('W752-2: a prefix re-archive that fails partway keeps the earlier archived copy restorable', (t) => {
+  const s = sandbox(t);
+  seed(s, V2);
+  run(s);
+  const before = fs.readFileSync(gzPathOf(s));
+  seed(s, V2 + line(4, 'one appended line') + '\n'); // a prefix superset: nothing is kept as a generation
+  const sess = listSessions({ projectRoot: s.proj, home: s.home }).sessions.find((x) => x.id === SID);
+  // the seam: a gzip that writes bytes that do not verify, so the run fails AFTER the new copy is written over the old name
+  const r = archiveSession(sess, { slug: ccProjectSlug(s.proj), archiveDir: s.archiveDir, gzip: () => Buffer.from('not a gzip stream') });
+  assert.strictEqual(r.ok, false);
+  assert.deepStrictEqual(genFiles(s), [], 'a prefix keeps no generation');
+  assert.ok(fs.existsSync(gzPathOf(s)) && fs.readFileSync(gzPathOf(s)).equals(before), 'the earlier archived copy is back at its name, byte for byte');
+  assert.ok(everyRestorable(s).includes(V2), "the earlier copy's bytes are restorable after the failed run");
+});
+
+test('W752-1: a damaged generation is refused naming the newest copy and only the other kept generations, said once', (t) => {
+  const s = sandbox(t);
+  reArchive(s, () => V2); // generation 1 holds ORIGINAL, the newest copy holds V2
+  const gen1 = genFiles(s)[0];
+  const bad = Buffer.from(fs.readFileSync(gen1)); bad[bad.length - 6] ^= 0xff; fs.writeFileSync(gen1, bad);
+  const r = cli(s, ['estate-restore', SID, '--generation', '1']);
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /generation 1 is damaged \(it does not decompress\), so nothing was restored from it/);
+  assert.match(r.stderr, /restore the newest copy without --generation/);
+  assert.doesNotMatch(r.stderr, /kept: generation 1\b/, 'the damaged generation is not offered back');
+  assert.strictEqual((r.stderr.match(/with --generation/g) || []).length, 0, 'no other generation is kept, so no --generation advice');
+  assert.strictEqual(restoreTo(s).text, V2, 'the newest copy it names is intact');
+});
+
 test('(e) a re-archive never deletes an earlier generation, even when it fails; deleteCold and the bands are untouched', (t) => {
   const s = sandbox(t);
   reArchive(s, () => V2);

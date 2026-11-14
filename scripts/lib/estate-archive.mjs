@@ -527,7 +527,15 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   try { fs.mkdirSync(archiveDir, { recursive: true }); rootPhys = physicalOrNull(archiveDir); } catch { /* rootPhys stays null */ }
   if (!rootPhys) return { ok: false, reason: 'archive root unresolvable — session skipped (fail-closed)' };
   const written = [];
-  const cleanupPartial = () => { for (const w of written) { try { fs.rmSync(w, { force: true }); } catch {} } };
+  // 29gw fire 753 (W752-2): a prefix replace writes the new copy over the earlier archive's own name, so a rollback that removed
+  // it would leave the archive without the earlier copy. Its bytes are held here and put back instead (writeDurable: a temp file
+  // beside it, then a rename); a copy this run created from nothing is removed as before.
+  const held = new Map();
+  const cleanupPartial = () => {
+    for (const w of written) {
+      if (held.has(w)) { try { writeDurable(w, held.get(w)); } catch {} } else { try { fs.rmSync(w, { force: true }); } catch {} }
+    }
+  };
   // THE FENCE (fire 119, 18a): the caller's global lock can be taken over once it is LOCK_STALE_MS old. Before each write
   // this re-reads it (lockState); a robbed run stops there and removes nothing, since the new holder may be archiving this same
   // session to these same paths and removing a partial copy could remove its verified one. Fire 122: only a foreign token is a
@@ -577,6 +585,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       // otherwise it is kept as a generation first, written with 'wx' and read back before the new copy goes over it.
       const prior = priorArchive(dest, buf, bounds);
       if (prior.refuse) return fail(`${prior.refuse}: ${f.rel} — session skipped, originals kept`);
+      if (prior.prefix) held.set(dest, prior.prefix);
       if (prior.keep) {
         if (genN === null) genN = nextGeneration(destBase, sess.id);
         const genPath = `${dest}.gen${genN}`;
@@ -688,7 +697,8 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
 }
 
 // 29gt fire 750. The earlier archive at `dest`, judged against the new source `buf` by CONTENT: the old copy's decompressed bytes
-// must equal the first bytes of the new source (never size, count, mtime or date alone). Returns {} when there is no earlier copy or
+// must equal the first bytes of the new source (never size, count, mtime or date alone). Returns {} when there is no earlier copy,
+// { prefix: gz } when it is an exact prefix (the replace drops nothing; its bytes are held so a rollback can put them back), or
 // it is an exact prefix (the replace drops nothing), { keep: true, gz } when it must be kept as a generation, { refuse } when it
 // cannot be judged safely. A copy that will not decompress is KEPT (never judged a prefix): nothing unreadable is ever replaced.
 function priorArchive(dest, buf, bounds) {
@@ -700,7 +710,7 @@ function priorArchive(dest, buf, bounds) {
   if (got.over !== undefined || got.grew !== undefined) return { refuse: 'the earlier archive is over the restore bound or changed while it was read' };
   let old;
   try { old = zlib.gunzipSync(got.buf, { maxOutputLength: Math.max(1, buf.length) }); } catch { return { keep: true, gz: got.buf }; } // longer than the new source, or damaged
-  if (old.length <= buf.length && buf.subarray(0, old.length).equals(old)) return {};
+  if (old.length <= buf.length && buf.subarray(0, old.length).equals(old)) return { prefix: got.buf }; // held for a rollback (W752-2)
   return { keep: true, gz: got.buf };
 }
 // The session's kept generations, from the names alone: Map N -> [{ gzPath, rel }] (rel = the archived file's original rel).
@@ -1206,6 +1216,7 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
   }
   const generations = [...gens.keys()].sort((a, b) => a - b);
   const genList = generations.length ? `earlier copies kept: generation ${generations.join(', ')} — restore one with --generation <N>` : 'no earlier copies are kept';
+  let hasNewest = sources.length > 0;
   if (wantGen !== null) {
     if (!gens.has(wantGen)) return { ok: false, error: `generation ${wantGen} of session '${sessionId}' is not in the archive at ${archiveDir} (${genList})` };
     sources = gens.get(wantGen);
@@ -1262,7 +1273,13 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
         }
         // 29gt fire 750: a damaged archive says so in plain words; zlib's own text follows in brackets, never alone.
         if (e && typeof e.code === 'string' && e.code.startsWith('Z_')) {
-          return { ok: false, error: `restore refused on ${s.rel}: the archived copy is damaged (it does not decompress), so nothing was restored from it. If an earlier copy is kept, restore it with --generation <N> (${genList}); otherwise use a backup of the archive folder. [zlib: ${e.message}]`, dir, files };
+          const others = generations.filter((n) => n !== wantGen);
+          const tries = [];
+          if (wantGen !== null && hasNewest) tries.push('restore the newest copy without --generation');
+          if (others.length) tries.push(`restore another kept copy with --generation <N> (kept: generation ${others.join(', ')})`);
+          tries.push('use a backup of the archive folder');
+          const what = wantGen !== null ? `generation ${wantGen} is damaged` : 'the archived copy is damaged';
+          return { ok: false, error: `restore refused on ${s.rel}: ${what} (it does not decompress), so nothing was restored from it. To get the session back: ${tries.join('; or ')}. [zlib: ${e.message}]`, dir, files };
         }
         throw e;
       }
