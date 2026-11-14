@@ -33,7 +33,7 @@ const childEnv = (dir, extra = {}, allow = []) => {
   return Object.assign(sandboxEnv(dir), extra);
 };
 // The one place every spawn of these tests goes through, so the sandbox is applied by construction.
-const spawnIn = (cwd, script, args = [], { env, allow, input } = {}) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: 30000, input, env: childEnv(cwd, env, allow) });
+const spawnIn = (cwd, script, args = [], { env, allow, input } = {}) => spawnSync(process.execPath, ['--max-old-space-size=2048', script, ...args], { cwd, encoding: 'utf8', timeout: 30000, input, env: childEnv(cwd, env, allow) });
 const made = [];
 test.after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
@@ -260,4 +260,25 @@ test('verify-release-shape.mjs: a published title holding a newline is printed e
   const lines = res.stderr.split(/\r?\n/);
   assert.equal(lines.includes(forged), false, 'the forged line never stands alone in the log');
   assert.ok(lines.some((l) => l.startsWith('verify-release-shape: TITLE MISMATCH -- intended "v1.0.0 - a fix", published "v1.0.0 - a fix\\n' + forged + '\\nx"')), res.stderr);
+});
+
+// order 2026-11-07c (2), the 07b survivor: the INTENDED title goes out through JSON.stringify too. A title can hold a double quote, and raw it would end the quoted field
+// early, so the line no longer reads back as the two titles it names.
+test('verify-release-shape.mjs: an intended title holding a double quote is printed as a JSON string on the mismatch line -- RED under 07b mutant D2', () => {
+  const dir = scratch();
+  fs.writeFileSync(path.join(dir, 'release-title.txt'), 'v1.0.0 - a "quoted" fix\n');
+  fs.writeFileSync(path.join(dir, 'release-body.md'), 'A fix.\n');
+  const res = run(dir, JSON.stringify({ name: 'v1.0.0 - a fix', body: 'A fix.' }));
+  assert.equal(res.status, 1, res.stdout + res.stderr);
+  assert.ok(res.stderr.split(/\r?\n/).includes('verify-release-shape: TITLE MISMATCH -- intended "v1.0.0 - a \\"quoted\\" fix", published "v1.0.0 - a fix"'), res.stderr);
+});
+
+// UMB3-193 round 3, item 3: the harness rail -- a spawned child carries a heap cap. The probe prints the flags the child was started with.
+test('verify-release-shape.test.mjs spawnIn: the child is started with --max-old-space-size=2048 -- RED before UMB3-193 round 3', () => {
+  const dir = scratch();
+  const probe = path.join(dir, 'exec-argv-probe.mjs');
+  fs.writeFileSync(probe, 'console.log(JSON.stringify(process.execArgv));\n');
+  const res = spawnIn(dir, probe);
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(JSON.parse(res.stdout).includes('--max-old-space-size=2048'), res.stdout);
 });
