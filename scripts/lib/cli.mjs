@@ -678,7 +678,7 @@ function main() {
       // 29gx fire 756: the generation-bound refusals this project's estate runs recorded (for /coalwash:stats STATE).
       const archiveDir = resolveArchiveDir(clampedRead(loadMergedConfig({ cwd: process.cwd(), home }), 'estate'), home);
       r.generationRefusals = readGenerationRefusals(archiveDir, ccProjectSlug(projectRoot));
-      if (r.generationRefusals.count) r.text += `\n  generation-bound refusals (this project): ${r.generationRefusals.count} since ${r.generationRefusals.since} — sessions left live because estate.maxGenerations was reached (cli.mjs estate-run names each)`;
+      if (r.generationRefusals.count) r.text += `\n  generation-bound refusals (this project): ${r.generationRefusals.count} since ${r.generationRefusals.since} — times an estate run refused a session (one per session per run) because estate.maxGenerations was reached (cli.mjs estate-run names each)`;
       if (r.generationRefusals.unreadable) r.text += `\n  generation-bound refusals: the record in ${oneLine(archiveDir)} could not be read (${r.generationRefusals.unreadable})`;
       console.log(args.includes('--json') ? JSON.stringify(r, null, 1) : r.text);
     } catch (e) {
