@@ -791,3 +791,38 @@ test('762 F5: a linked session folder in the archive refuses the session before 
   assert.match(r.failed[0].reason, /is a link or not a folder/);
   assert.ok(fs.existsSync(path.join(s.projDir, `${SID}.jsonl`)), 'the live session stays');
 });
+
+// 29gz fire 765 (L764-1): a restore writes and names its files in code-unit order of their names, whatever order the directory read
+// returns. The session holds the transcript and two files in its own folder, created b before a; sorted, the transcript comes first
+// ('.' sorts before either separator), then a.txt, then b.txt.
+function threeFileSession(s) {
+  seed(s, V2);
+  const dir = path.join(s.projDir, SID, 'tool-results');
+  fs.mkdirSync(dir, { recursive: true });
+  const aged = new Date(Date.now() - 30 * DAY);
+  for (const n of ['b.txt', 'a.txt']) { const p = path.join(dir, n); fs.writeFileSync(p, `${n} body\n`); fs.utimesSync(p, aged, aged); }
+  assert.strictEqual(run(s).archived.length, 1);
+  return { transcript: `${SID}.jsonl`, a: path.join(SID, 'tool-results', 'a.txt'), b: path.join(SID, 'tool-results', 'b.txt') };
+}
+const inOrder = (text, names) => names.map((n) => text.indexOf(n)).every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1]));
+
+test('765 L764-1: a restore lists the files it wrote in name order', (t) => {
+  const s = sandbox(t);
+  const f = threeFileSession(s);
+  const r = cli(s, ['estate-restore', SID, '--to', path.join(s.out, 'all')]);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.ok(inOrder(r.stdout, [`  ${f.transcript} (`, `  ${f.a} (`, `  ${f.b} (`]), `written list in name order:\n${r.stdout}`);
+});
+
+test('765 L764-1: a restore with damaged files names them, and the files it wrote, in name order', (t) => {
+  const s = sandbox(t);
+  const f = threeFileSession(s);
+  const slugDir = path.dirname(gzPathOf(s));
+  for (const rel of [f.transcript, f.b]) fs.writeFileSync(path.join(slugDir, `${rel}.gz`), 'these are not gzip bytes');
+  const r = cli(s, ['estate-restore', SID, '--to', path.join(s.out, 'part')]);
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /restore incomplete: .* in 2 of 3 file\(s\)/);
+  const damaged = r.stderr.slice(r.stderr.indexOf('Damaged: '));
+  assert.ok(inOrder(damaged, [`${f.transcript}, archived at`, `${f.b}, archived at`]), `Damaged list in name order:\n${r.stderr}`);
+  assert.ok(r.stderr.includes(`  ${f.a} (`) && !r.stderr.includes(`  ${f.b} (`), 'the one intact file is the one written');
+});

@@ -1368,6 +1368,9 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
     return { ok: false, error: `session '${sessionId}' has no newest archived copy in ${archiveDir}; ${genList}` };
   }
   if (!sources.length) return { ok: false, error: `session '${sessionId}' not found in the archive at ${archiveDir}` };
+  // 29gz fire 765 (L764-1; node/runtime.md section 9): the files are restored, written and named in code-unit order of their names, never
+  // in the order the directory read returned them, which differs by volume.
+  sources = [...sources].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 
   // 29gz fire 762 (lab F-1): a file of this copy that does not decompress is named and skipped, and every intact file is still written;
   // the restore then reports the copy as not whole. Nothing damaged is ever written out.
