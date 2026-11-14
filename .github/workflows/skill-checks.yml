@@ -15,6 +15,11 @@ permissions:
   contents: read
   # Hosted reports/PR comments: uncomment this, then refresh trusted-caller-blobs.
   # id-token: write
+# One run per ref: a newer run supersedes an older one. The workflow only reads and reports, so a cancelled run
+# leaves nothing half-done (the canon: one concurrency group per workflow).
+concurrency:
+  group: skill-checks-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   skills:
     uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@ba7779ad617c6444c98b6241a75bce92067e9d56
