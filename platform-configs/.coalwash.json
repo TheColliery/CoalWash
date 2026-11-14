@@ -101,6 +101,10 @@
   //   a value set in a project config is ignored.
   // indexEnabled: append a dig-index row per archived session (searchable via
   //   `cli.mjs estate-search <query>`; local file, never pushed anywhere).
+  // maxGenerations: how many earlier copies (generations) one archived session
+  //   may keep when a re-archive finds it edited, not appended to (0-1000;
+  //   0 keeps none). Past it the session is refused and left live: no kept
+  //   copy is ever deleted or merged. A project config may only lower it.
   // digCrush: ULTRA trigger #2 — the dig-gauge PRE-READ tollgate. An agent runs
   //   `cli.mjs dig-gauge --from [FILE]` BEFORE a raw transcript dig (report-only,
   //   never blocks). KNEE-GROUNDED priors (not %-of-window): the byte/4 ~est
@@ -113,7 +117,7 @@
   //   maxSessionsPerRun (25; 1-100000) · maxBytesPerRun (500 MB; 1MiB-1TiB). The
   //   loop stops at a completed session-unit boundary once either is reached
   //   (zero partial), reports N/M; run again for the rest.
-  "estate": { "compressAfterDays": 14, "purgeAfterDays": 180, "deleteCold": false, "archiveDir": "", "indexEnabled": true, "digCrush": { "singleFileTok": 35000, "pileTok": 58000, "fileCount": 6 }, "runBudget": { "maxSessionsPerRun": 25, "maxBytesPerRun": 524288000 } },
+  "estate": { "compressAfterDays": 14, "purgeAfterDays": 180, "deleteCold": false, "archiveDir": "", "indexEnabled": true, "maxGenerations": 10, "digCrush": { "singleFileTok": 35000, "pileTok": 58000, "fileCount": 6 }, "runBudget": { "maxSessionsPerRun": 25, "maxBytesPerRun": 524288000 } },
 
   // RE-TIER envelope (the wizard's FOURTH choice; wizard-only, never a
   // hook/band/BMI trigger). A +/- BAND around targetTokens, never a locked

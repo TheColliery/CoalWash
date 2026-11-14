@@ -115,6 +115,7 @@ export const CONFIG_SCHEMA = [
     deleteCold: { type: 'bool', def: false },
     archiveDir: { type: 'string', def: '' },
     indexEnabled: { type: 'bool', def: true },
+    maxGenerations: { type: 'int', min: 0, max: 1000, def: 10 },
     digCrush: { type: 'object', fields: {
       singleFileTok: { type: 'int', min: 20000, max: 200000, def: 35000 },
       pileTok: { type: 'int', min: 40000, max: 200000, def: 58000 },
@@ -124,7 +125,7 @@ export const CONFIG_SCHEMA = [
       maxSessionsPerRun: { type: 'int', min: 1, max: 100000, def: 25 },
       maxBytesPerRun: { type: 'int', min: 1048576, max: 1099511627776, def: 524288000 },
     }, def: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } },
-  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, digCrush: { singleFileTok: 35000, pileTok: 58000, fileCount: 6 }, runBudget: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/ (read from the GLOBAL config only: a project value is ignored); indexEnabled = write dig-index rows; digCrush = the dig-gauge PRE-READ crush thresholds (singleFileTok 20000-200000 / pileTok 40000-200000 / fileCount 3-50 — CRUSHING if any one holds); runBudget = the per-run ULTRA work-limit (maxSessionsPerRun 1-100000 / maxBytesPerRun 1MiB-1TiB — the session loop stops at a unit boundary once either is reached, run again for the rest) (default: {14, 180, false, "", true, {35000, 58000, 6}, {25, 524288000}})' },
+  }, def: { compressAfterDays: 14, purgeAfterDays: 180, deleteCold: false, archiveDir: '', indexEnabled: true, maxGenerations: 10, digCrush: { singleFileTok: 35000, pileTok: 58000, fileCount: 6 }, runBudget: { maxSessionsPerRun: 25, maxBytesPerRun: 524288000 } }, help: 'ULTRA estate tier (wizard-only): compressAfterDays = WARM age before a transcript is gzip-archived (copy-verify-then-delete); purgeAfterDays = COLD age (0 = never; cold is report-only unless deleteCold is explicitly true = archive-then-delete, death-certified); archiveDir = absolute path, "" = the default under ~/.claude/coal/coalwash/ (read from the GLOBAL config only: a project value is ignored); indexEnabled = write dig-index rows; maxGenerations = how many earlier copies (generations) one archived session may keep when a re-archive finds an edited, non-appended session (0-1000; 0 keeps none, so every such re-archive is refused; reaching the bound never deletes or merges a kept copy: the session is refused, left live and counted; a project value may only lower it); digCrush = the dig-gauge PRE-READ crush thresholds (singleFileTok 20000-200000 / pileTok 40000-200000 / fileCount 3-50 — CRUSHING if any one holds); runBudget = the per-run ULTRA work-limit (maxSessionsPerRun 1-100000 / maxBytesPerRun 1MiB-1TiB — the session loop stops at a unit boundary once either is reached, run again for the rest) (default: {14, 180, false, "", true, 10, {35000, 58000, 6}, {25, 524288000}})' },
 ];
 
 // 0m tombstone — "FORCE IS A DICTATOR, NO OFF SWITCH" (USER 2026-07-11:

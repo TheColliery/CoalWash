@@ -1937,12 +1937,17 @@ test('#57 EXDEV (the Claude Code #32533 class): a cross-device rename failure mi
   } finally { clean(proj); }
 });
 
+// 29gx fire 756 narrowed this pin to what it guards: the hop from the LIVE tree to the archive is copy-verify-then-delete, never a
+// rename. The archive's own commit (main's ruling: write the new copy beside the old, verify it, then rename it over) renames a staged
+// file onto a name in the SAME folder, built as a string suffix of the final path (stageBeside), so no rename crosses a device. Those
+// two sites are pinned by their exact text, and any other rename in either file fails this test.
 test('#57: the cross-device archive hop (estate-archive + retier) NEVER uses rename — copy-verify-then-delete only (an archiveDir may sit on another drive by design)', () => {
   const libDir = path.dirname(fileURLToPath(import.meta.url));
-  for (const f of ['estate-archive.mjs', 'retier.mjs']) {
-    const src = fs.readFileSync(path.join(libDir, f), 'utf8');
-    assert.ok(!src.includes('renameSync'), `${f} must not rename across a potential device boundary`);
-  }
+  assert.ok(!fs.readFileSync(path.join(libDir, 'retier.mjs'), 'utf8').includes('renameSync'), 'retier.mjs must not rename across a potential device boundary');
+  const ea = fs.readFileSync(path.join(libDir, 'estate-archive.mjs'), 'utf8');
+  const renames = ea.split(/\r?\n/).filter((l) => l.includes('renameSync')).map((l) => l.trim());
+  assert.deepStrictEqual(renames, ['fs.renameSync(o.gen.tmp, o.gen.final);', 'fs.renameSync(o.tmp, o.gz);'], 'estate-archive.mjs renames only a staged file onto its final name in the same folder (the commit)');
+  assert.ok(/const tmp = `\$\{finalPath\}\.\$\{crypto\.randomBytes\(12\)\.toString\('hex'\)\}\.\$\{STAGE_SUFFIX\}`;/.test(ea), 'a staged file is named as a suffix of its final path, so it sits in the same folder');
 });
 
 // The event identity is a CALL-SITE contract and it was broken by sweeping ONE

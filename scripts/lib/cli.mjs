@@ -93,7 +93,7 @@ import { estateReport } from './estate.mjs';
 import {
   estateUltraScan, ultraBillLine, runEstate, runEstateReport,
   searchIndex, searchLines, restoreSession, resolveArchiveDir, collectTombstones,
-  readEstateKeyResolvedState, writeEstateKeyResolvedState, namedKeeps,
+  readEstateKeyResolvedState, writeEstateKeyResolvedState, namedKeeps, readGenerationRefusals,
 } from './estate-archive.mjs';
 import { escapeRawControls } from './receipt.mjs'; // 29n F472-1: the printed-line escape for every bin- or archive-derived string
 import { retierScan, retierScanLines, runRetier, runRetierReport } from './retier.mjs';
@@ -467,12 +467,15 @@ function projectBoundHints({ ignored, estate, home }) {
     if (hit.key !== 'estate.runBudget' && !PROJECT_BOUNDED_KEYS.includes(hit.key)) continue;
     const isPurge = hit.key === 'estate.purgeAfterDays';
     const isCompress = hit.key === 'estate.compressAfterDays';
-    const used = isPurge ? estate.purgeAfterDays : isCompress ? estate.compressAfterDays : hit.key === 'estate.runBudget' ? estate.runBudget : estate.runBudget[hit.key.slice('estate.runBudget.'.length)];
+    const isMaxGen = hit.key === 'estate.maxGenerations';
+    const used = isPurge ? estate.purgeAfterDays : isCompress ? estate.compressAfterDays : isMaxGen ? estate.maxGenerations : hit.key === 'estate.runBudget' ? estate.runBudget : estate.runBudget[hit.key.slice('estate.runBudget.'.length)];
     const rule = isPurge
       ? 'a project value may only bring the cold boundary earlier (at or below your own purgeAfterDays, with 0, "never cold", counted as the highest), whether or not estate.deleteCold is true in your own config'
       : isCompress
         ? 'a project value may only keep sessions active LONGER (at or above your own compressAfterDays), whether or not estate.deleteCold is true in your own config'
-        : 'a project value may only LOWER this work limit, and only with a number the schema accepts';
+        : isMaxGen
+          ? 'a project value may only LOWER how many earlier copies a session keeps (at or below your own estate.maxGenerations), so that it refuses sooner'
+          : 'a project value may only LOWER this work limit, and only with a number the schema accepts';
     out.push(`[CoalWash] ${hit.key}: the project config (${oneLine(hit.path)}) asks for ${oneLine(JSON.stringify(hit.value))}, and that was ignored. A cloned repo ships a project config, and it must not be able to widen what an estate run archives and removes, so ${rule}. This run used ${oneLine(JSON.stringify(used))}. If you want that value, set ${hit.key} in ${oneLine(globalConfigPath(home))}.`);
   }
   return out;
@@ -672,6 +675,11 @@ function main() {
       const priorKeyResolved = readEstateKeyResolvedState(home);
       const r = estateReport({ projectRoot, home, priorKeyResolved });
       writeEstateKeyResolvedState(r.horizon.keyResolvedNow, home);
+      // 29gx fire 756: the generation-bound refusals this project's estate runs recorded (for /coalwash:stats STATE).
+      const archiveDir = resolveArchiveDir(clampedRead(loadMergedConfig({ cwd: process.cwd(), home }), 'estate'), home);
+      r.generationRefusals = readGenerationRefusals(archiveDir, ccProjectSlug(projectRoot));
+      if (r.generationRefusals.count) r.text += `\n  generation-bound refusals (this project): ${r.generationRefusals.count} since ${r.generationRefusals.since} — sessions left live because estate.maxGenerations was reached (cli.mjs estate-run names each)`;
+      if (r.generationRefusals.unreadable) r.text += `\n  generation-bound refusals: the record in ${oneLine(archiveDir)} could not be read (${r.generationRefusals.unreadable})`;
       console.log(args.includes('--json') ? JSON.stringify(r, null, 1) : r.text);
     } catch (e) {
       console.error(`estate failed: ${escapeRawControls(String(e.message))}`);

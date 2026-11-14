@@ -1070,7 +1070,8 @@ const ESTATE_FIELDS = CONFIG_SCHEMA.find((s) => s.key === 'estate').fields;
 const RUNBUDGET_FIELDS = ESTATE_FIELDS.runBudget.fields;
 const PURGE_SPEC = ESTATE_FIELDS.purgeAfterDays;
 const COMPRESS_SPEC = ESTATE_FIELDS.compressAfterDays;
-export const PROJECT_BOUNDED_KEYS = Object.freeze([...Object.keys(RUNBUDGET_FIELDS).map((f) => `estate.runBudget.${f}`), 'estate.purgeAfterDays', 'estate.compressAfterDays']);
+const MAXGEN_SPEC = ESTATE_FIELDS.maxGenerations;
+export const PROJECT_BOUNDED_KEYS = Object.freeze([...Object.keys(RUNBUDGET_FIELDS).map((f) => `estate.runBudget.${f}`), 'estate.purgeAfterDays', 'estate.compressAfterDays', 'estate.maxGenerations']);
 
 // CWK-137 D3 (head's ruling): sub-keys of an object-typed key that are read from the GLOBAL layer ONLY. Not a consent clamp
 // (SAFER_OBJECT_BOOL above has a "safer value" to fall back to; these have none) but a REACH clamp: `estate.archiveDir` names
@@ -1165,6 +1166,16 @@ function mergeObjectKey(key, globalObj, projectObj, globalUnreadable) {
       const userValue = !globalUnreadable && validateValue(COMPRESS_SPEC, g.compressAfterDays) === null ? g.compressAfterDays : COMPRESS_SPEC.def;
       if (validateValue(COMPRESS_SPEC, p.compressAfterDays) !== null || p.compressAfterDays < userValue) {
         if (!globalUnreadable && g.compressAfterDays !== undefined) merged.compressAfterDays = g.compressAfterDays; else delete merged.compressAfterDays;
+      }
+    }
+    // 29gx fire 756 (hooks-safety.md section 9, a numeric key clamped BY DIRECTION): estate.maxGenerations bounds how many earlier copies one
+    // session keeps. A HIGHER value lets more edited sessions be archived and their live originals removed, and lets a cloned repo grow the
+    // user's archive volume; a LOWER value only refuses sooner (the session stays live, nothing is deleted). So a project value is honored
+    // only when the schema accepts it AND it is <= the user's own value (their global value, else the schema default).
+    if (p.maxGenerations !== undefined) {
+      const userValue = !globalUnreadable && validateValue(MAXGEN_SPEC, g.maxGenerations) === null ? g.maxGenerations : MAXGEN_SPEC.def;
+      if (validateValue(MAXGEN_SPEC, p.maxGenerations) !== null || p.maxGenerations > userValue) {
+        if (!globalUnreadable && g.maxGenerations !== undefined) merged.maxGenerations = g.maxGenerations; else delete merged.maxGenerations;
       }
     }
   }
@@ -1321,6 +1332,7 @@ export function loadMergedConfigReport({ cwd = process.cwd(), home = os.homedir(
     }
     if (pEstate.purgeAfterDays !== undefined) dropped('estate.purgeAfterDays', pEstate.purgeAfterDays, eEstate.purgeAfterDays);
     if (pEstate.compressAfterDays !== undefined) dropped('estate.compressAfterDays', pEstate.compressAfterDays, eEstate.compressAfterDays);
+    if (pEstate.maxGenerations !== undefined) dropped('estate.maxGenerations', pEstate.maxGenerations, eEstate.maxGenerations);
   }
   return { cfg, unreadable, ignored };
 }

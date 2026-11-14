@@ -1925,7 +1925,7 @@ test('E1: loadMergedConfigReport().ignored names every project runBudget field a
     ]);
     assert.deepStrictEqual(rep.cfg.estate.runBudget, { maxSessionsPerRun: 5, maxBytesPerRun: 10485760 }, 'and the merge did drop them: the report describes what the merge did');
     assert.strictEqual(rep.cfg.estate.purgeAfterDays, 90);
-    assert.deepStrictEqual([...ConfigLoad.PROJECT_BOUNDED_KEYS], ['estate.runBudget.maxSessionsPerRun', 'estate.runBudget.maxBytesPerRun', 'estate.purgeAfterDays', 'estate.compressAfterDays'], 'the one list configure.mjs and the cli read (compressAfterDays joined it at R14 bounce 2: the old three-key list was written before F-R14-6)');
+    assert.deepStrictEqual([...ConfigLoad.PROJECT_BOUNDED_KEYS], ['estate.runBudget.maxSessionsPerRun', 'estate.runBudget.maxBytesPerRun', 'estate.purgeAfterDays', 'estate.compressAfterDays', 'estate.maxGenerations'], 'the one list configure.mjs and the cli read (compressAfterDays joined it at R14 bounce 2: the old three-key list was written before F-R14-6; maxGenerations joined it at 29gx fire 756, a lower-only key)');
   } finally { clean(home, proj); }
 });
 

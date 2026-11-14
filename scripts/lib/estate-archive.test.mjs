@@ -502,18 +502,22 @@ test('archive-clobber TOCTOU (co-writer removes a verified .gz before the delete
     const archiveDir = path.join(home, 'arch');
     const slugDir = path.join(archiveDir, ccProjectSlug(proj));
     // A faithful stand-in for a sync client removing an already-verified .gz
-    // between our synchronous fs calls: on the 2nd gzip, delete the .gz the
-    // 1st file already wrote+verified. (In prod the co-writer acts at the OS
-    // level in the same window; the seam makes the race deterministic.)
-    let calls = 0;
-    const clobberGzip = (buf) => {
-      if (++calls === 2) {
-        const gz = fs.readdirSync(slugDir, { recursive: true }).map(String).find((n) => n.endsWith('.gz'));
-        if (gz) fs.rmSync(path.join(slugDir, gz), { force: true });
-      }
-      return zlib.gzipSync(buf);
+    // between our synchronous fs calls: right after the commit renames the 1st
+    // verified copy onto its .gz name, delete it. (In prod the co-writer acts at
+    // the OS level in the same window; the seam makes the race deterministic.)
+    // 29gx fire 756 moved the seam: a copy reaches its .gz name only at the
+    // commit now (it is staged and verified beside it first), so the clobber
+    // follows the first commit rename instead of the 2nd gzip.
+    let renames = 0;
+    const realRename = fs.renameSync;
+    fs.renameSync = function clobberAfterRename(a, b) {
+      const out = realRename.call(fs, a, b);
+      if (++renames === 1 && String(b).endsWith('.gz')) fs.rmSync(b, { force: true });
+      return out;
     };
-    const r = archiveSession(sess, { slug: c.slug, archiveDir, gzip: clobberGzip });
+    let r;
+    try { r = archiveSession(sess, { slug: c.slug, archiveDir }); } finally { fs.renameSync = realRename; }
+    assert.ok(renames >= 1, 'the seam fired: a copy was renamed onto its .gz name and then removed');
     assert.strictEqual(r.ok, false, 'aborts — the sole handle is gone, must not delete');
     assert.ok(/no longer verifies before delete/.test(r.reason), r.reason);
     for (const p of Object.values(files)) assert.ok(fs.existsSync(p), `original kept: ${p}`);

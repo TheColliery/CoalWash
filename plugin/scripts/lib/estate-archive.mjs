@@ -61,6 +61,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto';
 import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { appendOwnLog } from './repo-fs.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
@@ -83,6 +84,16 @@ const DEATH_LOG_NAME = 'death.log'; // one-flock with tailings.mjs's certificate
 // re-archive of the session. The name ends in `.gen<N>`, not `.gz`, so an install older than this layout never collects it as a
 // current copy (its restore matches `*.gz` only) and never writes over it (it writes `<rel>.gz` only).
 const GEN_RE = /\.gz\.gen([1-9][0-9]{0,5})$/;
+// 29gx fire 756. The generation bound's default and its schema maximum (config-schema.mjs estate.maxGenerations); a refusal past it is
+// recorded, one JSON line each, in this file in the archive root, for /coalwash:stats. No restore, search or run reads it as an archive.
+const DEFAULT_MAX_GENERATIONS = 10;
+const MAX_GENERATIONS_CAP = 1000;
+const GENERATION_REFUSALS_NAME = 'generation-refusals.jsonl';
+// A staged copy is written beside its final name as `<final>.<24 hex>.coalwash-new` (STAGE_SUFFIX), verified, then renamed over it.
+// A killed run can leave one, or writeDurable's own `<final>.<24 hex>.coalwash-tmp`; STAGED_RE names both, for an archive copy or a
+// generation, and the collector removes only files that match it.
+const STAGE_SUFFIX = 'coalwash-new';
+const STAGED_RE = /\.gz(\.gen[1-9][0-9]{0,5})?\.[0-9a-f]{24}\.coalwash-(new|tmp)$/;
 // Index rows carry rowSchema 2 from this layout on; a row without it is an older row and reads as before. A re-archive that kept
 // a generation writes `replacedGeneration: N` on its new row, so search can name the row before it as generation N.
 export const ESTATE_ROW_SCHEMA = 2;
@@ -120,6 +131,8 @@ export function resolveEstateCfg(estate) {
     deleteCold: e.deleteCold === true,
     archiveDir: typeof e.archiveDir === 'string' ? e.archiveDir : '',
     indexEnabled: e.indexEnabled !== false,
+    // 29gx fire 756: the generation bound; a value outside the schema's integer 0-1000 reads as the default 10, as clampedRead does.
+    maxGenerations: Number.isInteger(e.maxGenerations) && e.maxGenerations >= 0 && e.maxGenerations <= MAX_GENERATIONS_CAP ? e.maxGenerations : DEFAULT_MAX_GENERATIONS,
     runBudget: { maxSessionsPerRun, maxBytesPerRun },
   };
 }
@@ -513,7 +526,7 @@ function appendDeathCert(archiveDir, slug, line) {
 // dir itself, not the index, so recovery never depends on the row).
 // opts.gzip is injectable for tests (default zlib.gzipSync). opts.lockState is the caller's lock state() (fires 119 and 122,
 // the fence below); its `lockFile` names the lock in a refusal.
-export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder, lockState = () => ({ state: 'own' }), lockFile = 'the global lock', bounds = RESTORE_BOUNDS } = {}) {
+export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder, lockState = () => ({ state: 'own' }), lockFile = 'the global lock', bounds = RESTORE_BOUNDS, maxGenerations = DEFAULT_MAX_GENERATIONS } = {}) {
   const destBase = path.join(archiveDir, slug);
   // Write-side containment (loss class #57's git sibling, GHSA-2hvf-7c8p-28fx:
   // the SOURCE enumeration is realpath-contained, but the DESTINATION
@@ -526,15 +539,24 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   let rootPhys = null;
   try { fs.mkdirSync(archiveDir, { recursive: true }); rootPhys = physicalOrNull(archiveDir); } catch { /* rootPhys stays null */ }
   if (!rootPhys) return { ok: false, reason: 'archive root unresolvable — session skipped (fail-closed)' };
-  const written = [];
-  // 29gw fire 753 (W752-2): a prefix replace writes the new copy over the earlier archive's own name, so a rollback that removed
-  // it would leave the archive without the earlier copy. Its bytes are held here and put back instead (writeDurable: a temp file
-  // beside it, then a rename); a copy this run created from nothing is removed as before.
+  // 29gx fire 756, WRITE, VERIFY, THEN REPLACE: every archive copy and every kept generation is first written BESIDE its final name
+  // (`<final>.<24 hex>.coalwash-new`, 'wx', fsync), read back through the handle check restore uses and compared, and renamed over the
+  // final name only at the COMMIT below, after every check of the session has passed. Until then no archive name changes, so a run that
+  // fails, or is killed, before the commit leaves every earlier copy as it was; a failure removes only the staged files it made, and a
+  // killed run's are removed by the next run of the session (collectStagedLeftovers, below).
+  const written = []; // staged files this run made (each removed on a failure; a renamed one is already gone)
+  const created = []; // archive names the commit created from nothing
+  // 29gw fire 753, kept for the window AFTER the commit only: a replaced copy's earlier bytes are held, so a failure after it (a rename
+  // that fails, the re-verify before delete) puts them back and leaves the session's archive as it was (writeDurable: a temp beside it,
+  // then a rename). A kill in that window loses no byte: a replaced copy was a prefix of the new one, or its bytes were committed to a
+  // generation first.
   const held = new Map();
+  let committed = false;
   const cleanupPartial = () => {
-    for (const w of written) {
-      if (held.has(w)) { try { writeDurable(w, held.get(w)); } catch {} } else { try { fs.rmSync(w, { force: true }); } catch {} }
-    }
+    for (const w of written) { try { fs.rmSync(w, { force: true }); } catch {} }
+    if (!committed) return;
+    for (const c of created) { try { fs.rmSync(c, { force: true }); } catch {} }
+    for (const [d, bytes] of held) { try { writeDurable(d, bytes); } catch {} }
   };
   // THE FENCE (fire 119, 18a): the caller's global lock can be taken over once it is LOCK_STALE_MS old. Before each write
   // this re-reads it (lockState); a robbed run stops there and removes nothing, since the new holder may be archiving this same
@@ -548,8 +570,19 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   };
   const notDeleted = () => `${written.length} archive copy(ies) of this session already written stay in place (removing one could remove the new holder's copy of the same session); every original of this session is kept`;
   const fail = (reason) => stolen(`removing the partial archive (after: ${reason})`, notDeleted()) || (cleanupPartial(), { ok: false, reason });
+  // 29gx fire 756, THE GENERATION BOUND: a re-archive that would keep one more generation than estate.maxGenerations allows refuses the
+  // session. It never deletes or merges a kept copy to make room; nothing of this session is written, and the live session stays.
+  const boundRefusal = (rel, have) => {
+    const r = fail(`refused: the earlier archived copy of ${rel} is not a prefix of the live session, so archiving it would keep one more generation, but this session already keeps ${have} generation${have === 1 ? '' : 's'}, the most estate.maxGenerations allows (${maxGenerations}), so nothing was archived or removed. The live session and every archived copy are unchanged; no kept copy is deleted or merged to make room. To archive it, raise estate.maxGenerations in your own config; until then the session stays live and is checked again on the next run`);
+    if (!r.robbed) r.generationBound = { kept: have, bound: maxGenerations };
+    return r;
+  };
+  const robbedCollect = stolen('collecting what an earlier run of this session left', 'nothing was written or removed, and every original of this session is kept');
+  if (robbedCollect) return robbedCollect;
+  collectStagedLeftovers(destBase, sess.id);
   let transcriptBuf = null;
   const originals = [];
+  let gens = null; // the session's kept generations, read once, the first time a file must be kept
   let genN = null; // the generation number this re-archive gives every file it keeps (one N per session per run)
   const kept = [];
   // What the listing already proves: at the largest compressed size a restore takes, these sizes still could not come back, so nothing is read
@@ -585,26 +618,26 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       // otherwise it is kept as a generation first, written with 'wx' and read back before the new copy goes over it.
       const prior = priorArchive(dest, buf, bounds);
       if (prior.refuse) return fail(`${prior.refuse}: ${f.rel} — session skipped, originals kept`);
-      if (prior.prefix) held.set(dest, prior.prefix);
+      let gen = null;
       if (prior.keep) {
-        if (genN === null) genN = nextGeneration(destBase, sess.id);
+        if (gens === null) gens = sessionGenerations(destBase, sess.id);
+        if (gens.size >= maxGenerations) return boundRefusal(f.rel, gens.size);
+        if (genN === null) genN = gens.size ? Math.max(...gens.keys()) + 1 : 1;
         const genPath = `${dest}.gen${genN}`;
         // genPath is dest's own name plus `.gen<N>`, in the folder the containment check above already resolved, so it needs no
-        // second root check. Nothing may already stand at it: a planted link is refused, never followed (Windows' create-new
-        // open follows a dangling reparse point), and so is an unreadable entry.
-        let standing = true;
-        try { fs.lstatSync(genPath); } catch (e) { if (e && e.code === 'ENOENT') standing = false; }
-        if (standing) return fail(`something already stands at the generation name for ${f.rel} — session skipped, originals kept`);
-        writeExclusive(genPath, prior.gz);
-        if (!fs.readFileSync(genPath).equals(prior.gz)) return fail(`the kept generation of ${f.rel} does not read back — session skipped, originals kept`);
+        // second root check. Nothing may already stand at it: a planted link is refused, never followed, and so is an unreadable
+        // entry. The name is looked at again just before the commit renames onto it.
+        if (standingAt(genPath)) return fail(`something already stands at the generation name for ${f.rel} — session skipped, originals kept`);
+        const genTmp = stageBeside(genPath, prior.gz, written);
+        if (!readStaged(genTmp).equals(prior.gz)) return fail(`the kept generation of ${f.rel} does not read back — session skipped, originals kept`);
+        gen = { tmp: genTmp, final: genPath };
         kept.push({ rel: f.rel, generation: genN });
       }
-      writeDurable(dest, gz); // H4: fsync the .gz CONTENT (this tier keeps no snapshot)
-      written.push(dest);
-      const back = zlib.gunzipSync(fs.readFileSync(dest), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
+      const tmp = stageBeside(dest, gz, written); // H4: fsync'd at write (this tier keeps no snapshot)
+      const back = zlib.gunzipSync(readStaged(tmp), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
       if (!back.equals(buf)) { return fail(`verify mismatch: ${f.rel} — original kept`); }
+      originals.push({ path: f.path, rel: f.rel, gz: dest, tmp, gen, earlier: prior.prefix || (prior.keep ? prior.gz : null), inflated: buf.length });
     } catch (e) { return fail(`archive failed: ${f.rel}: ${e.message} — original kept`); }
-    originals.push({ path: f.path, rel: f.rel, gz: dest, inflated: buf.length });
   }
 
   // External-writer guard over the WHOLE listing->delete window (applyPlan's
@@ -638,6 +671,30 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // verify-the-recovery-copy-immediately-before-destroying discipline
   // applyPlan's verifySnapshot applies to its snapshot. Any miss = fail-closed:
   // drop the partial archive, keep every original.
+  // THE RESTORE BOUNDS, read on the sizes just staged and verified (the numbers restoreSession refuses on). A session that restore
+  // could not return is removed as a partial archive and every original stays; nothing is deleted that the tool could not bring back.
+  let boundWhy = null;
+  try {
+    boundWhy = restoreBoundReason(originals.map((o) => ({ gzBytes: fs.statSync(o.tmp).size, inflatedBytes: o.inflated })), bounds);
+  } catch (e) { return fail(`archive size unreadable: ${e.message} — session skipped, originals kept`); }
+  if (boundWhy) return fail(`restore could not return this session (${boundWhy}) — its copy removed, every original kept`);
+
+  // THE COMMIT (29gx fire 756): each kept generation is renamed onto its name first, then each verified copy over its archive name.
+  // A rename replaces the directory entry, so a reader sees the earlier copy or the new one, never a part of either.
+  const robbedCommit = stolen('the commit of the archive copies', notDeleted());
+  if (robbedCommit) return robbedCommit;
+  committed = true;
+  try {
+    for (const o of originals) {
+      if (o.gen) {
+        if (standingAt(o.gen.final)) return fail(`something already stands at the generation name for ${o.rel} — session skipped, originals kept`);
+        fs.renameSync(o.gen.tmp, o.gen.final);
+      }
+      fs.renameSync(o.tmp, o.gz);
+      if (o.earlier) held.set(o.gz, o.earlier); else created.push(o.gz);
+    }
+  } catch (e) { return fail(`archive commit failed: ${e.message} — originals kept`); }
+
   for (const o of originals) {
     let ok = false;
     try { ok = zlib.gunzipSync(fs.readFileSync(o.gz), { maxOutputLength: o.inflated + 1 }).equals(fs.readFileSync(o.path)); } catch { ok = false; }
@@ -645,14 +702,6 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       return fail(`archive no longer verifies before delete: ${o.rel} (removed/corrupted since it was written — a co-writer on the archive volume?) — session skipped, originals kept`);
     }
   }
-
-  // THE RESTORE BOUNDS, read on the sizes just written and verified (the numbers restoreSession refuses on). A session that restore
-  // could not return is removed as a partial archive and every original stays; nothing is deleted that the tool could not bring back.
-  let boundWhy = null;
-  try {
-    boundWhy = restoreBoundReason(originals.map((o) => ({ gzBytes: fs.statSync(o.gz).size, inflatedBytes: o.inflated })), bounds);
-  } catch (e) { return fail(`archive size unreadable: ${e.message} — session skipped, originals kept`); }
-  if (boundWhy) return fail(`restore could not return this session (${boundWhy}) — its copy removed, every original kept`);
 
   // H4 DURABILITY: fsync every archived .gz's DIRECTORY ENTRY before deleting the
   // originals — a power-loss in the write->unlink window must not lose the SOLE
@@ -739,15 +788,44 @@ function sessionGenerations(slugDir, sessionId) {
   }
   return gens;
 }
-function nextGeneration(slugDir, sessionId) {
-  const gens = sessionGenerations(slugDir, sessionId);
-  return gens.size ? Math.max(...gens.keys()) + 1 : 1;
+// True when anything (a file, a folder, a link, an entry that cannot be read) stands at `p`; only ENOENT means nothing does.
+function standingAt(p) {
+  try { fs.lstatSync(p); } catch (e) { if (e && e.code === 'ENOENT') return false; }
+  return true;
 }
-// Create `p` only if it does not exist ('wx'), write and fsync it; an existing file is never written over (EEXIST throws).
-function writeExclusive(p, data) {
-  const fd = fs.openSync(p, 'wx', 0o600);
+// 29gx fire 756: write `data` to a new file beside `finalPath` (`<final>.<24 hex>.coalwash-new`, created 'wx' 0600, fsync'd) and return its
+// path. The path joins `staged` as soon as the file exists, so a write that fails partway is removed by the caller's clean-up.
+function stageBeside(finalPath, data, staged) {
+  const tmp = `${finalPath}.${crypto.randomBytes(12).toString('hex')}.${STAGE_SUFFIX}`;
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  staged.push(tmp);
   try { fs.writeSync(fd, data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-  fsyncDirBestEffort(path.dirname(p));
+  return tmp;
+}
+// Read a staged file back through restore's own handle check (readArchiveHandle: a plain file, read through one handle, not growing).
+// No size bound here: the restore bounds are read on the staged sizes right after the loop, each with its own reason.
+function readStaged(p) {
+  const got = readArchiveHandle(p, Number.MAX_SAFE_INTEGER);
+  if (!got.buf) throw new Error(`the staged copy ${path.basename(p)} is not a plain file or changed while it was read`);
+  return got.buf;
+}
+// 29gx fire 756, THE COLLECTOR: before a run archives a session, remove what a killed run of that session left. Only plain files whose
+// name matches STAGED_RE are removed, one by one and never recursively: in the slug folder those whose name starts `<sessionId>.`, and
+// anything under the session's own `<sessionId>/` folder. A folder, a link or any other name is left alone. None of these names ends in
+// `.gz` or `.gz.gen<N>`, so no restore, search or generation count ever took one for an archive copy.
+function collectStagedLeftovers(slugDir, sessionId) {
+  const sweep = (dir, accept) => {
+    let es;
+    try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of es) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { if (accept === null) sweep(p, null); continue; }
+      if (!e.isFile() || !STAGED_RE.test(e.name) || (accept !== null && !accept(e.name))) continue;
+      try { fs.unlinkSync(p); } catch { /* left for the next run */ }
+    }
+  };
+  sweep(slugDir, (n) => n.startsWith(`${sessionId}.`));
+  sweep(path.join(slugDir, sessionId), null);
 }
 
 // Remove now-EMPTY directories bottom-up; push the rel path (from `base`) of any
@@ -870,10 +948,18 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
         continue;
       }
       const cold = sess.band === 'cold';
-      const r = archiveSession(sess, { slug: c.slug, archiveDir, now, cold, gzip, lockState: lock.state, lockFile: globalLockPath(home), bounds });
+      const r = archiveSession(sess, { slug: c.slug, archiveDir, now, cold, gzip, lockState: lock.state, lockFile: globalLockPath(home), bounds, maxGenerations: c.cfg.maxGenerations });
       // fire 119: a robbed session stops the whole run, so no later session starts under a lock this run no longer holds.
       if (r.robbed) { res.ok = false; res.robbed = r.robbed; res.lockLost = r.lockLost; res.error = r.reason; break; }
-      if (!r.ok) { res.failed.push({ id: sess.id, reason: r.reason }); continue; }
+      if (!r.ok) {
+        res.failed.push({ id: sess.id, reason: r.reason });
+        if (r.generationBound) {
+          res.generationRefusals = (res.generationRefusals || 0) + 1;
+          const why = recordGenerationRefusal(archiveDir, { now, sessionId: sess.id, projectSlug: c.slug, ...r.generationBound });
+          if (why) res.failed.push({ id: sess.id, reason: `the refusal above was not recorded for /coalwash:stats (${why})` });
+        }
+        continue;
+      }
       const s = c.cfg.indexEnabled ? lock.state() : { state: 'own' };
       if (s.state !== 'own') {
         res.ok = false; res.robbed = 'global'; res.lockLost = s.state === 'unreadable' ? 'unreadable' : 'stolen';
@@ -894,6 +980,36 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
     if (lockLeft && res) res.lockLeft = lockLeft; // the object the try already returned: the caller sees this field
   }
   throw withLockLeft(thrown, lockLeft); // reached only when the body threw (fire 123): the error still names a lock left behind
+}
+
+// 29gx fire 756: one JSON line per generation-bound refusal, appended to GENERATION_REFUSALS_NAME in the archive root through the same
+// proved append the index uses. Returns null, or why the record could not be written (the run reports it; the refusal itself stands).
+function recordGenerationRefusal(archiveDir, { now, sessionId, projectSlug, kept, bound }) {
+  const rec = { timestamp: new Date(now).toISOString(), severity: 'WARN', event: 'generation-bound-refusal', sessionId, projectSlug, kept, bound };
+  try { appendOwnLog(path.join(archiveDir, GENERATION_REFUSALS_NAME), JSON.stringify(rec) + '\n'); return null; } catch (e) { return (e && e.code) || (e && e.message) || 'unknown'; }
+}
+// For /coalwash:stats: how many generation-bound refusals the archive recorded (for one project slug when given) and the earliest.
+// A missing file is { count: 0, since: null }, the state of every archive written before this record existed; a line that is not one
+// of these records is skipped. The file is read only up to GENERATION_REFUSALS_READ_MAX bytes.
+const GENERATION_REFUSALS_READ_MAX = 8 * 1024 * 1024;
+export function readGenerationRefusals(archiveDir, projectSlug = null) {
+  let text = '';
+  try {
+    const got = readArchiveHandle(path.join(archiveDir, GENERATION_REFUSALS_NAME), GENERATION_REFUSALS_READ_MAX);
+    if (!got.buf) return { count: 0, since: null, unreadable: got.notFile ? 'not a plain file' : 'over the read bound' };
+    text = got.buf.toString('utf8');
+  } catch (e) { return e && e.code === 'ENOENT' ? { count: 0, since: null } : { count: 0, since: null, unreadable: (e && e.code) || 'unreadable' }; }
+  let count = 0;
+  let since = null;
+  for (const raw of text.split(/\r?\n/)) {
+    let rec;
+    try { rec = JSON.parse(raw); } catch { continue; }
+    if (!rec || rec.event !== 'generation-bound-refusal' || typeof rec.timestamp !== 'string') continue;
+    if (projectSlug !== null && rec.projectSlug !== projectSlug) continue;
+    count++;
+    if (since === null || rec.timestamp < since) since = rec.timestamp;
+  }
+  return { count, since };
 }
 
 // Plain-text run report (program-built; the receipt-style deliverable).

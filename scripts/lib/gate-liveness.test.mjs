@@ -214,11 +214,14 @@ test('GATE-LIVENESS 4 — the delete-boundary TOCTOU re-verify is load-bearing: 
     write(jsonl, transcript());
     ageFile(jsonl, 30, now); // WARM
 
-    // A per-.gz-read counter: read #1 = the WRITE-verify (real), read #2 = the
-    // DELETE-boundary re-verify (a co-writer clobbered the .gz in between).
+    // A per-.gz-read counter. 29gx fire 756: the WRITE-verify now reads the
+    // staged copy beside the .gz name through one handle (no readFileSync of a
+    // .gz name), so read #1 of a .gz name = the DELETE-boundary re-verify, after
+    // the commit renamed the verified copy onto it (a co-writer clobbered it in
+    // between). Before 756 that read was #2, after the in-place write-verify.
     function mkClobber() {
       let gzReads = 0; const orig = fs.readFileSync;
-      return { impl: (p, ...rest) => { if (String(p).endsWith('.gz')) { gzReads++; if (gzReads >= 2) return wrongGz; } return orig(p, ...rest); }, orig };
+      return { impl: (p, ...rest) => { if (String(p).endsWith('.gz')) { gzReads++; if (gzReads >= 1) return wrongGz; } return orig(p, ...rest); }, orig };
     }
 
     // FIRES: real .equals — the re-verify sees the clobber → session KEPT.

@@ -607,7 +607,9 @@ function main() {
           ? '  A project config may only bring the cold boundary earlier (at or below your own purgeAfterDays; 0, "never cold", counts as the highest), whether or not estate.deleteCold is true in your own config,'
           : c.key === 'estate.compressAfterDays'
             ? '  A project config may only keep sessions active longer (at or above your own compressAfterDays), whether or not estate.deleteCold is true in your own config,'
-            : '  A project config may only LOWER a work limit, with a number the schema accepts,');
+            : c.key === 'estate.maxGenerations'
+              ? '  A project config may only LOWER how many earlier copies a session keeps (at or below your own estate.maxGenerations),'
+              : '  A project config may only LOWER a work limit, with a number the schema accepts,');
         console.warn('  because a cloned repo ships a project config and it must not be able to widen what an estate run archives and removes.');
       } else {
         console.warn('  A consent-bearing key merges SAFER-VALUE-WINS (hooks-safety.md §9): a project');
