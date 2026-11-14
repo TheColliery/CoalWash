@@ -579,6 +579,14 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   };
   const robbedCollect = stolen('collecting what an earlier run of this session left', 'nothing was written or removed, and every original of this session is kept');
   if (robbedCollect) return robbedCollect;
+  // 29gz fire 762 (CodeRabbit t335 F5; the PROVENANCE RULE's "bind before probing"): the project folder and the session folder in the
+  // archive must be real folders before anything sweeps or writes in them. A link there (a symlink or a junction, which this tool never
+  // makes) refuses the session before the collector runs, so the collector never follows one.
+  for (const d of [destBase, path.join(destBase, sess.id)]) {
+    let st = null;
+    try { st = fs.lstatSync(d); } catch (e) { if (!e || e.code !== 'ENOENT') return fail(`the archive folder ${d} could not be inspected (${e && e.code}) — session skipped, originals kept`); }
+    if (st && (st.isSymbolicLink() || !st.isDirectory())) return fail(`the archive folder ${d} is a link or not a folder: a sweep or a write through it escapes the archive root's containment, so a run never sweeps or writes through a link in the archive — session skipped, originals kept`);
+  }
   collectStagedLeftovers(destBase, sess.id);
   let transcriptBuf = null;
   const originals = [];
@@ -636,7 +644,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       const tmp = stageBeside(dest, gz, written); // H4: fsync'd at write (this tier keeps no snapshot)
       const back = zlib.gunzipSync(readStaged(tmp), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
       if (!back.equals(buf)) { return fail(`verify mismatch: ${f.rel} — original kept`); }
-      originals.push({ path: f.path, rel: f.rel, gz: dest, tmp, gen, earlier: prior.prefix || (prior.keep ? prior.gz : null), inflated: buf.length });
+      originals.push({ path: f.path, rel: f.rel, gz: dest, tmp, staged: gz, gen, earlier: prior.prefix || (prior.keep ? prior.gz : null), inflated: buf.length });
     } catch (e) { return fail(`archive failed: ${f.rel}: ${e.message} — original kept`); }
   }
 
@@ -681,19 +689,39 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
 
   // THE COMMIT (29gx fire 756): each kept generation is renamed onto its name first, then each verified copy over its archive name.
   // A rename replaces the directory entry, so a reader sees the earlier copy or the new one, never a part of either.
-  const robbedCommit = stolen('the commit of the archive copies', notDeleted());
-  if (robbedCommit) return robbedCommit;
-  committed = true;
-  try {
-    for (const o of originals) {
-      if (o.gen) {
+  // 29gz fire 762 (CodeRabbit t335 F2): the lock is re-read before EACH rename, as the fence above says ("before each write"); a run
+  // robbed between two renames stops there with no clean-up, like every other robbed step.
+  for (const o of originals) {
+    if (o.gen) {
+      const robbedGen = stolen(`the commit of the kept generation of ${o.rel}`, notDeleted());
+      if (robbedGen) return robbedGen;
+      committed = true;
+      try {
         if (standingAt(o.gen.final)) return fail(`something already stands at the generation name for ${o.rel} — session skipped, originals kept`);
         fs.renameSync(o.gen.tmp, o.gen.final);
-      }
-      fs.renameSync(o.tmp, o.gz);
-      if (o.earlier) held.set(o.gz, o.earlier); else created.push(o.gz);
+      } catch (e) { return fail(`archive commit failed: ${e.message} — originals kept`); }
     }
-  } catch (e) { return fail(`archive commit failed: ${e.message} — originals kept`); }
+    const robbedCopy = stolen(`the commit of the archive copy of ${o.rel}`, notDeleted());
+    if (robbedCopy) return robbedCopy;
+    committed = true;
+    try {
+      fs.renameSync(o.tmp, o.gz);
+    } catch (e) { return fail(`archive commit failed: ${e.message} — originals kept`); }
+    if (o.earlier) held.set(o.gz, o.earlier); else created.push(o.gz);
+  }
+
+  // 29gz fire 762 (CodeRabbit t335 F3): every committed name is read back through restore's handle check and compared with the bytes
+  // that were verified before the commit: each kept generation with the earlier copy, each new copy with the copy that was staged. A file
+  // altered between its verify and its rename (an outside writer on the archive folder) stops the run before any live file is deleted;
+  // the clean-up then puts the earlier copy back under its archive name.
+  for (const o of originals) {
+    const checks = o.gen ? [[o.gen.final, o.earlier, `the kept generation of ${o.rel} (${o.gen.final})`], [o.gz, o.staged, `the archive copy of ${o.rel}`]] : [[o.gz, o.staged, `the archive copy of ${o.rel}`]];
+    for (const [p, want, what] of checks) {
+      let same = false;
+      try { same = readStaged(p).equals(want); } catch { same = false; }
+      if (!same) return fail(`archive no longer verifies before delete: ${what} changed after it was verified (something else wrote to the archive folder between the check and the commit), so no live file was deleted: this run's copies were taken back, any earlier archived copy was put back under its archive name, and the session stays live — session skipped, originals kept`);
+    }
+  }
 
   for (const o of originals) {
     let ok = false;
@@ -1341,6 +1369,9 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
   }
   if (!sources.length) return { ok: false, error: `session '${sessionId}' not found in the archive at ${archiveDir}` };
 
+  // 29gz fire 762 (lab F-1): a file of this copy that does not decompress is named and skipped, and every intact file is still written;
+  // the restore then reports the copy as not whole. Nothing damaged is ever written out.
+  const damaged = [];
   let dir = to;
   try {
     if (dir) { dir = path.resolve(dir); fs.mkdirSync(dir, { recursive: true }); }
@@ -1388,15 +1419,7 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
             : { ok: false, error: `restore refused on ${s.rel}: it would inflate past ${fileBound} bytes for a ${gz.length}-byte archive`, dir, files };
         }
         // 29gt fire 750: a damaged archive says so in plain words; zlib's own text follows in brackets, never alone.
-        if (e && typeof e.code === 'string' && e.code.startsWith('Z_')) {
-          const others = generations.filter((n) => n !== wantGen);
-          const tries = [];
-          if (wantGen !== null && hasNewest) tries.push('restore the newest copy without --generation');
-          if (others.length) tries.push(`restore another kept copy with --generation <N> (kept: generation ${others.join(', ')})`);
-          tries.push('use a backup of the archive folder');
-          const what = wantGen !== null ? `generation ${wantGen} is damaged` : 'the archived copy is damaged';
-          return { ok: false, error: `restore refused on ${s.rel}: ${what} (it does not decompress), so nothing was restored from it. To get the session back: ${tries.join('; or ')}. [zlib: ${e.message}]`, dir, files };
-        }
+        if (e && typeof e.code === 'string' && e.code.startsWith('Z_')) { damaged.push({ rel: s.rel, gzPath: s.gzPath, zlib: e.message }); continue; }
         throw e;
       }
       if (buf.length > remaining) return { ok: false, error: `restore refused on ${s.rel}: it would pass the ${sessionBound}-byte session bound (the whole session's inflated bytes; the files already written stay)`, dir, files };
@@ -1418,6 +1441,20 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
         for (const h of scan.hits) tombFound.set(h.identity, h);
       }
     } catch (e) { return { ok: false, error: `restore failed on ${s.rel}: ${e.message}`, dir, files }; }
+  }
+  if (damaged.length) {
+    const others = generations.filter((n) => n !== wantGen);
+    const tries = [];
+    if (wantGen !== null && hasNewest) tries.push('restore the newest copy without --generation');
+    if (others.length) tries.push(`restore another kept copy with --generation <N> (kept: generation ${others.join(', ')})`);
+    tries.push(`decompress the damaged archived file${damaged.length === 1 ? '' : 's'} named above with any gunzip tool, which may still recover part of ${damaged.length === 1 ? 'it' : 'them'}`);
+    tries.push('use a backup of the archive folder');
+    const what = wantGen !== null ? `generation ${wantGen} is damaged` : 'the archived copy is damaged';
+    const named = damaged.map((d) => `${d.rel}, archived at ${d.gzPath} [zlib: ${d.zlib}]`).join('; ');
+    const head = files.length
+      ? `restore incomplete: ${what} in ${damaged.length} of ${damaged.length + files.length} file(s) (it does not decompress), so nothing was restored from ${damaged.length === 1 ? 'that file' : 'those files'}; the ${files.length} intact file(s) were written`
+      : `restore refused on ${damaged[0].rel}: ${what} (it does not decompress), so nothing was restored from it`;
+    return { ok: false, error: `${head}. Damaged: ${named}. To get the session back: ${tries.join('; or ')}.`, dir, files, damaged, generation: wantGen, generations };
   }
   const laterRemoved = wantTombstoneScan ? [...tombFound.values()] : [];
   // The scan result says what it covered: every byte of every restored file, in windows, with none skipped.

@@ -231,7 +231,15 @@ test('(e) a re-archive never deletes an earlier generation, even when it fails; 
   const got = everyRestorable(s);
   assert.ok(got.includes(ORIGINAL) && got.includes(V2), `every copy archived before the failed run is still restorable (${got.length} copies)`);
   assert.ok(fs.existsSync(path.join(s.projDir, `${SID}.jsonl`)), 'the failed run kept the original');
-  assert.deepStrictEqual(Object.keys(estate), [], 'the run used the schema defaults: deleteCold stays off');
+  // 29gz fire 762 (CodeRabbit t335 F7): an outcome, never the config's own spelling. Under the schema defaults a 200-day session
+  // beside this one is listed cold, kept live and never archived, so deleteCold is off and the cold band is intact.
+  const coldP = path.join(s.projDir, `${SID2}.jsonl`);
+  fs.writeFileSync(coldP, ORIGINAL.replace('CW29GT-NEEDLE', 'CW29GT-COLD'));
+  const longAgo = new Date(Date.now() - 200 * DAY);
+  fs.utimesSync(coldP, longAgo, longAgo);
+  const r2 = run(s);
+  assert.ok(r2.coldListed.some((c) => c.id === SID2), 'the 200-day session is listed cold under the schema defaults');
+  assert.ok(!r2.archived.some((a) => a.id === SID2) && fs.existsSync(coldP), 'and is kept live, never archived: deleteCold is off');
 });
 
 test('schema: rows written now carry rowSchema 2; an older estate (no rowSchema, no generation files, duplicate rows) still reads and restores', (t) => {
@@ -583,4 +591,203 @@ test('756 commit: something that appears at the generation name after staging st
   assert.strictEqual(fs.readFileSync(planted, 'utf8'), 'planted', 'the entry at the name is untouched');
   assert.ok(fs.readFileSync(gzPathOf(s)).equals(earlier), 'the earlier copy is unchanged');
   assert.deepStrictEqual(leftovers(s), [], 'no staged file is left behind');
+});
+
+// ---------------------------------------------------------------------------
+// 29gz fire 762: PATCH 1.19.1 (CodeRabbit t335 F3, F2, F5; lab F-1, O-3, O-4)
+// ---------------------------------------------------------------------------
+
+// The seam of the reviewer's witness `scratchpad/29gd/w335.mjs`: fs.renameSync patched to flip one byte of a staged file just before
+// it is renamed onto the name `onto` matches, standing in for an outside writer on the archive folder. Returns the run's result.
+function archiveWithFlip(s, onto) {
+  const sess = listSessions({ projectRoot: s.proj, home: s.home }).sessions.find((x) => x.id === SID);
+  const real = fs.renameSync;
+  let flipped = false;
+  fs.renameSync = function patched(a, b) {
+    if (!flipped && String(a).endsWith('.coalwash-new') && onto.test(String(b))) {
+      const buf = fs.readFileSync(a);
+      buf[buf.length >> 1] ^= 0x01;
+      fs.writeFileSync(a, buf);
+      flipped = true;
+    }
+    return real.call(fs, a, b);
+  };
+  let r;
+  try { r = archiveSession(sess, { slug: ccProjectSlug(s.proj), archiveDir: s.archiveDir }); } finally { fs.renameSync = real; }
+  assert.ok(flipped, 'the seam fired: a staged file was altered before its rename');
+  return r;
+}
+function v2ArchivedThenV3Live(s) {
+  seed(s, V2);
+  assert.strictEqual(run(s).archived.length, 1);
+  const earlier = fs.readFileSync(gzPathOf(s));
+  seed(s, V3); // a non-prefix rewrite: the earlier copy is kept as generation 1
+  return earlier;
+}
+
+test('762 F3: a kept generation altered after its verify stops the run before any live file is deleted, and the earlier copy restores', (t) => {
+  const s = sandbox(t);
+  const earlier = v2ArchivedThenV3Live(s);
+  const r = archiveWithFlip(s, /\.gen\d+$/);
+  assert.strictEqual(r.ok, false, `the run must not report success: ${JSON.stringify(r)}`);
+  assert.match(r.reason, /the kept generation of .* changed after it was verified/);
+  assert.strictEqual(fs.readFileSync(path.join(s.projDir, `${SID}.jsonl`), 'utf8'), V3, 'the live session is untouched');
+  assert.ok(fs.readFileSync(gzPathOf(s)).equals(earlier), 'the earlier copy is back under its archive name, byte for byte');
+  assert.strictEqual(restoreTo(s).text, V2, 'and it restores');
+  assert.deepStrictEqual(leftovers(s), [], 'no staged file is left behind');
+});
+
+test('762 F3: a new copy altered after its verify stops the run before any live file is deleted, and the earlier copy restores', (t) => {
+  const s = sandbox(t);
+  const earlier = v2ArchivedThenV3Live(s);
+  const r = archiveWithFlip(s, new RegExp(`${SID}\\.jsonl\\.gz$`));
+  assert.strictEqual(r.ok, false, `the run must not report success: ${JSON.stringify(r)}`);
+  assert.match(r.reason, /the archive copy of .* changed after it was verified/);
+  assert.strictEqual(fs.readFileSync(path.join(s.projDir, `${SID}.jsonl`), 'utf8'), V3, 'the live session is untouched');
+  assert.ok(fs.readFileSync(gzPathOf(s)).equals(earlier), 'the earlier copy is back under its archive name, byte for byte');
+  assert.strictEqual(restoreTo(s).text, V2, 'and it restores');
+});
+
+test('762 F2: a lock taken over between two commit renames stops the run there, before the next rename, with no clean-up', (t) => {
+  const s = sandbox(t);
+  const earlier = v2ArchivedThenV3Live(s);
+  const sess = listSessions({ projectRoot: s.proj, home: s.home }).sessions.find((x) => x.id === SID);
+  const genPath = `${gzPathOf(s)}.gen1`;
+  // the seam: the lock reads as taken over from the moment the generation has been renamed onto its name
+  const lockState = () => (fs.existsSync(genPath) ? { state: 'stolen' } : { state: 'own' });
+  const r = archiveSession(sess, { slug: ccProjectSlug(s.proj), archiveDir: s.archiveDir, lockState });
+  assert.strictEqual(r.robbed, 'global', JSON.stringify(r));
+  assert.match(r.reason, /stopped before the commit of the archive copy of/);
+  assert.ok(fs.readFileSync(gzPathOf(s)).equals(earlier), 'the archive copy was not renamed after the theft');
+  assert.ok(fs.existsSync(path.join(s.projDir, `${SID}.jsonl`)), 'no live file was deleted');
+  assert.strictEqual(leftovers(s).length, 1, 'robbed means no clean-up: the staged copy stays for the next run to collect');
+});
+
+test('762 F2: a lock taken over just before the generation rename stops the run there: nothing is renamed and nothing is cleaned up', (t) => {
+  const s = sandbox(t);
+  const earlier = v2ArchivedThenV3Live(s);
+  const sess = listSessions({ projectRoot: s.proj, home: s.home }).sessions.find((x) => x.id === SID);
+  const slugDir = path.dirname(gzPathOf(s));
+  // the seam: the lock reads as taken over once both staged files exist (the loop is done and the commit is next)
+  const staged = () => fs.readdirSync(slugDir).filter((n) => n.endsWith('.coalwash-new')).length;
+  const lockState = () => (staged() >= 2 ? { state: 'stolen' } : { state: 'own' });
+  const r = archiveSession(sess, { slug: ccProjectSlug(s.proj), archiveDir: s.archiveDir, lockState });
+  assert.strictEqual(r.robbed, 'global', JSON.stringify(r));
+  assert.match(r.reason, /stopped before the commit of the kept generation of/);
+  assert.deepStrictEqual(genFiles(s), [], 'the generation was not renamed onto its name');
+  assert.ok(fs.readFileSync(gzPathOf(s)).equals(earlier), 'the archive copy was not renamed');
+  assert.strictEqual(leftovers(s).length, 2, 'robbed means no clean-up: both staged files stay for the next run to collect');
+});
+
+// A two-file session archived twice with an edit between: generation 1 holds both earlier files. The transcript is the first file
+// restore reads (the slug folder's flat files come before the session folder).
+const EXTRA1 = 'extra file, first version\n';
+const EXTRA2 = 'extra file, edited\n';
+function twoFileTwoArchives(s) {
+  seedTwo(s, V2, EXTRA1);
+  assert.strictEqual(run(s).archived.length, 1);
+  assert.ok(restoreSession(SID, { archiveDir: s.archiveDir, to: s.projDir }).ok);
+  seedTwo(s, V3, EXTRA2);
+  const r = run(s);
+  assert.strictEqual(r.archived.length, 1, JSON.stringify(r));
+  assert.strictEqual(genFiles(s).length, 2, 'generation 1 holds both earlier files');
+}
+// The two files of the copy, by the name each has in the restore target, its archive path, and the bytes it holds in each copy.
+const F1_FILES = {
+  transcript: { rel: (sid) => `${sid}.jsonl`, gz: (s) => gzPathOf(s), newest: V3, gen1: V2 },
+  extra: { rel: (sid) => path.join(sid, 'tool-results', 'a.txt'), gz: (s) => path.join(path.dirname(gzPathOf(s)), SID, 'tool-results', 'a.txt.gz'), newest: EXTRA2, gen1: EXTRA1 },
+};
+for (const [leg, suffix, args, key] of [['the newest copy', '', [], 'newest'], ['generation 1', '.gen1', ['--generation', '1'], 'gen1']]) {
+  for (const [badName, goodName] of [['transcript', 'extra'], ['extra', 'transcript']]) {
+    test(`762 F-1: a restore of ${leg} with its ${badName} file damaged still writes the intact file, names the damaged one, and exits non-zero`, (t) => {
+      const s = sandbox(t);
+      twoFileTwoArchives(s);
+      const bad = F1_FILES[badName].gz(s) + suffix;
+      fs.writeFileSync(bad, 'these are not gzip bytes');
+      const to = path.join(s.out, 'f1');
+      const r = cli(s, ['estate-restore', SID, ...args, '--to', to]);
+      const good = F1_FILES[goodName];
+      assert.strictEqual(r.status, 1, 'the copy is not whole, so the exit is non-zero');
+      assert.strictEqual(fs.readFileSync(path.join(to, good.rel(SID)), 'utf8'), good[key], 'the intact file is written');
+      assert.ok(!fs.existsSync(path.join(to, F1_FILES[badName].rel(SID))), 'nothing damaged is written out');
+      assert.match(r.stderr, /restore incomplete: .*damaged in 1 of 2 file\(s\)/);
+      assert.ok(r.stderr.includes(`${F1_FILES[badName].rel(SID)}, archived at `) && r.stderr.includes(path.basename(bad)), 'the damaged file and the path where its bytes still are');
+      assert.match(r.stderr, /gunzip/, 'what the person can do');
+      assert.ok(r.stderr.includes('1 file(s) were written to ') && r.stderr.includes(`  ${good.rel(SID)} (`), 'which files were written');
+    });
+  }
+}
+
+test('762 O-3: a torn index line is followed by the next row on its own line, so search still finds the later session', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.strictEqual(run(s).archived.length, 1);
+  const idx = path.join(s.archiveDir, 'index.jsonl');
+  fs.appendFileSync(idx, '{"sessionId":"torn-half-of-a-row","projectSl'); // a writer killed halfway through a row
+  const other = path.join(s.projDir, `${SID2}.jsonl`);
+  fs.writeFileSync(other, ORIGINAL.replace('CW29GT-NEEDLE', 'CW29GT-OTHER'));
+  const aged = new Date(Date.now() - 30 * DAY);
+  fs.utimesSync(other, aged, aged);
+  assert.strictEqual(run(s).archived.length, 1);
+  assert.deepStrictEqual(searchIndex('CW29GT-OTHER', { archiveDir: s.archiveDir }).map((r) => r.sessionId), [SID2], 'the row after the torn line is found');
+  fs.appendFileSync(idx, '{"sessionId":"torn-at-the-end'); // a torn line at the very end
+  assert.strictEqual(searchIndex('CW29GT-NEEDLE', { archiveDir: s.archiveDir }).length, 1, 'rows before a torn last line still read');
+  assert.strictEqual(searchIndex('CW29GT-OTHER', { archiveDir: s.archiveDir }).length, 1);
+});
+
+test('762 O-3: a torn refusal record is followed by the next record on its own line, so the stats count still sees it', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.strictEqual(run(s).archived.length, 1);
+  assert.ok(restoreSession(SID, { archiveDir: s.archiveDir, to: s.projDir }).ok);
+  seed(s, V2);
+  const rec = path.join(s.archiveDir, 'generation-refusals.jsonl');
+  fs.writeFileSync(rec, '{"timestamp":"2026-11-01T00:00:00.000Z","event":"generation-bound-ref'); // a torn record
+  const r = runEstate({ projectRoot: s.proj, home: s.home, estate: { maxGenerations: 0 } });
+  assert.strictEqual(r.generationRefusals, 1);
+  let st = cli(s, ['estate', '--json']);
+  assert.strictEqual(JSON.parse(st.stdout).generationRefusals.count, 1, 'the record after the torn line is counted');
+  fs.appendFileSync(rec, '{"timestamp":"2026-11-02T00:00:00.000Z","event":"gen'); // a torn line at the very end
+  st = cli(s, ['estate', '--json']);
+  assert.strictEqual(JSON.parse(st.stdout).generationRefusals.count, 1, 'records before a torn last line still count');
+});
+
+// F5: a link (a junction on Windows, a directory symlink elsewhere) where the archive keeps a project's or a session's folder. Making
+// one is a capability of the volume and the account, so it is probed by trying, and a test that cannot make one skips visibly.
+function linkDir(target, link) {
+  try { fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir'); return true; } catch { return false; }
+}
+const STAGED_NAME = (stem) => `${stem}.${'ab'.repeat(12)}.coalwash-new`;
+
+test('762 F5: a linked project folder in the archive refuses the session before any sweep; nothing outside is removed', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  const outside = path.join(s.root, 'outside');
+  fs.mkdirSync(outside);
+  const bait = path.join(outside, STAGED_NAME(`${SID}.jsonl.gz`));
+  fs.writeFileSync(bait, 'outside');
+  fs.mkdirSync(s.archiveDir, { recursive: true });
+  if (!linkDir(outside, path.join(s.archiveDir, ccProjectSlug(s.proj)))) { t.skip('this volume or account cannot make a directory link'); return; }
+  const r = run(s);
+  assert.strictEqual(fs.readFileSync(bait, 'utf8'), 'outside', 'the file behind the link is untouched');
+  assert.strictEqual(r.archived.length, 0);
+  assert.match(r.failed[0].reason, /is a link or not a folder/);
+  assert.ok(fs.existsSync(path.join(s.projDir, `${SID}.jsonl`)), 'the live session stays');
+});
+
+test('762 F5: a linked session folder in the archive refuses the session before any sweep; nothing outside is removed', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  const outside = path.join(s.root, 'outside');
+  fs.mkdirSync(outside);
+  const bait = path.join(outside, STAGED_NAME('a.txt.gz'));
+  fs.writeFileSync(bait, 'outside');
+  const slugDir = path.join(s.archiveDir, ccProjectSlug(s.proj));
+  fs.mkdirSync(slugDir, { recursive: true });
+  if (!linkDir(outside, path.join(slugDir, SID))) { t.skip('this volume or account cannot make a directory link'); return; }
+  const r = run(s);
+  assert.strictEqual(fs.readFileSync(bait, 'utf8'), 'outside', 'the file behind the link is untouched');
+  assert.strictEqual(r.archived.length, 0);
+  assert.match(r.failed[0].reason, /is a link or not a folder/);
+  assert.ok(fs.existsSync(path.join(s.projDir, `${SID}.jsonl`)), 'the live session stays');
 });

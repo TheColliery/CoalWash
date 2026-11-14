@@ -270,9 +270,19 @@ export function appendOwnLog(file, text) {
   let present = null;
   try { present = fs.lstatSync(file); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
   if (present && !present.isFile()) throw new Error(`${file} is not a plain file (not-plain)`);
-  const o = openPlainFile(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), null, 0o600);
+  const o = openPlainFile(file, fs.constants.O_RDWR | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), null, 0o600);
   if (o.fd === undefined) throw new Error(`${file} is not a plain file, or changed under the append (${o.why})`);
-  try { fs.writeFileSync(o.fd, text); } finally { fs.closeSync(o.fd); }
+  try {
+    // 29gz fire 762 (lab O-3): a writer killed halfway through a line leaves the file without its final newline. The next record then
+    // starts on a line of its own, so the torn half is one unreadable line and every record after it still reads.
+    const size = fs.fstatSync(o.fd).size;
+    let lead = '';
+    if (size > 0) {
+      const last = Buffer.alloc(1);
+      if (fs.readSync(o.fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a) lead = '\n';
+    }
+    fs.writeFileSync(o.fd, lead + text);
+  } finally { fs.closeSync(o.fd); }
 }
 
 // Write `content` to `target` inside `root`, or throw RepoWriteRefused.

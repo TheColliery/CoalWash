@@ -797,7 +797,16 @@ function main() {
         generation = Number(g);
       }
       const r = restoreSession(sessionId, { archiveDir: resolveArchiveDir(estate, home), to: toValue, generation, tombstones });
-      if (!r.ok) { console.error(`estate-restore: ${r.error}`); process.exitCode = 1; return; }
+      if (!r.ok) {
+        console.error(`estate-restore: ${r.error}`);
+        // 29gz fire 762 (lab O-4, F-1): a refused or incomplete restore names every file it did write, and where.
+        if (Array.isArray(r.files) && r.files.length) {
+          console.error(`estate-restore: ${r.files.length} file(s) were written to ${r.dir} before it stopped:`);
+          for (const f of r.files) console.error(`  ${escapeRawControls(String(f.rel))} (${f.bytes} bytes)`);
+        }
+        process.exitCode = 1;
+        return;
+      }
       const which = r.generation ? `generation ${r.generation} (an earlier copy, kept when a later archive of this session was not a superset of it)` : 'the newest archived copy';
       console.log(`[CoalWash] restored ${which} of session ${sessionId}: ${r.files.length} file(s) to ${r.dir} — byte-exact copies of what was archived; nothing written into the live CC tree${toValue ? ' beyond your --to choice' : ''}`);
       const others = (r.generations || []).filter((n) => n !== r.generation);
