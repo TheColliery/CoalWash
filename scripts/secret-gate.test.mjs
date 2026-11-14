@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GATE = path.join(HERE, 'secret-gate.mjs');
@@ -76,7 +76,19 @@ function run(dir, args = [], input = '', extraEnv = {}) {
   return { code: r.status, out: r.stdout || '', err: r.stderr || '' };
 }
 
-test.after(() => { for (const d of [...made, SANDBOX]) fs.rmSync(d, { recursive: true, force: true }); });
+// Teardown of a tree git children just used: on Windows a git.exe that outlives its launcher by a few seconds still holds the tree, and one plain rmSync
+// answers EBUSY, EPERM or ENOTEMPTY, failing the test for a reason that is not the test's (CoalWash e63, measured: a loop of fresh calls clears it, the
+// retry options of one call do not; order 16i item 6). A tree still held past the budget throws: a real leak stays loud.
+function removeTree(dir, budgetMs = 30000) {
+  const until = Date.now() + budgetMs;
+  for (;;) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); return; } catch (e) {
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(e && e.code) || Date.now() >= until) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+}
+test.after(() => { for (const d of [...made, SANDBOX]) removeTree(d); });
 
 test('a clean tree passes: exit 0 and a PASS SECRETS line naming the files scanned', () => {
   const r = run(repo([{ 'README.md': 'hello\n' }]));
@@ -128,6 +140,38 @@ test('--pre-push with a clean range passes and says what it read; with no refs o
   assert.match(run(dir, ['--pre-push'], '').out, /no refs on stdin, nothing to scan/);
 });
 
+// 14h (item 14, courier 3; CoalWash LOW): --remote=<name> names the PUSH remote, so a commit held only by ANOTHER remote still counts as unpushed. Nothing exercised the flag.
+// The fixture: three commits, the middle one adds a key and the last deletes it (the tree at HEAD is clean), the tip sits on the remote-tracking ref of `other` only, and the push is a new branch to `origin`.
+test('--pre-push --remote=<name>: a commit held only by another remote is scanned for the named push remote, and is skipped when the named remote already holds it or no remote is named', () => {
+  const dir = repo([{ 'a.txt': 'one\n' }, { 'k.txt': `${KEY}\n` }, { 'k.txt': null }]);
+  git(dir, 'remote', 'add', 'origin', 'https://example.invalid/o.git');
+  git(dir, 'remote', 'add', 'other', 'https://example.invalid/p.git');
+  const tip = git(dir, 'rev-parse', 'HEAD');
+  git(dir, 'update-ref', 'refs/remotes/other/main', tip);
+  const stdin = `refs/heads/main ${tip} refs/heads/main ${ZERO}\n`;
+  const toOrigin = run(dir, ['--pre-push', '--remote=origin'], stdin);
+  assert.strictEqual(toOrigin.code, 1, toOrigin.out + toOrigin.err);
+  assert.match(toOrigin.out, /pushed [0-9a-f]{12} "k\.txt":1 aws-access-key-id/);
+  for (const flags of [['--remote=other'], [], ['--remote=nosuchremote']]) {
+    const r = run(dir, ['--pre-push', ...flags], stdin);
+    assert.strictEqual(r.code, 0, `${flags.join(' ') || '(no --remote)'}: ${r.out}${r.err}`);
+    assert.match(r.out, /pushed range: 1 ref\(s\), 0 commit\(s\)/);
+  }
+});
+
+test('--pre-push --remote=<name> with a value that is not the name of a remote of this repository (a glob, a dash-led value, empty) is ignored and the scan falls back to every remote', () => {
+  const dir = repo([{ 'a.txt': 'one\n' }, { 'k.txt': `${KEY}\n` }, { 'k.txt': null }]);
+  git(dir, 'remote', 'add', 'other', 'https://example.invalid/p.git');
+  const tip = git(dir, 'rev-parse', 'HEAD');
+  git(dir, 'update-ref', 'refs/remotes/other/main', tip);
+  const stdin = `refs/heads/main ${tip} refs/heads/main ${ZERO}\n`;
+  for (const bad of ['--remote=*', '--remote=--all', '--remote=ot*', '--remote=']) {
+    const r = run(dir, ['--pre-push', bad], stdin);
+    assert.strictEqual(r.code, 0, `${bad}: ${r.out}${r.err}`);
+    assert.match(r.out, /pushed range: 1 ref\(s\), 0 commit\(s\)/, bad);
+  }
+});
+
 test('a pushed tag whose target is not a commit is refused by name, never scanned unread', () => {
   const dir = repo([{ 'a.txt': 'one\n' }]);
   const blob = git(dir, 'hash-object', '-w', 'a.txt');
@@ -149,6 +193,22 @@ test('a scan that cannot run fails: a missing scanner and a directory that is no
   const r = run(dir);
   assert.strictEqual(r.code, 1);
   assert.match(r.out, /FAIL SECRETS: .*not inside a git repository/);
+});
+
+test('a git that runs and refuses is reported with its own first line, never as git missing from PATH (found 2026-10-23 while testing the one-wording classifier class)', () => {
+  // a .git FILE naming a directory that is gone: git 2.56 answers "gitfile does not point to a valid repository", exit 128.
+  // RED before the fix: the gate printed the cause "is git on PATH?" although git ran (git 2.56), or, on the ubuntu runner's
+  // older git, which answers "not a git repository: <path>", the wrong cause "not inside a git repository" (CI, 2026-10-23).
+  const dir = fs.mkdtempSync(path.join(SANDBOX, 'secret-gate-brokenlink-'));
+  made.push(dir);
+  fs.mkdirSync(path.join(dir, 'scripts', 'lib'), { recursive: true });
+  fs.copyFileSync(GATE, path.join(dir, 'scripts', 'secret-gate.mjs'));
+  fs.copyFileSync(LIB, path.join(dir, 'scripts', 'lib', 'secret-scan.mjs'));
+  fs.writeFileSync(path.join(dir, '.git'), 'gitdir: ' + path.join(dir, 'gone-gitdir') + '\n');
+  const r = run(dir);
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /FAIL SECRETS: git could not list the tracked files \(fatal: /);
+  assert.ok(!/is git on PATH/.test(r.out), 'git ran, so PATH is not the cause');
 });
 
 test('--help prints the usage and exits 0; an unknown flag is an error with the usage on stderr (64)', () => {
@@ -290,4 +350,47 @@ test('the sandbox is closed against a repository ABOVE the temp folder: a non-re
   const r = spawnSync(process.execPath, ['--max-old-space-size=512', '--test', '--test-timeout=60000', '--test-reporter=tap', '--test-name-pattern=a scan that cannot run', fileURLToPath(import.meta.url)], { encoding: 'utf8', timeout: 120000, env });
   assert.match(r.stdout, /^# pass 1$/m, 'the nested run really ran the test: ' + r.stdout.slice(-400));
   assert.strictEqual(r.status, 0, r.stdout.slice(-800) + r.stderr.slice(-400));
+});
+
+// ---- order 2026-11-03b: a binary-looking NAME no longer skips a blob before its bytes are read; a blob id shared by several paths is read once;
+// git is never launched from the checkout the gate scans. Each was RED on the code before it.
+test('a staged text file with a binary-looking name is still scanned: the bytes decide, never the name -- RED before 2026-11-03b', () => {
+  const nul = String.fromCharCode(0);
+  const r = run(repo([{ 'notes.png': `id ${KEY}\n`, 'real.png': `PNG${nul}${nul} id ${KEY}\n` }]));
+  assert.strictEqual(r.code, 1, r.out + r.err);
+  assert.match(r.out, /tree "notes\.png":1 /, 'the text file named .png was read and its key found');
+  assert.doesNotMatch(r.out, /real\.png/, 'a blob whose first bytes hold a NUL is binary by its content and stays out of the text scan');
+});
+
+test('a blob id staged at several paths is handed to git cat-file once, and every path is still reported -- RED before 2026-11-03b', () => {
+  const dir = repo([{ 'a.txt': `id ${KEY}\n`, 'b.txt': `id ${KEY}\n`, 'c/d.txt': `id ${KEY}\n`, 'README.md': 'hello\n' }]);
+  // A preload records what the gate hands to cat-file; the gate's own code is never changed for the test.
+  const preload = path.join(SANDBOX, `catfile-probe-${made.length}.mjs`);
+  const log = preload + '.log';
+  fs.writeFileSync(preload, [
+    "import cp from 'node:child_process';",
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    'const orig = cp.execFileSync;',
+    "cp.execFileSync = function (file, args, opts) { if (Array.isArray(args) && args.includes('cat-file') && opts && opts.input != null) fs.appendFileSync(process.env.GATE_PROBE_LOG, String(opts.input)); return orig.apply(this, arguments); };",
+    'syncBuiltinESMExports();',
+  ].join('\n'));
+  const r = run(dir, [], '', { NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preload).href}`].filter(Boolean).join(' '), GATE_PROBE_LOG: log });
+  assert.strictEqual(r.code, 1, r.out + r.err);
+  for (const f of ['a.txt', 'b.txt', 'c/d.txt']) assert.ok(r.out.includes(`tree "${f}":1 `), `${f} is reported: ${r.out}`);
+  const ids = fs.readFileSync(log, 'utf8').split(/\r?\n/).filter(Boolean);
+  assert.ok(ids.length >= 2, 'the probe saw the cat-file input');
+  assert.strictEqual(new Set(ids).size, ids.length, `every id is asked for once: ${ids.length} asked, ${new Set(ids).size} distinct`);
+});
+
+test('a git.exe planted in the scanned checkout is never run in git\'s place on Windows -- RED before 2026-11-03b', (t) => {
+  // Elsewhere the current folder is searched only when PATH names it, the user's own setting, so the case is Windows'.
+  if (process.platform !== 'win32') { t.skip('only Windows looks for a program in the current folder first'); return; }
+  const dir = repo([{ 'README.md': 'hello\n' }]);
+  // any small program stands in for a planted git.exe: it cannot list the index, so a gate that ran it cannot pass
+  fs.copyFileSync(path.join(process.env.SystemRoot, 'System32', 'whoami.exe'), path.join(dir, 'git.exe'));
+  // the sandbox environment never carries Windows' own switch, so the gate must set it for itself
+  const r = run(dir);
+  assert.strictEqual(r.code, 0, r.out + r.err);
+  assert.match(r.out, /^PASS SECRETS: tree scan of \d+ tracked text file\(s\) clean/m);
 });
