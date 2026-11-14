@@ -2,6 +2,22 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.19.0] - 2026-11-14
+
+A re-archived session keeps its earlier copy, restorable with --generation
+
+### Added
+
+- `estate-restore <sessionId> --generation <N>` returns an earlier copy that a re-archive kept, and the restore line names which copy it returned and how to reach the others. — test: `scripts/lib/estate-generations.test.mjs`
+
+### Fixed
+
+- A session restored from the archive, then edited (not only appended to), then archived again replaced the earlier archived copy, so the bytes only that copy held were lost. Now the earlier copy is kept as a generation. — test: `scripts/lib/estate-generations.test.mjs`
+- A refused restore of a damaged archive now says so in plain words, with zlib's own text in brackets. — test: `scripts/lib/estate-generations.test.mjs`
+- A refused restore no longer leaves an empty folder in the temp folder. — test: `scripts/lib/estate-generations.test.mjs`
+
+An older CoalWash install that re-archives such a session itself still replaces the newest copy, and an older install ignores `--generation`. Update every install.
+
 ## [1.18.1] - 2026-11-14
 
 The nudge quotes the store's current fat, not the last reading
