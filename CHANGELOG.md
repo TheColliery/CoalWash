@@ -2,6 +2,21 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.19.1] - 2026-11-15
+
+A restore returns every intact file of a damaged copy
+
+### Fixed
+
+- A re-archive now reads every kept generation and every new copy back after it renames them, before it deletes any live file; a copy changed in between stops the run, puts the earlier copy back, and leaves the live session in place. — test: `scripts/lib/estate-generations.test.mjs`
+- A run whose lock is taken over between two of its commit renames now stops at the next rename instead of finishing the commit. — test: `scripts/lib/estate-generations.test.mjs`
+- A restore whose copy holds a damaged file now still writes every intact file of that copy, names each damaged file with the path where its bytes still are and what to try, and exits non-zero. Before, a hand gunzip was the only way to get an intact file out of a copy that held a damaged one; the tool now returns it. — test: `scripts/lib/estate-generations.test.mjs`
+- A refused or incomplete restore now names every file it already wrote, and where. — test: `scripts/lib/estate-generations.test.mjs`
+- A torn line in the estate index or the refusal record no longer hides the next record written after it. — test: `scripts/lib/estate-generations.test.mjs`
+- A linked project or session folder inside the archive now refuses the session before anything in it is swept. — test: `scripts/lib/estate-generations.test.mjs`
+
+Note on 1.19.0: its entry says `--generation <N>` returns a kept copy. For a session archived as several files, a generation holds only the files whose earlier copy was not a prefix of the new one, so it can return part of a session. The 1.19.0 entry is not edited.
+
 ## [1.19.0] - 2026-11-14
 
 A re-archive of an edited session keeps its earlier copy
