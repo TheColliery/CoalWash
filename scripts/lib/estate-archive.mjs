@@ -1151,9 +1151,24 @@ function readArchiveHandle(gzPath, bound) {
 // CC's live tree unless an explicit --to points there (the default tmpdir
 // guarantees it). Scans the archive dir itself (not the index), so a session
 // archived without an index row still restores.
-// 29gt fire 750: `generation` (an integer >= 1) restores that kept generation; absent, the newest copy.
+// 29gt fire 750: `generation` (an integer >= 1) restores that kept generation; absent, the newest copy. A refused restore that made
+// its own default folder removes it again when nothing was written into it (a narrow, non-recursive delete of that one folder).
 export function restoreSession(sessionId, opts = {}) {
-  return restoreSessionInner(sessionId, opts);
+  const r = restoreSessionInner(sessionId, opts);
+  if (!r.ok && !opts.to && r.dir && Array.isArray(r.files) && r.files.length === 0 && dropEmptyDefaultTarget(r.dir)) {
+    const { dir: _dropped, ...rest } = r;
+    return rest;
+  }
+  return r;
+}
+function dropEmptyDefaultTarget(dir) {
+  try {
+    const tmp = fs.realpathSync.native(os.tmpdir());
+    const real = fs.realpathSync.native(dir);
+    if (path.dirname(real) !== tmp || !path.basename(real).startsWith('coalwash-estate-')) return false; // only the folder this restore made
+    fs.rmdirSync(real); // non-recursive: refuses a folder that holds anything
+    return true;
+  } catch { return false; }
 }
 function restoreSessionInner(sessionId, { archiveDir, to = null, generation = null, tombstones, sessionCeilBytes, bounds = RESTORE_BOUNDS, tombstoneWindowBytes = TOMBSTONE_WINDOW_BYTES } = {}) { // sessionCeilBytes and bounds: the test seams for the bounds
   const B = sessionCeilBytes === undefined ? bounds : { ...bounds, sessionCeilBytes };
@@ -1244,6 +1259,10 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
           return remaining < fileBound
             ? { ok: false, error: `restore refused on ${s.rel}: it would pass the ${sessionBound}-byte session bound (the whole session's inflated bytes; the files already written stay)`, dir, files }
             : { ok: false, error: `restore refused on ${s.rel}: it would inflate past ${fileBound} bytes for a ${gz.length}-byte archive`, dir, files };
+        }
+        // 29gt fire 750: a damaged archive says so in plain words; zlib's own text follows in brackets, never alone.
+        if (e && typeof e.code === 'string' && e.code.startsWith('Z_')) {
+          return { ok: false, error: `restore refused on ${s.rel}: the archived copy is damaged (it does not decompress), so nothing was restored from it. If an earlier copy is kept, restore it with --generation <N> (${genList}); otherwise use a backup of the archive folder. [zlib: ${e.message}]`, dir, files };
         }
         throw e;
       }

@@ -237,3 +237,14 @@ test('(e) something already standing at the generation name refuses the re-archi
   assert.ok(fs.existsSync(path.join(s.projDir, `${SID}.jsonl`)), 'the original is kept');
 });
 
+test('a damaged archive is refused in plain words with zlib in brackets, and the refused restore leaves no empty folder in temp', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  run(s);
+  damage(s);
+  const r = cli(s, ['estate-restore', SID]);
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /the archived copy is damaged \(it does not decompress\), so nothing was restored from it/);
+  assert.match(r.stderr, /\[zlib: [^\]]+\]/);
+  assert.deepStrictEqual(fs.readdirSync(path.join(s.root, 'tmp')).filter((n) => n.startsWith('coalwash-estate-')), [], 'no empty restore folder is left behind');
+});
