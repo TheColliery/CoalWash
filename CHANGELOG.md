@@ -4,17 +4,20 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [1.19.0] - 2026-11-14
 
-A re-archive of an edited session keeps its earlier copy, restorable with --generation
+A re-archive of an edited session keeps its earlier copy
+
+An edited session's earlier copy is kept as a generation, and `estate-restore <sessionId> --generation <N>` returns it.
 
 ### Added
 
 - `estate-restore <sessionId> --generation <N>` returns an earlier copy that a re-archive kept, and the restore line names which copy it returned and how to reach the others. — test: `scripts/lib/estate-generations.test.mjs`
+- `estate.maxGenerations` (default 10, range 0-1000) bounds the kept copies of one session. Past it an edited re-archive is refused in words: every copy is kept, the session stays live, and the refusals are counted in `/coalwash:stats`. A project config may only lower it. — test: `scripts/lib/estate-generations.test.mjs`
 
 ### Fixed
 
 - A session restored from the archive, then edited (not only appended to), then archived again replaced the earlier archived copy, so the bytes only that copy held were lost. Now the earlier copy is kept as a generation. — test: `scripts/lib/estate-generations.test.mjs`
 - A refused restore of a damaged archive now says so in plain words, with zlib's own text in brackets, and names the intact newest copy and how to restore it. — test: `scripts/lib/estate-generations.test.mjs`
-- A re-archive that failed partway removed the earlier archived copy, so only the live transcript still held its bytes. Now the earlier copy is held and put back if the run fails. — test: `scripts/lib/estate-generations.test.mjs`
+- A re-archive that failed partway removed the earlier archived copy, so only the live transcript still held its bytes. Now a replaced copy is written beside the old one, verified, then renamed, so a killed run loses or corrupts no copy. — test: `scripts/lib/estate-generations.test.mjs`
 - A refused restore no longer leaves an empty folder in the temp folder. — test: `scripts/lib/estate-generations.test.mjs`
 
 An older CoalWash install that re-archives such a session itself still replaces the newest copy, and an older install ignores `--generation`. Update every install.
