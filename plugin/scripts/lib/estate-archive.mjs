@@ -867,7 +867,7 @@ function sameKept(gens, rel, gz, bounds) {
 // The words for an archived file the index repair cannot open (fire 784, t338 F1): which file, why, and what the person can do.
 const unopenable = (file, e) => `its archived transcript ${file} could not be opened (${(e && e.code) || 'error'}), so the index repair skipped it and search will not list it; fix the file's permissions or close the program that holds it, then run again`;
 function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
-  const out = { added: 0, failed: [], robbedState: null };
+  const out = { added: 0, failed: [], undecodable: [], robbedState: null };
   const slugDir = path.join(archiveDir, slug);
   let names;
   try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { return out; }
@@ -895,7 +895,9 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
     if (prev && (typeof prev.transcriptGzSha256 !== 'string' || prev.transcriptGzSha256 === sha)) continue;
     let transcriptBuf;
     try { transcriptBuf = zlib.gunzipSync(got.buf, { maxOutputLength: restoreInflateBoundWith(got.buf.length, bounds) }); } catch (e) {
-      out.failed.push({ id: sid, reason: `its archived transcript does not decompress (${e && e.code}), so no index row was added for it; restore it by id` });
+      const f = { id: sid, reason: `its archived transcript does not decompress (${e && e.code}), so no index row was added for it; restore it by id` };
+      out.failed.push(f);
+      out.undecodable.push(f);
       continue;
     }
     const row = buildIndexRow({ sessionId: sid, projectSlug: slug, transcriptBuf, totalBytes: transcriptBuf.length, now }); // bytes: the transcript's own (the session's other files are not read here)
@@ -1109,11 +1111,14 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       bytesFreed: 0, indexRows: 0, budgetDeferred: 0, budgetReached: false,
     };
     const budget = c.cfg.runBudget;
+    let undecodable = []; // fire 785 (lab 1.19.2 K-E): the repair's does-not-decompress entries, dropped below for a session this run re-archives
+    const indexedNow = new Set();
     if (c.cfg.indexEnabled) {
       const rec = reconcileIndex(archiveDir, c.slug, { now, lockState: lock.state, bounds });
       res.indexRows += rec.added;
       if (rec.added) res.reconciledRows = rec.added;
       for (const f of rec.failed) res.failed.push(f);
+      undecodable = rec.undecodable;
       if (rec.failed.length) res.indexRepairFailed = rec.failed.length; // fire 784 (t338 F1): the CLI exits non-zero on it
       if (rec.robbedState) {
         const s = rec.robbedState;
@@ -1161,9 +1166,17 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
         break;
       }
       if (c.cfg.indexEnabled && !appendIndexRow(archiveDir, r.row)) res.failed.push({ id: sess.id, reason: 'index append failed (bytes archived + originals deleted — restore unaffected; the next run adds the row)' });
-      else if (c.cfg.indexEnabled) res.indexRows++;
+      else if (c.cfg.indexEnabled) { res.indexRows++; indexedNow.add(sess.id); }
       res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept, alreadyKept: r.alreadyKept });
       res.bytesFreed += r.bytes;
+    }
+    // fire 785 (lab 1.19.2 K-E): a session this same run archived cleanly with its index row appended no longer needs the repair's
+    // "does not decompress ... restore it by id" hint, and the run no longer counts it as a repair it could not do.
+    const moot = new Set(undecodable.filter((f) => indexedNow.has(f.id)));
+    if (moot.size) {
+      res.failed = res.failed.filter((f) => !moot.has(f));
+      const left = (res.indexRepairFailed || 0) - moot.size;
+      if (left > 0) res.indexRepairFailed = left; else delete res.indexRepairFailed;
     }
     res.budgetReached = res.budgetDeferred > 0;
     return res;

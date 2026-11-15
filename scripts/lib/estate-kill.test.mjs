@@ -507,3 +507,29 @@ test('F7: estate-restore escapes control characters in the refusal it prints', (
   assert.strictEqual(err.includes(String.fromCodePoint(0x202e)), false, 'no raw U+202E reaches stderr');
   assert.strictEqual(err.includes(String.fromCodePoint(0x9b)), false, 'no raw U+009B reaches stderr');
 });
+
+test('K-E (lab 1.19.2): a session the same run then archives cleanly is not reported as an archive that does not decompress', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.strictEqual(run(s).archived.length, 1);
+  fs.writeFileSync(gzPathOf(s), damagedGz()); // the archived copy is damaged, so its index row no longer matches it
+  seed(s, V2);
+  const res = run(s, Date.now() + LATER);
+  assert.deepStrictEqual(res.archived.map((a) => a.id), [SID], `the session is archived cleanly: ${JSON.stringify(res)}`);
+  assert.strictEqual(restoreText(s), V2, 'the new copy restores');
+  const why = res.failed.filter((f) => f.id === SID).map((f) => f.reason).join(' | ');
+  assert.ok(!/does not decompress/.test(why), `no stale hint for a session this run archived cleanly: ${why}`);
+  assert.strictEqual(res.indexRepairFailed, undefined, 'the run does not count a repair this run made moot');
+  assert.ok(!/does not decompress/.test(runEstateReport(res)), runEstateReport(res));
+});
+
+test('K-E control: an archive that does not decompress and is NOT re-archived in the same run is still named', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.strictEqual(run(s).archived.length, 1);
+  fs.writeFileSync(gzPathOf(s), damagedGz());
+  const res = run(s, Date.now() + LATER);
+  assert.strictEqual(res.archived.length, 0);
+  const why = res.failed.filter((f) => f.id === SID).map((f) => f.reason).join(' | ');
+  assert.match(why, /does not decompress/);
+});
