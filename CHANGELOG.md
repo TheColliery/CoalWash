@@ -2,6 +2,21 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.19.2] - 2026-11-15
+
+An interrupted archive is found again, and no copy is kept twice
+
+### Fixed
+
+- An archive whose run was killed after it removed a session's original, but before it wrote that session's index row, is now listed by `estate-search` after the next run; an index row lost to a failed write is added the same way. Before, that session could not be found by search until restored by hand. — test: `scripts/lib/estate-kill.test.mjs`
+- `estate-search` marks an earlier row as a kept generation only when that generation holds the copy the row describes. Before, a missing row could label a different copy as a kept generation, so its restore command returned the wrong bytes. — test: `scripts/lib/estate-kill.test.mjs`
+- A re-archive refused after its commit now moves a changed kept generation aside, never deletes it, and keeps a verified one. Its message lists what it removed, put back, left in place and moved aside. Before, the message claimed copies were taken back that were not, and a changed generation could be removed. — test: `scripts/lib/estate-kill.test.mjs`
+- A re-archive after a run stopped between its two renames no longer keeps the same earlier copy a second time, so it spends no `estate.maxGenerations` slot on it. — test: `scripts/lib/estate-kill.test.mjs`
+- A restore refused partway now still names every damaged file it found before the refusal, and says the files after it were not restored. Before, the damaged files found earlier were not named. — test: `scripts/lib/estate-kill.test.mjs`
+- `estate-restore` escapes control characters in every line it prints, refusals included, so a file name cannot change what the terminal shows. — test: `scripts/lib/estate-kill.test.mjs`
+
+Forward note for `[1.19.1]` (not edited): its lead says a restore returns every intact file of a damaged copy. That held only when no later file was refused; a refusal later in the copy stopped the restore before the files after it.
+
 ## [1.19.1] - 2026-11-15
 
 A restore returns every intact file of a damaged copy
