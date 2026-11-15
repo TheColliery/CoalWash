@@ -240,20 +240,59 @@ test('WD (lab 1.19.2): when another writer deletes this run\'s kept generation, 
   assert.strictEqual(fs.readFileSync(transcriptPath(s), 'utf8'), V2, 'the live session stays');
 });
 
-test('O-1: a run killed between a generation\'s rename and its copy\'s rename does not make the next run keep the same bytes again', (t) => {
+// fire 793 (main's ruling on the 1.19.3 labtest F4 window): the 1.19.2 O-1 test asserted that ONE kept generation holding the earlier
+// copy is reused; that one holder is then the only copy behind the live delete (LAB-RECORD section 1, T-24/M-20), so the ruling replaces
+// it: one holder keeps a fresh copy, as 1.19.1 always did, and two holders are reused, so repeated kills keep at most two copies.
+test('O-1 one holder: a run killed between a generation\'s rename and its copy\'s rename makes the next run keep a fresh copy, as 1.19.1 does', (t) => {
   const s = sandbox(t);
   archiveThenRewrite(s);
   killedRun(s, 'after-gen-rename');
   assert.strictEqual(filesUnder(s.archiveDir, /\.gz\.gen\d+$/).length, 1, 'the kill left generation 1 beside the same copy');
   const res = run(s, Date.now() + LATER);
   assert.strictEqual(res.archived.length, 1, JSON.stringify(res));
-  assert.deepStrictEqual(filesUnder(s.archiveDir, /\.gz\.gen\d+$/).map((p) => path.basename(p)), [`${SID}.jsonl.gz.gen1`], 'no second generation of the same bytes');
-  assert.deepStrictEqual(res.archived[0].alreadyKept, [{ rel: `${SID}.jsonl`, generation: 1 }]);
-  assert.match(runEstateReport(res), /ALREADY-KEPT .*already kept, byte for byte, as generation 1/);
+  assert.deepStrictEqual(filesUnder(s.archiveDir, /\.gz\.gen\d+$/).map((p) => path.basename(p)), [`${SID}.jsonl.gz.gen1`, `${SID}.jsonl.gz.gen2`], 'a fresh generation of the earlier copy');
+  assert.strictEqual(res.archived[0].alreadyKept, undefined);
+  assert.strictEqual(res.archived[0].generation, 2);
   assert.strictEqual(restoreText(s, { generation: 1 }), ORIGINAL);
+  assert.strictEqual(restoreText(s, { generation: 2 }), ORIGINAL);
   assert.strictEqual(restoreText(s), V2);
   const rows = searchIndex('CW772-NEEDLE', { archiveDir: s.archiveDir });
-  assert.ok(rows.some((r) => r.generation === 1), `search labels the earlier row with the generation that holds it: ${JSON.stringify(rows)}`);
+  assert.ok(rows.some((r) => r.generation === 2), `search labels the earlier row with the generation that holds it: ${JSON.stringify(rows)}`);
+});
+test('O-1 two holders: when two kept generations already hold the earlier copy, the next run keeps no third', (t) => {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen1`);
+  fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen2`); // the state after a kill, then a fresh keep, then a second kill
+  const res = run(s, Date.now() + LATER);
+  assert.strictEqual(res.archived.length, 1, JSON.stringify(res));
+  assert.deepStrictEqual(filesUnder(s.archiveDir, /\.gz\.gen\d+$/).map((p) => path.basename(p)), [`${SID}.jsonl.gz.gen1`, `${SID}.jsonl.gz.gen2`], 'no third generation of the same bytes');
+  assert.deepStrictEqual(res.archived[0].alreadyKept, [{ rel: `${SID}.jsonl`, generation: 2 }]);
+  assert.match(runEstateReport(res), /ALREADY-KEPT .*already kept, byte for byte, as generation 2/);
+  assert.strictEqual(restoreText(s, { generation: 1 }), ORIGINAL);
+  assert.strictEqual(restoreText(s, { generation: 2 }), ORIGINAL);
+  assert.strictEqual(restoreText(s), V2);
+});
+test('O-1 two holders: the newest holder is named by number, not by name order (generation 10 after 9)', (t) => {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen9`);
+  fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen10`);
+  const res = run(s, Date.now() + LATER);
+  assert.deepStrictEqual(res.archived[0].alreadyKept, [{ rel: `${SID}.jsonl`, generation: 10 }], JSON.stringify(res));
+});
+test('O-1 two holders compare by content: two generations of the same size but other bytes do not stand in for the earlier copy', (t) => {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  const other = Buffer.from(fs.readFileSync(gzPathOf(s)));
+  other[Math.floor(other.length / 2)] ^= 0xff; // same size, other bytes
+  fs.writeFileSync(`${gzPathOf(s)}.gen1`, other);
+  fs.writeFileSync(`${gzPathOf(s)}.gen2`, other);
+  const res = run(s, Date.now() + LATER);
+  assert.strictEqual(res.archived.length, 1, JSON.stringify(res));
+  assert.strictEqual(res.archived[0].alreadyKept, undefined, 'no reuse of copies that only match by size');
+  assert.strictEqual(res.archived[0].generation, 3);
+  assert.strictEqual(restoreText(s, { generation: 3 }), ORIGINAL, 'the earlier copy is kept fresh');
 });
 
 test('O-1 compares by content: a kept generation of the same size but other bytes does not stand in for the copy being replaced', (t) => {
@@ -406,6 +445,9 @@ function reusedGenWritten(t, moment) {
   archiveThenRewrite(s);
   const gen1 = `${gzPathOf(s)}.gen1`;
   fs.copyFileSync(gzPathOf(s), gen1); // the O-1 state
+  // fire 793: with one holder the run now keeps a fresh copy and reuses nothing, so the reused-generation read-back is walked in the
+  // two-holder state, the one state where a generation is still reused; the writer hits gen1, one of the two holders.
+  fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen2`);
   const real = fs.renameSync;
   let wrote = false;
   fs.renameSync = function patched(a, b, ...r) {
@@ -583,3 +625,52 @@ test('C2 (INSPECT 787): a kept generation that does not decompress is reported a
   assert.match(line, /does not decompress/, `the line says the kept copy is damaged: ${line}`);
   assert.ok(!/restore it with/.test(line), `no restore advice for a damaged copy: ${line}`);
 });
+
+// fire 793 (labtest 1.19.3 F4 window, LAB-RECORD section 1, points T-24 and M-20; main's ruling: a fix is never weaker than the
+// version before the defect). The class: can a run delete the live file while the only other copy of the earlier version sits at a
+// name that existed before the run? The O-1 state (a run killed right after a generation's rename, so gen1 equals the archive copy),
+// the files edited, and an outside writer that replaces gen1 with a valid impostor gzip or removes it, AFTER the read-back and just
+// BEFORE the run's first live delete. Walked: the first fs.rmSync of a live file. Not walked: every other mutating call of the run
+// (the lab harness f4-legs.mjs walks them all).
+function heldVersions(s, rel) {
+  const slugDir = path.join(s.archiveDir, ccProjectSlug(s.proj));
+  const out = [];
+  try { out.push(fs.readFileSync(path.join(s.projDir, rel), 'utf8')); } catch { /* not live */ }
+  let names = []; try { names = fs.readdirSync(slugDir); } catch { /* none */ }
+  for (const n of names.sort()) if (n.startsWith(`${rel}.gz`)) { try { out.push(zlib.gunzipSync(fs.readFileSync(path.join(slugDir, n))).toString('utf8')); } catch { /* not a copy */ } }
+  return out;
+}
+function everyVersionHeld(s, when) {
+  for (const [rel, vs] of [[`${SID}.jsonl`, [LBL_V0.t, LBL_V1.t]], [`${SID}.meta.json`, [LBL_V0.meta, LBL_V1.meta]]]) {
+    const held = heldVersions(s, rel);
+    for (const v of vs) assert.ok(held.includes(v), `${when}: ${rel} version "${v.slice(0, 40)}" is still on disk (live, the archive copy or a generation)`);
+  }
+}
+for (const [state, rename, rel] of [['T', '1', `${SID}.jsonl`], ['M', '3', `${SID}.meta.json`]]) {
+  for (const writer of ['replace', 'remove']) {
+    test(`F4W (lab 1.19.3) state ${state}, writer ${writer}s the reused gen1 before the first live delete: no version is lost, or the session is not reported archived`, (t) => {
+      const s = lblSetup(t);
+      killedRun(s, 'after-commit-rename', rename);
+      const slugDir = path.join(s.archiveDir, ccProjectSlug(s.proj));
+      const gen1 = path.join(slugDir, `${rel}.gz.gen1`);
+      assert.ok(fs.readFileSync(gen1).equals(fs.readFileSync(path.join(slugDir, `${rel}.gz`))), 'the O-1 state: gen1 holds the archive copy byte for byte');
+      const live = path.resolve(s.projDir);
+      const real = fs.rmSync;
+      let struck = false;
+      fs.rmSync = function patched(p, ...r) {
+        if (!struck && path.resolve(String(p)).startsWith(live + path.sep)) {
+          struck = true;
+          if (writer === 'replace') fs.writeFileSync(gen1, zlib.gzipSync(Buffer.from('IMPOSTOR\n'))); else fs.unlinkSync(gen1);
+        }
+        return real.call(fs, p, ...r);
+      };
+      let res;
+      try { res = run(s, Date.now() + LATER); } finally { fs.rmSync = real; }
+      assert.ok(struck, 'the outside writer struck before the first live delete');
+      if (res.archived.length === 0) return; // not reported archived: the live files stay, nothing to check further
+      everyVersionHeld(s, 'after the run');
+      run(s, Date.now() + 2 * LATER);
+      everyVersionHeld(s, 'after the user\'s following run');
+    });
+  }
+}
