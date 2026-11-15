@@ -533,3 +533,19 @@ test('K-E control: an archive that does not decompress and is NOT re-archived in
   const why = res.failed.filter((f) => f.id === SID).map((f) => f.reason).join(' | ');
   assert.match(why, /does not decompress/);
 });
+
+test('Aside (lab 1.19.2): a later run lists the files a refused run moved aside, and leaves them where they are', (t) => {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  const coWriter = zlib.gzipSync(Buffer.from('CO-WRITER BYTES\n'));
+  const real = fs.renameSync;
+  fs.renameSync = function patched(a, b, ...r) { const out = real.call(fs, a, b, ...r); if (/\.gz\.gen1$/.test(String(b))) fs.writeFileSync(b, coWriter); return out; };
+  try { assert.strictEqual(run(s).archived.length, 0); } finally { fs.renameSync = real; }
+  const aside = filesUnder(s.archiveDir, /\.coalwash-aside$/);
+  assert.strictEqual(aside.length, 1);
+  const res = run(s, Date.now() + LATER);
+  assert.deepStrictEqual(res.asideFiles, aside, `the later run lists it: ${JSON.stringify(res)}`);
+  const report = runEstateReport(res);
+  assert.ok(report.includes('ASIDE: 1 file(s)') && report.includes(aside[0]), report);
+  assert.ok(fs.readFileSync(aside[0]).equals(coWriter), 'listed, never moved or changed');
+});

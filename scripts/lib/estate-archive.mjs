@@ -1008,6 +1008,22 @@ function collectStagedLeftovers(slugDir, sessionId) {
   sweep(slugDir, (n) => n.startsWith(`${sessionId}.`));
   sweep(path.join(slugDir, sessionId), null);
 }
+// fire 785 (lab 1.19.2): the files a refused run moved aside (`*.${ASIDE_SUFFIX}`) in this project's archive folder, so a later run's
+// report can list them. Reading only: plain files, the folder walked without following a link, sorted.
+function listAsides(slugDir) {
+  const out = [];
+  const walk = (dir) => {
+    let es;
+    try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of es) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && e.name.endsWith(`.${ASIDE_SUFFIX}`)) out.push(p);
+    }
+  };
+  walk(slugDir);
+  return out.sort();
+}
 
 // Remove now-EMPTY directories bottom-up; push the rel path (from `base`) of any
 // surviving FILE into `survivors`. rmdirSync (non-recursive) REFUSES a non-empty
@@ -1170,6 +1186,8 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept, alreadyKept: r.alreadyKept });
       res.bytesFreed += r.bytes;
     }
+    const asides = listAsides(path.join(archiveDir, c.slug));
+    if (asides.length) res.asideFiles = asides;
     // fire 785 (lab 1.19.2 K-E): a session this same run archived cleanly with its index row appended no longer needs the repair's
     // "does not decompress ... restore it by id" hint, and the run no longer counts it as a repair it could not do.
     const moot = new Set(undecodable.filter((f) => indexedNow.has(f.id)));
@@ -1225,6 +1243,7 @@ export function runEstateReport(res) {
   if (res.robbed) lines.push(`  STOPPED: ${res.error}`);
   if (res.lockLeft) lines.push(`  LOCK LEFT: ${res.lockLeft}`);
   lines.push(`  archive: ${res.archiveDir} (${res.indexRows} index row(s) appended · restore: cli.mjs estate-restore <sessionId>)`);
+  if (res.asideFiles && res.asideFiles.length) lines.push(`  ASIDE: ${res.asideFiles.length} file(s) in this project's archive were moved aside by a refused run and kept, never deleted (they hold bytes that run could not verify; restore and search never read them): ${res.asideFiles.join('; ')}`);
   if (res.reconciledRows) lines.push(`  INDEXED: ${res.reconciledRows} archived session(s) had no index row (an earlier run stopped before writing it, its append failed, or indexing was off), so this run added one for each`);
   if (res.budgetReached) {
     const total = res.archived.length + res.budgetDeferred;
