@@ -81,8 +81,10 @@ function archiveThenRewrite(s) {
 const CHILD = `import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-const [engine, projectRoot, home, mode, target] = process.argv.slice(2);
-const die = () => { process.kill(process.pid, 'SIGKILL'); for (;;) { /* never past the kill */ } };
+const [engine, projectRoot, home, mode, target, marker] = process.argv.slice(2);
+// fire 784 (t338 F2): the marker is written just before the kill, so the test knows the kill point was reached
+const die = () => { fs.writeFileSync(marker, 'reached'); process.kill(process.pid, 'SIGKILL'); for (;;) { /* never past the kill */ } };
+if (mode === 'throw-first') throw new Error('a broken harness: the child stops before it reaches any kill point');
 const realRm = fs.rmSync;
 const realRename = fs.renameSync;
 if (mode === 'after-delete') fs.rmSync = function (p, ...r) { const out = realRm.call(fs, p, ...r); if (path.resolve(String(p)) === path.resolve(target)) die(); return out; };
@@ -101,9 +103,13 @@ function killedRun(s, mode, target = '') {
     HOME: s.home, USERPROFILE: s.home, TEMP: path.join(s.root, 'tmp'), TMP: path.join(s.root, 'tmp'), TMPDIR: path.join(s.root, 'tmp'),
     NODE_OPTIONS: '--max-old-space-size=2048',
   };
-  const c = spawnSync(process.execPath, [child, ENGINE, s.proj, s.home, mode, target], { cwd: s.proj, env, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', windowsHide: true });
+  const marker = path.join(s.root, 'kill-marker');
+  fs.rmSync(marker, { force: true });
+  const c = spawnSync(process.execPath, [child, ENGINE, s.proj, s.home, mode, target, marker], { cwd: s.proj, env, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', windowsHide: true });
+  assert.strictEqual(c.error, undefined, `the child ran and ended within its time (error: ${c.error && c.error.code})`);
   assert.notStrictEqual(c.status, 3, `the kill point fired (stderr: ${c.stderr})`);
   assert.notStrictEqual(c.status, 0, `the child was killed, not finished (stderr: ${c.stderr})`);
+  assert.ok(fs.existsSync(marker), `the kill point was reached: the child wrote its marker just before the kill (status ${c.status}, stderr: ${c.stderr})`);
   return c;
 }
 
@@ -287,6 +293,15 @@ test('F774-2: an index written before 1.19.2 keeps its kept-generation row in se
   assert.deepStrictEqual(out.map((r) => [r.firstUserLine, r.generation]), [['the first archive (now kept as generation 1)', undefined], ['the re-archive that kept it', undefined]], 'both rows are listed; the older one carries no label it cannot prove');
   const prefixOnly = [{ rowSchema: 2, sessionId: 's2', projectSlug: 'p', firstUserLine: 'a prefix of the next' }, { rowSchema: 2, sessionId: 's2', projectSlug: 'p', firstUserLine: 'the superset' }];
   assert.deepStrictEqual(currentRows(prefixOnly).map((r) => r.firstUserLine), ['the superset'], 'a row whose copy the next one replaced as a prefix is still not shown');
+});
+
+// fire 784 (CodeRabbit t338 F2, witness scratchpad/29gd/w338b-run.mjs): the kill harness itself. A child that stops before it reaches
+// any kill point (it exits 1, as a broken harness would) must fail the test, never pass as a kill.
+test('F2 (t338): the kill harness rejects a child that never reached its kill point', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.throws(() => killedRun(s, 'throw-first'), /the kill point was reached/);
+  assert.strictEqual(fs.existsSync(transcriptPath(s)), true, 'nothing ran: the session is untouched');
 });
 
 // fire 778 (labtest 1.19.2 G-1, witness U/scratchpad/cw-lab-1192/lbl-witness.mjs, as room tests). A transcript and a meta file, both
