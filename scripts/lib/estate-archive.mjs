@@ -628,7 +628,6 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   let gens = null; // the session's kept generations, read once, the first time a file must be kept
   let genN = null; // the generation number this re-archive gives every file it keeps (one N per session per run)
   const kept = [];
-  const alreadyKept = []; // 29he fire 772 (lab O-1): earlier copies a kept generation already holds byte for byte, so none is kept again
   let transcriptSha = null; // F4: the sha256 of the transcript's new archive copy, and of the copy it replaces
   let priorTranscriptSha = null;
   // What the listing already proves: at the largest compressed size a restore takes, these sizes still could not come back, so nothing is read
@@ -669,15 +668,11 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
         transcriptSha = sha256(gz);
         if (prior.prefix || prior.keep) priorTranscriptSha = sha256(prior.prefix || prior.gz);
       }
-      // 29he fire 772 (lab O-1): a run killed between a generation's rename and its copy's rename leaves the earlier copy at both names.
-      // 29hn fire 793 (labtest 1.19.3 F4 window; main's ruling: never weaker than 1.19.1): a kept generation is reused only when at least
-      // TWO kept generations already hold these exact bytes (compared byte for byte, never by size), so an outside writer on one of them
-      // between the read-back and the first live delete still leaves another. One holder alone would be the only copy behind the delete,
-      // so the earlier copy is kept again in a fresh generation, as 1.19.1 always did; repeated kills therefore keep at most two copies.
-      if (prior.keep && gens === null) gens = sessionGenerations(destBase, sess.id);
-      const dupGen = prior.keep ? sameKept(gens, f.rel, prior.gz, bounds, 2) : null;
-      if (dupGen !== null) alreadyKept.push({ rel: f.rel, generation: dupGen.generation });
-      else if (prior.keep) {
+      // 29hn fire 796 (INSPECT 795 F795-1; the head's ruling, remedy (a), under main's "a fix is never weaker than the version before the
+      // defect"): the earlier copy is ALWAYS kept in a fresh generation, whatever kept generations already hold it, as 1.19.1 did. The
+      // 1.19.2 O-1 reuse is gone: a reused generation existed before the run, so a writer on it after the read-back left no copy.
+      if (prior.keep) {
+        if (gens === null) gens = sessionGenerations(destBase, sess.id);
         if (gens.size >= maxGenerations) return boundRefusal(f.rel, gens.size);
         if (genN === null) genN = gens.size ? Math.max(...gens.keys()) + 1 : 1;
         const genPath = `${dest}.gen${genN}`;
@@ -693,10 +688,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       const tmp = stageBeside(dest, gz, written); // H4: fsync'd at write (this tier keeps no snapshot)
       const back = zlib.gunzipSync(readStaged(tmp), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
       if (!back.equals(buf)) { return fail(`verify mismatch: ${f.rel} — original kept`); }
-      // fire 784 (t338 F4): a reused generation is a kept copy this run relies on (the replace drops the earlier copy only because it
-      // holds those bytes), so its path and expected bytes ride along for the read-back before the delete.
-      const reused = dupGen !== null ? { holders: dupGen.holders, want: prior.gz } : null;
-      originals.push({ path: f.path, rel: f.rel, gz: dest, tmp, staged: gz, gen, reused, earlier: prior.prefix || (prior.keep ? prior.gz : null), inflated: buf.length });
+      originals.push({ path: f.path, rel: f.rel, gz: dest, tmp, staged: gz, gen, earlier: prior.prefix || (prior.keep ? prior.gz : null), inflated: buf.length });
     } catch (e) { return fail(`archive failed: ${f.rel}: ${e.message} — original kept`); }
   }
 
@@ -768,12 +760,11 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // altered between its verify and its rename (an outside writer on the archive folder) stops the run before any live file is deleted;
   // the clean-up then puts the earlier copy back under its archive name.
   // 29hj fire 784 (t338 F4; the chief's ruling on CW-073: every kept copy a run relies on is read back before any live file is deleted):
-  // the copies a delete relies on are the new copy, the generation this run kept, and the generation an earlier run left holding the
-  // earlier copy byte for byte (O-1, `reused`; fire 793: reused only when two or more hold it, and every holder is read), so all are read here. An earlier copy that is a prefix of the new one lives inside
+  // the copies a delete relies on are the new copy and the generation this run kept (fire 796: never a generation an earlier run left),
+  // so both are read here. An earlier copy that is a prefix of the new one lives inside
   // the new copy, which is read.
   for (const o of originals) {
     const checks = o.gen ? [[o.gen.final, o.earlier, `the kept generation of ${o.rel} (${o.gen.final})`], [o.gz, o.staged, `the archive copy of ${o.rel}`]] : [[o.gz, o.staged, `the archive copy of ${o.rel}`]];
-    if (o.reused) for (const h of o.reused.holders) checks.push([h.gzPath, o.reused.want, `the kept generation ${h.generation} of ${o.rel} this run relies on (${h.gzPath})`]);
     for (const [p, want, what] of checks) {
       let same = false;
       try { same = readStaged(p).equals(want); } catch { same = false; }
@@ -824,14 +815,13 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   if (transcriptSha) row.transcriptGzSha256 = transcriptSha;
   // The generation that holds the replaced copy (fire 775, INSPECT F774-1; fire 778, labtest 1.19.2 G-1). `replacedTranscriptGzSha256`,
   // the identity search labels an earlier row by, is written ONLY when that generation holds the transcript's own earlier copy: the one
-  // that already held it byte for byte (O-1, sameKept), or the one this run kept for it (the prior copy, read back before the commit).
+  // that this run kept for it (the prior copy, read back before the commit).
   // When the transcript's earlier copy is a prefix of the new one, equal bytes included (the copy a stopped run committed), no
   // generation holds it and the row names no replaced transcript, so no earlier row is labelled with a generation holding another file.
   // `replacedGeneration` alone still names the generation this run kept for another file.
-  const tAlready = alreadyKept.find((a) => a.rel === `${sess.id}.jsonl`);
   const tKept = kept.find((k) => k.rel === `${sess.id}.jsonl`);
-  const tGen = tAlready ? tAlready.generation : tKept ? tKept.generation : null;
-  const replaced = tGen !== null ? tGen : genN !== null ? genN : (alreadyKept.length ? Math.max(...alreadyKept.map((a) => a.generation)) : null);
+  const tGen = tKept ? tKept.generation : null;
+  const replaced = genN; // one generation number per run, so the transcript's own generation (tGen) is this one when set
   if (replaced !== null) {
     row.replacedGeneration = replaced;
     if (tGen !== null && priorTranscriptSha) row.replacedTranscriptGzSha256 = priorTranscriptSha;
@@ -842,25 +832,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     const ageDays = Math.round((now - sess.newestMtimeMs) / DAY_MS);
     appendDeathCert(archiveDir, slug, `${new Date(now).toISOString()} destroyed-cold ${sess.id} (age ${ageDays}d, ${sess.files.length} file(s), ${sess.bytes} bytes — archived+verified first)`);
   }
-  return { ok: true, deleted, deleteFailed, unpruned, files: originals.length, bytes: sess.bytes, row, generation: genN, kept, ...(alreadyKept.length ? { alreadyKept } : {}) };
-}
-
-// 29he fire 772 (lab O-1): the newest kept generation of `rel` whose archived bytes equal `gz` exactly, as { generation, gzPath, holders },
-// or null when fewer than `atLeast` kept generations hold them (fire 793: `holders` lists every one, each read back before the delete).
-// Each candidate is read through restore's handle check under the restore bound; one that cannot be read is never taken as a match.
-function sameKept(gens, rel, gz, bounds, atLeast = 1) {
-  const holders = [];
-  for (const [n, list] of gens) {
-    for (const g of list) {
-      if (g.rel !== rel) continue;
-      const got = readArchiveHandle(g.gzPath, bounds.maxGzBytes);
-      if (got.buf && got.buf.equals(gz)) holders.push({ generation: n, gzPath: g.gzPath });
-    }
-  }
-  if (holders.length < atLeast) return null;
-  holders.sort((a, b) => a.generation - b.generation);
-  const best = holders[holders.length - 1];
-  return { generation: best.generation, gzPath: best.gzPath, holders };
+  return { ok: true, deleted, deleteFailed, unpruned, files: originals.length, bytes: sess.bytes, row, generation: genN, kept };
 }
 
 // 29he fire 772 (lab O-2): a run killed after a session's originals are deleted and before its index row is written leaves an archive
@@ -1182,13 +1154,13 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       if (s.state !== 'own') {
         res.ok = false; res.robbed = 'global'; res.lockLost = s.state === 'unreadable' ? 'unreadable' : 'stolen';
         res.error = `${lockLostHead(s, { run: 'ULTRA run', file: globalLockPath(home), where: `the index row of session ${sess.id}`, after: 'with no clean-up' })} The session was archived and verified and its originals deleted; its index row was not appended (estate-restore reads the archive itself, so it stays restorable)`;
-        res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept, alreadyKept: r.alreadyKept });
+        res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept });
         res.bytesFreed += r.bytes;
         break;
       }
       if (c.cfg.indexEnabled && !appendIndexRow(archiveDir, r.row)) res.failed.push({ id: sess.id, reason: 'index append failed (bytes archived + originals deleted — restore unaffected; the next run adds the row)' });
       else if (c.cfg.indexEnabled) { res.indexRows++; indexedNow.add(sess.id); }
-      res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept, alreadyKept: r.alreadyKept });
+      res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept });
       res.bytesFreed += r.bytes;
     }
     const asides = listAsides(path.join(archiveDir, c.slug));
@@ -1267,7 +1239,6 @@ export function runEstateReport(res) {
     // 29gt fire 750: a re-archive that found an earlier copy it could not replace without dropping bytes kept that copy.
     if (Number.isInteger(a.generation) && a.damagedGeneration === a.generation) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived transcript does not decompress (it is damaged); it was kept as generation ${a.generation} so its bytes are not lost, and a restore of that generation names it as damaged and does not return it`);
     else if (Number.isInteger(a.generation)) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived copy was not a prefix of this one, so it was kept as generation ${a.generation} (restore it with: cli.mjs estate-restore ${escapeRawControls(String(a.id))} --generation ${a.generation})`);
-    for (const k of Array.isArray(a.alreadyKept) ? a.alreadyKept : []) lines.push(`  ALREADY-KEPT ${escapeRawControls(String(a.id))}: the earlier archived copy of ${escapeRawControls(String(k.rel))} is already kept, byte for byte, as generation ${k.generation}, so no second copy was kept (restore it with: cli.mjs estate-restore ${escapeRawControls(String(a.id))} --generation ${k.generation})`);
     if (a.unpruned && a.unpruned.length) lines.push(`  KEPT-IN-PLACE ${escapeRawControls(String(a.id))}: ${a.unpruned.length} un-enumerated file(s) under <sid>/ left intact (not archived — appeared post-listing / walk-capped): ${a.unpruned.slice(0, 5).map((n) => escapeRawControls(String(n))).join(', ')}${a.unpruned.length > 5 ? ', …' : ''}`);
   }
   if (res.coldListed.length) {

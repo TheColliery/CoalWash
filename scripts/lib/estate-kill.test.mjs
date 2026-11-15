@@ -259,27 +259,29 @@ test('O-1 one holder: a run killed between a generation\'s rename and its copy\'
   const rows = searchIndex('CW772-NEEDLE', { archiveDir: s.archiveDir });
   assert.ok(rows.some((r) => r.generation === 2), `search labels the earlier row with the generation that holds it: ${JSON.stringify(rows)}`);
 });
-test('O-1 two holders: when two kept generations already hold the earlier copy, the next run keeps no third', (t) => {
+// fire 796 (remedy (a)): the two-holder reuse is gone, so these two tests change from "no third copy" to "a fresh copy, as 1.19.1".
+test('O-1 two holders: when two kept generations already hold the earlier copy, the next run still keeps a fresh third, as 1.19.1 does', (t) => {
   const s = sandbox(t);
   archiveThenRewrite(s);
   fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen1`);
   fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen2`); // the state after a kill, then a fresh keep, then a second kill
   const res = run(s, Date.now() + LATER);
   assert.strictEqual(res.archived.length, 1, JSON.stringify(res));
-  assert.deepStrictEqual(filesUnder(s.archiveDir, /\.gz\.gen\d+$/).map((p) => path.basename(p)), [`${SID}.jsonl.gz.gen1`, `${SID}.jsonl.gz.gen2`], 'no third generation of the same bytes');
-  assert.deepStrictEqual(res.archived[0].alreadyKept, [{ rel: `${SID}.jsonl`, generation: 2 }]);
-  assert.match(runEstateReport(res), /ALREADY-KEPT .*already kept, byte for byte, as generation 2/);
-  assert.strictEqual(restoreText(s, { generation: 1 }), ORIGINAL);
-  assert.strictEqual(restoreText(s, { generation: 2 }), ORIGINAL);
+  assert.deepStrictEqual(filesUnder(s.archiveDir, /\.gz\.gen\d+$/).map((p) => path.basename(p)), [`${SID}.jsonl.gz.gen1`, `${SID}.jsonl.gz.gen2`, `${SID}.jsonl.gz.gen3`], 'a fresh third generation');
+  assert.strictEqual(res.archived[0].alreadyKept, undefined);
+  assert.strictEqual(res.archived[0].generation, 3);
+  assert.ok(!/ALREADY-KEPT/.test(runEstateReport(res)), 'no line claims a copy was reused');
+  for (const g of [1, 2, 3]) assert.strictEqual(restoreText(s, { generation: g }), ORIGINAL);
   assert.strictEqual(restoreText(s), V2);
 });
-test('O-1 two holders: the newest holder is named by number, not by name order (generation 10 after 9)', (t) => {
+test('O-1 two holders: the fresh generation is numbered after the highest kept one by number, not by name order (11 after 9 and 10)', (t) => {
   const s = sandbox(t);
   archiveThenRewrite(s);
   fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen9`);
   fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen10`);
   const res = run(s, Date.now() + LATER);
-  assert.deepStrictEqual(res.archived[0].alreadyKept, [{ rel: `${SID}.jsonl`, generation: 10 }], JSON.stringify(res));
+  assert.strictEqual(res.archived[0].generation, 11, JSON.stringify(res));
+  assert.strictEqual(restoreText(s, { generation: 11 }), ORIGINAL);
 });
 test('O-1 two holders compare by content: two generations of the same size but other bytes do not stand in for the earlier copy', (t) => {
   const s = sandbox(t);
@@ -445,8 +447,8 @@ function reusedGenWritten(t, moment) {
   archiveThenRewrite(s);
   const gen1 = `${gzPathOf(s)}.gen1`;
   fs.copyFileSync(gzPathOf(s), gen1); // the O-1 state
-  // fire 793: with one holder the run now keeps a fresh copy and reuses nothing, so the reused-generation read-back is walked in the
-  // two-holder state, the one state where a generation is still reused; the writer hits gen1, one of the two holders.
+  // fire 793 put this in the two-holder state, then the one state that reused; since fire 796 no state reuses, and the writer hits gen1,
+  // a generation that existed before the run.
   fs.copyFileSync(gzPathOf(s), `${gzPathOf(s)}.gen2`);
   const real = fs.renameSync;
   let wrote = false;
@@ -460,14 +462,16 @@ function reusedGenWritten(t, moment) {
   let res;
   try { res = run(s, Date.now() + LATER); } finally { fs.renameSync = real; }
   assert.ok(wrote, 'the outside writer struck inside the window');
-  assert.strictEqual(fs.existsSync(transcriptPath(s)), true, `the live session is not deleted when a kept copy it relies on no longer reads back: ${JSON.stringify(res)}`);
-  assert.strictEqual(res.archived.length, 0, 'the session is not reported archived');
-  assert.match(res.failed.map((f) => f.reason).join(' | '), /archive no longer verifies before delete/);
-  assert.strictEqual(restoreText(s), ORIGINAL, 'the earlier version stays restorable (put back at its archive name)');
-  assert.strictEqual(fs.readFileSync(transcriptPath(s), 'utf8'), V2);
+  // fire 796 (remedy (a)): no generation is reused any more, so the run relies only on the fresh copy it kept (generation 3); a writer
+  // on a pre-existing generation no longer stops the run (the 784 asserts "not archived" and "refused" held only while gen1 was reused),
+  // and what must hold is the claim itself: the earlier version stays restorable, from the fresh copy.
+  assert.strictEqual(res.archived.length, 1, `the run archives with its own fresh copy: ${JSON.stringify(res.failed)}`);
+  assert.strictEqual(res.archived[0].generation, 3);
+  assert.strictEqual(restoreText(s, { generation: 3 }), ORIGINAL, 'the earlier version stays restorable from the fresh copy');
+  assert.strictEqual(restoreText(s), V2);
 }
-test('F4 (t338): an outside writer on the REUSED generation just before the commit rename stops the delete; the earlier version stays restorable', (t) => reusedGenWritten(t, 'before'));
-test('F4 (t338): an outside writer on the REUSED generation just after the commit rename stops the delete; the earlier version stays restorable', (t) => reusedGenWritten(t, 'after'));
+test('F4 (t338): an outside writer on a PRE-EXISTING generation just before the commit rename does not reach the earlier version: the run kept a fresh copy', (t) => reusedGenWritten(t, 'before'));
+test('F4 (t338): an outside writer on a PRE-EXISTING generation just after the commit rename does not reach the earlier version: the run kept a fresh copy', (t) => reusedGenWritten(t, 'after'));
 
 // fire 784 (CodeRabbit t338 F1, witness scratchpad/29gd/w338.mjs leg F1): an archived copy the index repair cannot open (EACCES, as a
 // POSIX chmod 000 or a Windows deny ACL gives) is named in words, the run goes on with the other sessions, and it reports a failure.
@@ -706,4 +710,38 @@ for (const [state, rename, rel] of [['T', '1', `${SID}.jsonl`], ['M', '3', `${SI
       assert.strictEqual(heldVersions(s, rel).includes(v0), false, 'observed: no copy of the earlier version is left (the inherent limit)');
     });
   }
+}
+
+// fire 796 (INSPECT 795 F795-1, witness scratchpad/29gd/w795.mjs; the head's ruling, remedy (a)): in the two-holder state, a writer that
+// strikes only the generations that existed BEFORE the run, after the read-back and just before the first live delete, must not lose
+// the earlier version: the run keeps a fresh copy whenever it keeps the earlier one, as 1.19.1 always did.
+for (const writer of ['pre-truncate', 'pre-remove', 'pre-renameover']) {
+  test(`F795-1 two holders, writer ${writer} on the pre-existing generations before the first live delete: the earlier version stays restorable`, (t) => {
+    const s = sandbox(t);
+    archiveThenRewrite(s);
+    const gz = gzPathOf(s);
+    fs.copyFileSync(gz, `${gz}.gen1`);
+    fs.copyFileSync(gz, `${gz}.gen2`); // the two-holder state
+    const pre = [`${gz}.gen1`, `${gz}.gen2`];
+    const impostor = zlib.gzipSync(Buffer.from(line(0, 'impostor-version F795') + '\n'));
+    const real = fs.rmSync;
+    let struck = false;
+    fs.rmSync = function patched(p, ...r) {
+      if (!struck && path.resolve(String(p)) === path.resolve(transcriptPath(s))) {
+        struck = true;
+        for (const g of pre) {
+          if (writer === 'pre-truncate') fs.truncateSync(g, 0);
+          else if (writer === 'pre-remove') fs.unlinkSync(g);
+          else { const tmp = `${g}.w796`; fs.writeFileSync(tmp, impostor); fs.renameSync(tmp, g); }
+        }
+      }
+      return real.call(fs, p, ...r);
+    };
+    let res;
+    try { res = run(s, Date.now() + LATER); } finally { fs.rmSync = real; }
+    assert.ok(struck, 'the writer struck before the first live delete');
+    const got = [restoreText(s)];
+    for (let g = 1; g <= 4; g++) got.push(restoreText(s, { generation: g }));
+    assert.ok(got.includes(ORIGINAL), `the earlier version stays restorable (archived ${res.archived.length})`);
+  });
 }
