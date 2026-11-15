@@ -810,14 +810,19 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
 
   const row = buildIndexRow({ sessionId: sess.id, projectSlug: slug, transcriptBuf, totalBytes: sess.bytes, now, cold });
   if (transcriptSha) row.transcriptGzSha256 = transcriptSha;
-  // The generation that holds the replaced transcript copy, named by the transcript itself (fire 775, INSPECT F774-1): the one that
-  // already held it (O-1), else the one this run kept (genN holds the transcript when it was kept); only when the transcript's earlier
-  // copy is a prefix of the new one (no generation holds it) does the row fall back to the generation this run kept for another file.
+  // The generation that holds the replaced copy (fire 775, INSPECT F774-1; fire 778, labtest 1.19.2 G-1). `replacedTranscriptGzSha256`,
+  // the identity search labels an earlier row by, is written ONLY when that generation holds the transcript's own earlier copy: the one
+  // that already held it byte for byte (O-1, sameKept), or the one this run kept for it (the prior copy, read back before the commit).
+  // When the transcript's earlier copy is a prefix of the new one, equal bytes included (the copy a stopped run committed), no
+  // generation holds it and the row names no replaced transcript, so no earlier row is labelled with a generation holding another file.
+  // `replacedGeneration` alone still names the generation this run kept for another file.
   const tAlready = alreadyKept.find((a) => a.rel === `${sess.id}.jsonl`);
-  const replaced = tAlready ? tAlready.generation : genN !== null ? genN : (alreadyKept.length ? Math.max(...alreadyKept.map((a) => a.generation)) : null);
+  const tKept = kept.find((k) => k.rel === `${sess.id}.jsonl`);
+  const tGen = tAlready ? tAlready.generation : tKept ? tKept.generation : null;
+  const replaced = tGen !== null ? tGen : genN !== null ? genN : (alreadyKept.length ? Math.max(...alreadyKept.map((a) => a.generation)) : null);
   if (replaced !== null) {
     row.replacedGeneration = replaced;
-    if (priorTranscriptSha) row.replacedTranscriptGzSha256 = priorTranscriptSha;
+    if (tGen !== null && priorTranscriptSha) row.replacedTranscriptGzSha256 = priorTranscriptSha;
   }
   if (cold) {
     const robbedCert = stolen('the death-log record', `${afterDeletes}; the death-log record and the index row were not written`);

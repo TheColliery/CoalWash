@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { runEstate, runEstateReport, restoreSession, searchIndex, currentRows, resolveArchiveDir } from './estate-archive.mjs';
 import { ccProjectSlug } from './class-b.mjs';
+import { acquireLock, globalLockPath, LOCK_STALE_MS } from './apply.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR;
 const DAY = 86400000;
@@ -59,7 +60,8 @@ const gzPathOf = (s) => path.join(s.archiveDir, ccProjectSlug(s.proj), `${SID}.j
 function restoreText(s, opts = {}) {
   const to = path.join(s.out, `${opts.generation ?? 'current'}-${crypto.randomBytes(4).toString('hex')}`);
   const r = restoreSession(SID, { archiveDir: s.archiveDir, to, ...opts });
-  return r.ok ? fs.readFileSync(path.join(to, `${SID}.jsonl`), 'utf8') : null;
+  const p = path.join(to, `${SID}.jsonl`);
+  return r.ok && fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null; // a generation can hold another file of the session and no transcript
 }
 const filesUnder = (dir, re) => {
   const out = [];
@@ -85,6 +87,8 @@ const realRm = fs.rmSync;
 const realRename = fs.renameSync;
 if (mode === 'after-delete') fs.rmSync = function (p, ...r) { const out = realRm.call(fs, p, ...r); if (path.resolve(String(p)) === path.resolve(target)) die(); return out; };
 if (mode === 'after-gen-rename') fs.renameSync = function (a, b, ...r) { const out = realRename.call(fs, a, b, ...r); if (/[.]gz[.]gen[0-9]+$/.test(String(b))) die(); return out; };
+let commits = 0; // after-commit-rename: the Nth rename of a staged copy onto its final name (a kept generation or a newest copy)
+if (mode === 'after-commit-rename') fs.renameSync = function (a, b, ...r) { const out = realRename.call(fs, a, b, ...r); if (/[.]coalwash-new$/.test(String(a)) && ++commits === Number(target)) die(); return out; };
 const ea = await import(pathToFileURL(engine).href);
 ea.runEstate({ projectRoot, home, estate: {} });
 process.exitCode = 3; // reached only when the kill point never fired
@@ -283,6 +287,80 @@ test('F774-2: an index written before 1.19.2 keeps its kept-generation row in se
   assert.deepStrictEqual(out.map((r) => [r.firstUserLine, r.generation]), [['the first archive (now kept as generation 1)', undefined], ['the re-archive that kept it', undefined]], 'both rows are listed; the older one carries no label it cannot prove');
   const prefixOnly = [{ rowSchema: 2, sessionId: 's2', projectSlug: 'p', firstUserLine: 'a prefix of the next' }, { rowSchema: 2, sessionId: 's2', projectSlug: 'p', firstUserLine: 'the superset' }];
   assert.deepStrictEqual(currentRows(prefixOnly).map((r) => r.firstUserLine), ['the superset'], 'a row whose copy the next one replaced as a prefix is still not shown');
+});
+
+// fire 778 (labtest 1.19.2 G-1, witness U/scratchpad/cw-lab-1192/lbl-witness.mjs, as room tests). A transcript and a meta file, both
+// edited between V0 and V1; the V1 run's commit renames are 1 transcript generation, 2 transcript newest, 3 meta generation, 4 meta
+// newest. The V1 run stops right after one of them (KILLED, or its lock STOLEN), or after its transcript delete (KILLED), or does not
+// stop with the transcript APPENDED (P); then the next run. Every label search shows must name a generation whose transcript copy is
+// the row's own copy (its sha256 and what `--generation N` restores), and both versions stay restorable.
+const LBL_V0 = { t: [line(0, 'first-version CW778-NEEDLE'), line(1, 'zero'), line(2, 'zero middle')].join('\n') + '\n', meta: '{"title":"v0"}\n' };
+const LBL_V1 = { t: [line(0, 'second-version CW778-NEEDLE'), line(1, 'one'), line(2, 'one middle')].join('\n') + '\n', meta: '{"title":"v1 edited"}\n' };
+const LBL_V1P = { t: LBL_V0.t + line(3, 'appended') + '\n', meta: '{"title":"v1 edited"}\n' };
+const metaPath = (s) => path.join(s.projDir, `${SID}.meta.json`);
+function lblPut(s, v) {
+  for (const [p, text] of [[transcriptPath(s), v.t], [metaPath(s), v.meta]]) { fs.writeFileSync(p, text); const at = new Date(Date.now() - 30 * DAY); fs.utimesSync(p, at, at); }
+}
+function lblSetup(t, v1 = LBL_V1) {
+  const s = sandbox(t);
+  lblPut(s, LBL_V0);
+  assert.strictEqual(run(s).archived.length, 1);
+  lblPut(s, v1);
+  return s;
+}
+function stolenAfterCommitRename(s, n) {
+  const real = fs.renameSync;
+  let commits = 0;
+  fs.renameSync = function patched(a, b, ...r) {
+    const out = real.call(fs, a, b, ...r);
+    if (/\.coalwash-new$/.test(String(a)) && ++commits === n) {
+      const old = new Date(Date.now() - LOCK_STALE_MS - 60000);
+      fs.utimesSync(globalLockPath(s.home), old, old);
+      assert.ok(acquireLock(globalLockPath(s.home), { sessionId: 'thief' }).acquired, 'the thief took the lock');
+    }
+    return out;
+  };
+  try { return run(s); } finally { fs.renameSync = real; }
+}
+function labelsHold(s, v1) {
+  const slugDir = path.join(s.archiveDir, ccProjectSlug(s.proj));
+  const rows = searchIndex('CW778-NEEDLE', { archiveDir: s.archiveDir });
+  for (const r of rows.filter((x) => Number.isInteger(x.generation))) {
+    const genGz = path.join(slugDir, `${SID}.jsonl.gz.gen${r.generation}`);
+    assert.ok(fs.existsSync(genGz), `the row "${r.firstUserLine}" is labelled generation ${r.generation}, which holds no transcript`);
+    assert.strictEqual(sha(fs.readFileSync(genGz)), r.transcriptGzSha256, `generation ${r.generation} holds the copy the row "${r.firstUserLine}" describes`);
+    const got = restoreText(s, { generation: r.generation });
+    assert.strictEqual(String(got).split('\n')[0].includes(r.firstUserLine.split(' ')[0]), true, `--generation ${r.generation} restores the row's copy`);
+  }
+  const all = new Set([restoreText(s)]);
+  for (let g = 1; g <= 4; g++) { const x = restoreText(s, { generation: g }); if (x !== null) all.add(x); }
+  for (const v of [LBL_V0.t, v1.t]) assert.ok([...all].some((x) => x !== null && x.startsWith(v)), 'every version stays restorable');
+}
+
+test('G-1 P: an appended transcript with an edited meta file labels no row with the meta file\'s generation', (t) => {
+  const s = lblSetup(t, LBL_V1P);
+  assert.strictEqual(run(s).archived.length, 1);
+  labelsHold(s, LBL_V1P);
+});
+for (const n of [1, 2, 3, 4]) {
+  test(`G-1 K${n}: a run KILLED right after commit rename ${n}, then the next run: every label names the copy its generation holds`, (t) => {
+    const s = lblSetup(t);
+    killedRun(s, 'after-commit-rename', String(n));
+    run(s, Date.now() + LATER);
+    labelsHold(s, LBL_V1);
+  });
+  test(`G-1 S${n}: a run whose lock is STOLEN right after commit rename ${n}, then the next run: every label names the copy its generation holds`, (t) => {
+    const s = lblSetup(t);
+    assert.strictEqual(stolenAfterCommitRename(s, n).robbed, 'global');
+    run(s, Date.now() + LATER);
+    labelsHold(s, LBL_V1);
+  });
+}
+test('G-1 KD: a run KILLED right after its transcript delete, then the next run: every label names the copy its generation holds', (t) => {
+  const s = lblSetup(t);
+  killedRun(s, 'after-delete', transcriptPath(s));
+  run(s, Date.now() + LATER);
+  labelsHold(s, LBL_V1);
 });
 
 // t336 F8 and F7 (witness scratchpad/29gd/w336.mjs, as room tests)
