@@ -49,6 +49,7 @@ const TESTS = [
   'scripts/lib/estate.test.mjs',
   'scripts/lib/estate-archive.test.mjs',
   'scripts/lib/estate-generations.test.mjs',
+  'scripts/lib/estate-kill.test.mjs',
   'scripts/lib/retier.test.mjs',
   'scripts/lib/writeguard-slot.test.mjs', // 655: a snapshot in a -N slot is listed and restored
   'scripts/lib/from-file-bom.test.mjs', // 656 F656-4: the --from and --to-file readers strip a leading byte order mark

@@ -97,6 +97,13 @@ const STAGED_RE = /\.gz(\.gen[1-9][0-9]{0,5})?\.[0-9a-f]{24}\.coalwash-(new|tmp)
 // Index rows carry rowSchema 2 from this layout on; a row without it is an older row and reads as before. A re-archive that kept
 // a generation writes `replacedGeneration: N` on its new row, so search can name the row before it as generation N.
 export const ESTATE_ROW_SCHEMA = 2;
+// 29he fire 772 (CodeRabbit t335 F4): a row also carries the sha256 of the transcript's archive copy it describes
+// (`transcriptGzSha256`), and a re-archive that replaced a copy names the replaced copy's sha256 (`replacedTranscriptGzSha256`)
+// beside `replacedGeneration`. Search labels an earlier row as a generation only when those two match, never by its position.
+const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+// The suffix a refused commit gives a kept generation whose bytes it can no longer vouch for (fire 772, lab F-2). It is not `.gz`,
+// not `.gz.gen<N>` and not a staged name, so no restore, generation count or collector ever takes it for an archive copy or removes it.
+const ASIDE_SUFFIX = 'coalwash-aside';
 const DAY_MS = 86400000;
 // ~est display ratio for "MB after" on the bill — jsonl compresses ~10:1
 // (blueprint §19's own figure). A display heuristic, never a promise.
@@ -523,7 +530,8 @@ function appendDeathCert(archiveDir, slug, line) {
 // The index row is built from the transcript buffer and returned; the CALLER
 // appends it AFTER this returns ok (row-follows-bytes, so a crash between
 // delete and append can only under-index — estate-restore scans the archive
-// dir itself, not the index, so recovery never depends on the row).
+// dir itself, not the index, so recovery never depends on the row; the next
+// run's reconcileIndex adds the missing row, fire 772).
 // opts.gzip is injectable for tests (default zlib.gzipSync). opts.lockState is the caller's lock state() (fires 119 and 122,
 // the fence below); its `lockFile` names the lock in a refusal.
 export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold = false, gzip = zlib.gzipSync, isPlaceholder = isCloudPlaceholder, lockState = () => ({ state: 'own' }), lockFile = 'the global lock', bounds = RESTORE_BOUNDS, maxGenerations = DEFAULT_MAX_GENERATIONS } = {}) {
@@ -551,12 +559,37 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // then a rename). A kill in that window loses no byte: a replaced copy was a prefix of the new one, or its bytes were committed to a
   // generation first.
   const held = new Map();
+  const genDone = []; // 29he fire 772 (lab F-2): each generation this run renamed in, with the bytes it verified there
   let committed = false;
+  // Returns what it did as plain words (empty before the commit, when it only removes this run's staged files), so the refusal says
+  // exactly what was taken back and what was left.
   const cleanupPartial = () => {
     for (const w of written) { try { fs.rmSync(w, { force: true }); } catch {} }
-    if (!committed) return;
-    for (const c of created) { try { fs.rmSync(c, { force: true }); } catch {} }
-    for (const [d, bytes] of held) { try { writeDurable(d, bytes); } catch {} }
+    if (!committed) return '';
+    const notes = [];
+    for (const c of created) {
+      try { fs.rmSync(c, { force: true }); notes.push(`removed this run's new archive copy ${c}`); } catch (e) { notes.push(`could not remove this run's new archive copy ${c} (${e && e.code})`); }
+    }
+    for (const [d, bytes] of held) {
+      try { writeDurable(d, bytes); notes.push(`put the earlier archived copy back at ${d}`); } catch (e) { notes.push(`could not put the earlier archived copy back at ${d} (${e && e.code}); it is still held in this run's kept generation`); }
+    }
+    // A generation this run renamed in that still holds the bytes it verified is a good earlier copy and stays (the 756 commit rule).
+    // One that no longer holds them is moved aside and never deleted: a hard link at the aside name in the same folder, then the
+    // generation name is removed, so the bytes are never without a name (no rename: the commit's two are the only ones, the #57 pin).
+    for (const g of genDone) {
+      let same = false;
+      try { same = readStaged(g.final).equals(g.want); } catch { same = false; }
+      if (same) { notes.push(`left this run's kept generation ${g.final} in place: it holds the earlier copy's bytes as they were verified`); continue; }
+      const aside = `${g.final}.${crypto.randomBytes(12).toString('hex')}.${ASIDE_SUFFIX}`;
+      try { fs.linkSync(g.final, aside); } catch (e) {
+        notes.push(`this run's kept generation ${g.final} no longer holds the bytes this run verified and could not be moved aside (${e && e.code}), so it stays at that name: check it before restoring that generation`);
+        continue;
+      }
+      try { fs.unlinkSync(g.final); notes.push(`moved this run's kept generation ${g.final} aside to ${aside} without deleting it: it no longer held the bytes this run verified`); } catch (e) {
+        notes.push(`this run's kept generation ${g.final} no longer holds the bytes this run verified; it was linked aside to ${aside} but its own name could not be removed (${e && e.code}): check it before restoring that generation`);
+      }
+    }
+    return notes.length ? `. Clean-up: ${notes.join('; ')}` : '';
   };
   // THE FENCE (fire 119, 18a): the caller's global lock can be taken over once it is LOCK_STALE_MS old. Before each write
   // this re-reads it (lockState); a robbed run stops there and removes nothing, since the new holder may be archiving this same
@@ -569,7 +602,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     return { ok: false, robbed: 'global', lockLost: s.state === 'unreadable' ? 'unreadable' : 'stolen', reason: `${head} ${state}` };
   };
   const notDeleted = () => `${written.length} archive copy(ies) of this session already written stay in place (removing one could remove the new holder's copy of the same session); every original of this session is kept`;
-  const fail = (reason) => stolen(`removing the partial archive (after: ${reason})`, notDeleted()) || (cleanupPartial(), { ok: false, reason });
+  const fail = (reason) => stolen(`removing the partial archive (after: ${reason})`, notDeleted()) || { ok: false, reason: `${reason}${cleanupPartial()}` };
   // 29gx fire 756, THE GENERATION BOUND: a re-archive that would keep one more generation than estate.maxGenerations allows refuses the
   // session. It never deletes or merges a kept copy to make room; nothing of this session is written, and the live session stays.
   const boundRefusal = (rel, have) => {
@@ -593,6 +626,9 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   let gens = null; // the session's kept generations, read once, the first time a file must be kept
   let genN = null; // the generation number this re-archive gives every file it keeps (one N per session per run)
   const kept = [];
+  const alreadyKept = []; // 29he fire 772 (lab O-1): earlier copies a kept generation already holds byte for byte, so none is kept again
+  let transcriptSha = null; // F4: the sha256 of the transcript's new archive copy, and of the copy it replaces
+  let priorTranscriptSha = null;
   // What the listing already proves: at the largest compressed size a restore takes, these sizes still could not come back, so nothing is read
   // or gzipped. The check after the copies decides the rest.
   const listedWhy = restoreBoundReason(sess.files.map((f) => ({ gzBytes: bounds.maxGzBytes, inflatedBytes: f.bytes })), bounds);
@@ -627,8 +663,17 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       const prior = priorArchive(dest, buf, bounds);
       if (prior.refuse) return fail(`${prior.refuse}: ${f.rel} — session skipped, originals kept`);
       let gen = null;
-      if (prior.keep) {
-        if (gens === null) gens = sessionGenerations(destBase, sess.id);
+      if (f.rel === `${sess.id}.jsonl`) {
+        transcriptSha = sha256(gz);
+        if (prior.prefix || prior.keep) priorTranscriptSha = sha256(prior.prefix || prior.gz);
+      }
+      // 29he fire 772 (lab O-1): a run killed between a generation's rename and its copy's rename leaves the earlier copy at both names.
+      // When a kept generation of this file already holds these exact bytes (compared byte for byte, never by size), it is not kept
+      // again: the replace drops nothing, since that generation keeps them, and no slot of estate.maxGenerations is spent.
+      if (prior.keep && gens === null) gens = sessionGenerations(destBase, sess.id);
+      const dupGen = prior.keep ? sameKept(gens, f.rel, prior.gz, bounds) : null;
+      if (dupGen !== null) alreadyKept.push({ rel: f.rel, generation: dupGen });
+      else if (prior.keep) {
         if (gens.size >= maxGenerations) return boundRefusal(f.rel, gens.size);
         if (genN === null) genN = gens.size ? Math.max(...gens.keys()) + 1 : 1;
         const genPath = `${dest}.gen${genN}`;
@@ -699,6 +744,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       try {
         if (standingAt(o.gen.final)) return fail(`something already stands at the generation name for ${o.rel} — session skipped, originals kept`);
         fs.renameSync(o.gen.tmp, o.gen.final);
+        genDone.push({ final: o.gen.final, want: o.earlier });
       } catch (e) { return fail(`archive commit failed: ${e.message} — originals kept`); }
     }
     const robbedCopy = stolen(`the commit of the archive copy of ${o.rel}`, notDeleted());
@@ -719,7 +765,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     for (const [p, want, what] of checks) {
       let same = false;
       try { same = readStaged(p).equals(want); } catch { same = false; }
-      if (!same) return fail(`archive no longer verifies before delete: ${what} changed after it was verified (something else wrote to the archive folder between the check and the commit), so no live file was deleted: this run's copies were taken back, any earlier archived copy was put back under its archive name, and the session stays live — session skipped, originals kept`);
+      if (!same) return fail(`archive no longer verifies before delete: ${what} changed after it was verified (something else wrote to the archive folder between the check and the commit), so no live file was deleted and the session stays live — session skipped, originals kept`);
     }
   }
 
@@ -763,14 +809,87 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   }
 
   const row = buildIndexRow({ sessionId: sess.id, projectSlug: slug, transcriptBuf, totalBytes: sess.bytes, now, cold });
-  if (genN !== null) row.replacedGeneration = genN;
+  if (transcriptSha) row.transcriptGzSha256 = transcriptSha;
+  // The generation that holds the replaced copy: the one this run kept, else the one that already held it (O-1).
+  const replaced = genN !== null ? genN : (alreadyKept.length ? Math.max(...alreadyKept.map((a) => a.generation)) : null);
+  if (replaced !== null) {
+    row.replacedGeneration = replaced;
+    if (priorTranscriptSha) row.replacedTranscriptGzSha256 = priorTranscriptSha;
+  }
   if (cold) {
     const robbedCert = stolen('the death-log record', `${afterDeletes}; the death-log record and the index row were not written`);
     if (robbedCert) return robbedCert;
     const ageDays = Math.round((now - sess.newestMtimeMs) / DAY_MS);
     appendDeathCert(archiveDir, slug, `${new Date(now).toISOString()} destroyed-cold ${sess.id} (age ${ageDays}d, ${sess.files.length} file(s), ${sess.bytes} bytes — archived+verified first)`);
   }
-  return { ok: true, deleted, deleteFailed, unpruned, files: originals.length, bytes: sess.bytes, row, generation: genN, kept };
+  return { ok: true, deleted, deleteFailed, unpruned, files: originals.length, bytes: sess.bytes, row, generation: genN, kept, ...(alreadyKept.length ? { alreadyKept } : {}) };
+}
+
+// 29he fire 772 (lab O-1): the number of a kept generation of `rel` whose archived bytes equal `gz` exactly, or null. Each candidate is
+// read through restore's handle check under the restore bound; one that cannot be read is never taken as a match.
+function sameKept(gens, rel, gz, bounds) {
+  let best = null;
+  for (const [n, list] of gens) {
+    for (const g of list) {
+      if (g.rel !== rel) continue;
+      const got = readArchiveHandle(g.gzPath, bounds.maxGzBytes);
+      if (got.buf && got.buf.equals(gz) && (best === null || n > best)) best = n;
+    }
+  }
+  return best;
+}
+
+// 29he fire 772 (lab O-2): a run killed after a session's originals are deleted and before its index row is written leaves an archive
+// that search never lists. Each run that indexes first adds a row for every archived session of this project whose archive the index
+// does not describe: no row for it, or a newest row that names a different transcript copy (a session still live too: its row describes
+// the archived copy, and the run's own archive step adds the next row). Chosen over writing the row before the deletes, which would leave a row behind
+// for a run robbed of its lock after the copies were committed; this also mends rows lost to a failed append or to indexEnabled false.
+// A newest row from an older install (no transcriptGzSha256) is taken as describing the archive: it cannot be told apart.
+function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
+  const out = { added: 0, failed: [], robbedState: null };
+  const slugDir = path.join(archiveDir, slug);
+  let names;
+  try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { return out; }
+  const latest = new Map(); // sessionId -> the newest row for (sessionId, slug), in file order
+  try {
+    for (const raw of fs.readFileSync(path.join(archiveDir, ESTATE_INDEX_NAME), 'utf8').split('\n')) {
+      let row;
+      try { row = JSON.parse(raw); } catch { continue; }
+      if (row && typeof row === 'object' && row.retier !== true && typeof row.sessionId === 'string' && row.projectSlug === slug) latest.set(row.sessionId, row);
+    }
+  } catch { /* no index yet: every archived session here is rowless */ }
+  const sids = names.filter((d) => d.isFile() && d.name.endsWith('.jsonl.gz')).map((d) => d.name.slice(0, -'.jsonl.gz'.length)).filter((sid) => isBareId(sid) && !sid.includes('.')).sort();
+  for (const sid of sids) {
+    const got = readArchiveHandle(path.join(slugDir, `${sid}.jsonl.gz`), bounds.maxGzBytes);
+    if (!got.buf) continue;
+    const sha = sha256(got.buf);
+    const prev = latest.get(sid);
+    if (prev && (typeof prev.transcriptGzSha256 !== 'string' || prev.transcriptGzSha256 === sha)) continue;
+    let transcriptBuf;
+    try { transcriptBuf = zlib.gunzipSync(got.buf, { maxOutputLength: restoreInflateBoundWith(got.buf.length, bounds) }); } catch (e) {
+      out.failed.push({ id: sid, reason: `its archived transcript does not decompress (${e && e.code}), so no index row was added for it; restore it by id` });
+      continue;
+    }
+    const row = buildIndexRow({ sessionId: sid, projectSlug: slug, transcriptBuf, totalBytes: transcriptBuf.length, now }); // bytes: the transcript's own (the session's other files are not read here)
+    row.transcriptGzSha256 = sha;
+    row.reconciled = true; // archivedAt is when this row was added, not when the copy was archived
+    if (prev && typeof prev.transcriptGzSha256 === 'string') {
+      let n = null;
+      for (const [g, list] of sessionGenerations(slugDir, sid)) {
+        for (const e of list) {
+          if (e.rel !== `${sid}.jsonl`) continue;
+          const kg = readArchiveHandle(e.gzPath, bounds.maxGzBytes);
+          if (kg.buf && sha256(kg.buf) === prev.transcriptGzSha256 && (n === null || g > n)) n = g;
+        }
+      }
+      if (n !== null) { row.replacedGeneration = n; row.replacedTranscriptGzSha256 = prev.transcriptGzSha256; }
+    }
+    const s = lockState();
+    if (s.state !== 'own') { out.robbedState = s; return out; }
+    if (appendIndexRow(archiveDir, row)) out.added++;
+    else out.failed.push({ id: sid, reason: 'its index row could not be appended (the archive itself still restores it by id)' });
+  }
+  return out;
 }
 
 // 29gt fire 750. The earlier archive at `dest`, judged against the new source `buf` by CONTENT: the old copy's decompressed bytes
@@ -958,6 +1077,18 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       bytesFreed: 0, indexRows: 0, budgetDeferred: 0, budgetReached: false,
     };
     const budget = c.cfg.runBudget;
+    if (c.cfg.indexEnabled) {
+      const rec = reconcileIndex(archiveDir, c.slug, { now, lockState: lock.state, bounds });
+      res.indexRows += rec.added;
+      if (rec.added) res.reconciledRows = rec.added;
+      for (const f of rec.failed) res.failed.push(f);
+      if (rec.robbedState) {
+        const s = rec.robbedState;
+        res.ok = false; res.robbed = 'global'; res.lockLost = s.state === 'unreadable' ? 'unreadable' : 'stolen';
+        res.error = `${lockLostHead(s, { run: 'ULTRA run', file: globalLockPath(home), where: 'adding the index rows a stopped run left out', after: 'with no clean-up' })} No session was archived by this run; the sessions without a row still restore by id`;
+        return res;
+      }
+    }
     for (const sess of c.sessions) {
       if (sess.band === 'active') { res.activeSkipped++; continue; }
       if (sess.band === 'cold' && !c.cfg.deleteCold) {
@@ -992,13 +1123,13 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       if (s.state !== 'own') {
         res.ok = false; res.robbed = 'global'; res.lockLost = s.state === 'unreadable' ? 'unreadable' : 'stolen';
         res.error = `${lockLostHead(s, { run: 'ULTRA run', file: globalLockPath(home), where: `the index row of session ${sess.id}`, after: 'with no clean-up' })} The session was archived and verified and its originals deleted; its index row was not appended (estate-restore reads the archive itself, so it stays restorable)`;
-        res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept });
+        res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept, alreadyKept: r.alreadyKept });
         res.bytesFreed += r.bytes;
         break;
       }
-      if (c.cfg.indexEnabled && !appendIndexRow(archiveDir, r.row)) res.failed.push({ id: sess.id, reason: 'index append failed (bytes archived + originals deleted — restore unaffected)' });
+      if (c.cfg.indexEnabled && !appendIndexRow(archiveDir, r.row)) res.failed.push({ id: sess.id, reason: 'index append failed (bytes archived + originals deleted — restore unaffected; the next run adds the row)' });
       else if (c.cfg.indexEnabled) res.indexRows++;
-      res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept });
+      res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept, alreadyKept: r.alreadyKept });
       res.bytesFreed += r.bytes;
     }
     res.budgetReached = res.budgetDeferred > 0;
@@ -1048,6 +1179,7 @@ export function runEstateReport(res) {
   if (res.robbed) lines.push(`  STOPPED: ${res.error}`);
   if (res.lockLeft) lines.push(`  LOCK LEFT: ${res.lockLeft}`);
   lines.push(`  archive: ${res.archiveDir} (${res.indexRows} index row(s) appended · restore: cli.mjs estate-restore <sessionId>)`);
+  if (res.reconciledRows) lines.push(`  INDEXED: ${res.reconciledRows} archived session(s) had no index row (an earlier run stopped before writing it, its append failed, or indexing was off), so this run added one for each`);
   if (res.budgetReached) {
     const total = res.archived.length + res.budgetDeferred;
     lines.push(`  BUDGET: archived ${res.archived.length}/${total} eligible session(s) this run — per-run work-limit reached; ${res.budgetDeferred} deferred, run ULTRA again for the rest (zero partial — each unit is its own copy-verify-delete tx)`);
@@ -1058,6 +1190,7 @@ export function runEstateReport(res) {
   for (const a of res.archived) {
     // 29gt fire 750: a re-archive that found an earlier copy it could not replace without dropping bytes kept that copy.
     if (Number.isInteger(a.generation)) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived copy was not a prefix of this one, so it was kept as generation ${a.generation} (restore it with: cli.mjs estate-restore ${escapeRawControls(String(a.id))} --generation ${a.generation})`);
+    for (const k of Array.isArray(a.alreadyKept) ? a.alreadyKept : []) lines.push(`  ALREADY-KEPT ${escapeRawControls(String(a.id))}: the earlier archived copy of ${escapeRawControls(String(k.rel))} is already kept, byte for byte, as generation ${k.generation}, so no second copy was kept (restore it with: cli.mjs estate-restore ${escapeRawControls(String(a.id))} --generation ${k.generation})`);
     if (a.unpruned && a.unpruned.length) lines.push(`  KEPT-IN-PLACE ${escapeRawControls(String(a.id))}: ${a.unpruned.length} un-enumerated file(s) under <sid>/ left intact (not archived — appeared post-listing / walk-capped): ${a.unpruned.slice(0, 5).map((n) => escapeRawControls(String(n))).join(', ')}${a.unpruned.length > 5 ? ', …' : ''}`);
   }
   if (res.coldListed.length) {
@@ -1175,9 +1308,9 @@ export function searchIndex(query, { archiveDir, tombstones } = {}) {
 
 // 29gt fire 750 (the LOW at the index append): an archived session gets one row per archive, so a session archived again had
 // several rows, the earlier ones describing a copy since replaced. One row per session (keyed by sessionId and projectSlug, in file
-// order): the last row is the current copy; an earlier row is kept only when the row after it says it replaced a generation
-// (`replacedGeneration: N`), and is then marked `generation: N`; any other earlier row described a copy that is a prefix of a later
-// one (or an older install's row) and is dropped. RE-TIER's dig rows (`retier: true`) and rows without a string sessionId pass through.
+// order): the last row is the current copy; an earlier row is kept only when a later row says it replaced that row's own copy as a
+// generation (fire 772, below), and is then marked `generation: N`; any other earlier row described a copy that is a prefix of a later
+// one (or is an older install's row) and is dropped. RE-TIER's dig rows (`retier: true`) and rows without a string sessionId pass through.
 export function currentRows(rows) {
   const groups = new Map();
   const passthrough = [];
@@ -1188,12 +1321,23 @@ export function currentRows(rows) {
     groups.get(key).push([i, row]);
   });
   const keep = [...passthrough];
+  // 29he fire 772 (CodeRabbit t335 F4): an earlier row is marked `generation: N` only when a later row that replaced generation N names
+  // this row's own transcript copy (`replacedTranscriptGzSha256` equal to its `transcriptGzSha256`), never because it sits just before
+  // that row: a missing row would otherwise shift the label onto a row that describes a different copy. When several earlier rows name
+  // the same copy, the one closest before the replacing row is marked. A row without these fields (an older install's) is not marked.
   for (const g of groups.values()) {
+    const label = new Map(); // k -> N
+    for (let j = 1; j < g.length; j++) {
+      const r = g[j][1];
+      if (!(Number.isInteger(r.replacedGeneration) && r.replacedGeneration >= 1) || typeof r.replacedTranscriptGzSha256 !== 'string') continue;
+      for (let k = j - 1; k >= 0; k--) {
+        if (g[k][1].transcriptGzSha256 === r.replacedTranscriptGzSha256) { if (!label.has(k)) label.set(k, r.replacedGeneration); break; }
+      }
+    }
     for (let k = 0; k < g.length; k++) {
       const [i, row] = g[k];
-      if (k === g.length - 1) { keep.push([i, row]); continue; }
-      const next = g[k + 1][1].replacedGeneration;
-      if (Number.isInteger(next) && next >= 1) keep.push([i, { ...row, generation: next }]);
+      if (k === g.length - 1) keep.push([i, row]);
+      else if (label.has(k)) keep.push([i, { ...row, generation: label.get(k) }]);
     }
   }
   return keep.sort((a, b) => a[0] - b[0]).map(([, row]) => row);
@@ -1391,9 +1535,17 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
   // inflated byte is taken from that remainder, so the bytes restored in one session are bounded by the same budget.
   const sessionBound = B.sessionCeilBytes;
   let remaining = sessionBound;
+  // 29he fire 772 (CodeRabbit t336 F8): a refusal after the loop has started still returns and names every file it found damaged before
+  // it, and says the restore stopped there, so the files after it were not restored.
+  const refuse = (si, error) => {
+    const after = sources.length - si - 1;
+    const named = damaged.map((d) => `${d.rel}, archived at ${d.gzPath} [zlib: ${d.zlib}]`).join('; ');
+    const tail = `${damaged.length ? `. Found damaged before it stopped (nothing restored from ${damaged.length === 1 ? 'it' : 'them'}): ${named}` : ''}${after ? `. The restore stopped at ${sources[si].rel}, so the ${after} file(s) after it were not restored` : ''}`;
+    return { ok: false, error: `${error}${tail}`, dir, files, ...(damaged.length ? { damaged } : {}) };
+  };
   const tombFound = new Map(); // anchor identity -> hit, collected across every window of every file; no concatenated text is ever built
   let tombBytes = 0;
-  for (const s of sources) {
+  for (const [si, s] of sources.entries()) {
     try {
       // CWK-162 B3: every directory component BELOW the destination root must be a real directory. A link planted at <to>/<sid>
       // (or deeper) used to carry the restored bytes outside the destination with ok:true; an explicit `--to` is the exposed
@@ -1401,31 +1553,31 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
       // is checked. A refusal reads "... is a link" (ownSandboxDir) and stops the restore: files already written stay, as before.
       const relDir = path.dirname(s.rel);
       try { ownSandboxDir(dir, ...(relDir === '.' ? [] : relDir.split(path.sep))); } catch (e) {
-        if (e && e.code === 'COALWASH_WRITE_REFUSED') return { ok: false, error: `restore refused on ${s.rel}: ${String(e.message).split(' -- ')[0]} (a restore never writes through a link under its destination)`, dir, files };
+        if (e && e.code === 'COALWASH_WRITE_REFUSED') return refuse(si, `restore refused on ${s.rel}: ${String(e.message).split(' -- ')[0]} (a restore never writes through a link under its destination)`);
         throw e;
       }
       // R15 (CodeQL #47/#50 js/file-system-race; supersedes R14 NIT 3's after-the-fact length check): the archive is OPENED first, its kind and size
       // are judged on the HANDLE, and only that many bytes (plus one probe byte) are read through it. The path is looked up once, so what is
       // bounded is what is read, with no window between a stat and a read.
       const got = readArchiveHandle(s.gzPath, B.maxGzBytes);
-      if (got.notFile) return { ok: false, error: `restore refused on ${s.rel}: the archive entry is not a regular file`, dir, files };
-      if (got.over !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is ${got.over} bytes, over the ${B.maxGzBytes}-byte bound`, dir, files };
-      if (got.grew !== undefined) return { ok: false, error: `restore refused on ${s.rel}: the compressed file is longer than the ${got.grew} bytes its handle reported (it grew after its size was read)`, dir, files };
+      if (got.notFile) return refuse(si, `restore refused on ${s.rel}: the archive entry is not a regular file`);
+      if (got.over !== undefined) return refuse(si, `restore refused on ${s.rel}: the compressed file is ${got.over} bytes, over the ${B.maxGzBytes}-byte bound`);
+      if (got.grew !== undefined) return refuse(si, `restore refused on ${s.rel}: the compressed file is longer than the ${got.grew} bytes its handle reported (it grew after its size was read)`);
       const gz = got.buf;
       const fileBound = restoreInflateBoundWith(gz.length, B);
       let buf;
       // zlib refuses a bound of 0, so a session already at its ceiling inflates at most one byte, and the size check below decides
       try { buf = zlib.gunzipSync(gz, { maxOutputLength: Math.max(1, Math.min(fileBound, remaining)) }); } catch (e) {
         if (e && e.code === 'ERR_BUFFER_TOO_LARGE') {
-          return remaining < fileBound
-            ? { ok: false, error: `restore refused on ${s.rel}: it would pass the ${sessionBound}-byte session bound (the whole session's inflated bytes; the files already written stay)`, dir, files }
-            : { ok: false, error: `restore refused on ${s.rel}: it would inflate past ${fileBound} bytes for a ${gz.length}-byte archive`, dir, files };
+          return refuse(si, remaining < fileBound
+            ? `restore refused on ${s.rel}: it would pass the ${sessionBound}-byte session bound (the whole session's inflated bytes; the files already written stay)`
+            : `restore refused on ${s.rel}: it would inflate past ${fileBound} bytes for a ${gz.length}-byte archive`);
         }
         // 29gt fire 750: a damaged archive says so in plain words; zlib's own text follows in brackets, never alone.
         if (e && typeof e.code === 'string' && e.code.startsWith('Z_')) { damaged.push({ rel: s.rel, gzPath: s.gzPath, zlib: e.message }); continue; }
         throw e;
       }
-      if (buf.length > remaining) return { ok: false, error: `restore refused on ${s.rel}: it would pass the ${sessionBound}-byte session bound (the whole session's inflated bytes; the files already written stay)`, dir, files };
+      if (buf.length > remaining) return refuse(si, `restore refused on ${s.rel}: it would pass the ${sessionBound}-byte session bound (the whole session's inflated bytes; the files already written stay)`);
       remaining -= buf.length;
       const dest = path.join(dir, s.rel);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -1433,8 +1585,8 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
       // a file with a second hard link is refused and left in place; nothing absent or an ordinary single-link file behaves as before.
       let st = null;
       try { st = fs.lstatSync(dest); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
-      if (st && st.isSymbolicLink()) return { ok: false, error: `restore refused on ${s.rel}: the destination file is a link (a restore never writes through a link under its destination)`, dir, files };
-      if (st && (!st.isFile() || st.nlink > 1)) return { ok: false, error: `restore refused on ${s.rel}: the destination entry is not a single-link regular file (a restore never writes through a link under its destination)`, dir, files };
+      if (st && st.isSymbolicLink()) return refuse(si, `restore refused on ${s.rel}: the destination file is a link (a restore never writes through a link under its destination)`);
+      if (st && (!st.isFile() || st.nlink > 1)) return refuse(si, `restore refused on ${s.rel}: the destination entry is not a single-link regular file (a restore never writes through a link under its destination)`);
       writeDurable(dest, buf, fileModeOr600(dest)); // 29n F470-f: a restored file keeps its own mode, 0600 when it is new. MED: recovery write matches the forward path's durability (this tier keeps no snapshot)
       fsyncDirBestEffort(path.dirname(dest));
       files.push({ rel: s.rel, bytes: buf.length });
@@ -1443,7 +1595,7 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
         tombBytes += buf.length;
         for (const h of scan.hits) tombFound.set(h.identity, h);
       }
-    } catch (e) { return { ok: false, error: `restore failed on ${s.rel}: ${e.message}`, dir, files }; }
+    } catch (e) { return refuse(si, `restore failed on ${s.rel}: ${e.message}`); }
   }
   if (damaged.length) {
     const others = generations.filter((n) => n !== wantGen);
