@@ -1243,7 +1243,7 @@ export function runEstateReport(res) {
   if (res.robbed) lines.push(`  STOPPED: ${res.error}`);
   if (res.lockLeft) lines.push(`  LOCK LEFT: ${res.lockLeft}`);
   lines.push(`  archive: ${res.archiveDir} (${res.indexRows} index row(s) appended · restore: cli.mjs estate-restore <sessionId>)`);
-  if (res.asideFiles && res.asideFiles.length) lines.push(`  ASIDE: ${res.asideFiles.length} file(s) in this project's archive were moved aside by a refused run and kept, never deleted (they hold bytes that run could not verify; restore and search never read them): ${res.asideFiles.join('; ')}`);
+  if (res.asideFiles && res.asideFiles.length) lines.push(`  ASIDE: ${res.asideFiles.length} file(s) in this project's archive were moved aside by a refused run and kept, never deleted (they hold bytes that run could not verify; restore and search never read them): ${res.asideFiles.map((p) => escapeRawControls(String(p))).join('; ')}`); // 788 (INSPECT 787 C1): names from the archive folder, escaped as the KEPT lines
   if (res.reconciledRows) lines.push(`  INDEXED: ${res.reconciledRows} archived session(s) had no index row (an earlier run stopped before writing it, its append failed, or indexing was off), so this run added one for each`);
   if (res.budgetReached) {
     const total = res.archived.length + res.budgetDeferred;

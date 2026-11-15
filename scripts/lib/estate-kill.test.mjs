@@ -549,3 +549,19 @@ test('Aside (lab 1.19.2): a later run lists the files a refused run moved aside,
   assert.ok(report.includes('ASIDE: 1 file(s)') && report.includes(aside[0]), report);
   assert.ok(fs.readFileSync(aside[0]).equals(coWriter), 'listed, never moved or changed');
 });
+
+test('C1 (INSPECT 787): the ASIDE line escapes control characters in a file name, as the KEPT lines do', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.strictEqual(run(s).archived.length, 1);
+  const name = `x${String.fromCodePoint(0x202e)}y${String.fromCodePoint(0x9b)}2K.jsonl.gz.gen1.${'ab'.repeat(12)}.coalwash-aside`;
+  fs.writeFileSync(path.join(path.dirname(gzPathOf(s)), name), 'planted\n');
+  const res = run(s, Date.now() + LATER);
+  assert.strictEqual(res.asideFiles.length, 1, JSON.stringify(res));
+  const report = runEstateReport(res);
+  const aside = report.split('\n').find((l) => l.startsWith('  ASIDE:'));
+  assert.ok(aside, report);
+  assert.strictEqual(aside.includes(String.fromCodePoint(0x202e)), false, 'no raw U+202E in the ASIDE line');
+  assert.strictEqual(aside.includes(String.fromCodePoint(0x9b)), false, 'no raw U+009B in the ASIDE line');
+  assert.ok(aside.includes('2K.jsonl.gz.gen1.'), `the name is still printed, escaped: ${aside}`);
+});
