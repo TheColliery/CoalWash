@@ -243,6 +243,48 @@ test('O-1 compares by content: a kept generation of the same size but other byte
   for (const v of [A, B, C]) assert.ok(got.has(v), `every archived version stays restorable (${got.size} restorable)`);
 });
 
+// fire 775 (INSPECT 774, witnesses scratchpad/29gd/i774-inputs.mjs input (b) and i774-oldrows.mjs, as room tests)
+test('F774-1: a kept-generation label names the generation that holds the transcript\'s earlier copy, not another file\'s', (t) => {
+  const s = sandbox(t);
+  const SUB = path.join(s.projDir, SID, 'subagents', 'agent-1.jsonl');
+  const put = (p, text) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); const at = new Date(Date.now() - 30 * DAY); fs.utimesSync(p, at, at); };
+  const T1 = [line(0, 'Needle CW775-NEEDLE transcript'), line(1, 'one'), line(2, 'middle said once')].join('\n') + '\n';
+  const S1 = [line(0, 'subagent start'), line(1, 'sub middle said once')].join('\n') + '\n';
+  const T2 = T1.replace('middle said once', 'middle said twice');
+  const S2 = S1.replace('sub middle said once', 'sub middle said twice');
+  put(transcriptPath(s), T1); put(SUB, S1);
+  assert.strictEqual(run(s).archived.length, 1);
+  assert.ok(restoreSession(SID, { archiveDir: s.archiveDir, to: s.projDir }).ok);
+  put(transcriptPath(s), T2); put(SUB, S2);
+  // run 2: a co-writer alters only the subagent file's generation after its rename; the refused commit leaves the transcript's verified generation 1
+  const coWriter = zlib.gzipSync(Buffer.from('CO-WRITER\n'));
+  const real = fs.renameSync;
+  fs.renameSync = function patched(a, b, ...r) { const out = real.call(fs, a, b, ...r); if (/agent-1\.jsonl\.gz\.gen1$/.test(String(b))) fs.writeFileSync(b, coWriter); return out; };
+  try { assert.strictEqual(run(s, Date.now() + LATER).archived.length, 0); } finally { fs.renameSync = real; }
+  // run 3: the transcript's earlier copy is already kept as generation 1; the subagent file's is kept now as generation 2
+  const r3 = run(s, Date.now() + 2 * LATER);
+  assert.strictEqual(r3.archived.length, 1, JSON.stringify(r3));
+  const labelled = searchIndex('CW775-NEEDLE', { archiveDir: s.archiveDir }).filter((r) => Number.isInteger(r.generation));
+  assert.strictEqual(labelled.length, 1, 'the earlier row is labelled once');
+  const to = path.join(s.out, 'f774-1');
+  const rr = restoreSession(SID, { archiveDir: s.archiveDir, to, generation: labelled[0].generation });
+  assert.ok(rr.ok, JSON.stringify(rr));
+  const got = path.join(to, `${SID}.jsonl`);
+  assert.ok(fs.existsSync(got), `--generation ${labelled[0].generation}, the label search shows, returns the transcript`);
+  assert.strictEqual(fs.readFileSync(got, 'utf8'), T1, 'and it is the copy that row describes');
+});
+
+test('F774-2: an index written before 1.19.2 keeps its kept-generation row in search, unlabelled (it cannot be matched)', () => {
+  const rows = [
+    { rowSchema: 2, sessionId: 's1', projectSlug: 'p', firstUserLine: 'the first archive (now kept as generation 1)' },
+    { rowSchema: 2, sessionId: 's1', projectSlug: 'p', firstUserLine: 'the re-archive that kept it', replacedGeneration: 1 },
+  ];
+  const out = currentRows(rows);
+  assert.deepStrictEqual(out.map((r) => [r.firstUserLine, r.generation]), [['the first archive (now kept as generation 1)', undefined], ['the re-archive that kept it', undefined]], 'both rows are listed; the older one carries no label it cannot prove');
+  const prefixOnly = [{ rowSchema: 2, sessionId: 's2', projectSlug: 'p', firstUserLine: 'a prefix of the next' }, { rowSchema: 2, sessionId: 's2', projectSlug: 'p', firstUserLine: 'the superset' }];
+  assert.deepStrictEqual(currentRows(prefixOnly).map((r) => r.firstUserLine), ['the superset'], 'a row whose copy the next one replaced as a prefix is still not shown');
+});
+
 // t336 F8 and F7 (witness scratchpad/29gd/w336.mjs, as room tests)
 const damagedGz = () => { const g = Buffer.from(zlib.gzipSync(Buffer.from('damaged member\n'))); g[g.length - 8] ^= 0xff; return g; };
 
