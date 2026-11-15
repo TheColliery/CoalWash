@@ -363,6 +363,36 @@ test('G-1 KD: a run KILLED right after its transcript delete, then the next run:
   labelsHold(s, LBL_V1);
 });
 
+// fire 784 (CodeRabbit t338 F4, witness scratchpad/29gd/w338.mjs leg F4; the chief's ruling on row CW-073: every kept copy a run relies
+// on is read back before any live file is deleted). The O-1 state (generation 1 already holds the archive copy byte for byte), the
+// session edited (not a prefix), and an outside writer that overwrites that REUSED generation inside the window before the delete:
+// (a) just before the commit renames the new copy over the archive name, (b) just after it.
+function reusedGenWritten(t, moment) {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  const gen1 = `${gzPathOf(s)}.gen1`;
+  fs.copyFileSync(gzPathOf(s), gen1); // the O-1 state
+  const real = fs.renameSync;
+  let wrote = false;
+  fs.renameSync = function patched(a, b, ...r) {
+    const onto = /\.coalwash-new$/.test(String(a)) && path.resolve(String(b)) === path.resolve(gzPathOf(s));
+    if (onto && moment === 'before' && !wrote) { fs.writeFileSync(gen1, 'an outside writer, not gzip\n'); wrote = true; }
+    const out = real.call(fs, a, b, ...r);
+    if (onto && moment === 'after' && !wrote) { fs.writeFileSync(gen1, 'an outside writer, not gzip\n'); wrote = true; }
+    return out;
+  };
+  let res;
+  try { res = run(s, Date.now() + LATER); } finally { fs.renameSync = real; }
+  assert.ok(wrote, 'the outside writer struck inside the window');
+  assert.strictEqual(fs.existsSync(transcriptPath(s)), true, `the live session is not deleted when a kept copy it relies on no longer reads back: ${JSON.stringify(res)}`);
+  assert.strictEqual(res.archived.length, 0, 'the session is not reported archived');
+  assert.match(res.failed.map((f) => f.reason).join(' | '), /archive no longer verifies before delete/);
+  assert.strictEqual(restoreText(s), ORIGINAL, 'the earlier version stays restorable (put back at its archive name)');
+  assert.strictEqual(fs.readFileSync(transcriptPath(s), 'utf8'), V2);
+}
+test('F4 (t338): an outside writer on the REUSED generation just before the commit rename stops the delete; the earlier version stays restorable', (t) => reusedGenWritten(t, 'before'));
+test('F4 (t338): an outside writer on the REUSED generation just after the commit rename stops the delete; the earlier version stays restorable', (t) => reusedGenWritten(t, 'after'));
+
 // t336 F8 and F7 (witness scratchpad/29gd/w336.mjs, as room tests)
 const damagedGz = () => { const g = Buffer.from(zlib.gzipSync(Buffer.from('damaged member\n'))); g[g.length - 8] ^= 0xff; return g; };
 

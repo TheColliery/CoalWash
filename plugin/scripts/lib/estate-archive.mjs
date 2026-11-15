@@ -672,7 +672,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       // again: the replace drops nothing, since that generation keeps them, and no slot of estate.maxGenerations is spent.
       if (prior.keep && gens === null) gens = sessionGenerations(destBase, sess.id);
       const dupGen = prior.keep ? sameKept(gens, f.rel, prior.gz, bounds) : null;
-      if (dupGen !== null) alreadyKept.push({ rel: f.rel, generation: dupGen });
+      if (dupGen !== null) alreadyKept.push({ rel: f.rel, generation: dupGen.generation });
       else if (prior.keep) {
         if (gens.size >= maxGenerations) return boundRefusal(f.rel, gens.size);
         if (genN === null) genN = gens.size ? Math.max(...gens.keys()) + 1 : 1;
@@ -689,7 +689,10 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       const tmp = stageBeside(dest, gz, written); // H4: fsync'd at write (this tier keeps no snapshot)
       const back = zlib.gunzipSync(readStaged(tmp), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
       if (!back.equals(buf)) { return fail(`verify mismatch: ${f.rel} — original kept`); }
-      originals.push({ path: f.path, rel: f.rel, gz: dest, tmp, staged: gz, gen, earlier: prior.prefix || (prior.keep ? prior.gz : null), inflated: buf.length });
+      // fire 784 (t338 F4): a reused generation is a kept copy this run relies on (the replace drops the earlier copy only because it
+      // holds those bytes), so its path and expected bytes ride along for the read-back before the delete.
+      const reused = dupGen !== null ? { gzPath: dupGen.gzPath, want: prior.gz, generation: dupGen.generation } : null;
+      originals.push({ path: f.path, rel: f.rel, gz: dest, tmp, staged: gz, gen, reused, earlier: prior.prefix || (prior.keep ? prior.gz : null), inflated: buf.length });
     } catch (e) { return fail(`archive failed: ${f.rel}: ${e.message} — original kept`); }
   }
 
@@ -760,8 +763,13 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // that were verified before the commit: each kept generation with the earlier copy, each new copy with the copy that was staged. A file
   // altered between its verify and its rename (an outside writer on the archive folder) stops the run before any live file is deleted;
   // the clean-up then puts the earlier copy back under its archive name.
+  // 29hj fire 784 (t338 F4; the chief's ruling on CW-073: every kept copy a run relies on is read back before any live file is deleted):
+  // the copies a delete relies on are the new copy, the generation this run kept, and the generation an earlier run left holding the
+  // earlier copy byte for byte (O-1, `reused`), so all three are read here. An earlier copy that is a prefix of the new one lives inside
+  // the new copy, which is read.
   for (const o of originals) {
     const checks = o.gen ? [[o.gen.final, o.earlier, `the kept generation of ${o.rel} (${o.gen.final})`], [o.gz, o.staged, `the archive copy of ${o.rel}`]] : [[o.gz, o.staged, `the archive copy of ${o.rel}`]];
+    if (o.reused) checks.push([o.reused.gzPath, o.reused.want, `the kept generation ${o.reused.generation} of ${o.rel} this run relies on (${o.reused.gzPath})`]);
     for (const [p, want, what] of checks) {
       let same = false;
       try { same = readStaged(p).equals(want); } catch { same = false; }
@@ -833,15 +841,16 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   return { ok: true, deleted, deleteFailed, unpruned, files: originals.length, bytes: sess.bytes, row, generation: genN, kept, ...(alreadyKept.length ? { alreadyKept } : {}) };
 }
 
-// 29he fire 772 (lab O-1): the number of a kept generation of `rel` whose archived bytes equal `gz` exactly, or null. Each candidate is
-// read through restore's handle check under the restore bound; one that cannot be read is never taken as a match.
+// 29he fire 772 (lab O-1): the kept generation of `rel` whose archived bytes equal `gz` exactly, as { generation, gzPath }, or null
+// (fire 784: its path too, so the read-back before the delete can read it again). Each candidate is read through restore's handle check
+// under the restore bound; one that cannot be read is never taken as a match.
 function sameKept(gens, rel, gz, bounds) {
   let best = null;
   for (const [n, list] of gens) {
     for (const g of list) {
       if (g.rel !== rel) continue;
       const got = readArchiveHandle(g.gzPath, bounds.maxGzBytes);
-      if (got.buf && got.buf.equals(gz) && (best === null || n > best)) best = n;
+      if (got.buf && got.buf.equals(gz) && (best === null || n > best.generation)) best = { generation: n, gzPath: g.gzPath };
     }
   }
   return best;
