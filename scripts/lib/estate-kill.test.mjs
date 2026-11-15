@@ -221,6 +221,25 @@ test('F-2: when the earlier copy cannot be put back, the generation this run mad
   assert.strictEqual(fs.readFileSync(transcriptPath(s), 'utf8'), V2, 'the live session stays');
 });
 
+test('WD (lab 1.19.2): when another writer deletes this run\'s kept generation, the refusal says it is gone, not that it stays to be checked', (t) => {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  const real = fs.renameSync;
+  let gen = null;
+  let res;
+  fs.renameSync = function patched(a, b, ...r) { const out = real.call(fs, a, b, ...r); if (/\.gz\.gen1$/.test(String(b))) { gen = String(b); fs.unlinkSync(b); } return out; };
+  try { res = run(s); } finally { fs.renameSync = real; }
+  assert.ok(gen, 'the generation rename ran');
+  assert.strictEqual(res.archived.length, 0, JSON.stringify(res));
+  const why = res.failed.map((f) => f.reason).join(' | ');
+  assert.ok(!fs.existsSync(gen), 'nothing stands at the generation name');
+  assert.ok(!why.includes('so it stays at that name'), `no word says it stays: ${why}`);
+  assert.ok(why.includes(gen) && /was removed by another writer.*nothing stands at that name/.test(why), `the refusal says it is gone: ${why}`);
+  assert.strictEqual(filesUnder(s.archiveDir, /\.coalwash-aside$/).length, 0, 'nothing was moved aside');
+  assert.strictEqual(restoreText(s), ORIGINAL, 'the earlier copy is back at its archive name');
+  assert.strictEqual(fs.readFileSync(transcriptPath(s), 'utf8'), V2, 'the live session stays');
+});
+
 test('O-1: a run killed between a generation\'s rename and its copy\'s rename does not make the next run keep the same bytes again', (t) => {
   const s = sandbox(t);
   archiveThenRewrite(s);

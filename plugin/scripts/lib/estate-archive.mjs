@@ -582,6 +582,8 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       if (same) { notes.push(`left this run's kept generation ${g.final} in place: it holds the earlier copy's bytes as they were verified`); continue; }
       const aside = `${g.final}.${crypto.randomBytes(12).toString('hex')}.${ASIDE_SUFFIX}`;
       try { fs.linkSync(g.final, aside); } catch (e) {
+        // fire 785 (lab 1.19.2 WD): ENOENT means another writer removed it after this run verified it; there is nothing to check there.
+        if (e && e.code === 'ENOENT') { notes.push(`this run's kept generation ${g.final} was removed by another writer after this run verified it, so nothing stands at that name and there is nothing to check there`); continue; }
         notes.push(`this run's kept generation ${g.final} no longer holds the bytes this run verified and could not be moved aside (${e && e.code}), so it stays at that name: check it before restoring that generation`);
         continue;
       }
