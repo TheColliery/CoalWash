@@ -2,6 +2,20 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.19.3] - 2026-11-16
+
+A re-archive reads back a reused earlier copy before it deletes
+
+### Fixed
+
+- A re-archive whose earlier copy was already kept as a generation now reads that generation back, with the other copies, before it deletes the live session. Before, an outside writer on that generation could leave the earlier version unreadable while the run reported ok and deleted the live session. This was a regression in 1.19.2 only. — test: `scripts/lib/estate-kill.test.mjs`
+- An archived copy that the index repair cannot open (a permission, or a file another program holds) is now named in the run's report, and the run goes on with every other session and exits non-zero. Before, the whole run stopped on it and archived nothing. — test: `scripts/lib/estate-kill.test.mjs`
+- When another writer removed a kept generation during a refused run, the message now says it is gone. Before, it said the generation stayed at its name, so the user was told to check a file that was not there. — test: `scripts/lib/estate-kill.test.mjs`
+- A session that the same run archives cleanly is no longer reported as an archive that does not decompress, and no longer makes the run exit non-zero. Before, a session archived again in the same run was still reported that way. — test: `scripts/lib/estate-kill.test.mjs`
+- `estate-run` now lists the files a refused run moved aside, in its report and its result, so they can be found and checked. Nothing is deleted. Before, a moved-aside file was kept on disk and never listed, so it could be missed. — test: `scripts/lib/estate-kill.test.mjs`
+
+Forward note for `[1.19.2]` (not edited): its O-1 line says a re-archive no longer keeps the same earlier copy a second time. That was true, but the reused copy was not read back before the delete; the first bullet above is the fix.
+
 ## [1.19.2] - 2026-11-15
 
 An interrupted archive is found again, and no copy is kept twice
