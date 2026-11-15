@@ -862,6 +862,8 @@ function sameKept(gens, rel, gz, bounds) {
 // the archived copy, and the run's own archive step adds the next row). Chosen over writing the row before the deletes, which would leave a row behind
 // for a run robbed of its lock after the copies were committed; this also mends rows lost to a failed append or to indexEnabled false.
 // A newest row from an older install (no transcriptGzSha256) is taken as describing the archive: it cannot be told apart.
+// The words for an archived file the index repair cannot open (fire 784, t338 F1): which file, why, and what the person can do.
+const unopenable = (file, e) => `its archived transcript ${file} could not be opened (${(e && e.code) || 'error'}), so the index repair skipped it and search will not list it; fix the file's permissions or close the program that holds it, then run again`;
 function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
   const out = { added: 0, failed: [], robbedState: null };
   const slugDir = path.join(archiveDir, slug);
@@ -877,7 +879,14 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
   } catch { /* no index yet: every archived session here is rowless */ }
   const sids = names.filter((d) => d.isFile() && d.name.endsWith('.jsonl.gz')).map((d) => d.name.slice(0, -'.jsonl.gz'.length)).filter((sid) => isBareId(sid) && !sid.includes('.')).sort();
   for (const sid of sids) {
-    const got = readArchiveHandle(path.join(slugDir, `${sid}.jsonl.gz`), bounds.maxGzBytes);
+    // fire 784 (t338 F1): an archive this repair cannot open (a permission, an ACL, a file another program holds) is named in words and
+    // skipped; the run goes on with every other session and reports the failure, so the CLI exits non-zero.
+    const gzPath = path.join(slugDir, `${sid}.jsonl.gz`);
+    let got;
+    try { got = readArchiveHandle(gzPath, bounds.maxGzBytes); } catch (e) {
+      out.failed.push({ id: sid, reason: unopenable(gzPath, e) });
+      continue;
+    }
     if (!got.buf) continue;
     const sha = sha256(got.buf);
     const prev = latest.get(sid);
@@ -895,7 +904,11 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
       for (const [g, list] of sessionGenerations(slugDir, sid)) {
         for (const e of list) {
           if (e.rel !== `${sid}.jsonl`) continue;
-          const kg = readArchiveHandle(e.gzPath, bounds.maxGzBytes);
+          let kg;
+          try { kg = readArchiveHandle(e.gzPath, bounds.maxGzBytes); } catch (err) {
+            out.failed.push({ id: sid, reason: `its kept generation ${e.gzPath} could not be opened (${(err && err.code) || 'error'}), so the index repair could not tell which copy it holds and gave the earlier row no generation label; fix the file's permissions or close the program that holds it, then run again` });
+            continue;
+          }
           if (kg.buf && sha256(kg.buf) === prev.transcriptGzSha256 && (n === null || g > n)) n = g;
         }
       }
@@ -1099,6 +1112,7 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       res.indexRows += rec.added;
       if (rec.added) res.reconciledRows = rec.added;
       for (const f of rec.failed) res.failed.push(f);
+      if (rec.failed.length) res.indexRepairFailed = rec.failed.length; // fire 784 (t338 F1): the CLI exits non-zero on it
       if (rec.robbedState) {
         const s = rec.robbedState;
         res.ok = false; res.robbed = 'global'; res.lockLost = s.state === 'unreadable' ? 'unreadable' : 'stolen';

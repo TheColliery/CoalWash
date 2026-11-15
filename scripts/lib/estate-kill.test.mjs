@@ -393,6 +393,50 @@ function reusedGenWritten(t, moment) {
 test('F4 (t338): an outside writer on the REUSED generation just before the commit rename stops the delete; the earlier version stays restorable', (t) => reusedGenWritten(t, 'before'));
 test('F4 (t338): an outside writer on the REUSED generation just after the commit rename stops the delete; the earlier version stays restorable', (t) => reusedGenWritten(t, 'after'));
 
+// fire 784 (CodeRabbit t338 F1, witness scratchpad/29gd/w338.mjs leg F1): an archived copy the index repair cannot open (EACCES, as a
+// POSIX chmod 000 or a Windows deny ACL gives) is named in words, the run goes on with the other sessions, and it reports a failure.
+test('F1 (t338): an archive the index repair cannot open is named, the other sessions still archive, and the run reports the failure', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.strictEqual(run(s).archived.length, 1);
+  const SID2 = 'd7847847-7847-4784-8784-784784784784';
+  const live2 = path.join(s.projDir, `${SID2}.jsonl`);
+  fs.writeFileSync(live2, [line(0, 'another session F1-784'), line(1, 'two')].join('\n') + '\n');
+  const at = new Date(Date.now() - 30 * DAY); fs.utimesSync(live2, at, at);
+  const locked = path.resolve(gzPathOf(s));
+  const real = fs.openSync;
+  fs.openSync = function patched(p, ...r) {
+    if (path.resolve(String(p)) === locked) throw Object.assign(new Error(`EACCES: permission denied, open '${p}'`), { code: 'EACCES' });
+    return real.call(fs, p, ...r);
+  };
+  let res;
+  try { res = run(s, Date.now() + LATER); } finally { fs.openSync = real; }
+  assert.deepStrictEqual(res.archived.map((a) => a.id), [SID2], `the other session still archives: ${JSON.stringify(res)}`);
+  const why = res.failed.filter((f) => f.id === SID).map((f) => f.reason).join(' | ');
+  assert.ok(why.includes(gzPathOf(s)) && /could not be opened \(EACCES\)/.test(why), `the archive is named in words: ${why}`);
+  assert.strictEqual(res.indexRepairFailed, 1, 'the run counts the index repair it could not do, so the CLI exits non-zero');
+  assert.match(runEstateReport(res), /KEPT c7727727-7727-4772-8772-772772772772: its archived transcript .* could not be opened \(EACCES\)/);
+});
+
+test('F1 (t338): a kept generation the index repair cannot open is named, the run goes on, and no label is guessed for it', (t) => {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  killedRun(s, 'after-delete', transcriptPath(s)); // the re-archive's row is missing, so the next run's repair reads generation 1
+  const locked = path.resolve(`${gzPathOf(s)}.gen1`);
+  const real = fs.openSync;
+  fs.openSync = function patched(p, ...r) {
+    if (path.resolve(String(p)) === locked) throw Object.assign(new Error(`EACCES: permission denied, open '${p}'`), { code: 'EACCES' });
+    return real.call(fs, p, ...r);
+  };
+  let res;
+  try { res = run(s, Date.now() + LATER); } finally { fs.openSync = real; }
+  const why = res.failed.map((f) => f.reason).join(' | ');
+  assert.ok(why.includes(`${gzPathOf(s)}.gen1`) && /could not be opened \(EACCES\)/.test(why), `the generation is named: ${why}`);
+  assert.strictEqual(res.indexRepairFailed, 1);
+  assert.strictEqual(res.reconciledRows, 1, 'the current copy still gets its row');
+  assert.ok(!searchIndex('CW772-NEEDLE', { archiveDir: s.archiveDir }).some((r) => Number.isInteger(r.generation)), 'no generation label is guessed for a copy it could not read');
+});
+
 // t336 F8 and F7 (witness scratchpad/29gd/w336.mjs, as room tests)
 const damagedGz = () => { const g = Buffer.from(zlib.gzipSync(Buffer.from('damaged member\n'))); g[g.length - 8] ^= 0xff; return g; };
 

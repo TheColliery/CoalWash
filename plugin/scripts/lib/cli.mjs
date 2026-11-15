@@ -706,6 +706,7 @@ function main() {
       const res = runEstate(opts);
       console.log(runEstateReport(res));
       if (!res.ok) process.exitCode = 1; // deferred/lock-held = loud, nothing touched
+      if (res.indexRepairFailed) process.exitCode = 1; // fire 784 (t338 F1): an archived copy the index repair could not read is named above
     } catch (e) {
       console.error(`estate-run failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
