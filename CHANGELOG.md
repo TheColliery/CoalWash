@@ -4,11 +4,11 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ## [1.19.3] - 2026-11-16
 
-A re-archive reads back a reused earlier copy before it deletes
+A re-archive keeps a fresh copy of the earlier version before it deletes
 
 ### Fixed
 
-- A re-archive whose earlier copy was already kept as a generation now reads that generation back, with the other copies, before it deletes the live session. Before, an outside writer on that generation could leave the earlier version unreadable while the run reported ok and deleted the live session. A run that stopped right after it kept an earlier copy as a generation, and the next run reused that one generation as the only copy behind the delete, now keeps the earlier copy again in a fresh generation, unless two kept generations already hold it. A stopped run therefore costs at most one extra generation slot. Before, that one reused generation could be the only copy, and the same outside writer could lose the earlier version while the run reported the session archived. This was a regression in 1.19.2 only. — test: `scripts/lib/estate-kill.test.mjs`
+- A re-archive now keeps the earlier copy in a fresh generation, as 1.19.1 did, and reads that fresh copy and the new copy back before it deletes the live session. Before, a re-archive could reuse an earlier generation as its only copy behind the delete, so an outside writer on that generation could leave the earlier version unreadable while the run reported ok and deleted the live session. Each stopped run now spends one generation slot when it re-archives the session. This was a regression in 1.19.2 only. — test: `scripts/lib/estate-kill.test.mjs`
 - An archived copy that the index repair cannot open (a permission, or a file another program holds), or that does not decompress, is now named in the run's report, and the run goes on with every other session. `estate-run` exits non-zero for it on each run until the copy is fixed or removed. Before, the whole run stopped on a copy the index repair could not open, and archived nothing. — test: `scripts/lib/estate-kill.test.mjs`
 - When another writer removed a kept generation during a refused run, the message now says it is gone. Before, it said the generation stayed at its name, so the user was told to check a file that was not there. — test: `scripts/lib/estate-kill.test.mjs`
 - A session that the same run archives cleanly is no longer reported as an archive that does not decompress. Before, a session archived again in the same run was still reported that way. When that run kept the damaged copy as a kept generation, the session's line says that generation does not decompress, names it as damaged, and gives no restore command for it. — test: `scripts/lib/estate-kill.test.mjs`
@@ -16,7 +16,7 @@ A re-archive reads back a reused earlier copy before it deletes
 
 Known limit (all versions): if another program changes or removes every kept copy of a file's earlier version after a run's last check and before it deletes the live file, the earlier version is lost and the run still reports the session archived. No check can close this, because it acts after the last read; 1.19.1 has the same limit.
 
-Forward note for `[1.19.2]` (not edited): its O-1 line says a re-archive no longer keeps the same earlier copy a second time, so it spends no `estate.maxGenerations` slot on it. That holds only when two kept generations already hold the copy. With one, the copy is kept again, as the first bullet above says.
+Forward note for `[1.19.2]` (not edited): its O-1 line says a re-archive no longer keeps the same earlier copy a second time, so it spends no `estate.maxGenerations` slot on it. 1.19.3 withdraws that: a re-archive keeps the same earlier copy again in a fresh generation and spends a slot, as 1.19.1 did. The ALREADY-KEPT report line is gone.
 
 ## [1.19.2] - 2026-11-15
 
