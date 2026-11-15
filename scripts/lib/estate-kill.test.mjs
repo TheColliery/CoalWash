@@ -674,3 +674,36 @@ for (const [state, rename, rel] of [['T', '1', `${SID}.jsonl`], ['M', '3', `${SI
     });
   }
 }
+
+// fire 793 item 5 (labtest 1.19.3, points T-29/M-22 on 1.19.1; booked as INHERENT by main's ruling): a writer that hits EVERY kept
+// generation of the file after the read-back and before the first live delete leaves no copy of the earlier version, and the run still
+// reports the session archived. This states the observed behaviour, the same on 1.19.1 (bbe1a08); no read-back can close it, since the
+// writer acts after the last read. It is a witness of a limit, not a guarantee.
+for (const [state, rename, rel] of [['T', '1', `${SID}.jsonl`], ['M', '3', `${SID}.meta.json`]]) {
+  for (const writer of ['replace', 'remove']) {
+    test(`INHERENT (lab 1.19.3) state ${state}: a writer that ${writer}s EVERY kept generation before the first live delete loses the earlier version, as 1.19.1 does`, (t) => {
+      const s = lblSetup(t);
+      killedRun(s, 'after-commit-rename', rename);
+      const slugDir = path.join(s.archiveDir, ccProjectSlug(s.proj));
+      const live = path.resolve(s.projDir);
+      const real = fs.rmSync;
+      let struck = 0;
+      fs.rmSync = function patched(p, ...r) {
+        if (struck === 0 && path.resolve(String(p)).startsWith(live + path.sep)) {
+          for (const n of fs.readdirSync(slugDir).filter((x) => x.startsWith(`${rel}.gz.gen`))) {
+            const g = path.join(slugDir, n);
+            if (writer === 'replace') fs.writeFileSync(g, zlib.gzipSync(Buffer.from('IMPOSTOR\n'))); else fs.unlinkSync(g);
+            struck++;
+          }
+        }
+        return real.call(fs, p, ...r);
+      };
+      let res;
+      try { res = run(s, Date.now() + LATER); } finally { fs.rmSync = real; }
+      assert.ok(struck >= 1, 'the writer hit every kept generation before the first live delete');
+      assert.strictEqual(res.archived.length, 1, `the run reports the session archived: ${JSON.stringify(res.failed)}`);
+      const v0 = rel.endsWith('.jsonl') ? LBL_V0.t : LBL_V0.meta;
+      assert.strictEqual(heldVersions(s, rel).includes(v0), false, 'observed: no copy of the earlier version is left (the inherent limit)');
+    });
+  }
+}
