@@ -1192,6 +1192,12 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
     // "does not decompress ... restore it by id" hint, and the run no longer counts it as a repair it could not do.
     const moot = new Set(undecodable.filter((f) => indexedNow.has(f.id)));
     if (moot.size) {
+      // 788 (INSPECT 787 C2): when this run kept that damaged copy as a generation, the session's report line says so (no restore advice).
+      for (const f of moot) {
+        const a = res.archived.find((x) => x.id === f.id);
+        const tk = a && Array.isArray(a.kept) ? a.kept.find((k) => k.rel === `${f.id}.jsonl`) : null;
+        if (tk) a.damagedGeneration = tk.generation;
+      }
       res.failed = res.failed.filter((f) => !moot.has(f));
       const left = (res.indexRepairFailed || 0) - moot.size;
       if (left > 0) res.indexRepairFailed = left; else delete res.indexRepairFailed;
@@ -1254,7 +1260,8 @@ export function runEstateReport(res) {
   // its container LEFT in place (never rm -rf'd) — surface the survivors.
   for (const a of res.archived) {
     // 29gt fire 750: a re-archive that found an earlier copy it could not replace without dropping bytes kept that copy.
-    if (Number.isInteger(a.generation)) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived copy was not a prefix of this one, so it was kept as generation ${a.generation} (restore it with: cli.mjs estate-restore ${escapeRawControls(String(a.id))} --generation ${a.generation})`);
+    if (Number.isInteger(a.generation) && a.damagedGeneration === a.generation) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived transcript does not decompress (it is damaged); it was kept as generation ${a.generation} so its bytes are not lost, and a restore of that generation names it as damaged and does not return it`);
+    else if (Number.isInteger(a.generation)) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived copy was not a prefix of this one, so it was kept as generation ${a.generation} (restore it with: cli.mjs estate-restore ${escapeRawControls(String(a.id))} --generation ${a.generation})`);
     for (const k of Array.isArray(a.alreadyKept) ? a.alreadyKept : []) lines.push(`  ALREADY-KEPT ${escapeRawControls(String(a.id))}: the earlier archived copy of ${escapeRawControls(String(k.rel))} is already kept, byte for byte, as generation ${k.generation}, so no second copy was kept (restore it with: cli.mjs estate-restore ${escapeRawControls(String(a.id))} --generation ${k.generation})`);
     if (a.unpruned && a.unpruned.length) lines.push(`  KEPT-IN-PLACE ${escapeRawControls(String(a.id))}: ${a.unpruned.length} un-enumerated file(s) under <sid>/ left intact (not archived — appeared post-listing / walk-capped): ${a.unpruned.slice(0, 5).map((n) => escapeRawControls(String(n))).join(', ')}${a.unpruned.length > 5 ? ', …' : ''}`);
   }

@@ -520,7 +520,8 @@ test('K-E (lab 1.19.2): a session the same run then archives cleanly is not repo
   const why = res.failed.filter((f) => f.id === SID).map((f) => f.reason).join(' | ');
   assert.ok(!/does not decompress/.test(why), `no stale hint for a session this run archived cleanly: ${why}`);
   assert.strictEqual(res.indexRepairFailed, undefined, 'the run does not count a repair this run made moot');
-  assert.ok(!/does not decompress/.test(runEstateReport(res)), runEstateReport(res));
+  // 788 (INSPECT 787 C2): the report now says the KEPT generation does not decompress, so only the repair's stale hint is barred here
+  assert.ok(!/no index row was added for it; restore it by id/.test(runEstateReport(res)), runEstateReport(res));
 });
 
 test('K-E control: an archive that does not decompress and is NOT re-archived in the same run is still named', (t) => {
@@ -564,4 +565,21 @@ test('C1 (INSPECT 787): the ASIDE line escapes control characters in a file name
   assert.strictEqual(aside.includes(String.fromCodePoint(0x202e)), false, 'no raw U+202E in the ASIDE line');
   assert.strictEqual(aside.includes(String.fromCodePoint(0x9b)), false, 'no raw U+009B in the ASIDE line');
   assert.ok(aside.includes('2K.jsonl.gz.gen1.'), `the name is still printed, escaped: ${aside}`);
+});
+
+test('C2 (INSPECT 787): a kept generation that does not decompress is reported as damaged, not as restorable', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.strictEqual(run(s).archived.length, 1);
+  fs.writeFileSync(gzPathOf(s), damagedGz());
+  seed(s, V2);
+  const res = run(s, Date.now() + LATER);
+  assert.deepStrictEqual(res.archived.map((a) => a.id), [SID], JSON.stringify(res));
+  assert.strictEqual(res.archived[0].generation, 1, 'the damaged copy is kept as generation 1');
+  assert.strictEqual(restoreText(s, { generation: 1 }), null, 'generation 1 does not restore a transcript');
+  const line = runEstateReport(res).split('\n').find((l) => l.startsWith(`  KEPT-EARLIER ${SID}`));
+  assert.ok(line, runEstateReport(res));
+  assert.match(line, /generation 1/);
+  assert.match(line, /does not decompress/, `the line says the kept copy is damaged: ${line}`);
+  assert.ok(!/restore it with/.test(line), `no restore advice for a damaged copy: ${line}`);
 });
