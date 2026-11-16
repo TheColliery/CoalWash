@@ -513,8 +513,28 @@ test('F1 (t338): a kept generation the index repair cannot open is named, the ru
   const why = res.failed.map((f) => f.reason).join(' | ');
   assert.ok(why.includes(`${gzPathOf(s)}.gen1`) && /could not be opened \(EACCES\)/.test(why), `the generation is named: ${why}`);
   assert.strictEqual(res.indexRepairFailed, 1);
-  assert.strictEqual(res.reconciledRows, 1, 'the current copy still gets its row');
+  // 29hz fire 803 (t340 F7): changed from "the current copy still gets its row" (1). That row carried the current copy's sha, so the
+  // next run's matching-hash shortcut skipped the session and the label was never set. Now no row is written; the next test repairs it.
+  assert.ok(!res.reconciledRows, 'no row this run, so the next run repairs it');
   assert.ok(!searchIndex('CW772-NEEDLE', { archiveDir: s.archiveDir }).some((r) => Number.isInteger(r.generation)), 'no generation label is guessed for a copy it could not read');
+});
+
+// 29hz fire 803 (CodeRabbit t340 F7): once the kept generation reads again, the next run's index repair adds the row and labels it.
+test('F7 (t340): after a generation read fails, the next run repairs the row and labels the generation', (t) => {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  killedRun(s, 'after-delete', transcriptPath(s));
+  const locked = path.resolve(`${gzPathOf(s)}.gen1`);
+  const real = fs.openSync;
+  fs.openSync = function patched(p, ...r) {
+    if (path.resolve(String(p)) === locked) throw Object.assign(new Error(`EACCES: permission denied, open '${p}'`), { code: 'EACCES' });
+    return real.call(fs, p, ...r);
+  };
+  try { run(s, Date.now() + LATER); } finally { fs.openSync = real; }
+  const res = run(s, Date.now() + 2 * LATER);
+  assert.strictEqual(res.indexRepairFailed, undefined, JSON.stringify(res));
+  assert.strictEqual(res.reconciledRows, 1, `the repair adds the row once the read succeeds: ${JSON.stringify(res)}`);
+  assert.ok(searchIndex('CW772-NEEDLE', { archiveDir: s.archiveDir }).some((r) => r.generation === 1), 'the earlier copy is labelled generation 1');
 });
 
 // t336 F8 and F7 (witness scratchpad/29gd/w336.mjs, as room tests)
@@ -630,6 +650,44 @@ test('C2 (INSPECT 787): a kept generation that does not decompress is reported a
   assert.ok(!/restore it with/.test(line), `no restore advice for a damaged copy: ${line}`);
 });
 
+// 29hz fire 803 (CodeRabbit t340 F1): the damaged label comes from the archive read that decides the keep (priorArchive, by the
+// gunzip error code), not from the index repair's earlier read of the same name. (b) it holds with the index off; (a) a damaged copy
+// swapped for a valid one after the repair's read is not called damaged.
+test('F1 (t340): a kept copy that does not decompress is labelled damaged with the index off', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.strictEqual(run(s).archived.length, 1);
+  fs.writeFileSync(gzPathOf(s), damagedGz());
+  seed(s, V2);
+  const res = runEstate({ projectRoot: s.proj, home: s.home, estate: { indexEnabled: false }, now: Date.now() + LATER });
+  assert.strictEqual(res.archived[0] && res.archived[0].generation, 1, JSON.stringify(res));
+  assert.strictEqual(res.archived[0].damagedGeneration, 1, 'labelled damaged without the index repair');
+  assert.match(runEstateReport(res), /KEPT-EARLIER .*does not decompress/);
+});
+
+test('F1 (t340): a damaged copy swapped for a valid one after the index repair read is not labelled damaged', (t) => {
+  const s = sandbox(t);
+  seed(s, ORIGINAL);
+  assert.strictEqual(run(s).archived.length, 1);
+  fs.writeFileSync(gzPathOf(s), damagedGz());
+  seed(s, V2);
+  const real = zlib.gunzipSync;
+  let swapped = false;
+  zlib.gunzipSync = function patched(...a) {
+    try { return real.apply(zlib, a); } catch (e) {
+      if (!swapped) { swapped = true; fs.writeFileSync(gzPathOf(s), zlib.gzipSync(Buffer.from('ANOTHER VALID COPY\n'))); }
+      throw e;
+    }
+  };
+  let res;
+  try { res = run(s, Date.now() + LATER); } finally { zlib.gunzipSync = real; }
+  assert.ok(swapped, 'the outside writer swapped the copy after the repair read');
+  assert.strictEqual(res.archived[0] && res.archived[0].generation, 1, JSON.stringify(res));
+  assert.strictEqual(res.archived[0].damagedGeneration, undefined, 'the kept copy is valid, so it is not labelled damaged');
+  const report = runEstateReport(res);
+  assert.ok(!/does not decompress/.test(report) && /--generation 1/.test(report), `the restore advice, not the damaged line: ${report}`);
+});
+
 // fire 793 (labtest 1.19.3 F4 window, LAB-RECORD section 1, points T-24 and M-20; main's ruling: a fix is never weaker than the
 // version before the defect). The class: can a run delete the live file while the only other copy of the earlier version sits at a
 // name that existed before the run? The O-1 state (a run killed right after a generation's rename, so gen1 equals the archive copy),
@@ -671,7 +729,9 @@ for (const [state, rename, rel] of [['T', '1', `${SID}.jsonl`], ['M', '3', `${SI
       let res;
       try { res = run(s, Date.now() + LATER); } finally { fs.rmSync = real; }
       assert.ok(struck, 'the outside writer struck before the first live delete');
-      if (res.archived.length === 0) return; // not reported archived: the live files stay, nothing to check further
+      // 29hz fire 803 (CodeRabbit t340 F3): "not reported archived" does not prove the live files stay (a run stopped during its
+      // deletes reports no archived row), so every version is checked on this branch too.
+      if (res.archived.length === 0) { everyVersionHeld(s, 'after the run'); return; }
       everyVersionHeld(s, 'after the run');
       run(s, Date.now() + 2 * LATER);
       everyVersionHeld(s, 'after the user\'s following run');

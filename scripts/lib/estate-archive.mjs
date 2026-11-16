@@ -683,7 +683,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
         const genTmp = stageBeside(genPath, prior.gz, written);
         if (!readStaged(genTmp).equals(prior.gz)) return fail(`the kept generation of ${f.rel} does not read back — session skipped, originals kept`);
         gen = { tmp: genTmp, final: genPath };
-        kept.push({ rel: f.rel, generation: genN });
+        kept.push({ rel: f.rel, generation: genN, ...(prior.damaged ? { damaged: true } : {}) });
       }
       const tmp = stageBeside(dest, gz, written); // H4: fsync'd at write (this tier keeps no snapshot)
       const back = zlib.gunzipSync(readStaged(tmp), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
@@ -880,6 +880,9 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
     const row = buildIndexRow({ sessionId: sid, projectSlug: slug, transcriptBuf, totalBytes: transcriptBuf.length, now }); // bytes: the transcript's own (the session's other files are not read here)
     row.transcriptGzSha256 = sha;
     row.reconciled = true; // archivedAt is when this row was added, not when the copy was archived
+    // 29hz fire 803 (CodeRabbit t340 F7): a generation this repair could not read leaves the session with NO new row, so the next run's
+    // repair tries again and labels it once the read succeeds (a row here would carry the current sha and the shortcut above would skip it).
+    let genUnread = false;
     if (prev && typeof prev.transcriptGzSha256 === 'string') {
       let n = null;
       for (const [g, list] of sessionGenerations(slugDir, sid)) {
@@ -888,6 +891,7 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
           let kg;
           try { kg = readArchiveHandle(e.gzPath, bounds.maxGzBytes); } catch (err) {
             out.failed.push({ id: sid, reason: `its kept generation ${e.gzPath} could not be opened (${(err && err.code) || 'error'}), so the index repair could not tell which copy it holds and gave the earlier row no generation label; fix the file's permissions or close the program that holds it, then run again` });
+            genUnread = true;
             continue;
           }
           if (kg.buf && sha256(kg.buf) === prev.transcriptGzSha256 && (n === null || g > n)) n = g;
@@ -895,6 +899,7 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
       }
       if (n !== null) { row.replacedGeneration = n; row.replacedTranscriptGzSha256 = prev.transcriptGzSha256; }
     }
+    if (genUnread) continue;
     const s = lockState();
     if (s.state !== 'own') { out.robbedState = s; return out; }
     if (appendIndexRow(archiveDir, row)) out.added++;
@@ -916,7 +921,11 @@ function priorArchive(dest, buf, bounds) {
   if (got.notFile) return { refuse: 'the earlier archive is not a regular file' };
   if (got.over !== undefined || got.grew !== undefined) return { refuse: 'the earlier archive is over the restore bound or changed while it was read' };
   let old;
-  try { old = zlib.gunzipSync(got.buf, { maxOutputLength: Math.max(1, buf.length) }); } catch { return { keep: true, gz: got.buf }; } // longer than the new source, or damaged
+  // 29hz fire 803 (CodeRabbit t340 F1): a zlib error code (Z_DATA_ERROR, Z_BUF_ERROR) marks the copy damaged; ERR_BUFFER_TOO_LARGE
+  // is a copy longer than the new source, not damaged.
+  try { old = zlib.gunzipSync(got.buf, { maxOutputLength: Math.max(1, buf.length) }); } catch (e) {
+    return { keep: true, gz: got.buf, ...(e && typeof e.code === 'string' && e.code.startsWith('Z_') ? { damaged: true } : {}) };
+  }
   if (old.length <= buf.length && buf.subarray(0, old.length).equals(old)) return { prefix: got.buf }; // held for a rollback (W752-2)
   return { keep: true, gz: got.buf };
 }
@@ -1167,14 +1176,15 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
     if (asides.length) res.asideFiles = asides;
     // fire 785 (lab 1.19.2 K-E): a session this same run archived cleanly with its index row appended no longer needs the repair's
     // "does not decompress ... restore it by id" hint, and the run no longer counts it as a repair it could not do.
+    // 788 (INSPECT 787 C2): when this run kept a damaged copy as a generation, the session's report line says so (no restore advice).
+    // 29hz fire 803 (CodeRabbit t340 F1): the mark comes from the archive read that decided the keep (priorArchive), so it holds with
+    // the index off and is not carried over from the repair's earlier read of a copy that has since been replaced.
+    for (const a of res.archived) {
+      const tk = Array.isArray(a.kept) ? a.kept.find((k) => k.rel === `${a.id}.jsonl` && k.damaged) : null;
+      if (tk) a.damagedGeneration = tk.generation;
+    }
     const moot = new Set(undecodable.filter((f) => indexedNow.has(f.id)));
     if (moot.size) {
-      // 788 (INSPECT 787 C2): when this run kept that damaged copy as a generation, the session's report line says so (no restore advice).
-      for (const f of moot) {
-        const a = res.archived.find((x) => x.id === f.id);
-        const tk = a && Array.isArray(a.kept) ? a.kept.find((k) => k.rel === `${f.id}.jsonl`) : null;
-        if (tk) a.damagedGeneration = tk.generation;
-      }
       res.failed = res.failed.filter((f) => !moot.has(f));
       const left = (res.indexRepairFailed || 0) - moot.size;
       if (left > 0) res.indexRepairFailed = left; else delete res.indexRepairFailed;
