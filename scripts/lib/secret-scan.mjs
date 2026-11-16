@@ -424,7 +424,12 @@ export function fingerprint(file, pattern, value) {
 function readLine(line, nulDrop = true) {
   const found = matchLine(line);
   if (!nulDrop || !line.includes(NUL)) return found;
-  for (const h of matchLine(line.split(NUL).join(''))) if (!found.some((f) => f.pattern === h.pattern && f.value === h.value)) found.push(h);
+  // a Set, not a scan of `found` per hit: a line of many distinct tokens (each NUL-separated) would otherwise cost the square of their count
+  const seen = new Set(found.map((f) => `${f.pattern}${NUL}${f.value}`));
+  for (const h of matchLine(line.split(NUL).join(''))) {
+    const k = `${h.pattern}${NUL}${h.value}`;
+    if (!seen.has(k)) { seen.add(k); found.push(h); }
+  }
   return found;
 }
 
@@ -459,8 +464,6 @@ const WIDE_SKEW = 4;
 // Fewer than the shortest token any pattern matches (15 characters, a Slack token): a key in wide text brings at least that many NULs of its own,
 // so a few stray NULs (a short binary header) never make bytes read as wide text.
 const WIDE_MIN_NULS = 12;
-// A code point past U+10FFFF (a UTF-32 reading at a wrong alignment or order) cannot be a character, and decodes to U+FFFD.
-const REPLACEMENT = String.fromCharCode(0xfffd);
 export function wideKinds(bytes) {
   const b = bytes;
   const kinds = new Set();
@@ -488,6 +491,7 @@ function decodeUnits(bytes, width, offset, littleEndian) {
   let cps = [];
   for (let i = 0; i < part.length; i += 4) {
     const cp = littleEndian ? part.readUInt32LE(i) : part.readUInt32BE(i);
+    // a code point past U+10FFFF (a reading at a wrong alignment or order) cannot be a character: U+FFFD
     cps.push(cp > 0x10ffff ? 0xfffd : cp);
     if (cps.length === CODE_POINT_CHUNK) { out.push(String.fromCodePoint(...cps)); cps = []; }
   }

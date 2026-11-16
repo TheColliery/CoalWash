@@ -777,6 +777,8 @@ test('wide text past the decode bound fails the scan by name, costs a few times 
   const m = /tree "samples\.bin":1 wide-text-too-large-to-decode \(fp ([0-9a-f]{16})\)/.exec(big.r.out);
   assert.ok(m, 'the file is named with its fingerprint: ' + big.r.out + big.r.err);
   assert.match(big.r.out, /secret-scan\.acks/, 'the message names the acknowledgement file');
+  assert.match(big.r.out, /NOT decoded or scanned\. Check each for keys first: acknowledging its fingerprint in secret-scan\.acks lets those exact bytes pass without the wide-text scan/);
+  assert.doesNotMatch(big.r.out, /secret-shaped match/, 'a file too large to decode is not called a match');
   const grew = big.peak - base.peak;
   assert.ok(grew < 6 * SAMPLES_BYTES, `the peak grew by ${(grew / 1048576).toFixed(1)} MiB for a ${SAMPLES_BYTES / 1048576} MiB file`);
   // the pushed range reads the same bytes past the bound (a new file's hunk is its whole content, its missing last line break restored): the same
@@ -804,8 +806,37 @@ test('the decode bound gives wide text past it one hit that follows its bytes, n
   const two = scanBytes(wide(0x62), 'w.bin');
   assert.deepStrictEqual(one.map((h) => [h.line, h.pattern]), [[1, WIDE_TOO_LARGE]]);
   assert.notStrictEqual(one[0].fp, two[0].fp, 'other bytes ask again');
+  assert.notStrictEqual(scanBytes(wide(0x61), 'v.bin')[0].fp, one[0].fp, 'the same bytes at another path ask again');
   const plain = Buffer.alloc(WIDE_DECODE_MAX_BYTES + 2, 0x61);
   for (let i = 0; i < plain.length; i += 64) plain[i] = 0x0a;
   assert.deepStrictEqual(scanBytes(plain, 'a.txt'), []);
   assert.strictEqual(wideTexts(utf32le('x'.repeat(200000)))[0], 'x'.repeat(200000));
+});
+
+// 16a (15i NIT-2, the c175 item): the bound itself. Wide text of exactly WIDE_DECODE_MAX_BYTES is still decoded and scanned; one byte more is not
+// (the bound unit test above). The key at the end is found, and no too-large hit is given.
+test('wide text of exactly the decode bound is still scanned, with no too-large hit', async () => {
+  const { scanBytes, WIDE_DECODE_MAX_BYTES } = await import(pathToFileURL(LIB).href);
+  const b = Buffer.alloc(WIDE_DECODE_MAX_BYTES);
+  for (let i = 0; i < b.length; i += 2) b[i] = i % 64 === 0 ? 0x0a : 0x61;
+  const key = Buffer.from(`\nid ${KEY}\n`, 'utf16le');
+  key.copy(b, b.length - key.length);
+  assert.deepStrictEqual(scanBytes(b, 'edge.bin').map((h) => h.pattern), ['aws-access-key-id']);
+});
+
+// t340 (CodeRabbit, on CoalWash's copy): the NUL-removed reading de-duplicated each hit by scanning every hit before it, so one line of many
+// distinct key-shaped tokens with NULs between their characters cost the square of their count (20,000 tokens: 11.8 s on one machine; 40,000:
+// 41.6 s). With a Set it is linear (20,000: about 0.1 s). The bound below sits between the two by two orders of magnitude.
+test('one line of 20,000 distinct key-shaped tokens with NULs between their characters is read in linear time, every token once', async () => {
+  const { scanText } = await import(pathToFileURL(LIB).href);
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const tok = (i) => { let s = ''; for (let k = 0; k < 16; k++) { s += A[i % 32]; i = Math.floor(i / 32); } return 'AKIA' + s; };
+  const line = Array.from({ length: 20000 }, (_, i) => tok(i)).join(' ').split('').join(String.fromCharCode(0));
+  const start = Date.now();
+  const hits = scanText(line, 'f.txt');
+  const ms = Date.now() - start;
+  assert.strictEqual(hits.length, 20000);
+  assert.ok(ms < 2000, `20,000 tokens took ${ms} ms`);
+  const spaced = (s) => s.split('').join(String.fromCharCode(0));
+  assert.strictEqual(scanText(`${spaced(KEY)} ${spaced(KEY)}`, 'f.txt').length, 1, 'the same token twice on one line is one hit');
 });
