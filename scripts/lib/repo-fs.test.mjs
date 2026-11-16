@@ -700,12 +700,35 @@ function renameFails(t) {
 test('CodeQL #43/#44 sibling: writeRepoFile falls back to an in-place write for a plain single-link file when the rename fails (the control for the swap test below)', (t) => {
   const { project } = sandbox(t, 'wrfplain');
   const target = path.join(project, 'cfg.json');
-  fs.writeFileSync(target, 'OLD');
+  // 29hz fire 803 (CWK2-069 (c)): the old content is LONGER than the new, so the exact-bytes assert below also proves the fallback
+  // truncates first. MUTANT: delete the fs.ftruncateSync(o.fd, 0) line in writeRepoFile -- this test must go red (a stale tail).
+  fs.writeFileSync(target, 'OLD CONTENT, LONGER THAN THE NEW BYTES WRITTEN OVER IT');
   const restore = renameFails(t);
   writeRepoFile(target, 'NEW BYTES', project);
   restore();
   assert.equal(fs.readFileSync(target, 'utf8'), 'NEW BYTES', 'the in-place fallback wrote through the verified handle');
   assert.deepEqual(fs.readdirSync(project).sort(), ['cfg.json'], 'and left no temp file behind');
+});
+
+// 29hz fire 803 (CWK2-069 (b), the class fix of CoalMine 02dff20): a write that throws partway (a full disk) leaves no temp file
+// behind, and the caller gets the original error.
+test('CWK2-069: writeRepoFile, a write that throws mid-flight removes its temp and rethrows the original error (ENOSPC)', (t) => {
+  const { project } = sandbox(t, 'wrfnospc');
+  const target = path.join(project, 'cfg.json');
+  fs.writeFileSync(target, 'OLD');
+  const real = fs.writeFileSync;
+  // A disk that fills mid-write: two bytes land in the temp (by path or by its fd), then the write throws.
+  fs.writeFileSync = function patched(p, data, ...r) {
+    if (typeof p !== 'number' && !String(p).includes('.coalwash-tmp-')) return real.call(fs, p, data, ...r);
+    real.call(fs, p, String(data).slice(0, 2), ...r);
+    throw Object.assign(new Error('ENOSPC: simulated'), { code: 'ENOSPC' });
+  };
+  const restore = () => { fs.writeFileSync = real; };
+  t.after(restore);
+  assert.throws(() => writeRepoFile(target, 'NEW', project), (e) => e.code === 'ENOSPC' && e.message === 'ENOSPC: simulated', 'the original error');
+  restore();
+  assert.deepEqual(fs.readdirSync(project).sort(), ['cfg.json'], 'no *.coalwash-tmp-* file is left behind');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'OLD', 'the target bytes are unchanged');
 });
 
 test('CodeQL #43/#44 sibling: writeRepoFile\'s in-place fallback does not write to the file its open landed on when the name was swapped after the check', (t) => {
@@ -948,19 +971,21 @@ test('F452-B2 a sweep that throws inside its locked section still names a bin lo
 // 29n fire 470 (T-F row 48): replaceFile honours the mode it is given, 0600 by default (the seam is the write call).
 import { replaceFile as f470Replace } from './repo-fs.mjs';
 
-test('F470-f replaceFile creates its temp with the mode it is given, 0600 by default (the seam is the write call)', () => {
+// 29hz fire 803 (CWK2-069 (b)): the seam moved from the write call to the open call, where the temp is now created (the open and the
+// write are separate); the property is unchanged: the mode each temp is created with.
+test('F470-f replaceFile creates its temp with the mode it is given, 0600 by default (the seam is the open call)', () => {
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'rf-f470f-')));
-  const realWrite = fs.writeFileSync;
-  const opts = [];
-  fs.writeFileSync = function patched(p, data, o, ...rest) {
-    if (o && typeof o === 'object' && o.flag === 'wx') opts.push(o);
-    return realWrite.call(fs, p, data, o, ...rest);
+  const realOpen = fs.openSync;
+  const modes = [];
+  fs.openSync = function patched(p, flags, mode, ...rest) {
+    if (flags === 'wx' && String(p).includes('.coalwash-tmp-')) modes.push(mode);
+    return realOpen.call(fs, p, flags, mode, ...rest);
   };
   try {
     f470Replace(path.join(dir, 'a.txt'), 'x');
     f470Replace(path.join(dir, 'b.txt'), 'y', 0o640);
-    assert.deepStrictEqual(opts.map((o) => o.mode), [0o600, 0o640], `the mode each temp is created with: ${JSON.stringify(opts)}`);
-  } finally { fs.writeFileSync = realWrite; fs.rmSync(dir, { recursive: true, force: true }); }
+    assert.deepStrictEqual(modes, [0o600, 0o640], `the mode each temp is created with: ${JSON.stringify(modes)}`);
+  } finally { fs.openSync = realOpen; fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // 29n fire 473 (F472-2, RED first): the bin blob and index are created at 0600 (the seam is the open and write calls).

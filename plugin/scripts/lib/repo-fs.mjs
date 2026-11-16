@@ -183,7 +183,22 @@ export function fileModeOr600(p) {
 }
 export function replaceFile(target, content, mode = 0o600) {
   const tmp = `${target}.coalwash-tmp-${crypto.randomBytes(6).toString('hex')}`;
-  fs.writeFileSync(tmp, content, { flag: 'wx', mode });
+  // 29hz fire 803 (CWK2-069, the class fix of CoalMine 02dff20): the open and the write are separate. An EEXIST on the open is a
+  // file we did not create, so it is named to the user and never unlinked; a write that throws (ENOSPC, EIO) closes and removes our
+  // temp, then rethrows the original error.
+  let fd;
+  try { fd = fs.openSync(tmp, 'wx', mode); } catch (e) {
+    if (e && e.code === 'EEXIST') throw new RepoWriteRefused(`${target}: a leftover file ${tmp} is in the way -- remove that file and re-run`);
+    throw e;
+  }
+  try {
+    fs.writeFileSync(fd, content);
+    fs.closeSync(fd);
+  } catch (e) {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+    try { fs.unlinkSync(tmp); } catch { /* best effort: this temp is ours, the write just failed */ }
+    throw e;
+  }
   try {
     fs.renameSync(tmp, target);
   } catch (e) {
