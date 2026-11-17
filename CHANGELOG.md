@@ -2,6 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.19.5] - 2026-11-18
+
+An unreadable kept copy is retried, and a damaged side file is named
+
+### Fixed
+
+- When the index repair cannot read a kept generation without an error (it is not a regular file, it is over the restore bound, or it changed while it was read), the run now names that generation, writes no row for its session, exits non-zero, and tries again on the next run. Before, it silently counted the generation as not matching. — test: `scripts/lib/estate-kill.test.mjs`
+- The estate report names a damaged earlier copy of a session file other than its transcript, with its generation and archive path. Before, only a damaged transcript was named. — test: `scripts/lib/estate-kill.test.mjs`
+- When Windows refuses a rename (EPERM or EBUSY), the state file, its legacy-file migration and the bin index no longer leave a temporary file behind. — test: `scripts/lib/repo-fs.test.mjs`
+
+The `[1.19.4]` erratum is closed: its search and `--generation N` wording is corrected in the method docs. `estate-search` still lists a session from its earlier row, without the generation label, and `--generation N` of an unreadable generation fails until it is readable.
+
 ## [1.19.4] - 2026-11-17
 
 A failed write leaves no temp file, and a damaged copy is labelled reliably
