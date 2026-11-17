@@ -13,6 +13,8 @@ A failed write leaves no temp file, and a damaged copy is labelled reliably
 - A kept generation that does not decompress is labelled as damaged from the archive's own read, so the label shows with indexing off too. A copy that a later write replaces with a valid one is no longer labelled. — test: `scripts/lib/estate-kill.test.mjs`
 - When the index repair cannot read a kept generation, it writes no row for that session in that run, and the next run adds the row once the read succeeds. While the copy stays unreadable, `estate-search` does not find that session, though restore by id still works and the run exits non-zero each time. Before, the run wrote a row anyway. — test: `scripts/lib/estate-kill.test.mjs`
 
+**Erratum (2026-11-18):** the last Fixed bullet says `estate-search` does not find that session. That is wrong: while a kept generation stays unreadable, `estate-search` still lists the session from its earlier row, without the generation label. Restore by id of the current copy still works, and `--generation N` of that unreadable generation does not until it is readable. This holds until 1.19.5.
+
 ## [1.19.3] - 2026-11-16
 
 A re-archive keeps a fresh copy of the earlier version before it deletes
