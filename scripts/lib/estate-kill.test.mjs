@@ -665,6 +665,27 @@ test('F1 (t340): a kept copy that does not decompress is labelled damaged with t
   assert.match(runEstateReport(res), /KEPT-EARLIER .*does not decompress/);
 });
 
+// 29ib fire 807 (INSPECT 806 F806-1): a damaged earlier copy LONGER than the new source. The length-bounded decode throws
+// ERR_BUFFER_TOO_LARGE before zlib reaches the damage, so the mark is read again under the restore bound. Index on and off.
+for (const idx of ['on', 'off']) {
+  test(`F806-1: a damaged earlier copy longer than the new source is labelled damaged (index ${idx})`, (t) => {
+    const s = sandbox(t);
+    const long = Array.from({ length: 8000 }, (_, i) => line(i, `F806 ${crypto.createHash('sha256').update(String(i)).digest('hex')}`)).join('\n') + '\n';
+    seed(s, long);
+    assert.strictEqual(run(s).archived.length, 1);
+    const g = Buffer.from(zlib.gzipSync(Buffer.from(long)));
+    g[g.length - 8] ^= 0xff; // the CRC: the whole body decodes, then zlib reports the damage
+    assert.ok(long.length > 1024 * 1024, 'the copy is past one decode chunk');
+    fs.writeFileSync(gzPathOf(s), g);
+    seed(s, line(0, 'a short new transcript, not a superset') + '\n');
+    const res = runEstate({ projectRoot: s.proj, home: s.home, estate: idx === 'on' ? {} : { indexEnabled: false }, now: Date.now() + LATER });
+    assert.strictEqual(res.archived[0] && res.archived[0].generation, 1, JSON.stringify(res));
+    assert.strictEqual(res.archived[0].damagedGeneration, 1, 'labelled damaged');
+    const report = runEstateReport(res);
+    assert.ok(/does not decompress/.test(report) && !/restore it with/.test(report), report);
+  });
+}
+
 test('F1 (t340): a damaged copy swapped for a valid one after the index repair read is not labelled damaged', (t) => {
   const s = sandbox(t);
   seed(s, ORIGINAL);

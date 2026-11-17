@@ -913,6 +913,7 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
 // { prefix: gz } when it is an exact prefix (the replace drops nothing; its bytes are held so a rollback can put them back), or
 // it is an exact prefix (the replace drops nothing), { keep: true, gz } when it must be kept as a generation, { refuse } when it
 // cannot be judged safely. A copy that will not decompress is KEPT (never judged a prefix): nothing unreadable is ever replaced.
+const ZLIB_DAMAGE_CODES = new Set(['Z_DATA_ERROR', 'Z_BUF_ERROR', 'Z_NEED_DICT']); // what zlib reports for bytes that are not a whole gzip
 function priorArchive(dest, buf, bounds) {
   let st;
   try { st = fs.lstatSync(dest); } catch (e) { if (e && e.code === 'ENOENT') return {}; return { refuse: `the earlier archive could not be read (${e && e.code})` }; }
@@ -921,10 +922,16 @@ function priorArchive(dest, buf, bounds) {
   if (got.notFile) return { refuse: 'the earlier archive is not a regular file' };
   if (got.over !== undefined || got.grew !== undefined) return { refuse: 'the earlier archive is over the restore bound or changed while it was read' };
   let old;
-  // 29hz fire 803 (CodeRabbit t340 F1): a zlib error code (Z_DATA_ERROR, Z_BUF_ERROR) marks the copy damaged; ERR_BUFFER_TOO_LARGE
-  // is a copy longer than the new source, not damaged.
+  // 29hz fire 803 (CodeRabbit t340 F1): a damage code marks the copy damaged. 29ib fire 807 (INSPECT 806 F806-1, N806-3): the codes
+  // are named (Z_MEM_ERROR is memory, not damage), and a copy longer than the new source throws ERR_BUFFER_TOO_LARGE before zlib
+  // reaches any damage, so it is decoded once more under the restore bound (the bound the index repair and a restore use) and marked
+  // on a damage code there.
   try { old = zlib.gunzipSync(got.buf, { maxOutputLength: Math.max(1, buf.length) }); } catch (e) {
-    return { keep: true, gz: got.buf, ...(e && typeof e.code === 'string' && e.code.startsWith('Z_') ? { damaged: true } : {}) };
+    let code = e && e.code;
+    if (code === 'ERR_BUFFER_TOO_LARGE') {
+      try { zlib.gunzipSync(got.buf, { maxOutputLength: restoreInflateBoundWith(got.buf.length, bounds) }); code = null; } catch (e2) { code = e2 && e2.code; }
+    }
+    return { keep: true, gz: got.buf, ...(ZLIB_DAMAGE_CODES.has(code) ? { damaged: true } : {}) };
   }
   if (old.length <= buf.length && buf.subarray(0, old.length).equals(old)) return { prefix: got.buf }; // held for a rollback (W752-2)
   return { keep: true, gz: got.buf };
