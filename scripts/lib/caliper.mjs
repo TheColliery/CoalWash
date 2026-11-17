@@ -90,7 +90,7 @@ import { parseJsonc } from './jsonc.mjs';
 // + the SAME realpath containment primitives (physicalOrNull/containedIn) the
 // write path uses — never a re-hardcoded path or a hand-rolled containment.
 import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
-import { openPlainFile, escapesRoot } from './repo-fs.mjs';
+import { openPlainFile, escapesRoot, writeOwnTemp } from './repo-fs.mjs';
 
 // ---------------------------------------------------------------------------
 // constants — PLACEHOLDERS, calibrate at the fidelity benchmark (2026-07-08
@@ -1195,7 +1195,7 @@ function dropOldRootEntry(projectRoot, home) {
       // fsync is added here on purpose: this closes a security hole, it does not
       // change this path's durability posture.
       const tmp = `${p}.${crypto.randomBytes(12).toString('hex')}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(all), { encoding: 'utf8', flag: 'wx' });
+      writeOwnTemp(tmp, JSON.stringify(all)); // fire 807 L806-5: a throwing write removes its temp
       fs.renameSync(tmp, p);
     }
   } catch { /* fail-silent — migration is best-effort, never blocks a write */ }
@@ -1463,7 +1463,7 @@ function saveState(proj, projectRoot, home) {
     // fsync is added here on purpose: this closes a security hole, it does not
     // change this path's durability posture.
     const tmp = `${p}.${crypto.randomBytes(12).toString('hex')}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(toWrite), { encoding: 'utf8', flag: 'wx' });
+    writeOwnTemp(tmp, JSON.stringify(toWrite)); // fire 807 L806-5: a throwing write removes its temp
     fs.renameSync(tmp, p);
     dropOldRootEntry(projectRoot, home); // no-old-version-leftover (the rc.2-era legacy file)
     // EXACTLY ONE LIVE HOME. loadState reads the slug-dir path then the coal/

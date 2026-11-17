@@ -591,19 +591,20 @@ test('U7: recordKeep never writes THROUGH an alias planted at its temp -- the fi
   const proj = sandbox();
   const victim = path.join(proj, 'VICTIM-outside-the-store.txt');
   fs.writeFileSync(victim, 'VICTIM ORIGINAL', 'utf8');
-  const realWrite = fs.writeFileSync;
+  // 29ib fire 807 (L806-5): the temp is now created by an O_EXCL open (writeOwnTemp) and written by fd, so the plant goes at the open.
+  const realOpen = fs.openSync;
   let planted = null;
-  fs.writeFileSync = (p, ...rest) => {
+  fs.openSync = (p, ...rest) => {
     if (planted === null && typeof p === 'string' && p.includes('.tmp')) {
       planted = p;
       try { fs.linkSync(victim, p); } catch { /* a pre-existing entry is itself the fail-closed case */ }
     }
-    return realWrite(p, ...rest);
+    return realOpen(p, ...rest);
   };
   let ok;
   try {
     ok = recordKeep(proj, { target: 'MEMORY.md', reason: 'u7' });
-  } finally { fs.writeFileSync = realWrite; }
+  } finally { fs.openSync = realOpen; }
   try {
     assert.ok(planted, 'the plant fired (a temp path was written) -- otherwise this test proves nothing');
     assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM ORIGINAL', 'the file outside the project is UNTOUCHED (pre-fix the plain write follows the planted alias and truncates it)');
@@ -624,16 +625,21 @@ test('U7: recordKeep never writes THROUGH an alias planted at its temp -- the fi
 // ---------------------------------------------------------------------------
 function atKeepsTemp(file, fn, { after = false } = {}) {
   const real = fs.writeFileSync;
+  // 29ib fire 807 (L806-5): the temp is written by fd now (writeOwnTemp), so the open records which path each fd names.
+  const realOpen = fs.openSync;
+  const fdPath = new Map();
+  fs.openSync = function patchedOpen(p, ...rest) { const fd = realOpen.call(fs, p, ...rest); fdPath.set(fd, String(p)); return fd; };
   let fired = false;
   fs.writeFileSync = function patched(p, ...rest) {
-    const hit = !fired && String(p).startsWith(`${file}.`) && String(p).endsWith('.tmp');
+    const name = typeof p === 'number' ? fdPath.get(p) || '' : String(p);
+    const hit = !fired && name.startsWith(`${file}.`) && name.endsWith('.tmp');
     if (hit) fired = true;
     if (hit && !after) fn();
     const out = real.call(fs, p, ...rest);
     if (hit && after) fn();
     return out;
   };
-  return () => { fs.writeFileSync = real; return fired; };
+  return () => { fs.writeFileSync = real; fs.openSync = realOpen; return fired; };
 }
 function faultReads(lockPath) {
   const real = fs.openSync;

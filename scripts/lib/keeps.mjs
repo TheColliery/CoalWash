@@ -32,7 +32,7 @@ import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { txDirFor, ensureSelfIgnore, trackedInOwnFolder, acquireLock, lockLeftNote } from './apply.mjs';
 import { claudeBaseDir, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir } from './repo-fs.mjs';
+import { ownSandboxDir, writeOwnTemp } from './repo-fs.mjs';
 
 export const KEEPS_NAME = 'keeps.json'; // exported for apply.mjs's KEEPS-GATE (opts.txDir-aware path build)
 const KEEPS_SCHEMA_V = 1;
@@ -349,7 +349,7 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
       ...(mergedPendingUser ? { pendingUser: true, pendingSince: mergedPendingSince } : {}),
     });
     const name = `${file}.${crypto.randomBytes(12).toString('hex')}.tmp`;
-    fs.writeFileSync(name, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { encoding: 'utf8', flag: 'wx', mode: 0o600 }); // 29n F472-2: keeps quote memory content
+    writeOwnTemp(name, JSON.stringify({ v: KEEPS_SCHEMA_V, keeps }), { mode: 0o600 }); // 29n F472-2: keeps quote memory content; fire 807 L806-5: a throwing write removes its temp
     tmp = name;
     // fire 126: a recorder that stalled past KEEPS_LOCK_STALE_MS may have been robbed, and its new holder may have renamed its
     // own store since. This one REFUSES rather than re-merging: unlike a bin item (whose blob is already on disk and needs its

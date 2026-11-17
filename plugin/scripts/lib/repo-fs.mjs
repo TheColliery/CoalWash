@@ -181,22 +181,26 @@ function targetFileWhy(target) {
 export function fileModeOr600(p) {
   try { return fs.statSync(p).mode & 0o777; } catch { return 0o600; }
 }
-export function replaceFile(target, content, mode = 0o600) {
-  const tmp = `${target}.coalwash-tmp-${crypto.randomBytes(6).toString('hex')}`;
-  // 29hz fire 803 (CWK2-069, the class fix of CoalMine 02dff20): the open and the write are separate. An EEXIST on the open is a
-  // file we did not create, so it is named to the user and never unlinked; a write that throws (ENOSPC, EIO) closes and removes our
-  // temp, then rethrows the original error.
-  let fd;
-  try { fd = fs.openSync(tmp, 'wx', mode); } catch (e) {
-    if (e && e.code === 'EEXIST') throw new RepoWriteRefused(`${target}: a leftover file ${tmp} is in the way -- remove that file and re-run`);
-    throw e;
-  }
+// Create the temp `tmp` (a name the caller made unpredictable) with O_EXCL and write `content` to it. 29hz fire 803 (CWK2-069, the
+// class fix of CoalMine 02dff20) and 29ib fire 807 (INSPECT 806 L806-5, the same class at four more sites): the open and the write
+// are separate, so a write that throws (ENOSPC, EIO) closes and removes this temp, then rethrows the original error. An open that
+// fails (EEXIST included: a file we did not create) throws as it came, and nothing is removed. Default mode = writeFileSync's own.
+export function writeOwnTemp(tmp, content, { mode = 0o666, encoding = 'utf8' } = {}) {
+  const fd = fs.openSync(tmp, 'wx', mode);
   try {
-    fs.writeFileSync(fd, content);
+    fs.writeFileSync(fd, content, encoding);
     fs.closeSync(fd);
   } catch (e) {
     try { fs.closeSync(fd); } catch { /* already closed */ }
     try { fs.unlinkSync(tmp); } catch { /* best effort: this temp is ours, the write just failed */ }
+    throw e;
+  }
+}
+export function replaceFile(target, content, mode = 0o600) {
+  const tmp = `${target}.coalwash-tmp-${crypto.randomBytes(6).toString('hex')}`;
+  // An EEXIST on the open is a file we did not create, so it is named to the user and never unlinked.
+  try { writeOwnTemp(tmp, content, { mode }); } catch (e) {
+    if (e && e.code === 'EEXIST') throw new RepoWriteRefused(`${target}: a leftover file ${tmp} is in the way -- remove that file and re-run`);
     throw e;
   }
   try {

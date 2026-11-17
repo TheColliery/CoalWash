@@ -1011,3 +1011,98 @@ test('F472-2 the bin blob and index are created at 0600 (the seam is the open an
     assert.deepStrictEqual(made.filter((m) => m.mode !== 0o600), [], `every bin writer is created at 0600: ${JSON.stringify(made)}`);
   } finally { fs.openSync = realOpen; fs.writeFileSync = realWrite; fs.rmSync(proj, { recursive: true, force: true }); }
 });
+
+// 29ib fire 807 (INSPECT 806 L806-2): the EEXIST branch of replaceFile. A file already standing at our temp name is not ours: the
+// write is refused in words naming it, and that file is never removed or changed. MUTANTS: the branch unlinks it, or rethrows raw.
+test('L806-2: replaceFile refuses in words when its temp name is taken, and leaves that file untouched', (t) => {
+  const { project } = sandbox(t, 'eexist');
+  const target = path.join(project, 'cfg.json');
+  fs.writeFileSync(target, 'OLD');
+  const realOpen = fs.openSync;
+  let planted = null;
+  fs.openSync = function patched(p, flags, ...r) {
+    if (flags === 'wx' && String(p).includes('.coalwash-tmp-')) {
+      planted = String(p);
+      realOpen.call(fs, planted, 'w'); // a file someone else left at exactly this name
+      fs.writeFileSync(planted, 'PLANTED');
+      throw Object.assign(new Error(`EEXIST: file already exists, open '${p}'`), { code: 'EEXIST' });
+    }
+    return realOpen.call(fs, p, flags, ...r);
+  };
+  t.after(() => { fs.openSync = realOpen; });
+  assert.throws(() => writeRepoFile(target, 'NEW', project), (e) => e instanceof RepoWriteRefused && e.message.includes(planted) && /remove/.test(e.message));
+  fs.openSync = realOpen;
+  assert.equal(fs.readFileSync(planted, 'utf8'), 'PLANTED', 'the planted file is not ours, so it is unchanged');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'OLD');
+});
+
+// 29ib fire 807 (INSPECT 806 L806-5, the class of CWK2-069 at four more sites): a temp written in one call (`writeFileSync(tmp, ...,
+// 'wx')`) that throws part-way stays on disk. Each site now goes through writeOwnTemp, which removes its own temp and rethrows.
+// The stub tracks fd -> path so a write by fd is matched to the temp it writes.
+function throwingTempWrites(t, re) {
+  const realOpen = fs.openSync;
+  const realWrite = fs.writeFileSync;
+  const fdPath = new Map();
+  let hits = 0;
+  fs.openSync = function patched(p, ...r) { const fd = realOpen.call(fs, p, ...r); fdPath.set(fd, String(p)); return fd; };
+  fs.writeFileSync = function patched(p, data, ...r) {
+    const name = typeof p === 'number' ? fdPath.get(p) || '' : String(p);
+    if (!re.test(name)) return realWrite.call(fs, p, data, ...r);
+    hits++;
+    realWrite.call(fs, p, String(data).slice(0, 2), ...r);
+    throw Object.assign(new Error('ENOSPC: simulated'), { code: 'ENOSPC' });
+  };
+  const restore = () => { fs.openSync = realOpen; fs.writeFileSync = realWrite; };
+  t.after(restore);
+  return { restore, hits: () => hits };
+}
+function tempsUnder(dir) {
+  const out = [];
+  const walk = (d) => { let es; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return; } for (const e of es) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.[0-9a-f]{24}\.tmp$/.test(e.name)) out.push(p); } };
+  walk(dir);
+  return out.sort();
+}
+import { setLeanFloor as l5Floor, oldStatePath as l5Old } from './caliper.mjs';
+
+test('L806-5 keeps.mjs: a keeps write that throws part-way leaves no temp', (t) => {
+  const { dir, project } = sandbox(t, 'l5keeps');
+  const w = throwingTempWrites(t, /keeps\.json\.[0-9a-f]{24}\.tmp$/);
+  const out = recordKeep(project, { target: 'a.md', reason: 'r' });
+  w.restore();
+  assert.ok(w.hits() > 0 && out && out.ok === false, JSON.stringify(out));
+  assert.deepEqual(tempsUnder(dir), []);
+});
+
+test('L806-5 tailings.mjs: a bin index write that throws part-way leaves no temp', (t) => {
+  const { dir, project } = sandbox(t, 'l5bin');
+  const w = throwingTempWrites(t, /index\.json\.[0-9a-f]{24}\.tmp$/);
+  try { recordBinItem(project, FAT_BIN_NAME, { content: 'cut text', original: 'a.md' }); } catch { /* the outcome is not the point */ }
+  w.restore();
+  assert.ok(w.hits() > 0);
+  assert.deepEqual(tempsUnder(dir), []);
+});
+
+test('L806-5 caliper.mjs saveState: a state write that throws part-way leaves no temp', (t) => {
+  const { dir, project } = sandbox(t, 'l5state');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  // no slug folder in this fixture, so the state lands at the fallback `coal/coalwash/state-<slug>.json`
+  const w = throwingTempWrites(t, /coalwash[\\/]state-[^\\/]*\.json\.[0-9a-f]{24}\.tmp$/);
+  try { l5Floor(home, project, 1000); } catch { /* fail-silent or not, the temp is the point */ }
+  w.restore();
+  assert.ok(w.hits() > 0);
+  assert.deepEqual(tempsUnder(dir), []);
+});
+
+test('L806-5 caliper.mjs legacy-file migration: a rewrite that throws part-way leaves no temp', (t) => {
+  const { dir, project, outside } = sandbox(t, 'l5legacy');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  // two live entries, so the migration rewrites the legacy file instead of removing it
+  fs.writeFileSync(l5Old(home), JSON.stringify({ projects: { [path.resolve(project)]: {}, [path.resolve(outside)]: {} } }));
+  const w = throwingTempWrites(t, /\.coalwash-state\.json\.[0-9a-f]{24}\.tmp$/);
+  try { l5Floor(home, project, 1000); } catch { /* fail-silent by design */ }
+  w.restore();
+  assert.ok(w.hits() > 0, 'the migration reached its rewrite');
+  assert.deepEqual(tempsUnder(dir), []);
+});
