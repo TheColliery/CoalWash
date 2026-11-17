@@ -894,7 +894,15 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
             genUnread = true;
             continue;
           }
-          if (kg.buf && sha256(kg.buf) === prev.transcriptGzSha256 && (n === null || g > n)) n = g;
+          // 29ig fire 813 (CodeRabbit t343 F1): the reader also fails without a throw ({ notFile }, { over }, { grew }, no bytes).
+          // Each is unread too: named, no row this run, so the next run's repair tries again.
+          if (!kg.buf) {
+            const why = kg.notFile ? 'it is not a regular file' : kg.over !== undefined ? `it is over the restore bound at ${kg.over} bytes` : 'it changed while it was read';
+            out.failed.push({ id: sid, reason: `its kept generation ${e.gzPath} could not be read (${why}), so the index repair could not tell which copy it holds and added no row for this session; the next run tries again` });
+            genUnread = true;
+            continue;
+          }
+          if (sha256(kg.buf) === prev.transcriptGzSha256 && (n === null || g > n)) n = g;
         }
       }
       if (n !== null) { row.replacedGeneration = n; row.replacedTranscriptGzSha256 = prev.transcriptGzSha256; }

@@ -826,3 +826,34 @@ for (const writer of ['pre-truncate', 'pre-remove', 'pre-renameover']) {
     assert.ok(got.includes(ORIGINAL), `the earlier version stays restorable (archived ${res.archived.length})`);
   });
 }
+
+// 29ig fire 813 (CodeRabbit t343 F1): a kept generation that the index repair reads as no bytes, without a throw (the reader
+// returns { grew } when a writer appends during the read, { over } past the size bound, { notFile } for a non-file), is unread too:
+// the repair names it and adds no row, so the next run repairs it. A folder at the generation's name never reaches the read
+// (the listing takes files only), so the stub reports the size the reader sees: one byte short gives { grew }, past the bound { over }.
+for (const [shape, sizeOf] of [['grew', (n) => n - 1], ['over', () => 512 * 1024 * 1024]]) {
+  test(`F1 (t343): a kept generation the index repair reads as ${shape} is named, gets no row, and the next run labels it`, (t) => {
+    const s = sandbox(t);
+    archiveThenRewrite(s);
+    killedRun(s, 'after-delete', transcriptPath(s)); // the re-archive's row is missing, so the next run's repair reads generation 1
+    const gen1 = path.resolve(`${gzPathOf(s)}.gen1`);
+    const realOpen = fs.openSync;
+    const realFstat = fs.fstatSync;
+    const genFds = new Set();
+    fs.openSync = function patched(p, ...r) { const fd = realOpen.call(fs, p, ...r); if (path.resolve(String(p)) === gen1) genFds.add(fd); return fd; };
+    fs.fstatSync = function patched(fd, ...r) {
+      const st = realFstat.call(fs, fd, ...r);
+      if (!genFds.has(fd)) return st;
+      return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { size: sizeOf(st.size) });
+    };
+    let first;
+    try { first = run(s, Date.now() + LATER); } finally { fs.openSync = realOpen; fs.fstatSync = realFstat; }
+    const why = first.failed.map((f) => f.reason).join(' | ');
+    assert.ok(why.includes(`${gzPathOf(s)}.gen1`), `the generation is named: ${why}`);
+    assert.ok(!first.reconciledRows, `no row this run: ${JSON.stringify(first)}`);
+    const res = run(s, Date.now() + 2 * LATER);
+    assert.strictEqual(res.reconciledRows, 1, `the repair adds the row once the read succeeds: ${JSON.stringify(res)}`);
+    assert.ok(searchIndex('CW772-NEEDLE', { archiveDir: s.archiveDir }).some((r) => r.generation === 1), 'the earlier copy is labelled generation 1');
+  });
+}
+
