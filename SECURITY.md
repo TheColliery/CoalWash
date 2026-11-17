@@ -27,17 +27,16 @@ A second scan runs on each pull request as an advisory check: `.github/workflows
 
 ## Independent Scanning—NVIDIA SkillSpector
 
-Last scan: CoalWash **v1.15.12** dist (commit `f8bb64f`), **2026-11-06 02:48:56 UTC**, with [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) **v2.13.4**, pinned at commit `5482446`, static stage. Score **100/100 (CRITICAL)**, DO_NOT_INSTALL, **59 issues, 0 real**. Coverage: 21 of 38 files fully inspected. Against v1.15.9: 41 identical, 17 moved by line with the same fingerprint, 1 false positive at the same site, 0 new.
+Last scan: CoalWash **v1.19.4** dist (the plugin folder as shipped at `dafdc22`; the report names the folder, not a version or commit), **2026-11-17 10:30:05 UTC**, with [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) **v2.13.4**, pinned at commit `5482446`, static stage. Score **100/100 (CRITICAL)**, DO_NOT_INSTALL, **58 issues**. Coverage: **21 of 39 components** fully inspected (53.8%, status partial). Against the previous report (2026-11-16 00:53 UTC, 57 issues): 57 identical by fingerprint and line, 1 new (`TM3` at `scripts/lib/repo-fs.mjs:188`), 0 gone.
 
 - **RA2 ×22** (MEDIUM): a word in a source comment, refusal message or reference document. Text, not logic.
 - **RA1 ×10** (HIGH): "self-update". The hook only schedules a check; the agent offers `claude plugin update` and never installs.
 - **TM1 ×7** (HIGH): a deletion word at a line end in a comment or refusal text.
 - **AS1 ×7** (HIGH): a word in a comment or refusal text.
 - **PE3 ×3** (HIGH): a comment naming credential files as examples of what is refused.
-- **AR2 ×2** (HIGH): a word in a comment or refusal text.
 - **EA2 ×3** (MEDIUM): by design. A delete in the adjudicated plan is its own authorization, with snapshot and undo. The warm-tier estate archive deletes an original after copy-verify, with no consent gate.
 - **OH3 ×2** (MEDIUM): a constant or comment naming an input bound, not an output.
-- **TM3 ×1** (MEDIUM): a comment naming the 0600 default; the code uses 0600.
+- **TM3 ×2** (MEDIUM): the `world-readable` finding at `scripts/lib/repo-fs.mjs:180`, carried from the last scan; and `mode = 0o666` at `scripts/lib/repo-fs.mjs:188`, the default of `writeOwnTemp` (new in 1.19.4). The second is answered REJECTED, no change: every caller passes the mode it passed before the port, and the umask narrows it on POSIX.
 - **BH1 ×1** (MEDIUM): notice that `hooks/hooks.json` registers lifecycle hooks.
 - **AS3 ×1** (MEDIUM): a word in a comment or refusal text.
 
