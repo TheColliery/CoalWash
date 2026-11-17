@@ -87,6 +87,7 @@ const TESTS = [
   'scripts/verify-release-shape.test.mjs',
   'scripts/lib/release-shape.test.mjs',
   'scripts/lib/ag-conductor.test.mjs', // 29e: the AG transport's hermetic tests (airbag, sweep, gated Stop and SessionStart)
+  'scripts/lib/session-files.test.mjs', // 29ig fire 813 (CW-055): both routes' per-session files are swept by the next session
   'scripts/agy-validate.test.mjs', // 29e: the agy validator on this dist; skips visibly where agy is absent
 ];
 
