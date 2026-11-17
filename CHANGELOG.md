@@ -2,6 +2,16 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [1.19.4] - 2026-11-17
+
+A failed write leaves no temp file, and a damaged copy is labelled reliably
+
+### Fixed
+
+- A write that fails part-way, for example on a full disk, now removes the temporary file it made beside the memory file, so no leftover stays behind. A temporary name that is already taken is refused, and the message names the file to remove; that file is left alone. Before, the failed write's temporary file stayed on disk. — test: `scripts/lib/repo-fs.test.mjs`
+- A kept generation that does not decompress is labelled as damaged from the archive's own read, so the label shows with indexing off too. A copy that a later write replaces with a valid one is no longer labelled. — test: `scripts/lib/estate-kill.test.mjs`
+- When the index repair cannot read a kept generation, it writes no row for that session in that run, and the next run adds the row once the read succeeds. Before, the run wrote a row anyway. — test: `scripts/lib/estate-kill.test.mjs`
+
 ## [1.19.3] - 2026-11-16
 
 A re-archive keeps a fresh copy of the earlier version before it deletes
