@@ -683,7 +683,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
         const genTmp = stageBeside(genPath, prior.gz, written);
         if (!readStaged(genTmp).equals(prior.gz)) return fail(`the kept generation of ${f.rel} does not read back — session skipped, originals kept`);
         gen = { tmp: genTmp, final: genPath };
-        kept.push({ rel: f.rel, generation: genN, ...(prior.damaged ? { damaged: true } : {}) });
+        kept.push({ rel: f.rel, generation: genN, ...(prior.damaged ? { damaged: true, gzPath: genPath } : {}) });
       }
       const tmp = stageBeside(dest, gz, written); // H4: fsync'd at write (this tier keeps no snapshot)
       const back = zlib.gunzipSync(readStaged(tmp), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
@@ -1197,6 +1197,10 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
     for (const a of res.archived) {
       const tk = Array.isArray(a.kept) ? a.kept.find((k) => k.rel === `${a.id}.jsonl` && k.damaged) : null;
       if (tk) a.damagedGeneration = tk.generation;
+      // 29ig fire 813 (CodeRabbit t343 F8; the head's ruling): a damaged kept copy of any other file of the session is named by its
+      // archive path; the transcript keeps its own wording above.
+      const dmg = Array.isArray(a.kept) ? a.kept.filter((k) => k.damaged && k.rel !== `${a.id}.jsonl`).map((k) => ({ rel: k.rel, generation: k.generation, gzPath: k.gzPath })) : [];
+      if (dmg.length) a.damagedFiles = dmg;
     }
     const moot = new Set(undecodable.filter((f) => indexedNow.has(f.id)));
     if (moot.size) {
@@ -1264,6 +1268,7 @@ export function runEstateReport(res) {
     // 29gt fire 750: a re-archive that found an earlier copy it could not replace without dropping bytes kept that copy.
     if (Number.isInteger(a.generation) && a.damagedGeneration === a.generation) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived transcript does not decompress (it is damaged); it was kept as generation ${a.generation} so its bytes are not lost, and a restore of that generation names it as damaged and does not return it`);
     else if (Number.isInteger(a.generation)) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived copy was not a prefix of this one, so it was kept as generation ${a.generation} (restore it with: cli.mjs estate-restore ${escapeRawControls(String(a.id))} --generation ${a.generation})`);
+    for (const d of Array.isArray(a.damagedFiles) ? a.damagedFiles : []) lines.push(`  KEPT-EARLIER ${escapeRawControls(String(a.id))}: the earlier archived copy of ${escapeRawControls(String(d.rel))} does not decompress (it is damaged); it was kept as generation ${d.generation} at ${escapeRawControls(String(d.gzPath))} so its bytes are not lost, and a restore of that generation names it as damaged and does not return it`);
     if (a.unpruned && a.unpruned.length) lines.push(`  KEPT-IN-PLACE ${escapeRawControls(String(a.id))}: ${a.unpruned.length} un-enumerated file(s) under <sid>/ left intact (not archived — appeared post-listing / walk-capped): ${a.unpruned.slice(0, 5).map((n) => escapeRawControls(String(n))).join(', ')}${a.unpruned.length > 5 ? ', …' : ''}`);
   }
   if (res.coldListed.length) {

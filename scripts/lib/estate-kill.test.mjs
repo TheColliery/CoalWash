@@ -857,3 +857,20 @@ for (const [shape, sizeOf] of [['grew', (n) => n - 1], ['over', () => 512 * 1024
   });
 }
 
+// 29ig fire 813 (CodeRabbit t343 F8; the head's ruling): a damaged kept copy of a session file other than its transcript is named in
+// the report by its archive path. The transcript's own wording stays as it is.
+test('F8 (t343): a damaged kept copy of a non-transcript file is named in the report by its archive path', (t) => {
+  const s = sandbox(t);
+  lblPut(s, LBL_V0);
+  assert.strictEqual(run(s).archived.length, 1);
+  const metaGz = path.join(s.archiveDir, ccProjectSlug(s.proj), `${SID}.meta.json.gz`);
+  fs.writeFileSync(metaGz, damagedGz());
+  lblPut(s, LBL_V1P); // the transcript is appended (a prefix, replaced); the meta file is edited, so its damaged copy is kept
+  const res = run(s, Date.now() + LATER);
+  assert.deepStrictEqual(res.archived.map((a) => a.id), [SID], JSON.stringify(res));
+  const report = runEstateReport(res);
+  const line = report.split('\n').find((l) => l.includes(`${metaGz}.gen1`));
+  assert.ok(line, `the damaged meta copy is named by its archive path: ${report}`);
+  assert.match(line, /does not decompress/);
+  assert.ok(!/earlier archived transcript does not decompress/.test(report), 'the transcript is not called damaged');
+});
