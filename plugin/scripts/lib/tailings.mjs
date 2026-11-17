@@ -52,7 +52,7 @@ import path from 'node:path';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { ensureSelfIgnore, acquireLock, trackedInOwnFolder, lockLeftNote, withLockLeft } from './apply.mjs';
 import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir, appendOwnLog, writeOwnTemp } from './repo-fs.mjs';
+import { ownSandboxDir, appendOwnLog, writeOwnTemp, renameOwnTemp } from './repo-fs.mjs';
 import { HORIZON_MS, retentionPlan, BIN_BUDGET_STORE_MULTIPLE, TIER1_KEEP_ALL_MS } from './retention.mjs';
 import { escapeRawControls } from './receipt.mjs'; // 29ax F512-4: the one escaper a certificate field uses (receipt.mjs imports nothing back)
 
@@ -221,7 +221,7 @@ function saveIndex(dir, index) {
     // change this path's durability posture.
     const tmp = path.join(dir, `${INDEX_NAME}.${crypto.randomBytes(12).toString('hex')}.tmp`);
     writeOwnTemp(tmp, JSON.stringify(index), { mode: BIN_FILE_MODE }); // fire 807 L806-5: a throwing write removes its temp
-    fs.renameSync(tmp, path.join(dir, INDEX_NAME));
+    renameOwnTemp(tmp, path.join(dir, INDEX_NAME)); // fire 813 L808-2: a refused rename removes its temp
     return true;
   } catch {
     return false;

@@ -1106,3 +1106,49 @@ test('L806-5 caliper.mjs legacy-file migration: a rewrite that throws part-way l
   assert.ok(w.hits() > 0, 'the migration reached its rewrite');
   assert.deepEqual(tempsUnder(dir), []);
 });
+// 29ig fire 813 (RE-CHECK 808 L808-2, the rename leg of the L806-5 class): a rename refused after the temp is written (Windows EPERM,
+// a target another program holds) leaves no temp: the site removes its own temp and rethrows, as keeps.mjs and replaceFile do.
+function refusedRenames(t, re) {
+  const real = fs.renameSync;
+  let hits = 0;
+  fs.renameSync = function patched(from, ...r) {
+    if (!re.test(String(from))) return real.call(fs, from, ...r);
+    hits++;
+    throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}'`), { code: 'EPERM' });
+  };
+  const restore = () => { fs.renameSync = real; };
+  t.after(restore);
+  return { restore, hits: () => hits };
+}
+
+test('L808-2 tailings.mjs: a bin index rename that is refused leaves no temp', (t) => {
+  const { dir, project } = sandbox(t, 'l8bin');
+  const w = refusedRenames(t, /index\.json\.[0-9a-f]{24}\.tmp$/);
+  try { recordBinItem(project, FAT_BIN_NAME, { content: 'cut text', original: 'a.md' }); } catch { /* the outcome is not the point */ }
+  w.restore();
+  assert.ok(w.hits() > 0);
+  assert.deepEqual(tempsUnder(dir), []);
+});
+
+test('L808-2 caliper.mjs saveState: a state rename that is refused leaves no temp', (t) => {
+  const { dir, project } = sandbox(t, 'l8state');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  const w = refusedRenames(t, /coalwash[\\/]state-[^\\/]*\.json\.[0-9a-f]{24}\.tmp$/);
+  try { l5Floor(home, project, 1000); } catch { /* fail-silent or not, the temp is the point */ }
+  w.restore();
+  assert.ok(w.hits() > 0);
+  assert.deepEqual(tempsUnder(dir), []);
+});
+
+test('L808-2 caliper.mjs legacy-file migration: a rename that is refused leaves no temp', (t) => {
+  const { dir, project, outside } = sandbox(t, 'l8legacy');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(l5Old(home), JSON.stringify({ projects: { [path.resolve(project)]: {}, [path.resolve(outside)]: {} } }));
+  const w = refusedRenames(t, /\.coalwash-state\.json\.[0-9a-f]{24}\.tmp$/);
+  try { l5Floor(home, project, 1000); } catch { /* fail-silent by design */ }
+  w.restore();
+  assert.ok(w.hits() > 0, 'the migration reached its rename');
+  assert.deepEqual(tempsUnder(dir), []);
+});

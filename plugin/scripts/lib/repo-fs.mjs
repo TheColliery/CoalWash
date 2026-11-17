@@ -196,6 +196,14 @@ export function writeOwnTemp(tmp, content, { mode = 0o666, encoding = 'utf8' } =
     throw e;
   }
 }
+// Rename the temp `tmp` this caller made (writeOwnTemp) over `target`. 29ig fire 813 (RE-CHECK 808 L808-2): a rename that is refused
+// (Windows EPERM or EBUSY, a target another program holds) removes our temp, then rethrows the original error.
+export function renameOwnTemp(tmp, target) {
+  try { fs.renameSync(tmp, target); } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* best effort: our temp, the rename just failed */ }
+    throw e;
+  }
+}
 export function replaceFile(target, content, mode = 0o600) {
   const tmp = `${target}.coalwash-tmp-${crypto.randomBytes(6).toString('hex')}`;
   // An EEXIST on the open is a file we did not create, so it is named to the user and never unlinked.
