@@ -53,14 +53,16 @@ function spawnHook(sb, script, argv, payload) {
   assert.equal(r.status, 0, `${path.basename(script)} ${argv.join(' ')}: exits 0 (${String(r.stderr).slice(0, 200)})`);
 }
 
-// The Claude Code route: every event plugin/hooks/hooks.json wires, in session order.
-function ccSession(sb, session) {
+// The Claude Code route: every event plugin/hooks/hooks.json wires, in session order. `afterStart` runs right after
+// SessionStart, before any later event (t344 F3: so a check can pin what SessionStart itself did).
+function ccSession(sb, session, afterStart = () => {}) {
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN, 'hooks', 'hooks.json'), 'utf8'));
   assert.deepEqual(Object.keys(manifest.hooks).sort(), ['PostToolUse', 'PreToolUse', 'SessionStart', 'Stop'], 'the CC manifest wires four events');
   const script = path.join(PLUGIN, 'hooks', 'coalwash-conductor.js');
   const mem = path.join(sb.proj, 'MEMORY.md');
   const base = { session_id: session, cwd: sb.proj, transcript_path: path.join(sb.home, `${session}.jsonl`) };
   spawnHook(sb, script, [], { ...base, hook_event_name: 'SessionStart', source: 'startup' });
+  afterStart();
   spawnHook(sb, script, [], { ...base, hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: mem } });
   fs.appendFileSync(mem, `- Edited in ${session}.\n`);
   spawnHook(sb, script, [], { ...base, hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: mem } });
@@ -68,13 +70,14 @@ function ccSession(sb, session) {
   spawnHook(sb, script, [], { ...base, hook_event_name: 'Stop', stop_hook_active: false });
 }
 
-// The Antigravity route: every event plugin/hooks.json wires, with the measured agy payload shape.
-function agSession(sb, session) {
+// The Antigravity route: every event plugin/hooks.json wires, with the measured agy payload shape. `afterStart` as above.
+function agSession(sb, session, afterStart = () => {}) {
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN, 'hooks.json'), 'utf8'));
   assert.deepEqual(Object.keys(manifest.coalwash).sort(), ['PreToolUse', 'SessionStart', 'Stop'], 'the AG manifest wires three events');
   const base = { conversationId: session, workspacePaths: [sb.proj], modelName: 'fixture', stepIdx: 1 };
   const script = path.join(PLUGIN, 'hooks', 'ag-conductor.js');
   spawnHook(sb, script, ['SessionStart'], base);
+  afterStart();
   spawnHook(sb, script, ['PreToolUse'], { ...base, toolCall: { name: 'edit_file', args: { Path: 'MEMORY.md' } } });
   fs.appendFileSync(path.join(sb.proj, 'MEMORY.md'), `- Edited in ${session}.\n`);
   spawnHook(sb, script, ['Stop'], base);
@@ -102,7 +105,10 @@ for (const [route, runSession] of [['Claude Code', ccSession], ['Antigravity', a
     assert.ok(perA.length > 0, 'session A wrote a snapshot (the airbag fired), so the sweep has something to remove');
     for (const p of perA) assert.match(p, new RegExp(`^proj:\\.claude/coalwash/writeguard/${SESSION_A}/`), `every per-session file is a writeguard snapshot: ${p}`);
     ageSession(sb, SESSION_A);
-    runSession(sb, SESSION_B);
+    runSession(sb, SESSION_B, () => {
+      const leftAtStart = listing(sb).filter((p) => carries(p, SESSION_A));
+      assert.deepEqual(leftAtStart, [], 'session B\'s SessionStart, before any later event of B, removed every per-session file of session A');
+    });
     const afterB = listing(sb);
     const leftA = afterB.filter((p) => carries(p, SESSION_A));
     const perB = afterB.filter((p) => carries(p, SESSION_B));
