@@ -4,7 +4,7 @@
 // that file. scripts/lib/git-env-pins.test.mjs holds that every row is live, names how it ends, hides a real finding, and that the real tree passes
 // with exactly these files exempt and no other. A pinned file is an org carrier this room never edits.
 // 09a: scripts/secret-gate.test.mjs left this list when the canon rewrote it to named keys (2f066650); the room's own census file left with it.
-// 09b: scripts/secret-scan.test.mjs left it when the room adopted the house source a0319dcd (Bankfire bd328f2), which the canon census reads safe.
+// 09b: scripts/secret-scan.test.mjs left it when the room adopted the canon source (now .github 78c53e6), which the canon census reads safe.
 export const CENSUS_PINS = [
-  { rel: 'scripts/secret-gate.mjs', blob: 'ad1968c709f98dab3272182c1266597887b50ea6', why: "canon gate (.github 40b4940), byte-equal to the published-code template; its gitEnv() copies process.env minus GIT_* but keeps GIT_INDEX_FILE (commit mode must read the index the commit is made from) and GIT_CEILING_DIRECTORIES by design, so the census reads 'holds process.env without gitEnv()' at line 66; DELETE when the census rule accepts a GIT_*-stripping copy of process.env or the canon builds its env from named keys" },
+  { rel: 'scripts/secret-gate.mjs', blob: '719f76676090101f56113ac5a0cd8cb13721d470', why: "canon gate (.github 78c53e6), byte-equal to the published-code template; its gitEnv() copies process.env minus GIT_* but keeps GIT_INDEX_FILE (commit mode must read the index the commit is made from) and GIT_CEILING_DIRECTORIES by design, so the census reads 'holds process.env without gitEnv()' at line 66; DELETE when the census rule accepts a GIT_*-stripping copy of process.env or the canon builds its env from named keys" },
 ];

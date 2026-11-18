@@ -81,7 +81,7 @@ const PROBE_BYTES = 8000; // the scanner's looksBinary reads this many first byt
 // across pieces, each under the threshold, reads wide only in sum. So every probed blob keeps four counters, NULs by ABSOLUTE offset mod 4, over every byte it streams (constant memory, whatever the chunk
 // sizes), and the rule is applied once to the totals when the blob ends: a dropped blob whose totals read wide is answered { rereadBytes: size } instead of BINARY_BLOB, and the caller reads that one blob again,
 // held, and judges it on its whole bytes. The verdict equals judging the whole file; nothing is held for a blob that never reads wide. The rule restated here is wideKinds' count test in secret-scan.mjs
-// (the Bankfire source, its own constants); a test compares this verdict with the scanner's on the whole buffer.
+// (the scanner's source repository, its own constants); a test compares this verdict with the scanner's on the whole buffer.
 const WIDE_MIN_NULS = 12;
 const WIDE_SKEW = 4;
 const wideByCounts = (z) => {
