@@ -27,7 +27,7 @@ A second scan runs on each pull request as an advisory check: `.github/workflows
 
 ## Independent Scanning—NVIDIA SkillSpector
 
-Last scan: CoalWash **v1.19.4** dist (the plugin folder as shipped at `dafdc22`; the report names the folder, not a version or commit), **2026-11-17 10:30:05 UTC**, with [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) **v2.13.4**, pinned at commit `5482446`, static stage. Score **100/100 (CRITICAL)**, DO_NOT_INSTALL, **58 issues**. Coverage: **21 of 39 components** fully inspected (53.8%, status partial). Against the previous report (2026-11-16 00:53 UTC, 57 issues): 57 identical by fingerprint and line, 1 new (`TM3` at `scripts/lib/repo-fs.mjs:188`), 0 gone.
+Last scan: CoalWash **v1.19.5** dist (the plugin folder as shipped at `d96cb35`), **2026-11-18 05:47:09 UTC** (the report's `scanned_at`), with [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) **v2.13.4**, pinned at commit `5482446`, static stage. Score **100/100 (CRITICAL)**, DO_NOT_INSTALL, **58 issues**. Coverage: **21 of 39 components** fully inspected (53.8%, status partial). Against the previous report (2026-11-17 10:30 UTC, 58 issues): 58 identical by id, file, line and finding, 0 new, 0 gone.
 
 - **RA2 ×22** (MEDIUM): a word in a source comment, refusal message or reference document. Text, not logic.
 - **RA1 ×10** (HIGH): "self-update". The hook only schedules a check; the agent offers `claude plugin update` and never installs.
