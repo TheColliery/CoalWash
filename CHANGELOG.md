@@ -2,7 +2,13 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.19.6] - 2026-11-20
+
+A kept copy that shrinks while it is read is named and retried
+
+### Fixed
+
+- A kept generation that gets shorter while the index repair reads it is now reported as changed while it was read, as one that grows already is: the repair names it, writes no row for its session and tries again on the next run. Before, it wrote a row with no generation label, and the next run skipped that session for good. A restore refuses a copy that gets shorter while it is read, as it refuses one that grows. A current archived copy that gets shorter is named with the same reason, where it read "does not decompress ... restore it by id" before. A re-archive whose earlier copy gets shorter while it is read is refused, so the session is skipped and its originals are kept; before, the truncated copy was kept as a damaged generation. The refusals record that `cli.mjs estate`, and so `/coalwash:stats`, reads now reports a grown or shrunk record as unreadable, "changed while it was read"; before, a grown record said "over the read bound", and a shrunk one was read short and parsed as it stood, so its count could come out lower. (INSPECT 818 L818-2) — test: `scripts/lib/estate-kill.test.mjs`
 
 ### Changed
 
