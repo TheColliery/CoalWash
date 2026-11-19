@@ -866,6 +866,10 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
       out.failed.push({ id: sid, reason: unopenable(gzPath, e) });
       continue;
     }
+    if (got.shrank !== undefined) { // 29jo fire 849 (L818-2): named, no row, so the next run's repair reads it again
+      out.failed.push({ id: sid, reason: `its archived transcript ${gzPath} changed while it was read, so no index row was added for it; the next run tries again` });
+      continue;
+    }
     if (!got.buf) continue;
     const sha = sha256(got.buf);
     const prev = latest.get(sid);
@@ -928,7 +932,7 @@ function priorArchive(dest, buf, bounds) {
   if (!st.isFile()) return { refuse: 'the earlier archive is not a regular file' };
   const got = readArchiveHandle(dest, bounds.maxGzBytes);
   if (got.notFile) return { refuse: 'the earlier archive is not a regular file' };
-  if (got.over !== undefined || got.grew !== undefined) return { refuse: 'the earlier archive is over the restore bound or changed while it was read' };
+  if (got.over !== undefined || got.grew !== undefined || got.shrank !== undefined) return { refuse: 'the earlier archive is over the restore bound or changed while it was read' };
   let old;
   // 29hz fire 803 (CodeRabbit t340 F1): a damage code marks the copy damaged. 29ib fire 807 (INSPECT 806 F806-1, N806-3): the codes
   // are named (Z_MEM_ERROR is memory, not damage), and a copy longer than the new source throws ERR_BUFFER_TOO_LARGE before zlib
@@ -1231,7 +1235,7 @@ export function readGenerationRefusals(archiveDir, projectSlug = null) {
   let text = '';
   try {
     const got = readArchiveHandle(path.join(archiveDir, GENERATION_REFUSALS_NAME), GENERATION_REFUSALS_READ_MAX);
-    if (!got.buf) return { count: 0, since: null, unreadable: got.notFile ? 'not a plain file' : 'over the read bound' };
+    if (!got.buf) return { count: 0, since: null, unreadable: got.notFile ? 'not a plain file' : got.over !== undefined ? 'over the read bound' : 'changed while it was read' };
     text = got.buf.toString('utf8');
   } catch (e) { return e && e.code === 'ENOENT' ? { count: 0, since: null } : { count: 0, since: null, unreadable: (e && e.code) || 'unreadable' }; }
   let count = 0;
@@ -1501,9 +1505,10 @@ export function restoreBoundReason(files, b = RESTORE_BOUNDS) {
 }
 
 // One compressed archive file read through ONE handle (R15, CodeQL #47/#50): open, judge the handle, read what it reported and nothing more.
-// Returns { buf } | { notFile: true } | { over: <bytes> } | { grew: <bytes the handle reported> }. The open itself throws as statSync and
-// readFileSync did (ENOENT, EACCES ...), and the caller's catch reports it. A file that shrank after its size was read returns the shorter
-// buffer, which the gunzip then refuses as it always did; one that GREW is refused here, by a probe read of the byte after the reported end.
+// Returns { buf } | { notFile: true } | { over: <bytes> } | { grew: <bytes the handle reported> } | { shrank: <bytes the handle reported> }.
+// The open itself throws as statSync and readFileSync did (ENOENT, EACCES ...), and the caller's catch reports it. A file that GREW is
+// caught by a probe read of the byte after the reported end; one that SHRANK (a read ended before the reported end) returns { shrank },
+// never a shorter buffer (29jo fire 849, INSPECT 818 L818-2): both changed while they were read, and every caller treats them alike.
 const ARCHIVE_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0); // O_NONBLOCK: a FIFO swapped in cannot hang the open
 function readArchiveHandle(gzPath, bound) {
   const fd = fs.openSync(gzPath, ARCHIVE_READ_FLAGS);
@@ -1520,7 +1525,7 @@ function readArchiveHandle(gzPath, bound) {
       got += n;
     }
     if (got === want && fs.readSync(fd, Buffer.alloc(1), 0, 1, got) > 0) return { grew: want };
-    return { buf: got === want ? buf : buf.subarray(0, got) };
+    return got === want ? { buf } : { shrank: want };
   } finally { try { fs.closeSync(fd); } catch { /* already closed */ } }
 }
 
@@ -1644,6 +1649,7 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
       if (got.notFile) return refuse(si, `restore refused on ${s.rel}: the archive entry is not a regular file`);
       if (got.over !== undefined) return refuse(si, `restore refused on ${s.rel}: the compressed file is ${got.over} bytes, over the ${B.maxGzBytes}-byte bound`);
       if (got.grew !== undefined) return refuse(si, `restore refused on ${s.rel}: the compressed file is longer than the ${got.grew} bytes its handle reported (it grew after its size was read)`);
+      if (got.shrank !== undefined) return refuse(si, `restore refused on ${s.rel}: the compressed file is shorter than the ${got.shrank} bytes its handle reported (it shrank after its size was read)`);
       const gz = got.buf;
       const fileBound = restoreInflateBoundWith(gz.length, B);
       let buf;

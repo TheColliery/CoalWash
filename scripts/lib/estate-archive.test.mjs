@@ -1076,6 +1076,27 @@ test('R14 NIT 3 / R15 (B6): a compressed file that grew past the size its handle
   assert.deepStrictEqual(asked, [1, 1], 'one byte for the 1 reported, one probe byte, never the whole file');
 });
 
+// 29jo fire 849 (INSPECT 818 L818-2): a compressed file that SHRANK after its handle reported its size (a read ends early) is refused
+// by name, as one that grew is; it was once read short and handed to the gunzip. Witness: the handle reports 5 bytes more than the
+// valid gzip holds, so the read stops short and the restore is refused, never restored from the bytes that were there.
+test('L818-2: a compressed file that shrank below the size its handle reported is refused as changed, never restored', (t) => {
+  const arch = c7Dir('arch');
+  const to = c7Dir('to');
+  t.after(() => { for (const d of [arch, to]) fs.rmSync(d, { recursive: true, force: true }); });
+  const gz = path.join(arch, 'slug', `${SID_C7}.jsonl.gz`);
+  fs.mkdirSync(path.dirname(gz), { recursive: true });
+  fs.writeFileSync(gz, zlib.gzipSync(Buffer.from('{"type":"user"}\n')));
+  const realOpen = fs.openSync;
+  const realFstat = fs.fstatSync;
+  let gzFd = null;
+  fs.openSync = function spy(p, ...rest) { const h = realOpen.call(fs, p, ...rest); if (String(p) === gz) gzFd = h; return h; };
+  fs.fstatSync = function spy(h, ...rest) { const st = realFstat.call(fs, h, ...rest); return h === gzFd ? { size: st.size + 5, isFile: () => true } : st; };
+  let r;
+  try { r = restoreSession(SID_C7, { archiveDir: arch, to }); } finally { fs.openSync = realOpen; fs.fstatSync = realFstat; }
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 200));
+  assert.match(r.error, /shrank/, 'refused as shorter than the handle reported');
+});
+
 test('CWK-162 B6: a compressed file over RESTORE_MAX_GZ_BYTES is refused by its size, before it is read', (t) => {
   const arch = c7Dir('arch');
   const to = c7Dir('to');

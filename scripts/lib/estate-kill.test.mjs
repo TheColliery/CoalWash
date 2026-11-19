@@ -857,6 +857,36 @@ for (const [shape, sizeOf] of [['grew', (n) => n - 1], ['over', () => 512 * 1024
   });
 }
 
+// 29jo fire 844 (INSPECT 818 L818-2, witness scratchpad/29gd/w818.mjs): a kept generation that SHRINKS while the index repair reads
+// it (a read ends before the size its handle reported) changed while it was read, as one that grows does: it is named, gets no row,
+// and the next run labels it. The stub makes every read of generation 1's handle return 0; the handle is forgotten at its close, so a
+// later file that reuses the number is read for real. 29jo fire 849: the same for the current copy the repair reads (its first read).
+for (const [what, target] of [['a kept generation', (s) => `${gzPathOf(s)}.gen1`], ['the current archived copy', (s) => gzPathOf(s)]]) {
+test(`L818-2: ${what} that shrinks while the index repair reads it is named, gets no row, and the next run labels it`, (t) => {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  killedRun(s, 'after-delete', transcriptPath(s));
+  const gen1 = path.resolve(target(s));
+  const realOpen = fs.openSync;
+  const realRead = fs.readSync;
+  const realClose = fs.closeSync;
+  const genFds = new Set();
+  let hits = 0;
+  fs.openSync = function patched(p, ...r) { const fd = realOpen.call(fs, p, ...r); if (path.resolve(String(p)) === gen1) genFds.add(fd); return fd; };
+  fs.closeSync = function patched(fd, ...r) { genFds.delete(fd); return realClose.call(fs, fd, ...r); };
+  fs.readSync = function patched(fd, ...r) { if (genFds.has(fd)) { hits++; return 0; } return realRead.call(fs, fd, ...r); };
+  let first;
+  try { first = run(s, Date.now() + LATER); } finally { fs.openSync = realOpen; fs.readSync = realRead; fs.closeSync = realClose; }
+  assert.ok(hits >= 1, `the repair read ${what}`);
+  const why = first.failed.map((f) => f.reason).join(' | ');
+  assert.ok(why.includes(target(s)) && why.includes('changed while it was read'), `${what} is named as changed while it was read: ${why}`);
+  assert.ok(!first.reconciledRows, `no row this run: ${JSON.stringify(first)}`);
+  const res = run(s, Date.now() + 2 * LATER);
+  assert.strictEqual(res.reconciledRows, 1, `the repair adds the row once the read succeeds: ${JSON.stringify(res)}`);
+  assert.ok(searchIndex('CW772-NEEDLE', { archiveDir: s.archiveDir }).some((r) => r.generation === 1), 'the earlier copy is labelled generation 1');
+});
+}
+
 // 29ig fire 813 (CodeRabbit t343 F8; the head's ruling): a damaged kept copy of a session file other than its transcript is named in
 // the report by its archive path. The transcript's own wording stays as it is.
 test('F8 (t343): a damaged kept copy of a non-transcript file is named in the report by its archive path', (t) => {
