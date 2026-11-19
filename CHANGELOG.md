@@ -6,7 +6,7 @@ All notable changes to CoalWash are documented here. Format: [Keep a Changelog](
 
 ### Changed
 
-- The `[1.19.4]` erratum paragraph is withdrawn: a released entry is never edited, so this correction goes forward.
+- Forward note for `[1.19.4]` (not edited): its last Fixed bullet says that while a kept copy stays unreadable, `estate-search` does not find that session. `[1.19.5]`'s note says what is true: "`estate-search` still lists a session from its earlier row, without the generation label, and `--generation N` of an unreadable generation fails until it is readable." The erratum paragraph was withdrawn from this file only; the v1.19.4 Release body keeps it, by main's ruling.
 
 ## [1.19.5] - 2026-11-18
 
