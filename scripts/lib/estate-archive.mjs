@@ -1508,7 +1508,10 @@ export function restoreBoundReason(files, b = RESTORE_BOUNDS) {
 // Returns { buf } | { notFile: true } | { over: <bytes> } | { grew: <bytes the handle reported> } | { shrank: <bytes the handle reported> }.
 // The open itself throws as statSync and readFileSync did (ENOENT, EACCES ...), and the caller's catch reports it. A file that GREW is
 // caught by a probe read of the byte after the reported end; one that SHRANK (a read ended before the reported end) returns { shrank },
-// never a shorter buffer (29jo fire 849, INSPECT 818 L818-2): both changed while they were read, and every caller treats them alike.
+// never a shorter buffer (29jo fire 849, INSPECT 818 L818-2): both changed while they were read. The index repair's read of a kept
+// generation names either one; the re-archive's read of the earlier copy (priorArchive), restore and readStaged refuse either one;
+// readGenerationRefusals reports either one as "changed while it was read". The index repair's read of the CURRENT archived copy names
+// a shrunk one, but still skips a grown one with no reason given (no row, so the next run reads it again).
 const ARCHIVE_READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0); // O_NONBLOCK: a FIFO swapped in cannot hang the open
 function readArchiveHandle(gzPath, bound) {
   const fd = fs.openSync(gzPath, ARCHIVE_READ_FLAGS);
