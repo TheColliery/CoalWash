@@ -2,6 +2,12 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Fixed
+
+- An outside program that removed the newest archive copy during the last check before CoalWash deleted a live session let that check pass, so the live session was deleted while its latest content was in no copy. Now that check refuses an archive copy whose name is gone or points to another file, the session stays live, and the run names why. Still open: three outside writes inside one archive read, and a change in the window after that check (see SECURITY.md Known limits). — test: `scripts/lib/estate-kill.test.mjs`
+
 ## [1.19.6] - 2026-11-20
 
 A kept copy that shrinks while it is read is named and retried

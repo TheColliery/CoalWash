@@ -77,6 +77,7 @@ During a Full run, lines from this project's archived transcript sessions can en
 - A lock theft between the lock read and the write it guards still goes through, and the new holder overwrites the single journal. A lock held open by another program is re-read for about one second. An unreadable lock stops the run, and the next gauge rolls back from the snapshot.
 - A keep record's `self-ignore:` check is not retried. A rename that another program's open handle refuses for about 0.45 s refuses the record.
 - fsync is no stronger than the drive's write cache. The snapshot is the last backstop.
+- An outside program that writes inside the archive folder during one archive read can get past three checks: a same-size rewrite of an earlier copy during a re-archive keeps the damaged read and overwrites the good copy; a same-size rewrite of a kept generation during the index repair hides its search row with no message; a file removed while it is open still reads, so a search row can point at a copy that is gone. Each needs a write inside a single read. The check before a live delete now also reads each copy's name after the read, so a copy removed inside that read keeps the live session (1.19.7). A change between that name check and the delete is not caught.
 
 ## The class-A engine (not in the plugin)
 
