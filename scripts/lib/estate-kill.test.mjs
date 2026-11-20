@@ -887,6 +887,61 @@ test(`L818-2: ${what} that shrinks while the index repair reads it is named, get
 });
 }
 
+// 29ju fire 864 (T-OUTWRITER case 4, study scratchpad/29gd/study-T-OUTWRITER.md §3, witness scratchpad/29js/w-newest.mjs): the run's
+// LAST read of the newest archive copy before the live delete. An outside program that removes that copy inside the read leaves the
+// handle readable, so a check judged on the read alone passes and the live session is deleted with its latest content nowhere. The
+// check must refuse: the live file stays and the session is named. The trace pins that the three earlier opens of the newest copy
+// (the index repair, the earlier-copy read and the staged read-back) still come first and from where they did. The `replaced` leg
+// removes the copy and writes another valid copy at the name inside the read: the name is a regular file again, with another identity.
+for (const mode of ['removed', 'replaced']) {
+test(`T-OUTWRITER case 4: the newest copy ${mode} inside the last read before the live delete leaves the live file and refuses the run`, (t) => {
+  const s = sandbox(t);
+  archiveThenRewrite(s);
+  const gz = path.resolve(gzPathOf(s));
+  const realOpen = fs.openSync;
+  const realRead = fs.readSync;
+  const realClose = fs.closeSync;
+  const trace = [];
+  let target = null;
+  let fired = false;
+  let stubErr = null;
+  let writing = false; // the outside writer's own open is not one of the engine's
+  fs.openSync = function patched(p, ...r) {
+    const fd = realOpen.call(fs, p, ...r);
+    if (!writing && typeof p === 'string' && path.resolve(p) === gz) {
+      trace.push((new Error().stack || '').split('\n').slice(2, 7).join(' '));
+      if (trace.length === 4) target = fd;
+    }
+    return fd;
+  };
+  fs.closeSync = function patched(fd, ...r) { if (fd === target) target = null; return realClose.call(fs, fd, ...r); };
+  fs.readSync = function patched(fd, ...r) {
+    if (fd === target && !fired) {
+      fired = true;
+      writing = true;
+      try {
+        fs.unlinkSync(gz);
+        if (mode === 'replaced') fs.writeFileSync(gz, zlib.gzipSync(Buffer.from(line(0, 'impostor copy w864') + '\n')));
+      } catch (e) { stubErr = e; } finally { writing = false; }
+    }
+    return realRead.call(fs, fd, ...r);
+  };
+  let res;
+  try { res = run(s, Date.now() + LATER); } finally { fs.openSync = realOpen; fs.readSync = realRead; fs.closeSync = realClose; }
+  assert.strictEqual(trace.length, 4, `four opens of the newest copy: ${trace.length}`);
+  assert.match(trace[0], /reconcileIndex/, 'open 1 is the index repair');
+  assert.match(trace[1], /priorArchive/, 'open 2 is the earlier-copy read');
+  assert.match(trace[2], /readStaged/, 'open 3 is the staged read-back');
+  assert.ok(fired, `the newest copy was ${mode} inside the last read`);
+  assert.strictEqual(stubErr, null, `the outside writer itself succeeded: ${stubErr && stubErr.code}`);
+  assert.ok(fs.existsSync(transcriptPath(s)), 'the live session was not deleted');
+  assert.strictEqual(fs.readFileSync(transcriptPath(s), 'utf8'), V2, 'the live session still holds its latest content');
+  assert.strictEqual(res.archived.length, 0, `the session is not reported archived: ${JSON.stringify(res.archived)}`);
+  const why = (res.failed || []).map((f) => String(f.reason)).join(' | ');
+  assert.match(why, /session skipped, originals kept/, `the session is named and skipped: ${why}`);
+});
+}
+
 // 29ig fire 813 (CodeRabbit t343 F8; the head's ruling): a damaged kept copy of a session file other than its transcript is named in
 // the report by its archive path. The transcript's own wording stays as it is.
 test('F8 (t343): a damaged kept copy of a non-transcript file is named in the report by its archive path', (t) => {

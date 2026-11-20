@@ -219,16 +219,27 @@ test('GATE-LIVENESS 4 — the delete-boundary TOCTOU re-verify is load-bearing: 
     // .gz name), so read #1 of a .gz name = the DELETE-boundary re-verify, after
     // the commit renamed the verified copy onto it (a co-writer clobbered it in
     // between). Before 756 that read was #2, after the in-place write-verify.
+    // 29ju fire 866 (T-OUTWRITER case 4, the head's ruling on fire 864): the delete-boundary re-verify now reads the copy through ONE
+    // handle (fs.readFileSync(fd)), so the clobber also remembers each handle opened on a .gz name and returns the clobbered bytes when
+    // fs.readFileSync is given one. The handle reads of readArchiveHandle use fs.readSync and are not touched.
     function mkClobber() {
-      let gzReads = 0; const orig = fs.readFileSync;
-      return { impl: (p, ...rest) => { if (String(p).endsWith('.gz')) { gzReads++; if (gzReads >= 1) return wrongGz; } return orig(p, ...rest); }, orig };
+      let gzReads = 0; const orig = fs.readFileSync; const origOpen = fs.openSync; const gzFds = new Set();
+      return {
+        impl: (p, ...rest) => {
+          if (typeof p === 'number' ? gzFds.has(p) : String(p).endsWith('.gz')) { gzReads++; if (gzReads >= 1) return wrongGz; }
+          return orig(p, ...rest);
+        },
+        openImpl: (p, ...rest) => { const fd = origOpen(p, ...rest); if (String(p).endsWith('.gz')) gzFds.add(fd); return fd; },
+        orig,
+      };
     }
 
     // FIRES: real .equals — the re-verify sees the clobber → session KEPT.
     let c = mkClobber();
     let restore = patch(fs, 'readFileSync', c.impl);
+    let restoreOpen = patch(fs, 'openSync', c.openImpl);
     let r;
-    try { r = runEstate({ projectRoot: proj, home, now, estate: estateCfg() }); } finally { restore(); }
+    try { r = runEstate({ projectRoot: proj, home, now, estate: estateCfg() }); } finally { restoreOpen(); restore(); }
     assert.strictEqual(r.archived.length, 0, 'DEAD GATE: a post-write archive clobber was not caught at the delete boundary');
     assert.ok(r.failed.some((f) => /no longer verifies before delete/.test(f.reason)), 'the TOCTOU re-verify names the boundary');
     assert.ok(fs.existsSync(jsonl), 'original kept when the archive is clobbered after write');
@@ -237,9 +248,10 @@ test('GATE-LIVENESS 4 — the delete-boundary TOCTOU re-verify is load-bearing: 
     // passes → the original is deleted behind CLOBBERED bytes.
     c = mkClobber();
     const restoreRead = patch(fs, 'readFileSync', c.impl);
+    restoreOpen = patch(fs, 'openSync', c.openImpl);
     const restoreEq = patch(Buffer.prototype, 'equals', () => true);
     let r2;
-    try { r2 = runEstate({ projectRoot: proj, home, now, estate: estateCfg() }); } finally { restoreEq(); restoreRead(); }
+    try { r2 = runEstate({ projectRoot: proj, home, now, estate: estateCfg() }); } finally { restoreEq(); restoreOpen(); restoreRead(); }
     assert.ok(r2.archived.length >= 1, 'equals→true: the clobbered archive is accepted');
     assert.ok(!fs.existsSync(jsonl), 'original DELETED behind a clobbered archive = the loss the delete-boundary re-verify prevents');
   } finally { clean(home, proj); }

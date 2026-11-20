@@ -772,9 +772,28 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     }
   }
 
+  // The last check before the live delete: each new archive copy must still decompress to the live file. 29ju fire 864 (T-OUTWRITER
+  // case 4): the copy is read through ONE handle, and after the read its NAME must still be a regular file (not a link) with the
+  // handle's dev and ino, so a copy an outside program removed or replaced inside the read (a handle still reads a removed file) stops
+  // the run with the live file kept. A change after that name check and before the delete is not caught here (a stated limit).
   for (const o of originals) {
     let ok = false;
-    try { ok = zlib.gunzipSync(fs.readFileSync(o.gz), { maxOutputLength: o.inflated + 1 }).equals(fs.readFileSync(o.path)); } catch { ok = false; }
+    let named = false;
+    try {
+      let gzBuf;
+      let held;
+      const fd = fs.openSync(o.gz, 'r');
+      try {
+        held = fs.fstatSync(fd, { bigint: true });
+        gzBuf = fs.readFileSync(fd);
+      } finally { fs.closeSync(fd); }
+      const now = fs.lstatSync(o.gz, { bigint: true });
+      named = now.isFile() && !now.isSymbolicLink() && now.dev === held.dev && now.ino === held.ino;
+      if (named) ok = zlib.gunzipSync(gzBuf, { maxOutputLength: o.inflated + 1 }).equals(fs.readFileSync(o.path));
+    } catch { ok = false; }
+    if (!named) {
+      return fail(`archive no longer verifies before delete: the archive copy of ${o.rel} was changed or removed during the last check before the delete (an outside program in the archive folder?), so no live file was deleted — session skipped, originals kept`);
+    }
     if (!ok) {
       return fail(`archive no longer verifies before delete: ${o.rel} (removed/corrupted since it was written — a co-writer on the archive volume?) — session skipped, originals kept`);
     }
