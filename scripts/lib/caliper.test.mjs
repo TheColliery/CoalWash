@@ -3281,3 +3281,59 @@ test('F880-1: a CLI state edit whose re-read fails keeps every field it did not 
     assert.strictEqual(s.digGaugeSession, 'sess-880', 'the call\'s own flag is written');
   } finally { fs.openSync = realOpen; clean(home, proj); }
 });
+
+// Lab F1 (cw-lab-1198): a stale record at the FALLBACK path must never become the merge base for a state the edit loaded from the
+// main file. The main file is unreadable only at the save's re-read (a seam on its open), readable again after; the fallback holds an
+// older owned record missing the seeded fields. The save must keep what it loaded, and apply the edit, or say it was not applied.
+const SEEDED = { lastVerdict: { fatTokens: 1000 }, returnAsk: true, leanFloorTokens: 12345, quickTried: true, subSpawns: 5, lastCrossing: { band: 'OBESE', session: 'old', consumed: false } };
+function mainBusyOnSecondOpen(home, proj, fn) {
+  const main = path.resolve(statePath(proj, home));
+  const realOpen = fs.openSync;
+  let n = 0;
+  fs.openSync = function (p, ...rest) {
+    if (path.resolve(String(p)) === main && ++n === 2) throw Object.assign(new Error('EBUSY: planted'), { code: 'EBUSY' });
+    return realOpen.call(fs, p, ...rest);
+  };
+  try { return { result: fn(), opens: n }; } finally { fs.openSync = realOpen; }
+}
+for (const [name, call, check] of [
+  ['return-leave', (h, p, rep) => stateNs.answerReturnLeave(h, p, rep), (s) => s.lastObeseFat === 1000 && s.returnAsk === undefined],
+  ['restore', (h, p, rep) => stateNs.acknowledgeRestore(h, p, 400, null, rep), (s) => s.lastObeseFat > 777],
+  ['dig-gauge', (h, p) => stateNs.armDigGauge(h, p, 'sess-f1').applied, (s) => s.digGaugeSession === 'sess-f1'],
+]) {
+  test(`lab F1: ${name} never merges onto a stale fallback when its re-read of the main file fails`, () => {
+    const { home, proj } = sandbox();
+    try {
+      ccSlugDir(home, proj);
+      seedProj(home, proj, { projectRoot: proj, ...SEEDED, lastObeseFat: 777 });
+      const fb = stateFallbackPath(proj, home);
+      fs.mkdirSync(path.dirname(fb), { recursive: true });
+      fs.writeFileSync(fb, JSON.stringify({ projectRoot: proj, subSpawns: 1, stateSchema: STATE_SCHEMA }), 'utf8');
+      const rep = {};
+      const { result, opens } = mainBusyOnSecondOpen(home, proj, () => call(home, proj, rep));
+      assert.ok(opens >= 2, 'the fault reached the re-read: ' + opens);
+      const s = loadState(proj, home);
+      assert.strictEqual(s.leanFloorTokens, 12345, 'the floor is kept');
+      assert.strictEqual(s.quickTried, true, 'the quick mark is kept');
+      assert.strictEqual(s.subSpawns, 5, 'the spawn count is the loaded one, not the stale copy\'s');
+      if (result) assert.ok(check(s), `${name} reports applied, so its edit is in the file: ${JSON.stringify(s)}`);
+    } finally { clean(home, proj); }
+  });
+}
+
+// Lab F1 (b): another writer changes the very field this call changes, inside the window. The merge keeps theirs, so this call's change
+// is NOT applied, and the result must say so (falsy, with the field named), never a success.
+test('lab F1 (b): return-leave says its change was not applied when another writer changed the same field meanwhile', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: proj, ...SEEDED, lastObeseFat: 777 });
+    const rep = {};
+    let ret;
+    const fired = hookSavesAfterFirstRead(home, proj, { lastObeseFat: 888 }, () => { ret = stateNs.answerReturnLeave(home, proj, rep); });
+    assert.ok(fired, 'the seam fired');
+    assert.strictEqual(loadState(proj, home).lastObeseFat, 888, 'the other writer\'s value stands');
+    assert.ok(!ret, 'the call does not report success');
+    assert.ok(Array.isArray(rep.notApplied) && rep.notApplied.includes('lastObeseFat'), 'the report names the field: ' + JSON.stringify(rep));
+  } finally { clean(home, proj); }
+});

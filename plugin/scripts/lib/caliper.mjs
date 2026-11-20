@@ -1230,10 +1230,15 @@ export function loadState(projectRoot, home = os.homedir()) {
   // dir can appear later (CC's first real session) — reading both keeps that
   // state (the lean-floor baseline) from stranding on the location flip. A record
   // another project wrote into either path is skipped, and the next source tried.
-  const fresh = ownedRecord(readStateFile(statePath(projectRoot, home)), projectRoot)
-    || ownedRecord(readStateFile(stateFallbackPath(projectRoot, home)), projectRoot);
-  const proj = fresh || readOldRootEntry(projectRoot, home) || {};
-  return migrateProjSchema(proj);
+  return loadStateFrom(projectRoot, home).proj;
+}
+// loadState, also naming the file the record came from (null: the old root entry, or nothing), so a save can re-read THAT file.
+function loadStateFrom(projectRoot, home) {
+  for (const p of [statePath(projectRoot, home), stateFallbackPath(projectRoot, home)]) {
+    const rec = ownedRecord(readStateFile(p), projectRoot);
+    if (rec) return { proj: migrateProjSchema(rec), from: p };
+  }
+  return { proj: migrateProjSchema(readOldRootEntry(projectRoot, home) || {}), from: null };
 }
 
 // Persist THIS project's flat state to the new per-project path (atomic
@@ -1437,18 +1442,29 @@ function sweepDeadProjectStates(home, projectRoot) {
 // loadState makes). loadState answers {} for a failed read (an open error, a transient EBUSY) and for a record another project
 // wrote; merging onto that would keep this call's few fields and drop every other one. With no owned record read, save what this
 // call loaded, whole, as before T-29LD-2.
-function saveChangedFields(projectRoot, home, before, after) {
-  const owned = ownedRecord(readStateFile(statePath(projectRoot, home)), projectRoot)
-    || ownedRecord(readStateFile(stateFallbackPath(projectRoot, home)), projectRoot);
-  if (!owned) return saveState(after, projectRoot, home);
+// Lab F1 (cw-lab-1198): the re-read is of the SAME file the load read (`from`), never the other path: a stale fallback copy beside a
+// main file that failed its re-read would read every field it lacks as another writer's change. Returns { saved, notApplied }: the
+// fields this call changed that another writer changed meanwhile (theirs stands, so this call's change is not applied).
+function saveChangedFields(projectRoot, home, from, before, after) {
+  // A load that found no owned record read the main file first and found nothing there, so the re-read is of the main file: a
+  // record that is whole again there (a lock released, a rename done) is merged onto, never overwritten with the empty load.
+  const owned = ownedRecord(readStateFile(from || statePath(projectRoot, home)), projectRoot);
+  if (!owned) return { saved: saveState(after, projectRoot, home), notApplied: [] };
   const fresh = migrateProjSchema(owned);
+  const notApplied = [];
   for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
     const was = JSON.stringify(before[k]);
     if (JSON.stringify(after[k]) === was) continue; // not changed by this call: the fresh value stands
-    if (JSON.stringify(fresh[k]) !== was) continue; // changed by another writer since this call's load: theirs stands
+    if (JSON.stringify(fresh[k]) !== was) { notApplied.push(k); continue; } // changed by another writer since this call's load: theirs stands
     if (after[k] === undefined) delete fresh[k]; else fresh[k] = after[k];
   }
-  return saveState(fresh, projectRoot, home);
+  return { saved: saveState(fresh, projectRoot, home), notApplied };
+}
+// The three CLI edits' answer: true only when the save landed AND every field the call changed was applied; `report.notApplied` names
+// the fields another writer kept (lab F1 (b)), so the CLI can say what was not applied instead of its success line.
+function appliedResult(r, report) {
+  if (report && typeof report === 'object') report.notApplied = r.notApplied;
+  return r.saved === true && r.notApplied.length === 0;
 }
 
 function saveState(proj, projectRoot, home) {
@@ -1886,9 +1902,9 @@ export function restorePostWashSnapshot(home, projectRoot, snap) {
   } catch { return false; }
 }
 // 699 (BB-469): "leave it" answered for a pending return. The current fat becomes the plateau, the crossing is consumed, and the return and wash marks clear: the next look is silent, and growth past +500 re-arms as today.
-export function answerReturnLeave(home, projectRoot) {
+export function answerReturnLeave(home, projectRoot, report) {
   try {
-    const proj = loadState(projectRoot, home);
+    const { proj, from } = loadStateFrom(projectRoot, home);
     const before = JSON.parse(JSON.stringify(proj));
     const fat = proj.lastVerdict ? Number(proj.lastVerdict.fatTokens) : NaN;
     if (!Number.isFinite(fat)) return false; // 702 (F700-3): change nothing without a finite fat
@@ -1896,18 +1912,18 @@ export function answerReturnLeave(home, projectRoot) {
     if (proj.lastCrossing && typeof proj.lastCrossing === "object") proj.lastCrossing = { ...proj.lastCrossing, consumed: true };
     delete proj.returnAsk;
     delete proj.postWash;
-    return saveChangedFields(projectRoot, home, before, proj); // T-29LD-2
+    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj), report); // T-29LD-2, lab F1
   } catch { return false; }
 }
 // 29fd (fire 694): the bin door (cli.mjs restore) hands an item's bytes back for
 // the user to write. Those bytes are text the wash removed coming home, so the
 // OBESE watermark rises by the same amount: the restore returns to an
 // acknowledged plateau and does not re-arm the nudge. Fail-silent like recordPostWash.
-export function acknowledgeRestore(home, projectRoot, bytes, original = null) {
+export function acknowledgeRestore(home, projectRoot, bytes, original = null, report) {
   try {
     const n = Number(bytes);
     if (!Number.isFinite(n) || n <= 0) return false;
-    const proj = loadState(projectRoot, home);
+    const { proj, from } = loadStateFrom(projectRoot, home);
     const before = JSON.parse(JSON.stringify(proj));
     // 711 (F703-1): the bin door hands back the wash's own text, so the restored file leaves the episode. An episode with no
     // washed file left is closed, so later growth is never read as a return.
@@ -1926,7 +1942,7 @@ export function acknowledgeRestore(home, projectRoot, bytes, original = null) {
     if (proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat))) {
       proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
     }
-    return saveChangedFields(projectRoot, home, before, proj); // T-29LD-2
+    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj), report); // T-29LD-2, lab F1
   } catch { return false; }
 }
 
@@ -1962,13 +1978,14 @@ export function markQuickTried(home, projectRoot, now = Date.now()) {
 // CLEAR dig writes nothing at all.
 export function armDigGauge(home, projectRoot, session, now = Date.now()) {
   if (session == null) return { surface: true };
-  const proj = loadState(projectRoot, home);
+  const { proj, from } = loadStateFrom(projectRoot, home);
   if (proj.digGaugeSession === session) return { surface: false }; // already surfaced this session
   const before = JSON.parse(JSON.stringify(proj));
   proj.digGaugeSession = session;
   proj.digGaugeAt = now;
-  saveChangedFields(projectRoot, home, before, proj); // T-29LD-2
-  return { surface: true };
+  // lab F1 (b): `applied` false when the once-per-session mark was not saved, so the CLI can say the offer may show again.
+  const r = saveChangedFields(projectRoot, home, from, before, proj); // T-29LD-2
+  return { surface: true, applied: r.saved === true && r.notApplied.length === 0, notApplied: r.notApplied };
 }
 
 // CWK-081 (1) — THE EPISODE'S FULL-TIER PASS, recorded. The externalize advisory
