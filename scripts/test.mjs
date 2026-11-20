@@ -157,8 +157,11 @@ async function main() {
     if (r.stdout || r.stderr) console.error(`--- ${r.name || r.file} (${r.status}) ---\n${r.stdout ?? ''}${r.stderr ?? ''}`);
   }
   // 661: every skipped test gets its own SKIPPED line before the summary, as the canon's main() prints them (a skip is never silent).
+  // 876: then one TIME line per file that ran, as the canon's main() prints them, so CI's log sizes the per-file clock.
   const { skippedLines } = wave;
+  const { timeLines } = wave;
   for (const line of skippedLines(run.results)) console.log(line);
+  for (const line of timeLines(run.results)) console.log(line);
   const summary = wave.summarize(results, TESTS.length);
   console.log(summary.line);
   process.exitCode = summary.red ? 1 : 0;

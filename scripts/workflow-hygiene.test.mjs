@@ -115,6 +115,29 @@ test('661: the suite runner prints a SKIPPED line for each skipped test, before 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+// 876: the runner prints one TIME line per file that ran, after the SKIPPED lines and before the summary line, as the canon's own main() does
+// (wave-run.mjs, 1c7a36a), so CI's log sizes the per-file clock. The order is pinned in the runner's source; the lines are produced by a real run.
+test('876: the suite runner prints a TIME line for each file that ran, after the SKIPPED lines and before its summary line', async () => {
+  const src = read(path.join(repo, 'scripts', 'test.mjs'));
+  const skipAt = src.indexOf('skippedLines(run.results)');
+  const at = src.indexOf('timeLines(run.results)');
+  const summaryAt = src.indexOf('console.log(summary.line)');
+  assert.ok(at > 0, 'the runner prints timeLines(run.results)');
+  assert.ok(at > skipAt && summaryAt > at, 'the TIME lines come after the SKIPPED lines and before the summary line');
+  assert.match(src, /const \{ timeLines \} = wave;/, 'the runner takes timeLines from the wave runner it loaded');
+  const wave = await import(pathToFileURL(path.join(repo, 'scripts', 'lib', 'wave-run.mjs')).href);
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw876-time-')));
+  try {
+    fs.writeFileSync(path.join(dir, 'a.fixture.mjs'), "import { test } from 'node:test';\ntest('a', () => {});\n", 'utf8');
+    fs.writeFileSync(path.join(dir, 'b.fixture.mjs'), "import { test } from 'node:test';\ntest('b', () => {});\n", 'utf8');
+    const sandbox = { ...process.env, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir };
+    const run = await wave.runWaves({ files: ['a.fixture.mjs', 'b.fixture.mjs'], cwd: dir, env: sandbox, heapMb: 512, fileTimeoutMs: 60000, deadlineMs: 120000 });
+    const lines = wave.timeLines(run.results);
+    assert.equal(lines.length, 2, `one TIME line per file: ${JSON.stringify(lines)}`);
+    for (const l of lines) assert.match(l, /^TIME [ab]\.fixture\.mjs: \d+\.\d s$/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // 09a: the suite runs through the canon wave runner, so the clocks are the room's numbers in scripts/lib/test-plan.mjs, handed to runWaves
 // (the per-test bound becomes each file child's --test-timeout, the run bound its whole-run deadline that kills the tree).
 test('CWK-154 (2): the suite runner has a finite clock -- a per-test bound, a per-file clock and a whole-run deadline handed to the wave runner, under the CI job clock', () => {
