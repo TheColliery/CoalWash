@@ -637,7 +637,8 @@ function main() {
           // because the refusal means the handle did not prove the name to be ours.
           const o = openPlainFile(outPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), null, 0o600);
           if (o.fd === undefined) {
-            throw Object.assign(new Error(o.why === 'unopenable' ? (o.code || 'unopenable') : `the name changed under the create (${o.why})`), { code: o.why === 'unopenable' ? o.code : 'ECHANGED' });
+            // L880-2: a volume that reports no file id cannot prove the name is the file just created: say that, not a swap.
+            throw Object.assign(new Error(o.why === 'unopenable' ? (o.code || 'unopenable') : `the name changed under the create (${o.why})`), { code: o.why === 'unopenable' ? o.code : o.why === 'unverifiable' ? 'EUNVERIFIABLE' : 'ECHANGED' });
           }
           try {
             fs.writeFileSync(o.fd, r.content);
@@ -655,8 +656,10 @@ function main() {
           console.error(e && e.code === 'EEXIST'
             ? `writeguard-restore: ${shown} already exists — refusing to overwrite it; nothing was written`
             : e && e.code === 'ECHANGED'
-              ? `writeguard-restore: ${shown} changed while it was created (a link or another file took the name) — refusing; no snapshot byte was written`
-              : `writeguard-restore: could not write ${shown}: ${escapeRawControls(String(e && e.code ? e.code : e.message))}`);
+              ? `writeguard-restore: ${shown} changed while it was created (a link or another file took the name) — refusing; no snapshot byte was written; an empty file may remain at that name`
+              : e && e.code === 'EUNVERIFIABLE'
+                ? `writeguard-restore: this volume cannot prove that ${shown} is the file just created (it reports no file id) — refusing; nothing was written into it; an empty file may remain at that name`
+                : `writeguard-restore: could not write ${shown}: ${escapeRawControls(String(e && e.code ? e.code : e.message))}`);
           process.exitCode = 1;
           return;
         }

@@ -175,6 +175,40 @@ test('T-29LD-3: writeguard-restore --out refuses, and writes no snapshot bytes, 
   } finally { clean(home, proj); }
 });
 
+// L880-2: a volume that reports file id 0 cannot prove the name is the file just created. The refusal must say so (never "a link or
+// another file took the name"), write nothing, and say an empty file may remain. A preload makes fstat of the created handle report ino 0.
+test('L880-2: writeguard-restore --out on a volume with no file ids says the volume cannot prove the file, and that an empty file may remain', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    fs.writeFileSync(gov, '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n', 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const out = path.join(proj, 'MEMORY.md.restored');
+    const preload = path.join(proj, 'no-ino.mjs');
+    fs.writeFileSync(preload, [
+      "import fs from 'node:fs';",
+      'const out = process.env.CW881_OUT; const openOrig = fs.openSync; const fstatOrig = fs.fstatSync; const ours = new Set();',
+      'fs.openSync = function (p, ...rest) { const fd = openOrig.call(fs, p, ...rest); if (String(p) === out) ours.add(fd); return fd; };',
+      'fs.fstatSync = function (fd, ...rest) {',
+      '  const st = fstatOrig.call(fs, fd, ...rest);',
+      '  if (!ours.has(fd)) return st;',
+      '  const z = Object.create(Object.getPrototypeOf(st)); Object.assign(z, st); z.ino = typeof st.ino === "bigint" ? 0n : 0; return z;',
+      '};',
+      '',
+    ].join('\n'), 'utf8');
+    const r = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, CLI, 'writeguard-restore', path.basename(snap), '--out', out], {
+      cwd: proj,
+      env: { ...process.env, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, CLAUDE_CONFIG_DIR: '', CW881_OUT: out },
+      encoding: 'utf8',
+      timeout: 20000,
+    });
+    assert.strictEqual(r.status, 1, 'the run refuses: ' + r.stderr);
+    assert.match(r.stderr, /cannot prove/, 'the refusal names the volume, not a swapped name: ' + r.stderr);
+    assert.match(r.stderr, /empty file may remain/, 'and says an empty file may remain at the name: ' + r.stderr);
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), '', 'nothing was written into it');
+  } finally { clean(home, proj); }
+});
+
 // T-29LD-3, the swapped entry: the create opens ONE handle and proves the name still names it before a byte is written. A preload
 // swaps the name right after that open (the created file renamed away, another file put in its place); the run must refuse,
 // leave the other file untouched, and write no snapshot byte into the file it created. This leg runs on every volume.
