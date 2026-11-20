@@ -1429,6 +1429,21 @@ function sweepDeadProjectStates(home, projectRoot) {
   } catch { /* fail-silent -- cleanup is best-effort, never blocks a write */ }
 }
 
+// T-29LD-2: a load-edit-save made from the CLI (restore, return-leave, dig-gauge) while a hook may save the same file. No lock is
+// shared with the hooks' writers, so the save re-loads the file and writes only what THIS call changed, each field only while it
+// still holds the value this call loaded: a field another writer saved meanwhile keeps that writer's value, and every field this
+// call did not touch is the fresh one. The window left is the re-load to the rename, inside saveState (a stated limit).
+function saveChangedFields(projectRoot, home, before, after) {
+  const fresh = loadState(projectRoot, home);
+  for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const was = JSON.stringify(before[k]);
+    if (JSON.stringify(after[k]) === was) continue; // not changed by this call: the fresh value stands
+    if (JSON.stringify(fresh[k]) !== was) continue; // changed by another writer since this call's load: theirs stands
+    if (after[k] === undefined) delete fresh[k]; else fresh[k] = after[k];
+  }
+  return saveState(fresh, projectRoot, home);
+}
+
 function saveState(proj, projectRoot, home) {
   try {
     const p = statePath(projectRoot, home);
@@ -1867,13 +1882,14 @@ export function restorePostWashSnapshot(home, projectRoot, snap) {
 export function answerReturnLeave(home, projectRoot) {
   try {
     const proj = loadState(projectRoot, home);
+    const before = JSON.parse(JSON.stringify(proj));
     const fat = proj.lastVerdict ? Number(proj.lastVerdict.fatTokens) : NaN;
     if (!Number.isFinite(fat)) return false; // 702 (F700-3): change nothing without a finite fat
     proj.lastObeseFat = Math.round(fat);
     if (proj.lastCrossing && typeof proj.lastCrossing === "object") proj.lastCrossing = { ...proj.lastCrossing, consumed: true };
     delete proj.returnAsk;
     delete proj.postWash;
-    return saveState(proj, projectRoot, home);
+    return saveChangedFields(projectRoot, home, before, proj); // T-29LD-2
   } catch { return false; }
 }
 // 29fd (fire 694): the bin door (cli.mjs restore) hands an item's bytes back for
@@ -1885,6 +1901,7 @@ export function acknowledgeRestore(home, projectRoot, bytes, original = null) {
     const n = Number(bytes);
     if (!Number.isFinite(n) || n <= 0) return false;
     const proj = loadState(projectRoot, home);
+    const before = JSON.parse(JSON.stringify(proj));
     // 711 (F703-1): the bin door hands back the wash's own text, so the restored file leaves the episode. An episode with no
     // washed file left is closed, so later growth is never read as a return.
     if (proj.postWash && proj.postWash.removed && original) {
@@ -1902,7 +1919,7 @@ export function acknowledgeRestore(home, projectRoot, bytes, original = null) {
     if (proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat))) {
       proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
     }
-    return saveState(proj, projectRoot, home);
+    return saveChangedFields(projectRoot, home, before, proj); // T-29LD-2
   } catch { return false; }
 }
 
@@ -1940,9 +1957,10 @@ export function armDigGauge(home, projectRoot, session, now = Date.now()) {
   if (session == null) return { surface: true };
   const proj = loadState(projectRoot, home);
   if (proj.digGaugeSession === session) return { surface: false }; // already surfaced this session
+  const before = JSON.parse(JSON.stringify(proj));
   proj.digGaugeSession = session;
   proj.digGaugeAt = now;
-  saveState(proj, projectRoot, home);
+  saveChangedFields(projectRoot, home, before, proj); // T-29LD-2
   return { surface: true };
 }
 

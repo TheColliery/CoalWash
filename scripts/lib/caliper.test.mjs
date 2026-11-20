@@ -3184,3 +3184,72 @@ test('record identity: a foreign record at the slug path does not hide this proj
     assert.strictEqual(loadState(proj, home).leanFloorTokens, 4000, 'the own record at the fallback is read');
   } finally { clean(home, proj, other); }
 });
+
+// T-29LD-2: the CLI's state edits (restore, return-leave, dig-gauge) load, edit and save state.json. A hook that saves its own
+// field inside that window must keep it. The seam: right after the call's first read of state.json closes, a "hook" saves a
+// field the call does not own; the call's save must not put the old value back.
+function hookSavesAfterFirstRead(home, proj, patch, fn) {
+  const sp = path.resolve(statePath(proj, home));
+  const origOpen = fs.openSync;
+  const origClose = fs.closeSync;
+  const fds = new Set();
+  let fired = false;
+  fs.openSync = function (p, ...rest) {
+    const fd = origOpen.call(fs, p, ...rest);
+    if (!fired && path.resolve(String(p)) === sp) fds.add(fd);
+    return fd;
+  };
+  fs.closeSync = function (fd) {
+    const r = origClose.call(fs, fd);
+    if (!fired && fds.has(fd)) {
+      fired = true;
+      const j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+      fs.writeFileSync(sp, JSON.stringify({ ...j, ...patch }), 'utf8');
+    }
+    return r;
+  };
+  try { fn(); } finally { fs.openSync = origOpen; fs.closeSync = origClose; }
+  return fired;
+}
+const NEW_CROSSING = { band: 'FULL', session: 'hook-session', consumed: false };
+
+test('T-29LD-2: return-leave keeps a crossing and a spawn count a hook saved while it ran', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: proj, lastVerdict: { fatTokens: 1000 }, lastCrossing: { band: 'OBESE', session: 'old', consumed: false }, returnAsk: true });
+    const fired = hookSavesAfterFirstRead(home, proj, { lastCrossing: NEW_CROSSING, subSpawns: 3 }, () => stateNs.answerReturnLeave(home, proj));
+    assert.ok(fired, 'the seam fired');
+    const s = loadState(proj, home);
+    assert.deepStrictEqual(s.lastCrossing, NEW_CROSSING, 'the crossing the hook saved survives, unconsumed');
+    assert.strictEqual(s.subSpawns, 3, 'the spawn count the hook saved survives');
+    assert.strictEqual(s.lastObeseFat, 1000, 'the call\'s own field is written');
+    assert.strictEqual(s.returnAsk, undefined, 'and its own mark is cleared');
+  } finally { clean(home, proj); }
+});
+
+test('T-29LD-2: a bin restore keeps a spawn count a hook saved while it ran', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: proj, lastObeseFat: 1000 });
+    const fired = hookSavesAfterFirstRead(home, proj, { subSpawns: 5 }, () => stateNs.acknowledgeRestore(home, proj, 400));
+    assert.ok(fired, 'the seam fired');
+    const s = loadState(proj, home);
+    assert.strictEqual(s.subSpawns, 5, 'the spawn count the hook saved survives');
+    assert.ok(s.lastObeseFat > 1000, 'the call\'s own watermark is raised');
+  } finally { clean(home, proj); }
+});
+
+test('T-29LD-2: a dig-gauge arm keeps a crossing a hook saved while it ran', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: proj, lastCrossing: { band: 'OBESE', session: 'old', consumed: false } });
+    const fired = hookSavesAfterFirstRead(home, proj, { lastCrossing: NEW_CROSSING }, () => stateNs.armDigGauge(home, proj, 'sess-a'));
+    assert.ok(fired, 'the seam fired');
+    const s = loadState(proj, home);
+    assert.deepStrictEqual(s.lastCrossing, NEW_CROSSING, 'the crossing the hook saved survives');
+    assert.strictEqual(s.digGaugeSession, 'sess-a', 'the call\'s own flag is written');
+  } finally { clean(home, proj); }
+});
