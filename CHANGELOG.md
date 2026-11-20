@@ -2,6 +2,14 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Fixed
+
+- `writeguard-restore --out` could create its copy at a link that took the output name just before the create, because Windows follows the link. It now creates the file through one handle, checks that the name still names that file, and only then writes. A name that changed is refused, and no snapshot byte is written. On Windows the window between the check and the create narrows but does not close: a dangling link planted there can still get an empty file created at its target. — test: `scripts/lib/cli.test.mjs`
+- `configure` picked where to write from a check made before it read the config. A config that appeared at the other name in between received the edit, which the loader does not read first, and the run reported success. Now the write follows what the read found, and a config that appears while `configure` runs is refused (nothing written, exit 1) or reported as not applied (exit 1), never as success. Between the last check and the rename, a config can still be replaced at the name the write uses. — test: `scripts/configure.test.mjs`
+- A CLI state edit (`restore`, `return-leave`, `dig-gauge`) could overwrite a crossing or spawn count that a hook saved while the command ran. Now it saves only the fields it changed, and only where no other writer has changed them since it read the state. A field that another writer and the command both change within the last few milliseconds of the save still takes the command's value. — test: `scripts/lib/caliper.test.mjs`
+
 ## [1.19.7] - 2026-11-20
 
 The last check before a live delete refuses a removed copy
