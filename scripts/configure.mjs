@@ -339,7 +339,8 @@ function main() {
   // when one exists, else the first-write home above. `projectConfigPath`
   // already returns candidate[0] on a miss, so "exists" is the discriminator.
   const cfgPath = found;
-  const writePath = isGlobal ? found : (fs.existsSync(found) ? found : firstWriteTarget(process.cwd()));
+  // T-29LD-4: the write target is decided below, from the read's own outcome, never from an existence check made before it.
+  let writePath = found;
 
   let cfg = {};
   let hadComments = false;
@@ -364,6 +365,10 @@ function main() {
   } else {
     readErr = { code: got.why === 'absent' ? 'ENOENT' : (got.code || got.why) };
   }
+  // T-29LD-4: a read that found a file writes back to that file; a read that found none writes the first-write home, and the
+  // write re-checks below that no config appeared meanwhile at either name.
+  const readFoundNone = !isGlobal && got.why === 'absent';
+  if (readFoundNone) writePath = firstWriteTarget(process.cwd());
   // F-R32-2: AN EMPTY CATCH HERE MADE AN UNREADABLE FILE INDISTINGUISHABLE FROM
   // AN ABSENT ONE, and the difference is the user's whole config. On an
   // EPERM/EACCES read of a file that IS there, `raw` stayed null, `cfg` stayed
@@ -522,6 +527,17 @@ function main() {
   // the wrong-WHY class in this one dispatch (F-R32-1, this, and the return's
   // own wording), and the sharpest: the earlier one mis-described a mechanism
   // that fires, this one named one that cannot.
+  // T-29LD-4: when the read found no config, nothing may have appeared at the read's name or at the write's name since; a config
+  // that did would be read first (or be replaced). A name that cannot be looked at counts as present (fail closed).
+  const present = (p) => { try { fs.lstatSync(p); return true; } catch (e) { return !(e && e.code === 'ENOENT'); } };
+  if (readFoundNone) {
+    const appeared = [...new Set([cfgPath, writePath])].find(present);
+    if (appeared) {
+      console.error(`Error: a config appeared at ${escapeRawControls(String(appeared))} while configure ran. Nothing was written; re-run.`);
+      process.exitCode = 1;
+      return;
+    }
+  }
   try {
     if (isGlobal) {
       // The user's own file, written as before (a dotfile manager's link is honoured).
@@ -548,6 +564,13 @@ function main() {
     } else {
       console.error(`Error: Failed to write to config file: ${escapeRawControls(String(e.message))}`);
     }
+    process.exitCode = 1;
+    return;
+  }
+  // T-29LD-4: the window the check above cannot close: a config that appeared at the read's name during the write is read first,
+  // so the setting just written is not the one any reader sees. Say so; never report success over it.
+  if (readFoundNone && cfgPath !== writePath && present(cfgPath)) {
+    console.error(`Error: a config appeared at ${escapeRawControls(String(cfgPath))} while configure wrote ${escapeRawControls(String(writePath))}. The loader reads ${escapeRawControls(String(cfgPath))} first, so the setting was not applied; re-run.`);
     process.exitCode = 1;
     return;
   }

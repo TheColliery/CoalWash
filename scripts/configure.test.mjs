@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { CONFIG_SCHEMA } from './lib/config-schema.mjs';
 import { flattenSchema, setPath, parseValue, firstWriteTarget } from './configure.mjs';
 
@@ -668,4 +668,58 @@ test('UMB-174: a UTF-8 BOM before a valid object still PARSES, and the write kee
   const after = JSON.parse(written.charCodeAt(0) === 0xfeff ? written.slice(1) : written);
   assert.strictEqual(after.updateCheckDays, 9, 'the key the BOM-prefixed file held survives the write');
   assert.strictEqual(after.language, 'en');
+});
+
+// T-29LD-4: the write target is decided by the read's own outcome, never by an existence check made before it. The project has
+// only `.agents`, so the loader's first candidate (`.claude/coal/coalwash.json`) differs from the first-write target
+// (`.agents/coal/coalwash.json`). A preload creates the first candidate inside the run; the edit must land where the loader
+// reads, or the run must say it did not.
+function seamRun(sb, args, body) {
+  const preload = path.join(sb.root, 'seam.mjs');
+  fs.writeFileSync(preload, ["import fs from 'node:fs';", "import path from 'node:path';", 'const first = process.env.CW877_FIRST;',
+    "const plant = () => { fs.mkdirSync(path.dirname(first), { recursive: true }); fs.writeFileSync(first, JSON.stringify({ language: 'th' })); };",
+    body, ''].join('\n'), 'utf8');
+  return spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, CONFIGURE, ...args], {
+    cwd: sb.proj,
+    encoding: 'utf8',
+    env: { ...process.env, HOME: sb.home, USERPROFILE: sb.home, TEMP: sb.root, TMP: sb.root, TMPDIR: sb.root, CLAUDE_CONFIG_DIR: '', CW877_FIRST: projCfg(sb) },
+    timeout: 20000,
+  });
+}
+const loaderReads = (sb) => {
+  for (const p of [projCfg(sb), path.join(sb.proj, '.agents', 'coal', 'coalwash.json')]) if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+  return null;
+};
+
+test('T-29LD-4 (A): a config created at the loader\'s first candidate after an existence check still receives the edit', (t) => {
+  const sb = sandbox(t);
+  fs.mkdirSync(path.join(sb.proj, '.agents'), { recursive: true });
+  // Fires right after the run has looked for the `.agents` folder to pick its first-write target: the first candidate appears
+  // between that choice and the write (planting it earlier would also make `.claude`, and the choice would follow it).
+  const r = seamRun(sb, ['--quickVsFull', 'full'], [
+    "const agents = path.join(path.dirname(path.dirname(path.dirname(first))), '.agents');",
+    'const orig = fs.existsSync; let fired = false;',
+    'fs.existsSync = function (p) { const v = orig.call(fs, p); if (!fired && v && String(p) === agents) { fired = true; plant(); } return v; };',
+  ].join('\n'));
+  assert.ok(fs.existsSync(projCfg(sb)), 'the seam fired: ' + r.stderr);
+  const read = loaderReads(sb);
+  if (r.status === 0) assert.strictEqual(read && read.quickVsFull, 'full', 'a run that reports success put the edit where the loader reads: ' + r.stdout + r.stderr);
+  else {
+    assert.doesNotMatch(r.stdout, /Successfully updated/, 'a refusal never reports success');
+    assert.ok(!fs.existsSync(path.join(sb.proj, '.agents', 'coal', 'coalwash.json')), 'a refusal wrote nothing at the first-write target');
+  }
+});
+
+test('T-29LD-4 (B): a config created at the loader\'s first candidate while the run writes is reported, never a silent success', (t) => {
+  const sb = sandbox(t);
+  fs.mkdirSync(path.join(sb.proj, '.agents'), { recursive: true });
+  // Fires on the first folder made under .agents (the write's own parent folder): the first candidate appears mid-write.
+  const r = seamRun(sb, ['--quickVsFull', 'full'], [
+    'const orig = fs.mkdirSync; let fired = false;',
+    "fs.mkdirSync = function (p, ...rest) { const v = orig.call(fs, p, ...rest); if (!fired && String(p).includes('.agents')) { fired = true; plant(); } return v; };",
+  ].join('\n'));
+  const read = loaderReads(sb);
+  if (read && read.quickVsFull === 'full') return; // the edit is where the loader reads
+  assert.notStrictEqual(r.status, 0, 'the run does not exit 0 when its edit is not where the loader reads: ' + r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /Successfully updated/, 'and never says it succeeded');
 });
