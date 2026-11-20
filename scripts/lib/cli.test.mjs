@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gauge, gaugeLine, measureOnly } from './cli.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem } from './tailings.mjs';
 import { snapshotOnFirstWrite } from './writeguard.mjs';
@@ -134,6 +134,79 @@ test('writeguard-restore --out: the restored file is owner-only where the volume
     const r = run(proj, home, ['writeguard-restore', path.basename(snap), '--out', out]);
     assert.strictEqual(r.status, 0, r.stderr);
     assert.strictEqual(fs.statSync(out).mode & 0o777, 0o600, 'the restored file is owner-only');
+  } finally { clean(home, proj); }
+});
+
+// T-29LD-3: the name is looked at, then created. A dangling link planted between the two must not receive the snapshot's bytes:
+// a preload plants it right after the CLI's lstat of the --out name answers ENOENT (the seam), so the create meets the link.
+test('T-29LD-3: writeguard-restore --out refuses, and writes no snapshot bytes, when a link is planted between the name check and the create', (t) => {
+  const { home, proj } = sandbox();
+  try {
+    const probeLink = path.join(proj, 'link-probe');
+    try { fs.symlinkSync(path.join(proj, 'nowhere'), probeLink, 'file'); fs.unlinkSync(probeLink); } catch { t.skip('this volume or account cannot make a file symlink'); return; }
+    const gov = path.join(proj, 'MEMORY.md');
+    const orig = '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n';
+    fs.writeFileSync(gov, orig, 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const out = path.join(proj, 'MEMORY.md.restored');
+    const target = path.join(proj, 'planted-target');
+    const preload = path.join(proj, 'plant-link.mjs');
+    fs.writeFileSync(preload, [
+      "import fs from 'node:fs';",
+      'const out = process.env.CW877_OUT; const target = process.env.CW877_TARGET; const orig = fs.lstatSync; let planted = false;',
+      'fs.lstatSync = function (p, ...rest) {',
+      '  try { return orig.call(fs, p, ...rest); } catch (e) {',
+      "    if (!planted && String(p) === out && e && e.code === 'ENOENT') { planted = true; fs.symlinkSync(target, out, 'file'); }",
+      '    throw e;',
+      '  }',
+      '};',
+      '',
+    ].join('\n'), 'utf8');
+    const r = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, CLI, 'writeguard-restore', path.basename(snap), '--out', out], {
+      cwd: proj,
+      env: { ...process.env, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, CLAUDE_CONFIG_DIR: '', CW877_OUT: out, CW877_TARGET: target },
+      encoding: 'utf8',
+      timeout: 20000,
+    });
+    assert.ok(fs.lstatSync(out).isSymbolicLink(), 'the seam planted the link: ' + r.stderr);
+    const landed = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : '';
+    assert.strictEqual(landed, '', 'no snapshot byte reached the link target');
+    assert.strictEqual(r.status, 1, 'the run refuses: ' + r.stderr);
+  } finally { clean(home, proj); }
+});
+
+// T-29LD-3, the swapped entry: the create opens ONE handle and proves the name still names it before a byte is written. A preload
+// swaps the name right after that open (the created file renamed away, another file put in its place); the run must refuse,
+// leave the other file untouched, and write no snapshot byte into the file it created. This leg runs on every volume.
+test('T-29LD-3: writeguard-restore --out refuses, writes nothing and leaves the stranger alone, when the name is swapped right after the create', () => {
+  const { home, proj } = sandbox();
+  try {
+    const gov = path.join(proj, 'MEMORY.md');
+    const orig = '# Memory\n\n[link](https://x.com) v1.0.0 — the original bytes.\n';
+    fs.writeFileSync(gov, orig, 'utf8');
+    const snap = snapshotOnFirstWrite(proj, 'sess', gov, { home });
+    const out = path.join(proj, 'MEMORY.md.restored');
+    const preload = path.join(proj, 'swap-entry.mjs');
+    fs.writeFileSync(preload, [
+      "import fs from 'node:fs';",
+      'const out = process.env.CW877_OUT; const orig = fs.openSync; let swapped = false;',
+      'fs.openSync = function (p, ...rest) {',
+      '  const fd = orig.call(fs, p, ...rest);',
+      "  if (!swapped && String(p) === out) { swapped = true; fs.renameSync(out, out + '.moved'); fs.writeFileSync(out, 'STRANGER'); }",
+      '  return fd;',
+      '};',
+      '',
+    ].join('\n'), 'utf8');
+    const r = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, CLI, 'writeguard-restore', path.basename(snap), '--out', out], {
+      cwd: proj,
+      env: { ...process.env, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, CLAUDE_CONFIG_DIR: '', CW877_OUT: out },
+      encoding: 'utf8',
+      timeout: 20000,
+    });
+    assert.ok(fs.existsSync(out + '.moved'), 'the create went through one handle the seam could swap: ' + r.stderr);
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), 'STRANGER', 'the file now at the name is left as it was');
+    assert.strictEqual(fs.readFileSync(out + '.moved', 'utf8'), '', 'no snapshot byte was written into the created file');
+    assert.strictEqual(r.status, 1, 'the run refuses: ' + r.stderr);
   } finally { clean(home, proj); }
 });
 

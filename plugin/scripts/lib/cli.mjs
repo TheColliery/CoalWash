@@ -632,12 +632,31 @@ function main() {
         try { fs.lstatSync(outPath); } catch (e) { free = Boolean(e && e.code === 'ENOENT'); }
         try {
           if (!free) throw Object.assign(new Error('name taken'), { code: 'EEXIST' });
-          fs.writeFileSync(outPath, r.content, { flag: 'wx', mode: 0o600 });
+          // T-29LD-3: create through ONE handle, prove the name still names that plain single-link file, then write through the
+          // handle. A name swapped or linked after the create is refused before a byte is written; nothing at the name is removed,
+          // because the refusal means the handle did not prove the name to be ours.
+          const o = openPlainFile(outPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), null, 0o600);
+          if (o.fd === undefined) {
+            throw Object.assign(new Error(o.why === 'unopenable' ? (o.code || 'unopenable') : `the name changed under the create (${o.why})`), { code: o.why === 'unopenable' ? o.code : 'ECHANGED' });
+          }
+          try {
+            fs.writeFileSync(o.fd, r.content);
+          } catch (we) {
+            // A failed write leaves a partial file the handle proved to be ours: remove that entry only if the name still names it.
+            try {
+              const h = fs.fstatSync(o.fd, { bigint: true });
+              const n = fs.lstatSync(outPath, { bigint: true });
+              if (h.ino && h.dev === n.dev && h.ino === n.ino) fs.unlinkSync(outPath);
+            } catch { /* the name moved on: it is not ours to remove */ }
+            throw we;
+          } finally { fs.closeSync(o.fd); }
         } catch (e) {
           const shown = escapeRawControls(String(outPath));
           console.error(e && e.code === 'EEXIST'
             ? `writeguard-restore: ${shown} already exists — refusing to overwrite it; nothing was written`
-            : `writeguard-restore: could not write ${shown}: ${escapeRawControls(String(e && e.code ? e.code : e.message))}`);
+            : e && e.code === 'ECHANGED'
+              ? `writeguard-restore: ${shown} changed while it was created (a link or another file took the name) — refusing; no snapshot byte was written`
+              : `writeguard-restore: could not write ${shown}: ${escapeRawControls(String(e && e.code ? e.code : e.message))}`);
           process.exitCode = 1;
           return;
         }
