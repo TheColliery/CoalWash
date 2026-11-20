@@ -3253,3 +3253,31 @@ test('T-29LD-2: a dig-gauge arm keeps a crossing a hook saved while it ran', () 
     assert.strictEqual(s.digGaugeSession, 'sess-a', 'the call\'s own flag is written');
   } finally { clean(home, proj); }
 });
+
+// F880-1: the save's re-load can fail (a transient EBUSY while a hook renames over the file); loadState then answers {}. A merge onto
+// that empty base would write this call's few fields and drop every other one. The re-load that finds no owned record must save
+// what the call loaded, whole. Made from the INSPECT 880 witness: every open of a state file after the call's first throws EBUSY.
+test('F880-1: a CLI state edit whose re-read fails keeps every field it did not change', () => {
+  const { home, proj } = sandbox();
+  const realOpen = fs.openSync;
+  let seen = -1;
+  try {
+    setLeanFloor(home, proj, 12345);
+    markQuickTried(home, proj);
+    fs.openSync = function (p, ...rest) {
+      if (seen >= 0 && /^state(-.*)?[.]json$/.test(path.basename(String(p)))) {
+        seen++;
+        if (seen >= 2) throw Object.assign(new Error('EBUSY: planted'), { code: 'EBUSY' });
+      }
+      return realOpen.call(fs, p, ...rest);
+    };
+    seen = 0;
+    stateNs.armDigGauge(home, proj, 'sess-880');
+    fs.openSync = realOpen;
+    assert.ok(seen >= 2, 'the fault reached the re-load: ' + seen);
+    const s = loadState(proj, home);
+    assert.strictEqual(s.leanFloorTokens, 12345, 'the floor the call never touched is kept');
+    assert.strictEqual(s.quickTried, true, 'the quick mark the call never touched is kept');
+    assert.strictEqual(s.digGaugeSession, 'sess-880', 'the call\'s own flag is written');
+  } finally { fs.openSync = realOpen; clean(home, proj); }
+});

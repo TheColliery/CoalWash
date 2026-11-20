@@ -1433,8 +1433,15 @@ function sweepDeadProjectStates(home, projectRoot) {
 // shared with the hooks' writers, so the save re-loads the file and writes only what THIS call changed, each field only while it
 // still holds the value this call loaded: a field another writer saved meanwhile keeps that writer's value, and every field this
 // call did not touch is the fresh one. The window left is the re-load to the rename, inside saveState (a stated limit).
+// F880-1: the merge base is only a record this project OWNS, read again at save time from either state path (the same two reads
+// loadState makes). loadState answers {} for a failed read (an open error, a transient EBUSY) and for a record another project
+// wrote; merging onto that would keep this call's few fields and drop every other one. With no owned record read, save what this
+// call loaded, whole, as before T-29LD-2.
 function saveChangedFields(projectRoot, home, before, after) {
-  const fresh = loadState(projectRoot, home);
+  const owned = ownedRecord(readStateFile(statePath(projectRoot, home)), projectRoot)
+    || ownedRecord(readStateFile(stateFallbackPath(projectRoot, home)), projectRoot);
+  if (!owned) return saveState(after, projectRoot, home);
+  const fresh = migrateProjSchema(owned);
   for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
     const was = JSON.stringify(before[k]);
     if (JSON.stringify(after[k]) === was) continue; // not changed by this call: the fresh value stands
