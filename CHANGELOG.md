@@ -2,6 +2,17 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Fixed
+
+- A CLI state edit that loaded no state record (the read failed, or the file was whole again later) computed its change on an empty base. A `restore` then answered acknowledged while its watermark rise was skipped, and the change was not replayed onto the record the save found. Now the edit is replayed onto that record. An edit that cannot apply there (`return-leave` with no finite fat) changes nothing and exits 1. Test: `scripts/lib/caliper.test.mjs` (a load that fails briefly, then a save that finds the record: the watermark rises and the replayed change is kept)
+- A hook that moved the state to the main file in the middle of a CLI state edit (the command had loaded the fallback copy) lost its crossing and spawn count: the save wrote the edit to the main file without them. Now the save also reads the other state path and takes its record when that record is stamped later than both the loaded record and the file it re-read. Test: `scripts/lib/caliper.test.mjs` (a hook moves the state to the main file during an edit: its spawn count is kept)
+- A newer state record in the fallback copy beside the main file was never read: the load preferred the main file, and the next save removed the fallback, so its newer fields were lost. Now the newer of the two stamped records is loaded. A record written before this version has no stamp and never beats the main file, so an older fallback copy stays unread. Test: `scripts/lib/caliper.test.mjs` (a newer fallback record's field is loaded and kept; an unstamped fallback is not loaded over the main file)
+- `restore` printed its success line and exited 0 when the state save failed. `restore` and `return-leave` also printed "(the rest was applied)" when nothing had been saved. Now a failed save is named on stderr. `restore` still exits 0, since the bytes it prints are complete. `return-leave` says it was NOT applied and exits 1. "(the rest was applied)" prints only when the save landed. Test: `scripts/lib/cli.test.mjs` (a failed state save is named by `restore` and `return-leave`, and neither says the rest was applied)
+- When `writeguard-restore --out` refused because the output name changed while the file was created, the message said an empty file might remain at that name. A stranger's file can sit there, or nothing. Now the message says what is true on every such path: nothing was written, and what is at that name was left as it was. The empty-file wording stays only where the created file is still at the name. Test: `scripts/lib/cli.test.mjs` (another file takes the output name after the create: the refusal does not claim an empty file remains there)
+- When a write into `writeguard-restore --out` failed, its cleanup removed the file by name after checking it, so another file that took the name between the check and the removal was deleted. Now the cleanup empties the file the run created, through its own handle, and leaves it in place. It never removes by name, and the refusal says so. Test: `scripts/lib/cli.test.mjs` (a file another program puts at the output name during a failed write is not removed)
+
 ## [1.19.8] - 2026-11-21
 
 Three races a second writer could win now refuse or keep its change
