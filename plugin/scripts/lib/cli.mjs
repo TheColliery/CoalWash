@@ -652,12 +652,12 @@ function main() {
           try {
             fs.writeFileSync(o.fd, r.content);
           } catch (we) {
-            // A failed write leaves a partial file the handle proved to be ours: remove that entry only if the name still names it.
-            try {
-              const h = fs.fstatSync(o.fd, { bigint: true });
-              const n = fs.lstatSync(outPath, { bigint: true });
-              if (h.ino && h.dev === n.dev && h.ino === n.ino) fs.unlinkSync(outPath);
-            } catch { /* the name moved on: it is not ours to remove */ }
+            // N880-5: a failed write leaves a partial file the handle proved to be ours. It is never unlinked by name (a name checked
+            // then unlinked is two steps, and a swap between them removes a stranger's file); it is emptied through its own handle,
+            // which reaches only that file wherever the name now points, and left in place, and the refusal names it.
+            let emptied = false;
+            try { fs.ftruncateSync(o.fd, 0); emptied = true; } catch { /* the refusal says a partial file may remain */ }
+            try { we.cwOutLeft = emptied ? 'emptied' : 'partial'; } catch { /* a frozen error: the generic refusal stands */ }
             throw we;
           } finally { fs.closeSync(o.fd); }
         } catch (e) {
@@ -670,7 +670,9 @@ function main() {
               ? `writeguard-restore: ${shown} changed while it was created (a link, another file or a second name took the name, or it was removed) — refusing; nothing was written; what is at that name now is not CoalWash's to touch and was left as it was`
               : e && e.code === 'EUNVERIFIABLE'
                 ? `writeguard-restore: this volume cannot prove that ${shown} is the file just created (it reports no file id) — refusing; nothing was written into it; an empty file may remain at that name`
-                : `writeguard-restore: could not write ${shown}: ${escapeRawControls(String(e && e.code ? e.code : e.message))}`);
+                : e && e.cwOutLeft
+                  ? `writeguard-restore: could not write ${shown}: ${escapeRawControls(String(e.code ? e.code : e.message))} — refusing; the file it created was ${e.cwOutLeft === 'emptied' ? 'emptied and left in place' : 'left in place and may hold part of the snapshot'} (it is not removed by name: another file could take the name in between); remove it by hand if it is still the file you asked for`
+                  : `writeguard-restore: could not write ${shown}: ${escapeRawControls(String(e && e.code ? e.code : e.message))}`);
           process.exitCode = 1;
           return;
         }
