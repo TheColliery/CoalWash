@@ -665,7 +665,9 @@ function main() {
           console.error(e && e.code === 'EEXIST'
             ? `writeguard-restore: ${shown} already exists — refusing to overwrite it; nothing was written`
             : e && e.code === 'ECHANGED'
-              ? `writeguard-restore: ${shown} changed while it was created (a link or another file took the name) — refusing; no snapshot byte was written; an empty file may remain at that name`
+              // L884-1: ECHANGED is every `openPlainFile` refusal after the create (not-plain, changed): a link, another file or a second
+              // name took the name, or it was removed. Whatever is there now was not proven ours, so nothing at the name is touched.
+              ? `writeguard-restore: ${shown} changed while it was created (a link, another file or a second name took the name, or it was removed) — refusing; nothing was written; what is at that name now is not CoalWash's to touch and was left as it was`
               : e && e.code === 'EUNVERIFIABLE'
                 ? `writeguard-restore: this volume cannot prove that ${shown} is the file just created (it reports no file id) — refusing; nothing was written into it; an empty file may remain at that name`
                 : `writeguard-restore: could not write ${shown}: ${escapeRawControls(String(e && e.code ? e.code : e.message))}`);

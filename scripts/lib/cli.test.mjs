@@ -241,6 +241,10 @@ test('T-29LD-3: writeguard-restore --out refuses, writes nothing and leaves the 
     assert.strictEqual(fs.readFileSync(out, 'utf8'), 'STRANGER', 'the file now at the name is left as it was');
     assert.strictEqual(fs.readFileSync(out + '.moved', 'utf8'), '', 'no snapshot byte was written into the created file');
     assert.strictEqual(r.status, 1, 'the run refuses: ' + r.stderr);
+    // L884-1: the created file is gone from the name, and a stranger's file sits there, so no "empty file may remain" there
+    assert.doesNotMatch(r.stderr, /empty file may remain/, 'the refusal does not claim an empty file at the name: ' + r.stderr);
+    assert.match(r.stderr, /not CoalWash's to touch and was left as it was/, 'it says what is at the name was left alone: ' + r.stderr);
+    assert.match(r.stderr, /nothing was written/, 'and that nothing was written: ' + r.stderr);
   } finally { clean(home, proj); }
 });
 
