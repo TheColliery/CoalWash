@@ -212,12 +212,16 @@ test('E2-4 keeps (simulated file link): a project keeps.json whose realpath is o
   writeJson(kp, { v: 1, keeps: [{ target: 'PLANTED', reason: 'from outside' }] });
   const undo = fakeRealpath(t, kp, s.secret);
   assert.deepEqual(loadKeeps(s.project), []);
+  const before = fs.readFileSync(kp, 'utf8');
   const r = recordKeep(s.project, { target: 'NEW', reason: 'r' });
   undo();
-  assert.equal(r.ok, true, JSON.stringify(r));
+  // T-RD-KEEPS (named step, 29mm item R: "a refused link" is a read failure, not an empty store): the record is now refused by
+  // name and writes nothing, where it used to rewrite the store without the outside keeps; the outside keeps are still never merged
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.match(String(r.error), /could not be read \(outside-root\); nothing was written/, r.error);
   const written = fs.readFileSync(kp, 'utf8');
-  assert.match(written, /NEW/);
-  assert.doesNotMatch(written, /PLANTED/, 'the outside keeps were not read into the rewrite');
+  assert.equal(written, before, 'nothing was written');
+  assert.doesNotMatch(written, /NEW/, 'the outside keeps were not merged into a rewrite');
 });
 
 test('E2-4 keeps: a project keeps.json that is a FILE symlink out of the project protects nothing', (t) => {

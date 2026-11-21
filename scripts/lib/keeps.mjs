@@ -14,8 +14,9 @@
 //
 // Lives inside the SAME sandbox dir apply.mjs already self-ignores + contains
 // (<project>/.claude/coalwash/) — no new privacy surface, no new config key.
-// Fail-silent throughout (Phoenix-13): a missing/corrupt file reads as [], a
-// write failure is swallowed. The ledger is a nice-to-have optimization, never
+// Readers are fail-silent (Phoenix-13): a missing/corrupt file reads as []. The
+// recorder never throws: it answers { ok: false, error } and writes nothing over
+// a store it could not read or parse (T-RD-KEEPS). The ledger is a nice-to-have optimization, never
 // load-bearing for correctness — losing it just re-exposes a target to review.
 //
 // GLOBAL variant (design-pass item, MEMORY.md "THE SHARED GLOBAL SLICE"): a
@@ -31,7 +32,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { txDirFor, ensureSelfIgnore, trackedInOwnFolder, acquireLock, lockLeftNote } from './apply.mjs';
-import { claudeBaseDir, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
+import { claudeBaseDir, readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir, writeOwnTemp } from './repo-fs.mjs';
 
 export const KEEPS_NAME = 'keeps.json'; // exported for apply.mjs's KEEPS-GATE (opts.txDir-aware path build)
@@ -113,13 +114,45 @@ function rawKeepsOrNull(file, root) {
 // actually using (opts.txDir in hermetic tests) — one loader, one schema.
 // `root` = null: a caller-trusted path (the global store, a test fixture); a project store goes through loadProjectKeepsAt.
 export function loadKeepsAt(file, root = null) {
-  const parsed = rawKeepsOrNull(file, root);
+  return keepsOf(rawKeepsOrNull(file, root));
+}
+// The keeps a parsed store holds ([] for any shape or schema this version cannot read).
+function keepsOf(parsed) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
   if (parsed.v !== null && typeof parsed.v === 'object') return []; // An object schema field is unreadable, and Number() on it throws
   if (Number(parsed.v) > KEEPS_SCHEMA_V) return []; // newer schema: unreadable to us
   return Array.isArray(parsed.keeps) ? parsed.keeps.filter((k) => k && typeof k.target === 'string') : [];
 }
-const loadKeepsFrom = loadKeepsAt;
+
+// T-RD-KEEPS (29mm item R): the store as the RECORDER reads it before it rewrites the file, one of four answers, so "no keeps" is
+// never confused with "could not read the keeps". 'absent' (nothing there: ENOENT/ENOTDIR, or a file with no bytes but white
+// space, which holds nothing to lose) · 'unreadable' (the file is there and the read failed: EPERM, EACCES, EBUSY, a directory or
+// special file at the path, over the bound, a link the containment refuses) · 'corrupt' (read, but not JSON, or not a keeps
+// object: the user's record too, so it is never replaced; RULED with T-RD-KEEPS) · 'parsed' (with `raw`). A throw reads as
+// 'unreadable', the side that writes nothing. The readers (loadKeeps, the KEEPS-GATE) keep their lenient [] (they write nothing).
+function keepsStoreRead(file, root) {
+  let o;
+  try { o = repoReadOutcome(file, root, MAX_DOC_BYTES); } catch (e) { return { kind: 'unreadable', code: (e && e.code) || 'error' }; }
+  if (!o.buf) {
+    if (o.why === 'absent') return { kind: 'absent' };
+    return { kind: 'unreadable', code: o.code && o.why !== 'unreadable' ? `${o.why}, ${o.code}` : (o.code || o.why) };
+  }
+  let text = o.buf.toString('utf8');
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  if (text.trim() === '') return { kind: 'absent' };
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return { kind: 'corrupt' }; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'corrupt' };
+  if (parsed.keeps !== undefined && !Array.isArray(parsed.keeps)) return { kind: 'corrupt' };
+  return { kind: 'parsed', raw: parsed };
+}
+// The refusal a store read that is neither absent nor parsed answers with: it names the file and the code, writes nothing.
+function storeReadRefusal(file, read) {
+  const error = read.kind === 'corrupt'
+    ? `keeps read: the store ${file} is not a keeps store CoalWash can read (not JSON, or not its { v, keeps: [...] } shape); nothing was written and the file stands — fix the file or move it aside, then record the keep`
+    : `keeps read: the store ${file} exists but could not be read (${read.code}); nothing was written and the store stands — ${read.code === 'directory' ? 'move the directory away' : 'make the file readable'}, then record the keep`;
+  return { ok: false, anchorDropped: false, anchorStored: false, error };
+}
 
 // Record (or refresh) an adjudicated keep at `file`. Upserts by `target` — a
 // re-review of the same target REPLACES the prior entry rather than piling up
@@ -166,8 +199,11 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
   const newer = (raw) => raw && typeof raw === 'object' && !Array.isArray(raw) && Number(raw.v) > KEEPS_SCHEMA_V;
   // fire 126: the body's returns land in `out`, so the lock's release below is reported on every result
   const out = (() => { try {
-    const raw = rawKeepsOrNull(file, root);
-    if (newer(raw)) return { ok: false, anchorDropped: false, anchorStored: false }; // read-only to us
+    // T-RD-KEEPS: refused BEFORE anything is written (the folder, its catch-all, the lock, a temp) when the store exists and could
+    // not be read, or is not a keeps store
+    const first = keepsStoreRead(file, root);
+    if (first.kind === 'unreadable' || first.kind === 'corrupt') return storeReadRefusal(file, first);
+    if (first.kind === 'parsed' && newer(first.raw)) return { ok: false, anchorDropped: false, anchorStored: false }; // read-only to us
     ensureDir();
     lock = acquireKeepsLock(file, selfIgnore);
     if (lock.nonPlain) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: ${lockFile} is not a plain file (it is ${lock.nonPlain}); CoalWash never takes over a lock it did not make, so nothing was written and no retry was spent — remove it by hand once no CoalWash run is active` };
@@ -175,8 +211,11 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
     if (lock.exhausted) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: ${lockFile} could not be created after ${lock.exhausted} attempts (${lock.code}); nothing was written — record the keep again, and if it fails the same way again, check that the folder can be written` };
     if (!lock.acquired) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: another recorder holds ${lockFile} (${lock.reason}); nothing was written — record the keep again` };
     // re-read INSIDE the lock: the read above may be stale by now, and the upsert must start from what is on disk
-    if (newer(rawKeepsOrNull(file, root))) return { ok: false, anchorDropped: false, anchorStored: false };
-    const existing = loadKeepsFrom(file, root);
+    // the same four answers again: a store that became unreadable since the read above is refused, the lock released below
+    const again = keepsStoreRead(file, root);
+    if (again.kind === 'unreadable' || again.kind === 'corrupt') return storeReadRefusal(file, again);
+    if (again.kind === 'parsed' && newer(again.raw)) return { ok: false, anchorDropped: false, anchorStored: false };
+    const existing = again.kind === 'parsed' ? keepsOf(again.raw) : [];
     const prior = existing.find((k) => k.target === target);
     const keeps = existing.filter((k) => k.target !== target);
     // grad6 W3-K2 (CoalBoard verdict): this used to REBUILD the entry from
@@ -393,7 +432,7 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
 // A project store, read contained to the tx dir ITSELF (E2-4). `txDir` is ownSandboxDir's answer (or a caller-trusted
 // override), so no link sits between the project root and it; the containment refuses one planted below it.
 export function loadProjectKeepsAt(txDir) {
-  return loadKeepsFrom(path.join(txDir, KEEPS_NAME), txDir);
+  return loadKeepsAt(path.join(txDir, KEEPS_NAME), txDir);
 }
 export function loadKeeps(projectRoot) {
   let dir;
@@ -419,7 +458,7 @@ export function pendingUserKeeps(keeps) {
 }
 
 export function loadGlobalKeeps(home = os.homedir()) {
-  return loadKeepsFrom(globalKeepsPath(home));
+  return loadKeepsAt(globalKeepsPath(home));
 }
 export function recordGlobalKeep(home = os.homedir(), opts = {}) {
   const dir = claudeBaseDir(home);

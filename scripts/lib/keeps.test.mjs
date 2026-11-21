@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { keepsPath, loadKeeps, recordKeep, globalKeepsPath, loadGlobalKeeps, recordGlobalKeep, pendingUserKeeps } from './keeps.mjs';
 import * as keepsModule from './keeps.mjs';
 import { txDirFor, acquireLock } from './apply.mjs';
@@ -1084,9 +1085,11 @@ test('fire 133: a keeps store that is a directory refuses at once with what it i
     let r;
     try { r = recordKeep(proj, { target: 'blocked' }); } finally { f.restore(); }
     assert.strictEqual(r.ok, false, JSON.stringify(r));
-    assert.ok(r.error.startsWith(`keeps write: the store ${keepsPath(proj)} is a directory`) && r.error.includes('move the directory away'), r.error);
+    // T-RD-KEEPS (named step): the directory is now refused at the store READ, before the lock and the temp, so no rename is
+    // tried at all (it was refused at the first rename before); the words still say what it is and what to do
+    assert.ok(r.error.startsWith(`keeps read: the store ${keepsPath(proj)} exists but could not be read (directory)`) && r.error.includes('move the directory away'), r.error);
     assert.ok(!r.error.includes('record the keep again'), r.error);
-    assert.strictEqual(f.tries, 1, 'no rename retry');
+    assert.strictEqual(f.tries, 0, 'no rename tried');
     assert.strictEqual(fs.statSync(keepsPath(proj)).isDirectory(), true, 'the directory is left alone');
     assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
   } finally { clean(proj); }
@@ -1161,5 +1164,89 @@ for (const [name, plant, wantFlags] of [
       assert.ok(r.error.includes(`another recorder holds ${lockPath}`) && r.error.endsWith('record the keep again'), r.error);
       assert.ok(!r.error.includes('could not be taken'), 'never refused as permanent');
     } finally { clean(proj); }
+  });
+}
+
+// T-RD-KEEPS (29mm item R, inspect-906 §5 D1): a keeps store that EXISTS but could not be read was read as an empty store, so the
+// next record renamed a one-entry store over every prior keep and answered ok. Only "does not exist" means empty; any other read
+// failure, and content that is not a keeps store (ruled: the user's record too, never replaced silently), refuses by name, ok:false,
+// and nothing is written: the bytes stand, and no temp and no lock are left in the folder.
+const PRIOR_KEEPS = JSON.stringify({ v: 1, keeps: [{ target: 'a.md', reason: 'kept by the user', date: '2026-01-01' }, { target: 'b.md', reason: 'kept too', date: '2026-01-02' }] });
+function storeFor(scope) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `cwk-rd-${scope}-`)));
+  const file = scope === 'global' ? globalKeepsPath(root) : keepsPath(root);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const record = (opts) => (scope === 'global' ? recordGlobalKeep(root, opts) : recordKeep(root, opts));
+  return { root, file, record };
+}
+function assertRefusedUntouched(file, before, r, codeRe) {
+  assert.strictEqual(r.ok, false, 'the record is refused: ' + JSON.stringify(r));
+  assert.ok(typeof r.error === 'string' && r.error.includes(file), 'the refusal names the store: ' + r.error);
+  assert.match(r.error, codeRe, 'the refusal names what went wrong');
+  assert.match(r.error, /nothing was written/, 'and says nothing was written');
+  const left = fs.readdirSync(path.dirname(file)).filter((n) => n.startsWith(path.basename(file) + '.'));
+  assert.deepStrictEqual(left, [], 'no temp and no lock is left beside the store');
+  if (before !== null) assert.strictEqual(fs.readFileSync(file, 'utf8'), before, 'the store is byte for byte unchanged');
+}
+for (const scope of ['project', 'global']) {
+  test(`T-RD-KEEPS: a ${scope} keeps store whose read fails EPERM is never replaced; the record is refused by name`, (t) => {
+    const { root, file, record } = storeFor(scope);
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    fs.writeFileSync(file, PRIOR_KEEPS, 'utf8');
+    const target = path.resolve(file);
+    const realOpen = fs.openSync;
+    fs.openSync = function (p, flags, ...rest) {
+      if (path.resolve(String(p)) === target && (flags === undefined || flags === 'r' || (typeof flags === 'number' && (flags & 3) === 0))) {
+        const e = new Error(`EPERM: operation not permitted, open '${p}'`); e.code = 'EPERM'; throw e;
+      }
+      return realOpen.call(fs, p, flags, ...rest);
+    };
+    let r;
+    try { r = record({ target: 'new.md', reason: 'a new keep' }); } finally { fs.openSync = realOpen; }
+    assertRefusedUntouched(file, PRIOR_KEEPS, r, /EPERM/);
+  });
+
+  test(`T-RD-KEEPS: a ${scope} keeps store that is not JSON (or not the keeps shape) is never replaced; the record is refused by name`, (t) => {
+    const { root, file, record } = storeFor(scope);
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    for (const bytes of ['{ not json, but the user\'s', JSON.stringify([{ target: 'x' }]), JSON.stringify({ v: 1, keeps: { target: 'x' } })]) {
+      fs.writeFileSync(file, bytes, 'utf8');
+      assertRefusedUntouched(file, bytes, record({ target: 'new.md', reason: 'a new keep' }), /not a keeps store/);
+    }
+  });
+
+  test(`T-RD-KEEPS: a directory at the ${scope} keeps store's path is refused before anything is written`, (t) => {
+    const { root, file, record } = storeFor(scope);
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    fs.mkdirSync(file);
+    assertRefusedUntouched(file, null, record({ target: 'new.md', reason: 'a new keep' }), /could not be read \(directory\)/);
+    assert.ok(fs.statSync(file).isDirectory(), 'the directory stands');
+  });
+
+  test(`T-RD-KEEPS: a ${scope} keeps store the OS denies reading (Windows ACL deny, or mode 000 as a non-root user) is never replaced`, (t) => {
+    const { root, file, record } = storeFor(scope);
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    fs.writeFileSync(file, PRIOR_KEEPS, 'utf8');
+    let restore;
+    if (process.platform === 'win32') {
+      const user = process.env.USERNAME;
+      if (!user) return t.skip('USERNAME is unset, so no ACL deny can name this user');
+      const deny = spawnSync('icacls', [file, '/deny', `${user}:(RD)`], { encoding: 'utf8', timeout: 20000 });
+      if (deny.status !== 0) return t.skip(`icacls cannot set a deny here (${deny.error ? deny.error.code : deny.status})`);
+      restore = () => spawnSync('icacls', [file, '/remove:d', user], { encoding: 'utf8', timeout: 20000 });
+    } else {
+      if (typeof process.getuid === 'function' && process.getuid() === 0) return t.skip('running as root, which reads a mode-000 file anyway');
+      fs.chmodSync(file, 0o000);
+      restore = () => fs.chmodSync(file, 0o600);
+    }
+    try {
+      let bound = false;
+      try { fs.readFileSync(file); } catch (e) { bound = e.code === 'EPERM' || e.code === 'EACCES'; }
+      if (!bound) return t.skip('the read deny does not bind this process here, so the case cannot be planted');
+      const r = record({ target: 'new.md', reason: 'a new keep' });
+      restore();
+      restore = null;
+      assertRefusedUntouched(file, PRIOR_KEEPS, r, /EPERM|EACCES/);
+    } finally { if (restore) restore(); }
   });
 }

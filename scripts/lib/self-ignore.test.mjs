@@ -305,7 +305,7 @@ const ANCHOR = 'PRIVATE-MEMORY-ANCHOR quoted text 42';
 test('L58-1: a TRACKED keeps.json is never written over: recordKeep refuses and git status stays clean', { skip: !HAS_GIT && 'git is not on PATH' }, async (t) => {
   const { recordKeep } = await import('./keeps.mjs');
   const s = sandbox(t);
-  plantTracked(s, 'keeps.json', '[]\n');
+  plantTracked(s, 'keeps.json', '{"v":1,"keeps":[]}\n'); // T-RD-KEEPS (named step): a valid empty store, so the TRACKED refusal answers (a bare [] is now refused first as not a keeps store; nothing is written either way)
   const r = recordKeep(s.proj, { target: path.join(s.store, 'MEMORY.md'), reason: 'x', anchor: ANCHOR });
   assert.equal(gitc(s, 'status', '--porcelain', '--', '.claude/coalwash'), '', 'no tracked file under .claude/coalwash changed');
   assert.ok(!fs.readFileSync(path.join(s.txDir, 'keeps.json'), 'utf8').includes(ANCHOR), 'the anchor reaches no tracked file');
@@ -337,7 +337,7 @@ for (const [label, rel, body] of [['journal.json', 'journal.json', '{}\n'], ['a 
 test('L58-1: a git query that ERRORS inside a repository (a corrupt index) refuses; it is never read as "nothing tracked"', { skip: !HAS_GIT && 'git is not on PATH' }, async (t) => {
   const { recordKeep } = await import('./keeps.mjs');
   const s = sandbox(t);
-  plantTracked(s, 'keeps.json', '[]\n');
+  plantTracked(s, 'keeps.json', '{"v":1,"keeps":[]}\n'); // T-RD-KEEPS (named step): a valid empty store, so the TRACKED refusal answers (a bare [] is now refused first as not a keeps store; nothing is written either way)
   fs.writeFileSync(path.join(s.proj, '.git', 'index'), 'not an index');
   const r = recordKeep(s.proj, { target: path.join(s.store, 'MEMORY.md'), reason: 'x', anchor: ANCHOR });
   assert.equal(r.ok, false);
