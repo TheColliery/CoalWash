@@ -3394,9 +3394,10 @@ test('T-NEWERFB: a newer fallback record beside the main file is the one loaded,
     const main = statePath(proj, home);
     const fb = stateFallbackPath(proj, home);
     const m = JSON.parse(fs.readFileSync(main, 'utf8'));
-    const stamp = (typeof m.savedAt === 'number' ? m.savedAt : Date.now()) + 60000;
+    // F2: "newer" is a higher revision counter (a save that followed the main file's), never a later clock stamp.
+    assert.ok(Number.isSafeInteger(m.saveRev), 'the engine\'s save writes a revision counter: ' + JSON.stringify(m));
     fs.mkdirSync(path.dirname(fb), { recursive: true });
-    fs.writeFileSync(fb, JSON.stringify({ ...m, leanFloorTokens: 222, labNewer: true, savedAt: stamp }), 'utf8');
+    fs.writeFileSync(fb, JSON.stringify({ ...m, leanFloorTokens: 222, labNewer: true, saveRev: m.saveRev + 1 }), 'utf8');
     const r = stateNs.armDigGauge(home, proj, 'sess-nfb');
     assert.strictEqual(r.applied, true, 'the arm is applied');
     assert.ok(!fs.existsSync(fb), 'the fallback is reaped by the save (one live home)');
@@ -3406,6 +3407,43 @@ test('T-NEWERFB: a newer fallback record beside the main file is the one loaded,
     assert.strictEqual(s.digGaugeSession, 'sess-nfb', 'the call\'s own flag is written');
   } finally { clean(home, proj); }
 });
+
+// F2 (cw-lab-1199 §1): the newer of the two state paths was picked by the wall-clock `savedAt`, so a stale fallback stamped in the
+// future (dual-boot RTC, a VM restore, a clock change) beat a main file written later, and the edit saved that stale record over the
+// main file. The lab's row: `restore | future-stamped stale fallback (clock skew) | ... fillers=0/8 applied=false STALE ... saved=true`.
+// The third case: a main file an older binary wrote (no counter) beside a fallback with one: a missing counter prefers the main file.
+const F2_CASES = [
+  ['with no revision counter', () => ({}), null],
+  ['with an older revision counter', (m) => ({ saveRev: Number.isSafeInteger(m.saveRev) ? Math.max(0, m.saveRev - 1) : 0 }), null],
+  ['with a counter, beside a main file with none', () => ({ saveRev: 99 }), (m) => { const { saveRev: _r, ...rest } = m; return rest; }],
+];
+for (const [name, fbRev, mainAs] of F2_CASES) {
+  test(`F2: a stale fallback stamped in the future (${name}) never wins over the main file, so a restore keeps every main field`, () => {
+    const { home, proj } = sandbox();
+    try {
+      ccSlugDir(home, proj);
+      seedProj(home, proj, { projectRoot: proj, ...SEEDED, lastObeseFat: 777 });
+      setLeanFloor(home, proj, 12345); // the main file, written now by the engine (it carries whatever stamp this version writes)
+      const main = statePath(proj, home);
+      const fb = stateFallbackPath(proj, home);
+      if (mainAs) fs.writeFileSync(main, JSON.stringify(mainAs(JSON.parse(fs.readFileSync(main, 'utf8')))), 'utf8');
+      const m = JSON.parse(fs.readFileSync(main, 'utf8'));
+      fs.mkdirSync(path.dirname(fb), { recursive: true });
+      fs.writeFileSync(fb, JSON.stringify({ stateSchema: STATE_SCHEMA, projectRoot: path.resolve(proj), savedAt: Date.now() + 365 * 86400000, subSpawns: 1, labF1: 'stale', ...fbRev(m) }), 'utf8');
+      const rep = {};
+      const r = stateNs.acknowledgeRestore(home, proj, 400, null, rep);
+      const s = JSON.parse(fs.readFileSync(main, 'utf8'));
+      assert.strictEqual(s.labF1, undefined, 'the stale fallback is not the record saved: ' + JSON.stringify(s));
+      assert.strictEqual(s.subSpawns, 5, 'the main file\'s spawn count is kept');
+      assert.strictEqual(s.leanFloorTokens, 12345, 'the main file\'s floor is kept');
+      assert.strictEqual(s.quickTried, true, 'the main file\'s quickTried is kept');
+      assert.ok(s.lastObeseFat > 777, 'the restore\'s own watermark is raised on the main record');
+      const seen = [m.saveRev, fbRev(m).saveRev].filter(Number.isSafeInteger);
+      assert.ok(Number.isSafeInteger(s.saveRev) && seen.every((v) => s.saveRev > v), 'the save raises past every counter read: ' + s.saveRev);
+      assert.strictEqual(r, true, 'and it says it applied: ' + JSON.stringify(rep));
+    } finally { clean(home, proj); }
+  });
+}
 
 for (const mode of ['EBUSY', 'unparsable']) {
   test(`T-RISESKIP: a restore whose load fails (${mode}) but whose save finds the record whole raises the watermark it answers for`, () => {

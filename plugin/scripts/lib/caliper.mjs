@@ -1251,20 +1251,40 @@ export function loadState(projectRoot, home = os.homedir()) {
   // another project wrote into either path is skipped, and the next source tried.
   return loadStateFrom(projectRoot, home).proj;
 }
-// A record's save stamp (saveState writes `savedAt`); a record written before 1.19.9 carries none and reads as the oldest.
-function savedStamp(rec) {
-  return rec && typeof rec.savedAt === 'number' && Number.isFinite(rec.savedAt) ? rec.savedAt : -Infinity;
+// F2 (cw-lab-1199): which of the two state paths is newer is read from `saveRev`, a per-project revision counter each save raises
+// from the highest it read, never from a wall clock (a clock set ahead stamped a stale fallback newer than a main file written
+// later). A record with no counter (every record written before this version) or a counter that is not a safe non-negative integer
+// reads as null.
+function revOf(rec) {
+  const v = rec && rec.saveRev;
+  return Number.isSafeInteger(v) && v >= 0 ? v : null;
 }
+// The fallback-side record is newer than the main-side one only when BOTH carry a counter and its counter is higher. A tie, a missing
+// or unreadable counter prefers the MAIN file, as 1.19.8 always did: the main record is the base, so none of its fields is dropped.
+function fallbackNewer(f, m) {
+  const a = revOf(f);
+  const b = revOf(m);
+  return a !== null && b !== null && a > b;
+}
+// The highest counter among the records given (null: none carries one), so the next save raises from every record this call read.
+function maxRev(...recs) {
+  let hi = null;
+  for (const r of recs) { const v = revOf(r); if (v !== null && (hi === null || v > hi)) hi = v; }
+  return hi;
+}
+const withRev = (rec, rev) => (rev === null ? rec : { ...rec, saveRev: rev });
 // loadState, also naming the file the record came from (null: the old root entry, or nothing), so a save can re-read THAT file.
-// T-NEWERFB: both state paths are read; the fallback is taken over an owned main record only when its stamp is LATER (a record
-// with no stamp never wins over the main file, so a stale unstamped fallback copy stays unread, as lab F1 needs).
+// T-NEWERFB: both state paths are read; the fallback is taken over an owned main record only when its counter is HIGHER (fallbackNewer:
+// a record with no counter never wins over the main file, so a stale fallback copy stays unread, as lab F1 needs). The record handed
+// back carries the highest counter read at either path, so its save raises past both.
 function loadStateFrom(projectRoot, home) {
   const pm = statePath(projectRoot, home);
   const pf = stateFallbackPath(projectRoot, home);
   const m = ownedRecord(readStateFile(pm), projectRoot);
   const f = path.resolve(pf) === path.resolve(pm) ? null : ownedRecord(readStateFile(pf), projectRoot);
-  if (f && (!m || savedStamp(f) > savedStamp(m))) return { proj: migrateProjSchema(f), from: pf };
-  if (m) return { proj: migrateProjSchema(m), from: pm };
+  const hi = maxRev(m, f);
+  if (f && (!m || fallbackNewer(f, m))) return { proj: migrateProjSchema(withRev(f, hi)), from: pf };
+  if (m) return { proj: migrateProjSchema(withRev(m, hi)), from: pm };
   return { proj: migrateProjSchema(readOldRootEntry(projectRoot, home) || {}), from: null };
 }
 
@@ -1472,11 +1492,11 @@ function sweepDeadProjectStates(home, projectRoot) {
 // Lab F1 (cw-lab-1198): the re-read is of the SAME file the load read (`from`), never the other path: a stale fallback copy beside a
 // main file that failed its re-read would read every field it lacks as another writer's change. Returns { saved, notApplied }: the
 // fields this call changed that another writer changed meanwhile (theirs stands, so this call's change is not applied).
-// T-HOMEMOVE: the OTHER state path is read too, and taken only when its stamp is later than both the loaded record's and the
-// re-read file's (a hook that moved the state's home to the main file mid-edit saved a stamped record there). A stale or unstamped
-// copy at the other path never qualifies, so lab F1 stands. A path that could not be read (T-WHOLESAVE): nothing is saved, saved:
-// false. Row 13 stays open: two saves in one millisecond tie on `savedAt`, and only a revision counter (a new persisted field, a
-// state-schema change) could say which is newer.
+// T-HOMEMOVE: the OTHER state path is read too, and taken only when its revision counter is higher than every counter the load read
+// (a hook that moved the state's home to the main file mid-edit saved a raised counter there). A stale copy, or one with no counter,
+// at the other path never qualifies, so lab F1 stands. A path that could not be read (T-WHOLESAVE): nothing is saved, saved: false.
+// Row 13 is closed by the counter (F2): a save that follows another raises past its counter, so two ordered saves never tie; two
+// saves made from the same read carry the same counter, are concurrent, and the main file wins the tie.
 // T-RISESKIP: a load that found no owned record (from null: a failed read, a later-whole file) computed its edit on an empty base,
 // so its edit is replayed with `step` onto the record found at save time; `step` returns false when it cannot apply there.
 function saveChangedFields(projectRoot, home, from, before, after, step) {
@@ -1492,10 +1512,18 @@ function saveChangedFields(projectRoot, home, from, before, after, step) {
   if ((same(own, pm) ? A : O).kind === 'unreadable') return { saved: false, notApplied: [] };
   let owned = A.kind === 'owned' ? A.rec : null;
   if (O.kind === 'owned') {
-    // t363 #14: a load that found no owned record takes any owned record now readable, whatever its stamp (newer first, the main
-    // file on a tie); a load that found one takes the other path only on a later stamp than both (lab F1, T-HOMEMOVE).
-    if (from === null) { if (!owned || savedStamp(O.rec) > savedStamp(owned)) owned = O.rec; }
-    else if (savedStamp(O.rec) > savedStamp(before) && (!owned || savedStamp(O.rec) > savedStamp(owned))) owned = O.rec;
+    // t363 #14: a load that found no owned record takes any owned record now readable, whatever its counter (`own` is the main file
+    // here, so the fallback only on a higher counter: newer first, the main file on a tie or a missing counter).
+    if (from === null) { if (!owned || fallbackNewer(O.rec, owned)) owned = O.rec; }
+    else {
+      // A load that found one takes the other path only when a save wrote it since the load: it carries a counter higher than
+      // every counter the load read (`before` holds the highest), so a stale copy never qualifies (lab F1); against the record
+      // re-read at `own`, the main side wins a tie or a missing counter (F2), the fallback side only on a higher counter.
+      const r = revOf(O.rec);
+      const sinceLoad = r !== null && (revOf(before) === null || r > revOf(before));
+      const ownBeats = owned !== null && (same(other, pm) ? fallbackNewer(owned, O.rec) : !fallbackNewer(O.rec, owned));
+      if (sinceLoad && !ownBeats) owned = O.rec;
+    }
   }
   if (!owned) {
     // No owned record at either path: write the loaded state only where neither path failed to read (absent or foreign); a path
@@ -1503,7 +1531,7 @@ function saveChangedFields(projectRoot, home, from, before, after, step) {
     if (A.kind === 'unreadable' || O.kind === 'unreadable') return { saved: false, notApplied: [] };
     return { saved: saveState(after, projectRoot, home), notApplied: [] };
   }
-  const fresh = migrateProjSchema(owned);
+  const fresh = migrateProjSchema(withRev(owned, maxRev(A.rec, O.rec, before))); // the save raises past every counter read
   if (from === null && typeof step === 'function') {
     const re = JSON.parse(JSON.stringify(fresh));
     if (step(re) === false) return { saved: null, notApplied: [] }; // not applicable there, never a failed save (L887-1)
@@ -1551,8 +1579,14 @@ function saveState(proj, projectRoot, home) {
     const nowMs = Date.now();
     const sinceSweep = nowMs - Number(base.deadStateSweepAt);
     const deadSweepDue = !(Number.isFinite(sinceSweep) && sinceSweep >= 0 && sinceSweep < DEAD_SWEEP_EVERY_MS); // CWK-157; a future stamp (clock skew) is "due"
-    // `savedAt` (1.19.9, T-NEWERFB, T-HOMEMOVE): the write's stamp, read to pick the newer of the two state paths. Version-STABLE.
-    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, savedAt: nowMs, ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
+    // `saveRev` (F2): one above the highest counter the caller read (loadState and the CLI save hand it on the record), read to pick
+    // the newer of the two state paths. An additive field read by shape, no field's meaning changed: STATE_SCHEMA stays 1, and an
+    // older binary never reads it, only carries it through its own `...base` spread. `savedAt`, the clock stamp it replaces, was
+    // never released (born and dropped inside 1.19.9), so a dev-era copy is dropped here rather than carried.
+    const { savedAt: _clockStamp, ...kept } = base;
+    const r = revOf(base);
+    const saveRev = r === null ? 1 : Number.isSafeInteger(r + 1) ? r + 1 : r;
+    const toWrite = { ...kept, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, saveRev, ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
     // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
     // carries (read its comment for the full reasoning; this module cannot import
     // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
