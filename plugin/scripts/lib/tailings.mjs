@@ -189,12 +189,24 @@ function removeStaleTemps(dir, { dryRun = false } = {}) {
   return gone;
 }
 function loadIndex(dir) {
+  return loadIndexRead(dir).index;
+}
+// T-RD-BININDEX (29mm item R): the index as a WRITER reads it. `unreadable` is true when index.json exists and the read failed
+// (EPERM, EACCES, EBUSY, a directory or special file at the path, over the bound, a link the containment refuses): the rows list
+// rebuilt from the blobs then carries no original or origin, so a writer that saved it would erase every item's name. Content that
+// was read but does not parse stays as before (CoalWash's own record, re-listed from the blobs), so a damaged index never strands
+// the bin. A throw reads as unreadable, the side that writes nothing.
+function loadIndexRead(dir) {
   let index = [];
+  let unreadable = false;
   try {
     // CWK-137: bounded. E2-4: contained to the bin dir ITSELF (`dir` is binDir's ownSandboxDir answer).
-    const parsed = JSON.parse(readRepoFileBounded(path.join(dir, INDEX_NAME), dir, MAX_DOC_BYTES));
-    if (Array.isArray(parsed)) index = parsed.filter((i) => i && isBareId(i.id) && BIN_ID_SHAPE.test(i.id)); // 653: a planted id never lists
-  } catch { /* no index (or an unreadable one): the blobs below are still listed */ }
+    const o = repoReadOutcome(path.join(dir, INDEX_NAME), dir, MAX_DOC_BYTES);
+    if (o.buf) {
+      const parsed = JSON.parse(o.buf.toString('utf8'));
+      if (Array.isArray(parsed)) index = parsed.filter((i) => i && isBareId(i.id) && BIN_ID_SHAPE.test(i.id)); // 653: a planted id never lists
+    } else if (o.why !== 'absent') unreadable = true;
+  } catch (e) { if (!(e instanceof SyntaxError)) unreadable = true; /* a parse failure: the blobs below are still listed */ }
   try {
     const named = new Set(index.map((i) => i.id));
     for (const f of fs.readdirSync(dir)) {
@@ -205,7 +217,7 @@ function loadIndex(dir) {
       index.push({ id: f, at: Number(f.slice(0, f.indexOf('-'))), bytes: st.size, original: null, origin: null });
     }
   } catch { /* no bin folder: nothing to list */ }
-  return index;
+  return { index, unreadable };
 }
 function saveIndex(dir, index) {
   try {
@@ -348,6 +360,9 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     // board enumeration): this id doubles as a WRITE PATH, so its unpredictability
     // is a security property, not just a name. Math.random() is not a CSPRNG
     // (security.md: never Math.random for anything security-relevant).
+    // T-RD-BININDEX: an index that exists but could not be read is never saved over, so no blob is written for a row that could not
+    // be listed (null, as any failed record; the lock is released below)
+    if (loadIndexRead(dir).unreadable) return null;
     const id = `${now}-${crypto.randomBytes(6).toString('hex')}`;
     const body = Buffer.isBuffer(content) ? content : Buffer.from(typeof content === 'string' ? content : '', 'utf8');
     // A fresh inode, or EEXIST-fail-closed — never write THROUGH an alias planted at the blob path. A pre-existing
@@ -358,7 +373,9 @@ export function recordBinItem(projectRoot, name, { content, original, origin = '
     // sweep never has to re-stat the common case.
     const row = { id, at: now, bytes: body.length, original: typeof original === 'string' ? original : null, origin: origin === 'wizard-cut' || origin === 'clobber-bank' ? origin : 'program-cut' };
     // loadIndex lists this item's own blob (written above) as a bare reconciled row; the full row replaces it.
-    let index = loadIndex(dir).filter((i) => i.id !== id);
+    const read = loadIndexRead(dir);
+    if (read.unreadable) { try { fs.rmSync(path.join(dir, id), { force: true }); } catch {} return null; } // became unreadable since the check above
+    let index = read.index.filter((i) => i.id !== id);
     index.push(row);
     if (typeof __testHooks.beforeIndexSave === 'function') __testHooks.beforeIndexSave(dir);
     // P95-1: a holder stalled past BIN_LOCK_STALE_MS is stolen from, and the thief may already have saved its row. Saving
@@ -503,7 +520,11 @@ function sweepBinLocked(dir, horizonMs, now, budgetBytes, lock) {
   if (temps.length) {
     try { appendOwnLog(path.join(dir, DEATH_LOG_NAME), temps.map((f) => `${new Date(now).toISOString()} removed unfinished temp ${f} (a writer died before the copy was named)`).join('\n') + '\n'); } catch { /* a record, not a gate */ }
   }
-  const index = loadIndex(dir); // re-read INSIDE the lock: the peek above may be stale by now
+  const read = loadIndexRead(dir); // re-read INSIDE the lock: the peek above may be stale by now
+  // T-RD-BININDEX: an index that exists but could not be read is never saved over and nothing is destroyed on it; the sweep waits
+  // for a run whose read succeeds (`indexUnreadable` says why it did nothing)
+  if (read.unreadable) return { destroyed: 0, kept: read.index.length, indexUnreadable: true };
+  const index = read.index;
   if (!index.length) return { destroyed: 0, kept: 0 };
   // 29ax: the index and the disk can disagree (a row whose file is gone, a declared size that is not the file's). The bin is
   // weighed from what is ON DISK. A held row never reaches the plan and weighs nothing (F512-1: a held file cannot be evicted,

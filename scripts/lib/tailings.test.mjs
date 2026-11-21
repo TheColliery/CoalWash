@@ -1255,3 +1255,48 @@ test('29ay M19: a destroyed row original is escaped in its certificate, as its i
     assert.ok(!/\u001b/.test(log), 'no raw ESC reaches the log');
   } finally { clean(proj); }
 });
+
+// T-RD-BININDEX (29mm item R, inspect-906 §5 D1): an index.json that exists but could not be read was treated as no index; the blobs
+// were re-listed with `original: null, origin: null` and the next save wrote that over the index, so each item's original name and
+// origin were lost. An unreadable index is now left in place: a record writes no blob and no index (null), and a sweep writes no
+// index and destroys nothing (it waits for a run whose read succeeds).
+function binIndexReadsFailEPERM(file, fn) {
+  const target = path.resolve(file);
+  const realOpen = fs.openSync;
+  fs.openSync = function (p, flags, ...rest) {
+    if (path.resolve(String(p)) === target && (flags === undefined || flags === 'r' || (typeof flags === 'number' && (flags & 3) === 0))) {
+      const e = new Error(`EPERM: operation not permitted, open '${p}'`); e.code = 'EPERM'; throw e;
+    }
+    return realOpen.call(fs, p, flags, ...rest);
+  };
+  try { return fn(); } finally { fs.openSync = realOpen; }
+}
+test('T-RD-BININDEX: a bin record whose index.json read fails EPERM writes no blob and never replaces the index', (t) => {
+  const proj = sandbox();
+  t.after(() => clean(proj));
+  const first = recordBinItem(proj, FAT_BIN_NAME, { content: 'first cut\n', original: 'MEMORY.md', now: 1700000000000 });
+  assert.ok(first, 'the first item is recorded');
+  const dir = path.join(txDirFor(proj), FAT_BIN_NAME);
+  const idx = path.join(dir, 'index.json');
+  const before = fs.readFileSync(idx, 'utf8');
+  const blobsBefore = fs.readdirSync(dir).filter((f) => BIN_ID_SHAPE.test(f)).sort();
+  const second = binIndexReadsFailEPERM(idx, () => recordBinItem(proj, FAT_BIN_NAME, { content: 'second cut\n', original: 'CLAUDE.md', now: 1700000001000 }));
+  assert.strictEqual(second, null, 'the record says it did not land');
+  assert.strictEqual(fs.readFileSync(idx, 'utf8'), before, 'the index it could not read is byte for byte unchanged (the first item keeps its name)');
+  assert.deepStrictEqual(fs.readdirSync(dir).filter((f) => BIN_ID_SHAPE.test(f)).sort(), blobsBefore, 'no new blob is left');
+  assert.deepStrictEqual(fs.readdirSync(dir).filter((f) => f.endsWith('.tmp')), [], 'no temp is left');
+});
+test('T-RD-BININDEX: a sweep whose index.json read fails EPERM never replaces the index and destroys nothing', (t) => {
+  const proj = sandbox();
+  t.after(() => clean(proj));
+  const old = 1700000000000;
+  const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'old cut\n', original: 'MEMORY.md', now: old });
+  assert.ok(id);
+  const dir = path.join(txDirFor(proj), FAT_BIN_NAME);
+  const idx = path.join(dir, 'index.json');
+  const before = fs.readFileSync(idx, 'utf8');
+  const r = binIndexReadsFailEPERM(idx, () => sweepFatBin(proj, { now: old + HORIZON_MS.fat + 86400000 }));
+  assert.strictEqual(r.destroyed, 0, 'nothing is destroyed on an index it could not read: ' + JSON.stringify(r));
+  assert.strictEqual(fs.readFileSync(idx, 'utf8'), before, 'the index is byte for byte unchanged');
+  assert.ok(fs.existsSync(path.join(dir, id)), 'the item stands');
+});

@@ -5346,6 +5346,29 @@ test('29ay M24: a row-less blob is counted on its own binMismatches line, with n
   } finally { clean(proj, home); }
 });
 
+test('T-RD-BININDEX: a bin whose index exists but cannot be read is not swept, its index stands, and the receipt says so', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    recordBinItem(proj, FAT_BIN_NAME, { content: 'an old cut', original: 'o.md', now: Date.now() });
+    const idxPath = path.resolve(path.join(txDirFor(proj), FAT_BIN_NAME, 'index.json'));
+    const before = fs.readFileSync(idxPath, 'utf8');
+    const f1 = path.join(store, 'f1.md');
+    write(f1, 'plain prose\n');
+    const realOpen = fs.openSync;
+    fs.openSync = function (p, flags, ...rest) {
+      if (path.resolve(String(p)) === idxPath && (typeof flags === 'number' ? (flags & 3) === 0 : (flags === undefined || flags === 'r'))) {
+        const e = new Error(`EPERM: operation not permitted, open '${p}'`); e.code = 'EPERM'; throw e;
+      }
+      return realOpen.call(fs, p, flags, ...rest);
+    };
+    let r;
+    try { r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'still plain prose\n' }]), { home }); } finally { fs.openSync = realOpen; }
+    assert.ok(Array.isArray(r.binMismatches) && r.binMismatches.some((l) => /fat-bin: its index exists but could not be read, so it was left as it is/.test(l)), 'the receipt names it: ' + JSON.stringify(r.binMismatches));
+    assert.strictEqual(fs.readFileSync(idxPath, 'utf8'), before, 'the index is byte for byte unchanged');
+  } finally { clean(proj, home); }
+});
+
 // ---------------------------------------------------------------------------
 // an undo write replaces whatever sits at its target, a link included, and never writes through one.
 test('restoreFile: a hard link at the target is replaced, and the other name keeps its own bytes', (t) => {

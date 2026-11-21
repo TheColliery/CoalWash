@@ -1550,6 +1550,7 @@ export function applyPlan(plan, opts = {}) {
       // their name). Counts only, never an id: the ids are in the death log.
       const binMismatches = binSweeps.flatMap(([name, r]) => {
         const lines = [];
+        if (r && r.indexUnreadable) lines.push(`retention: ${name}: its index exists but could not be read, so it was left as it is and nothing in this bin was swept`); // T-RD-BININDEX
         if (r && Array.isArray(r.mismatches) && r.mismatches.length) lines.push(`retention: ${name}: the index and the disk disagree on ${r.mismatches.length} rows (${r.heldBytes || 0}B real held); nothing deleted or edited, the bin is weighed from the disk; see the death log`);
         if (r && Array.isArray(r.rowless) && r.rowless.length) lines.push(`retention: ${name}: ${r.rowless.length} blobs have no row and age by their name; see the death log`);
         return lines;
