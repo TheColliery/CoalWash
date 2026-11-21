@@ -1296,7 +1296,7 @@ test('binaries whose small 16-bit values run in both byte orders (a PE string ta
   assert.strictEqual(r.code, 0, 'the gate passes the PE-shaped file: ' + r.out + r.err);
 });
 
-// 21a (Bankfire PR 70: CodeRabbit Verify's "false rejection of a longer UTF-16LE word at the 1 MiB window boundary", and CodeRabbit's thread on a key cut by a
+// 21a (a carrier's pull request: CodeRabbit Verify's "false rejection of a longer UTF-16LE word at the 1 MiB window boundary", and CodeRabbit's thread on a key cut by a
 // window): the wide-spelled search runs in windows, and a window's text END satisfied a pattern's closing boundary, so a word too long to be a key, cut by the end,
 // was reported; and a key across the edge was reported at its shorter first sighting, a fingerprint an acknowledgment of the whole value never matches. Each match
 // now belongs to the one window that owns its first byte, and that window's text runs past it. The gate's stream probe uses the same windows.
@@ -1328,7 +1328,7 @@ test('a wide-spelled word cut by a scan window is judged whole: a word too long 
   assert.strictEqual(probe(small), true);
 });
 
-// 21a (Bankfire PR 70, CodeRabbit on the gate's index listing): a path that is not valid UTF-8 was decoded to U+FFFD, so two such paths holding one key became one
+// 21a (CodeRabbit on a carrier's pull request, on the gate's index listing): a path that is not valid UTF-8 was decoded to U+FFFD, so two such paths holding one key became one
 // string, one hit and one fingerprint, and one acknowledgment cleared both; the push side's patch headers decoded the same way. Such a path now fails the gate by
 // name, at commit and at push, and its hits are never given a fingerprint another path shares. A path that is valid UTF-8 keeps its fingerprint.
 test('a staged or pushed path that is not valid UTF-8 fails the gate by name instead of sharing a fingerprint with another path -- RED before 21a', () => {
@@ -1360,7 +1360,7 @@ test('a staged or pushed path that is not valid UTF-8 fails the gate by name ins
   assert.ok(!pushed.out.includes(String.fromCharCode(0xfffd)), 'no path is shown decoded to U+FFFD: ' + pushed.out);
 });
 
-// 21a (Bankfire PR 70, CodeRabbit on the gate's failure message): "committed on the branch you push" sent a user whose staged tree held a match to the pushed branch,
+// 21a (CodeRabbit on a carrier's pull request, on the gate's failure message): "committed on the branch you push" sent a user whose staged tree held a match to the pushed branch,
 // while the tree scan reads acknowledgments from HEAD. The message now names the tree each kind of hit is acknowledged in.
 test('the failure message says where each kind of hit is acknowledged: a tree hit in HEAD, a pushed hit in the pushed commit -- RED before 21a', () => {
   const r = run(repo([{ 'k.txt': 'token = ' + 'gh' + 'p_' + 'Q7w'.repeat(12) + '\n' }]));

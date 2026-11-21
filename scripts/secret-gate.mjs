@@ -196,7 +196,7 @@ async function main() {
   const remoteArg = (args.find((a) => a.startsWith('--remote=')) || '').slice('--remote='.length);
   const fails = [];
   let tracked;
-  // 21a (Bankfire PR 70, CodeRabbit): the listing is split as BYTES, and a path that does not survive a round trip through UTF-8 is set aside and named, never
+  // 21a (CodeRabbit on a carrier's pull request): the listing is split as BYTES, and a path that does not survive a round trip through UTF-8 is set aside and named, never
   // decoded to U+FFFD: two such paths would become one name, and their hits one fingerprint that one acknowledgment clears for both
   const oddPaths = [];
   try {

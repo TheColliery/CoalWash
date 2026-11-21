@@ -520,7 +520,7 @@ function spelledIn(text, onMatch) {
   }
 }
 // The search over bytes in windows of SPELL_WINDOW + SPELL_CARRY bytes, each starting SPELL_WINDOW after the one before, so neighbours overlap by SPELL_CARRY
-// and a window holds a bounded number of bytes whatever the file's size. 21a (Bankfire PR 70: CodeRabbit Verify's false rejection, and the fingerprint of a
+// and a window holds a bounded number of bytes whatever the file's size. 21a (a carrier's pull request: CodeRabbit Verify's false rejection, and the fingerprint of a
 // key cut by a window): a match is reported by ONE window, the one that OWNS its first byte. A window owns from SPELL_EDGE bytes past its start (the first
 // owns from 0) up to SPELL_EDGE bytes past the next window's start (the last owns to the end), so the owners tile the file. The window's text runs on past
 // what it owns by SPELL_CARRY - SPELL_EDGE bytes, longer than any provider key the patterns accept whole: a match it owns ends inside its text, so a word cut
@@ -830,7 +830,7 @@ function unquotePath(p) {
   }
   return utf8Path(Buffer.from(bytes));
 }
-// A path's bytes as text, or an EPATHBYTES error naming them when they are not UTF-8 (21a, Bankfire PR 70): decoded, two such paths would become one name, and their
+// A path's bytes as text, or an EPATHBYTES error naming them when they are not UTF-8 (21a, a carrier's pull request): decoded, two such paths would become one name, and their
 // hits one fingerprint that one acknowledgment clears for both. The caller (the gate's push scan) turns the error into a failure that names the path.
 function utf8Path(bytes) {
   const s = bytes.toString('utf8');
