@@ -1473,7 +1473,7 @@ function saveChangedFields(projectRoot, home, from, before, after, step) {
   const fresh = migrateProjSchema(owned);
   if (from === null && typeof step === 'function') {
     const re = JSON.parse(JSON.stringify(fresh));
-    if (step(re) === false) return { saved: false, notApplied: [] };
+    if (step(re) === false) return { saved: null, notApplied: [] }; // not applicable there, never a failed save (L887-1)
     return { saved: saveState(re, projectRoot, home), notApplied: [] };
   }
   const notApplied = [];
@@ -1487,8 +1487,10 @@ function saveChangedFields(projectRoot, home, from, before, after, step) {
 }
 // The three CLI edits' answer: true only when the save landed AND every field the call changed was applied; `report.notApplied` names
 // the fields another writer kept (lab F1 (b)), so the CLI can say what was not applied instead of its success line.
+// L887-1: `report.saved` says whether the save landed (false: the state file could not be saved; absent: the edit never reached a
+// save, or its step could not apply), so the CLI says "(the rest was applied)" only when something was.
 function appliedResult(r, report) {
-  if (report && typeof report === 'object') report.notApplied = r.notApplied;
+  if (report && typeof report === 'object') { report.notApplied = r.notApplied; if (typeof r.saved === 'boolean') report.saved = r.saved; }
   return r.saved === true && r.notApplied.length === 0;
 }
 

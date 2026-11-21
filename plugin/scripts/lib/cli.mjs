@@ -301,7 +301,7 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
       // makes the lookup write the state file: its "pure read" wording is gone.
       const rep = {}; // lab F1 (b): whether the watermark rise was applied, and which fields another writer kept
       const acknowledged = acknowledgeRestore(home, projectRoot, r.buf.length, item.original || null, rep);
-      return { found: true, bin, id, original: item.original || null, bytes: r.buf.length, content: r.buf, acknowledged, notApplied: rep.notApplied || [] };
+      return { found: true, bin, id, original: item.original || null, bytes: r.buf.length, content: r.buf, acknowledged, notApplied: rep.notApplied || [], saved: rep.saved };
     }
     // CWK-137: an item that is THERE but refused (over the read bound, not a regular
     // file) is not "not found" -- say which, so the user knows to copy it by hand.
@@ -547,8 +547,9 @@ function main() {
     if (!loadState(projectRoot, home).returnAsk) { console.error('[CoalWash] no return is pending in this project; nothing changed'); return; }
     const rep = {};
     if (answerReturnLeave(home, projectRoot, rep)) console.error('[CoalWash] return left as it is: this store is not asked about again until it grows');
+    // L887-1: "(the rest was applied)" only when the save landed; a failed save applied nothing, whatever another writer did
+    else if (rep.saved === false) { console.error('return-leave: NOT applied: the state file could not be saved; re-run it'); process.exitCode = 1; }
     else if (rep.notApplied && rep.notApplied.length) { console.error(`return-leave: not fully applied: another writer changed ${rep.notApplied.join(', ')} while it ran, and their values were kept (the rest was applied); re-run it`); process.exitCode = 1; } // lab F1 (b), N880-6
-    else if (rep.notApplied) { console.error('return-leave: NOT applied: the state file could not be saved; re-run it'); process.exitCode = 1; }
     else { console.error('return-leave: not answered (the current fat reading is not finite), so nothing was changed'); process.exitCode = 1; }
   } else if (cmd === 'restore') {
     let id = args[1];
@@ -574,7 +575,10 @@ function main() {
       }
       process.stdout.write(r.content); // the payload — pipeable, verbatim
       console.error(`[CoalWash] restored ${r.id} from ${r.bin} (${r.bytes} bytes${r.original ? `, cut from ${escapeRawControls(String(r.original))}` : ''}) — content on stdout; nothing was written to the store`);
-      if (r.notApplied && r.notApplied.length) console.error(`[CoalWash] the restore's state record was not fully updated: another writer changed ${r.notApplied.join(', ')} while it ran, and their values were kept (the rest was applied)`);
+      // L887-1: the restored bytes are on stdout whatever the state save did, so restore exits 0; a re-run would raise the
+      // watermark a second time. A failed save is named, and "(the rest was applied)" is said only when the save landed.
+      if (r.saved === false) console.error("[CoalWash] the restore's state record was NOT updated (the state file could not be saved); the restored bytes above are complete");
+      else if (r.notApplied && r.notApplied.length) console.error(`[CoalWash] the restore's state record was not fully updated: another writer changed ${r.notApplied.join(', ')} while it ran, and their values were kept (the rest was applied)`);
     } catch (e) {
       console.error(`restore failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;

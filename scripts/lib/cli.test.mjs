@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gauge, gaugeLine, measureOnly } from './cli.mjs';
-import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem } from './tailings.mjs';
+import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin } from './tailings.mjs';
 import { snapshotOnFirstWrite } from './writeguard.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1159,4 +1159,65 @@ test('(e) config-status --platform antigravity reports the repository-root confi
     assert.strictEqual(cc.status, 0, cc.stderr);
     assert.strictEqual(JSON.parse(cc.stdout).resolution, null, 'control: without the flag the CC walk stops in sub, which holds no config');
   } finally { clean(home, repo); }
+});
+
+// L887-1: the restore and return-leave lines when the state SAVE fails. A preload refuses the rename onto state.json (the save's
+// last step), and, when CW891_PATCH is set, plays another writer that changes a field right after the call's first read.
+function saveFailsPreload(proj) {
+  const preload = path.join(proj, 'save-fails.mjs');
+  fs.writeFileSync(preload, [
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    'const sp = path.resolve(process.env.CW891_STATE); const patch = process.env.CW891_PATCH ? JSON.parse(process.env.CW891_PATCH) : null;',
+    'const at = Number(process.env.CW891_AT || 1); let closes = 0;',
+    'const oOpen = fs.openSync; const oClose = fs.closeSync; const oRename = fs.renameSync; const fds = new Set(); let fired = false;',
+    'fs.openSync = function (p, ...rest) { const fd = oOpen.call(fs, p, ...rest); if (!fired && path.resolve(String(p)) === sp) fds.add(fd); return fd; };',
+    'fs.closeSync = function (fd) { const r = oClose.call(fs, fd); if (patch && !fired && fds.has(fd) && ++closes === at) { fired = true; const j = JSON.parse(fs.readFileSync(sp, "utf8")); fs.writeFileSync(sp, JSON.stringify({ ...j, ...patch })); } return r; };',
+    "fs.renameSync = function (from, to, ...rest) { if (path.resolve(String(to)) === sp) throw Object.assign(new Error('EPERM: planted'), { code: 'EPERM' }); return oRename.call(fs, from, to, ...rest); };",
+    '',
+  ].join('\n'), 'utf8');
+  return preload;
+}
+function runPreloaded(proj, home, preload, args, extraEnv) {
+  return spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, CLI, ...args], {
+    cwd: proj,
+    env: { ...process.env, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, CLAUDE_CONFIG_DIR: '', NODE_OPTIONS: '--max-old-space-size=2048', ...extraEnv },
+    encoding: 'utf8',
+    timeout: 20000,
+    killSignal: 'SIGKILL',
+  });
+}
+function seedState(home, proj, st) {
+  const sp = projStatePath(home, proj);
+  fs.mkdirSync(path.dirname(sp), { recursive: true });
+  fs.writeFileSync(sp, JSON.stringify({ projectRoot: fs.realpathSync.native(proj), stateSchema: 1, ...st }), 'utf8');
+  return sp;
+}
+for (const [label, patch] of [['the save fails', null], ['another writer changed the field and the save fails', { lastObeseFat: 999 }]]) {
+  test(`L887-1: restore says its state record was NOT updated when ${label}, never "(the rest was applied)", and still hands back the bytes`, () => {
+    const { home, proj } = sandbox();
+    try {
+      const sp = seedState(home, proj, { lastObeseFat: 1000 });
+      const content = 'restored lines\n';
+      const rec = recordBinItem(proj, FAT_BIN_NAME, { content: Buffer.from(content), original: path.join(proj, 'MEMORY.md'), origin: 'program-cut', now: Date.now() });
+      const id = (rec && rec.id) || (listBin(proj, FAT_BIN_NAME)[0] || {}).id;
+      assert.ok(id, 'a bin item to restore');
+      const r = runPreloaded(proj, home, saveFailsPreload(proj), ['restore', id], { CW891_STATE: sp, CW891_PATCH: patch ? JSON.stringify(patch) : '', CW891_AT: '1' });
+      assert.strictEqual(r.stdout, content, 'the restored bytes are on stdout: ' + r.stderr);
+      assert.match(r.stderr, /NOT updated \(the state file could not be saved\)/, 'the failed save is named: ' + r.stderr);
+      assert.doesNotMatch(r.stderr, /the rest was applied/, 'nothing was saved, so nothing else was applied: ' + r.stderr);
+      assert.strictEqual(r.status, 0, 'exit 0: the bytes are restored, and a re-run would raise the watermark twice: ' + r.stderr);
+    } finally { clean(home, proj); }
+  });
+}
+test('L887-1: return-leave whose save fails after another writer changed its field says NOT applied, never "(the rest was applied)"', () => {
+  const { home, proj } = sandbox();
+  try {
+    const sp = seedState(home, proj, { returnAsk: true, lastVerdict: { fatTokens: 1000 }, lastObeseFat: 777 });
+    // the CLI's own returnAsk check is the first read; the edit's load is the second
+    const r = runPreloaded(proj, home, saveFailsPreload(proj), ['return-leave'], { CW891_STATE: sp, CW891_PATCH: JSON.stringify({ lastObeseFat: 888 }), CW891_AT: '2' });
+    assert.match(r.stderr, /NOT applied: the state file could not be saved/, 'the failed save is named: ' + r.stderr);
+    assert.doesNotMatch(r.stderr, /the rest was applied/, 'nothing was saved: ' + r.stderr);
+    assert.strictEqual(r.status, 1, 'and it exits 1: ' + r.stderr);
+  } finally { clean(home, proj); }
 });
