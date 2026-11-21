@@ -45,6 +45,7 @@ export function assertDistRoot(distRoot) {
 // the Claude Code route never reads them.
 export const DIST_ITEMS = [
   path.join('.claude-plugin', 'plugin.json'),
+  path.join('.claude-plugin', 'icon.png'), // the directory-listing icon `plugin.json`'s `icon` names (Claude Code does not read it)
   'plugin.json',
   'hooks.json',
   'assets',

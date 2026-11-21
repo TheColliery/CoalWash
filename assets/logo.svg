@@ -1,7 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="CoalWash">
-  <rect width="64" height="64" rx="10" fill="#17262c"/>
-  <rect x="14" y="40" width="36" height="14" rx="4" fill="#3a3f47"/>
-  <rect x="14" y="40" width="36" height="3" rx="1.5" fill="#5b6470"/>
-  <path d="M32 8 C32 8 20 24 20 36 A12 12 0 0 0 44 36 C44 24 32 8 32 8 Z" fill="#4fb3d9"/>
-  <ellipse cx="27" cy="32" rx="2.5" ry="4" fill="#bfe9f7" opacity="0.7"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="1024" height="1024"><title>CoalWash</title><rect width="64" height="64" fill="#134a6e"/><path fill="none" stroke="#f3ead8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" d="M32 11 C26 19 18 28 18 37 A14 14 0 0 0 46 37 C46 28 38 19 32 11 Z"/><path fill="none" stroke="#f3ead8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" d="M25 39 Q28.5 35.5 32 39 T39 39"/></svg>
