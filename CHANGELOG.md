@@ -2,6 +2,15 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Fixed
+
+- A keeps store that existed but could not be read (a directory at its path, an OS read denial, or content that is not a keeps store) was read as empty, and the next keep replaced it, so the keeps already recorded in it were lost. Now the recorder refuses by name before anything is written, and the store stays as it was. The read made inside the store's lock is not repeated up to the rename. Test: `scripts/lib/keeps.test.mjs` (a keeps store that is a directory, is unreadable, or is not a keeps object is refused in project and global scope, and its bytes stay as they were)
+- The hook-side state savers (the ones that record a sub-spawn, a lean floor, a Quick attempt, a crossing, a stamp or a consumed crossing) could write a near-empty state file over a main state file they could not read, when the fallback held the real record. Now a state file that cannot be read stops those saves before anything is written, and the saver answers false. The read made before the rename is not repeated up to the rename. Test: `scripts/lib/caliper.test.mjs` (six hook-side savers leave an unreadable main state file byte for byte; a fallback-only state is not shadowed by a near-empty main file)
+- A bin index that existed but could not be read was read as empty, so recording a bin item wrote a new index over it, and a sweep of that bin could destroy items. Now recording a bin item writes nothing and answers that it did not land, the sweep destroys nothing in that bin, and the apply receipt says the index was left as it is. An index that reads but does not parse is still re-listed from the bin's files, as before. The read made before the rename is not repeated up to the rename. Test: `scripts/lib/tailings.test.mjs` (a bin index that exists but cannot be read: the record does not land and the sweep destroys nothing)
+- A read-only project config, `--global` config or keeps store was written anyway on POSIX, the rename replacing the file, and on Windows the run ended in a bare I/O error. Now a file with no write bit is refused by name before anything is written: the run names the file, says it is read-only and that nothing was written, and exits 1. The file and its mode are kept. A file that cannot be inspected is reported as that, not as read-only. On POSIX, a file made read-only after this check is still replaced. Test: `scripts/configure.test.mjs` (a read-only project or global config is refused by name, exits 1, and keeps its bytes and mode) and `scripts/lib/repo-fs.test.mjs` (a target with no write bit is refused before any temp file exists; a target that cannot be inspected gets a sentence that says so)
+
 ## [1.19.9] - 2026-11-21
 
 A state edit never saves over a record it could not read
