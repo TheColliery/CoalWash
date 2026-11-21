@@ -3272,13 +3272,16 @@ test('F880-1: a CLI state edit whose re-read fails keeps every field it did not 
       return realOpen.call(fs, p, ...rest);
     };
     seen = 0;
-    stateNs.armDigGauge(home, proj, 'sess-880');
+    const r880 = stateNs.armDigGauge(home, proj, 'sess-880');
     fs.openSync = realOpen;
     assert.ok(seen >= 2, 'the fault reached the re-load: ' + seen);
     const s = loadState(proj, home);
     assert.strictEqual(s.leanFloorTokens, 12345, 'the floor the call never touched is kept');
     assert.strictEqual(s.quickTried, true, 'the quick mark the call never touched is kept');
-    assert.strictEqual(s.digGaugeSession, 'sess-880', 'the call\'s own flag is written');
+    // T-WHOLESAVE (1.19.9, the head's ruling): the re-read failed, so the edit may not write over the file; its own flag is either
+    // written or reported not saved, never claimed. (This assert read "the call's own flag is written" under the 1.19.8 whole-save.)
+    if (r880.applied) assert.strictEqual(s.digGaugeSession, 'sess-880', 'the call reports its flag saved, so it is in the file');
+    else assert.notStrictEqual(s.digGaugeSession, 'sess-880', 'the call reports its flag not saved, and it is not in the file');
   } finally { fs.openSync = realOpen; clean(home, proj); }
 });
 
@@ -3438,3 +3441,108 @@ for (const mode of ['EBUSY', 'unparsable']) {
     } finally { fs.openSync = realOpen; clean(home, proj); }
   });
 }
+
+// T-WHOLESAVE (F899-1; t363 #4, #14): a state edit never saves over a state file it could not read. "No record" (absent on both
+// paths) still takes the first write; "could not read" (an open or read error) takes none, and the edit reports saved: false.
+const STATE_NAME = /^state(-.*)?[.]json$/;
+for (const [name, call, ret] of [
+  ['restore', (h, p, rep) => stateNs.acknowledgeRestore(h, p, 400, null, rep), (r) => r],
+  ['dig-gauge', (h, p) => stateNs.armDigGauge(h, p, 'sess-ws'), (r) => r.applied],
+]) {
+  test(`T-WHOLESAVE: ${name} whose load and save re-read both fail saves nothing over the file and says not applied`, () => {
+    const { home, proj } = sandbox();
+    const realOpen = fs.openSync;
+    try {
+      ccSlugDir(home, proj);
+      seedProj(home, proj, { projectRoot: proj, ...SEEDED, lastObeseFat: 777 });
+      const main = statePath(proj, home);
+      const bytes = fs.readFileSync(main);
+      let opens = 0;
+      fs.openSync = function (p, ...rest) {
+        if (STATE_NAME.test(path.basename(String(p)))) { opens++; throw Object.assign(new Error('EBUSY: planted'), { code: 'EBUSY' }); }
+        return realOpen.call(fs, p, ...rest);
+      };
+      const rep = {};
+      const r = call(home, proj, rep);
+      fs.openSync = realOpen;
+      assert.ok(opens >= 2, 'the fault reached the load and the re-read: ' + opens);
+      assert.ok(fs.readFileSync(main).equals(bytes), 'the state file is byte for byte as it was: nothing was saved over it');
+      assert.ok(!ret(r), 'the edit does not report applied: ' + JSON.stringify(r));
+      if (name === 'restore') assert.strictEqual(rep.saved, false, 'and the report says the save did not land: ' + JSON.stringify(rep));
+    } finally { fs.openSync = realOpen; clean(home, proj); }
+  });
+}
+
+test('T-WHOLESAVE (t363 #14): an unstamped fallback that the load could not read but the save can is the record the edit is replayed onto', () => {
+  const { home, proj } = sandbox();
+  const realOpen = fs.openSync;
+  try {
+    ccSlugDir(home, proj);
+    const fb = path.resolve(stateFallbackPath(proj, home));
+    fs.mkdirSync(path.dirname(fb), { recursive: true });
+    fs.writeFileSync(fb, JSON.stringify({ projectRoot: proj, stateSchema: STATE_SCHEMA, ...SEEDED, lastObeseFat: 777 }), 'utf8'); // no savedAt
+    let n = 0;
+    fs.openSync = function (p, ...rest) {
+      if (path.resolve(String(p)) === fb && ++n === 1) throw Object.assign(new Error('EBUSY: planted'), { code: 'EBUSY' });
+      return realOpen.call(fs, p, ...rest);
+    };
+    const rep = {};
+    const r = stateNs.acknowledgeRestore(home, proj, 400, null, rep);
+    fs.openSync = realOpen;
+    assert.ok(n >= 2, 'the load hit the fault and the save read the fallback again: ' + n);
+    const s = loadState(proj, home);
+    assert.strictEqual(s.leanFloorTokens, 12345, 'the fallback\'s floor survives: ' + JSON.stringify(s));
+    assert.strictEqual(s.quickTried, true, 'and its quick mark');
+    assert.ok(s.lastObeseFat > 777, 'the rise is applied onto that record');
+    assert.ok(r, 'and the edit says so: ' + JSON.stringify(rep));
+  } finally { fs.openSync = realOpen; clean(home, proj); }
+});
+
+test('T-WHOLESAVE (t363 #4): a load that read the file, then a save whose re-read fails, keeps a hook\'s newer field and saves nothing', () => {
+  const { home, proj } = sandbox();
+  const realOpen = fs.openSync;
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: proj, ...SEEDED, lastObeseFat: 777 });
+    const main = path.resolve(statePath(proj, home));
+    let armed = false;
+    fs.openSync = function (p, ...rest) {
+      if (armed && path.resolve(String(p)) === main) throw Object.assign(new Error('EBUSY: planted'), { code: 'EBUSY' });
+      return realOpen.call(fs, p, ...rest);
+    };
+    const rep = {};
+    const { result, fired } = afterFirstReadOf(main, () => {
+      const j = JSON.parse(fs.readFileSync(main, 'utf8'));
+      fs.writeFileSync(main, JSON.stringify({ ...j, subSpawns: 9 }), 'utf8'); // a hook saves a newer field
+      armed = true; // and from here the file cannot be read
+    }, () => stateNs.acknowledgeRestore(home, proj, 400, null, rep));
+    fs.openSync = realOpen;
+    assert.ok(fired(), 'the seam fired');
+    const s = JSON.parse(fs.readFileSync(main, 'utf8'));
+    assert.strictEqual(s.subSpawns, 9, 'the hook\'s newer field survives: ' + JSON.stringify(s));
+    assert.strictEqual(s.lastObeseFat, 777, 'nothing of the edit was written');
+    assert.ok(!result, 'the edit does not report applied');
+    assert.strictEqual(rep.saved, false, 'and the report says the save did not land: ' + JSON.stringify(rep));
+  } finally { fs.openSync = realOpen; clean(home, proj); }
+});
+
+test('T-WHOLESAVE (t363 #4, dig-gauge): an edit that read the state file but whose save re-read fails writes nothing and reports the mark not saved', () => {
+  const { home, proj } = sandbox();
+  const realOpen = fs.openSync;
+  try {
+    ccSlugDir(home, proj);
+    setLeanFloor(home, proj, 12345);
+    const main = path.resolve(statePath(proj, home));
+    const bytes = fs.readFileSync(main);
+    let n = 0;
+    fs.openSync = function (p, ...rest) {
+      if (path.resolve(String(p)) === main && ++n >= 2) throw Object.assign(new Error('EBUSY: planted'), { code: 'EBUSY' });
+      return realOpen.call(fs, p, ...rest);
+    };
+    const r = stateNs.armDigGauge(home, proj, 'sess-r4');
+    fs.openSync = realOpen;
+    assert.ok(n >= 2, 'the load read the file and the re-read met the fault: ' + n);
+    assert.ok(fs.readFileSync(main).equals(bytes), 'nothing was written over the file the re-read could not read');
+    assert.strictEqual(r.applied, false, 'the mark is reported not saved: ' + JSON.stringify(r));
+  } finally { fs.openSync = realOpen; clean(home, proj); }
+});

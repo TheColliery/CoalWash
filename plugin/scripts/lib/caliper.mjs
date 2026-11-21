@@ -1054,6 +1054,25 @@ function readStateFile(p) {
   }
 }
 
+// T-WHOLESAVE (F899-1): a state path read as one of four answers, so "no record" is never confused with "could not read".
+// 'absent' (ENOENT/ENOTDIR: nothing there) · 'unreadable' (the file is there and the open or read failed: a lock, EBUSY, EPERM, a
+// non-file, over the bound) · 'foreign' (read, but holds no record this project owns: another project's, or content that is not a
+// JSON object, which a save may repair) · 'owned' (with `rec`). A throw anywhere reads as 'unreadable', the side that writes nothing.
+function readStateAt(p, projectRoot) {
+  try {
+    const o = repoReadOutcome(p, null, MAX_CONFIG_BYTES);
+    if (!o.buf) return { kind: o.why === 'absent' || o.code === 'ENOENT' || o.code === 'ENOTDIR' ? 'absent' : 'unreadable' };
+    let raw = o.buf.toString('utf8');
+    if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
+    let parsed = null;
+    try { parsed = parseJsonc(raw); } catch { parsed = null; }
+    const rec = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? ownedRecord(parsed, projectRoot) : null;
+    return rec ? { kind: 'owned', rec } : { kind: 'foreign' };
+  } catch {
+    return { kind: 'unreadable' };
+  }
+}
+
 // rc.2 STATE SCHEMA VERSION — the "no-old-version-leftover" standard applied to
 // the state layer: a reinstall/upgrade must never carry VERSION-STALE state (a
 // consumed crossing from a pre-0m version is meaningless under force-dictator; a
@@ -1448,14 +1467,16 @@ function sweepDeadProjectStates(home, projectRoot) {
 // call did not touch is the fresh one. The window left is the re-load to the rename, inside saveState (a stated limit).
 // F880-1: the merge base is only a record this project OWNS, read again at save time from either state path (the same two reads
 // loadState makes). loadState answers {} for a failed read (an open error, a transient EBUSY) and for a record another project
-// wrote; merging onto that would keep this call's few fields and drop every other one. With no owned record read, save what this
-// call loaded, whole, as before T-29LD-2.
+// wrote; merging onto that would keep this call's few fields and drop every other one. With no owned record read and both paths
+// absent or holding no owned record, save what this call loaded, whole (T-WHOLESAVE: never when a path could not be read).
 // Lab F1 (cw-lab-1198): the re-read is of the SAME file the load read (`from`), never the other path: a stale fallback copy beside a
 // main file that failed its re-read would read every field it lacks as another writer's change. Returns { saved, notApplied }: the
 // fields this call changed that another writer changed meanwhile (theirs stands, so this call's change is not applied).
 // T-HOMEMOVE: the OTHER state path is read too, and taken only when its stamp is later than both the loaded record's and the
 // re-read file's (a hook that moved the state's home to the main file mid-edit saved a stamped record there). A stale or unstamped
-// copy at the other path never qualifies, so lab F1 stands. Both unreadable: save what this call loaded, whole, as before.
+// copy at the other path never qualifies, so lab F1 stands. A path that could not be read (T-WHOLESAVE): nothing is saved, saved:
+// false. Row 13 stays open: two saves in one millisecond tie on `savedAt`, and only a revision counter (a new persisted field, a
+// state-schema change) could say which is newer.
 // T-RISESKIP: a load that found no owned record (from null: a failed read, a later-whole file) computed its edit on an empty base,
 // so its edit is replayed with `step` onto the record found at save time; `step` returns false when it cannot apply there.
 function saveChangedFields(projectRoot, home, from, before, after, step) {
@@ -1463,13 +1484,25 @@ function saveChangedFields(projectRoot, home, from, before, after, step) {
   // record that is whole again there (a lock released, a rename done) is merged onto, never overwritten with the empty load.
   const pm = statePath(projectRoot, home);
   const own = from || pm;
-  const other = path.resolve(own) === path.resolve(pm) ? stateFallbackPath(projectRoot, home) : pm;
-  let owned = ownedRecord(readStateFile(own), projectRoot);
-  if (path.resolve(other) !== path.resolve(own)) {
-    const o = ownedRecord(readStateFile(other), projectRoot);
-    if (o && savedStamp(o) > savedStamp(before) && (!owned || savedStamp(o) > savedStamp(owned))) owned = o;
+  const same = (a, b) => path.resolve(a) === path.resolve(b);
+  const other = same(own, pm) ? stateFallbackPath(projectRoot, home) : pm;
+  const A = readStateAt(own, projectRoot);
+  const O = same(other, own) ? { kind: 'absent' } : readStateAt(other, projectRoot);
+  // T-WHOLESAVE (F899-1, t363 #4): the save writes the main file, so a main file this call could not read is never written over.
+  if ((same(own, pm) ? A : O).kind === 'unreadable') return { saved: false, notApplied: [] };
+  let owned = A.kind === 'owned' ? A.rec : null;
+  if (O.kind === 'owned') {
+    // t363 #14: a load that found no owned record takes any owned record now readable, whatever its stamp (newer first, the main
+    // file on a tie); a load that found one takes the other path only on a later stamp than both (lab F1, T-HOMEMOVE).
+    if (from === null) { if (!owned || savedStamp(O.rec) > savedStamp(owned)) owned = O.rec; }
+    else if (savedStamp(O.rec) > savedStamp(before) && (!owned || savedStamp(O.rec) > savedStamp(owned))) owned = O.rec;
   }
-  if (!owned) return { saved: saveState(after, projectRoot, home), notApplied: [] };
+  if (!owned) {
+    // No owned record at either path: write the loaded state only where neither path failed to read (absent or foreign); a path
+    // that could not be read may hold the record this call never saw, so nothing is written and the edit says so.
+    if (A.kind === 'unreadable' || O.kind === 'unreadable') return { saved: false, notApplied: [] };
+    return { saved: saveState(after, projectRoot, home), notApplied: [] };
+  }
   const fresh = migrateProjSchema(owned);
   if (from === null && typeof step === 'function') {
     const re = JSON.parse(JSON.stringify(fresh));
