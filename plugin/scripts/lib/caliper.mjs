@@ -1061,7 +1061,7 @@ function readStateFile(p) {
 function readStateAt(p, projectRoot) {
   try {
     const o = repoReadOutcome(p, null, MAX_CONFIG_BYTES);
-    if (!o.buf) return { kind: o.why === 'absent' || o.code === 'ENOENT' || o.code === 'ENOTDIR' ? 'absent' : 'unreadable' };
+    if (!o.buf) return o.why === 'absent' || o.code === 'ENOENT' || o.code === 'ENOTDIR' ? { kind: 'absent' } : { kind: 'unreadable', why: o.why };
     let raw = o.buf.toString('utf8');
     if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
     let parsed = null;
@@ -1249,8 +1249,15 @@ export function loadState(projectRoot, home = os.homedir()) {
   // dir can appear later (CC's first real session) — reading both keeps that
   // state (the lean-floor baseline) from stranding on the location flip. A record
   // another project wrote into either path is skipped, and the next source tried.
-  return loadStateFrom(projectRoot, home).proj;
+  const r = loadStateFrom(projectRoot, home);
+  if (r.blocked) UNSAVABLE.add(r.proj);
+  return r.proj;
 }
+// T-RD-HOOKSTATE (29mm item R): a record loadState handed back from a load that could not read a state file it would write over.
+// The hook-side savers mutate that same object and pass it to saveState, which then writes nothing and answers false: fail-silent
+// (no throw, no output), the unread bytes stand, and the next hook whose read succeeds saves as before. Keyed on the object, so
+// a reader that only reads is unaffected; a record a save path builds anew (the CLI edits' saveChangedFields) carries its own guard.
+const UNSAVABLE = new WeakSet();
 // F2 (cw-lab-1199): which of the two state paths is newer is read from `saveRev`, a per-project revision counter each save raises
 // from the highest it read, never from a wall clock (a clock set ahead stamped a stale fallback newer than a main file written
 // later). A record with no counter (every record written before this version) or a counter that is not a safe non-negative integer
@@ -1277,15 +1284,23 @@ const withRev = (rec, rev) => (rev === null ? rec : { ...rec, saveRev: rev });
 // T-NEWERFB: both state paths are read; the fallback is taken over an owned main record only when its counter is HIGHER (fallbackNewer:
 // a record with no counter never wins over the main file, so a stale fallback copy stays unread, as lab F1 needs). The record handed
 // back carries the highest counter read at either path, so its save raises past both.
+// T-RD-HOOKSTATE: `blocked` is true when a whole-state save of this record would write over bytes the load never saw: the main file
+// (the one a save writes) exists and could not be read, or no owned record was readable and the fallback FILE (which the save reaps)
+// could not be read. A directory or special file at the fallback path holds no record and the reap cannot remove it, so it never
+// blocks (the lab's "not stranded" row: after a hook save the CLI edit applies). The same four answers the CLI save reads.
 function loadStateFrom(projectRoot, home) {
   const pm = statePath(projectRoot, home);
   const pf = stateFallbackPath(projectRoot, home);
-  const m = ownedRecord(readStateFile(pm), projectRoot);
-  const f = path.resolve(pf) === path.resolve(pm) ? null : ownedRecord(readStateFile(pf), projectRoot);
+  const M = readStateAt(pm, projectRoot);
+  const F = path.resolve(pf) === path.resolve(pm) ? { kind: 'absent' } : readStateAt(pf, projectRoot);
+  const m = M.kind === 'owned' ? M.rec : null;
+  const f = F.kind === 'owned' ? F.rec : null;
+  const fbHeldFile = F.kind === 'unreadable' && F.why !== 'directory' && F.why !== 'not-regular';
+  const blocked = M.kind === 'unreadable' || (!m && !f && fbHeldFile);
   const hi = maxRev(m, f);
-  if (f && (!m || fallbackNewer(f, m))) return { proj: migrateProjSchema(withRev(f, hi)), from: pf };
-  if (m) return { proj: migrateProjSchema(withRev(m, hi)), from: pm };
-  return { proj: migrateProjSchema(readOldRootEntry(projectRoot, home) || {}), from: null };
+  if (f && (!m || fallbackNewer(f, m))) return { proj: migrateProjSchema(withRev(f, hi)), from: pf, blocked };
+  if (m) return { proj: migrateProjSchema(withRev(m, hi)), from: pm, blocked };
+  return { proj: migrateProjSchema(readOldRootEntry(projectRoot, home) || {}), from: null, blocked };
 }
 
 // Persist THIS project's flat state to the new per-project path (atomic
@@ -1556,6 +1571,7 @@ function appliedResult(r, report) {
 }
 
 function saveState(proj, projectRoot, home) {
+  if (proj && typeof proj === 'object' && UNSAVABLE.has(proj)) return false; // T-RD-HOOKSTATE: never over a file the load could not read
   try {
     const p = statePath(projectRoot, home);
     fs.mkdirSync(path.dirname(p), { recursive: true }); // the coalwash/ subdir only — the slug dir must already exist (never-create guard)

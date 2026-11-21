@@ -3445,6 +3445,59 @@ for (const [name, fbRev, mainAs] of F2_CASES) {
   });
 }
 
+// T-RD-HOOKSTATE (29mm item R, inspect-906 §5 D1): the hook-side savers (loadState, then saveState whole) read a state file that
+// exists but could not be read as {}, then renamed the near-empty record over it: the floor, the crossing and the spawn bill gone.
+// A saver now skips the save when the main file could not be read, or when no owned record was readable and the fallback could
+// not be read; it stays fail-silent (no throw, nothing written, the bytes stand, and the unread fallback is not reaped).
+function readsFailEPERM(files, fn) {
+  const targets = new Set(files.map((f) => path.resolve(f)));
+  const realOpen = fs.openSync;
+  fs.openSync = function (p, flags, ...rest) {
+    if (targets.has(path.resolve(String(p))) && (flags === undefined || flags === 'r' || (typeof flags === 'number' && (flags & 3) === 0))) {
+      const e = new Error(`EPERM: operation not permitted, open '${p}'`); e.code = 'EPERM'; throw e;
+    }
+    return realOpen.call(fs, p, flags, ...rest);
+  };
+  try { return fn(); } finally { fs.openSync = realOpen; }
+}
+const HOOK_SAVERS = [
+  ['recordSubSpawn', (h, p) => recordSubSpawn(h, p, 4242)],
+  ['setLeanFloor', (h, p) => setLeanFloor(h, p, 777)],
+  ['markQuickTried', (h, p) => markQuickTried(h, p, 4242)],
+  ['recordCrossing', (h, p) => recordCrossing(h, p, 'FULL', 'OBESE', 4242, { session: 'hook-session' })],
+  ['recordStamp', (h, p) => recordStamp(h, p, 1, 4242)],
+  ['consumeCrossing', (h, p) => consumeCrossing(h, p, 4242)],
+];
+for (const [name, save] of HOOK_SAVERS) {
+  test(`T-RD-HOOKSTATE: ${name} never saves over a main state file whose read fails EPERM; no throw, the bytes stand`, () => {
+    const { home, proj } = sandbox();
+    try {
+      ccSlugDir(home, proj);
+      seedProj(home, proj, { projectRoot: proj, ...SEEDED, lastObeseFat: 777 });
+      const main = statePath(proj, home);
+      const before = fs.readFileSync(main, 'utf8');
+      assert.doesNotThrow(() => readsFailEPERM([main], () => save(home, proj)), 'a hook-side saver never throws');
+      assert.strictEqual(fs.readFileSync(main, 'utf8'), before, 'the state file it could not read is byte for byte unchanged');
+      assert.deepStrictEqual(fs.readdirSync(path.dirname(main)).filter((n) => n.endsWith('.tmp')), [], 'no temp is left');
+    } finally { clean(home, proj); }
+  });
+}
+test('T-RD-HOOKSTATE: with no main file and an unreadable fallback, a hook-side saver writes no main file and never reaps the fallback', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: proj, ...SEEDED, lastObeseFat: 777 });
+    const main = statePath(proj, home);
+    const fb = stateFallbackPath(proj, home);
+    fs.mkdirSync(path.dirname(fb), { recursive: true });
+    fs.renameSync(main, fb);
+    const before = fs.readFileSync(fb, 'utf8');
+    readsFailEPERM([fb], () => recordSubSpawn(home, proj, 4242));
+    assert.ok(!fs.existsSync(main), 'no near-empty main file is written to shadow the fallback');
+    assert.strictEqual(fs.readFileSync(fb, 'utf8'), before, 'the fallback it could not read stands, unreaped');
+  } finally { clean(home, proj); }
+});
+
 for (const mode of ['EBUSY', 'unparsable']) {
   test(`T-RISESKIP: a restore whose load fails (${mode}) but whose save finds the record whole raises the watermark it answers for`, () => {
     const { home, proj } = sandbox();
