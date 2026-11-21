@@ -723,3 +723,42 @@ test('T-29LD-4 (B): a config created at the loader\'s first candidate while the 
   assert.notStrictEqual(r.status, 0, 'the run does not exit 0 when its edit is not where the loader reads: ' + r.stdout + r.stderr);
   assert.doesNotMatch(r.stdout, /Successfully updated/, 'and never says it succeeded');
 });
+
+// T-RD-CFGTEST (29mm item R, inspect-906 §5 D1): `configure.mjs`'s refusal of a config that EXISTS but cannot be read (its
+// `readErr` guard) as a seam leg, project and --global: every read-open of the config throws EPERM inside the run, which must exit 1,
+// print the refusal naming the file and the code, and leave the file byte for byte unchanged. The ACL leg is F-R32-2 above.
+for (const scope of ['project', 'global']) {
+  test(`T-RD-CFGTEST: a ${scope} config whose read fails EPERM is refused by name, exit 1, the file unchanged`, (t) => {
+    const sb = sandbox(t);
+    const cfg = scope === 'global' ? path.join(sb.home, '.claude', '.coalwash.json') : projCfg(sb);
+    fs.mkdirSync(path.dirname(cfg), { recursive: true });
+    const original = JSON.stringify({ fileMaxSizeKb: 40, language: 'th', quickVsFull: 'full' }, null, 2) + '\n';
+    fs.writeFileSync(cfg, original);
+    const preload = path.join(sb.root, 'rd-seam.mjs');
+    fs.writeFileSync(preload, [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      'const target = path.resolve(process.env.CW_RD_TARGET);',
+      'const realOpen = fs.openSync;',
+      'fs.openSync = function (p, flags, ...rest) {',
+      "  if (path.resolve(String(p)) === target && (typeof flags === 'number' ? (flags & 3) === 0 : (flags === undefined || flags === 'r'))) {",
+      "    const e = new Error('EPERM: operation not permitted, open ' + p); e.code = 'EPERM'; throw e;",
+      '  }',
+      '  return realOpen.call(fs, p, flags, ...rest);',
+      '};',
+      '',
+    ].join('\n'), 'utf8');
+    const args = scope === 'global' ? ['--global', '--updateCheckDays', '30'] : ['--updateCheckDays', '30'];
+    const r = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, CONFIGURE, ...args], {
+      cwd: sb.proj,
+      encoding: 'utf8',
+      env: { ...process.env, HOME: sb.home, USERPROFILE: sb.home, TEMP: sb.root, TMP: sb.root, TMPDIR: sb.root, CLAUDE_CONFIG_DIR: '', CW_RD_TARGET: cfg },
+      timeout: 20000,
+    });
+    assert.strictEqual(r.status, 1, 'the run exits 1: ' + r.stdout + r.stderr);
+    assert.ok(r.stderr.includes('exists but could not be read (EPERM)') && r.stderr.includes('Nothing was written'), 'the refusal names the code and says nothing was written: ' + r.stderr);
+    assert.ok(r.stderr.includes(path.basename(cfg)), 'the refusal names the file: ' + r.stderr);
+    assert.doesNotMatch(r.stdout, /Successfully updated/);
+    assert.strictEqual(fs.readFileSync(cfg, 'utf8'), original, 'the config is byte for byte unchanged');
+  });
+}
