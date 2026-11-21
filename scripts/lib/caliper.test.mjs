@@ -3337,3 +3337,104 @@ test('lab F1 (b): return-leave says its change was not applied when another writ
     assert.ok(Array.isArray(rep.notApplied) && rep.notApplied.includes('lastObeseFat'), 'the report names the field: ' + JSON.stringify(rep));
   } finally { clean(home, proj); }
 });
+
+// 1.19.9 state tickets (docket `tickets-1199.md`; the lab's se-leg rows, cw-lab-1198 RE-READ 21b). The seam: right after the
+// call's first read of `watched` closes, `act` runs once (a hook that writes, or an outside program).
+function afterFirstReadOf(watched, act, fn) {
+  const w = path.resolve(watched);
+  const origOpen = fs.openSync;
+  const origClose = fs.closeSync;
+  const fds = new Set();
+  let fired = false;
+  fs.openSync = function (p, ...rest) {
+    const fd = origOpen.call(fs, p, ...rest);
+    if (!fired && path.resolve(String(p)) === w) fds.add(fd);
+    return fd;
+  };
+  fs.closeSync = function (fd) {
+    const r = origClose.call(fs, fd);
+    if (!fired && fds.has(fd)) { fired = true; act(); }
+    return r;
+  };
+  try { return { result: fn(), fired: () => fired }; } finally { fs.openSync = origOpen; fs.closeSync = origClose; }
+}
+
+test('T-HOMEMOVE: an edit loaded from the fallback keeps the spawn and crossing a hook saved to the main file while it ran', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    seedProj(home, proj, { projectRoot: proj, ...SEEDED, lastObeseFat: 777 });
+    const main = statePath(proj, home);
+    const fb = stateFallbackPath(proj, home);
+    fs.mkdirSync(path.dirname(fb), { recursive: true });
+    fs.renameSync(main, fb); // the state's home is the fallback when the edit loads
+    const rep = {};
+    const { result, fired } = afterFirstReadOf(fb, () => {
+      recordSubSpawn(home, proj, 4242); // the hook loads the fallback and saves the main file
+      recordCrossing(home, proj, 'FULL', 'OBESE', 4242, { session: 'hook-session' });
+    }, () => stateNs.acknowledgeRestore(home, proj, 400, null, rep));
+    assert.ok(fired(), 'the seam fired');
+    const s = JSON.parse(fs.readFileSync(main, 'utf8'));
+    assert.strictEqual(s.subSpawns, 6, 'the hook\'s spawn count survives: ' + JSON.stringify(s));
+    assert.strictEqual(s.lastSubSpawnAt, 4242, 'the hook\'s spawn stamp survives');
+    assert.strictEqual(s.leanFloorTokens, 12345, 'the seeded floor is kept');
+    assert.ok(s.lastObeseFat > 777, 'the call\'s own watermark is raised');
+    assert.ok(result, 'and it says so: ' + JSON.stringify(rep));
+  } finally { clean(home, proj); }
+});
+
+test('T-NEWERFB: a newer fallback record beside the main file is the one loaded, so its fields survive the save that reaps it', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    setLeanFloor(home, proj, 111); // the main file, written by the engine
+    const main = statePath(proj, home);
+    const fb = stateFallbackPath(proj, home);
+    const m = JSON.parse(fs.readFileSync(main, 'utf8'));
+    const stamp = (typeof m.savedAt === 'number' ? m.savedAt : Date.now()) + 60000;
+    fs.mkdirSync(path.dirname(fb), { recursive: true });
+    fs.writeFileSync(fb, JSON.stringify({ ...m, leanFloorTokens: 222, labNewer: true, savedAt: stamp }), 'utf8');
+    const r = stateNs.armDigGauge(home, proj, 'sess-nfb');
+    assert.strictEqual(r.applied, true, 'the arm is applied');
+    assert.ok(!fs.existsSync(fb), 'the fallback is reaped by the save (one live home)');
+    const s = JSON.parse(fs.readFileSync(main, 'utf8'));
+    assert.strictEqual(s.labNewer, true, 'the newer record\'s field survives: ' + JSON.stringify(s));
+    assert.strictEqual(s.leanFloorTokens, 222, 'the newer floor survives');
+    assert.strictEqual(s.digGaugeSession, 'sess-nfb', 'the call\'s own flag is written');
+  } finally { clean(home, proj); }
+});
+
+for (const mode of ['EBUSY', 'unparsable']) {
+  test(`T-RISESKIP: a restore whose load fails (${mode}) but whose save finds the record whole raises the watermark it answers for`, () => {
+    const { home, proj } = sandbox();
+    const realOpen = fs.openSync;
+    try {
+      ccSlugDir(home, proj);
+      seedProj(home, proj, { projectRoot: proj, ...SEEDED, lastObeseFat: 777 });
+      const main = path.resolve(statePath(proj, home));
+      const whole = fs.readFileSync(main, 'utf8');
+      let n = 0;
+      if (mode === 'unparsable') fs.writeFileSync(main, '{ not json', 'utf8');
+      fs.openSync = function (p, ...rest) {
+        if (path.resolve(String(p)) === main && ++n === 1) {
+          if (mode === 'EBUSY') throw Object.assign(new Error('EBUSY: planted'), { code: 'EBUSY' });
+        }
+        return realOpen.call(fs, p, ...rest);
+      };
+      const rep = {};
+      let ret;
+      if (mode === 'unparsable') {
+        ({ result: ret } = afterFirstReadOf(main, () => fs.writeFileSync(main, whole, 'utf8'), () => stateNs.acknowledgeRestore(home, proj, 400, null, rep)));
+      } else {
+        ret = stateNs.acknowledgeRestore(home, proj, 400, null, rep);
+      }
+      fs.openSync = realOpen;
+      assert.ok(n >= 1, 'the load read the main file');
+      const s = loadState(proj, home);
+      assert.strictEqual(s.leanFloorTokens, 12345, 'the floor is kept');
+      if (ret) assert.ok(s.lastObeseFat > 777, `the restore answers acknowledged, so its rise is in the file: ${JSON.stringify(s)}`);
+      else assert.ok(Array.isArray(rep.notApplied), 'a refusal says so');
+      assert.ok(ret, 'the rise is applied on the record found at save time');
+    } finally { fs.openSync = realOpen; clean(home, proj); }
+  });
+}

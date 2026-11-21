@@ -1232,12 +1232,20 @@ export function loadState(projectRoot, home = os.homedir()) {
   // another project wrote into either path is skipped, and the next source tried.
   return loadStateFrom(projectRoot, home).proj;
 }
+// A record's save stamp (saveState writes `savedAt`); a record written before 1.19.9 carries none and reads as the oldest.
+function savedStamp(rec) {
+  return rec && typeof rec.savedAt === 'number' && Number.isFinite(rec.savedAt) ? rec.savedAt : -Infinity;
+}
 // loadState, also naming the file the record came from (null: the old root entry, or nothing), so a save can re-read THAT file.
+// T-NEWERFB: both state paths are read; the fallback is taken over an owned main record only when its stamp is LATER (a record
+// with no stamp never wins over the main file, so a stale unstamped fallback copy stays unread, as lab F1 needs).
 function loadStateFrom(projectRoot, home) {
-  for (const p of [statePath(projectRoot, home), stateFallbackPath(projectRoot, home)]) {
-    const rec = ownedRecord(readStateFile(p), projectRoot);
-    if (rec) return { proj: migrateProjSchema(rec), from: p };
-  }
+  const pm = statePath(projectRoot, home);
+  const pf = stateFallbackPath(projectRoot, home);
+  const m = ownedRecord(readStateFile(pm), projectRoot);
+  const f = path.resolve(pf) === path.resolve(pm) ? null : ownedRecord(readStateFile(pf), projectRoot);
+  if (f && (!m || savedStamp(f) > savedStamp(m))) return { proj: migrateProjSchema(f), from: pf };
+  if (m) return { proj: migrateProjSchema(m), from: pm };
   return { proj: migrateProjSchema(readOldRootEntry(projectRoot, home) || {}), from: null };
 }
 
@@ -1445,12 +1453,29 @@ function sweepDeadProjectStates(home, projectRoot) {
 // Lab F1 (cw-lab-1198): the re-read is of the SAME file the load read (`from`), never the other path: a stale fallback copy beside a
 // main file that failed its re-read would read every field it lacks as another writer's change. Returns { saved, notApplied }: the
 // fields this call changed that another writer changed meanwhile (theirs stands, so this call's change is not applied).
-function saveChangedFields(projectRoot, home, from, before, after) {
+// T-HOMEMOVE: the OTHER state path is read too, and taken only when its stamp is later than both the loaded record's and the
+// re-read file's (a hook that moved the state's home to the main file mid-edit saved a stamped record there). A stale or unstamped
+// copy at the other path never qualifies, so lab F1 stands. Both unreadable: save what this call loaded, whole, as before.
+// T-RISESKIP: a load that found no owned record (from null: a failed read, a later-whole file) computed its edit on an empty base,
+// so its edit is replayed with `step` onto the record found at save time; `step` returns false when it cannot apply there.
+function saveChangedFields(projectRoot, home, from, before, after, step) {
   // A load that found no owned record read the main file first and found nothing there, so the re-read is of the main file: a
   // record that is whole again there (a lock released, a rename done) is merged onto, never overwritten with the empty load.
-  const owned = ownedRecord(readStateFile(from || statePath(projectRoot, home)), projectRoot);
+  const pm = statePath(projectRoot, home);
+  const own = from || pm;
+  const other = path.resolve(own) === path.resolve(pm) ? stateFallbackPath(projectRoot, home) : pm;
+  let owned = ownedRecord(readStateFile(own), projectRoot);
+  if (path.resolve(other) !== path.resolve(own)) {
+    const o = ownedRecord(readStateFile(other), projectRoot);
+    if (o && savedStamp(o) > savedStamp(before) && (!owned || savedStamp(o) > savedStamp(owned))) owned = o;
+  }
   if (!owned) return { saved: saveState(after, projectRoot, home), notApplied: [] };
   const fresh = migrateProjSchema(owned);
+  if (from === null && typeof step === 'function') {
+    const re = JSON.parse(JSON.stringify(fresh));
+    if (step(re) === false) return { saved: false, notApplied: [] };
+    return { saved: saveState(re, projectRoot, home), notApplied: [] };
+  }
   const notApplied = [];
   for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
     const was = JSON.stringify(before[k]);
@@ -1491,7 +1516,8 @@ function saveState(proj, projectRoot, home) {
     const nowMs = Date.now();
     const sinceSweep = nowMs - Number(base.deadStateSweepAt);
     const deadSweepDue = !(Number.isFinite(sinceSweep) && sinceSweep >= 0 && sinceSweep < DEAD_SWEEP_EVERY_MS); // CWK-157; a future stamp (clock skew) is "due"
-    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
+    // `savedAt` (1.19.9, T-NEWERFB, T-HOMEMOVE): the write's stamp, read to pick the newer of the two state paths. Version-STABLE.
+    const toWrite = { ...base, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, savedAt: nowMs, ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
     // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
     // carries (read its comment for the full reasoning; this module cannot import
     // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
@@ -1906,13 +1932,17 @@ export function answerReturnLeave(home, projectRoot, report) {
   try {
     const { proj, from } = loadStateFrom(projectRoot, home);
     const before = JSON.parse(JSON.stringify(proj));
-    const fat = proj.lastVerdict ? Number(proj.lastVerdict.fatTokens) : NaN;
-    if (!Number.isFinite(fat)) return false; // 702 (F700-3): change nothing without a finite fat
-    proj.lastObeseFat = Math.round(fat);
-    if (proj.lastCrossing && typeof proj.lastCrossing === "object") proj.lastCrossing = { ...proj.lastCrossing, consumed: true };
-    delete proj.returnAsk;
-    delete proj.postWash;
-    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj), report); // T-29LD-2, lab F1
+    const step = (p) => {
+      const fat = p.lastVerdict ? Number(p.lastVerdict.fatTokens) : NaN;
+      if (!Number.isFinite(fat)) return false; // 702 (F700-3): change nothing without a finite fat
+      p.lastObeseFat = Math.round(fat);
+      if (p.lastCrossing && typeof p.lastCrossing === "object") p.lastCrossing = { ...p.lastCrossing, consumed: true };
+      delete p.returnAsk;
+      delete p.postWash;
+      return true;
+    };
+    if (!step(proj)) return false;
+    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj, step), report); // T-29LD-2, lab F1, T-RISESKIP
   } catch { return false; }
 }
 // 29fd (fire 694): the bin door (cli.mjs restore) hands an item's bytes back for
@@ -1925,24 +1955,28 @@ export function acknowledgeRestore(home, projectRoot, bytes, original = null, re
     if (!Number.isFinite(n) || n <= 0) return false;
     const { proj, from } = loadStateFrom(projectRoot, home);
     const before = JSON.parse(JSON.stringify(proj));
-    // 711 (F703-1): the bin door hands back the wash's own text, so the restored file leaves the episode. An episode with no
-    // washed file left is closed, so later growth is never read as a return.
-    if (proj.postWash && proj.postWash.removed && original) {
-      const want = path.resolve(String(original));
-      const rem = {};
-      for (const k of Object.keys(proj.postWash.removed)) if (path.resolve(k) !== want) rem[k] = proj.postWash.removed[k];
-      const unt = {};
-      for (const k of Object.keys(proj.postWash.untracked || {})) if (path.resolve(k) !== want) unt[k] = proj.postWash.untracked[k];
-      if (Object.keys(rem).length) {
-        const next = { ...proj.postWash, removed: rem };
-        if (Object.keys(unt).length) next.untracked = unt; else delete next.untracked;
-        proj.postWash = next;
-      } else { delete proj.postWash; delete proj.returnAsk; }
-    }
-    if (proj.lastObeseFat != null && Number.isFinite(Number(proj.lastObeseFat))) {
-      proj.lastObeseFat = Math.round(Number(proj.lastObeseFat) + tokensEstFromBytes(n));
-    }
-    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj), report); // T-29LD-2, lab F1
+    const step = (p) => {
+      // 711 (F703-1): the bin door hands back the wash's own text, so the restored file leaves the episode. An episode with no
+      // washed file left is closed, so later growth is never read as a return.
+      if (p.postWash && p.postWash.removed && original) {
+        const want = path.resolve(String(original));
+        const rem = {};
+        for (const k of Object.keys(p.postWash.removed)) if (path.resolve(k) !== want) rem[k] = p.postWash.removed[k];
+        const unt = {};
+        for (const k of Object.keys(p.postWash.untracked || {})) if (path.resolve(k) !== want) unt[k] = p.postWash.untracked[k];
+        if (Object.keys(rem).length) {
+          const next = { ...p.postWash, removed: rem };
+          if (Object.keys(unt).length) next.untracked = unt; else delete next.untracked;
+          p.postWash = next;
+        } else { delete p.postWash; delete p.returnAsk; }
+      }
+      if (p.lastObeseFat != null && Number.isFinite(Number(p.lastObeseFat))) {
+        p.lastObeseFat = Math.round(Number(p.lastObeseFat) + tokensEstFromBytes(n));
+      }
+      return true;
+    };
+    step(proj);
+    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj, step), report); // T-29LD-2, lab F1, T-RISESKIP
   } catch { return false; }
 }
 
@@ -1981,10 +2015,10 @@ export function armDigGauge(home, projectRoot, session, now = Date.now()) {
   const { proj, from } = loadStateFrom(projectRoot, home);
   if (proj.digGaugeSession === session) return { surface: false }; // already surfaced this session
   const before = JSON.parse(JSON.stringify(proj));
-  proj.digGaugeSession = session;
-  proj.digGaugeAt = now;
+  const step = (p) => { p.digGaugeSession = session; p.digGaugeAt = now; return true; };
+  step(proj);
   // lab F1 (b): `applied` false when the once-per-session mark was not saved, so the CLI can say the offer may show again.
-  const r = saveChangedFields(projectRoot, home, from, before, proj); // T-29LD-2
+  const r = saveChangedFields(projectRoot, home, from, before, proj, step); // T-29LD-2, T-RISESKIP
   return { surface: true, applied: r.saved === true && r.notApplied.length === 0, notApplied: r.notApplied };
 }
 
