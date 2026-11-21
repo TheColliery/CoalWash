@@ -152,22 +152,33 @@ export function checkRepoWriteTarget(target, root) {
 function repoWriteRefusal(target, root) {
   const dirR = repoDirRefusal(path.dirname(path.resolve(target)), root);
   if (dirR) return dirR;
-  const fileWhy = targetFileWhy(target);
-  return fileWhy ? { why: fileWhy, folder: null, kind: null } : null;
+  const f = targetFileWhy(target);
+  return f ? { why: f.why, folder: null, kind: f.kind } : null;
 }
+// The target FILE's own refusal, { why, kind } or null. Z (T-RD-0444, 29mm item Z): an inspect failure is the file's, kind
+// 'inspect' (file advice, never folder advice: the 29mm form's F1); a file with no write bit (mode & 0o222 === 0; Windows reports
+// its read-only attribute as 0o444) is kind 'read-only', refused before any temp exists, its mode kept, never chmodded. Stated
+// limit: a file made read-only after this check, on POSIX, is still replaced by the rename (the 29mm form's F2).
 function targetFileWhy(target) {
   let st;
   try { st = fs.lstatSync(target); } catch (e) {
     if (e && e.code === 'ENOENT') return null;
-    return `cannot inspect ${target} (${e && e.code})`;
+    return { why: `${target} could not be inspected (${e && e.code})`, kind: 'inspect' };
   }
   if (st.isSymbolicLink()) {
     let to = 'an unresolvable target';
     try { to = fs.realpathSync.native(target); } catch { /* dangling */ }
-    return `${target} is a symbolic link to ${to}`;
+    return { why: `${target} is a symbolic link to ${to}`, kind: null };
   }
-  if (!st.isFile()) return `${target} exists but is not a regular file`;
+  if (!st.isFile()) return { why: `${target} exists but is not a regular file`, kind: null };
+  if ((st.mode & 0o222) === 0) return { why: `${target} is read-only (no write permission, or its read-only attribute is on)`, kind: 'read-only' };
   return null;
+}
+// Z: the same read-only and inspect refusal for a writer that is not contained to a project (the --global config, the keeps
+// store): a RepoWriteRefused with kind 'read-only' or 'inspect', or null.
+export function readOnlyRefusal(target) {
+  const f = targetFileWhy(target);
+  return f && (f.kind === 'read-only' || f.kind === 'inspect') ? new RepoWriteRefused(f.why, null, f.kind) : null;
 }
 
 // Write `content` (string or Buffer) to `target` through an unpredictable sibling temp

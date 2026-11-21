@@ -82,7 +82,7 @@ import { CONFIG_SCHEMA, RETIRED_KEYS, validateValue, validateConfig } from './li
 import { parseJsonc } from './lib/jsonc.mjs';
 import { projectConfigPath, projectConfigCandidates, globalConfigPath, loadMergedConfig, findProjectRoot, repoReadOutcome, MAX_CONFIG_BYTES, GLOBAL_ONLY_KEYS, PROJECT_BOUNDED_KEYS } from './lib/config-load.mjs';
 import { plainShellArg } from './lib/ask.mjs';
-import { writeRepoFile, RepoWriteRefused } from './lib/repo-fs.mjs';
+import { writeRepoFile, RepoWriteRefused, readOnlyRefusal } from './lib/repo-fs.mjs';
 import { escapeRawControls } from './lib/receipt.mjs';
 
 // Prototype-pollution guard. `parseJsonc` already drops these at PARSE (so a
@@ -540,7 +540,10 @@ function main() {
   }
   try {
     if (isGlobal) {
-      // The user's own file, written as before (a dotfile manager's link is honoured).
+      // The user's own file, written as before (a dotfile manager's link is honoured). Z (T-RD-0444): a read-only file, or one that
+      // cannot be inspected, is refused by name before anything is written, never chmodded and never replaced.
+      const ro = readOnlyRefusal(writePath);
+      if (ro) throw ro;
       fs.mkdirSync(path.dirname(writePath), { recursive: true });
       fs.writeFileSync(writePath, JSON.stringify(next, null, 2) + '\n', 'utf8');
     } else {
@@ -560,7 +563,12 @@ function main() {
       }[e.kind] || `Replace the link or file at ${f} with a real folder (or remove it) and re-run.`;
       console.error(`[refused] ${escapeRawControls(String(writePath))}: ${escapeRawControls(String(e.message))} -- nothing was written. ${escapeRawControls(String(advice))}`);
     } else if (e instanceof RepoWriteRefused) {
-      console.error(`[refused] ${escapeRawControls(String(writePath))}: ${escapeRawControls(String(e.message))} -- nothing was written. Replace it with a regular file inside the project (or remove it) and re-run.`);
+      // Z (T-RD-0444): the target FILE's own refusal carries file advice true for its kind (the 29mm form's F1)
+      const advice = {
+        'read-only': 'Make the file writable if you mean to change it, then re-run.',
+        inspect: 'Check that the file can be inspected (its permissions, or another program holding it) and re-run.',
+      }[e.kind] || 'Replace it with a regular file inside the project (or remove it) and re-run.';
+      console.error(`[refused] ${escapeRawControls(String(writePath))}: ${escapeRawControls(String(e.message))} -- nothing was written. ${advice}`);
     } else {
       console.error(`Error: Failed to write to config file: ${escapeRawControls(String(e.message))}`);
     }

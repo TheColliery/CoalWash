@@ -762,3 +762,25 @@ for (const scope of ['project', 'global']) {
     assert.strictEqual(fs.readFileSync(cfg, 'utf8'), original, 'the config is byte for byte unchanged');
   });
 }
+
+// Z, T-RD-0444 (29mm item Z): a read-only config (no write bit; on Windows the read-only attribute) is refused by name, exit 1, the
+// file and its mode kept, never chmodded and never replaced, project and --global. Asserted on the mode, never on EACCES.
+for (const scope of ['project', 'global']) {
+  test(`T-RD-0444: a read-only ${scope} config is refused by name, exit 1, the file and its mode unchanged`, (t) => {
+    const sb = sandbox(t);
+    const cfg = scope === 'global' ? path.join(sb.home, '.claude', '.coalwash.json') : projCfg(sb);
+    fs.mkdirSync(path.dirname(cfg), { recursive: true });
+    const original = JSON.stringify({ language: 'th' }, null, 2) + '\n';
+    fs.writeFileSync(cfg, original);
+    fs.chmodSync(cfg, 0o444);
+    t.after(() => { try { fs.chmodSync(cfg, 0o644); } catch { /* gone */ } });
+    const mode = fs.statSync(cfg).mode & 0o777;
+    assert.strictEqual(mode & 0o222, 0, 'the fixture has no write bit');
+    const r = run(sb, scope === 'global' ? ['--global', '--updateCheckDays', '30'] : ['--updateCheckDays', '30']);
+    assert.strictEqual(r.status, 1, r.stdout + r.stderr);
+    assert.ok(/read-only/.test(r.stderr) && /nothing was written/.test(r.stderr) && r.stderr.includes(path.basename(cfg)), 'the refusal names the file and says read-only, nothing written: ' + r.stderr);
+    assert.match(r.stderr, /make the file writable/i, 'file advice, not folder advice');
+    assert.strictEqual(fs.readFileSync(cfg, 'utf8'), original, 'the config is unchanged');
+    assert.strictEqual(fs.statSync(cfg).mode & 0o777, mode, 'its mode is kept');
+  });
+}

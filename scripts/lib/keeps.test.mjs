@@ -1069,9 +1069,11 @@ test('fire 133: a read-only keeps store refuses at once with what it is, spends 
     let r;
     try { r = recordKeep(proj, { target: 'blocked' }); } finally { f.restore(); fs.chmodSync(keepsPath(proj), 0o644); }
     assert.strictEqual(r.ok, false, JSON.stringify(r));
-    assert.ok(r.error.startsWith(`keeps write: the store ${keepsPath(proj)} is read-only`) && r.error.includes('clear the read-only attribute'), r.error);
+    // Z, T-RD-0444 (named step): the read-only store is now refused by its mode BEFORE the lock and the temp, so no rename is
+    // tried at all (it was refused at the first rename before); the words still say what it is and what to do
+    assert.ok(r.error.startsWith(`keeps write: the store ${keepsPath(proj)} is read-only`) && r.error.includes('make the file writable'), r.error);
     assert.ok(!r.error.includes('another program may be holding it open') && !r.error.includes('record the keep again'), r.error);
-    assert.strictEqual(f.tries, 1, 'no rename retry');
+    assert.strictEqual(f.tries, 0, 'no rename tried');
     assert.deepStrictEqual(fs.readFileSync(keepsPath(proj)), before);
     assert.deepStrictEqual(tempsBeside(keepsPath(proj)), [], 'no temp left');
   } finally { try { fs.chmodSync(keepsPath(proj), 0o644); } catch { /* absent */ } clean(proj); }
@@ -1248,5 +1250,20 @@ for (const scope of ['project', 'global']) {
       restore = null;
       assertRefusedUntouched(file, PRIOR_KEEPS, r, /EPERM|EACCES/);
     } finally { if (restore) restore(); }
+  });
+}
+
+// Z, T-RD-0444 (29mm item Z): a read-only keeps store (no write bit) is refused by name before the lock and the temp, the file and
+// its mode kept. On POSIX the rename used to replace it; on Windows the rename failed and L131-1 named it after the temp was made.
+for (const scope of ['project', 'global']) {
+  test(`T-RD-0444: a read-only ${scope} keeps store is refused by name before anything is written, its mode kept`, (t) => {
+    const { root, file, record } = storeFor(scope);
+    t.after(() => { try { fs.chmodSync(file, 0o644); } catch { /* gone */ } fs.rmSync(root, { recursive: true, force: true }); });
+    fs.writeFileSync(file, PRIOR_KEEPS, 'utf8');
+    fs.chmodSync(file, 0o444);
+    const mode = fs.statSync(file).mode & 0o777;
+    const r = record({ target: 'new.md', reason: 'a new keep' });
+    assertRefusedUntouched(file, PRIOR_KEEPS, r, /read-only/);
+    assert.strictEqual(fs.statSync(file).mode & 0o777, mode, 'its mode is kept');
   });
 }

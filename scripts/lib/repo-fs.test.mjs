@@ -1152,3 +1152,43 @@ test('L808-2 caliper.mjs legacy-file migration: a rename that is refused leaves 
   assert.ok(w.hits() > 0, 'the migration reached its rename');
   assert.deepEqual(tempsUnder(dir), []);
 });
+
+// Z, T-RD-0444 (29mm item Z, inspect-906 §5 D2): a target that exists as a file with no write bit (mode & 0o222 === 0; on Windows the
+// read-only attribute, which Node reports as 0o444) is REFUSED BY NAME before the temp exists, and its mode is kept. On POSIX the
+// rename over it used to replace it as 0600; on Windows the rename and the in-place fallback failed with a bare EPERM. The test
+// asserts on the MODE, never on EACCES (root ignores the bit), and needs no non-root user, since the check reads the mode itself.
+test('T-RD-0444: writeRepoFile refuses a read-only target by name before any temp, the file and its mode kept', (t) => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-0444-')));
+  t.after(() => { try { fs.chmodSync(path.join(root, 'cfg.json'), 0o644); } catch { /* absent */ } fs.rmSync(root, { recursive: true, force: true }); });
+  const target = path.join(root, 'cfg.json');
+  fs.writeFileSync(target, '{"keep":"me"}\n');
+  fs.chmodSync(target, 0o444);
+  const mode = fs.statSync(target).mode & 0o777;
+  assert.strictEqual(mode & 0o222, 0, 'the fixture has no write bit');
+  let err = null;
+  try { writeRepoFile(target, '{"replaced":true}\n', root); } catch (e) { err = e; }
+  assert.ok(err instanceof RepoWriteRefused, 'refused by name, never a bare I/O error: ' + (err && (err.code || err.message)));
+  assert.strictEqual(err.kind, 'read-only');
+  assert.match(err.message, /read-only/);
+  assert.strictEqual(fs.readFileSync(target, 'utf8'), '{"keep":"me"}\n', 'the file is unchanged');
+  assert.strictEqual(fs.statSync(target).mode & 0o777, mode, 'its mode is kept');
+  assert.deepStrictEqual(fs.readdirSync(root).filter((n) => n.includes('coalwash-tmp')), [], 'no temp was made');
+});
+test('T-RD-0444: a target that cannot be inspected is refused with a file sentence, "could not be inspected"', (t) => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-0444i-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const target = path.resolve(path.join(root, 'cfg.json'));
+  fs.writeFileSync(target, '{}\n');
+  const realLstat = fs.lstatSync;
+  fs.lstatSync = function (p, ...rest) {
+    if (path.resolve(String(p)) === target) { const e = new Error(`EPERM: lstat '${p}'`); e.code = 'EPERM'; throw e; }
+    return realLstat.call(fs, p, ...rest);
+  };
+  let err = null;
+  try { writeRepoFile(target, 'x', root); } catch (e) { err = e; } finally { fs.lstatSync = realLstat; }
+  assert.ok(err instanceof RepoWriteRefused, String(err && err.message));
+  assert.strictEqual(err.kind, 'inspect', 'the refusal is the file\'s, not a folder\'s');
+  assert.strictEqual(err.folder, null);
+  assert.match(err.message, /could not be inspected \(EPERM\)/);
+  assert.strictEqual(fs.readFileSync(target, 'utf8'), '{}\n');
+});

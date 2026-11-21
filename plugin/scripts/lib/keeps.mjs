@@ -33,7 +33,7 @@ import os from 'node:os';
 import crypto from 'node:crypto'; // U7: CSPRNG suffix for the write temp below (zero-dep builtin)
 import { txDirFor, ensureSelfIgnore, trackedInOwnFolder, acquireLock, lockLeftNote } from './apply.mjs';
 import { claudeBaseDir, readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
-import { ownSandboxDir, writeOwnTemp } from './repo-fs.mjs';
+import { ownSandboxDir, writeOwnTemp, readOnlyRefusal } from './repo-fs.mjs';
 
 export const KEEPS_NAME = 'keeps.json'; // exported for apply.mjs's KEEPS-GATE (opts.txDir-aware path build)
 const KEEPS_SCHEMA_V = 1;
@@ -204,6 +204,14 @@ function recordKeepAt(file, root, ensureDir, selfIgnore, { target, reason = '', 
     const first = keepsStoreRead(file, root);
     if (first.kind === 'unreadable' || first.kind === 'corrupt') return storeReadRefusal(file, first);
     if (first.kind === 'parsed' && newer(first.raw)) return { ok: false, anchorDropped: false, anchorStored: false }; // read-only to us
+    // Z (T-RD-0444): a store with no write bit is the user's choice: refused by name before the lock and the temp, its mode kept
+    const ro = first.kind === 'absent' ? null : readOnlyRefusal(file);
+    if (ro) {
+      const error = ro.kind === 'read-only'
+        ? `keeps write: the store ${file} is read-only (no write permission, or its read-only attribute is on); nothing was written and the store stands — make the file writable if you mean to record a keep`
+        : `keeps write: ${ro.message}; nothing was written and the store stands — check the file's permissions, or another program holding it, then record the keep`;
+      return { ok: false, anchorDropped: false, anchorStored: false, error };
+    }
     ensureDir();
     lock = acquireKeepsLock(file, selfIgnore);
     if (lock.nonPlain) return { ok: false, anchorDropped: false, anchorStored: false, error: `keeps lock: ${lockFile} is not a plain file (it is ${lock.nonPlain}); CoalWash never takes over a lock it did not make, so nothing was written and no retry was spent — remove it by hand once no CoalWash run is active` };
