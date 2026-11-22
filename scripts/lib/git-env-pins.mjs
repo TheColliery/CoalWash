@@ -6,5 +6,5 @@
 // 09a: scripts/secret-gate.test.mjs left this list when the canon rewrote it to named keys (2f066650); the room's own census file left with it.
 // 09b: scripts/secret-scan.test.mjs left it when the room adopted the canon source (now .github 78c53e6), which the canon census reads safe.
 export const CENSUS_PINS = [
-  { rel: 'scripts/secret-gate.mjs', blob: '235bf5b5b4dffaa814c07b7c56b5499232937b2b', why: "canon gate (.github ea92a58), byte-equal to the published-code template; its gitEnv() copies process.env minus GIT_* but keeps GIT_INDEX_FILE (commit mode must read the index the commit is made from) and GIT_CEILING_DIRECTORIES by design, so the census reads 'holds process.env without gitEnv()' at line 79; DELETE when the census rule accepts a GIT_*-stripping copy of process.env or the canon builds its env from named keys" },
+  { rel: 'scripts/secret-gate.mjs', blob: '8a10f8625de40e967a7131d0e4697b36684a69a2', why: "canon gate (.github 1a5a941), byte-equal to the published-code template; its gitEnv() copies process.env minus GIT_* but keeps GIT_INDEX_FILE (commit mode must read the index the commit is made from) and GIT_CEILING_DIRECTORIES by design, so the census reads 'holds process.env without gitEnv()' at line 78; DELETE when the census rule accepts a GIT_*-stripping copy of process.env or the canon builds its env from named keys" },
 ];
