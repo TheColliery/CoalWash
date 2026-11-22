@@ -5909,3 +5909,55 @@ for (const [kind, form] of [['newer-schema', 'newer'], ['unparseable', 'other']]
     } finally { clean(proj, home); }
   });
 }
+
+// Class 60 (main's ruling (2) on the lab's 1.20.0 reading, "KEEPS-GATE, keeps.json emptied to 0 bytes: CUT"): a keeps store that
+// EXISTS and holds no JSON at all (0 bytes, white space only, or a byte-order mark alone) is a value nobody wrote, not the user's
+// "no keeps": it was read as absent, so a wash cut a span the user had pinned. It is now UNPARSEABLE, so the KEEPS-GATE stops the
+// wash by name as 4b does (nothing applied, no snapshot, the pinned span byte for byte). A store that parses to an empty object or
+// an empty keeps list IS the user's own "no keeps", and the wash may cut (legs d and e: the fix must not over-refuse).
+const EMPTIED = { 'empty-0': '', whitespace: ' \r\n\t \n', 'bom-only': String.fromCharCode(0xfeff), 'bom-whitespace': String.fromCharCode(0xfeff) + '  \n' };
+for (const scope of ['project', 'global']) {
+  for (const [kind, bytes] of Object.entries(EMPTIED)) {
+    test(`class 60 KEEPS-GATE: a ${scope} keeps store emptied to ${kind} stops the wash by name and cuts nothing (the pinned span survives)`, () => {
+      const { proj, store } = sandbox();
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+      try {
+        const kept = path.join(store, 'kept.md');
+        write(kept, PINNED);
+        const rec = scope === 'global'
+          ? recordGlobalKeep(home, { target: 'kept.md:decisive', reason: 'user-adjudicated', anchor: PIN, anchorFile: kept })
+          : recordKeep(proj, { target: 'kept.md:decisive', reason: 'user-adjudicated', anchor: PIN, anchorFile: kept });
+        assert.strictEqual(rec.anchorStored, true, 'the keep pins the span (non-vacuity)');
+        const file = scope === 'global' ? globalKeepsPath(home) : keepsPath(proj);
+        fs.writeFileSync(file, bytes, 'utf8');
+        assert.strictEqual(fs.statSync(file).size, Buffer.byteLength(bytes, 'utf8'), 'the store holds exactly the emptied bytes');
+        const r = apply(planFor(proj, store, [{ type: 'rewrite', path: kept, content: CUT }]), { home });
+        assert.strictEqual(fs.readFileSync(kept, 'utf8'), PINNED, 'the pinned span survives byte for byte');
+        assert.strictEqual(r.ok, false, 'the wash is refused: ' + JSON.stringify(r));
+        assert.ok(typeof r.error === 'string' && r.error.includes(file) && /keeps/i.test(r.error), 'the error names the store: ' + r.error);
+        assert.strictEqual(r.applied || 0, 0, 'nothing applied');
+        assert.deepStrictEqual(snapsIn(proj), [], 'no snapshot was made');
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), bytes, 'the emptied store is left as it was');
+      } finally { clean(proj, home); }
+    });
+  }
+  for (const [kind, bytes] of [['empty-object', '{}'], ['empty-keeps', '{"keeps":[]}'], ['no-keeps-field', '{"v":1}']]) {
+    test(`class 60 control: a ${scope} keeps store that parses to ${kind} is the user's own "no keeps", and the wash cuts`, () => {
+      const { proj, store } = sandbox();
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+      try {
+        const kept = path.join(store, 'kept.md');
+        write(kept, PINNED);
+        const rec = scope === 'global'
+          ? recordGlobalKeep(home, { target: 'kept.md:decisive', reason: 'user-adjudicated', anchor: PIN, anchorFile: kept })
+          : recordKeep(proj, { target: 'kept.md:decisive', reason: 'user-adjudicated', anchor: PIN, anchorFile: kept });
+        assert.strictEqual(rec.anchorStored, true, 'the keep pins the span before the store is emptied');
+        const file = scope === 'global' ? globalKeepsPath(home) : keepsPath(proj);
+        fs.writeFileSync(file, bytes, 'utf8');
+        const r = apply(planFor(proj, store, [{ type: 'rewrite', path: kept, content: CUT }]), { home });
+        assert.strictEqual(r.ok, true, 'the wash runs: ' + JSON.stringify(r));
+        assert.strictEqual(fs.readFileSync(kept, 'utf8'), CUT, 'the span is cut (no keep protects it)');
+      } finally { clean(proj, home); }
+    });
+  }
+}

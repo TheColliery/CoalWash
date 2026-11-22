@@ -1217,6 +1217,18 @@ for (const scope of ['project', 'global']) {
     }
   });
 
+  // Class 60 (main's ruling (2)): a store that exists and holds no JSON at all (0 bytes, white space, a byte-order mark alone) is a
+  // value nobody wrote; it was read as absent, so the recorder renamed a new one-entry store over the user's file. It is now refused
+  // like a store that is not JSON, and the file stands byte for byte.
+  test(`class 60: a ${scope} keeps store emptied to 0 bytes, white space or a byte-order mark alone is never replaced; the record is refused by name`, (t) => {
+    const { root, file, record } = storeFor(scope);
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    for (const bytes of ['', ' \r\n\t \n', String.fromCharCode(0xfeff), String.fromCharCode(0xfeff) + '  \n']) {
+      fs.writeFileSync(file, bytes, 'utf8');
+      assertRefusedUntouched(file, bytes, record({ target: 'new.md', reason: 'a new keep' }), /not a keeps store/);
+    }
+  });
+
   test(`T-RD-KEEPS: a directory at the ${scope} keeps store's path is refused before anything is written`, (t) => {
     const { root, file, record } = storeFor(scope);
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));

@@ -125,8 +125,8 @@ function keepsOf(parsed) {
 }
 
 // T-RD-KEEPS (29mm item R): the store as the RECORDER reads it before it rewrites the file, one of four answers, so "no keeps" is
-// never confused with "could not read the keeps". 'absent' (nothing there: ENOENT/ENOTDIR, or a file with no bytes but white
-// space, which holds nothing to lose) · 'unreadable' (the file is there and the read failed: EPERM, EACCES, EBUSY, a directory or
+// never confused with "could not read the keeps". 'absent' (nothing there: ENOENT/ENOTDIR; since class 60 a file with no bytes but
+// white space or a byte-order mark is 'corrupt', not absent) · 'unreadable' (the file is there and the read failed: EPERM, EACCES, EBUSY, a directory or
 // special file at the path, over the bound, a link the containment refuses) · 'corrupt' (read, but not JSON, or not a keeps
 // object: the user's record too, so it is never replaced; RULED with T-RD-KEEPS) · 'parsed' (with `raw`). A throw reads as
 // 'unreadable', the side that writes nothing. The readers (loadKeeps, the KEEPS-GATE) keep their lenient [] (they write nothing).
@@ -139,7 +139,10 @@ function keepsStoreRead(file, root) {
   }
   let text = o.buf.toString('utf8');
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  if (text.trim() === '') return { kind: 'absent' };
+  // Class 60 (main's ruling (2)): a store that exists and holds no JSON at all (0 bytes, white space, a byte-order mark alone) is a
+  // value nobody wrote, never the user's "no keeps" (that is `{}` or an empty `keeps` list, which parse). It reads as 'corrupt', so
+  // the KEEPS-GATE stops the wash on it and the recorder never renames a new store over it. Only a missing file means no keeps.
+  if (text.trim() === '') return { kind: 'corrupt', empty: true };
   let parsed;
   try { parsed = JSON.parse(text); } catch { return { kind: 'corrupt' }; }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'corrupt' };
@@ -149,22 +152,23 @@ function keepsStoreRead(file, root) {
 // The refusal a store read that is neither absent nor parsed answers with: it names the file and the code, writes nothing.
 function storeReadRefusal(file, read) {
   const error = read.kind === 'corrupt'
-    ? `keeps read: the store ${file} is not a keeps store CoalWash can read (not JSON, or not its { v, keeps: [...] } shape); nothing was written and the file stands — fix the file or move it aside, then record the keep`
+    ? `keeps read: the store ${file} is not a keeps store CoalWash can read (${read.empty ? 'it is empty: no bytes but white space or a byte-order mark' : 'not JSON, or not its { v, keeps: [...] } shape'}); nothing was written and the file stands — fix the file or move it aside, then record the keep`
     : `keeps read: the store ${file} exists but could not be read (${read.code}); nothing was written and the store stands — ${read.code === 'directory' ? 'move the directory away' : 'make the file readable'}, then record the keep`;
   return { ok: false, anchorDropped: false, anchorStored: false, error };
 }
 
 // 4b (main's ruling): the KEEPS-GATE's read. A gate on a cut never reads "could not read the keeps" as "no keeps": that let a wash
-// cut a span the user protected. `{ keeps }` when the store is absent (ENOENT/ENOTDIR, or white space only: nothing to protect) or
+// cut a span the user protected. `{ keeps }` when the store is absent (ENOENT/ENOTDIR: nothing to protect) or
 // read and understood; `{ error }` when it exists and could not be read (any code, a directory or special file at the path, over
-// the bound, a link the containment refuses), is not a keeps store (not JSON, not an object, a `keeps` that is not an array), or
+// the bound, a link the containment refuses), is not a keeps store (not JSON, not an object, a `keeps` that is not an array, or,
+// class 60, empty: no bytes but white space or a byte-order mark, a value nobody wrote), or
 // carries a schema this version does not know (an object `v`, or a `v` above KEEPS_SCHEMA_V). The gate stops the wash on an error.
 // `root`: the project tx dir (the containment the project store is read under), or null for the user's own global store.
 export function keepsForGate(file, root = null) {
   const read = keepsStoreRead(file, root);
   if (read.kind === 'absent') return { keeps: [] };
   if (read.kind === 'unreadable') return { error: `the keeps store ${file} exists but could not be read (${read.code})` };
-  if (read.kind === 'corrupt') return { error: `the keeps store ${file} is not a keeps store CoalWash can read (not JSON, or not its { v, keeps: [...] } shape)` };
+  if (read.kind === 'corrupt') return { error: `the keeps store ${file} is not a keeps store CoalWash can read (${read.empty ? 'it is empty: no bytes but white space or a byte-order mark' : 'not JSON, or not its { v, keeps: [...] } shape'})` };
   const v = read.raw.v;
   if (v !== null && typeof v === 'object') return { error: `the keeps store ${file} carries a schema field this version cannot read` };
   if (Number(v) > KEEPS_SCHEMA_V) return { error: `the keeps store ${file} was written by a newer CoalWash (schema ${String(v)}; this version reads ${KEEPS_SCHEMA_V})`, newer: true };
