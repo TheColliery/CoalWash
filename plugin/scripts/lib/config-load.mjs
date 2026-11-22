@@ -525,7 +525,8 @@ export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
       if (n === 0) break;
       got += n;
     }
-    return { buf: got === want ? buf : buf.subarray(0, got) };
+    // T76-1: the handle's own mtime rides with the bytes, so a caller that dates what it read never stats the name a second time.
+    return { buf: got === want ? buf : buf.subarray(0, got), mtimeMs: st.mtimeMs };
   } catch (e) {
     const code = e && e.code;
     return { why: code === 'EISDIR' ? 'directory' : 'unreadable', code };

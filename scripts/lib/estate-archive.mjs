@@ -242,8 +242,9 @@ export function chJournalGuard(projectRoot) {
     const o = repoReadOutcome(p, projectRoot, MAX_DOC_BYTES);
     if (o.why === 'absent') return none;
     if (!o.buf) return { inProgress: true, mtimeMs: null, sessionId: null };
-    let mtimeMs = null;
-    try { mtimeMs = fs.statSync(p).mtimeMs; } catch { /* unreadable stat = uncertain -> caller protects */ }
+    // T76-1: the age comes from the handle the content was read through (repoReadOutcome's fstat), never a second stat of the name,
+    // which a file renamed over it in between would answer with ITS mtime. A missing mtime reads as uncertain: the caller protects.
+    const mtimeMs = o.mtimeMs;
     // 917 sweep: a journal that EXISTS but does not parse (a torn write, a hand edit, not a JSON object) is one this guard cannot
     // judge, so it counts as in progress, dated by its own mtime: fresh protects the newest unit, stale freezes nothing. It read
     // as "no session" before, and the archive (copy, then DELETE) could take a live transcript.

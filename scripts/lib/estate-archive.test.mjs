@@ -1753,3 +1753,33 @@ test('917 sweep: a STALE CoalHearth journal that does not parse blocks nothing (
     assert.strictEqual(c.sessions.find((s) => s.id === 'sess-idle').band, 'warm');
   } finally { clean(home, proj); }
 });
+
+// T76-1 (INSPECT 920): chJournalGuard read the journal's CONTENT through a handle but its AGE by a second stat of the NAME, so a file
+// renamed over the name in between dated the read content with the other file's mtime (a 30-day-old copy made a FRESH torn journal
+// read as stale, and the newest session lost its protection before the archive's copy-then-DELETE). The age now comes from the same
+// handle. Seam: the swap lands when the guard closes the handle it read (after the read, before any later stat), on both trees.
+test('T76-1: a journal swapped for an old file right after its read is dated by the file that was READ, not the one swapped in', () => {
+  const { home, proj } = sandbox();
+  try {
+    const dir = path.join(proj, '.claude', 'coalhearth');
+    const p = path.join(dir, 'session_handoff.json');
+    write(p, '{"status":"in_progr'); // a torn, FRESH journal: counts as in progress, dated by its mtime
+    const old = path.join(dir, 'old-copy.json');
+    write(old, '{"status":"done"}');
+    const thirty = (Date.now() - 30 * 86400000) / 1000;
+    fs.utimesSync(old, thirty, thirty);
+    const target = path.resolve(p);
+    const realOpen = fs.openSync;
+    const realClose = fs.closeSync;
+    const fds = new Set();
+    let swapped = false;
+    fs.openSync = function (q, ...rest) { const fd = realOpen.call(fs, q, ...rest); if (path.resolve(String(q)) === target) fds.add(fd); return fd; };
+    fs.closeSync = function (fd) { const r = realClose.call(fs, fd); if (!swapped && fds.has(fd)) { swapped = true; fs.renameSync(old, p); } return r; };
+    let g;
+    try { g = chJournalGuard(proj); } finally { fs.openSync = realOpen; fs.closeSync = realClose; }
+    assert.ok(swapped, 'the seam fired');
+    assert.strictEqual(g.inProgress, true);
+    const ageDays = (Date.now() - g.mtimeMs) / 86400000;
+    assert.ok(ageDays < 1, `the age is the read file's (fresh), not the swapped-in file's: ${ageDays.toFixed(1)} days`);
+  } finally { clean(home, proj); }
+});
