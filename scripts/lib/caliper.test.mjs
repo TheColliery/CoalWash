@@ -3637,3 +3637,60 @@ test('T-WHOLESAVE (t363 #4, dig-gauge): an edit that read the state file but who
     assert.strictEqual(r.applied, false, 'the mark is reported not saved: ' + JSON.stringify(r));
   } finally { fs.openSync = realOpen; clean(home, proj); }
 });
+
+// F915-1 (with T-REAPUNREAD, F906-1): a save that could not read the fallback raised the counter only from what it read and then
+// reaped the fallback best-effort. A held fallback (neither readable nor removable) kept its higher counter, later won the load and
+// was saved over the main file; a fallback the save could not read but could remove was reaped unread. Now such a fallback is never
+// reaped, the main record says so (`fallbackUnread`), the load keeps the main file while that mark stands, and the next save that
+// can read the fallback raises past its counter and reaps it. The witness was scratchpad/29mw/w-reapfail.mjs.
+function heldFallback(pf, fn, { removable = false } = {}) {
+  const target = path.resolve(pf);
+  const realOpen = fs.openSync;
+  const realRm = fs.rmSync;
+  fs.openSync = function (p, ...rest) { if (path.resolve(String(p)) === target) { const e = new Error('EBUSY: planted'); e.code = 'EBUSY'; throw e; } return realOpen.call(fs, p, ...rest); };
+  if (!removable) fs.rmSync = function (p, ...rest) { if (path.resolve(String(p)) === target) { const e = new Error('EBUSY: planted'); e.code = 'EBUSY'; throw e; } return realRm.call(fs, p, ...rest); };
+  try { return fn(); } finally { fs.openSync = realOpen; fs.rmSync = realRm; }
+}
+function staleFallbackBeside(home, proj) {
+  ccSlugDir(home, proj);
+  setLeanFloor(home, proj, 12345);
+  markQuickTried(home, proj);
+  const pm = statePath(proj, home);
+  const pf = stateFallbackPath(proj, home);
+  fs.writeFileSync(pm, JSON.stringify({ ...JSON.parse(fs.readFileSync(pm, 'utf8')), saveRev: 3 }));
+  fs.mkdirSync(path.dirname(pf), { recursive: true });
+  fs.writeFileSync(pf, JSON.stringify({ ...JSON.parse(fs.readFileSync(pm, 'utf8')), leanFloorTokens: 777, quickTried: false, saveRev: 9 })); // the stale leftover
+  return { pm, pf };
+}
+test('F915-1: a fallback held through a save (neither readable nor removable) never later wins over the main file', () => {
+  const { home, proj } = sandbox();
+  try {
+    const { pm, pf } = staleFallbackBeside(home, proj);
+    const rep = {};
+    const ret = heldFallback(pf, () => stateNs.acknowledgeRestore(home, proj, 400, null, rep));
+    assert.strictEqual(ret, true, 'the edit on the main file applies: ' + JSON.stringify(rep));
+    assert.ok(fs.existsSync(pf), 'the held fallback is still there');
+    const next = loadState(proj, home);
+    assert.strictEqual(next.leanFloorTokens, 12345, 'the next load keeps the main file, not the stale fallback');
+    recordSubSpawn(home, proj, 4242);
+    const m = JSON.parse(fs.readFileSync(pm, 'utf8'));
+    assert.strictEqual(m.leanFloorTokens, 12345, 'the main file\'s floor survives the next hook save');
+    assert.strictEqual(m.quickTried, true, 'and its quickTried');
+    assert.ok(m.saveRev > 9, 'the save that could read the fallback raised past its counter: ' + m.saveRev);
+    assert.ok(!fs.existsSync(pf), 'and reaped it');
+    assert.strictEqual(m.fallbackUnread, undefined, 'the mark is cleared once the fallback is gone');
+  } finally { clean(home, proj); }
+});
+test('T-REAPUNREAD (F906-1): a fallback a save could not read is never reaped unread, and the main record marks it', () => {
+  const { home, proj } = sandbox();
+  try {
+    const { pm, pf } = staleFallbackBeside(home, proj);
+    const before = fs.readFileSync(pf, 'utf8');
+    heldFallback(pf, () => recordSubSpawn(home, proj, 4242), { removable: true });
+    assert.ok(fs.existsSync(pf), 'the unread fallback is not reaped');
+    assert.strictEqual(fs.readFileSync(pf, 'utf8'), before, 'and is byte for byte unchanged');
+    const m = JSON.parse(fs.readFileSync(pm, 'utf8'));
+    assert.strictEqual(m.fallbackUnread, true, 'the main record says a fallback stands unread');
+    assert.strictEqual(m.leanFloorTokens, 12345);
+  } finally { clean(home, proj); }
+});

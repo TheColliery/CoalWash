@@ -1298,9 +1298,13 @@ function loadStateFrom(projectRoot, home) {
   const fbHeldFile = F.kind === 'unreadable' && F.why !== 'directory' && F.why !== 'not-regular';
   const blocked = M.kind === 'unreadable' || (!m && !f && fbHeldFile);
   const hi = maxRev(m, f);
-  if (f && (!m || fallbackNewer(f, m))) return { proj: migrateProjSchema(withRev(f, hi)), from: pf, blocked };
-  if (m) return { proj: migrateProjSchema(withRev(m, hi)), from: pm, blocked };
-  return { proj: migrateProjSchema(readOldRootEntry(projectRoot, home) || {}), from: null, blocked };
+  const fbUnreadAtLoad = fbHeldFile; // F915-1: the CLI save never takes over a fallback this load could not read
+  // F915-1: a main record marked `fallbackUnread` was saved while a fallback stood beside it unread; that fallback is a leftover
+  // whose counter the save could not pass, so it never wins the load while the mark stands. Its counter still feeds `hi`, so the next
+  // save, which can read it, raises past it and reaps it.
+  if (f && (!m || (fallbackNewer(f, m) && m.fallbackUnread !== true))) return { proj: migrateProjSchema(withRev(f, hi)), from: pf, blocked, fbUnreadAtLoad };
+  if (m) return { proj: migrateProjSchema(withRev(m, hi)), from: pm, blocked, fbUnreadAtLoad };
+  return { proj: migrateProjSchema(readOldRootEntry(projectRoot, home) || {}), from: null, blocked, fbUnreadAtLoad };
 }
 
 // Persist THIS project's flat state to the new per-project path (atomic
@@ -1514,7 +1518,7 @@ function sweepDeadProjectStates(home, projectRoot) {
 // saves made from the same read carry the same counter, are concurrent, and the main file wins the tie.
 // T-RISESKIP: a load that found no owned record (from null: a failed read, a later-whole file) computed its edit on an empty base,
 // so its edit is replayed with `step` onto the record found at save time; `step` returns false when it cannot apply there.
-function saveChangedFields(projectRoot, home, from, before, after, step) {
+function saveChangedFields(projectRoot, home, from, before, after, step, fbUnreadAtLoad = false) {
   // A load that found no owned record read the main file first and found nothing there, so the re-read is of the main file: a
   // record that is whole again there (a lock released, a rename done) is merged onto, never overwritten with the empty load.
   const pm = statePath(projectRoot, home);
@@ -1529,7 +1533,10 @@ function saveChangedFields(projectRoot, home, from, before, after, step) {
   if (O.kind === 'owned') {
     // t363 #14: a load that found no owned record takes any owned record now readable, whatever its counter (`own` is the main file
     // here, so the fallback only on a higher counter: newer first, the main file on a tie or a missing counter).
-    if (from === null) { if (!owned || fallbackNewer(O.rec, owned)) owned = O.rec; }
+    // F915-1: the fallback is never taken over a main record marked `fallbackUnread`, nor when the load could not read it (its
+    // counter was never seen, so a higher one says nothing about being newer): the main file wins on that doubt.
+    const fbDoubt = !same(other, pm) && ((owned && owned.fallbackUnread === true) || fbUnreadAtLoad === true);
+    if (from === null) { if (!owned || (fallbackNewer(O.rec, owned) && !fbDoubt)) owned = O.rec; }
     else {
       // A load that found one takes the other path only when a save wrote it since the load: it carries a counter higher than
       // every counter the load read (`before` holds the highest), so a stale copy never qualifies (lab F1); against the record
@@ -1537,7 +1544,7 @@ function saveChangedFields(projectRoot, home, from, before, after, step) {
       const r = revOf(O.rec);
       const sinceLoad = r !== null && (revOf(before) === null || r > revOf(before));
       const ownBeats = owned !== null && (same(other, pm) ? fallbackNewer(owned, O.rec) : !fallbackNewer(O.rec, owned));
-      if (sinceLoad && !ownBeats) owned = O.rec;
+      if (sinceLoad && !ownBeats && !fbDoubt) owned = O.rec;
     }
   }
   if (!owned) {
@@ -1599,10 +1606,19 @@ function saveState(proj, projectRoot, home) {
     // the newer of the two state paths. An additive field read by shape, no field's meaning changed: STATE_SCHEMA stays 1, and an
     // older binary never reads it, only carries it through its own `...base` spread. `savedAt`, the clock stamp it replaces, was
     // never released (born and dropped inside 1.19.9), so a dev-era copy is dropped here rather than carried.
-    const { savedAt: _clockStamp, ...kept } = base;
-    const r = revOf(base);
+    // F915-1 (with T-REAPUNREAD, F906-1): the fallback is read before the write. One that exists and could not be read is never
+    // reaped (it may hold a record this save never saw) and the main record says so (`fallbackUnread: true`), so the load keeps the
+    // main file while it stands; one that could be read lends its counter, so this save outranks it even if the reap fails. A
+    // directory or special file there holds no record and is left to the reap's best effort, as before. Additive, read by shape:
+    // STATE_SCHEMA stays 1, and an older binary carries the field through its `...base` spread and never reads it.
+    const fb = stateFallbackPath(projectRoot, home);
+    const fbDistinct = path.resolve(p) !== path.resolve(fb);
+    const FB = fbDistinct ? readStateAt(fb, projectRoot) : { kind: 'absent' };
+    const fbUnread = FB.kind === 'unreadable' && FB.why !== 'directory' && FB.why !== 'not-regular';
+    const { savedAt: _clockStamp, fallbackUnread: _priorMark, ...kept } = base;
+    const r = maxRev(base, FB.kind === 'owned' ? FB.rec : null);
     const saveRev = r === null ? 1 : Number.isSafeInteger(r + 1) ? r + 1 : r;
-    const toWrite = { ...kept, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, saveRev, ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
+    const toWrite = { ...kept, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, saveRev, ...(fbUnread ? { fallbackUnread: true } : {}), ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
     // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
     // carries (read its comment for the full reasoning; this module cannot import
     // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
@@ -1621,8 +1637,7 @@ function saveState(proj, projectRoot, home) {
     // cleanupPeriodDays) the read silently RESURRECTS it and the lean floor
     // reverts to a pre-flip value (blind wave R1 / TP-5). Reap our own old copy on
     // the write that moves home; same no-old-version-leftover mechanism as above.
-    const fb = stateFallbackPath(projectRoot, home);
-    if (path.resolve(p) !== path.resolve(fb)) { try { fs.rmSync(fb, { force: true }); } catch { /* best-effort */ } }
+    if (fbDistinct && !fbUnread) { try { fs.rmSync(fb, { force: true }); } catch { /* best-effort: its counter is already outranked */ } }
     if (!alreadySwept) pruneStrayStateDirs(projectRoot, home);
     if (deadSweepDue) sweepDeadProjectStates(home, projectRoot); // CWK-157: after our own write, so a failed sweep never costs the write
     return true;
@@ -2015,7 +2030,7 @@ export function restorePostWashSnapshot(home, projectRoot, snap) {
 // 699 (BB-469): "leave it" answered for a pending return. The current fat becomes the plateau, the crossing is consumed, and the return and wash marks clear: the next look is silent, and growth past +500 re-arms as today.
 export function answerReturnLeave(home, projectRoot, report) {
   try {
-    const { proj, from } = loadStateFrom(projectRoot, home);
+    const { proj, from, fbUnreadAtLoad } = loadStateFrom(projectRoot, home);
     const before = JSON.parse(JSON.stringify(proj));
     const step = (p) => {
       const fat = p.lastVerdict ? Number(p.lastVerdict.fatTokens) : NaN;
@@ -2027,7 +2042,7 @@ export function answerReturnLeave(home, projectRoot, report) {
       return true;
     };
     if (!step(proj)) return false;
-    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj, step), report); // T-29LD-2, lab F1, T-RISESKIP
+    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj, step, fbUnreadAtLoad), report); // T-29LD-2, lab F1, T-RISESKIP
   } catch { return false; }
 }
 // 29fd (fire 694): the bin door (cli.mjs restore) hands an item's bytes back for
@@ -2038,7 +2053,7 @@ export function acknowledgeRestore(home, projectRoot, bytes, original = null, re
   try {
     const n = Number(bytes);
     if (!Number.isFinite(n) || n <= 0) return false;
-    const { proj, from } = loadStateFrom(projectRoot, home);
+    const { proj, from, fbUnreadAtLoad } = loadStateFrom(projectRoot, home);
     const before = JSON.parse(JSON.stringify(proj));
     const step = (p) => {
       // 711 (F703-1): the bin door hands back the wash's own text, so the restored file leaves the episode. An episode with no
@@ -2061,7 +2076,7 @@ export function acknowledgeRestore(home, projectRoot, bytes, original = null, re
       return true;
     };
     step(proj);
-    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj, step), report); // T-29LD-2, lab F1, T-RISESKIP
+    return appliedResult(saveChangedFields(projectRoot, home, from, before, proj, step, fbUnreadAtLoad), report); // T-29LD-2, lab F1, T-RISESKIP
   } catch { return false; }
 }
 
@@ -2097,13 +2112,13 @@ export function markQuickTried(home, projectRoot, now = Date.now()) {
 // CLEAR dig writes nothing at all.
 export function armDigGauge(home, projectRoot, session, now = Date.now()) {
   if (session == null) return { surface: true };
-  const { proj, from } = loadStateFrom(projectRoot, home);
+  const { proj, from, fbUnreadAtLoad } = loadStateFrom(projectRoot, home);
   if (proj.digGaugeSession === session) return { surface: false }; // already surfaced this session
   const before = JSON.parse(JSON.stringify(proj));
   const step = (p) => { p.digGaugeSession = session; p.digGaugeAt = now; return true; };
   step(proj);
   // lab F1 (b): `applied` false when the once-per-session mark was not saved, so the CLI can say the offer may show again.
-  const r = saveChangedFields(projectRoot, home, from, before, proj, step); // T-29LD-2, T-RISESKIP
+  const r = saveChangedFields(projectRoot, home, from, before, proj, step, fbUnreadAtLoad); // T-29LD-2, T-RISESKIP
   return { surface: true, applied: r.saved === true && r.notApplied.length === 0, notApplied: r.notApplied };
 }
 
