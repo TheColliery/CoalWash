@@ -1630,7 +1630,11 @@ function saveState(proj, projectRoot, home) {
     const { savedAt: _clockStamp, fallbackUnread: _priorMark, ...kept } = base;
     const r = maxRev(base, FB.kind === 'owned' ? FB.rec : null);
     const saveRev = r === null ? 1 : Number.isSafeInteger(r + 1) ? r + 1 : r;
-    const toWrite = { ...kept, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, saveRev, ...(fbUnread ? { fallbackUnread: true } : {}), ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
+    // F924-1: the `fallbackUnread` mark is decided BEFORE the one rename onto main, never by a second write after it (a second rename
+    // over main lost a record another writer saved there in between). The fallback is compared with what this save read just before the
+    // rename (fallbackEntrySame): one written or replaced since the read is kept and marked in this same record.
+    const fbChanged = fbDistinct && !fbUnread && fallbackEntrySame(fb, FB) === 'changed';
+    const toWrite = { ...kept, stateSchema: STATE_SCHEMA, projectRoot: path.resolve(projectRoot), strayPruneDone: true, saveRev, ...(fbUnread || fbChanged ? { fallbackUnread: true } : {}), ...(deadSweepDue ? { deadStateSweepAt: nowMs } : {}) };
     // U7: UNPREDICTABLE temp + O_EXCL, the same cure apply.mjs's writeDurable
     // carries (read its comment for the full reasoning; this module cannot import
     // it -- apply.mjs imports THIS one, so the dependency runs only one way). A
@@ -1650,22 +1654,19 @@ function saveState(proj, projectRoot, home) {
     // reverts to a pre-flip value (blind wave R1 / TP-5). Reap our own old copy on
     // the write that moves home; same no-old-version-leftover mechanism as above.
     // T76-2: the reap acts on the NAME only while the name still holds what this save read (fallbackEntrySame). A fallback written
-    // after the read, or one the check cannot inspect, is kept, and the main record is written once more with `fallbackUnread`, so the
-    // load keeps the main file until a save that reads it outranks and reaps it. A failed re-write leaves the fallback kept unmarked.
-    if (fbDistinct && !fbUnread) {
+    // after the read, or one the check cannot inspect, is kept. F924-1: main is renamed over ONCE. A fallback that changed before the
+    // rename is already marked in the record just written (fbChanged); one that changes after the pre-rename compare is kept without the
+    // mark (main is never written a second time) and the save returns false: the mark is missing, said, never silent. The load then
+    // picks between the two records by their counters.
+    let markMissing = false;
+    if (fbDistinct && !fbUnread && !fbChanged) {
       const same = fallbackEntrySame(fb, FB);
       if (same === 'same') { try { fs.rmSync(fb, { force: true }); } catch { /* best-effort: its counter is already outranked */ } }
-      else if (same === 'changed') {
-        try {
-          const tmp2 = `${p}.${crypto.randomBytes(12).toString('hex')}.tmp`;
-          writeOwnTemp(tmp2, JSON.stringify({ ...toWrite, fallbackUnread: true }));
-          renameOwnTemp(tmp2, p);
-        } catch { /* the fallback stays; the main record carries no mark */ }
-      }
+      else if (same === 'changed') markMissing = true;
     }
     if (!alreadySwept) pruneStrayStateDirs(projectRoot, home);
     if (deadSweepDue) sweepDeadProjectStates(home, projectRoot); // CWK-157: after our own write, so a failed sweep never costs the write
-    return true;
+    return !markMissing;
   } catch {
     return false;
   }

@@ -3698,9 +3698,10 @@ test('T-REAPUNREAD (F906-1): a fallback a save could not read is never reaped un
 // T76-2 (INSPECT 920): saveState read the fallback BEFORE the main write and removed it by NAME after, with no check that the name
 // still held what was read, so a fallback record written in between was removed unread (the F906-1 class shrunk to a window). The
 // reap now compares the name's identity (dev+ino, or size and mtime where a volume gives no stable id) with the read's, and removes
-// only on a match; otherwise the fallback is kept and the main record is marked `fallbackUnread`. Seam: the fallback is written while
-// the main file's temp is renamed into place (between the fallback read and the reap).
-test('T76-2: a fallback written between the save\'s fallback read and its reap is kept, never removed unread, and the record is marked', () => {
+// only on a match; otherwise the fallback is kept. Since F924-1 main is never written a second time to carry the `fallbackUnread`
+// mark: a fallback that appears after the pre-rename check is kept unmarked and the save returns false. Seam: the fallback is written
+// while the main file's temp is renamed into place (between the fallback read and the reap).
+test('T76-2: a fallback written between the save\'s fallback read and its reap is kept, never removed unread, and the missing mark is said', () => {
   const { home, proj } = sandbox();
   try {
     ccSlugDir(home, proj);
@@ -3718,11 +3719,92 @@ test('T76-2: a fallback written between the save\'s fallback read and its reap i
     let ret;
     try { ret = recordSubSpawn(home, proj, 4242); } finally { fs.renameSync = realRename; }
     assert.ok(fired, 'the seam fired');
-    assert.strictEqual(ret, true, 'the save itself lands');
     assert.ok(fs.existsSync(pf), 'the fallback written after the read is not removed unread');
     assert.strictEqual(fs.readFileSync(pf, 'utf8'), planted, 'and is byte for byte what was written');
     const m = JSON.parse(fs.readFileSync(pm, 'utf8'));
-    assert.strictEqual(m.fallbackUnread, true, 'the main record says a fallback stands unread');
+    // F924-1 changed this leg: the fallback appears DURING the one rename onto main, after the pre-rename compare, and main is never
+    // written a second time, so the record carries no mark and the save says so (false) instead of re-marking main.
+    assert.strictEqual(m.fallbackUnread, undefined, 'main is not written a second time to carry the mark');
+    assert.strictEqual(ret, false, 'the save says the mark is missing');
     assert.strictEqual(m.leanFloorTokens, 12345, 'the main record keeps its own fields');
+  } finally { clean(home, proj); }
+});
+
+// F924-1 (INSPECT 924): when the fallback changed after the read, saveState renamed `{ ...toWrite, fallbackUnread: true }` over the
+// main file a SECOND time without reading main again, so a record another writer saved to main between the two renames was lost and
+// its counter set back. Main is now renamed over once: the mark is decided before that rename, and a fallback that changes after it is
+// kept without the mark and the save says so (it returns false). Seams: during the first rename onto main a fallback is planted (the
+// T76-2 case, through the rename seam); a hook then writes main in place, at the open of the save's SECOND temp (between the two renames
+// in the old code) or, where there is no second temp, after the save returns.
+test('F924-1: a record another writer saves to main between the save\'s two renames survives, the fallback is kept, and the missing mark is said', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    setLeanFloor(home, proj, 12345);
+    const pm = path.resolve(statePath(proj, home));
+    const pf = path.resolve(stateFallbackPath(proj, home));
+    const rec = JSON.parse(fs.readFileSync(pm, 'utf8'));
+    const planted = JSON.stringify({ ...rec, leanFloorTokens: 777, saveRev: 3 });
+    const realRename = fs.renameSync;
+    const realOpen = fs.openSync;
+    let n = 0;
+    let temps = 0;
+    fs.renameSync = function (a, b, ...rest) {
+      if (path.resolve(String(b)) === pm && ++n === 1) { fs.mkdirSync(path.dirname(pf), { recursive: true }); fs.writeFileSync(pf, planted); }
+      return realRename.call(fs, a, b, ...rest);
+    };
+    fs.openSync = function (p, flags, ...rest) {
+      const r = path.resolve(String(p));
+      if (flags === 'wx' && r.startsWith(pm + '.') && r.endsWith('.tmp') && ++temps === 2) {
+        const now = JSON.parse(fs.readFileSync(pm, 'utf8'));
+        fs.writeFileSync(pm, JSON.stringify({ ...now, subSpawns: 9, saveRev: 77 }));
+      }
+      return realOpen.call(fs, p, flags, ...rest);
+    };
+    let ret;
+    try { ret = recordSubSpawn(home, proj, 4242); } finally { fs.renameSync = realRename; fs.openSync = realOpen; }
+    // Where the save makes no second temp (no second write), the hook writes at the first moment the save no longer holds main: after it
+    // returns. Either way the hook's write lands after the save's first rename onto main.
+    if (temps < 2) { const now = JSON.parse(fs.readFileSync(pm, 'utf8')); fs.writeFileSync(pm, JSON.stringify({ ...now, subSpawns: 9, saveRev: 77 })); }
+    assert.strictEqual(n, 1, 'main is renamed over once');
+    const m = JSON.parse(fs.readFileSync(pm, 'utf8'));
+    assert.strictEqual(m.subSpawns, 9, 'the hook record written between the two renames is not overwritten');
+    assert.strictEqual(m.saveRev, 77, 'and its counter is not set back');
+    assert.ok(fs.existsSync(pf), 'the fallback that changed is kept');
+    assert.strictEqual(fs.readFileSync(pf, 'utf8'), planted, 'byte for byte');
+    assert.strictEqual(ret, false, 'the save says the fallbackUnread mark is missing');
+  } finally { clean(home, proj); }
+});
+
+// F924-1, the mark's own path: a fallback that appears after the save's fallback read and before its one rename onto main (seamed at the
+// pre-rename identity check, the first bigint lstat of the fallback name; with no fallback at the read, the read's open fails before
+// its own lstat) is kept and marked in that one record; main is renamed over once.
+test('F924-1: a fallback that changes before the one rename is kept and marked in the same record', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    setLeanFloor(home, proj, 12345);
+    const pm = path.resolve(statePath(proj, home));
+    const pf = path.resolve(stateFallbackPath(proj, home));
+    const rec = JSON.parse(fs.readFileSync(pm, 'utf8'));
+    const planted = JSON.stringify({ ...rec, leanFloorTokens: 777, saveRev: 3 });
+    const realLstat = fs.lstatSync;
+    const realRename = fs.renameSync;
+    let planted1 = false;
+    let n = 0;
+    fs.lstatSync = function (p, ...rest) {
+      if (!planted1 && path.resolve(String(p)) === pf && rest[0] && rest[0].bigint === true) { planted1 = true; fs.mkdirSync(path.dirname(pf), { recursive: true }); fs.writeFileSync(pf, planted); }
+      return realLstat.call(fs, p, ...rest);
+    };
+    fs.renameSync = function (a, b, ...rest) { if (path.resolve(String(b)) === pm) n++; return realRename.call(fs, a, b, ...rest); };
+    let ret;
+    try { ret = recordSubSpawn(home, proj, 4242); } finally { fs.lstatSync = realLstat; fs.renameSync = realRename; }
+    assert.ok(planted1, 'the seam fired');
+    assert.strictEqual(n, 1, 'main is renamed over once');
+    assert.strictEqual(ret, true, 'the save lands with its mark');
+    const m = JSON.parse(fs.readFileSync(pm, 'utf8'));
+    assert.strictEqual(m.fallbackUnread, true, 'the one record says a fallback stands unread');
+    assert.strictEqual(m.subSpawns, 1, 'and carries the save');
+    assert.strictEqual(fs.readFileSync(pf, 'utf8'), planted, 'the fallback is kept byte for byte');
   } finally { clean(home, proj); }
 });
