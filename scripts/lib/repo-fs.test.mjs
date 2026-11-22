@@ -425,7 +425,9 @@ test('CWK-137: the CoalHearth journal guard reads a bounded, contained file -- a
   const file = path.join(project, '.claude', 'coalhearth', 'session_handoff.json');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, 'not json');
-  assert.deepEqual(chJournalGuard(project), NONE, 'garbage content is still "no session" (unchanged)');
+  // 917 sweep (named step): garbage content read as "no session" was the fail-open this leg used to pin as unchanged; a journal the
+  // guard cannot judge now counts as in progress, dated by its own mtime
+  assert.equal(chJournalGuard(project).inProgress, true, 'garbage content is UNCERTAIN, never "no session"');
   fs.writeFileSync(file, '{"status":"in_progress","sessionId":"abc"}');
   assert.equal(chJournalGuard(project).sessionId, 'abc', 'control: a readable in-progress journal is read');
   overBoundFile(file, '{"status":"in_progress","pad":"');

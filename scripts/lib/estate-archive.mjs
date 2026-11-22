@@ -230,7 +230,7 @@ export function writeEstateKeyResolvedState(resolved, home = os.homedir()) {
 //     sync/restore; this file lives beside the work itself)
 //   - sessionId IF a future CH version ever adds it (an ADDITIONAL match,
 //     never the requirement)
-// Fail-silent on absent/corrupt (no CoalHearth installed = no guard needed);
+// Absent = no guard (no CoalHearth installed); a journal that exists but cannot be read or parsed counts as in progress (917);
 // classifySessions applies the banding policy on these signals.
 export function chJournalGuard(projectRoot) {
   const none = { inProgress: false, mtimeMs: null, sessionId: null };
@@ -242,10 +242,15 @@ export function chJournalGuard(projectRoot) {
     const o = repoReadOutcome(p, projectRoot, MAX_DOC_BYTES);
     if (o.why === 'absent') return none;
     if (!o.buf) return { inProgress: true, mtimeMs: null, sessionId: null };
-    const j = JSON.parse(o.buf.toString('utf8'));
-    if (!j || j.status !== 'in_progress') return none;
     let mtimeMs = null;
     try { mtimeMs = fs.statSync(p).mtimeMs; } catch { /* unreadable stat = uncertain -> caller protects */ }
+    // 917 sweep: a journal that EXISTS but does not parse (a torn write, a hand edit, not a JSON object) is one this guard cannot
+    // judge, so it counts as in progress, dated by its own mtime: fresh protects the newest unit, stale freezes nothing. It read
+    // as "no session" before, and the archive (copy, then DELETE) could take a live transcript.
+    let j;
+    try { j = JSON.parse(o.buf.toString('utf8')); } catch { j = undefined; }
+    if (!j || typeof j !== 'object' || Array.isArray(j)) return { inProgress: true, mtimeMs: Number.isFinite(mtimeMs) ? mtimeMs : null, sessionId: null };
+    if (j.status !== 'in_progress') return none;
     return {
       inProgress: true,
       mtimeMs: Number.isFinite(mtimeMs) ? mtimeMs : null,

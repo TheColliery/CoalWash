@@ -1723,3 +1723,33 @@ test('fire 628 at 2048 anchors, matchTombstones returns the hits the includes() 
   assert.ok(want.length >= 3, `the reference finds the planted anchors: ${want.length}`);
   assert.deepStrictEqual(got, want);
 });
+
+// 917 SWEEP (the class "a gate reads could-not-read as nothing to protect"): chJournalGuard read a CoalHearth journal that EXISTS
+// but does not parse (a torn write, a hand edit) as "no session in progress", so the newest session banded WARM and the archive
+// (copy, then DELETE) could take a live transcript. A journal it cannot judge now counts as in progress, dated by the file's own
+// mtime: a fresh one protects the newest unit, a stale one (a months-old leftover) freezes nothing, as an in_progress journal does.
+for (const [name, bytes] of [['a torn write', '{"status":"in_progr'], ['not a JSON object', '["in_progress"]']]) {
+  test(`917 sweep: a FRESH CoalHearth journal that does not parse (${name}) protects the newest session, as an in-progress one does`, () => {
+    const { home, proj } = sandbox();
+    try {
+      seedSession(home, proj, 'sess-idle', 40);
+      seedSession(home, proj, 'sess-older', 100);
+      write(path.join(proj, '.claude', 'coalhearth', 'session_handoff.json'), bytes);
+      const band = Object.fromEntries(classifySessions({ projectRoot: proj, home, estate: estateCfg() }).sessions.map((s) => [s.id, s.band]));
+      assert.strictEqual(band['sess-idle'], 'active', 'a journal it cannot judge protects the newest unit (fail toward protecting)');
+      assert.strictEqual(band['sess-older'], 'warm', 'older units still archive');
+      assert.strictEqual(chJournalGuard(proj).inProgress, true);
+    } finally { clean(home, proj); }
+  });
+}
+test('917 sweep: a STALE CoalHearth journal that does not parse blocks nothing (a months-old leftover never freezes archiving)', () => {
+  const { home, proj } = sandbox();
+  try {
+    seedSession(home, proj, 'sess-idle', 40);
+    const j = path.join(proj, '.claude', 'coalhearth', 'session_handoff.json');
+    write(j, '{"status":"in_progr');
+    ageFile(j, 40);
+    const c = classifySessions({ projectRoot: proj, home, estate: estateCfg() });
+    assert.strictEqual(c.sessions.find((s) => s.id === 'sess-idle').band, 'warm');
+  } finally { clean(home, proj); }
+});
