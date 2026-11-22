@@ -3694,3 +3694,35 @@ test('T-REAPUNREAD (F906-1): a fallback a save could not read is never reaped un
     assert.strictEqual(m.leanFloorTokens, 12345);
   } finally { clean(home, proj); }
 });
+
+// T76-2 (INSPECT 920): saveState read the fallback BEFORE the main write and removed it by NAME after, with no check that the name
+// still held what was read, so a fallback record written in between was removed unread (the F906-1 class shrunk to a window). The
+// reap now compares the name's identity (dev+ino, or size and mtime where a volume gives no stable id) with the read's, and removes
+// only on a match; otherwise the fallback is kept and the main record is marked `fallbackUnread`. Seam: the fallback is written while
+// the main file's temp is renamed into place (between the fallback read and the reap).
+test('T76-2: a fallback written between the save\'s fallback read and its reap is kept, never removed unread, and the record is marked', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    setLeanFloor(home, proj, 12345);
+    const pm = path.resolve(statePath(proj, home));
+    const pf = path.resolve(stateFallbackPath(proj, home));
+    const rec = JSON.parse(fs.readFileSync(pm, 'utf8'));
+    const planted = JSON.stringify({ ...rec, leanFloorTokens: 777, saveRev: 99 });
+    const realRename = fs.renameSync;
+    let fired = false;
+    fs.renameSync = function (a, b, ...rest) {
+      if (!fired && path.resolve(String(b)) === pm) { fired = true; fs.mkdirSync(path.dirname(pf), { recursive: true }); fs.writeFileSync(pf, planted); }
+      return realRename.call(fs, a, b, ...rest);
+    };
+    let ret;
+    try { ret = recordSubSpawn(home, proj, 4242); } finally { fs.renameSync = realRename; }
+    assert.ok(fired, 'the seam fired');
+    assert.strictEqual(ret, true, 'the save itself lands');
+    assert.ok(fs.existsSync(pf), 'the fallback written after the read is not removed unread');
+    assert.strictEqual(fs.readFileSync(pf, 'utf8'), planted, 'and is byte for byte what was written');
+    const m = JSON.parse(fs.readFileSync(pm, 'utf8'));
+    assert.strictEqual(m.fallbackUnread, true, 'the main record says a fallback stands unread');
+    assert.strictEqual(m.leanFloorTokens, 12345, 'the main record keeps its own fields');
+  } finally { clean(home, proj); }
+});

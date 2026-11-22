@@ -1067,7 +1067,7 @@ function readStateAt(p, projectRoot) {
     let parsed = null;
     try { parsed = parseJsonc(raw); } catch { parsed = null; }
     const rec = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? ownedRecord(parsed, projectRoot) : null;
-    return rec ? { kind: 'owned', rec } : { kind: 'foreign' };
+    return rec ? { kind: 'owned', rec, ident: o.ident } : { kind: 'foreign', ident: o.ident };
   } catch {
     return { kind: 'unreadable' };
   }
@@ -1577,6 +1577,18 @@ function appliedResult(r, report) {
   return r.saved === true && r.notApplied.length === 0;
 }
 
+// T76-2: does the fallback NAME still hold the entry saveState read? 'gone' (nothing there now), 'same' (the entry read, by dev+ino, or by
+// size and mtime where the volume reports no inode id; or something that holds no record: a directory or special file), else 'changed':
+// written after the read (it was absent then), replaced, or an lstat that failed for any reason but ENOENT.
+function fallbackEntrySame(fb, FB) {
+  let st;
+  try { st = fs.lstatSync(fb, { bigint: true }); } catch (e) { return e && e.code === 'ENOENT' ? 'gone' : 'changed'; }
+  if (!st.isFile()) return 'same';
+  const id = FB && FB.ident;
+  if (!id) return 'changed';
+  if (id.ino !== '0' && st.ino !== 0n) return String(st.dev) === id.dev && String(st.ino) === id.ino ? 'same' : 'changed';
+  return Number(st.size) === id.size && Number(st.mtimeMs) === Math.trunc(id.mtimeMs) ? 'same' : 'changed'; // a bigint stat's mtimeMs is whole milliseconds
+}
 function saveState(proj, projectRoot, home) {
   if (proj && typeof proj === 'object' && UNSAVABLE.has(proj)) return false; // T-RD-HOOKSTATE: never over a file the load could not read
   try {
@@ -1637,7 +1649,20 @@ function saveState(proj, projectRoot, home) {
     // cleanupPeriodDays) the read silently RESURRECTS it and the lean floor
     // reverts to a pre-flip value (blind wave R1 / TP-5). Reap our own old copy on
     // the write that moves home; same no-old-version-leftover mechanism as above.
-    if (fbDistinct && !fbUnread) { try { fs.rmSync(fb, { force: true }); } catch { /* best-effort: its counter is already outranked */ } }
+    // T76-2: the reap acts on the NAME only while the name still holds what this save read (fallbackEntrySame). A fallback written
+    // after the read, or one the check cannot inspect, is kept, and the main record is written once more with `fallbackUnread`, so the
+    // load keeps the main file until a save that reads it outranks and reaps it. A failed re-write leaves the fallback kept unmarked.
+    if (fbDistinct && !fbUnread) {
+      const same = fallbackEntrySame(fb, FB);
+      if (same === 'same') { try { fs.rmSync(fb, { force: true }); } catch { /* best-effort: its counter is already outranked */ } }
+      else if (same === 'changed') {
+        try {
+          const tmp2 = `${p}.${crypto.randomBytes(12).toString('hex')}.tmp`;
+          writeOwnTemp(tmp2, JSON.stringify({ ...toWrite, fallbackUnread: true }));
+          renameOwnTemp(tmp2, p);
+        } catch { /* the fallback stays; the main record carries no mark */ }
+      }
+    }
     if (!alreadySwept) pruneStrayStateDirs(projectRoot, home);
     if (deadSweepDue) sweepDeadProjectStates(home, projectRoot); // CWK-157: after our own write, so a failed sweep never costs the write
     return true;

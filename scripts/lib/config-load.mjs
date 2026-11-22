@@ -502,6 +502,7 @@ export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
   if (!v.kind) return v;
   if (v.kind === 'dir') return { why: 'directory' };
   let fd;
+  let hs = null; // the handle's bigint stat, when taken: its dev+ino name the entry this read came from
   try {
     fd = fs.openSync(file, REPO_READ_FLAGS);
     if (root != null) {
@@ -510,7 +511,7 @@ export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
       const rootPhys = canonicalOrNull(root);
       const pPhys = canonicalOrNull(file);
       if (!rootPhys || !pPhys || !pathWithin(pPhys, rootPhys)) return { why: 'changed' };
-      const hs = fs.fstatSync(fd, { bigint: true });
+      hs = fs.fstatSync(fd, { bigint: true });
       const ps = fs.statSync(file, { bigint: true });
       if (hs.ino && ps.ino && (hs.dev !== ps.dev || hs.ino !== ps.ino)) return { why: 'changed' };
     }
@@ -526,7 +527,10 @@ export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
       got += n;
     }
     // T76-1: the handle's own mtime rides with the bytes, so a caller that dates what it read never stats the name a second time.
-    return { buf: got === want ? buf : buf.subarray(0, got), mtimeMs: st.mtimeMs };
+    // T76-2: the entry's identity rides with the bytes (dev+ino as strings, so a caller may serialize it; size and mtime for a volume
+    // that reports no stable id), so a caller that later acts on the NAME can first check the name still holds what it read.
+    const ids = hs || fs.fstatSync(fd, { bigint: true });
+    return { buf: got === want ? buf : buf.subarray(0, got), mtimeMs: st.mtimeMs, ident: { dev: String(ids.dev), ino: String(ids.ino), size: st.size, mtimeMs: st.mtimeMs } };
   } catch (e) {
     const code = e && e.code;
     return { why: code === 'EISDIR' ? 'directory' : 'unreadable', code };
