@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { execSync, spawnSync } from 'node:child_process';
 import { gitEnv } from './git-env.mjs';
 import { applyPlan, recoverDangling, acquireLock, sweepSnapshots, isPinned, txDirFor, LOCK_STALE_MS, LOCK_READ_WAIT_MS, verifySnapshot, sniffUnrewritable, globalLockPath, deadLinkLine, __testHooks, writeDurable } from './apply.mjs';
-import { recordKeep, recordGlobalKeep, loadKeeps, keepsPath } from './keeps.mjs';
+import { recordKeep, recordGlobalKeep, loadKeeps, keepsPath, globalKeepsPath } from './keeps.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin, restoreFromBin, __testHooks as tailHooks } from './tailings.mjs';
 import { HORIZON_MS, retentionPlan } from './retention.mjs';
 import { recordVerdict, loadState } from './caliper.mjs';
@@ -5791,3 +5791,94 @@ test('restoreFile: a link at the target is replaced even when the file it names 
     assert.strictEqual(fs.readFileSync(same, 'utf8'), 'SAME bytes', 'the file the link named is untouched');
   } finally { clean(proj); }
 });
+
+// 4b (main's ruling on the lab's 1.19.10 reading): the KEEPS-GATE read a keeps store that EXISTS but could not be read or parsed
+// as "no keeps", so a wash cut a span the user had protected. Now either store (project or global) that cannot be read for any
+// reason but ENOENT, or cannot be parsed (not JSON, a wrong shape, a schema this version does not know), STOPS the wash with one
+// named error and cuts nothing: no action applied, no snapshot made. Each leg records a keep that pins a span the plan cuts, then
+// breaks the store; the span must survive byte for byte and the error must name the store.
+const PINNED = 'The decisive clause: asked three times deliberately. Filler prose.\n';
+const PIN = 'asked three times deliberately';
+const CUT = 'The decisive clause: (compressed). Filler prose.\n';
+function keepsBreaker(kind, file) {
+  if (kind === 'unparseable') { fs.appendFileSync(file, '\n{ not json'); return () => {}; }
+  if (kind === 'newer-schema') { const j = JSON.parse(fs.readFileSync(file, 'utf8')); fs.writeFileSync(file, JSON.stringify({ ...j, v: 99 })); return () => {}; }
+  if (kind === 'directory') { fs.rmSync(file, { force: true }); fs.mkdirSync(path.join(file, 'held'), { recursive: true }); return () => {}; }
+  if (kind === 'read-seam') {
+    const target = path.resolve(file);
+    const realOpen = fs.openSync;
+    fs.openSync = function (p, flags, ...rest) {
+      if (path.resolve(String(p)) === target && (typeof flags === 'number' ? (flags & 3) === 0 : (flags === undefined || flags === 'r'))) {
+        const e = new Error(`EPERM: operation not permitted, open '${p}'`); e.code = 'EPERM'; throw e;
+      }
+      return realOpen.call(fs, p, flags, ...rest);
+    };
+    return () => { fs.openSync = realOpen; };
+  }
+  return null;
+}
+function snapsIn(proj) {
+  const tx = txDirFor(proj);
+  try { return fs.readdirSync(tx).filter((n) => n.startsWith('snap-')); } catch { return []; }
+}
+for (const scope of ['project', 'global']) {
+  for (const kind of ['read-seam', 'unparseable', 'newer-schema', 'directory']) {
+    test(`4b KEEPS-GATE: a ${scope} keeps store that is ${kind} stops the wash by name and cuts nothing (the pinned span survives)`, () => {
+      const { proj, store } = sandbox();
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+      let restore = () => {};
+      try {
+        const kept = path.join(store, 'kept.md');
+        write(kept, PINNED);
+        const rec = scope === 'global'
+          ? recordGlobalKeep(home, { target: 'kept.md:decisive', reason: 'user-adjudicated', anchor: PIN, anchorFile: kept })
+          : recordKeep(proj, { target: 'kept.md:decisive', reason: 'user-adjudicated', anchor: PIN, anchorFile: kept });
+        assert.strictEqual(rec.anchorStored, true, 'the keep pins the span (non-vacuity)');
+        const file = scope === 'global' ? globalKeepsPath(home) : keepsPath(proj);
+        restore = keepsBreaker(kind, file);
+        const r = apply(planFor(proj, store, [{ type: 'rewrite', path: kept, content: CUT }]), { home });
+        restore(); restore = () => {};
+        assert.strictEqual(fs.readFileSync(kept, 'utf8'), PINNED, 'the pinned span survives byte for byte');
+        assert.strictEqual(r.ok, false, 'the wash is refused: ' + JSON.stringify(r));
+        assert.ok(typeof r.error === 'string' && r.error.includes(file) && /keeps/i.test(r.error), 'the error names the store: ' + r.error);
+        assert.strictEqual(r.applied || 0, 0, 'nothing applied');
+        assert.deepStrictEqual(snapsIn(proj), [], 'no snapshot was made');
+      } finally { restore(); clean(proj, home); }
+    });
+  }
+  test(`4b KEEPS-GATE: a ${scope} keeps store the OS denies reading (Windows ACL deny, or mode 000 as a non-root user) stops the wash`, (t) => {
+    const { proj, store } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+    let undo = null;
+    try {
+      const kept = path.join(store, 'kept.md');
+      write(kept, PINNED);
+      const rec = scope === 'global'
+        ? recordGlobalKeep(home, { target: 'kept.md:decisive', anchor: PIN, anchorFile: kept })
+        : recordKeep(proj, { target: 'kept.md:decisive', anchor: PIN, anchorFile: kept });
+      assert.strictEqual(rec.anchorStored, true);
+      const file = scope === 'global' ? globalKeepsPath(home) : keepsPath(proj);
+      assert.ok(file.startsWith(scope === 'global' ? home : proj), 'the store is inside a temp root this test made');
+      if (process.platform === 'win32') {
+        const user = process.env.USERNAME;
+        if (!user) return t.skip('USERNAME is unset, so no ACL deny can name this user');
+        const d = spawnSync('icacls', [file, '/deny', `${user}:(RD)`], { encoding: 'utf8', timeout: 20000 });
+        if (d.status !== 0) return t.skip(`icacls cannot set a deny here (${d.error ? d.error.code : d.status})`);
+        undo = () => spawnSync('icacls', [file, '/remove:d', user], { encoding: 'utf8', timeout: 20000 });
+      } else {
+        if (typeof process.getuid === 'function' && process.getuid() === 0) return t.skip('running as root, which reads a mode-000 file anyway');
+        fs.chmodSync(file, 0o000);
+        undo = () => fs.chmodSync(file, 0o600);
+      }
+      let bound = false;
+      try { fs.readFileSync(file); } catch (e) { bound = e.code === 'EPERM' || e.code === 'EACCES'; }
+      if (!bound) return t.skip('the read deny does not bind this process here, so the case cannot be planted');
+      const r = apply(planFor(proj, store, [{ type: 'rewrite', path: kept, content: CUT }]), { home });
+      undo(); undo = null;
+      assert.strictEqual(fs.readFileSync(kept, 'utf8'), PINNED, 'the pinned span survives byte for byte');
+      assert.strictEqual(r.ok, false, JSON.stringify(r));
+      assert.ok(typeof r.error === 'string' && r.error.includes(file), r.error);
+      assert.deepStrictEqual(snapsIn(proj), [], 'no snapshot was made');
+    } finally { if (undo) undo(); clean(proj, home); }
+  });
+}

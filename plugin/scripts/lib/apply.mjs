@@ -74,7 +74,7 @@ import { isCloudPlaceholder, ccMemoryDir, physicalForCreate, containedIn } from 
 // forms the SAME shape of cycle (it imports txDirFor/ensureSelfIgnore from
 // here; this file imports sweepFatBin/sweepStoreOld from there) — identical
 // reasoning, identical safety.
-import { loadKeepsAt, loadProjectKeepsAt, globalKeepsPath } from './keeps.mjs';
+import { keepsForGate, globalKeepsPath, KEEPS_NAME } from './keeps.mjs';
 // beta.12 item 4: the two bins' retention sweep (fat-bin 30d / store.old 60d,
 // retention.mjs's pure policy; 0i adds the store-proportional size cap)
 // piggybacks on this SAME preflight touchpoint — a sibling housekeeping call
@@ -1338,13 +1338,16 @@ export function applyPlan(plan, opts = {}) {
         if (pa === pb) return true;
         return (volumeCaseFolds(pa, true) || volumeCaseFolds(pb, true)) && pa.toLowerCase() === pb.toLowerCase();
       };
-      // Each store loads under its own try, so an unreadable project ledger cannot drop the global keeps (and the reverse).
-      // An unreadable keeps ledger must never block an apply (it is the shield, not the gate's subject).
-      let projectKeeps = [];
-      let globalKeeps = [];
-      try { projectKeeps = loadProjectKeepsAt(txDir); } catch { projectKeeps = []; } // E2-4: the project store contained to txDir
-      try { globalKeeps = loadKeepsAt(globalKeepsPath(home)); } catch { globalKeeps = []; }
-      let keeps = [...projectKeeps, ...globalKeeps]
+      // 4b (main's ruling): either store (project or global) that exists but cannot be read, or cannot be parsed, STOPS the wash
+      // here, before the snapshot and the first write, with one named error: a protection that could not be read is never read as
+      // "nothing to protect". Absent (ENOENT) stays "no keeps". Every cut reaches this line: Quick, Full and the force run through
+      // applyPlan, RE-TIER through retier.mjs's applyPlan call, and the hooks run no cut of their own (Phoenix #5).
+      const storeReads = [keepsForGate(path.join(txDir, KEEPS_NAME), txDir), keepsForGate(globalKeepsPath(home), null)]; // E2-4: the project store contained to txDir
+      const unread = storeReads.filter((s) => s.error).map((s) => s.error);
+      if (unread.length) {
+        return { ok: false, flagged, error: `keeps gate: ${unread.join('; ')} -- a keep there may protect what this plan cuts, so nothing was applied; make the store readable (or move it aside if you mean to drop its keeps), then run again` };
+      }
+      let keeps = [...storeReads[0].keeps, ...storeReads[1].keeps]
         .filter((k) => typeof k.anchor === 'string' && k.anchor && typeof k.anchorFile === 'string' && k.anchorFile);
       // Fixpoint: excluding one violating action can remove the very text that
       // satisfied ANOTHER keep (an anchor "migrated" into a now-excluded

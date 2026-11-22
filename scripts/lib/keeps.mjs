@@ -154,6 +154,23 @@ function storeReadRefusal(file, read) {
   return { ok: false, anchorDropped: false, anchorStored: false, error };
 }
 
+// 4b (main's ruling): the KEEPS-GATE's read. A gate on a cut never reads "could not read the keeps" as "no keeps": that let a wash
+// cut a span the user protected. `{ keeps }` when the store is absent (ENOENT/ENOTDIR, or white space only: nothing to protect) or
+// read and understood; `{ error }` when it exists and could not be read (any code, a directory or special file at the path, over
+// the bound, a link the containment refuses), is not a keeps store (not JSON, not an object, a `keeps` that is not an array), or
+// carries a schema this version does not know (an object `v`, or a `v` above KEEPS_SCHEMA_V). The gate stops the wash on an error.
+// `root`: the project tx dir (the containment the project store is read under), or null for the user's own global store.
+export function keepsForGate(file, root = null) {
+  const read = keepsStoreRead(file, root);
+  if (read.kind === 'absent') return { keeps: [] };
+  if (read.kind === 'unreadable') return { error: `the keeps store ${file} exists but could not be read (${read.code})` };
+  if (read.kind === 'corrupt') return { error: `the keeps store ${file} is not a keeps store CoalWash can read (not JSON, or not its { v, keeps: [...] } shape)` };
+  const v = read.raw.v;
+  if (v !== null && typeof v === 'object') return { error: `the keeps store ${file} carries a schema field this version cannot read` };
+  if (Number(v) > KEEPS_SCHEMA_V) return { error: `the keeps store ${file} was written by a newer CoalWash (schema ${String(v)}; this version reads ${KEEPS_SCHEMA_V})` };
+  return { keeps: keepsOf(read.raw) };
+}
+
 // Record (or refresh) an adjudicated keep at `file`. Upserts by `target` — a
 // re-review of the same target REPLACES the prior entry rather than piling up
 // duplicates (the ledger tracks the LATEST verdict, not a full history).
