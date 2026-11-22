@@ -167,7 +167,7 @@ export function keepsForGate(file, root = null) {
   if (read.kind === 'corrupt') return { error: `the keeps store ${file} is not a keeps store CoalWash can read (not JSON, or not its { v, keeps: [...] } shape)` };
   const v = read.raw.v;
   if (v !== null && typeof v === 'object') return { error: `the keeps store ${file} carries a schema field this version cannot read` };
-  if (Number(v) > KEEPS_SCHEMA_V) return { error: `the keeps store ${file} was written by a newer CoalWash (schema ${String(v)}; this version reads ${KEEPS_SCHEMA_V})` };
+  if (Number(v) > KEEPS_SCHEMA_V) return { error: `the keeps store ${file} was written by a newer CoalWash (schema ${String(v)}; this version reads ${KEEPS_SCHEMA_V})`, newer: true };
   return { keeps: keepsOf(read.raw) };
 }
 

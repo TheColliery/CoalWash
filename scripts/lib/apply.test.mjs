@@ -5882,3 +5882,30 @@ for (const scope of ['project', 'global']) {
     } finally { if (undo) undo(); clean(proj, home); }
   });
 }
+
+// L920-3 (INSPECT 920): the KEEPS-GATE's advice said "make the store readable (or move it aside if you mean to drop its keeps)" for
+// every reason, which is wrong for a store written by a newer CoalWash: it is readable; this version cannot understand it. That
+// reason's advice now says to update CoalWash, and that moving the store aside drops its keeps; every other reason keeps the old advice.
+// Both forms are pinned here (no test pinned the advice text before).
+for (const [kind, form] of [['newer-schema', 'newer'], ['unparseable', 'other']]) {
+  test(`L920-3: the KEEPS-GATE advice for a ${kind} store is the ${form} form`, () => {
+    const { proj, store } = sandbox();
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+    try {
+      const kept = path.join(store, 'kept.md');
+      write(kept, PINNED);
+      recordKeep(proj, { target: 'kept.md:decisive', anchor: PIN, anchorFile: kept });
+      keepsBreaker(kind, keepsPath(proj));
+      const r = apply(planFor(proj, store, [{ type: 'rewrite', path: kept, content: CUT }]), { home });
+      assert.strictEqual(r.ok, false);
+      if (form === 'newer') {
+        assert.match(r.error, /written by a newer CoalWash/);
+        assert.match(r.error, /update CoalWash/, 'the newer-schema advice says to update CoalWash: ' + r.error);
+        assert.match(r.error, /moving it aside drops its keeps/, 'and that moving the store aside drops its keeps: ' + r.error);
+        assert.doesNotMatch(r.error, /make the store readable/, 'never the readability advice for a readable store');
+      } else {
+        assert.ok(r.error.endsWith('-- a keep there may protect what this plan cuts, so nothing was applied; make the store readable (or move it aside if you mean to drop its keeps), then run again'), 'the other reasons keep today\'s advice verbatim: ' + r.error);
+      }
+    } finally { clean(proj, home); }
+  });
+}

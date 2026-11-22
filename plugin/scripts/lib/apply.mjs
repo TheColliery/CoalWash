@@ -1345,7 +1345,12 @@ export function applyPlan(plan, opts = {}) {
       const storeReads = [keepsForGate(path.join(txDir, KEEPS_NAME), txDir), keepsForGate(globalKeepsPath(home), null)]; // E2-4: the project store contained to txDir
       const unread = storeReads.filter((s) => s.error).map((s) => s.error);
       if (unread.length) {
-        return { ok: false, flagged, error: `keeps gate: ${unread.join('; ')} -- a keep there may protect what this plan cuts, so nothing was applied; make the store readable (or move it aside if you mean to drop its keeps), then run again` };
+        // L920-3: a store a newer CoalWash wrote is readable, so its advice is to update CoalWash (moving it aside drops its keeps); every
+        // other reason keeps the readability advice. A run that meets both kinds gives both.
+        const advice = [];
+        if (storeReads.some((s) => s.error && s.newer)) advice.push('update CoalWash to read a store a newer CoalWash wrote (moving it aside drops its keeps)');
+        if (storeReads.some((s) => s.error && !s.newer)) advice.push('make the store readable (or move it aside if you mean to drop its keeps)');
+        return { ok: false, flagged, error: `keeps gate: ${unread.join('; ')} -- a keep there may protect what this plan cuts, so nothing was applied; ${advice.join('; ')}, then run again` };
       }
       let keeps = [...storeReads[0].keeps, ...storeReads[1].keeps]
         .filter((k) => typeof k.anchor === 'string' && k.anchor && typeof k.anchorFile === 'string' && k.anchorFile);
