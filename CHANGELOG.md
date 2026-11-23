@@ -2,6 +2,14 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Fixed
+
+- A config, keeps store or state file read checked the file's resolved path, then took the identity it compared with the opened file from a second, separate resolution of the name. A link in the path could be retargeted between the two, so the read could return a file outside the project. Now the identity is read from the same resolved path the check looked at, and a path there that is not a plain regular file refuses the read. On a volume that reports no file ids, the read passes only when the opened file and the checked file also have the same size and modification time. A folder in the path swapped between the check and the identity read is not caught (SECURITY.md Known limits). Test: `scripts/lib/read-containment.test.mjs` (a name moved between the open and the identity read, and put back for the path check, is refused and never read; a name moved outside the project for the open is refused; on a volume with no file ids, a file of a different size is refused)
+- A CLI state edit whose change landed while a state record beside it changed during the save reported not saved, although its change was on disk. Now it reports saved, and prints one note that a record beside it changed during the save and was kept unread, to be reconciled by the next save; `return-leave` exits 0 in that case. A save that did not land still reports not saved. Test: `scripts/lib/cli.test.mjs` (a state edit that landed while a record beside it changed says saved and prints the note, for `restore` and `return-leave`) and `scripts/lib/caliper.test.mjs` (dig-gauge reports its mark applied in that case)
+- The refusal for an emptied keeps store gave the advice for an unreadable store, "make the store readable", although the file is readable and holds nothing. Now an emptied store's refusal says to write its keeps back, or delete the file if the user means to have no keeps; a run that also meets another unreadable store gets that store's advice too. Test: `scripts/lib/apply.test.mjs` (the emptied-store refusal gives the write-back-or-delete advice, not the readability advice)
+
 ## [1.19.10] - 2026-11-23
 
 An unreadable or read-only store is refused, never replaced

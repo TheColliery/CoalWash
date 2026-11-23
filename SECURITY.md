@@ -86,6 +86,9 @@ During a Full run, lines from this project's archived transcript sessions can en
 - `writeguard-restore --out`, a write that fails after the create: the file the run created is emptied through its own handle and left where it is, and the refusal names it. It is never removed by name, so a file another program put at that name meanwhile is not removed. If the emptying fails too, the file may hold part of the snapshot, and the refusal says so.
 - A keeps store, bin index or state file that is read, then changed or made unreadable before its rename, is not re-checked up to the rename. On POSIX, a file made read-only after its check (a config, a keeps store) is replaced by the rename.
 - The keeps gate reads each keeps store once per run, before the first cut. A store made unreadable after that read and before the writes is not read again, so a cut can still follow a store that became unreadable in that window.
+- A read of a config, keeps store or state file checks its resolved path, then compares the identity of the opened file with the file at that same path. A folder in the resolved path swapped for a junction or link between the check and the identity read still passes: Node has no call that maps an open handle back to its path on Windows or macOS.
+- On a volume that reports no inode id (inode 0), the identity compare uses size and modification time. A different file of the same size and modification time, put in place of the one read, passes.
+- A program that rewrites the fallback state file in place, keeping its file id, inside the save's window is not caught. CoalWash's own writers replace the file by rename.
 
 ## The class-A engine (not in the plugin)
 
