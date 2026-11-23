@@ -301,7 +301,7 @@ export function restore({ id, cwd = process.cwd(), home = os.homedir() } = {}) {
       // makes the lookup write the state file: its "pure read" wording is gone.
       const rep = {}; // lab F1 (b): whether the watermark rise was applied, and which fields another writer kept
       const acknowledged = acknowledgeRestore(home, projectRoot, r.buf.length, item.original || null, rep);
-      return { found: true, bin, id, original: item.original || null, bytes: r.buf.length, content: r.buf, acknowledged, notApplied: rep.notApplied || [], saved: rep.saved };
+      return { found: true, bin, id, original: item.original || null, bytes: r.buf.length, content: r.buf, acknowledged, notApplied: rep.notApplied || [], saved: rep.saved, reconciled: rep.reconciled !== false };
     }
     // CWK-137: an item that is THERE but refused (over the read bound, not a regular
     // file) is not "not found" -- say which, so the user knows to copy it by hand.
@@ -546,7 +546,10 @@ function main() {
     const projectRoot = findProjectRoot(process.cwd(), home);
     if (!loadState(projectRoot, home).returnAsk) { console.error('[CoalWash] no return is pending in this project; nothing changed'); return; }
     const rep = {};
-    if (answerReturnLeave(home, projectRoot, rep)) console.error('[CoalWash] return left as it is: this store is not asked about again until it grows');
+    if (answerReturnLeave(home, projectRoot, rep)) {
+      console.error('[CoalWash] return left as it is: this store is not asked about again until it grows');
+      if (rep.reconciled === false) console.error('[CoalWash] saved; a state record beside it changed during the save and was kept unread; the next save reconciles it'); // M3a
+    }
     // L887-1: "(the rest was applied)" only when the save landed; a failed save applied nothing, whatever another writer did
     else if (rep.saved === false) { console.error('return-leave: NOT applied: the state file could not be saved; re-run it'); process.exitCode = 1; }
     else if (rep.notApplied && rep.notApplied.length) { console.error(`return-leave: not fully applied: another writer changed ${rep.notApplied.join(', ')} while it ran, and their values were kept (the rest was applied); re-run it`); process.exitCode = 1; } // lab F1 (b), N880-6
@@ -579,6 +582,7 @@ function main() {
       // watermark a second time. A failed save is named, and "(the rest was applied)" is said only when the save landed.
       if (r.saved === false) console.error("[CoalWash] the restore's state record was NOT updated (the state file could not be saved); the restored bytes above are complete");
       else if (r.notApplied && r.notApplied.length) console.error(`[CoalWash] the restore's state record was not fully updated: another writer changed ${r.notApplied.join(', ')} while it ran, and their values were kept (the rest was applied)`);
+      else if (r.reconciled === false) console.error("[CoalWash] the restore's state record was saved; a state record beside it changed during the save and was kept unread; the next save reconciles it"); // M3a
     } catch (e) {
       console.error(`restore failed: ${escapeRawControls(String(e.message))}`);
       process.exitCode = 1;
@@ -891,6 +895,7 @@ function main() {
       const surface = arm.surface;
       // lab F1 (b): an arm whose once-per-session mark was not saved says so; the offer can then show again this session.
       if (arm.applied === false) console.error('[CoalWash] the once-per-session mark for this offer was NOT saved, so it may show again this session');
+      else if (arm.reconciled === false) console.error('[CoalWash] the once-per-session mark for this offer was saved; a state record beside it changed during the save and was kept unread; the next save reconciles it'); // M3a
       if (args.includes('--json')) {
         console.log(JSON.stringify({ ...verdict, surface, offer: surface ? digGaugeOffer(verdict) : null }, null, 1));
       } else {

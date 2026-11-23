@@ -3808,3 +3808,29 @@ test('F924-1: a fallback that changes before the one rename is kept and marked i
     assert.strictEqual(fs.readFileSync(pf, 'utf8'), planted, 'the fallback is kept byte for byte');
   } finally { clean(home, proj); }
 });
+
+// M3a / F928-1: a dig-gauge arm whose state record changes beside state.json during the one rename onto it LANDED (the mark is in
+// state.json), so it reports applied with `reconciled: false`, never "NOT saved". Seam: the fallback is written during that rename.
+test('M3a: a dig-gauge arm whose fallback changes during the one rename onto main reports applied and unreconciled, the mark on disk', () => {
+  const { home, proj } = sandbox();
+  try {
+    ccSlugDir(home, proj);
+    setLeanFloor(home, proj, 12345);
+    const pm = path.resolve(statePath(proj, home));
+    const pf = path.resolve(stateFallbackPath(proj, home));
+    const rec = JSON.parse(fs.readFileSync(pm, 'utf8'));
+    const realRename = fs.renameSync;
+    let fired = false;
+    fs.renameSync = function (a, b, ...rest) {
+      if (!fired && path.resolve(String(b)) === pm) { fired = true; fs.mkdirSync(path.dirname(pf), { recursive: true }); fs.writeFileSync(pf, JSON.stringify({ ...rec, leanFloorTokens: 777, saveRev: 3 })); }
+      return realRename.call(fs, a, b, ...rest);
+    };
+    let ret;
+    try { ret = stateNs.armDigGauge(home, proj, 'sess-938'); } finally { fs.renameSync = realRename; }
+    assert.ok(fired, 'the seam fired');
+    assert.strictEqual(JSON.parse(fs.readFileSync(pm, 'utf8')).digGaugeSession, 'sess-938', 'the mark is on disk');
+    assert.strictEqual(ret.applied, true, 'a save that landed is reported applied: ' + JSON.stringify(ret));
+    assert.strictEqual(ret.reconciled, false, 'and unreconciled: ' + JSON.stringify(ret));
+    assert.ok(fs.existsSync(pf), 'the changed record is kept');
+  } finally { clean(home, proj); }
+});

@@ -1523,6 +1523,8 @@ function saveChangedFields(projectRoot, home, from, before, after, step, fbUnrea
   // record that is whole again there (a lock released, a rename done) is merged onto, never overwritten with the empty load.
   const pm = statePath(projectRoot, home);
   const own = from || pm;
+  const out = {}; // M3a: saveState sets out.reconciled = false when its rename landed but the fallback changed after the compare
+  const done = (saved, notApplied) => ({ saved, notApplied, reconciled: out.reconciled !== false });
   const same = (a, b) => path.resolve(a) === path.resolve(b);
   const other = same(own, pm) ? stateFallbackPath(projectRoot, home) : pm;
   const A = readStateAt(own, projectRoot);
@@ -1551,13 +1553,13 @@ function saveChangedFields(projectRoot, home, from, before, after, step, fbUnrea
     // No owned record at either path: write the loaded state only where neither path failed to read (absent or foreign); a path
     // that could not be read may hold the record this call never saw, so nothing is written and the edit says so.
     if (A.kind === 'unreadable' || O.kind === 'unreadable') return { saved: false, notApplied: [] };
-    return { saved: saveState(after, projectRoot, home), notApplied: [] };
+    return done(saveState(after, projectRoot, home, out), []);
   }
   const fresh = migrateProjSchema(withRev(owned, maxRev(A.rec, O.rec, before))); // the save raises past every counter read
   if (from === null && typeof step === 'function') {
     const re = JSON.parse(JSON.stringify(fresh));
     if (step(re) === false) return { saved: null, notApplied: [] }; // not applicable there, never a failed save (L887-1)
-    return { saved: saveState(re, projectRoot, home), notApplied: [] };
+    return done(saveState(re, projectRoot, home, out), []);
   }
   const notApplied = [];
   for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
@@ -1566,14 +1568,18 @@ function saveChangedFields(projectRoot, home, from, before, after, step, fbUnrea
     if (JSON.stringify(fresh[k]) !== was) { notApplied.push(k); continue; } // changed by another writer since this call's load: theirs stands
     if (after[k] === undefined) delete fresh[k]; else fresh[k] = after[k];
   }
-  return { saved: saveState(fresh, projectRoot, home), notApplied };
+  return done(saveState(fresh, projectRoot, home, out), notApplied);
 }
 // The three CLI edits' answer: true only when the save landed AND every field the call changed was applied; `report.notApplied` names
 // the fields another writer kept (lab F1 (b)), so the CLI can say what was not applied instead of its success line.
 // L887-1: `report.saved` says whether the save landed (false: the state file could not be saved; absent: the edit never reached a
 // save, or its step could not apply), so the CLI says "(the rest was applied)" only when something was.
 function appliedResult(r, report) {
-  if (report && typeof report === 'object') { report.notApplied = r.notApplied; if (typeof r.saved === 'boolean') report.saved = r.saved; }
+  if (report && typeof report === 'object') {
+    report.notApplied = r.notApplied;
+    if (typeof r.saved === 'boolean') report.saved = r.saved;
+    if (r.reconciled === false) report.reconciled = false; // M3a: saved, but a state record beside it changed during the save
+  }
   return r.saved === true && r.notApplied.length === 0;
 }
 
@@ -1589,7 +1595,10 @@ function fallbackEntrySame(fb, FB) {
   if (id.ino !== '0' && st.ino !== 0n) return String(st.dev) === id.dev && String(st.ino) === id.ino ? 'same' : 'changed';
   return Number(st.size) === id.size && Number(st.mtimeMs) === Math.trunc(id.mtimeMs) ? 'same' : 'changed'; // a bigint stat's mtimeMs is whole milliseconds
 }
-function saveState(proj, projectRoot, home) {
+// M3a / F928-1: `out`, when given, receives `reconciled: false` when the one rename onto main LANDED but the fallback changed after
+// the pre-rename compare (kept unread, main unmarked); the save then returns true, since the record is on disk. With no `out` that
+// case still returns false (the hook callers, who read only the boolean, keep "the mark is missing, said").
+function saveState(proj, projectRoot, home, out = null) {
   if (proj && typeof proj === 'object' && UNSAVABLE.has(proj)) return false; // T-RD-HOOKSTATE: never over a file the load could not read
   try {
     const p = statePath(projectRoot, home);
@@ -1666,6 +1675,7 @@ function saveState(proj, projectRoot, home) {
     }
     if (!alreadySwept) pruneStrayStateDirs(projectRoot, home);
     if (deadSweepDue) sweepDeadProjectStates(home, projectRoot); // CWK-157: after our own write, so a failed sweep never costs the write
+    if (markMissing && out && typeof out === 'object') { out.reconciled = false; return true; }
     return !markMissing;
   } catch {
     return false;
@@ -2145,7 +2155,7 @@ export function armDigGauge(home, projectRoot, session, now = Date.now()) {
   step(proj);
   // lab F1 (b): `applied` false when the once-per-session mark was not saved, so the CLI can say the offer may show again.
   const r = saveChangedFields(projectRoot, home, from, before, proj, step, fbUnreadAtLoad); // T-29LD-2, T-RISESKIP
-  return { surface: true, applied: r.saved === true && r.notApplied.length === 0, notApplied: r.notApplied };
+  return { surface: true, applied: r.saved === true && r.notApplied.length === 0, notApplied: r.notApplied, reconciled: r.reconciled !== false };
 }
 
 // CWK-081 (1) — THE EPISODE'S FULL-TIER PASS, recorded. The externalize advisory

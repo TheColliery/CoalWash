@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gauge, gaugeLine, measureOnly } from './cli.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin } from './tailings.mjs';
 import { snapshotOnFirstWrite } from './writeguard.mjs';
+import { stateFallbackPath } from './caliper.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(here, 'cli.mjs');
@@ -1258,5 +1259,60 @@ test('N880-5: writeguard-restore --out whose write fails never removes a file th
     assert.ok(fs.existsSync(ownFile), 'the created file is left in place, never removed by name: ' + r.stderr);
     assert.strictEqual(fs.readFileSync(ownFile, 'utf8'), '', 'it was emptied through its handle: no partial bytes remain');
     assert.match(r.stderr, /emptied and left in place/, 'the refusal says so: ' + r.stderr);
+  } finally { clean(home, proj); }
+});
+
+// M3a / F928-1 (INSPECT 928): when a state record is written beside state.json DURING the save's one rename onto it, the save still
+// lands (the edit is on disk) but the fallback is kept unread and the main record unmarked. return-leave answered "NOT applied: the
+// state file could not be saved; re-run it" and exited 1, and restore said its state record was NOT updated, though the edit was in
+// state.json. Each command now says the save landed and adds one note. A preload writes the fallback record while the rename onto
+// state.json runs (a test-side seam: the w-928 shape through each command).
+function fallbackDuringRenamePreload(proj) {
+  const preload = path.join(proj, 'fb-during-rename.mjs');
+  fs.writeFileSync(preload, [
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    'const sp = path.resolve(process.env.CW938_STATE); const fb = path.resolve(process.env.CW938_FB); const oRename = fs.renameSync; let fired = false;',
+    "fs.renameSync = function (from, to, ...rest) { if (!fired && path.resolve(String(to)) === sp) { fired = true; fs.mkdirSync(path.dirname(fb), { recursive: true }); fs.writeFileSync(fb, process.env.CW938_REC); } return oRename.call(fs, from, to, ...rest); };",
+    '',
+  ].join('\n'), 'utf8');
+  return preload;
+}
+function fbEnv(home, proj, sp) {
+  // the child runs with CLAUDE_CONFIG_DIR empty, so the fallback path is computed the same way here
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'CLAUDE_CONFIG_DIR'); const was = process.env.CLAUDE_CONFIG_DIR;
+  let fb;
+  try { delete process.env.CLAUDE_CONFIG_DIR; fb = stateFallbackPath(fs.realpathSync.native(proj), home); } finally { if (had) process.env.CLAUDE_CONFIG_DIR = was; }
+  return { CW938_STATE: sp, CW938_FB: fb, CW938_REC: JSON.stringify({ projectRoot: fs.realpathSync.native(proj), stateSchema: 1, lastObeseFat: 4242, saveRev: 3 }) };
+}
+test('M3a: return-leave whose state record changes beside state.json during the save says it was left as it is, plus a note, and exits 0', () => {
+  const { home, proj } = sandbox();
+  try {
+    const sp = seedState(home, proj, { returnAsk: true, lastVerdict: { fatTokens: 1000 }, lastObeseFat: 777 });
+    const env = fbEnv(home, proj, sp);
+    const r = runPreloaded(proj, home, fallbackDuringRenamePreload(proj), ['return-leave'], env);
+    const st = JSON.parse(fs.readFileSync(sp, 'utf8'));
+    assert.strictEqual(st.returnAsk, undefined, 'the edit is on disk: ' + JSON.stringify(st));
+    assert.doesNotMatch(r.stderr, /could not be saved|re-run it/, 'a save that landed is never called failed: ' + r.stderr);
+    assert.match(r.stderr, /return left as it is/, r.stderr);
+    assert.match(r.stderr, /changed during the save and was kept unread; the next save reconciles it/, 'the note: ' + r.stderr);
+    assert.ok(fs.existsSync(env.CW938_FB), 'the changed record is kept');
+    assert.strictEqual(r.status, 0, 'exit 0: ' + r.stderr);
+  } finally { clean(home, proj); }
+});
+test('M3a: restore whose state record changes beside state.json during the save says the record was saved, plus a note, never NOT updated', () => {
+  const { home, proj } = sandbox();
+  try {
+    const sp = seedState(home, proj, { lastObeseFat: 1000 });
+    const content = 'restored lines\n';
+    const rec = recordBinItem(proj, FAT_BIN_NAME, { content: Buffer.from(content), original: path.join(proj, 'MEMORY.md'), origin: 'program-cut', now: Date.now() });
+    const id = (rec && rec.id) || (listBin(proj, FAT_BIN_NAME)[0] || {}).id;
+    assert.ok(id, 'a bin item to restore');
+    const r = runPreloaded(proj, home, fallbackDuringRenamePreload(proj), ['restore', id], fbEnv(home, proj, sp));
+    assert.strictEqual(r.stdout, content, r.stderr);
+    assert.ok(JSON.parse(fs.readFileSync(sp, 'utf8')).lastObeseFat > 1000, 'the watermark rose on disk');
+    assert.doesNotMatch(r.stderr, /NOT updated/, 'a save that landed is never called failed: ' + r.stderr);
+    assert.match(r.stderr, /state record was saved; a state record beside it changed during the save and was kept unread; the next save reconciles it/, r.stderr);
+    assert.strictEqual(r.status, 0, r.stderr);
   } finally { clean(home, proj); }
 });
