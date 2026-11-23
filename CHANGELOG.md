@@ -2,7 +2,9 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
-## [Unreleased]
+## [1.19.11] - 2026-11-23
+
+A read compares the file it opened with the path its check resolved
 
 ### Fixed
 
