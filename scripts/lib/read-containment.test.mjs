@@ -547,3 +547,115 @@ test('R46-2 apply rollback control: an untouched snapshot still restores the ori
   assert.equal(fs.readFileSync(f1, 'utf8'), 'original one\n');
   assert.equal(fs.readFileSync(f2, 'utf8'), 'original two\n');
 });
+
+// ---- T-29nj-1-CW (map 937): repoReadOutcome's identity is the lstat of the ONE realpath its post-open check resolved --------
+// The reader opened by name, checked the post-open realpath for containment, then took the identity it compares the handle with
+// from a SECOND resolution of the name (fs.statSync(file)). A name moved to X for the open, back for the realpath, and to X again for
+// that second resolution passed both checks and the bytes of X were read (ALT-LINK, witnessed RED in scratchpad/29oj/w-map937.mjs).
+// Fixture: a directory link root/link -> root/realA (a junction on Windows); A and B inside the root, X outside it. Every swap is a
+// test-side seam on a node call (fs.openSync, fs.realpathSync.native, the identity stat), never a seam in shipped code. The folder
+// residue (a component of the resolved path itself swapped, ALT-CHAIN) is a stated limit in SECURITY.md and is not pinned here.
+function linkFixture(t, label) {
+  const top = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, `cw-t29nj-${label}-`)));
+  t.after(() => {
+    assert.ok(top.startsWith(TMP_ROOT + path.sep), `refusing to remove ${top}: not under ${TMP_ROOT}`);
+    fs.rmSync(top, { recursive: true, force: true });
+  });
+  const root = path.join(top, 'root');
+  const D = { A: path.join(root, 'realA'), B: path.join(root, 'realB'), X: path.join(top, 'outside') };
+  for (const [k, d] of Object.entries(D)) { fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'k.json'), `bytes of ${k}\n`); }
+  const link = path.join(root, 'link');
+  const point = (to) => {
+    try { fs.unlinkSync(link); } catch { try { fs.rmdirSync(link); } catch { /* none yet */ } }
+    if (!dirLink(to, link)) throw new Error('cannot make a directory link here');
+  };
+  point(D.A);
+  return { top, root, D, link, point, file: path.join(link, 'k.json') };
+}
+// Run repoReadOutcome on `file` with seams: R5 (just before the open), afterOpen, R7 (the post-open realpath of the name, its second
+// call), ID (the identity read after the open: fs.statSync(name, bigint) in the old shape, fs.lstatSync(any, bigint) in the new one).
+// `ino0` makes every bigint stat after the open report ino 0n (an inode-0 volume). Every seam is restored before the result returns.
+function readWithSeams(file, root, plan = {}) {
+  const realOpen = fs.openSync, realStat = fs.statSync, realLstat = fs.lstatSync, realFstat = fs.fstatSync, realRp = fs.realpathSync.native;
+  const zero = (s) => Object.assign(Object.create(Object.getPrototypeOf(s)), s, { ino: 0n });
+  let opened = false, rpN = 0, idFired = false;
+  const id = () => { if (opened && !idFired) { idFired = true; if (plan.ID) plan.ID(); } };
+  fs.realpathSync.native = function (p, ...rest) {
+    if (p === file) { rpN++; if (rpN === 2 && plan.R7) plan.R7(); }
+    return realRp.call(fs.realpathSync, p, ...rest);
+  };
+  fs.openSync = function (p, ...rest) {
+    if (p === file && !opened) { if (plan.R5) plan.R5(); try { return realOpen.call(fs, p, ...rest); } finally { opened = true; if (plan.afterOpen) plan.afterOpen(); } }
+    return realOpen.call(fs, p, ...rest);
+  };
+  fs.statSync = function (p, opts, ...rest) {
+    if (opts && opts.bigint) { id(); const s = realStat.call(fs, p, opts, ...rest); return plan.ino0 && opened ? zero(s) : s; }
+    return realStat.call(fs, p, opts, ...rest);
+  };
+  fs.lstatSync = function (p, opts, ...rest) {
+    if (opts && opts.bigint && opened) { id(); const s = realLstat.call(fs, p, opts, ...rest); return plan.ino0 ? zero(s) : s; }
+    return realLstat.call(fs, p, opts, ...rest);
+  };
+  fs.fstatSync = function (fd, opts, ...rest) {
+    const s = realFstat.call(fs, fd, opts, ...rest);
+    return plan.ino0 && opts && opts.bigint ? zero(s) : s;
+  };
+  try { return repoReadOutcome(file, root, MAX_DOC_BYTES); } finally {
+    fs.openSync = realOpen; fs.statSync = realStat; fs.lstatSync = realLstat; fs.fstatSync = realFstat; fs.realpathSync.native = realRp;
+  }
+}
+const said = (o) => (o.buf ? `READ ${String(o.buf).trim()}` : `refused why=${o.why}`);
+
+test('T-29nj-1-CW leg 1 control: with no swap the read through the directory link returns A', (t) => {
+  const f = linkFixture(t, 'ctl');
+  assert.equal(said(readWithSeams(f.file, f.root)), 'READ bytes of A');
+});
+test('T-29nj-1-CW leg 2 INSIDE: the name moved to B for the open, back to A for the post-open realpath, to B for the identity is refused, never read', (t) => {
+  const f = linkFixture(t, 'in');
+  const o = readWithSeams(f.file, f.root, { R5: () => f.point(f.D.B), afterOpen: () => f.point(f.D.A), ID: () => f.point(f.D.B) });
+  assert.equal(said(o), 'refused why=changed', 'the handle (B) is not the entry the checked realpath names (A)');
+});
+test('T-29nj-1-CW leg 3 OUTSIDE: the name moved outside for the open, back for the post-open realpath, outside again for the identity is refused, never read', (t) => {
+  const f = linkFixture(t, 'out');
+  const o = readWithSeams(f.file, f.root, { R5: () => f.point(f.D.X), afterOpen: () => f.point(f.D.A), ID: () => f.point(f.D.X) });
+  assert.equal(said(o), 'refused why=changed', 'the outside bytes are never returned');
+  assert.ok(!o.buf || !/bytes of X/.test(String(o.buf)));
+});
+test('T-29nj-1-CW leg 4 single-swap regressions: the name moved outside just before the open, or just before the post-open realpath, is refused', (t) => {
+  const f = linkFixture(t, 'one');
+  assert.equal(said(readWithSeams(f.file, f.root, { R5: () => f.point(f.D.X) })), 'refused why=changed', 'R5 to X');
+  f.point(f.D.A);
+  assert.equal(said(readWithSeams(f.file, f.root, { R7: () => f.point(f.D.X) })), 'refused why=changed', 'R7 to X');
+});
+test('T-29nj-1-CW leg 5 real file link: a file symlink retargeted outside for the open and the identity, back for the post-open realpath, is refused', (t) => {
+  const top = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'cw-t29nj-flink-')));
+  t.after(() => {
+    assert.ok(top.startsWith(TMP_ROOT + path.sep), `refusing to remove ${top}: not under ${TMP_ROOT}`);
+    fs.rmSync(top, { recursive: true, force: true });
+  });
+  const root = path.join(top, 'root');
+  const A = path.join(root, 'a.json'), X = path.join(top, 'x.json'), file = path.join(root, 'k.json');
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(A, 'bytes of A\n'); fs.writeFileSync(X, 'bytes of X\n');
+  try { fs.symlinkSync(A, file, 'file'); } catch (e) {
+    if (e && (e.code === 'EPERM' || e.code === 'EACCES')) return t.skip('this account cannot make a file symlink');
+    throw e;
+  }
+  const retarget = (to) => { fs.unlinkSync(file); fs.symlinkSync(to, file, 'file'); };
+  const o = readWithSeams(file, root, { R5: () => retarget(X), afterOpen: () => retarget(A), ID: () => retarget(X) });
+  assert.equal(said(o), 'refused why=changed', 'the outside file the link pointed at during the open is never read');
+});
+test('T-29nj-1-CW leg 6 inode-0: on a volume with no inode ids, a handle and a checked entry that differ in size are refused', (t) => {
+  const f = linkFixture(t, 'ino0');
+  fs.writeFileSync(path.join(f.D.X, 'k.json'), 'bytes of X, longer than A\n');
+  const o = readWithSeams(f.file, f.root, { ino0: true, R5: () => f.point(f.D.X), afterOpen: () => f.point(f.D.A) });
+  assert.equal(said(o), 'refused why=changed', 'size and mtime stand in for the missing inode id');
+});
+test('T-29nj-1-CW leg 6 residual: on an inode-0 volume two different files with the same size and mtime still pass (the named limit of the size-and-mtime fallback)', (t) => {
+  const f = linkFixture(t, 'ino0res');
+  const a = path.join(f.D.A, 'k.json'), x = path.join(f.D.X, 'k.json');
+  const when = new Date('2026-01-01T00:00:00Z');
+  fs.utimesSync(a, when, when); fs.utimesSync(x, when, when);
+  const o = readWithSeams(f.file, f.root, { ino0: true, R5: () => f.point(f.D.X), afterOpen: () => f.point(f.D.A) });
+  assert.equal(said(o), 'READ bytes of X', 'the residual: same size, same mtime, no inode id, nothing left to tell them apart');
+});

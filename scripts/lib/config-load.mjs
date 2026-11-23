@@ -507,13 +507,23 @@ export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
     fd = fs.openSync(file, REPO_READ_FLAGS);
     if (root != null) {
       // The path was judged before the open, and the open can be overtaken: prove the handle is the entry the path names NOW,
-      // inside the root and the same inode. A filesystem that reports no inode id keeps the containment check alone.
+      // inside the root and the same inode.
+      // T-29nj-1-CW: the identity is the lstat of the ONE realpath the containment check just resolved (pPhys), never a second
+      // resolution of the name: a name moved outside for the open, back for that realpath and outside again for a second stat of
+      // the name passed both checks. Unless pPhys is a plain regular file the read is refused (a link there means the name moved
+      // after the realpath). On a volume that reports no inode id (ino 0 on either side) size and mtime stand in for it: two
+      // different files with the same size and mtime then pass, the named limit of that fallback. Any throw refuses (`changed`).
       const rootPhys = canonicalOrNull(root);
       const pPhys = canonicalOrNull(file);
       if (!rootPhys || !pPhys || !pathWithin(pPhys, rootPhys)) return { why: 'changed' };
       hs = fs.fstatSync(fd, { bigint: true });
-      const ps = fs.statSync(file, { bigint: true });
-      if (hs.ino && ps.ino && (hs.dev !== ps.dev || hs.ino !== ps.ino)) return { why: 'changed' };
+      let ps;
+      try { ps = fs.lstatSync(pPhys, { bigint: true }); } catch { return { why: 'changed' }; }
+      if (ps.isSymbolicLink() || !ps.isFile()) return { why: 'changed' };
+      const same = hs.ino === 0n || ps.ino === 0n
+        ? hs.size === ps.size && hs.mtimeMs === ps.mtimeMs
+        : hs.dev === ps.dev && hs.ino === ps.ino;
+      if (!same) return { why: 'changed' };
     }
     const st = fs.fstatSync(fd);
     if (!st.isFile()) return { why: st.isDirectory() ? 'directory' : 'not-regular' };
