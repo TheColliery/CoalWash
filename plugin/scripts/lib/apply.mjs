@@ -1349,7 +1349,9 @@ export function applyPlan(plan, opts = {}) {
         // other reason keeps the readability advice. A run that meets both kinds gives both.
         const advice = [];
         if (storeReads.some((s) => s.error && s.newer)) advice.push('update CoalWash to read a store a newer CoalWash wrote (moving it aside drops its keeps)');
-        if (storeReads.some((s) => s.error && !s.newer)) advice.push('make the store readable (or move it aside if you mean to drop its keeps)');
+        // L931-2: an emptied store reads fine and holds nothing, so its advice is to write its keeps back or delete the file
+        if (storeReads.some((s) => s.error && s.empty)) advice.push('write its keeps back, or delete the file if you mean to have no keeps');
+        if (storeReads.some((s) => s.error && !s.newer && !s.empty)) advice.push('make the store readable (or move it aside if you mean to drop its keeps)');
         return { ok: false, flagged, error: `keeps gate: ${unread.join('; ')} -- a keep there may protect what this plan cuts, so nothing was applied; ${advice.join('; ')}, then run again` };
       }
       let keeps = [...storeReads[0].keeps, ...storeReads[1].keeps]

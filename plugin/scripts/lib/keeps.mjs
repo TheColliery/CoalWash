@@ -168,7 +168,7 @@ export function keepsForGate(file, root = null) {
   const read = keepsStoreRead(file, root);
   if (read.kind === 'absent') return { keeps: [] };
   if (read.kind === 'unreadable') return { error: `the keeps store ${file} exists but could not be read (${read.code})` };
-  if (read.kind === 'corrupt') return { error: `the keeps store ${file} is not a keeps store CoalWash can read (${read.empty ? 'it is empty: no bytes but white space or a byte-order mark' : 'not JSON, or not its { v, keeps: [...] } shape'})` };
+  if (read.kind === 'corrupt') return { error: `the keeps store ${file} is not a keeps store CoalWash can read (${read.empty ? 'it is empty: no bytes but white space or a byte-order mark' : 'not JSON, or not its { v, keeps: [...] } shape'})`, ...(read.empty ? { empty: true } : {}) }; // L931-2: the gate's advice for an empty store
   const v = read.raw.v;
   if (v !== null && typeof v === 'object') return { error: `the keeps store ${file} carries a schema field this version cannot read` };
   if (Number(v) > KEEPS_SCHEMA_V) return { error: `the keeps store ${file} was written by a newer CoalWash (schema ${String(v)}; this version reads ${KEEPS_SCHEMA_V})`, newer: true };

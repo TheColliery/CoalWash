@@ -5961,3 +5961,40 @@ for (const scope of ['project', 'global']) {
     });
   }
 }
+
+// L931-2 (INSPECT 931): an emptied keeps store (class 60) got the readability advice ("make the store readable"), though the file reads
+// fine and holds nothing. Its refusal now carries an `empty` mark and its own advice: write its keeps back, or delete the file if you
+// mean to have no keeps (the recovery README.md already gives). The three forms are pinned; a run that meets two kinds gives both.
+const EMPTY_ADVICE = 'write its keeps back, or delete the file if you mean to have no keeps';
+const READABLE_ADVICE = 'make the store readable (or move it aside if you mean to drop its keeps)';
+const NEWER_ADVICE = 'update CoalWash to read a store a newer CoalWash wrote (moving it aside drops its keeps)';
+function gateAdvice(projectBreak, globalBreak) {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const kept = path.join(store, 'kept.md');
+    write(kept, PINNED);
+    recordKeep(proj, { target: 'kept.md:decisive', anchor: PIN, anchorFile: kept });
+    recordGlobalKeep(home, { target: 'kept.md:decisive', anchor: PIN, anchorFile: kept });
+    if (projectBreak) projectBreak(keepsPath(proj));
+    if (globalBreak) globalBreak(globalKeepsPath(home));
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: kept, content: CUT }]), { home });
+    assert.strictEqual(fs.readFileSync(kept, 'utf8'), PINNED, 'the pinned span survives');
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    return r.error;
+  } finally { clean(proj, home); }
+}
+const emptyIt = (file) => fs.writeFileSync(file, '', 'utf8');
+test('L931-2: the KEEPS-GATE advice for an emptied store is the empty form, never the readability advice', () => {
+  const e = gateAdvice(emptyIt, null);
+  assert.ok(e.endsWith(`; ${EMPTY_ADVICE}, then run again`), 'the empty form: ' + e);
+  assert.ok(!e.includes(READABLE_ADVICE), 'never the readability advice for an empty store: ' + e);
+});
+test('L931-2: the three KEEPS-GATE advice forms stand apart, and a run that meets an emptied and an unparseable store gives both', () => {
+  const both = gateAdvice(emptyIt, (f) => keepsBreaker('unparseable', f));
+  assert.ok(both.includes(EMPTY_ADVICE) && both.includes(READABLE_ADVICE), 'both forms: ' + both);
+  const newer = gateAdvice((f) => keepsBreaker('newer-schema', f), null);
+  assert.ok(newer.includes(NEWER_ADVICE) && !newer.includes(EMPTY_ADVICE) && !newer.includes(READABLE_ADVICE), 'the newer form alone: ' + newer);
+  const other = gateAdvice((f) => keepsBreaker('unparseable', f), null);
+  assert.ok(other.endsWith(`; ${READABLE_ADVICE}, then run again`) && !other.includes(EMPTY_ADVICE), 'the readability form alone: ' + other);
+});
