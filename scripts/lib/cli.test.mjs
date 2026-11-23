@@ -1241,8 +1241,9 @@ test('N880-5: writeguard-restore --out whose write fails never removes a file th
       "import fs from 'node:fs';",
       'const out = process.env.CW891_OUT; const oOpen = fs.openSync; const oWrite = fs.writeFileSync; const oLstat = fs.lstatSync; const ours = new Set(); let failed = false; let swapped = false;',
       'fs.openSync = function (p, ...rest) { const fd = oOpen.call(fs, p, ...rest); if (String(p) === out) ours.add(fd); return fd; };',
-      "fs.writeFileSync = function (f, data, ...rest) { if (typeof f === 'number' && ours.has(f) && !failed) { failed = true; oWrite.call(fs, f, 'PARTIAL'); throw Object.assign(new Error('ENOSPC: planted'), { code: 'ENOSPC' }); } return oWrite.call(fs, f, data, ...rest); };",
-      "fs.lstatSync = function (p, ...rest) { const st = oLstat.call(fs, p, ...rest); if (failed && !swapped && String(p) === out) { swapped = true; fs.renameSync(out, out + '.moved'); oWrite.call(fs, out, 'STRANGER'); } return st; };",
+      // E1 #11: the rename and the STRANGER write sit inside the write fault, after PARTIAL and before the throw, so the swap always
+      // happens before the cleanup looks at the name (the lstat seam it replaced never fired on this path)
+      "fs.writeFileSync = function (f, data, ...rest) { if (typeof f === 'number' && ours.has(f) && !failed) { failed = true; oWrite.call(fs, f, 'PARTIAL'); fs.renameSync(out, out + '.moved'); oWrite.call(fs, out, 'STRANGER'); swapped = true; throw Object.assign(new Error('ENOSPC: planted'), { code: 'ENOSPC' }); } return oWrite.call(fs, f, data, ...rest); };",
       '',
     ].join('\n'), 'utf8');
     const r = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, CLI, 'writeguard-restore', path.basename(snap), '--out', out], {
@@ -1253,11 +1254,9 @@ test('N880-5: writeguard-restore --out whose write fails never removes a file th
       killSignal: 'SIGKILL',
     });
     assert.strictEqual(r.status, 1, 'the run refuses: ' + r.stderr);
-    const swapped = fs.existsSync(out + '.moved');
-    if (swapped) assert.strictEqual(fs.readFileSync(out, 'utf8'), 'STRANGER', 'the file that took the name is left as it was: ' + r.stderr);
-    const ownFile = swapped ? out + '.moved' : out;
-    assert.ok(fs.existsSync(ownFile), 'the created file is left in place, never removed by name: ' + r.stderr);
-    assert.strictEqual(fs.readFileSync(ownFile, 'utf8'), '', 'it was emptied through its handle: no partial bytes remain');
+    assert.ok(fs.existsSync(out + '.moved'), 'the swap happened (E1 #11): ' + r.stderr);
+    assert.strictEqual(fs.readFileSync(out, 'utf8'), 'STRANGER', 'the file that took the name is left as it was: ' + r.stderr);
+    assert.strictEqual(fs.readFileSync(out + '.moved', 'utf8'), '', 'the created file, moved aside, was emptied through its handle: no partial bytes remain');
     assert.match(r.stderr, /emptied and left in place/, 'the refusal says so: ' + r.stderr);
   } finally { clean(home, proj); }
 });

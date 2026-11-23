@@ -3271,6 +3271,7 @@ test('F880-1: a CLI state edit whose re-read fails keeps every field it did not 
       }
       return realOpen.call(fs, p, ...rest);
     };
+    const before880 = fs.readFileSync(statePath(proj, home)); // E1 #14: the bytes the failed re-read must leave as they were
     seen = 0;
     const r880 = stateNs.armDigGauge(home, proj, 'sess-880');
     fs.openSync = realOpen;
@@ -3280,8 +3281,10 @@ test('F880-1: a CLI state edit whose re-read fails keeps every field it did not 
     assert.strictEqual(s.quickTried, true, 'the quick mark the call never touched is kept');
     // T-WHOLESAVE (1.19.9, the head's ruling): the re-read failed, so the edit may not write over the file; its own flag is either
     // written or reported not saved, never claimed. (This assert read "the call's own flag is written" under the 1.19.8 whole-save.)
-    if (r880.applied) assert.strictEqual(s.digGaugeSession, 'sess-880', 'the call reports its flag saved, so it is in the file');
-    else assert.notStrictEqual(s.digGaugeSession, 'sess-880', 'the call reports its flag not saved, and it is not in the file');
+    // E1 #14: one answer, never either branch: the re-read failed, so nothing was saved and the file is as it was
+    assert.strictEqual(r880.applied, false, 'the call reports its flag not saved: ' + JSON.stringify(r880));
+    assert.notStrictEqual(s.digGaugeSession, 'sess-880', 'and it is not in the file');
+    assert.ok(fs.readFileSync(statePath(proj, home)).equals(before880), 'the state file is byte for byte its pre-call bytes');
   } finally { fs.openSync = realOpen; clean(home, proj); }
 });
 
@@ -3382,6 +3385,11 @@ test('T-HOMEMOVE: an edit loaded from the fallback keeps the spawn and crossing 
     assert.strictEqual(s.lastSubSpawnAt, 4242, 'the hook\'s spawn stamp survives');
     assert.strictEqual(s.leanFloorTokens, 12345, 'the seeded floor is kept');
     assert.ok(s.lastObeseFat > 777, 'the call\'s own watermark is raised');
+    // E1 NIT #13: the crossing the hook recorded survives the call's save: band FULL, its session, not consumed
+    assert.ok(s.lastCrossing && typeof s.lastCrossing === 'object', 'the hook\'s crossing is in the file: ' + JSON.stringify(s));
+    assert.strictEqual(s.lastCrossing.band, 'FULL', JSON.stringify(s.lastCrossing));
+    assert.strictEqual(s.lastCrossing.session, 'hook-session', JSON.stringify(s.lastCrossing));
+    assert.notStrictEqual(s.lastCrossing.consumed, true, 'not consumed: ' + JSON.stringify(s.lastCrossing));
     assert.ok(result, 'and it says so: ' + JSON.stringify(rep));
   } finally { clean(home, proj); }
 });

@@ -5350,7 +5350,10 @@ test('T-RD-BININDEX: a bin whose index exists but cannot be read is not swept, i
   const { proj, store } = sandbox();
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
   try {
-    recordBinItem(proj, FAT_BIN_NAME, { content: 'an old cut', original: 'o.md', now: Date.now() });
+    // E1 NIT #12: an item past every horizon, so a sweep that ran would remove it; the readable-index control below shows it does
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'an old cut', original: 'o.md', now: Date.now() - 400 * 86400000 });
+    const blob = path.join(txDirFor(proj), FAT_BIN_NAME, id);
+    const blobBefore = fs.readFileSync(blob);
     const idxPath = path.resolve(path.join(txDirFor(proj), FAT_BIN_NAME, 'index.json'));
     const before = fs.readFileSync(idxPath, 'utf8');
     const f1 = path.join(store, 'f1.md');
@@ -5366,6 +5369,21 @@ test('T-RD-BININDEX: a bin whose index exists but cannot be read is not swept, i
     try { r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'still plain prose\n' }]), { home }); } finally { fs.openSync = realOpen; }
     assert.ok(Array.isArray(r.binMismatches) && r.binMismatches.some((l) => /fat-bin: its index exists but could not be read, so it was left as it is/.test(l)), 'the receipt names it: ' + JSON.stringify(r.binMismatches));
     assert.strictEqual(fs.readFileSync(idxPath, 'utf8'), before, 'the index is byte for byte unchanged');
+    assert.ok(fs.readFileSync(blob).equals(blobBefore), 'the item past the horizon is byte for byte kept (E1 NIT #12)');
+  } finally { clean(proj, home); }
+});
+test('T-RD-BININDEX control (E1 NIT #12): with the index readable, the same item past the horizon is swept', () => {
+  const { proj, store } = sandbox();
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cwa-home-')));
+  try {
+    const id = recordBinItem(proj, FAT_BIN_NAME, { content: 'an old cut', original: 'o.md', now: Date.now() - 400 * 86400000 });
+    const blob = path.join(txDirFor(proj), FAT_BIN_NAME, id);
+    assert.ok(fs.existsSync(blob), 'the item is there before the run');
+    const f1 = path.join(store, 'f1.md');
+    write(f1, 'plain prose\n');
+    const r = apply(planFor(proj, store, [{ type: 'rewrite', path: f1, content: 'still plain prose\n' }]), { home });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.ok(!fs.existsSync(blob), 'a readable index lets the sweep remove the item past the horizon');
   } finally { clean(proj, home); }
 });
 
@@ -5937,6 +5955,7 @@ for (const scope of ['project', 'global']) {
         assert.ok(typeof r.error === 'string' && r.error.includes(file) && /keeps/i.test(r.error), 'the error names the store: ' + r.error);
         assert.strictEqual(r.applied || 0, 0, 'nothing applied');
         assert.deepStrictEqual(snapsIn(proj), [], 'no snapshot was made');
+        assert.match(r.error, /it is empty/, 'the refusal says the store is empty (N931-a): ' + r.error);
         assert.strictEqual(fs.readFileSync(file, 'utf8'), bytes, 'the emptied store is left as it was');
       } finally { clean(proj, home); }
     });

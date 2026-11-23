@@ -1225,7 +1225,9 @@ for (const scope of ['project', 'global']) {
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     for (const bytes of ['', ' \r\n\t \n', String.fromCharCode(0xfeff), String.fromCharCode(0xfeff) + '  \n']) {
       fs.writeFileSync(file, bytes, 'utf8');
-      assertRefusedUntouched(file, bytes, record({ target: 'new.md', reason: 'a new keep' }), /not a keeps store/);
+      const r = record({ target: 'new.md', reason: 'a new keep' });
+      assertRefusedUntouched(file, bytes, r, /not a keeps store/);
+      assert.match(r.error, /it is empty/, 'the refusal says the store is empty (N931-a): ' + r.error);
     }
   });
 
@@ -1249,7 +1251,7 @@ for (const scope of ['project', 'global']) {
       if (deny.status !== 0) return t.skip(`icacls cannot set a deny here (${deny.error ? deny.error.code : deny.status})`);
       restore = () => spawnSync('icacls', [file, '/remove:d', user], { encoding: 'utf8', timeout: 20000 });
     } else {
-      if (typeof process.getuid === 'function' && process.getuid() === 0) return t.skip('running as root, which reads a mode-000 file anyway');
+      // E1 NIT #18: no uid shortcut: mode 000 is applied, and the read probe below decides the skip (root reads it anyway)
       fs.chmodSync(file, 0o000);
       restore = () => fs.chmodSync(file, 0o600);
     }

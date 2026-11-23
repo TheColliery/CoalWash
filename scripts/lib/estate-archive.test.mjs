@@ -1768,6 +1768,7 @@ test('T76-1: a journal swapped for an old file right after its read is dated by 
     write(old, '{"status":"done"}');
     const thirty = (Date.now() - 30 * 86400000) / 1000;
     fs.utimesSync(old, thirty, thirty);
+    const readMtime = fs.statSync(p).mtimeMs; // E1 NIT #17: the read file's own mtime, captured before the swap
     const target = path.resolve(p);
     const realOpen = fs.openSync;
     const realClose = fs.closeSync;
@@ -1779,7 +1780,6 @@ test('T76-1: a journal swapped for an old file right after its read is dated by 
     try { g = chJournalGuard(proj); } finally { fs.openSync = realOpen; fs.closeSync = realClose; }
     assert.ok(swapped, 'the seam fired');
     assert.strictEqual(g.inProgress, true);
-    const ageDays = (Date.now() - g.mtimeMs) / 86400000;
-    assert.ok(ageDays < 1, `the age is the read file's (fresh), not the swapped-in file's: ${ageDays.toFixed(1)} days`);
+    assert.strictEqual(g.mtimeMs, readMtime, `the age is the read file's, not the swapped-in file's (${g.mtimeMs} vs ${readMtime})`);
   } finally { clean(home, proj); }
 });
