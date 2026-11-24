@@ -9,7 +9,8 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { __walkTestHooks as W, archiveSession } from './estate-archive.mjs';
+import zlib from 'node:zlib';
+import { __walkTestHooks as W, archiveSession, restoreSession } from './estate-archive.mjs';
 import { __testHooks as A } from './apply.mjs';
 
 const TMP = fs.realpathSync.native(os.tmpdir());
@@ -142,4 +143,94 @@ test('B11 the staged-leftover sweep: a session sub-folder swapped for a link rig
   try { res = archiveSession({ id: 'abc', files: [] }, { slug: 's', archiveDir }); } finally { seam.undo(); }
   assert.ok(seam.fired(), 'the seam fired');
   assert.ok(fs.existsSync(victim), 'the outside file with a staged-temp name is never unlinked: ' + JSON.stringify(res));
+});
+
+// 29pr fire 953, F950-1 (INSPECT 950): each walk took its root from the realpath of the folder it had just listed (or been handed), so ONE
+// swap of THAT folder relocated the root and every entry below it read as inside. The root now comes from the folder ABOVE the one a walk
+// lists (the slug folder for the session level, the archive root for the slug level, `base` for the prune), and every entry of every
+// listing, the session and slug folders included, is checked against it. One test per site (the inspector's witnesses L1, L2, L3, L6,
+// L7), each with one real directory link that skips visibly where it cannot be made; and N950-1: the prune's last guard pinned.
+const SID = 'sess-953';
+test('F950-1 L1 sessionGenerations: the SESSION folder swapped for a link right after the slug listing is not followed, so no outside generation is listed', (t) => {
+  const r = root(t, 'l1');
+  const why = canLink(r); if (why) return t.skip(`this account cannot make a directory link here (${why})`);
+  const slugDir = path.join(r, 'archive', 's');
+  fs.mkdirSync(path.join(slugDir, SID), { recursive: true });
+  fs.writeFileSync(path.join(slugDir, SID, 'in.gz.gen1'), 'inside');
+  const out = path.join(r, 'outside'); fs.mkdirSync(out);
+  fs.writeFileSync(path.join(out, 'evil.gz.gen3'), 'outside, not ours');
+  const seam = swapAfterListing(t, slugDir, path.join(slugDir, SID), out, path.join(r, 'aside'));
+  const gens = W.sessionGenerations(slugDir, SID);
+  seam.undo();
+  assert.ok(seam.fired(), 'the seam fired');
+  const listed = [...gens.values()].flat().map((g) => path.basename(g.gzPath));
+  assert.ok(!listed.includes('evil.gz.gen3'), 'no outside generation is listed: ' + JSON.stringify(listed));
+});
+test('F950-1 L2 restoreSession: the SESSION folder swapped for a link right after the slug listing is not followed, so no outside bytes are restored', (t) => {
+  const r = root(t, 'l2');
+  const why = canLink(r); if (why) return t.skip(`this account cannot make a directory link here (${why})`);
+  const archiveDir = path.join(r, 'archive'); const slugDir = path.join(archiveDir, 's');
+  fs.mkdirSync(path.join(slugDir, SID), { recursive: true });
+  fs.writeFileSync(path.join(slugDir, SID, 'in.gz'), zlib.gzipSync(Buffer.from('INSIDE\n')));
+  const out = path.join(r, 'outside'); fs.mkdirSync(out);
+  fs.writeFileSync(path.join(out, 'evil.gz'), zlib.gzipSync(Buffer.from('OUTSIDE\n')));
+  const to = path.join(r, 'dest');
+  const seam = swapAfterListing(t, slugDir, path.join(slugDir, SID), out, path.join(r, 'aside'));
+  let res;
+  try { res = restoreSession(SID, { archiveDir, to }); } finally { seam.undo(); }
+  assert.ok(seam.fired(), 'the seam fired');
+  assert.ok(!fs.existsSync(path.join(to, SID, 'evil')), 'no outside bytes are restored: ' + JSON.stringify(res));
+});
+test('F950-1 L3 restoreSession: the SLUG folder swapped for a link right after the archive-root listing is not followed, so no outside bytes are restored', (t) => {
+  const r = root(t, 'l3');
+  const why = canLink(r); if (why) return t.skip(`this account cannot make a directory link here (${why})`);
+  const archiveDir = path.join(r, 'archive');
+  fs.mkdirSync(path.join(archiveDir, 's'), { recursive: true });
+  fs.writeFileSync(path.join(archiveDir, 's', `${SID}.jsonl.gz`), zlib.gzipSync(Buffer.from('INSIDE\n')));
+  const out = path.join(r, 'outside'); fs.mkdirSync(out);
+  fs.writeFileSync(path.join(out, `${SID}.jsonl.gz`), zlib.gzipSync(Buffer.from('OUTSIDE\n')));
+  const to = path.join(r, 'dest');
+  const seam = swapAfterListing(t, archiveDir, path.join(archiveDir, 's'), out, path.join(r, 'aside'));
+  let res;
+  try { res = restoreSession(SID, { archiveDir, to }); } finally { seam.undo(); }
+  assert.ok(seam.fired(), 'the seam fired');
+  const got = path.join(to, `${SID}.jsonl`);
+  const text = fs.existsSync(got) ? fs.readFileSync(got, 'utf8') : null;
+  assert.notStrictEqual(text, 'OUTSIDE\n', 'no outside bytes are restored: ' + JSON.stringify(res));
+});
+test('F950-1 L6 pruneEmptyDirs: handed a session folder that is a link out of base, it lists no outside name and removes nothing outside', (t) => {
+  const r = root(t, 'l6');
+  const why = canLink(r); if (why) return t.skip(`this account cannot make a directory link here (${why})`);
+  const base = path.join(r, 'proj'); fs.mkdirSync(base);
+  const out = path.join(r, 'outside'); fs.mkdirSync(path.join(out, 'empty'), { recursive: true });
+  fs.writeFileSync(path.join(out, 'secret-name.txt'), 'x');
+  linkDir(out, path.join(base, SID));
+  const survivors = [];
+  W.pruneEmptyDirs(path.join(base, SID), base, survivors);
+  assert.ok(!survivors.some((x) => x.includes('secret-name')), 'no outside name is listed: ' + JSON.stringify(survivors));
+  assert.ok(fs.existsSync(path.join(out, 'empty')), 'the empty folder outside is not removed');
+});
+test('F950-1 L7 listAsides: handed a slug folder that is a link out of the archive root, it lists no outside aside', (t) => {
+  const r = root(t, 'l7');
+  const why = canLink(r); if (why) return t.skip(`this account cannot make a directory link here (${why})`);
+  const archive = path.join(r, 'archive'); fs.mkdirSync(archive);
+  const out = path.join(r, 'outside'); fs.mkdirSync(out);
+  fs.writeFileSync(path.join(out, `a.gz.${HEX}.coalwash-aside`), 'x');
+  linkDir(out, path.join(archive, 's'));
+  const names = W.listAsides(path.join(archive, 's'));
+  assert.deepStrictEqual(names, [], 'no outside aside is listed: ' + JSON.stringify(names));
+});
+test('N950-1 pruneEmptyDirs: a parent swapped for a link after a child folder is listed never lets the empty-folder removal reach outside base', (t) => {
+  const r = root(t, 'm2');
+  const why = canLink(r); if (why) return t.skip(`this account cannot make a directory link here (${why})`);
+  const base = path.join(r, 'proj'); const sess = path.join(base, SID);
+  fs.mkdirSync(path.join(sess, 'sub'), { recursive: true });
+  const out = path.join(r, 'outside'); fs.mkdirSync(path.join(out, 'sub'), { recursive: true });
+  // after the walk lists `sess/sub` (empty), `sess` itself becomes a link to `out`, whose own empty `sub` is what the path now names
+  const seam = swapAfterListing(t, path.join(sess, 'sub'), sess, out, path.join(r, 'aside'));
+  const survivors = [];
+  W.pruneEmptyDirs(sess, base, survivors);
+  seam.undo();
+  assert.ok(seam.fired(), 'the seam fired');
+  assert.ok(fs.existsSync(path.join(out, 'sub')), 'the empty folder outside base is not removed: ' + JSON.stringify(survivors));
 });

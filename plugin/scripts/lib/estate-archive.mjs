@@ -980,22 +980,32 @@ function priorArchive(dest, buf, bounds) {
 // must lie inside the walk root's realpath (`walkPhys`, resolved once at the walk's start); a path that does not resolve, or resolves
 // outside, is skipped (fail closed). This is a check made at one moment: a swap between it and the act still follows (SECURITY.md
 // Known limits; no Node call opens or lists a folder beneath a handle).
-function withinWalkRoot(p, walkPhys) {
-  if (!walkPhys) return false;
+// 29pr fire 953, F950-1 (INSPECT 950): the root itself must come from the folder ABOVE the one a walk lists (the slug folder for the
+// session level, the archive root for the slug level, `base` for the prune), never from the realpath of a name the walk just listed: one
+// swap of THAT folder would relocate the root and every entry below it would read as inside. rootWithin answers the realpath of `p` when
+// it lies inside `walkPhys`, else null, so a caller that needs the next level's root resolves it once, already checked.
+function rootWithin(p, walkPhys) {
+  if (!walkPhys) return null;
   const phys = physicalOrNull(p);
-  return !!phys && containedIn(phys, [walkPhys]);
+  return phys && containedIn(phys, [walkPhys]) ? phys : null;
 }
-function sessionGenerations(slugDir, sessionId) {
+function withinWalkRoot(p, walkPhys) {
+  return rootWithin(p, walkPhys) !== null;
+}
+// F950-1: `walkPhys` is the slug folder's root, resolved BEFORE the listing (the caller's own slug folder, or the slug root
+// restoreSessionInner already checked against the archive root); the session folder the listing names is an entry like any other.
+function sessionGenerations(slugDir, sessionId, walkPhys = physicalOrNull(slugDir)) {
   const gens = new Map();
   const add = (n, gzPath, rel) => { if (!gens.has(n)) gens.set(n, []); gens.get(n).push({ gzPath, rel }); };
   let names;
   try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { return gens; }
   for (const d of names) {
     const m = GEN_RE.exec(d.name);
-    if (d.isFile() && m && d.name.startsWith(`${sessionId}.`)) add(Number(m[1]), path.join(slugDir, d.name), d.name.slice(0, m.index));
+    const top = path.join(slugDir, d.name);
+    if (!withinWalkRoot(top, walkPhys)) continue; // F950-1: the session folder (or a file) swapped for a link after the slug listing
+    if (d.isFile() && m && d.name.startsWith(`${sessionId}.`)) add(Number(m[1]), top, d.name.slice(0, m.index));
     else if (d.isDirectory() && d.name === sessionId) {
-      const sessDir = path.join(slugDir, d.name);
-      const walkPhys = physicalOrNull(sessDir);
+      const sessDir = top;
       const walk = (dir, relBase) => {
         let subs;
         try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -1055,9 +1065,13 @@ function collectStagedLeftovers(slugDir, sessionId) {
 }
 // fire 785 (lab 1.19.2): the files a refused run moved aside (`*.${ASIDE_SUFFIX}`) in this project's archive folder, so a later run's
 // report can list them. Reading only: plain files, the folder walked without following a link, sorted.
-function listAsides(slugDir) {
+// F950-1: `archPhys` is the archive root (the folder above the slug folder: the caller passes it from the global config, and the default
+// is the parent of the folder it was handed, never a listed name); the slug folder is checked against it, then every entry against the
+// slug folder's realpath found inside it.
+function listAsides(slugDir, archPhys = physicalOrNull(path.dirname(slugDir))) {
   const out = [];
-  const walkPhys = physicalOrNull(slugDir);
+  const walkPhys = rootWithin(slugDir, archPhys);
+  if (!walkPhys) return out; // the slug folder does not resolve inside the archive root: nothing is listed
   const walk = (dir) => {
     let es;
     try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -1082,7 +1096,10 @@ function listAsides(slugDir) {
 // never followed and never deleted.
 // B8 (29oy fire 947): a child folder swapped for a link after the listing is never descended into, so no folder outside `base` is
 // removed and no outside name is listed; the link itself stays where it is and is reported as a survivor by its name inside `base`.
+// F950-1: `dir` itself is checked against `base` BEFORE it is listed, so a folder handed in (or reached) that is a link out of `base`
+// prints no outside name; it is reported by its own name inside `base` when anything stands there, and nothing is removed.
 function pruneEmptyDirs(dir, base, survivors, walkPhys = physicalOrNull(base)) {
+  if (!withinWalkRoot(dir, walkPhys)) { if (standingAt(dir)) survivors.push(path.relative(base, dir)); return; }
   let names;
   try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; } // absent (no overflow dir) or unreadable
   for (const d of names) {
@@ -1236,7 +1253,7 @@ export function runEstate({ projectRoot = process.cwd(), home = os.homedir(), no
       res.archived.push({ id: sess.id, bytes: r.bytes, files: r.files, cold, deleteFailed: r.deleteFailed, unpruned: r.unpruned, generation: r.generation, kept: r.kept });
       res.bytesFreed += r.bytes;
     }
-    const asides = listAsides(path.join(archiveDir, c.slug));
+    const asides = listAsides(path.join(archiveDir, c.slug), physicalOrNull(archiveDir)); // F950-1: the archive root, from the global config
     if (asides.length) res.asideFiles = asides;
     // fire 785 (lab 1.19.2 K-E): a session this same run archived cleanly with its index row appended no longer needs the repair's
     // "does not decompress ... restore it by id" hint, and the run no longer counts it as a repair it could not do.
@@ -1587,9 +1604,11 @@ function readArchiveHandle(gzPath, bound) {
 // its own default folder removes it again when nothing was written into it (a narrow, non-recursive delete of that one folder).
 // B6 (29oy fire 947): the `.gz` copies under a session's archive folder, walked with the same per-path containment as the other estate
 // walks: a child swapped for a link after the listing is never followed, so an outside `.gz` never becomes a restore source.
-function restoreSourcesUnder(sessDir, relBase0) {
+// F950-1: `walkPhys` is the slug folder's root the caller checked against the archive root (restoreSessionInner passes it; the default
+// is the parent of the folder handed in, never the session folder's own realpath), and the session folder itself is checked first.
+function restoreSourcesUnder(sessDir, relBase0, walkPhys = physicalOrNull(path.dirname(sessDir))) {
   const out = [];
-  const walkPhys = physicalOrNull(sessDir);
+  if (!withinWalkRoot(sessDir, walkPhys)) return out;
   const collect = (dir, relBase) => {
     let subs;
     try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -1633,18 +1652,25 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
   }
   let sources = []; // { gzPath, rel } — rel is the ORIGINAL rel (`.gz` stripped)
   let gens = new Map();
+  // F950-1: the slug level's root is the archive root (the global config's estate.archiveDir), resolved before the listing; each slug
+  // folder the listing names is checked against it, and its realpath found there is the session level's root for every entry below.
+  const archPhys = physicalOrNull(archiveDir);
   for (const slug of slugs) {
     const slugDir = path.join(archiveDir, slug);
+    const slugPhys = rootWithin(slugDir, archPhys);
+    if (!slugPhys) continue; // the slug folder was swapped for a link after the archive-root listing: never followed
     let names;
     try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { continue; }
     for (const d of names) {
+      const p = path.join(slugDir, d.name);
+      if (!withinWalkRoot(p, slugPhys)) continue; // a top-level copy or the session folder swapped for a link after the slug listing
       if (d.isFile() && (d.name === `${sessionId}.jsonl.gz` || (d.name.startsWith(`${sessionId}.`) && d.name.endsWith('.gz')))) {
-        sources.push({ gzPath: path.join(slugDir, d.name), rel: d.name.slice(0, -3) });
+        sources.push({ gzPath: p, rel: d.name.slice(0, -3) });
       } else if (d.isDirectory() && d.name === sessionId) {
-        sources.push(...restoreSourcesUnder(path.join(slugDir, d.name), sessionId));
+        sources.push(...restoreSourcesUnder(p, sessionId, slugPhys));
       }
     }
-    gens = sessionGenerations(slugDir, sessionId); // `*.gz.gen<N>` never matches the `.gz` collection above
+    gens = sessionGenerations(slugDir, sessionId, slugPhys); // `*.gz.gen<N>` never matches the `.gz` collection above
     if (sources.length || gens.size) break; // a session id is unique — first slug that has it wins
   }
   const generations = [...gens.keys()].sort((a, b) => a - b);
