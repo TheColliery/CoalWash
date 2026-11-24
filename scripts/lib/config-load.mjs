@@ -511,8 +511,9 @@ export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
       // T-29nj-1-CW: the identity is the lstat of the ONE realpath the containment check just resolved (pPhys), never a second
       // resolution of the name: a name moved outside for the open, back for that realpath and outside again for a second stat of
       // the name passed both checks. Unless pPhys is a plain regular file the read is refused (a link there means the name moved
-      // after the realpath). On a volume that reports no inode id (ino 0 on either side) size and mtime stand in for it: two
-      // different files with the same size and mtime then pass, the named limit of that fallback. Any throw refuses (`changed`).
+      // after the realpath). On a volume that reports no inode id (ino 0 on either side) dev, size and mtime stand in for it
+      // (E1 t401 #3: dev too, so a file on another volume never passes): two different files on the same volume with the same size
+      // and mtime then pass, the named limit of that fallback. Any throw refuses (`changed`).
       const rootPhys = canonicalOrNull(root);
       const pPhys = canonicalOrNull(file);
       if (!rootPhys || !pPhys || !pathWithin(pPhys, rootPhys)) return { why: 'changed' };
@@ -521,7 +522,7 @@ export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
       try { ps = fs.lstatSync(pPhys, { bigint: true }); } catch { return { why: 'changed' }; }
       if (ps.isSymbolicLink() || !ps.isFile()) return { why: 'changed' };
       const same = hs.ino === 0n || ps.ino === 0n
-        ? hs.size === ps.size && hs.mtimeMs === ps.mtimeMs
+        ? hs.dev === ps.dev && hs.size === ps.size && hs.mtimeMs === ps.mtimeMs
         : hs.dev === ps.dev && hs.ino === ps.ino;
       if (!same) return { why: 'changed' };
     }

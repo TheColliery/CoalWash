@@ -3842,3 +3842,18 @@ test('M3a: a dig-gauge arm whose fallback changes during the one rename onto mai
     assert.ok(fs.existsSync(pf), 'the changed record is kept');
   } finally { clean(home, proj); }
 });
+
+// E1 t401 #3 (29oy fire 947): fallbackEntrySame, the compare the save's reap acts on ('same' removes the fallback), fell back to size and
+// mtime when either side reports inode 0, with no dev compare: a fallback on another volume with the same size and mtime read 'same' and
+// was REAPED. dev is compared too. The record's ident is planted with ino '0' (an inode-0 read) and the file's own size and mtime.
+test('E1 t401 #3: fallbackEntrySame on an inode-0 ident reads changed when the dev differs, same when it matches', () => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-t401-fb-')));
+  try {
+    const fb = path.join(dir, 'state.json');
+    fs.writeFileSync(fb, '{"saveRev":3}');
+    const st = fs.lstatSync(fb, { bigint: true });
+    const ident = (dev) => ({ ident: { dev, ino: '0', size: Number(st.size), mtimeMs: Number(st.mtimeMs) } });
+    assert.strictEqual(__testHooks.fallbackEntrySame(fb, ident(String(st.dev))), 'same', 'control: the same dev, size and mtime');
+    assert.strictEqual(__testHooks.fallbackEntrySame(fb, ident(String(st.dev + 1n))), 'changed', 'another dev is another file: never reaped');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

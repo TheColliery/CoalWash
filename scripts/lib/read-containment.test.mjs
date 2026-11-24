@@ -577,7 +577,8 @@ function linkFixture(t, label) {
 }
 // Run repoReadOutcome on `file` with seams: R5 (just before the open), afterOpen, R7 (the post-open realpath of the name, its second
 // call), ID (the identity read after the open: fs.statSync(name, bigint) in the old shape, fs.lstatSync(any, bigint) in the new one).
-// `ino0` makes every bigint stat after the open report ino 0n (an inode-0 volume). Every seam is restored before the result returns.
+// `ino0` makes every bigint stat after the open report ino 0n (an inode-0 volume). `devX` (E1 t401 #3) makes the handle's bigint stat
+// report another volume's dev. Every seam is restored before the result returns.
 function readWithSeams(file, root, plan = {}) {
   const realOpen = fs.openSync, realStat = fs.statSync, realLstat = fs.lstatSync, realFstat = fs.fstatSync, realRp = fs.realpathSync.native;
   const zero = (s) => Object.assign(Object.create(Object.getPrototypeOf(s)), s, { ino: 0n });
@@ -601,7 +602,8 @@ function readWithSeams(file, root, plan = {}) {
   };
   fs.fstatSync = function (fd, opts, ...rest) {
     const s = realFstat.call(fs, fd, opts, ...rest);
-    return plan.ino0 && opts && opts.bigint ? zero(s) : s;
+    const z = plan.ino0 && opts && opts.bigint ? zero(s) : s;
+    return plan.devX && opts && opts.bigint ? Object.assign(Object.create(Object.getPrototypeOf(z)), z, { dev: z.dev + 1n }) : z;
   };
   try { return repoReadOutcome(file, root, MAX_DOC_BYTES); } finally {
     fs.openSync = realOpen; fs.statSync = realStat; fs.lstatSync = realLstat; fs.fstatSync = realFstat; fs.realpathSync.native = realRp;
@@ -667,4 +669,20 @@ test('T-29nj-1-CW leg 6 residual: on an inode-0 volume two different files with 
   fs.utimesSync(a, when, when); fs.utimesSync(x, when, when);
   const o = readWithSeams(f.file, f.root, { ino0: true, R5: () => f.point(f.D.X), afterOpen: () => f.point(f.D.A) });
   assert.equal(said(o), 'READ bytes of X', 'the residual: same size, same mtime, no inode id, nothing left to tell them apart');
+});
+// E1 t401 #3 (29oy fire 947): the inode-0 fallback compared size and mtime only, so a handle on ANOTHER volume with the same size and
+// mtime passed. dev is compared too. No link is needed: one plain file, read with every bigint stat at ino 0n and the handle on another
+// volume (dev + 1); the entry is the same file, so size and mtime match.
+test('E1 t401 #3: on an inode-0 volume, a handle whose dev differs from the checked entry is refused even with the same size and mtime', (t) => {
+  const top = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'cw-t401-dev-')));
+  t.after(() => {
+    assert.ok(top.startsWith(TMP_ROOT + path.sep), `refusing to remove ${top}: not under ${TMP_ROOT}`);
+    fs.rmSync(top, { recursive: true, force: true });
+  });
+  const root = path.join(top, 'root');
+  fs.mkdirSync(root, { recursive: true });
+  const file = path.join(root, 'k.json');
+  fs.writeFileSync(file, 'bytes of A\n');
+  assert.equal(said(readWithSeams(file, root, { ino0: true })), 'READ bytes of A', 'control: the same dev, size and mtime read');
+  assert.equal(said(readWithSeams(file, root, { ino0: true, devX: true })), 'refused why=changed', 'another dev is another file, whatever its size and mtime');
 });

@@ -1331,6 +1331,7 @@ export const __testHooks = {
   strayPruneCalls: 0,
   deadStateSweepCalls: 0, // CWK-157: the dead-root sweep below is bounded by a stamp; counting calls is the load-independent pin
   reset() { this.strayPruneCalls = 0; this.deadStateSweepCalls = 0; },
+  fallbackEntrySame: (fb, FB) => fallbackEntrySame(fb, FB), // E1 t401 #3: the reap's identity compare, reached directly by its test
 };
 
 // Self-clean CW's OWN pre-fix scatter (no-old-version-leftover, rc.3 precedent):
@@ -1584,7 +1585,7 @@ function appliedResult(r, report) {
 }
 
 // T76-2: does the fallback NAME still hold the entry saveState read? 'gone' (nothing there now), 'same' (the entry read, by dev+ino, or by
-// size and mtime where the volume reports no inode id; or something that holds no record: a directory or special file), else 'changed':
+// dev, size and mtime where the volume reports no inode id (E1 t401 #3: dev too, so a fallback on another volume is never reaped); or something that holds no record: a directory or special file), else 'changed':
 // written after the read (it was absent then), replaced, or an lstat that failed for any reason but ENOENT.
 function fallbackEntrySame(fb, FB) {
   let st;
@@ -1593,7 +1594,7 @@ function fallbackEntrySame(fb, FB) {
   const id = FB && FB.ident;
   if (!id) return 'changed';
   if (id.ino !== '0' && st.ino !== 0n) return String(st.dev) === id.dev && String(st.ino) === id.ino ? 'same' : 'changed';
-  return Number(st.size) === id.size && Number(st.mtimeMs) === Math.trunc(id.mtimeMs) ? 'same' : 'changed'; // a bigint stat's mtimeMs is whole milliseconds
+  return String(st.dev) === id.dev && Number(st.size) === id.size && Number(st.mtimeMs) === Math.trunc(id.mtimeMs) ? 'same' : 'changed'; // a bigint stat's mtimeMs is whole milliseconds
 }
 // M3a / F928-1: `out`, when given, receives `reconciled: false` when the one rename onto main LANDED but the fallback changed after
 // the pre-rename compare (kept unread, main unmarked); the save then returns true, since the record is on disk. E1 t401 #2: what
