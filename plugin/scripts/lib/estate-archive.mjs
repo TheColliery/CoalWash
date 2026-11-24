@@ -340,13 +340,18 @@ function walkFiles(dir, baseDir, claudeRoots, out) {
 // (e.g. a meta.json) + everything under the `<sid>/` overflow dir. A dir with
 // no sibling .jsonl (an orphaned subagents/ leftover, GH #59248) is NOT a
 // session unit and is never touched here — P1's orphan report covers it.
+// F957-1 (29ps fire 958): the root is the slug folder, checked against the Claude base before it is listed (the folder above the one the
+// walk lists); every flat file and every file the session walk reaches is held to that slug folder, never to the whole Claude base, and
+// each session carries the root so archiveSession checks every path against it again before its delete.
 export function listSessions({ projectRoot = process.cwd(), home = os.homedir() } = {}) {
   const base = claudeBaseDir(home);
   const claudeRoot = physicalOrNull(base);
   if (!claudeRoot) return { slug: null, projDir: null, sessions: [] };
-  const claudeRoots = [claudeRoot];
   const slug = ccProjectSlug(projectRoot);
   const projDir = path.join(base, 'projects', slug);
+  const slugPhys = rootWithin(projDir, claudeRoot);
+  if (!slugPhys) return { slug, projDir, sessions: [] }; // a slug folder that does not resolve inside the Claude base is never listed
+  const claudeRoots = [slugPhys];
   let names;
   try { names = fs.readdirSync(projDir, { withFileTypes: true }); } catch { return { slug, projDir, sessions: [] }; }
 
@@ -372,6 +377,7 @@ export function listSessions({ projectRoot = process.cwd(), home = os.homedir() 
     if (!files.length) continue;
     sessions.push({
       id,
+      root: slugPhys, // F957-1: the checked slug folder; archiveSession holds every path to it again before the delete
       files,
       bytes: files.reduce((s, f) => s + f.bytes, 0),
       newestMtimeMs: Math.max(...files.map((f) => f.mtimeMs)),
@@ -812,6 +818,15 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // too (best-effort — a Windows dir fd throws and is swallowed, honest ceiling).
   for (const d of new Set(originals.map((o) => path.dirname(o.gz)))) fsyncDirBestEffort(d);
 
+  // F957-1 (29ps fire 958): a session from listSessions carries its checked slug folder (`root`). Right before the deletes, every original
+  // is checked to resolve inside it again, so a session folder swapped for a link after the listing never has a file deleted through it;
+  // any one outside stops the run before the first delete. (A session built by hand, with no `root`, keeps the paths it was handed.)
+  if (typeof sess.root === 'string') {
+    for (const o of originals) {
+      if (!withinWalkRoot(o.path, sess.root)) return fail(`${o.rel} no longer resolves inside this project's session folder (a folder swapped for a link after the listing?), so no live file was deleted — session skipped, originals kept`);
+    }
+  }
+
   // Deletes LAST. Every byte is now verified recoverable from the durable archive.
   let deleted = 0;
   const deleteFailed = [];
@@ -868,9 +883,13 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
 // A newest row from an older install (no transcriptGzSha256) is taken as describing the archive: it cannot be told apart.
 // The words for an archived file the index repair cannot open (fire 784, t338 F1): which file, why, and what the person can do.
 const unopenable = (file, e) => `its archived transcript ${file} could not be opened (${(e && e.code) || 'error'}), so the index repair skipped it and search will not list it; fix the file's permissions or close the program that holds it, then run again`;
+// F956-1 (29ps fire 958): the slug folder is checked against the archive root (the global config's estate.archiveDir) before it is listed,
+// each archived transcript is read only when it resolves inside that slug folder, and the generation walk is handed the same checked root.
 function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
   const out = { added: 0, failed: [], undecodable: [], robbedState: null };
   const slugDir = path.join(archiveDir, slug);
+  const slugPhys = rootWithin(slugDir, physicalOrNull(archiveDir));
+  if (!slugPhys) return out; // a slug folder that does not resolve inside the archive root is never read
   let names;
   try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { return out; }
   const latest = new Map(); // sessionId -> the newest row for (sessionId, slug), in file order
@@ -881,7 +900,7 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
       if (row && typeof row === 'object' && row.retier !== true && typeof row.sessionId === 'string' && row.projectSlug === slug) latest.set(row.sessionId, row);
     }
   } catch { /* no index yet: every archived session here is rowless */ }
-  const sids = names.filter((d) => d.isFile() && d.name.endsWith('.jsonl.gz')).map((d) => d.name.slice(0, -'.jsonl.gz'.length)).filter((sid) => isBareId(sid) && !sid.includes('.')).sort();
+  const sids = names.filter((d) => d.isFile() && d.name.endsWith('.jsonl.gz') && withinWalkRoot(path.join(slugDir, d.name), slugPhys)).map((d) => d.name.slice(0, -'.jsonl.gz'.length)).filter((sid) => isBareId(sid) && !sid.includes('.')).sort();
   for (const sid of sids) {
     // fire 784 (t338 F1): an archive this repair cannot open (a permission, an ACL, a file another program holds) is named in words and
     // skipped; the run goes on with every other session and reports the failure, so the CLI exits non-zero.
@@ -914,7 +933,7 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
     let genUnread = false;
     if (prev && typeof prev.transcriptGzSha256 === 'string') {
       let n = null;
-      for (const [g, list] of sessionGenerations(slugDir, sid)) {
+      for (const [g, list] of sessionGenerations(slugDir, sid, slugPhys)) {
         for (const e of list) {
           if (e.rel !== `${sid}.jsonl`) continue;
           let kg;

@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { claudeBaseDir, readCleanupPeriodDays, discoverRetentionCandidateKeys } from './config-load.mjs';
+import { claudeBaseDir, readCleanupPeriodDays, discoverRetentionCandidateKeys, repoReadOutcome } from './config-load.mjs';
 import { ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
 import { escapeRawControls } from './receipt.mjs';
 
@@ -339,12 +339,15 @@ export function discoverEstateCC({ projectRoot = process.cwd(), home = os.homedi
 // folder name and a path separator both fold to the same '-'); reading the
 // real value CC already wrote is exact where a slug-decode could only guess.
 // Read-budget capped; null on anything short of a clean parse — never guess.
+// F957-4 (29ps fire 958): the name comes from a directory entry that IS a file (a link reports its own type and is passed over), and the
+// head is read through the contained, bounded reader, held to the slug folder the caller checked, in the same call that opens it.
 function sniffCwd(slugDir) {
   let names;
-  try { names = fs.readdirSync(slugDir); } catch { return null; }
-  const jsonl = names.find((n) => n.endsWith('.jsonl'));
+  try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { return null; }
+  const jsonl = names.find((d) => d.isFile() && d.name.endsWith('.jsonl'));
   if (!jsonl) return null;
-  const head = readHead(path.join(slugDir, jsonl));
+  const got = repoReadOutcome(path.join(slugDir, jsonl.name), slugDir, SNIFF_BUDGET_BYTES, true);
+  const head = got.buf ? got.buf.toString('utf8') : null;
   if (!head) return null;
   const m = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(head);
   if (!m) return null;

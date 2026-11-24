@@ -49,7 +49,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
 import { tokensEst, postWashSnapshot, restorePostWashSnapshot } from './caliper.mjs';
-import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
+import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES, pathExists, repoEntryKind } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS, restoreFile, writeDurable } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
@@ -180,9 +180,10 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
   const stores = [];
   const skipped = []; // a store refused by a named rule, reported on the returned array's `skipped` property
 
-  const addStore = (label, dir) => {
+  const addStore = (label, dir, projectOnly = false) => {
     const phys = physicalOrNull(dir);
     if (!phys || !containedIn(phys, roots)) return; // fail-closed
+    if (projectOnly && !containedIn(phys, [projPhys])) return; // F957-2: a role store is held to the project root, never to home
     const indexPath = path.join(phys, 'MEMORY.md');
     // The index name is both read and rewritten, so a link at that name must resolve to an index of THIS store, or the store is
     // skipped with the reason. A name that does not resolve at all is no index, and the read below says so.
@@ -237,9 +238,17 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
   addStore('main', ccMemoryDir(projectRoot, home));
   const agentBase = path.join(projectRoot, '.claude', 'agent-memory');
   let roles = [];
-  // A role entry reaches addStore only when its directory entry reports a directory. A junction reports as a symbolic link, so it is not a role entry here; addStore resolves the path and checks containment.
-  try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { /* none */ }
-  for (const role of roles) addStore(`agent:${role}`, path.join(agentBase, role));
+  // F957-2 (29ps fire 958), the CWK-137 rule discoverRoleMemories already keeps (class-b.mjs): `.claude/agent-memory` must be a plain
+  // directory inside the project before it is listed, or a cloned repository's link at that name would make every folder in its target a
+  // role; and each role store is held to the PROJECT root, never to home.
+  if (!projPhys) { /* no resolvable project: no role store */ }
+  else if (pathExists(agentBase) && repoEntryKind(agentBase, projPhys) !== 'dir') {
+    skipped.push({ label: 'agent-memory', reason: '.claude/agent-memory is not a directory inside the project (a link out of it, or not a directory): no role store in it is read' });
+  } else {
+    // A role entry reaches addStore only when its directory entry reports a directory. A junction reports as a symbolic link, so it is not a role entry here; addStore resolves the path and checks containment.
+    try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { /* none */ }
+  }
+  for (const role of roles) addStore(`agent:${role}`, path.join(agentBase, role), true);
   stores.skipped = skipped;
   return stores;
 }

@@ -1040,10 +1040,11 @@ function projKey(projectRoot) {
 // Parse a state JSON file → a plain object, or null on any doubt (missing,
 // corrupt, wrong-shape, unreadable). Shared by the new-path + old-root reads and
 // the capacity adapter's P2 file.
-function readStateFile(p) {
+// `root`, when given, holds the read to that folder in the same call that opens it (F957-3: the stray sweep passes the Claude base).
+function readStateFile(p, root = null) {
   try {
     // Kind-gated and bounded: a special file at a fallback state name cannot block the read (the fallback path is project-named).
-    const o = repoReadOutcome(p, null, MAX_CONFIG_BYTES);
+    const o = repoReadOutcome(p, root, MAX_CONFIG_BYTES);
     if (!o.buf) return null;
     let raw = o.buf.toString('utf8');
     if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
@@ -1374,7 +1375,7 @@ function pruneStrayStateDirs(projectRoot, home) {
       if (name === mine) continue;
       const slugDir = path.join(projectsDir, name);
       const f = path.join(slugDir, 'coalwash', 'state.json');
-      const rec = readStateFile(f)?.projectRoot;
+      const rec = readStateFile(f, base)?.projectRoot; // F957-3 (29ps fire 958): never read through a slug folder linked out of the Claude base
       if (typeof rec !== 'string' || !rec) continue;            // legacy/unknown → keep-on-doubt
       if (name !== ccProjectSlug(rec)) continue;                // the dir must BE that root's slug (anti-plant)
       if (physicalDir(findProjectRoot(rec, home)) !== mineRoot) continue; // not a stray cwd of THIS project → not ours to touch
