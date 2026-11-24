@@ -569,7 +569,10 @@ function linkFixture(t, label) {
     try { fs.unlinkSync(link); } catch { try { fs.rmdirSync(link); } catch { /* none yet */ } }
     if (!dirLink(to, link)) throw new Error('cannot make a directory link here');
   };
-  point(D.A);
+  // E1 t401 #1: the FIRST link is the capability probe. Where this account cannot make a directory link the test skips VISIBLY and
+  // the caller returns on null; once the first link exists, a retarget that fails (point) still throws, so a test never passes on a
+  // swap that did not happen.
+  if (!dirLink(D.A, link)) { t.skip('this account cannot make a directory link here'); return null; }
   return { top, root, D, link, point, file: path.join(link, 'k.json') };
 }
 // Run repoReadOutcome on `file` with seams: R5 (just before the open), afterOpen, R7 (the post-open realpath of the name, its second
@@ -608,21 +611,25 @@ const said = (o) => (o.buf ? `READ ${String(o.buf).trim()}` : `refused why=${o.w
 
 test('T-29nj-1-CW leg 1 control: with no swap the read through the directory link returns A', (t) => {
   const f = linkFixture(t, 'ctl');
+  if (!f) return;
   assert.equal(said(readWithSeams(f.file, f.root)), 'READ bytes of A');
 });
 test('T-29nj-1-CW leg 2 INSIDE: the name moved to B for the open, back to A for the post-open realpath, to B for the identity is refused, never read', (t) => {
   const f = linkFixture(t, 'in');
+  if (!f) return;
   const o = readWithSeams(f.file, f.root, { R5: () => f.point(f.D.B), afterOpen: () => f.point(f.D.A), ID: () => f.point(f.D.B) });
   assert.equal(said(o), 'refused why=changed', 'the handle (B) is not the entry the checked realpath names (A)');
 });
 test('T-29nj-1-CW leg 3 OUTSIDE: the name moved outside for the open, back for the post-open realpath, outside again for the identity is refused, never read', (t) => {
   const f = linkFixture(t, 'out');
+  if (!f) return;
   const o = readWithSeams(f.file, f.root, { R5: () => f.point(f.D.X), afterOpen: () => f.point(f.D.A), ID: () => f.point(f.D.X) });
   assert.equal(said(o), 'refused why=changed', 'the outside bytes are never returned');
   assert.ok(!o.buf || !/bytes of X/.test(String(o.buf)));
 });
 test('T-29nj-1-CW leg 4 single-swap regressions: the name moved outside just before the open, or just before the post-open realpath, is refused', (t) => {
   const f = linkFixture(t, 'one');
+  if (!f) return;
   assert.equal(said(readWithSeams(f.file, f.root, { R5: () => f.point(f.D.X) })), 'refused why=changed', 'R5 to X');
   f.point(f.D.A);
   assert.equal(said(readWithSeams(f.file, f.root, { R7: () => f.point(f.D.X) })), 'refused why=changed', 'R7 to X');
@@ -647,12 +654,14 @@ test('T-29nj-1-CW leg 5 real file link: a file symlink retargeted outside for th
 });
 test('T-29nj-1-CW leg 6 inode-0: on a volume with no inode ids, a handle and a checked entry that differ in size are refused', (t) => {
   const f = linkFixture(t, 'ino0');
+  if (!f) return;
   fs.writeFileSync(path.join(f.D.X, 'k.json'), 'bytes of X, longer than A\n');
   const o = readWithSeams(f.file, f.root, { ino0: true, R5: () => f.point(f.D.X), afterOpen: () => f.point(f.D.A) });
   assert.equal(said(o), 'refused why=changed', 'size and mtime stand in for the missing inode id');
 });
 test('T-29nj-1-CW leg 6 residual: on an inode-0 volume two different files with the same size and mtime still pass (the named limit of the size-and-mtime fallback)', (t) => {
   const f = linkFixture(t, 'ino0res');
+  if (!f) return;
   const a = path.join(f.D.A, 'k.json'), x = path.join(f.D.X, 'k.json');
   const when = new Date('2026-01-01T00:00:00Z');
   fs.utimesSync(a, when, when); fs.utimesSync(x, when, when);
