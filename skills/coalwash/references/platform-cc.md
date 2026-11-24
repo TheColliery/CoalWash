@@ -12,7 +12,7 @@
 | Memory index | `~/.claude/projects/[slug]/memory/MEMORY.md` — slug = the absolute project path, every non-alphanumeric char → `-` | always-loaded; platform cap class 25,000 characters of the trimmed index / 200 lines (the caliper's absolute-cap tripwires) |
 | Memory files | sibling `*.md` in the same dir | on recall only — count toward total-store, not the per-session cost |
 
-The per-session saving = the **always-loaded** subset delta; the receipt splits it from total-store. Discovery is read-only, realpath-and-contained to the home + project trees; an unresolvable/escaping candidate is skipped + flagged.
+The per-session saving = the **always-loaded** subset delta; the receipt splits it from total-store. Discovery is read-only, realpath-and-contained to the home + project trees; an unresolvable/escaping candidate is skipped + flagged. The containment is a check made when it runs, not a guarantee against a folder swapped afterwards.
 
 ## Wiring + state files (all local, user-readable)
 

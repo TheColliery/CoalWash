@@ -2,6 +2,18 @@
 
 All notable changes to CoalWash are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/) (the version lives in `.claude-plugin/plugin.json`).
 
+## [Unreleased]
+
+### Fixed
+
+- An estate or dead-link walk followed a folder that had been swapped for a link after the walk listed it. The session-generation, restore-source, aside-listing, empty-folder prune, dead-link and staged-leftover walks could then read, print the name of, remove or unlink inside the swapped folder. Each walk now checks that the resolved path of an entry lies inside the resolved walk root before it acts on or descends into the entry, and refuses it when it does not. A swap between that check and the act still reaches the act: no Node call acts on a directory beneath a handle. Test: `scripts/lib/estate-walks.test.mjs` (one test per walk site; a seam swaps a child folder for a directory link right after the listing; a test skips visibly where no directory link can be made).
+- The CLI note for a state edit whose change landed beside a record that changed during the save (`return-leave`, `restore`, `dig-gauge`) said the next save reconciles that record. It now says the next load keeps the record with the higher save counter (this save's on a tie) and drops the other record's changes. The saved-state comment says the same. Test: `scripts/lib/cli.test.mjs` (the dig-gauge note on a tie and on a higher counter, then a reload).
+- The identity compare for a file on a volume that reports no inode id (inode 0) compared size and modification time only. It now compares the device as well, so a file on another volume with the same size and modification time never passes as the file read. The state-save fallback compare does the same. Test: `scripts/lib/read-containment.test.mjs` (the inode-0 leg with a different device, refused; and the fallback compare with a different device, changed).
+
+### Checked
+
+- The wizard's entry choice and background toggle were measured against the bill's own start or cancel ask, with the bill's output handed in, in a headless run on the cheapest model tier with no shell and no spawn tool. No round started the paid pass before that ask: 0 of 10 with the maintainer's own rules and hooks loaded, and 0 of 10 under `claude -p --safe-mode` (no house rules, hooks or memory). A point estimate at n = 10 per arm; the text is unchanged.
+
 ## [1.19.11] - 2026-11-23
 
 A read compares the file it opened with the path its check resolved
