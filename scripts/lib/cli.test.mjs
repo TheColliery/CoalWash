@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gauge, gaugeLine, measureOnly } from './cli.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, recordBinItem, listBin } from './tailings.mjs';
 import { snapshotOnFirstWrite } from './writeguard.mjs';
-import { stateFallbackPath } from './caliper.mjs';
+import { stateFallbackPath, loadState } from './caliper.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(here, 'cli.mjs');
@@ -1294,7 +1294,7 @@ test('M3a: return-leave whose state record changes beside state.json during the 
     assert.strictEqual(st.returnAsk, undefined, 'the edit is on disk: ' + JSON.stringify(st));
     assert.doesNotMatch(r.stderr, /could not be saved|re-run it/, 'a save that landed is never called failed: ' + r.stderr);
     assert.match(r.stderr, /return left as it is/, r.stderr);
-    assert.match(r.stderr, /changed during the save and was kept unread; the next save reconciles it/, 'the note: ' + r.stderr);
+    assert.match(r.stderr, /a state record beside it changed during the save and was kept unread; the next load keeps the record with the higher save counter \(this save's on a tie\) and drops the other record's changes/, 'the note: ' + r.stderr);
     assert.ok(fs.existsSync(env.CW938_FB), 'the changed record is kept');
     assert.strictEqual(r.status, 0, 'exit 0: ' + r.stderr);
   } finally { clean(home, proj); }
@@ -1311,7 +1311,40 @@ test('M3a: restore whose state record changes beside state.json during the save 
     assert.strictEqual(r.stdout, content, r.stderr);
     assert.ok(JSON.parse(fs.readFileSync(sp, 'utf8')).lastObeseFat > 1000, 'the watermark rose on disk');
     assert.doesNotMatch(r.stderr, /NOT updated/, 'a save that landed is never called failed: ' + r.stderr);
-    assert.match(r.stderr, /state record was saved; a state record beside it changed during the save and was kept unread; the next save reconciles it/, r.stderr);
+    assert.match(r.stderr, /state record was saved; a state record beside it changed during the save and was kept unread; the next load keeps the record with the higher save counter \(this save's on a tie\) and drops the other record's changes/, r.stderr);
     assert.strictEqual(r.status, 0, r.stderr);
   } finally { clean(home, proj); }
 });
+
+// E1 t401 #2 (29oy fire 947): the M3a note said "the next save reconciles it". What follows is decided by the next LOAD: it keeps the
+// record with the higher save counter (main on a tie, fallbackNewer) and drops the other record's changes; no later save brings them
+// back (merging two writers' records would re-open lab F1). Both arms through dig-gauge: this save writes counter 6 while a record
+// with counter 6 (tie) or 7 (higher) and no mark lands beside state.json, then the state is reloaded and the dig is run again.
+const DIG_OFFER = 'Offer the user ULTRA once';
+function loadStateNoConfigDir(proj, home) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'CLAUDE_CONFIG_DIR'); const was = process.env.CLAUDE_CONFIG_DIR;
+  try { delete process.env.CLAUDE_CONFIG_DIR; return loadState(fs.realpathSync.native(proj), home); } finally { if (had) process.env.CLAUDE_CONFIG_DIR = was; }
+}
+for (const [arm, fbRev, kept] of [['tie', 6, true], ['higher', 7, false]]) {
+  test(`E1 t401 #2 (${arm}): a dig-gauge mark saved while a record with save counter ${fbRev} lands beside it: the note says what the next load keeps, and the reload ${kept ? 'keeps' : 'drops'} the mark`, () => {
+    const { home, proj } = sandbox();
+    try {
+      const sp = seedState(home, proj, { saveRev: 5 });
+      const big = path.join(proj, 'big.jsonl');
+      fs.writeFileSync(big, Buffer.alloc(500000)); // 125000 tok, CRUSHING
+      const env = fbEnv(home, proj, sp);
+      env.CW938_REC = JSON.stringify({ projectRoot: fs.realpathSync.native(proj), stateSchema: 1, saveRev: fbRev });
+      const r = runPreloaded(proj, home, fallbackDuringRenamePreload(proj), ['dig-gauge', big, '--session', 's947'], env);
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.ok(r.stdout.includes(DIG_OFFER), 'the first CRUSHING surfaces the offer: ' + r.stdout);
+      assert.strictEqual(JSON.parse(fs.readFileSync(sp, 'utf8')).saveRev, 6, 'this save wrote counter 6');
+      assert.ok(fs.existsSync(env.CW938_FB), 'the record that landed beside it is kept unread');
+      assert.match(r.stderr, /the once-per-session mark for this offer was saved; a state record beside it changed during the save and was kept unread; the next load keeps the record with the higher save counter \(this save's on a tie\) and drops the other record's changes/, 'the printed note: ' + r.stderr);
+      const loaded = loadStateNoConfigDir(proj, home);
+      assert.strictEqual(loaded.digGaugeSession, kept ? 's947' : undefined, `the reload ${kept ? 'keeps this save (main wins the tie)' : 'takes the record with the higher counter, which has no mark'}: ` + JSON.stringify(loaded));
+      const again = run(proj, home, ['dig-gauge', big, '--session', 's947']);
+      assert.strictEqual(again.status, 0, again.stderr);
+      assert.strictEqual(again.stdout.includes(DIG_OFFER), !kept, `the offer ${kept ? 'is not shown again' : 'shows again this session'}: ` + again.stdout);
+    } finally { clean(home, proj); }
+  });
+}

@@ -1596,7 +1596,9 @@ function fallbackEntrySame(fb, FB) {
   return Number(st.size) === id.size && Number(st.mtimeMs) === Math.trunc(id.mtimeMs) ? 'same' : 'changed'; // a bigint stat's mtimeMs is whole milliseconds
 }
 // M3a / F928-1: `out`, when given, receives `reconciled: false` when the one rename onto main LANDED but the fallback changed after
-// the pre-rename compare (kept unread, main unmarked); the save then returns true, since the record is on disk. With no `out` that
+// the pre-rename compare (kept unread, main unmarked); the save then returns true, since the record is on disk. E1 t401 #2: what
+// follows is the next LOAD's choice: it keeps the record with the higher save counter (main on a tie, fallbackNewer) and drops the
+// other record's changes; no later save brings them back (merging two writers' records would re-open lab F1). With no `out` that
 // case still returns false (the hook callers, who read only the boolean, keep "the mark is missing, said").
 function saveState(proj, projectRoot, home, out = null) {
   if (proj && typeof proj === 'object' && UNSAVABLE.has(proj)) return false; // T-RD-HOOKSTATE: never over a file the load could not read
