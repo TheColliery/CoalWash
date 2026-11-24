@@ -46,6 +46,7 @@ const TRUSTED_ROOTS = new Map([
   ['[snapPhys]', 'caller-derived in retier (the snapshotDir parameter); in apply.mjs recoverDangling it is journal-derived but BOUND to the caller-derived tx dir before use — see the REVIEWED_EXEMPTIONS note'],
   ['[tx]', 'caller-derived: txDir(projectRoot)'],
   ['trees', 'caller-derived: the Claude base dir + projectRoot/.claude'],
+  ['[walkPhys]', 'caller-derived: physicalOrNull of the folder a walk was handed by its own caller (29oy fire 947, map 946 B5-B9 and B11): in estate-archive.mjs withinWalkRoot, a session or slug folder the walk lists under estate.archiveDir (the [rootPhys] trust class); in apply.mjs collectMdFiles, a dead-link scan root from physRoots (validated before use, see below) or the physical folder a parent walk handed down. It only NARROWS a walk: a false answer skips a path the walk would otherwise have followed through a link swapped in after its listing, a true answer does exactly what the walk did before; it never grants a read or a write the walk did not already reach'],
 ]);
 
 // Data-derived root sets that are LEGAL because they only ever NARROW a trusted

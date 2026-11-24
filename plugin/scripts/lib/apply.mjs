@@ -255,7 +255,7 @@ export function trackedInOwnFolder(dir) {
   return `git tracks ${n} file(s) in ${dir} — CoalWash writes nothing into its own folder while the repository tracks files there, since a write over a tracked file would reach the next commit (see them with: git ls-files -- .claude/coalwash)`;
 }
 // onFence (fire 119): called with the fence's label just before applyPlan re-reads its locks, so a test can steal one there.
-export const __testHooks = { normPostTextsBuilds: 0, isGitSegment, inGitDir, isGitMarker, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS, onFence: null };
+export const __testHooks = { collectMdFiles, normPostTextsBuilds: 0, isGitSegment, inGitDir, isGitMarker, STAGED_BYTES_MAX, gitMaxBuffer: GIT_TRACKED_MAX_BYTES, gitMaxPaths: GIT_TRACKED_MAX_PATHS, onFence: null };
 const JOURNAL_NAME = 'journal.json'; // CoalHearth-visible WAL location: <project>/.claude/coalwash/journal.json
 const LOCK_NAME = '.coalwash.lock';
 const GLOBAL_LOCK_NAME = '.coalwash-global.lock'; // the global-slice lock, at the ~/.claude root (an inert engine primitive; task #13 moved only the per-project state + update stamp, not this lock)
@@ -440,20 +440,27 @@ const DEADLINK_FILE_CAP = 2000; // defensive walk bound; hitting it only under-r
 // Surviving .md files under the plan's own roots. The tx dir subtree is
 // excluded — its snapshots/bins CONTAIN the deleted bytes and would mark
 // every delete "still referenced". Bounded, fail-silent per entry.
-function collectMdFiles(root, txPhys, out) {
+// B9 (29oy fire 947, reader class move (d)): each entry is { p, root }, `root` the PHYSICAL walk root the path must stay inside. A child
+// whose realpath is not inside that root (a folder swapped for a link after the listing) is skipped, and the read below is contained to
+// the same root through repoReadOutcome. A check at one moment: a swap between it and the read still follows (SECURITY.md Known limits).
+function collectMdFiles(root, txPhys, out, rootPhys = null) {
   if (out.length >= DEADLINK_FILE_CAP) return;
   let st = null;
   try { st = fs.statSync(root); } catch { return; }
-  if (st.isFile()) { if (/\.md$/i.test(root)) out.push(root); return; }
+  if (st.isFile()) { if (/\.md$/i.test(root)) out.push({ p: root, root: rootPhys || path.dirname(root) }); return; }
   if (!st.isDirectory()) return;
+  const walkPhys = rootPhys || physicalOrNull(root);
+  if (!walkPhys) return;
   if (txPhys && physicalOrNull(root) === txPhys) return; // never read our own snapshots/bins
   let names;
   try { names = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
   for (const d of names) {
     if (out.length >= DEADLINK_FILE_CAP) return;
     const p = path.join(root, d.name);
-    if (d.isDirectory()) collectMdFiles(p, txPhys, out);
-    else if (d.isFile() && /\.md$/i.test(d.name)) out.push(p);
+    const phys = physicalOrNull(p);
+    if (!phys || !containedIn(phys, [walkPhys])) continue; // fail closed: not inside the walk root now
+    if (d.isDirectory()) collectMdFiles(p, txPhys, out, walkPhys);
+    else if (d.isFile() && /\.md$/i.test(d.name)) out.push({ p, root: walkPhys });
   }
 }
 
@@ -470,9 +477,9 @@ function deadLinkScan(actionable, physRoots, txDir) {
   if (!files.length) return [];
   // CWK-137: bounded + kind-gated. A surviving .md over MAX_DOC_BYTES (or one that turned out not to be a regular
   // file) contributes nothing: the advisory then UNDER-reports, which is its safe direction, and no file is read whole.
-  // E2-4: root null kept: collectMdFiles keeps only Dirents that are plain files, under the realpath'd declared roots.
+  // B9 (29oy fire 947): each read is contained to its own physical walk root (repoReadOutcome's containment and identity), no longer null.
   const surviving = files
-    .map((p) => readRepoFileBounded(p, null, MAX_DOC_BYTES) ?? '')
+    .map((f) => readRepoFileBounded(f.p, f.root, MAX_DOC_BYTES) ?? '')
     .join('\n');
   const topics = deleted.map((a) => ({ path: a.phys, basename: path.basename(a.phys), text: '', mtimeMs: 0 }));
   const unref = new Set(unreferencedTopics({ topics }, surviving).map((t) => t.path));

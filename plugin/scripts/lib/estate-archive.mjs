@@ -975,6 +975,16 @@ function priorArchive(dest, buf, bounds) {
 }
 // The session's kept generations, from the names alone: Map N -> [{ gzPath, rel }] (rel = the archived file's original rel).
 // Files directly in the slug folder named `<sid>.*.gz.gen<N>`, and files under `<sid>/` named `*.gz.gen<N>`.
+// 29oy fire 947 (reader class, move (d), rows B5 to B8 and B11): a walk takes a child's kind from the listing, so a child folder swapped
+// for a junction or link AFTER the listing would be followed. Before a walk acts on a path, or descends into one, the path's realpath
+// must lie inside the walk root's realpath (`walkPhys`, resolved once at the walk's start); a path that does not resolve, or resolves
+// outside, is skipped (fail closed). This is a check made at one moment: a swap between it and the act still follows (SECURITY.md
+// Known limits; no Node call opens or lists a folder beneath a handle).
+function withinWalkRoot(p, walkPhys) {
+  if (!walkPhys) return false;
+  const phys = physicalOrNull(p);
+  return !!phys && containedIn(phys, [walkPhys]);
+}
 function sessionGenerations(slugDir, sessionId) {
   const gens = new Map();
   const add = (n, gzPath, rel) => { if (!gens.has(n)) gens.set(n, []); gens.get(n).push({ gzPath, rel }); };
@@ -984,17 +994,20 @@ function sessionGenerations(slugDir, sessionId) {
     const m = GEN_RE.exec(d.name);
     if (d.isFile() && m && d.name.startsWith(`${sessionId}.`)) add(Number(m[1]), path.join(slugDir, d.name), d.name.slice(0, m.index));
     else if (d.isDirectory() && d.name === sessionId) {
+      const sessDir = path.join(slugDir, d.name);
+      const walkPhys = physicalOrNull(sessDir);
       const walk = (dir, relBase) => {
         let subs;
         try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
         for (const s of subs) {
           const p = path.join(dir, s.name);
+          if (!withinWalkRoot(p, walkPhys)) continue; // B5: a child swapped to a link after the listing is never followed
           if (s.isDirectory()) { walk(p, path.join(relBase, s.name)); continue; }
           const g = GEN_RE.exec(s.name);
           if (s.isFile() && g) add(Number(g[1]), p, path.join(relBase, s.name.slice(0, g.index)));
         }
       };
-      walk(path.join(slugDir, d.name), sessionId);
+      walk(sessDir, sessionId);
     }
   }
   return gens;
@@ -1025,11 +1038,13 @@ function readStaged(p) {
 // anything under the session's own `<sessionId>/` folder. A folder, a link or any other name is left alone. None of these names ends in
 // `.gz` or `.gz.gen<N>`, so no restore, search or generation count ever took one for an archive copy.
 function collectStagedLeftovers(slugDir, sessionId) {
+  const walkPhys = physicalOrNull(slugDir);
   const sweep = (dir, accept) => {
     let es;
     try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of es) {
       const p = path.join(dir, e.name);
+      if (!withinWalkRoot(p, walkPhys)) continue; // B11: never unlink, or descend, through a child swapped to a link after the listing
       if (e.isDirectory()) { if (accept === null) sweep(p, null); continue; }
       if (!e.isFile() || !STAGED_RE.test(e.name) || (accept !== null && !accept(e.name))) continue;
       try { fs.unlinkSync(p); } catch { /* left for the next run */ }
@@ -1042,11 +1057,13 @@ function collectStagedLeftovers(slugDir, sessionId) {
 // report can list them. Reading only: plain files, the folder walked without following a link, sorted.
 function listAsides(slugDir) {
   const out = [];
+  const walkPhys = physicalOrNull(slugDir);
   const walk = (dir) => {
     let es;
     try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of es) {
       const p = path.join(dir, e.name);
+      if (!withinWalkRoot(p, walkPhys)) continue; // B7: a name outside the archive folder is never printed
       if (e.isDirectory()) walk(p);
       else if (e.isFile() && e.name.endsWith(`.${ASIDE_SUFFIX}`)) out.push(p);
     }
@@ -1063,14 +1080,17 @@ function listAsides(slugDir) {
 // recursive rm just because it shared the container). A symlink Dirent reports
 // its own type (isFile/isDirectory both false) -> it is treated as a survivor,
 // never followed and never deleted.
-function pruneEmptyDirs(dir, base, survivors) {
+// B8 (29oy fire 947): a child folder swapped for a link after the listing is never descended into, so no folder outside `base` is
+// removed and no outside name is listed; the link itself stays where it is and is reported as a survivor by its name inside `base`.
+function pruneEmptyDirs(dir, base, survivors, walkPhys = physicalOrNull(base)) {
   let names;
   try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; } // absent (no overflow dir) or unreadable
   for (const d of names) {
     const p = path.join(dir, d.name);
-    if (d.isDirectory()) pruneEmptyDirs(p, base, survivors);
-    else survivors.push(path.relative(base, p)); // a FILE (or symlink/special) we did not enumerate — keep + surface
+    if (d.isDirectory() && withinWalkRoot(p, walkPhys)) pruneEmptyDirs(p, base, survivors, walkPhys);
+    else survivors.push(path.relative(base, p)); // a FILE (or symlink/special, or a folder that no longer resolves inside) we did not enumerate — keep + surface
   }
+  if (!withinWalkRoot(dir, walkPhys)) return; // never remove a folder that does not resolve inside the root
   try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* still non-empty or already gone */ }
 }
 
@@ -1565,6 +1585,26 @@ function readArchiveHandle(gzPath, bound) {
 // archived without an index row still restores.
 // 29gt fire 750: `generation` (an integer >= 1) restores that kept generation; absent, the newest copy. A refused restore that made
 // its own default folder removes it again when nothing was written into it (a narrow, non-recursive delete of that one folder).
+// B6 (29oy fire 947): the `.gz` copies under a session's archive folder, walked with the same per-path containment as the other estate
+// walks: a child swapped for a link after the listing is never followed, so an outside `.gz` never becomes a restore source.
+function restoreSourcesUnder(sessDir, relBase0) {
+  const out = [];
+  const walkPhys = physicalOrNull(sessDir);
+  const collect = (dir, relBase) => {
+    let subs;
+    try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const s of subs) {
+      const p = path.join(dir, s.name);
+      if (!withinWalkRoot(p, walkPhys)) continue;
+      if (s.isDirectory()) collect(p, path.join(relBase, s.name));
+      else if (s.isFile() && s.name.endsWith('.gz')) out.push({ gzPath: p, rel: path.join(relBase, s.name.slice(0, -3)) });
+    }
+  };
+  collect(sessDir, relBase0);
+  return out;
+}
+// Test-only: the estate walks, reached directly by the reader-class tests (29oy fire 947). Not part of the module's contract.
+export const __walkTestHooks = Object.freeze({ sessionGenerations, collectStagedLeftovers, listAsides, pruneEmptyDirs, restoreSourcesUnder });
 export function restoreSession(sessionId, opts = {}) {
   const r = restoreSessionInner(sessionId, opts);
   if (!r.ok && !opts.to && r.dir && Array.isArray(r.files) && r.files.length === 0 && dropEmptyDefaultTarget(r.dir)) {
@@ -1601,16 +1641,7 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
       if (d.isFile() && (d.name === `${sessionId}.jsonl.gz` || (d.name.startsWith(`${sessionId}.`) && d.name.endsWith('.gz')))) {
         sources.push({ gzPath: path.join(slugDir, d.name), rel: d.name.slice(0, -3) });
       } else if (d.isDirectory() && d.name === sessionId) {
-        const collect = (dir, relBase) => {
-          let subs;
-          try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-          for (const s of subs) {
-            const p = path.join(dir, s.name);
-            if (s.isDirectory()) collect(p, path.join(relBase, s.name));
-            else if (s.isFile() && s.name.endsWith('.gz')) sources.push({ gzPath: p, rel: path.join(relBase, s.name.slice(0, -3)) });
-          }
-        };
-        collect(path.join(slugDir, d.name), sessionId);
+        sources.push(...restoreSourcesUnder(path.join(slugDir, d.name), sessionId));
       }
     }
     gens = sessionGenerations(slugDir, sessionId); // `*.gz.gen<N>` never matches the `.gz` collection above
