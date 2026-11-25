@@ -277,6 +277,38 @@ export function physicalForCreate(p) {
   }
 }
 
+// 29pt fire 963, THE ROW ROOT (main's c209 ruling; the signed root table, scratchpad/29oy/root-table-962.md). A row's root is the
+// deepest folder its act reads, writes or deletes in. It is HAND-JOINED: `rootPhys` is a trusted root the caller resolved once (the
+// Claude base, the archive root, the project root), `names` are the literal names below it down to that folder (a listed name is one
+// of them), and the joined folder is NEVER resolved: resolving it would let a link at one of those names move the expectation with it
+// (node/runtime.md section 4, the ownership rule). Only the candidate the act will use is resolved (physicalForCreate: the deepest
+// existing ancestor of a path that does not exist yet). Without `read`, the answer is the candidate's real path when it lies inside the
+// hand-joined folder, else null. With `read` ({ maxBytes, prefixOnly }), the answer is the contained reader's outcome for that candidate
+// held to the same folder ({ buf, ... } or { why }), and a candidate outside it reads { why: 'outside-root' }. Any error answers the
+// refusal (fail closed). A caller that writes or deletes calls this in the same function as the act, right before it (main's c196
+// ruling 1); a swap between this check and the act still reaches the act (the table's stated limit 1).
+// The cause a refused entry's flag names: a path that resolves outside its held folder is a link; one that does not resolve is unreadable.
+function heldWhy(p, folder) {
+  return physicalOrNull(p) ? `not inside ${folder} (a folder or file that is a link, or was swapped for one)` : 'unreadable or unresolvable';
+}
+export function heldPath(rootPhys, names, candidate, read = null) {
+  const refuse = read ? { why: 'outside-root' } : null;
+  try {
+    if (typeof rootPhys !== 'string' || !isCanonicalShape(rootPhys) || !Array.isArray(names) || typeof candidate !== 'string') return refuse;
+    // Each name is ONE segment: a separator, `.`, `..` or an empty name could walk the hand-joined folder somewhere else.
+    if (names.some((n) => typeof n !== 'string' || n === '' || n === '.' || n === '..' || /[\\/]/.test(n))) return refuse;
+    const held = path.join(rootPhys, ...names);
+    const phys = physicalForCreate(candidate);
+    if (!phys || !containedIn(phys, [held])) return refuse;
+    if (!read) return phys;
+    // The reader re-checks its own resolution against the TRUSTED root (resolving a resolved root changes nothing), so the expected
+    // folder is resolved nowhere; its handle-identity check binds the bytes to that resolution.
+    return repoReadOutcome(candidate, rootPhys, read.maxBytes, !!read.prefixOnly);
+  } catch {
+    return refuse;
+  }
+}
+
 // #57(d) CLOUD-PLACEHOLDER READ POISON (MASTER-LOSS-TAXONOMY.md #57 4th member):
 // a OneDrive Files-On-Demand / iCloud-optimized placeholder returns SHORT/stub
 // bytes on a plain read() with NO throw and the SAME wrong bytes on every
@@ -784,7 +816,9 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     const rel = dir === root ? '.' : path.relative(root, dir).split(path.sep).join('/');
     flags.push(`unreadable directory (${what}): ${rel} [${code}] — its contents are NOT counted`);
   };
-  const walkRulesTree = (rulesRoot, scope) => {
+  // 29pt fire 963, row 6: `heldRoot` + `heldNames` hand-join the walk's top (<project>/.claude/rules or <base>/rules); every entry, folder or
+  // file, is taken only when its real path lies inside that top, so a child swapped for a link after its listing adds nothing.
+  const walkRulesTree = (rulesRoot, scope, heldRoot, heldNames) => {
     const stack = [rulesRoot];
     let count = 0, dirs = 0;
     // Cap BOTH the .md count AND the directory traversal (Phoenix #3): a deep/wide
@@ -797,6 +831,11 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch (err) { noteUnreadable(err, dir, rulesRoot, `rules tree, scope ${scope}`); continue; }
       for (const d of names) {
         const p = path.join(dir, d.name);
+        const wanted = d.isDirectory() || (d.isFile() && d.name.endsWith('.md'));
+        if (wanted && !heldPath(heldRoot, heldNames, p)) {
+          flags.push(`refused path (rules tree, scope ${scope}): ${path.relative(rulesRoot, p).split(path.sep).join('/')} — ${heldWhy(p, 'the rules folder')} — its contents are NOT counted`);
+          continue;
+        }
         if (d.isDirectory()) stack.push(p);
         else if (d.isFile() && d.name.endsWith('.md')) {
           const phys = add(p, { scope, kind: 'governance', alwaysLoaded: false });
@@ -824,10 +863,10 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // Absent stays silent (the ordinary case); present-but-refused says so.
   if (projPhys) {
     const rulesRoot = path.join(projPhys, '.claude', 'rules');
-    if (repoEntryKind(rulesRoot, projPhys) === 'dir') walkRulesTree(rulesRoot, 'project');
+    if (repoEntryKind(rulesRoot, projPhys) === 'dir') walkRulesTree(rulesRoot, 'project', projPhys, ['.claude', 'rules']);
     else if (pathExists(rulesRoot)) flags.push('refused path (rules tree, scope project): .claude/rules — not a directory inside the project (a link out of it, or not a directory) — its contents are NOT counted');
   }
-  if (homePhys) walkRulesTree(path.join(claudeBaseDir(home), 'rules'), 'global');
+  if (homePhys && basePhys) walkRulesTree(path.join(claudeBaseDir(home), 'rules'), 'global', basePhys, ['rules']);
 
   // 4. Memory store: ~/.claude/projects/<slug>/memory/ — MEMORY.md is the
   //    always-loaded index; every OTHER *.md in the tree loads on recall.
@@ -868,7 +907,9 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   //    this walk as covering either.
   {
     const memDir = ccMemoryDir(projectRoot, home);
-    const stack = [{ dir: memDir, depth: 0 }];
+    // 29pt fire 963, row 7: the walk's top hand-joined as <base>/projects/<slug>/memory; every entry is held to it.
+    const memHeld = ['projects', ccProjectSlug(projectRoot), 'memory'];
+    const stack = basePhys ? [{ dir: memDir, depth: 0 }] : [];
     let count = 0, dirs = 0;
     while (stack.length && count < RULES_FILE_CAP && dirs < RULES_FILE_CAP) {
       const { dir, depth } = stack.pop();
@@ -877,6 +918,11 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
       try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch (err) { noteUnreadable(err, dir, memDir, 'memory store'); continue; }
       for (const d of names) {
         const p = path.join(dir, d.name);
+        const wanted = d.isDirectory() || (d.isFile() && d.name.endsWith('.md'));
+        if (wanted && !heldPath(basePhys, memHeld, p)) {
+          flags.push(`refused path (memory store): ${path.relative(memDir, p).split(path.sep).join('/')} — ${heldWhy(p, 'the memory folder')} — its contents are NOT counted`);
+          continue;
+        }
         if (d.isDirectory()) { stack.push({ dir: p, depth: depth + 1 }); continue; }
         if (!d.isFile() || !d.name.endsWith('.md')) continue;
         const isIndex = depth === 0 && d.name === 'MEMORY.md';
@@ -1020,7 +1066,13 @@ export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.ho
   }
   const out = [];
   for (const role of roles) {
+    // 29pt fire 963, row 8: each role folder, and each file in it, held to <project>/.claude/agent-memory/<role>/, hand-joined.
+    const roleHeld = ['.claude', 'agent-memory', role];
     const dirPhys = physicalOrNull(path.join(agentBase, role));
+    if (dirPhys && !heldPath(projPhys, roleHeld, path.join(agentBase, role))) {
+      flags.push(`refused path (role stores): ${role} — ${heldWhy(path.join(agentBase, role), 'its own agent-memory folder')} — its contents are NOT counted`);
+      continue;
+    }
     if (!dirPhys) {
       const code = refusalCode(path.join(agentBase, role));
       if (code) note(`role store ${role}`, role, code);
@@ -1047,7 +1099,7 @@ export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.ho
     let bytes = 0;
     for (const d of names) {
       if (!d.isFile() || !d.name.endsWith('.md')) continue; // a symlink Dirent reports its own type — never followed
-      const phys = physicalOrNull(path.join(dirPhys, d.name));
+      const phys = heldPath(projPhys, roleHeld, path.join(dirPhys, d.name)) ? physicalOrNull(path.join(dirPhys, d.name)) : null;
       if (!phys) {
         // ONE LOOP DEEPER than the finding names, swept in the same batch: a
         // single refused file inside a readable store drops out of the store

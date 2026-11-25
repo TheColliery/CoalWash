@@ -67,7 +67,7 @@ import { ownSandboxDir, openPlainFile, ensureCatchAllIgnore, fileModeOr600 } fro
 // WARM path (one helper, called at both trust points — not a second copy). A
 // pure read-only metadata stat; apply keeps its OWN physicalOrNull/containedIn
 // (security-audit locality), but this stub-sniff is imported to stay single-source.
-import { isCloudPlaceholder, ccMemoryDir, physicalForCreate, containedIn } from './class-b.mjs';
+import { isCloudPlaceholder, ccMemoryDir, ccProjectSlug, physicalForCreate, containedIn, heldPath } from './class-b.mjs';
 // NOTE a deliberate module cycle: keeps.mjs imports txDirFor/ensureSelfIgnore
 // from THIS file. Both sides bind function declarations used only at CALL
 // time, so ESM resolves the cycle safely regardless of entry order. tailings.mjs
@@ -1098,9 +1098,15 @@ function trustedRootsForAnchor(projectRoot, home, { trustedAnchor = false, platf
   // here — never claudeBaseDir wholesale.
   // 29h F415-1: on the AG route the trusted outer gate is the PROJECT root alone. Claude Code's memory store is not an AG store, so an
   // AG session cannot reach it even when a plan names it (the plan supplies its roots; only this gate decides which roots may be named).
+  // 29pt fire 963, row 24 (main's c209): the memory root is taken only when the memory folder resolves to <base>/projects/<slug>/memory
+  // itself, hand-joined from the resolved Claude base; a memory folder that is a link (to a folder under home) adds no root, so a plan can
+  // never rewrite through it.
+  const memDir = ccMemoryDir(projectRoot, home);
+  const memPhys = physicalOrNull(memDir);
+  const memRoot = memPhys && heldPath(physicalOrNull(claudeBaseDir(home)), ['projects', ccProjectSlug(projectRoot), 'memory'], memDir) ? memPhys : null;
   const roots = platform === 'antigravity'
     ? [physicalOrNull(projectRoot)].filter(Boolean)
-    : [physicalOrNull(projectRoot), physicalOrNull(ccMemoryDir(projectRoot, home))].filter(Boolean);
+    : [physicalOrNull(projectRoot), memRoot].filter(Boolean);
   if (!roots.length) return { ok: false, error: 'containment: no trusted root resolves (fail-closed)' };
   return { ok: true, roots };
 }

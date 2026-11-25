@@ -37,7 +37,7 @@ import os from 'node:os';
 import { inventory } from './fidelity-gate.mjs';
 import { readRepoFileBounded, volumeCaseFolds, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir } from './repo-fs.mjs';
-import { physicalOrNull, containedIn } from './class-b.mjs';
+import { physicalOrNull, containedIn, heldPath } from './class-b.mjs';
 import { FAT_BIN_NAME, STORE_OLD_NAME, listBin, restoreFromBin, isBareId } from './tailings.mjs';
 
 const CLASSES = ['wikilinks', 'dates', 'versions', 'links', 'frontmatter', 'codespans', 'quotes', 'numbers'];
@@ -92,7 +92,9 @@ export function computeCandidates({ anchorText, currentText, approvedTexts = [] 
 // `physTarget` — ascending scan, first hit wins. An unverified snapshot
 // (marker missing — a dangling/rolled-back txn) is skipped: never treated as
 // ground truth. Returns { snapDir, snapFile, at } or null.
-function oldestAnchor(txDir, physTarget) {
+// 29pt fire 963, row 1: a snap-<n> is read only inside <project>/.claude/coalwash/snap-<n>/, hand-joined from the resolved project root
+// (physRoot) and literal names; a snap-<n> that is a link to another folder of the tx folder is no anchor.
+function oldestAnchor(txDir, physTarget, physRoot) {
   let dirs;
   try { dirs = fs.readdirSync(txDir); } catch { return null; }
   const snaps = dirs
@@ -105,7 +107,12 @@ function oldestAnchor(txDir, physTarget) {
     let manifest;
     // E2-4: contained to txDir ITSELF -- a snap-<n> a cloned repo planted as a link (or a manifest that is one) resolves
     // outside it and is refused, never read.
-    try { manifest = JSON.parse(readRepoFileBounded(path.join(dir, 'manifest.json'), txDir, MAX_DOC_BYTES)); } catch { continue; }
+    const snapNames = ['.claude', 'coalwash', d];
+    try {
+      const got = heldPath(physRoot, snapNames, path.join(dir, 'manifest.json'), { maxBytes: MAX_DOC_BYTES });
+      if (!got.buf) continue;
+      manifest = JSON.parse(got.buf.toString('utf8'));
+    } catch { continue; }
     if (!Array.isArray(manifest)) continue;
     const hit = manifest.find((m) => m && samePath(m.original, physTarget));
     if (!hit) continue;
@@ -118,7 +125,7 @@ function oldestAnchor(txDir, physTarget) {
     if (!isBareId(hit.snap)) continue;
     const snapFile = path.join(dir, hit.snap);
     if (!fs.existsSync(snapFile)) continue; // manifest says so but the copy is gone — keep looking
-    return { snapDir: dir, snapFile, at };
+    return { snapDir: dir, snapFile, at, snapNames };
   }
   return null;
 }
@@ -173,11 +180,12 @@ export function anchorDiff(filePath, { projectRoot, home = os.homedir() } = {}) 
     const phys = physicalOrNull(filePath);
     if (!physRoot || !phys || !containedIn(phys, [physRoot])) return null; // fail-closed, out of tree
     const txDir = ownSandboxDir(projectRoot, '.claude', 'coalwash'); // CWK-137: throws on a planted link -> the catch below -> null
-    const anchor = oldestAnchor(txDir, phys);
+    const anchor = oldestAnchor(txDir, phys, physRoot);
     if (!anchor) return null; // no ground truth on disk for this file — nothing to compare
     // CWK-137: both reads bounded and kind-gated; a refusal is `unreadable` (null). E2-4: the snapshot copy is contained to
     // txDir ITSELF; `phys` keeps root null: it is the realpath containedIn checked against the project above.
-    const anchorText = readRepoFileBounded(anchor.snapFile, txDir, MAX_DOC_BYTES);
+    const snapGot = heldPath(physRoot, anchor.snapNames, anchor.snapFile, { maxBytes: MAX_DOC_BYTES }); // row 1: held to its snap-<n>/
+    const anchorText = snapGot.buf ? snapGot.buf.toString('utf8') : null;
     const currentText = readRepoFileBounded(phys, null, MAX_DOC_BYTES);
     if (anchorText === null || currentText === null) return null; // unreadable — fail-silent, never guess
     const approved = approvedSinceBudget(projectRoot, phys, anchor.at);

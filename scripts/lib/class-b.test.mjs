@@ -1459,12 +1459,15 @@ test('CWK2-029 (b): a memory store that is a directory JUNCTION to a HOME folder
     const d = discoverClassB({ projectRoot: room, home, platform: 'claude-code' });
     const p = path.join(outDir, 'MEMORY.md');
     assert.ok(!d.entries.some((e) => e.path === p), 'the junctioned memory index is never in entries (knife-reachable)');
-    const hit = d.inherited.filter((e) => e.path === p);
-    assert.strictEqual(hit.length, 1, 'it is still measured, by stat');
-    assert.notStrictEqual(hit[0].scope, 'project', 'it is never tagged scope project');
-    assert.ok(d.flags.some((f) => f.includes('~/notes-dir/MEMORY.md')), `one flag names it: ${JSON.stringify(d.flags)}`);
-    // INSPECT 99 L99-2: the gauge never reads the statOnly index, not even for its line count
-    const m = measureEntries(d.inherited, { withGzip: false });
+    // 29pt fire 963, CHANGED ON THE SIGNED ROOT TABLE (scratchpad/29oy/root-table-962.md, row 7 and section 4; main's c209 ruling): the
+    // memory walk is held to <base>/projects/<slug>/memory, hand-joined, so a memory folder that is a link is refused like any other
+    // link and nothing behind it is measured, not even by stat (it was, until 1.19.12: "it is still measured, by stat"). The refusal
+    // is announced. Whether such a user link is honoured (a widening) or named as a limit is main's open question (section 4).
+    assert.strictEqual(d.inherited.filter((e) => e.path === p).length, 0, 'nothing behind the linked memory folder is measured');
+    assert.ok(d.flags.some((f) => /refused path \(memory store\): MEMORY\.md/.test(f)), `one flag names the refusal: ${JSON.stringify(d.flags)}`);
+    // INSPECT 99 L99-2, kept on a statOnly index built by hand: the gauge never reads it, not even for its line count
+    const hit = [{ path: p, bytes: fs.statSync(p).size, scope: 'outside', kind: 'memory-index', alwaysLoaded: true, managed: false, statOnly: true }];
+    const m = measureEntries(hit, { withGzip: false });
     assert.strictEqual(m.index.lines, 0, 'measureEntries never reads a statOnly memory index for its lines');
     assert.strictEqual(m.index.bytes, fs.statSync(p).size, 'its index bytes still come from stat');
     const read = measureEntries(hit.map((e) => ({ ...e, statOnly: false })), { withGzip: false });

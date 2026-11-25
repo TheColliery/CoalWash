@@ -31,6 +31,7 @@ const LIB = path.dirname(fileURLToPath(import.meta.url));
 // Each entry states WHY it is trusted. A new name here must be justified in the
 // same diff — that review is the point of the gate.
 const TRUSTED_ROOTS = new Map([
+  ['[held]', 'hand-joined (29pt fire 963, main\'s c209, the signed root table 962): class-b.mjs heldPath joins a trusted root its CALLER resolved once (the Claude base, the archive root from the global config, the project root, home for the AG state folder) with literal names, a listed name among them, each one segment (no separator, `.` or `..`); the joined folder is never resolved (node/runtime.md section 4). It only NARROWS: a candidate is accepted only when its realpath lies inside that folder, so it grants nothing the trusted root did not'],
   ['roots', 'caller-derived: [home, projectRoot] (+ the Claude base dir in writeguard), built from function parameters'],
   ['[physRoot]', 'caller-derived: physicalOrNull(projectRoot) — anchor-diff'],
   ['[anchorPhys]', 'caller-derived: the resolved project anchor (opts.projectRoot or findProjectRoot(cwd))'],
@@ -41,8 +42,6 @@ const TRUSTED_ROOTS = new Map([
   ['[homePhys]', 'caller-derived: physicalOrNull(discoverClassB\'s home parameter) — class-b.mjs CWK2-029 (b): whether the room sits under HOME (bounds the ancestor walk) and the ~/ form of an OUTSIDE flag; neither answer grants a read or a write'],
   ['ancestorDirs', 'caller-derived: the physical folders strictly above the room\'s repository top (the nearest folder at or above [projPhys], up to [homePhys], holding a .git entry read by lstat; [projPhys] itself when none is found) and strictly below [homePhys], whose own CLAUDE.md realpath stays inside them (class-b.mjs CWK2-029 (b), RE-INSPECT 102 R102-1); a folder above the repository top is outside any clone it holds, and a CLAUDE.md between the room and that top is the clone\'s own (ownFiles), never an ancestor. It grants a READ, only to an ancestor CLAUDE.md\'s own @import closure (INSPECT 99 L99-3: a room-queued file inside it is OUTSIDE); it never grants a write'],
   ['[memPhys]', 'caller-derived: physicalOrNull(ccMemoryDir(projectRoot, home)), kept only while it is inside [basePhys] (class-b.mjs INSPECT 99 L99-1): the one place under ~/.claude a room-queued candidate may be read; it never grants a write'],
-  ['claudeRoots', 'home-anchored: the Claude base dir'],
-  ['[claudeRoot]', 'home-anchored: the Claude base dir'],
   ['[snapPhys]', 'caller-derived in retier (the snapshotDir parameter); in apply.mjs recoverDangling it is journal-derived but BOUND to the caller-derived tx dir before use — see the REVIEWED_EXEMPTIONS note'],
   ['[tx]', 'caller-derived: txDir(projectRoot)'],
   ['trees', 'caller-derived: the Claude base dir + projectRoot/.claude'],

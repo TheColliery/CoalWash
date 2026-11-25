@@ -47,9 +47,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
-import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG } from './class-b.mjs';
+import { ccProjectSlug, ccMemoryDir, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, heldPath } from './class-b.mjs';
 import { tokensEst, postWashSnapshot, restorePostWashSnapshot } from './caliper.mjs';
-import { readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES, pathExists, repoEntryKind } from './config-load.mjs';
+import { claudeBaseDir, readRepoFileBounded, repoReadOutcome, MAX_DOC_BYTES, pathExists, repoEntryKind } from './config-load.mjs';
 import { gateFiles, checkFidelity, inventoryDropKeys } from './fidelity-gate.mjs';
 import { applyPlan, acquireLock, globalLockPath, isPinned, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS, restoreFile, writeDurable } from './apply.mjs';
 import { resolveArchiveDir, appendIndexRow } from './estate-archive.mjs';
@@ -180,10 +180,13 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
   const stores = [];
   const skipped = []; // a store refused by a named rule, reported on the returned array's `skipped` property
 
-  const addStore = (label, dir, projectOnly = false) => {
-    const phys = physicalOrNull(dir);
+  // 29pt fire 963, rows 24 and 25 (main's c209): a store is HELD to its own folder, hand-joined from a trusted root resolved once
+  // (`held` = { root, names }): the main store to <base>/projects/<slug>/memory, a role store to <project>/.claude/agent-memory/<role>.
+  // A store folder that is a link (or is swapped for one after its listing) is no store: RE-TIER rewrites, creates and deletes inside the
+  // store folder, so it must be that folder itself.
+  const addStore = (label, dir, held) => {
+    const phys = held ? heldPath(held.root, held.names, dir) : null;
     if (!phys || !containedIn(phys, roots)) return; // fail-closed
-    if (projectOnly && !containedIn(phys, [projPhys])) return; // F957-2: a role store is held to the project root, never to home
     const indexPath = path.join(phys, 'MEMORY.md');
     // The index name is both read and rewritten, so a link at that name must resolve to an index of THIS store, or the store is
     // skipped with the reason. A name that does not resolve at all is no index, and the read below says so.
@@ -235,7 +238,7 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
     stores.push({ label, dir: phys, indexPath, indexText, topics, others });
   };
 
-  addStore('main', ccMemoryDir(projectRoot, home));
+  addStore('main', ccMemoryDir(projectRoot, home), { root: physicalOrNull(claudeBaseDir(home)), names: ['projects', ccProjectSlug(projectRoot), 'memory'] });
   const agentBase = path.join(projectRoot, '.claude', 'agent-memory');
   let roles = [];
   // F957-2 (29ps fire 958), the CWK-137 rule discoverRoleMemories already keeps (class-b.mjs): `.claude/agent-memory` must be a plain
@@ -248,7 +251,7 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
     // A role entry reaches addStore only when its directory entry reports a directory. A junction reports as a symbolic link, so it is not a role entry here; addStore resolves the path and checks containment.
     try { roles = fs.readdirSync(agentBase, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { /* none */ }
   }
-  for (const role of roles) addStore(`agent:${role}`, path.join(agentBase, role), true);
+  for (const role of roles) addStore(`agent:${role}`, path.join(agentBase, role), { root: projPhys, names: ['.claude', 'agent-memory', role] });
   stores.skipped = skipped;
   return stores;
 }

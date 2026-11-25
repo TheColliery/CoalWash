@@ -20,7 +20,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { claudeBaseDir, readCleanupPeriodDays, discoverRetentionCandidateKeys, repoReadOutcome } from './config-load.mjs';
-import { ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
+import { ccProjectSlug, physicalOrNull, heldPath } from './class-b.mjs';
+
+// 29pt fire 963 (main's c209, the signed root table 962): a HELD folder, { root, names }: `root` the Claude base resolved once, `names` the
+// literal names below it down to the deepest folder the act reads in. An entry counts only when its real path lies inside that
+// hand-joined folder (heldPath), so a slug, session or sub-folder that is a link (or is swapped for one after its listing) adds nothing.
+function inHeld(h, p) { return !!(h && heldPath(h.root, h.names, p)); }
+function heldUnder(h, ...more) { return { root: h.root, names: [...h.names, ...more] }; }
 import { escapeRawControls } from './receipt.mjs';
 
 // Read-budget cap for the two OPTIONAL content sniffs below (topic hint +
@@ -80,16 +86,17 @@ export function observedRetentionFloorDays({ home = os.homedir(), now = Date.now
   let seen = 0;
   outer: for (const d of projectDirs) {
     if (!d.isDirectory()) continue;
-    const slugPhys = physicalOrNull(path.join(projectsDir, d.name));
-    if (!slugPhys || !containedIn(slugPhys, [claudeRoot])) continue; // fail-closed
+    const slugHeld = { root: claudeRoot, names: ['projects', d.name] }; // row 18: <base>/projects/<x>, hand-joined
+    const slugPhys = inHeld(slugHeld, path.join(projectsDir, d.name)) ? physicalOrNull(path.join(projectsDir, d.name)) : null;
+    if (!slugPhys) continue; // fail-closed
     let files;
     try { files = fs.readdirSync(slugPhys, { withFileTypes: true }); } catch { continue; }
     for (const f of files) {
       if (seen >= ESTATE_PROJECTS_SCAN_CAP) break outer;
       if (!f.isFile() || !f.name.endsWith('.jsonl')) continue;
       seen++;
-      const filePhys = physicalOrNull(path.join(slugPhys, f.name));
-      if (!filePhys || !containedIn(filePhys, [claudeRoot])) continue;
+      const filePhys = inHeld(slugHeld, path.join(slugPhys, f.name)) ? physicalOrNull(path.join(slugPhys, f.name)) : null;
+      if (!filePhys) continue;
       const st = statOrNull(filePhys);
       if (!st || !st.isFile()) continue;
       const ageMs = now - st.mtimeMs;
@@ -118,8 +125,9 @@ export function observedMachineAgeDays({ home = os.homedir(), now = Date.now() }
   let maxAgeMs = -Infinity;
   for (const d of projectDirs) {
     if (!d.isDirectory()) continue;
-    const slugPhys = physicalOrNull(path.join(projectsDir, d.name));
-    if (!slugPhys || !containedIn(slugPhys, [claudeRoot])) continue; // fail-closed
+    const slugDir = path.join(projectsDir, d.name);
+    const slugPhys = inHeld({ root: claudeRoot, names: ['projects', d.name] }, slugDir) ? physicalOrNull(slugDir) : null; // row 19
+    if (!slugPhys) continue; // fail-closed
     const st = statOrNull(slugPhys);
     if (!st) continue;
     // birthtime is the true creation stamp; some POSIX filesystems don't support it and report
@@ -246,9 +254,9 @@ function readHead(filePath, budget = SNIFF_BUDGET_BYTES) {
 
 // A realpath-resolved, ~/.claude-contained file candidate, or null
 // (fail-closed) when unresolvable, escaping, or not a regular file.
-function addFile(candidate, type, claudeRoots) {
-  const phys = physicalOrNull(candidate);
-  if (!phys || !containedIn(phys, claudeRoots)) return null;
+function addFile(candidate, type, h) {
+  const phys = inHeld(h, candidate) ? physicalOrNull(candidate) : null;
+  if (!phys) return null;
   const st = statOrNull(phys);
   if (!st || !st.isFile()) return null;
   return { path: phys, bytes: st.size, type, mtimeMs: st.mtimeMs };
@@ -260,16 +268,18 @@ function addFile(candidate, type, claudeRoots) {
 // reports isSymbolicLink() true and neither isDirectory() nor isFile(), so
 // it is silently never traversed here — defense in depth; addFile's own
 // containment check still gates every file that IS reached).
-function walkDir(dir, type, claudeRoots, out, budget) {
+// Row 20 (29pt fire 963): `h` holds the walk's TOP, the folder it is handed; every entry, folder or file, is held to that top.
+function walkDir(dir, type, h, out, budget) {
   if (out.length >= budget) return;
+  if (!inHeld(h, dir)) return;
   let names;
   try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const d of names) {
     if (out.length >= budget) return;
     const p = path.join(dir, d.name);
-    if (d.isDirectory()) { walkDir(p, type, claudeRoots, out, budget); continue; }
+    if (d.isDirectory()) { if (inHeld(h, p)) walkDir(p, type, h, out, budget); continue; }
     if (!d.isFile()) continue; // symlink/other special file — never traversed
-    const entry = addFile(p, type, claudeRoots);
+    const entry = addFile(p, type, h);
     if (entry) out.push(entry);
   }
 }
@@ -293,9 +303,10 @@ export function discoverEstateCC({ projectRoot = process.cwd(), home = os.homedi
   const base = claudeBaseDir(home);
   const claudeRoot = physicalOrNull(base);
   if (!claudeRoot) return [];
-  const claudeRoots = [claudeRoot];
-
-  const projDir = path.join(base, 'projects', ccProjectSlug(projectRoot));
+  const slug = ccProjectSlug(projectRoot);
+  const projDir = path.join(base, 'projects', slug);
+  const slugHeld = { root: claudeRoot, names: ['projects', slug] }; // row 21: <base>/projects/<slug>, hand-joined
+  if (!inHeld(slugHeld, projDir)) return [];
   let names;
   try { names = fs.readdirSync(projDir, { withFileTypes: true }); } catch { return []; }
 
@@ -303,7 +314,7 @@ export function discoverEstateCC({ projectRoot = process.cwd(), home = os.homedi
   const sessionIds = new Set();
   for (const d of names) {
     if (!d.isFile() || !d.name.endsWith('.jsonl')) continue;
-    const entry = addFile(path.join(projDir, d.name), 'transcript', claudeRoots);
+    const entry = addFile(path.join(projDir, d.name), 'transcript', slugHeld);
     if (entry) out.push(entry);
     sessionIds.add(d.name.slice(0, -'.jsonl'.length));
   }
@@ -311,15 +322,17 @@ export function discoverEstateCC({ projectRoot = process.cwd(), home = os.homedi
     if (out.length >= ESTATE_FILE_CAP) break;
     if (!d.isDirectory() || !sessionIds.has(d.name)) continue; // only a KNOWN session's own dir
     const sessDir = path.join(projDir, d.name);
+    const sidHeld = heldUnder(slugHeld, d.name); // row 21: the session folder itself
+    if (!inHeld(sidHeld, sessDir)) continue;
     let subNames;
     try { subNames = fs.readdirSync(sessDir, { withFileTypes: true }); } catch { continue; }
     for (const s of subNames) {
       if (out.length >= ESTATE_FILE_CAP) break;
       const p = path.join(sessDir, s.name);
       if (s.isDirectory()) {
-        walkDir(p, s.name === 'tool-results' ? 'tool-results' : 'other', claudeRoots, out, ESTATE_FILE_CAP);
+        walkDir(p, s.name === 'tool-results' ? 'tool-results' : 'other', heldUnder(sidHeld, s.name), out, ESTATE_FILE_CAP);
       } else if (s.isFile()) {
-        const entry = addFile(p, 'other', claudeRoots);
+        const entry = addFile(p, 'other', sidHeld);
         if (entry) out.push(entry);
       }
     }
@@ -373,12 +386,13 @@ export function detectOrphanSlugs({ home = os.homedir() } = {}) {
   for (const d of names) {
     if (!d.isDirectory()) continue;
     const slugDir = path.join(projectsDir, d.name);
-    const phys = physicalOrNull(slugDir);
-    if (!phys || !containedIn(phys, [claudeRoot])) continue; // fail-closed
+    const slugHeld = { root: claudeRoot, names: ['projects', d.name] }; // row 23: <base>/projects/<x>, hand-joined
+    const phys = inHeld(slugHeld, slugDir) ? physicalOrNull(slugDir) : null;
+    if (!phys) continue; // fail-closed
     const cwd = sniffCwd(phys);
     if (!cwd || fs.existsSync(cwd)) continue; // no readable cwd, or the project is still there
     const bytes = [];
-    walkDir(phys, 'other', [claudeRoot], bytes, ESTATE_FILE_CAP);
+    walkDir(phys, 'other', slugHeld, bytes, ESTATE_FILE_CAP);
     orphans.push({ slug: d.name, cwd, path: phys, bytes: bytes.reduce((s, e) => s + e.bytes, 0) });
   }
   return orphans;

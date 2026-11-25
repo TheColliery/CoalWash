@@ -89,7 +89,7 @@ import { parseJsonc } from './jsonc.mjs';
 // dir, so we reuse the SAME adapter discovery computes (ccMemoryDir/ccProjectSlug)
 // + the SAME realpath containment primitives (physicalOrNull/containedIn) the
 // write path uses — never a re-hardcoded path or a hand-rolled containment.
-import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn } from './class-b.mjs';
+import { ccMemoryDir, ccProjectSlug, physicalOrNull, containedIn, heldPath } from './class-b.mjs';
 import { openPlainFile, escapesRoot, writeOwnTemp, renameOwnTemp } from './repo-fs.mjs';
 
 // ---------------------------------------------------------------------------
@@ -1041,11 +1041,14 @@ function projKey(projectRoot) {
 // corrupt, wrong-shape, unreadable). Shared by the new-path + old-root reads and
 // the capacity adapter's P2 file.
 // `root`, when given, holds the read to that folder in the same call that opens it (F957-3: the stray sweep passes the Claude base).
-function readStateFile(p, root = null) {
+function readStateFile(p) {
+  // Kind-gated and bounded: a special file at a fallback state name cannot block the read (the fallback path is project-named).
+  return parseStateOutcome(repoReadOutcome(p, null, MAX_CONFIG_BYTES));
+}
+// A state record from a reader's outcome ({ buf } or a refusal), or null.
+function parseStateOutcome(o) {
   try {
-    // Kind-gated and bounded: a special file at a fallback state name cannot block the read (the fallback path is project-named).
-    const o = repoReadOutcome(p, root, MAX_CONFIG_BYTES);
-    if (!o.buf) return null;
+    if (!o || !o.buf) return null;
     let raw = o.buf.toString('utf8');
     if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
     const parsed = parseJsonc(raw);
@@ -1368,6 +1371,8 @@ function pruneStrayStateDirs(projectRoot, home) {
   if (STATE_NAMESPACE) return; // the AG namespace never reads or removes Claude Code's slug folders (fire 417)
   try {
     const base = claudeBaseDir(home);
+    const basePhys = physicalOrNull(base); // 29pt fire 963, row 4: the trusted root, resolved once; every act below is held to <base>/projects/<name>/coalwash/
+    if (!basePhys) return;
     const projectsDir = path.join(base, 'projects');
     const mineRoot = physicalDir(projectRoot);
     const mine = ccProjectSlug(projectRoot);
@@ -1375,15 +1380,16 @@ function pruneStrayStateDirs(projectRoot, home) {
       if (name === mine) continue;
       const slugDir = path.join(projectsDir, name);
       const f = path.join(slugDir, 'coalwash', 'state.json');
-      const rec = readStateFile(f, base)?.projectRoot; // F957-3 (29ps fire 958): never read through a slug folder linked out of the Claude base
+      const held = ['projects', name, 'coalwash'];
+      const rec = parseStateOutcome(heldPath(basePhys, held, f, { maxBytes: MAX_CONFIG_BYTES }))?.projectRoot; // row 4: never read through a link at projects/<name> or coalwash
       if (typeof rec !== 'string' || !rec) continue;            // legacy/unknown → keep-on-doubt
       if (name !== ccProjectSlug(rec)) continue;                // the dir must BE that root's slug (anti-plant)
       if (physicalDir(findProjectRoot(rec, home)) !== mineRoot) continue; // not a stray cwd of THIS project → not ours to touch
       if (physicalDir(rec) === mineRoot) continue;              // that IS this project's root, not a stray
-      if (!containedNewPath(f, base)) continue;                 // realpath-and-contain before ANY rm (junction escape)
+      if (!heldPath(basePhys, held, f)) continue;               // row 4: held to its own coalwash/ folder before ANY rm
       fs.rmSync(f, { force: true });                            // ours, and spurious
-      rmdirIfEmpty(path.join(slugDir, 'coalwash'));
-      rmdirIfEmpty(slugDir);
+      if (heldPath(basePhys, held, path.join(slugDir, 'coalwash'))) rmdirIfEmpty(path.join(slugDir, 'coalwash'));
+      if (heldPath(basePhys, ['projects', name], slugDir)) rmdirIfEmpty(slugDir);
     }
   } catch { /* fail-silent — cleanup is best-effort, never blocks a write */ }
 }
@@ -1446,8 +1452,16 @@ export function rootIsGone(root, anchors, statSyncFn = fs.statSync) {
   const roots = (Array.isArray(anchors) ? anchors : []).map(physicalOrNull).filter(Boolean);
   return containedIn(ancPhys, roots);
 }
+// 29pt fire 963, row 5: the state folder as a trusted root (resolved once) and the literal names below it, the same folder agStateBase and
+// the coal/coalwash/ path name; each state file is opened and deleted only inside that hand-joined folder.
+function stateFolderHeld(home) {
+  return STATE_NAMESPACE
+    ? { rootPhys: physicalOrNull(home), names: ['.gemini', 'coal', 'coalwash', 'ag'] }
+    : { rootPhys: physicalOrNull(claudeBaseDir(home)), names: ['coal', 'coalwash'] };
+}
 export function deadProjectStateFiles(home = os.homedir()) {
   const dir = STATE_NAMESPACE ? agStateBase(home) : path.join(claudeBaseDir(home), 'coal', 'coalwash'); // the namespace's own folder: a CC sweep never lists an AG file, nor the reverse
+  const { rootPhys, names: heldNames } = stateFolderHeld(home);
   const out = [];
   const anchors = [home, os.tmpdir()];
   let names;
@@ -1455,6 +1469,7 @@ export function deadProjectStateFiles(home = os.homedir()) {
   for (const name of names) {
     if (!STATE_FILE_RE.test(name)) continue;
     const file = path.join(dir, name);
+    if (!heldPath(rootPhys, heldNames, file)) continue; // row 5: a state folder swapped for a link after its listing is not read through
     let fd;
     try {
       // R15 (CodeQL #46/#49 js/file-system-race): the state file is OPENED first, through the room's openPlainFile (a link, a special file, a
@@ -1492,11 +1507,11 @@ const DEAD_SWEEP_EVERY_MS = 24 * 60 * 60 * 1000;
 function sweepDeadProjectStates(home, projectRoot) {
   __testHooks.deadStateSweepCalls++;
   try {
-    const base = STATE_NAMESPACE ? agStateBase(home) : claudeBaseDir(home);
+    const { rootPhys, names: heldNames } = stateFolderHeld(home);
     const mine = `state-${ccProjectSlug(projectRoot)}.json`;
     for (const c of deadProjectStateFiles(home)) {
       if (c.name === mine) continue;                       // never the project being written
-      if (!containedNewPath(c.file, base)) continue;       // realpath-and-contain before ANY rm (junction escape)
+      if (!heldPath(rootPhys, heldNames, c.file)) continue; // row 5: held to the state folder itself before ANY rm (junction escape)
       try { fs.rmSync(c.file, { force: true }); } catch { /* best-effort */ }
     }
   } catch { /* fail-silent -- cleanup is best-effort, never blocks a write */ }

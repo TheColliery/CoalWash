@@ -64,7 +64,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { claudeBaseDir, repoReadOutcome, MAX_DOC_BYTES } from './config-load.mjs';
 import { appendOwnLog } from './repo-fs.mjs';
-import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder } from './class-b.mjs';
+import { ccProjectSlug, physicalOrNull, containedIn, physicalForCreate, detectPlatform, UNKNOWN_PLATFORM_FLAG, isCloudPlaceholder, heldPath } from './class-b.mjs';
 import { acquireLock, globalLockPath, writeDurable, fsyncDirBestEffort, lockLostHead, lockLeftNote, withLockLeft, LOCK_STALE_MS } from './apply.mjs';
 import { ownSandboxDir, fileModeOr600 } from './repo-fs.mjs';
 import { buildPrefixIndex, hasNeedle, PREFIX_K, INDEX_MIN_NEEDLES } from './text-index.mjs';
@@ -312,25 +312,28 @@ export function readRosterSids(projectRoot) {
 // session listing + band classification
 // ---------------------------------------------------------------------------
 
-function statFileOrNull(p, claudeRoots) {
-  const phys = physicalOrNull(p);
-  if (!phys || !containedIn(phys, claudeRoots)) return null; // fail-closed, same as estate.mjs
+// 29pt fire 963, rows 9 and 10: a file is taken only when it resolves inside its HELD folder (`h`, hand-joined); the record carries `h` so
+// archiveSession holds the same file to the same folder again before its delete.
+function statFileOrNull(p, h) {
+  const phys = inHeld(h, p) ? physicalOrNull(p) : null;
+  if (!phys) return null; // fail-closed, same as estate.mjs
   try {
     const st = fs.statSync(phys);
-    return st.isFile() ? { path: phys, bytes: st.size, mtimeMs: st.mtimeMs } : null;
+    return st.isFile() ? { path: phys, bytes: st.size, mtimeMs: st.mtimeMs, held: h } : null;
   } catch { return null; }
 }
 
-function walkFiles(dir, baseDir, claudeRoots, out) {
+// A recursive walk: `h` holds its TOP (<base>/projects/<slug>/<sid>/), and every entry, folder or file, is held to that top.
+function walkFiles(dir, baseDir, h, out) {
   if (out.length >= SESSION_FILE_CAP) return;
   let names;
   try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const d of names) {
     if (out.length >= SESSION_FILE_CAP) return;
     const p = path.join(dir, d.name);
-    if (d.isDirectory()) { walkFiles(p, baseDir, claudeRoots, out); continue; }
+    if (d.isDirectory()) { if (inHeld(h, p)) walkFiles(p, baseDir, h, out); continue; }
     if (!d.isFile()) continue; // symlink Dirent reports its own type — never traversed
-    const f = statFileOrNull(p, claudeRoots);
+    const f = statFileOrNull(p, h);
     if (f) out.push({ ...f, rel: path.relative(baseDir, f.path) });
   }
 }
@@ -340,18 +343,18 @@ function walkFiles(dir, baseDir, claudeRoots, out) {
 // (e.g. a meta.json) + everything under the `<sid>/` overflow dir. A dir with
 // no sibling .jsonl (an orphaned subagents/ leftover, GH #59248) is NOT a
 // session unit and is never touched here — P1's orphan report covers it.
-// F957-1 (29ps fire 958): the root is the slug folder, checked against the Claude base before it is listed (the folder above the one the
-// walk lists); every flat file and every file the session walk reaches is held to that slug folder, never to the whole Claude base, and
-// each session carries the root so archiveSession checks every path against it again before its delete.
+// 29pt fire 963, rows 9 and 10 (main's c209): the slug folder is HELD to <base>/projects/<slug>, hand-joined from the resolved Claude base, so
+// a slug folder that is a link (out of the base, or to another slug folder inside it) lists nothing. Each flat file is held to the slug
+// folder, every file under <sid>/ to that session folder itself, and each file record carries its held folder so archiveSession holds it
+// there again before its delete.
 export function listSessions({ projectRoot = process.cwd(), home = os.homedir() } = {}) {
   const base = claudeBaseDir(home);
   const claudeRoot = physicalOrNull(base);
   if (!claudeRoot) return { slug: null, projDir: null, sessions: [] };
   const slug = ccProjectSlug(projectRoot);
   const projDir = path.join(base, 'projects', slug);
-  const slugPhys = rootWithin(projDir, claudeRoot);
-  if (!slugPhys) return { slug, projDir, sessions: [] }; // a slug folder that does not resolve inside the Claude base is never listed
-  const claudeRoots = [slugPhys];
+  const slugHeld = { root: claudeRoot, names: ['projects', slug] };
+  if (!inHeld(slugHeld, projDir)) return { slug, projDir, sessions: [] }; // a slug folder that is not <base>/projects/<slug> itself is never listed
   let names;
   try { names = fs.readdirSync(projDir, { withFileTypes: true }); } catch { return { slug, projDir, sessions: [] }; }
 
@@ -367,17 +370,18 @@ export function listSessions({ projectRoot = process.cwd(), home = os.homedir() 
   for (const d of flatFiles) {
     const owner = sids.find((id) => d.name.startsWith(`${id}.`)); // longest-first order
     if (!owner) continue;
-    const f = statFileOrNull(path.join(projDir, d.name), claudeRoots);
+    const f = statFileOrNull(path.join(projDir, d.name), slugHeld);
     if (f) filesBySid.get(owner).push({ ...f, rel: d.name });
   }
   const sessions = [];
   for (const id of sids) {
     const files = filesBySid.get(id);
-    if (dirs.has(id)) walkFiles(path.join(projDir, id), projDir, claudeRoots, files);
+    const sidHeld = heldUnder(slugHeld, id);
+    if (dirs.has(id) && inHeld(sidHeld, path.join(projDir, id))) walkFiles(path.join(projDir, id), projDir, sidHeld, files);
     if (!files.length) continue;
     sessions.push({
       id,
-      root: slugPhys, // F957-1: the checked slug folder; archiveSession holds every path to it again before the delete
+      held: slugHeld, // rows 9, 10 and 15: archiveSession holds every file to its own held folder, and the prune to <slug>/<sid>/
       files,
       bytes: files.reduce((s, f) => s + f.bytes, 0),
       newestMtimeMs: Math.max(...files.map((f) => f.mtimeMs)),
@@ -634,7 +638,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
     try { st = fs.lstatSync(d); } catch (e) { if (!e || e.code !== 'ENOENT') return fail(`the archive folder ${d} could not be inspected (${e && e.code}) — session skipped, originals kept`); }
     if (st && (st.isSymbolicLink() || !st.isDirectory())) return fail(`the archive folder ${d} is a link or not a folder: a sweep or a write through it escapes the archive root's containment, so a run never sweeps or writes through a link in the archive — session skipped, originals kept`);
   }
-  collectStagedLeftovers(destBase, sess.id);
+  collectStagedLeftovers(destBase, sess.id, { root: rootPhys, names: [slug] }); // row 13
   let transcriptBuf = null;
   const originals = [];
   let gens = null; // the session's kept generations, read once, the first time a file must be kept
@@ -684,7 +688,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       // defect"): the earlier copy is ALWAYS kept in a fresh generation, whatever kept generations already hold it, as 1.19.1 did. The
       // 1.19.2 O-1 reuse is gone: a reused generation existed before the run, so a writer on it after the read-back left no copy.
       if (prior.keep) {
-        if (gens === null) gens = sessionGenerations(destBase, sess.id);
+        if (gens === null) gens = sessionGenerations(destBase, sess.id, { root: rootPhys, names: [slug] }); // row 12
         if (gens.size >= maxGenerations) return boundRefusal(f.rel, gens.size);
         if (genN === null) genN = gens.size ? Math.max(...gens.keys()) + 1 : 1;
         const genPath = `${dest}.gen${genN}`;
@@ -700,7 +704,7 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
       const tmp = stageBeside(dest, gz, written); // H4: fsync'd at write (this tier keeps no snapshot)
       const back = zlib.gunzipSync(readStaged(tmp), { maxOutputLength: buf.length + 1 }); // bounded by the original's own length
       if (!back.equals(buf)) { return fail(`verify mismatch: ${f.rel} — original kept`); }
-      originals.push({ path: f.path, rel: f.rel, gz: dest, tmp, staged: gz, gen, earlier: prior.prefix || (prior.keep ? prior.gz : null), inflated: buf.length });
+      originals.push({ path: f.path, held: f.held, rel: f.rel, gz: dest, tmp, staged: gz, gen, earlier: prior.prefix || (prior.keep ? prior.gz : null), inflated: buf.length });
     } catch (e) { return fail(`archive failed: ${f.rel}: ${e.message} — original kept`); }
   }
 
@@ -818,12 +822,13 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   // too (best-effort — a Windows dir fd throws and is swallowed, honest ceiling).
   for (const d of new Set(originals.map((o) => path.dirname(o.gz)))) fsyncDirBestEffort(d);
 
-  // F957-1 (29ps fire 958): a session from listSessions carries its checked slug folder (`root`). Right before the deletes, every original
-  // is checked to resolve inside it again, so a session folder swapped for a link after the listing never has a file deleted through it;
-  // any one outside stops the run before the first delete. (A session built by hand, with no `root`, keeps the paths it was handed.)
-  if (typeof sess.root === 'string') {
+  // F957-1 (29ps fire 958), 29pt fire 963 rows 9 and 10: a session from listSessions carries its held slug folder (`held`) and each file its
+  // own held folder. Right before the deletes, every original is held to its own folder again (the slug folder for a flat file, the
+  // session folder for a file under <sid>/), so a folder swapped for a link after the listing never has a file deleted through it; any one
+  // outside stops the run before the first delete. (A session built by hand, with no `held`, keeps the paths it was handed.)
+  if (sess.held) {
     for (const o of originals) {
-      if (!withinWalkRoot(o.path, sess.root)) return fail(`${o.rel} no longer resolves inside this project's session folder (a folder swapped for a link after the listing?), so no live file was deleted — session skipped, originals kept`);
+      if (!inHeld(o.held, o.path)) return fail(`${o.rel} no longer resolves inside this project's session folder (a folder swapped for a link after the listing?), so no live file was deleted — session skipped, originals kept`);
     }
   }
 
@@ -847,8 +852,11 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
   if (!deleteFailed.length && originals.length) {
     const robbedPrune = stolen('removing the emptied session folder', `${afterDeletes}; the emptied folder${cold ? ', the death-log record' : ''} and the index row were not written`);
     if (robbedPrune) return robbedPrune;
-    const projDir = path.dirname(originals[0].path);
-    pruneEmptyDirs(path.join(projDir, sess.id), projDir, unpruned);
+    // row 15: the prune is held to <base>/projects/<slug>/<sid>/, hand-joined; a hand-built session (no `held`) is held to the session
+    // folder below the folder its first original is in.
+    const projDir = sess.held ? path.join(sess.held.root, ...sess.held.names) : path.dirname(originals[0].path);
+    const sidHeld = sess.held ? heldUnder(sess.held, sess.id) : { root: physicalOrNull(projDir), names: [sess.id] };
+    pruneEmptyDirs(path.join(projDir, sess.id), projDir, unpruned, sidHeld);
   }
 
   const row = buildIndexRow({ sessionId: sess.id, projectSlug: slug, transcriptBuf, totalBytes: sess.bytes, now, cold });
@@ -885,11 +893,13 @@ export function archiveSession(sess, { slug, archiveDir, now = Date.now(), cold 
 const unopenable = (file, e) => `its archived transcript ${file} could not be opened (${(e && e.code) || 'error'}), so the index repair skipped it and search will not list it; fix the file's permissions or close the program that holds it, then run again`;
 // F956-1 (29ps fire 958): the slug folder is checked against the archive root (the global config's estate.archiveDir) before it is listed,
 // each archived transcript is read only when it resolves inside that slug folder, and the generation walk is handed the same checked root.
+// 29pt fire 963, row 11: the slug folder is HELD to <archive>/<slug>, hand-joined from the resolved archive root, so a slug folder linked to
+// another slug folder inside the archive is not read as this project's.
 function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
   const out = { added: 0, failed: [], undecodable: [], robbedState: null };
   const slugDir = path.join(archiveDir, slug);
-  const slugPhys = rootWithin(slugDir, physicalOrNull(archiveDir));
-  if (!slugPhys) return out; // a slug folder that does not resolve inside the archive root is never read
+  const slugHeld = { root: physicalOrNull(archiveDir), names: [slug] };
+  if (!inHeld(slugHeld, slugDir)) return out; // a slug folder that is not <archive>/<slug> itself is never read
   let names;
   try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { return out; }
   const latest = new Map(); // sessionId -> the newest row for (sessionId, slug), in file order
@@ -900,7 +910,7 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
       if (row && typeof row === 'object' && row.retier !== true && typeof row.sessionId === 'string' && row.projectSlug === slug) latest.set(row.sessionId, row);
     }
   } catch { /* no index yet: every archived session here is rowless */ }
-  const sids = names.filter((d) => d.isFile() && d.name.endsWith('.jsonl.gz') && withinWalkRoot(path.join(slugDir, d.name), slugPhys)).map((d) => d.name.slice(0, -'.jsonl.gz'.length)).filter((sid) => isBareId(sid) && !sid.includes('.')).sort();
+  const sids = names.filter((d) => d.isFile() && d.name.endsWith('.jsonl.gz') && inHeld(slugHeld, path.join(slugDir, d.name))).map((d) => d.name.slice(0, -'.jsonl.gz'.length)).filter((sid) => isBareId(sid) && !sid.includes('.')).sort();
   for (const sid of sids) {
     // fire 784 (t338 F1): an archive this repair cannot open (a permission, an ACL, a file another program holds) is named in words and
     // skipped; the run goes on with every other session and reports the failure, so the CLI exits non-zero.
@@ -933,7 +943,7 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
     let genUnread = false;
     if (prev && typeof prev.transcriptGzSha256 === 'string') {
       let n = null;
-      for (const [g, list] of sessionGenerations(slugDir, sid, slugPhys)) {
+      for (const [g, list] of sessionGenerations(slugDir, sid, slugHeld)) {
         for (const e of list) {
           if (e.rel !== `${sid}.jsonl`) continue;
           let kg;
@@ -996,41 +1006,43 @@ function priorArchive(dest, buf, bounds) {
 // Files directly in the slug folder named `<sid>.*.gz.gen<N>`, and files under `<sid>/` named `*.gz.gen<N>`.
 // 29oy fire 947 (reader class, move (d), rows B5 to B8 and B11): a walk takes a child's kind from the listing, so a child folder swapped
 // for a junction or link AFTER the listing would be followed. Before a walk acts on a path, or descends into one, the path's realpath
-// must lie inside the walk root's realpath (`walkPhys`, resolved once at the walk's start); a path that does not resolve, or resolves
+// must lie inside the walk's held folder (below); a path that does not resolve, or resolves
 // outside, is skipped (fail closed). This is a check made at one moment: a swap between it and the act still follows (SECURITY.md
 // Known limits; no Node call opens or lists a folder beneath a handle).
 // 29pr fire 953, F950-1 (INSPECT 950): the root itself must come from the folder ABOVE the one a walk lists (the slug folder for the
 // session level, the archive root for the slug level, `base` for the prune), never from the realpath of a name the walk just listed: one
-// swap of THAT folder would relocate the root and every entry below it would read as inside. rootWithin answers the realpath of `p` when
-// it lies inside `walkPhys`, else null, so a caller that needs the next level's root resolves it once, already checked.
-function rootWithin(p, walkPhys) {
-  if (!walkPhys) return null;
-  const phys = physicalOrNull(p);
-  return phys && containedIn(phys, [walkPhys]) ? phys : null;
-}
-function withinWalkRoot(p, walkPhys) {
-  return rootWithin(p, walkPhys) !== null;
-}
-// F950-1: `walkPhys` is the slug folder's root, resolved BEFORE the listing (the caller's own slug folder, or the slug root
-// restoreSessionInner already checked against the archive root); the session folder the listing names is an entry like any other.
-function sessionGenerations(slugDir, sessionId, walkPhys = physicalOrNull(slugDir)) {
+// swap of THAT folder would relocate the root and every entry below it would read as inside.
+// 29pt fire 963 (main's c209, the signed root table 962): F950-1 took a walk's root from the folder above the one it lists, but checked it
+// against the realpath of that folder, which a link can still move to a sibling inside the same root. Now every walk takes a HELD folder,
+// { root, names }: `root` a trusted root resolved once (the archive root from the global config, the Claude base), `names` the literal
+// names below it down to the deepest folder the walk acts in. The folder is hand-joined and never resolved; an entry counts only when its
+// real path lies inside it (heldPath, class-b.mjs). heldUnder names a folder one level down. A string (a folder the caller resolved) is
+// held as itself, with no names.
+function asHeld(h) { return typeof h === 'string' ? { root: h, names: [] } : h; }
+function inHeld(h, p) { const x = asHeld(h); return !!(x && heldPath(x.root, x.names, p)); }
+function heldUnder(h, ...more) { const x = asHeld(h); return x ? { root: x.root, names: [...x.names, ...more] } : null; }
+// The held folder of `dir` as the child of its parent, the parent resolved once: the default for a walk handed only a folder.
+function heldAsChild(dir) { return { root: physicalOrNull(path.dirname(dir)), names: [path.basename(dir)] }; }
+// Row 12: `slugHeld` holds the slug folder (<archive>/<slug>); the session folder is held to <archive>/<slug>/<sid>/ itself.
+function sessionGenerations(slugDir, sessionId, slugHeld = heldAsChild(slugDir)) {
   const gens = new Map();
   const add = (n, gzPath, rel) => { if (!gens.has(n)) gens.set(n, []); gens.get(n).push({ gzPath, rel }); };
+  const sidHeld = heldUnder(slugHeld, sessionId);
   let names;
   try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { return gens; }
   for (const d of names) {
     const m = GEN_RE.exec(d.name);
     const top = path.join(slugDir, d.name);
-    if (!withinWalkRoot(top, walkPhys)) continue; // F950-1: the session folder (or a file) swapped for a link after the slug listing
+    if (!inHeld(slugHeld, top)) continue; // F950-1: a file swapped for a link after the slug listing
     if (d.isFile() && m && d.name.startsWith(`${sessionId}.`)) add(Number(m[1]), top, d.name.slice(0, m.index));
-    else if (d.isDirectory() && d.name === sessionId) {
+    else if (d.isDirectory() && d.name === sessionId && inHeld(sidHeld, top)) { // row 12: the session folder is that session's own
       const sessDir = top;
       const walk = (dir, relBase) => {
         let subs;
         try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
         for (const s of subs) {
           const p = path.join(dir, s.name);
-          if (!withinWalkRoot(p, walkPhys)) continue; // B5: a child swapped to a link after the listing is never followed
+          if (!inHeld(sidHeld, p)) continue; // B5: a child swapped to a link after the listing is never followed
           if (s.isDirectory()) { walk(p, path.join(relBase, s.name)); continue; }
           const g = GEN_RE.exec(s.name);
           if (s.isFile() && g) add(Number(g[1]), p, path.join(relBase, s.name.slice(0, g.index)));
@@ -1066,37 +1078,41 @@ function readStaged(p) {
 // name matches STAGED_RE are removed, one by one and never recursively: in the slug folder those whose name starts `<sessionId>.`, and
 // anything under the session's own `<sessionId>/` folder. A folder, a link or any other name is left alone. None of these names ends in
 // `.gz` or `.gz.gen<N>`, so no restore, search or generation count ever took one for an archive copy.
-function collectStagedLeftovers(slugDir, sessionId) {
-  const walkPhys = physicalOrNull(slugDir);
-  const sweep = (dir, accept) => {
+// Row 13: `slugHeld` holds <archive>/<slug>; the flat sweep is held to it and the session sweep to <archive>/<slug>/<sid>/ itself, each
+// entry checked right before its unlink.
+function collectStagedLeftovers(slugDir, sessionId, slugHeld = heldAsChild(slugDir)) {
+  const sweep = (dir, accept, h) => {
     let es;
     try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of es) {
       const p = path.join(dir, e.name);
-      if (!withinWalkRoot(p, walkPhys)) continue; // B11: never unlink, or descend, through a child swapped to a link after the listing
-      if (e.isDirectory()) { if (accept === null) sweep(p, null); continue; }
+      if (!inHeld(h, p)) continue; // B11: never unlink, or descend, through a child swapped to a link after the listing
+      if (e.isDirectory()) { if (accept === null) sweep(p, null, h); continue; }
       if (!e.isFile() || !STAGED_RE.test(e.name) || (accept !== null && !accept(e.name))) continue;
+      if (!inHeld(h, p)) continue; // the check and the unlink in one place, right before it
       try { fs.unlinkSync(p); } catch { /* left for the next run */ }
     }
   };
-  sweep(slugDir, (n) => n.startsWith(`${sessionId}.`));
-  sweep(path.join(slugDir, sessionId), null);
+  sweep(slugDir, (n) => n.startsWith(`${sessionId}.`), slugHeld);
+  const sidHeld = heldUnder(slugHeld, sessionId);
+  if (inHeld(sidHeld, path.join(slugDir, sessionId))) sweep(path.join(slugDir, sessionId), null, sidHeld);
 }
 // fire 785 (lab 1.19.2): the files a refused run moved aside (`*.${ASIDE_SUFFIX}`) in this project's archive folder, so a later run's
 // report can list them. Reading only: plain files, the folder walked without following a link, sorted.
 // F950-1: `archPhys` is the archive root (the folder above the slug folder: the caller passes it from the global config, and the default
 // is the parent of the folder it was handed, never a listed name); the slug folder is checked against it, then every entry against the
 // slug folder's realpath found inside it.
+// Row 14: the slug folder is held to <archive>/<slug>, hand-joined from `archPhys` and the slug folder's own name.
 function listAsides(slugDir, archPhys = physicalOrNull(path.dirname(slugDir))) {
   const out = [];
-  const walkPhys = rootWithin(slugDir, archPhys);
-  if (!walkPhys) return out; // the slug folder does not resolve inside the archive root: nothing is listed
+  const slugHeld = { root: archPhys, names: [path.basename(slugDir)] };
+  if (!inHeld(slugHeld, slugDir)) return out; // the slug folder is not <archive>/<slug> itself: nothing is listed
   const walk = (dir) => {
     let es;
     try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of es) {
       const p = path.join(dir, e.name);
-      if (!withinWalkRoot(p, walkPhys)) continue; // B7: a name outside the archive folder is never printed
+      if (!inHeld(slugHeld, p)) continue; // B7: a name outside the archive folder is never printed
       if (e.isDirectory()) walk(p);
       else if (e.isFile() && e.name.endsWith(`.${ASIDE_SUFFIX}`)) out.push(p);
     }
@@ -1117,16 +1133,19 @@ function listAsides(slugDir, archPhys = physicalOrNull(path.dirname(slugDir))) {
 // removed and no outside name is listed; the link itself stays where it is and is reported as a survivor by its name inside `base`.
 // F950-1: `dir` itself is checked against `base` BEFORE it is listed, so a folder handed in (or reached) that is a link out of `base`
 // prints no outside name; it is reported by its own name inside `base` when anything stands there, and nothing is removed.
-function pruneEmptyDirs(dir, base, survivors, walkPhys = physicalOrNull(base)) {
-  if (!withinWalkRoot(dir, walkPhys)) { if (standingAt(dir)) survivors.push(path.relative(base, dir)); return; }
+// Row 15 (29pt fire 963): `h` holds the walk's TOP, <base>/projects/<slug>/<sid>/, hand-joined; every folder is held to it before it is
+// listed, descended into or removed. The default (a caller handing only `dir` and `base`) holds `dir` as the folder below `base`, `base`
+// resolved once.
+function pruneEmptyDirs(dir, base, survivors, h = { root: physicalOrNull(base), names: path.relative(base, dir).split(path.sep) }) {
+  if (!inHeld(h, dir)) { if (standingAt(dir)) survivors.push(path.relative(base, dir)); return; }
   let names;
   try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; } // absent (no overflow dir) or unreadable
   for (const d of names) {
     const p = path.join(dir, d.name);
-    if (d.isDirectory() && withinWalkRoot(p, walkPhys)) pruneEmptyDirs(p, base, survivors, walkPhys);
+    if (d.isDirectory() && inHeld(h, p)) pruneEmptyDirs(p, base, survivors, h);
     else survivors.push(path.relative(base, p)); // a FILE (or symlink/special, or a folder that no longer resolves inside) we did not enumerate — keep + surface
   }
-  if (!withinWalkRoot(dir, walkPhys)) return; // never remove a folder that does not resolve inside the root
+  if (!inHeld(h, dir)) return; // never remove a folder that does not resolve inside the held top
   try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* still non-empty or already gone */ }
 }
 
@@ -1623,17 +1642,18 @@ function readArchiveHandle(gzPath, bound) {
 // its own default folder removes it again when nothing was written into it (a narrow, non-recursive delete of that one folder).
 // B6 (29oy fire 947): the `.gz` copies under a session's archive folder, walked with the same per-path containment as the other estate
 // walks: a child swapped for a link after the listing is never followed, so an outside `.gz` never becomes a restore source.
-// F950-1: `walkPhys` is the slug folder's root the caller checked against the archive root (restoreSessionInner passes it; the default
-// is the parent of the folder handed in, never the session folder's own realpath), and the session folder itself is checked first.
-function restoreSourcesUnder(sessDir, relBase0, walkPhys = physicalOrNull(path.dirname(sessDir))) {
+// Row 16 (29pt fire 963): `sidHeld` holds <archive>/<slug>/<sid>/ itself, hand-joined; a string is the slug folder's root and the
+// session folder is held below it by its own name.
+function restoreSourcesUnder(sessDir, relBase0, sidHeld = heldAsChild(sessDir)) {
   const out = [];
-  if (!withinWalkRoot(sessDir, walkPhys)) return out;
+  const h = typeof sidHeld === 'string' ? heldUnder(sidHeld, path.basename(sessDir)) : sidHeld;
+  if (!inHeld(h, sessDir)) return out;
   const collect = (dir, relBase) => {
     let subs;
     try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const s of subs) {
       const p = path.join(dir, s.name);
-      if (!withinWalkRoot(p, walkPhys)) continue;
+      if (!inHeld(h, p)) continue;
       if (s.isDirectory()) collect(p, path.join(relBase, s.name));
       else if (s.isFile() && s.name.endsWith('.gz')) out.push({ gzPath: p, rel: path.join(relBase, s.name.slice(0, -3)) });
     }
@@ -1676,20 +1696,20 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
   const archPhys = physicalOrNull(archiveDir);
   for (const slug of slugs) {
     const slugDir = path.join(archiveDir, slug);
-    const slugPhys = rootWithin(slugDir, archPhys);
-    if (!slugPhys) continue; // the slug folder was swapped for a link after the archive-root listing: never followed
+    const slugHeld = { root: archPhys, names: [slug] }; // row 17: <archive>/<slug>, hand-joined
+    if (!inHeld(slugHeld, slugDir)) continue; // the slug folder was swapped for a link after the archive-root listing: never followed
     let names;
     try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { continue; }
     for (const d of names) {
       const p = path.join(slugDir, d.name);
-      if (!withinWalkRoot(p, slugPhys)) continue; // a top-level copy or the session folder swapped for a link after the slug listing
+      if (!inHeld(slugHeld, p)) continue; // a top-level copy or the session folder swapped for a link after the slug listing
       if (d.isFile() && (d.name === `${sessionId}.jsonl.gz` || (d.name.startsWith(`${sessionId}.`) && d.name.endsWith('.gz')))) {
         sources.push({ gzPath: p, rel: d.name.slice(0, -3) });
       } else if (d.isDirectory() && d.name === sessionId) {
-        sources.push(...restoreSourcesUnder(p, sessionId, slugPhys));
+        sources.push(...restoreSourcesUnder(p, sessionId, heldUnder(slugHeld, sessionId)));
       }
     }
-    gens = sessionGenerations(slugDir, sessionId, slugPhys); // `*.gz.gen<N>` never matches the `.gz` collection above
+    gens = sessionGenerations(slugDir, sessionId, slugHeld); // `*.gz.gen<N>` never matches the `.gz` collection above
     if (sources.length || gens.size) break; // a session id is unique — first slug that has it wins
   }
   const generations = [...gens.keys()].sort((a, b) => a - b);

@@ -55,7 +55,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { physicalOrNull, containedIn } from './class-b.mjs';
+import { physicalOrNull, containedIn, heldPath } from './class-b.mjs';
 import { claudeBaseDir, repoReadOutcome, readRepoBytesBounded, readRepoFileBounded, MAX_DOC_BYTES } from './config-load.mjs';
 import { ownSandboxDir, replaceFile, ensureCatchAllIgnore, fileModeOr600 } from './repo-fs.mjs';
 import { gateFiles } from './fidelity-gate.mjs';
@@ -390,20 +390,28 @@ export const SNAP_NAME_SHAPE = /^[A-Za-z0-9_.-]{1,80}--[0-9a-f]{64}(?:-\d+)?$/;
 // Every writeguard snapshot currently on disk. Fail-silent -> [].
 // E2-4: lstat at both levels -- CoalWash never makes a link here, so a session dir or an entry that is one (a cloned repo
 // can commit either) is skipped: its target's names and sizes are never listed.
+// 29pt fire 963, row 28: each session folder, and each entry in it, is held to <project>/.claude/coalwash/writeguard/<session>/,
+// hand-joined from the resolved project root, right before it is listed or lstat'd: a session folder swapped for a link after its lstat
+// lists nothing of the link's target.
+function sessionHeld(session) { return ['.claude', 'coalwash', 'writeguard', session]; }
 export function listWriteguard(projectRoot, { home: _home } = {}) {
   const out = [];
   try {
     const root = writeguardRoot(projectRoot);
     if (!fs.existsSync(root)) return out;
+    const projPhys = physicalOrNull(projectRoot);
     for (const session of fs.readdirSync(root)) {
       const sdir = path.join(root, session);
       let st; try { st = fs.lstatSync(sdir); } catch { continue; }
       if (!st.isDirectory()) continue;
+      const held = sessionHeld(session);
+      if (!heldPath(projPhys, held, sdir)) continue;
       for (const name of fs.readdirSync(sdir)) {
         if (!SNAP_NAME_SHAPE.test(name)) continue; // 653: only a name in the shape snapName writes is a snapshot; a sidecar, a temp or a planted name is not
         if (name === '.gitignore' || name.endsWith('.origpath')) continue; // sidecars are identity metadata, never a listable/restorable snapshot
         try {
           const p = path.join(sdir, name);
+          if (!heldPath(projPhys, held, p)) continue;
           const fst = fs.lstatSync(p);
           if (fst.isFile()) out.push({ session, name, snapshotPath: p, bytes: fst.size, mtimeMs: fst.mtimeMs });
         } catch { /* skip unreadable */ }
@@ -503,11 +511,18 @@ export function readWriteguardSnapshot(projectRoot, snapName, { home } = {}) {
 export const WRITEGUARD_LIVE_MS = 24 * 60 * 60 * 1000;
 
 // The newest mtime over a session folder: its own, and its direct entries'. A link is read by lstat and never followed into its target.
-function newestSessionMtime(dir) {
+// 29pt fire 963, row 29: `projPhys` + `held` hand-join the session folder; it, and each entry, must resolve inside it before it is
+// listed or lstat'd, or this throws and the sweep keeps the folder for the next pass.
+function newestSessionMtime(dir, projPhys, held) {
   const st = fs.lstatSync(dir);
   let newest = st.mtimeMs;
   if (st.isSymbolicLink() || !st.isDirectory()) return newest;
-  for (const n of fs.readdirSync(dir)) newest = Math.max(newest, fs.lstatSync(path.join(dir, n)).mtimeMs);
+  if (!heldPath(projPhys, held, dir)) throw new Error('session folder not inside its own writeguard folder');
+  for (const n of fs.readdirSync(dir)) {
+    const p = path.join(dir, n);
+    if (!heldPath(projPhys, held, p)) throw new Error('entry not inside its own writeguard folder');
+    newest = Math.max(newest, fs.lstatSync(p).mtimeMs);
+  }
   return newest;
 }
 
@@ -519,11 +534,12 @@ export function sweepWriteguard(projectRoot, currentSessionId, { home: _home } =
     const root = writeguardRoot(projectRoot);
     if (!fs.existsSync(root)) return;
     const keep = sanitizeSession(currentSessionId);
+    const projPhys = physicalOrNull(projectRoot);
     for (const name of fs.readdirSync(root)) {
       if (name === keep || name === '.gitignore') continue;
       const dir = path.join(root, name);
       let newest;
-      try { newest = newestSessionMtime(dir); } catch { continue; } // unreadable: keep it, the next pass decides
+      try { newest = newestSessionMtime(dir, projPhys, sessionHeld(name)); } catch { continue; } // unreadable, or not its own folder: keep it, the next pass decides
       if (Date.now() - newest < WRITEGUARD_LIVE_MS) continue;
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* leftover waits for the next pass */ }
     }
