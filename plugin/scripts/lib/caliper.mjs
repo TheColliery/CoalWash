@@ -1376,6 +1376,7 @@ function pruneStrayStateDirs(projectRoot, home) {
     const projectsDir = path.join(base, 'projects');
     const mineRoot = physicalDir(projectRoot);
     const mine = ccProjectSlug(projectRoot);
+    if (!heldPath(basePhys, ['projects'], projectsDir)) return; // row 4 (round 5): <base>/projects held before it is listed
     for (const name of fs.readdirSync(projectsDir)) {
       if (name === mine) continue;
       const slugDir = path.join(projectsDir, name);
@@ -1465,6 +1466,7 @@ export function deadProjectStateFiles(home = os.homedir()) {
   const out = [];
   const anchors = [home, os.tmpdir()];
   let names;
+  if (!heldPath(rootPhys, heldNames, dir)) return out; // row 5 (round 5): the state folder held before it is listed
   try { names = fs.readdirSync(dir); } catch { return out; }
   for (const name of names) {
     if (!STATE_FILE_RE.test(name)) continue;

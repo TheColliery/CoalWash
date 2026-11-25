@@ -52,6 +52,7 @@ const TESTS = [
   'scripts/lib/estate-walks.test.mjs',
   'scripts/lib/listing-class.test.mjs',
   'scripts/lib/root-table.test.mjs',
+  'scripts/lib/top-held.test.mjs',
   'scripts/lib/estate-kill.test.mjs',
   'scripts/lib/retier.test.mjs',
   'scripts/lib/writeguard-slot.test.mjs', // 655: a snapshot in a -N slot is listed and restored

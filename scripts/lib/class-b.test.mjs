@@ -1464,7 +1464,10 @@ test('CWK2-029 (b): a memory store that is a directory JUNCTION to a HOME folder
     // link and nothing behind it is measured, not even by stat (it was, until 1.19.12: "it is still measured, by stat"). The refusal
     // is announced. Whether such a user link is honoured (a widening) or named as a limit is main's open question (section 4).
     assert.strictEqual(d.inherited.filter((e) => e.path === p).length, 0, 'nothing behind the linked memory folder is measured');
-    assert.ok(d.flags.some((f) => /refused path \(memory store\): MEMORY\.md/.test(f)), `one flag names the refusal: ${JSON.stringify(d.flags)}`);
+    // 29qd fire 969 (round 5, main's c211 grant): the memory folder is refused at its TOP, before it is listed, so the flag names the
+    // folder (`.`), never a name inside it; this line asserted `MEMORY.md` (an entry) until 1.19.12's round 5.
+    assert.ok(d.flags.some((f) => /refused path \(memory store\): \. /.test(f)), `one flag names the refusal: ${JSON.stringify(d.flags)}`);
+    assert.ok(!d.flags.some((f) => f.includes('MEMORY.md')), `no name from behind the link is printed: ${JSON.stringify(d.flags)}`);
     // INSPECT 99 L99-2, kept on a statOnly index built by hand: the gauge never reads it, not even for its line count
     const hit = [{ path: p, bytes: fs.statSync(p).size, scope: 'outside', kind: 'memory-index', alwaysLoaded: true, managed: false, statOnly: true }];
     const m = measureEntries(hit, { withGzip: false });

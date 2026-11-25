@@ -80,6 +80,7 @@ export function observedRetentionFloorDays({ home = os.homedir(), now = Date.now
   if (!claudeRoot) return null;
   const projectsDir = path.join(base, 'projects');
   let projectDirs;
+  if (!inHeld({ root: claudeRoot, names: ['projects'] }, projectsDir)) return null; // row 18 (round 5): <base>/projects held before it is listed
   try { projectDirs = fs.readdirSync(projectsDir, { withFileTypes: true }); } catch { return null; }
 
   let maxAgeMs = -Infinity;
@@ -120,6 +121,7 @@ export function observedMachineAgeDays({ home = os.homedir(), now = Date.now() }
   if (!claudeRoot) return null;
   const projectsDir = path.join(base, 'projects');
   let projectDirs;
+  if (!inHeld({ root: claudeRoot, names: ['projects'] }, projectsDir)) return null; // row 19 (round 5): <base>/projects held before it is listed
   try { projectDirs = fs.readdirSync(projectsDir, { withFileTypes: true }); } catch { return null; }
 
   let maxAgeMs = -Infinity;
@@ -380,6 +382,7 @@ export function detectOrphanSlugs({ home = os.homedir() } = {}) {
   if (!claudeRoot) return [];
   const projectsDir = path.join(base, 'projects');
   let names;
+  if (!inHeld({ root: claudeRoot, names: ['projects'] }, projectsDir)) return []; // row 23 (round 5): <base>/projects held before it is listed
   try { names = fs.readdirSync(projectsDir, { withFileTypes: true }); } catch { return []; }
 
   const orphans = [];

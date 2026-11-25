@@ -819,6 +819,12 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
   // 29pt fire 963, row 6: `heldRoot` + `heldNames` hand-join the walk's top (<project>/.claude/rules or <base>/rules); every entry, folder or
   // file, is taken only when its real path lies inside that top, so a child swapped for a link after its listing adds nothing.
   const walkRulesTree = (rulesRoot, scope, heldRoot, heldNames) => {
+    // Row 6 (round 5): the walk's top is held before it is listed; a top that is a link (out of its root, or to another folder inside
+    // it) lists nothing.
+    if (!heldPath(heldRoot, heldNames, rulesRoot)) {
+      flags.push(`refused path (rules tree, scope ${scope}): . — ${heldWhy(rulesRoot, 'its own rules folder')} — its contents are NOT counted`);
+      return;
+    }
     const stack = [rulesRoot];
     let count = 0, dirs = 0;
     // Cap BOTH the .md count AND the directory traversal (Phoenix #3): a deep/wide
@@ -909,7 +915,10 @@ export function discoverClassB({ projectRoot = process.cwd(), home = os.homedir(
     const memDir = ccMemoryDir(projectRoot, home);
     // 29pt fire 963, row 7: the walk's top hand-joined as <base>/projects/<slug>/memory; every entry is held to it.
     const memHeld = ['projects', ccProjectSlug(projectRoot), 'memory'];
-    const stack = basePhys ? [{ dir: memDir, depth: 0 }] : [];
+    // Row 7 (round 5): the memory folder itself held before it is listed.
+    const topHeld = !!basePhys && !!heldPath(basePhys, memHeld, memDir);
+    if (basePhys && !topHeld) flags.push(`refused path (memory store): . — ${heldWhy(memDir, 'its own memory folder')} — its contents are NOT counted`);
+    const stack = topHeld ? [{ dir: memDir, depth: 0 }] : [];
     let count = 0, dirs = 0;
     while (stack.length && count < RULES_FILE_CAP && dirs < RULES_FILE_CAP) {
       const { dir, depth } = stack.pop();
@@ -1052,7 +1061,8 @@ export function discoverRoleMemories({ projectRoot = process.cwd(), home = os.ho
   const agentBase = path.join(projPhys, '.claude', 'agent-memory');
   // CWK-137: the same walk-root rule as the rules tree -- a cloned repo's
   // `.claude/agent-memory` link would make every directory in its target a "role".
-  if (pathExists(agentBase) && repoEntryKind(agentBase, projPhys) !== 'dir') {
+  // Row 8 (round 5): .claude/agent-memory is held to itself before it is listed, so a link to another folder of the project lists nothing.
+  if (pathExists(agentBase) && (repoEntryKind(agentBase, projPhys) !== 'dir' || !heldPath(projPhys, ['.claude', 'agent-memory'], agentBase))) {
     flags.push('refused path (role stores): .claude/agent-memory — not a directory inside the project (a link out of it, or not a directory) — its contents are NOT counted');
     return [];
   }

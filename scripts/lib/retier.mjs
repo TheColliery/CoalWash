@@ -245,7 +245,8 @@ export function collectStores({ projectRoot = process.cwd(), home = os.homedir()
   // directory inside the project before it is listed, or a cloned repository's link at that name would make every folder in its target a
   // role; and each role store is held to the PROJECT root, never to home.
   if (!projPhys) { /* no resolvable project: no role store */ }
-  else if (pathExists(agentBase) && repoEntryKind(agentBase, projPhys) !== 'dir') {
+  // Row 25 (round 5): .claude/agent-memory held to itself before it is listed (a link to another folder of the project lists nothing).
+  else if (pathExists(agentBase) && (repoEntryKind(agentBase, projPhys) !== 'dir' || !heldPath(projPhys, ['.claude', 'agent-memory'], agentBase))) {
     skipped.push({ label: 'agent-memory', reason: '.claude/agent-memory is not a directory inside the project (a link out of it, or not a directory): no role store in it is read' });
   } else {
     // A role entry reaches addStore only when its directory entry reports a directory. A junction reports as a symbolic link, so it is not a role entry here; addStore resolves the path and checks containment.
