@@ -21,10 +21,10 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 
 import { physicalForCreate as pfcClassB, physicalOrNull as ponClassB, containedIn } from './class-b.mjs';
-import { pathWithin } from './config-load.mjs';
+import { pathWithin, volumeCaseFolds } from './config-load.mjs';
 import { physicalForCreate as pfcClassA, isContainedIn, snapshotSource } from './explode.mjs';
 import { detonate } from './detonate.mjs';
 
@@ -165,28 +165,45 @@ test('pathWithin REFUSES a non-canonical argument on EITHER side', () => {
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
-// DECLARED DEPENDENCY — this asserts a property of NODE, not of our logic.
-// `containedIn` (class-b.mjs, and the byte-identical copy in apply.mjs) is the THIRD
-// containment shape: `path.relative` over an array of roots, carrying NO explicit
-// case-fold of its own. It is case-insensitive on win32 only because Node's win32
-// `path.relative` folds case internally. We do not own that behaviour and never
-// declared it. Asserting it here means that if it ever changes, it surfaces in OUR
-// gate — not in a user's containment check. The twin-pin tests above cover the other
-// two shapes (pathWithin / isContainedIn), which fold case explicitly.
-test('DEPENDENCY (win32): path.relative case-folds, which is the only reason containedIn is case-insensitive', (t) => {
-  if (!WIN) { t.skip('win32-only property — POSIX paths are case-SENSITIVE by design'); return; }
+// containedIn (class-b.mjs) is the THIRD containment shape. Since 976 (F1, round 6) it no longer
+// leans on Node: it folds case exactly where the folder's own probe measures an insensitive folder
+// (config-load's volumeCaseFolds, the same probe explode's isContainedIn uses). The rows below pin
+// that on an insensitive folder, where the case-variant IS the same folder. The case-SENSITIVE rows
+// live in the table above and in case-held.test.mjs.
+test('containedIn follows the folder probe: a case-variant of an INSENSITIVE folder is contained', (t) => {
+  if (!WIN) { t.skip('win32-only fixture — the case-variant rows need the probe to measure a folding folder'); return; }
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-FOLD-')));
   const child = path.join(base, 'a', 'b');
   try {
+    if (!volumeCaseFolds(base, false)) { t.skip('NAMED SKIP: this volume is case-sensitive, so there is no insensitive folder to fold'); return; }
     assert.strictEqual(containedIn(child, [base]), true, 'sanity: same-case child is contained');
     assert.strictEqual(containedIn(child.toUpperCase(), [base]), true,
-      'case-variant CHILD is contained — RELIES ON Node win32 path.relative folding case');
+      'case-variant CHILD is contained — the probe measured base as insensitive');
     assert.strictEqual(containedIn(child, [base.toUpperCase()]), true,
-      'case-variant BASE is contained — same Node dependency');
+      'case-variant BASE is contained — the probe measures the same folder');
     // and not vacuous: a genuine outsider is still refused, case-fold or not.
     assert.strictEqual(containedIn(path.join(path.dirname(base), 'elsewhere'), [base]), false,
       'a genuine outsider is not contained');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+// THE MISSING ROW (976, F1): a case-SENSITIVE folder, where all three shapes must agree a case-variant is OUTSIDE. Before 976 the
+// class-B shape folded here on win32 and the other two did not, so this table could not have caught it.
+test('TWIN-PIN, case-SENSITIVE folder: pathWithin, isContainedIn and containedIn all refuse a case-variant sibling', (t) => {
+  if (!WIN) { t.skip('win32-only fixture (the case-sensitive folder is made with fsutil)'); return; }
+  const cs = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-CS-')));
+  try {
+    const r = spawnSync('fsutil.exe', ['file', 'setCaseSensitiveInfo', cs, 'enable'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+    if (r.status !== 0) { t.skip(`NAMED SKIP: fsutil exit ${r.status}`); return; }
+    const proj = path.join(cs, 'proj'); const sib = path.join(cs, 'PROJ');
+    fs.mkdirSync(proj); fs.mkdirSync(sib);
+    const child = path.join(sib, 'a.txt'); fs.writeFileSync(child, 'x');
+    assert.strictEqual(volumeCaseFolds(proj, false), false, 'precondition: the probe measures the folder case-SENSITIVE');
+    assert.strictEqual(pathWithin(child, proj), false, 'pathWithin refuses the case-variant');
+    assert.strictEqual(isContainedIn(child, proj), false, 'isContainedIn refuses the case-variant');
+    assert.strictEqual(containedIn(child, [proj]), false, 'containedIn refuses the case-variant');
+    assert.strictEqual(containedIn(path.join(proj, 'a.txt'), [proj]), true, 'sanity: the same spelling is inside');
+  } finally { fs.rmSync(cs, { recursive: true, force: true }); }
 });
 
 // EVALUATED AGAINST THE CASES THAT ACTUALLY RAN — not against an assumed table.
