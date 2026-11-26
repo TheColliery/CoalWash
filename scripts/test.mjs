@@ -53,6 +53,7 @@ const TESTS = [
   'scripts/lib/listing-class.test.mjs',
   'scripts/lib/root-table.test.mjs',
   'scripts/lib/top-held.test.mjs',
+  'scripts/lib/held-unreadable.test.mjs', // 974 (F2, round 6): an entry whose real path cannot be taken is named, never dropped
   'scripts/lib/estate-kill.test.mjs',
   'scripts/lib/retier.test.mjs',
   'scripts/lib/writeguard-slot.test.mjs', // 655: a snapshot in a -N slot is listed and restored

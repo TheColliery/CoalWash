@@ -291,7 +291,24 @@ export function physicalForCreate(p) {
 function heldWhy(p, folder) {
   return physicalOrNull(p) ? `not inside ${folder} (a folder or file that is a link, or was swapped for one)` : 'unreadable or unresolvable';
 }
-export function heldPath(rootPhys, names, candidate, read = null) {
+// 29qh fire 974 (round 6, lab 1202 F2): THE THIRD ANSWER. An entry that EXISTS, is no link (lstat: not a symbolic link, which in Node
+// covers a junction), and whose own real path throws (a deny-read ACE makes realpathSync.native fail EPERM before any open) is neither
+// inside nor outside to physicalForCreate: it answered null, the same as a link out, so a caller dropped the entry in silence. Here the
+// proof of containment rests on the PARENT, which resolves and lies inside the held folder; a non-link entry cannot point anywhere else.
+// The answer is { unreadable: <code> }, given only to a caller that asks for it ({ unreadable: true }), so every other caller keeps the
+// refusal it had. A caller that takes it goes on to open the entry, and that open's own error names the file.
+function unreadableEntry(held, candidate) {
+  const p = path.resolve(candidate);
+  let st;
+  try { st = fs.lstatSync(p); } catch { return null; }
+  if (st.isSymbolicLink()) return null;
+  let code;
+  try { fs.realpathSync.native(p); return null; } catch (e) { code = (e && e.code) || 'EUNKNOWN'; } // it resolves: refused for another reason
+  const parent = physicalOrNull(path.dirname(p));
+  if (!parent || !containedIn(path.join(parent, path.basename(p)), [held])) return null;
+  return { unreadable: code };
+}
+export function heldPath(rootPhys, names, candidate, read = null, opts = null) {
   const refuse = read ? { why: 'outside-root' } : null;
   try {
     if (typeof rootPhys !== 'string' || !isCanonicalShape(rootPhys) || !Array.isArray(names) || typeof candidate !== 'string') return refuse;
@@ -299,7 +316,8 @@ export function heldPath(rootPhys, names, candidate, read = null) {
     if (names.some((n) => typeof n !== 'string' || n === '' || n === '.' || n === '..' || /[\\/]/.test(n))) return refuse;
     const held = path.join(rootPhys, ...names);
     const phys = physicalForCreate(candidate);
-    if (!phys || !containedIn(phys, [held])) return refuse;
+    if (!phys) return !read && opts && opts.unreadable === true ? unreadableEntry(held, candidate) : refuse;
+    if (!containedIn(phys, [held])) return refuse;
     if (!read) return phys;
     // The reader re-checks its own resolution against the TRUSTED root (resolving a resolved root changes nothing), so the expected
     // folder is resolved nowhere; its handle-identity check binds the bytes to that resolution.
