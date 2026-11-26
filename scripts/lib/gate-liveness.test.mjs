@@ -270,11 +270,18 @@ test('GATE-LIVENESS 5 — containment is load-bearing: a create escaping the dec
     assert.match(r.error, /containment|escapes/);
     assert.strictEqual(fs.existsSync(escaped), false, 'nothing written outside the roots');
 
-    // MUTANT: fake path.relative to a contained-looking rel → containedIn passes
-    // for everything → the out-of-roots write lands. (apply.mjs uses
-    // path.relative only inside containedIn, so this neutralizes exactly the
-    // containment check.)
-    const restore = patch(path, 'relative', () => 'inside');
+    // MUTANT: containedIn's prefix decision → always "inside" → the out-of-roots write lands. (976 F1: containedIn
+    // no longer calls path.relative — it compares case-normalized strings with startsWith, so faking path.relative
+    // neutralizes nothing; the test was proven wrong by the fix and this named step moves the mutant to the decision
+    // that IS containment now.)
+    // Only a prefix equal to the declared root is admitted: a blanket true also reaches the claude-base guard (pathWithin),
+    // which then refuses the anchor and tests nothing about containment.
+    const needle = store.toLowerCase(); const storeSep = needle + path.sep;
+    const startsWithOrig = String.prototype.startsWith;
+    const restore = patch(String.prototype, 'startsWith', function (s, ...rest) {
+      if (typeof s === 'string' && (s.toLowerCase() === storeSep || s.toLowerCase() === needle)) return true;
+      return startsWithOrig.call(this, s, ...rest);
+    });
     let r2;
     try { r2 = apply(planFor(proj, store, [{ type: 'create', path: escaped, content: 'ESCAPED-WRITE' }])); } finally { restore(); }
     assert.strictEqual(r2.ok, true, r2.error);
