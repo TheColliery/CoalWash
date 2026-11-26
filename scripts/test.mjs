@@ -54,6 +54,7 @@ const TESTS = [
   'scripts/lib/root-table.test.mjs',
   'scripts/lib/top-held.test.mjs',
   'scripts/lib/held-unreadable.test.mjs', // 974 (F2, round 6): an entry whose real path cannot be taken is named, never dropped
+  'scripts/lib/case-held.test.mjs', // 976 (F1, round 6): containedIn compares by the probed case of the folder, never the platform
   'scripts/lib/estate-kill.test.mjs',
   'scripts/lib/retier.test.mjs',
   'scripts/lib/writeguard-slot.test.mjs', // 655: a snapshot in a -N slot is listed and restored

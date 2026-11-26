@@ -233,6 +233,9 @@ export function physicalOrNull(p) {
 // canonical path. This also explains why the lab found no reachable exploit — all
 // 26 non-test call sites already canonicalize, so the contract was always real and
 // merely unenforced; this makes the code say what the callers already do.
+function isLinkAt(p) {
+  try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; }
+}
 export function containedIn(p, roots) {
   if (!p) return false;
   if (!isCanonicalShape(p)) return false; // fail-closed: the caller must canonicalize
@@ -240,8 +243,17 @@ export function containedIn(p, roots) {
     // A non-canonical ROOT is skipped rather than trusted — it cannot legitimately
     // admit anything, and an all-non-canonical root set therefore returns false.
     if (!root || !isCanonicalShape(root)) continue;
-    const rel = path.relative(root, p);
-    if (rel === '' || !escapesRoot(rel)) return true;
+    // A link at the root names another folder, so it is refused before the probe: volumeCaseFolds stats its argument, which
+    // follows a link, so probing a swapped held folder would stat its target (row 19, 976). Realpathed roots are never links.
+    if (isLinkAt(root)) continue;
+    // Case is the FOLDER's, measured by volumeCaseFolds (the probe shape explode.mjs uses), never the platform:
+    // path.relative folds case on every win32 folder, so a case-variant sibling of a case-SENSITIVE folder read as
+    // inside (lab 1202 F1, 29qg). A probe miss (the root is absent) takes the refusing side, no fold (foldOnMiss false).
+    const fold = volumeCaseFolds(root, false);
+    const norm = (s) => (fold ? s.toLowerCase() : s);
+    const r = norm(root);
+    const q = norm(p);
+    if (q === r || q.startsWith(r.endsWith(path.sep) ? r : r + path.sep)) return true;
   }
   return false;
 }
