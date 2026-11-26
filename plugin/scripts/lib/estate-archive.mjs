@@ -910,7 +910,7 @@ function reconcileIndex(archiveDir, slug, { now, lockState, bounds }) {
       if (row && typeof row === 'object' && row.retier !== true && typeof row.sessionId === 'string' && row.projectSlug === slug) latest.set(row.sessionId, row);
     }
   } catch { /* no index yet: every archived session here is rowless */ }
-  const sids = names.filter((d) => d.isFile() && d.name.endsWith('.jsonl.gz') && inHeld(slugHeld, path.join(slugDir, d.name))).map((d) => d.name.slice(0, -'.jsonl.gz'.length)).filter((sid) => isBareId(sid) && !sid.includes('.')).sort();
+  const sids = names.filter((d) => d.isFile() && d.name.endsWith('.jsonl.gz') && inHeldOrUnreadable(slugHeld, path.join(slugDir, d.name))).map((d) => d.name.slice(0, -'.jsonl.gz'.length)).filter((sid) => isBareId(sid) && !sid.includes('.')).sort();
   for (const sid of sids) {
     // fire 784 (t338 F1): an archive this repair cannot open (a permission, an ACL, a file another program holds) is named in words and
     // skipped; the run goes on with every other session and reports the failure, so the CLI exits non-zero.
@@ -1020,6 +1020,11 @@ function priorArchive(dest, buf, bounds) {
 // held as itself, with no names.
 function asHeld(h) { return typeof h === 'string' ? { root: h, names: [] } : h; }
 function inHeld(h, p) { const x = asHeld(h); return !!(x && heldPath(x.root, x.names, p)); }
+// 29qh fire 974 (round 6, lab 1202 F2): rows 11, 12, 16 and 17 also take an entry that exists, is no link, and whose real path cannot be
+// taken (heldPath's third answer). The row then opens it, and the open's own error names the file: the index repair's "could not be
+// opened" and its exit 1 (fire 784), and a restore's "restore failed on <rel>", as 1.19.11 said, never "not found" or a success with
+// the file left out. Every other walk keeps the refusal.
+function inHeldOrUnreadable(h, p) { const x = asHeld(h); return !!(x && heldPath(x.root, x.names, p, null, { unreadable: true })); }
 function heldUnder(h, ...more) { const x = asHeld(h); return x ? { root: x.root, names: [...x.names, ...more] } : null; }
 // The held folder of `dir` as the child of its parent, the parent resolved once: the default for a walk handed only a folder.
 function heldAsChild(dir) { return { root: physicalOrNull(path.dirname(dir)), names: [path.basename(dir)] }; }
@@ -1033,7 +1038,9 @@ function sessionGenerations(slugDir, sessionId, slugHeld = heldAsChild(slugDir))
   for (const d of names) {
     const m = GEN_RE.exec(d.name);
     const top = path.join(slugDir, d.name);
-    if (!inHeld(slugHeld, top)) continue; // F950-1: a file swapped for a link after the slug listing
+    // 29qh fire 974 (row 12): an unreadable kept generation stays counted and listed, so a --generation restore names it and the index
+    // repair says it could not read it (fire 784), never a success with that copy left out or a generation number that skips it.
+    if (!inHeldOrUnreadable(slugHeld, top)) continue; // F950-1: a file swapped for a link after the slug listing
     if (d.isFile() && m && d.name.startsWith(`${sessionId}.`)) add(Number(m[1]), top, d.name.slice(0, m.index));
     else if (d.isDirectory() && d.name === sessionId && inHeld(sidHeld, top)) { // row 12: the session folder is that session's own
       const sessDir = top;
@@ -1042,7 +1049,7 @@ function sessionGenerations(slugDir, sessionId, slugHeld = heldAsChild(slugDir))
         try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
         for (const s of subs) {
           const p = path.join(dir, s.name);
-          if (!inHeld(sidHeld, p)) continue; // B5: a child swapped to a link after the listing is never followed
+          if (!inHeldOrUnreadable(sidHeld, p)) continue; // B5: a child swapped to a link after the listing is never followed (row 12: an unreadable one is kept)
           if (s.isDirectory()) { walk(p, path.join(relBase, s.name)); continue; }
           const g = GEN_RE.exec(s.name);
           if (s.isFile() && g) add(Number(g[1]), p, path.join(relBase, s.name.slice(0, g.index)));
@@ -1653,7 +1660,7 @@ function restoreSourcesUnder(sessDir, relBase0, sidHeld = heldAsChild(sessDir)) 
     try { subs = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const s of subs) {
       const p = path.join(dir, s.name);
-      if (!inHeld(h, p)) continue;
+      if (!inHeldOrUnreadable(h, p)) continue; // row 16: an unreadable copy is collected, so its open names it
       if (s.isDirectory()) collect(p, path.join(relBase, s.name));
       else if (s.isFile() && s.name.endsWith('.gz')) out.push({ gzPath: p, rel: path.join(relBase, s.name.slice(0, -3)) });
     }
@@ -1702,7 +1709,7 @@ function restoreSessionInner(sessionId, { archiveDir, to = null, generation = nu
     try { names = fs.readdirSync(slugDir, { withFileTypes: true }); } catch { continue; }
     for (const d of names) {
       const p = path.join(slugDir, d.name);
-      if (!inHeld(slugHeld, p)) continue; // a top-level copy or the session folder swapped for a link after the slug listing
+      if (!inHeldOrUnreadable(slugHeld, p)) continue; // a top-level copy or the session folder swapped for a link after the slug listing (row 17: an unreadable copy is kept, so its open names it)
       if (d.isFile() && (d.name === `${sessionId}.jsonl.gz` || (d.name.startsWith(`${sessionId}.`) && d.name.endsWith('.gz')))) {
         sources.push({ gzPath: p, rel: d.name.slice(0, -3) });
       } else if (d.isDirectory() && d.name === sessionId) {
