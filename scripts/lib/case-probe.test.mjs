@@ -8,7 +8,8 @@
 //   (e) pathWithin's miss: a base with no case to flip takes the caller's polarity (permit: no fold).
 //   (f) C4/L1: a link ROOT is refused, never probed through (a regression guard; green before and after).
 //   (g) H2: heldPath refuses a name that is `..`, empty, `.` or holds a separator (a regression guard).
-//   (h) POSIX: a symlink at the flipped name under <proj>/.claude (class-988 §4); skips visibly where a symlink cannot be made.
+//   (h) a link at the flipped name under <proj>/.claude (class-988 §4), on a case-sensitive folder; one link made on every platform.
+//   (j) the PERMIT caller on a probe miss: a junction into the case-variant ancestor of a root with no case to flip (round 8, F990-3).
 // NOT BUILDABLE HERE, named and not faked (class-988 §2): U1 (an entry gone between physicalForCreate and lstat) and U3 (an entry that
 // realpath resolves while physicalOrNull refused its spelling). Each leg makes its folder case-sensitive by fsutil on Windows and
 // proves it by the probe itself; a folder that folds skips visibly by name. Temp roots under %TEMP%, removed with their links first.
@@ -20,7 +21,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { containedIn, heldPath, ccProjectSlug } from './class-b.mjs';
-import { volumeCaseFolds, pathWithin } from './config-load.mjs';
+import { volumeCaseFolds, pathWithin, repoEntryKind, readRepoFileBounded } from './config-load.mjs';
 import { runRetier, collectStores } from './retier.mjs';
 
 delete process.env.CLAUDE_CONFIG_DIR;
@@ -52,7 +53,8 @@ function sandbox(t) {
     for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     fs.rmSync(T, { recursive: true, force: true });
   });
-  return { T, home, junction: (l, target) => { fs.symlinkSync(target, l, 'junction'); links.push(l); } };
+  // `track` REGISTERS a link the leg already made, for the unlink; it never creates one (round 8, F990-1: a second create threw EEXIST).
+  return { T, home, track: (l) => links.push(l), junction: (l, target) => { fs.symlinkSync(target, l, 'junction'); links.push(l); } };
 }
 // The folder is made case-sensitive ON WINDOWS by fsutil, while empty; elsewhere the probe decides. Returns false (and skips) when the
 // probe, not the fixture, says the folder folds case.
@@ -194,10 +196,14 @@ test('heldPath: a name that is .., empty, . or holds a separator is refused (H2)
   }
 });
 
-// (h) POSIX: a symlink at the flipped name under <proj>/.claude (class-988 §4) ------------------------------------------------
-test('the case probe: a symlink at the flipped name under .claude answers a measured false, not a fold (POSIX, class-988 §4)', (t) => {
+// (h) the link at the flipped name under <proj>/.claude (class-988 §4), made ONCE on every platform (round 8, F990-1). The folder is made
+// case-sensitive first (fsutil on Windows), so the leg RUNS on this box. Its one link is a symlink where POSIX allows one and a junction on
+// Windows, which needs no privilege; no platform gate decides whether the body runs, only the probe does (EEXIST = the folder folds case).
+test('the case probe: a symlink at the flipped name under .claude answers a measured false, not a fold (class-988 §4)', (t) => {
   const sb = sandbox(t);
-  const claude = path.join(sb.T, 'proj', '.claude');
+  const cs = path.join(sb.T, 'cs'); fs.mkdirSync(cs);
+  if (!sensitiveFolder(t, cs)) return;
+  const claude = path.join(cs, 'proj', '.claude');
   w(path.join(claude, 'rules', 'f.md'), 'rules');
   // Probe the case-sensitivity by CREATING the flipped name, never by platform: EEXIST means this folder folds case.
   try { fs.mkdirSync(path.join(claude, 'Rules')); } catch (e) {
@@ -205,10 +211,32 @@ test('the case probe: a symlink at the flipped name under .claude answers a meas
     throw e;
   }
   w(path.join(claude, 'Rules', 'f.md'), 'OTHER');
-  try { fs.symlinkSync('rules', path.join(claude, 'RULES'), 'dir'); } catch (e) {
-    t.skip(`NAMED SKIP: a symlink cannot be made here (${e.code})`); return;
+  const link = path.join(claude, 'RULES');
+  try { fs.symlinkSync(path.join(claude, 'rules'), link, WIN ? 'junction' : 'dir'); } catch (e) {
+    t.skip(`NAMED SKIP: a link cannot be made here (${e.code})`); return;
   }
-  sb.junction(path.join(claude, 'RULES'), path.join(claude, 'rules')); // registered for the unlink; the symlink above is the one under test
+  sb.track(link); // registered for the unlink; the one link made above is the one under test
   const cand = fs.realpathSync.native(path.join(claude, 'Rules', 'f.md'));
-  assert.strictEqual(containedIn(cand, [path.join(claude, 'rules')]), false, 'a symlink at the flipped name does not make the case-variant inside');
+  assert.strictEqual(containedIn(cand, [path.join(claude, 'rules')]), false, 'a link at the flipped name does not make the case-variant inside');
+});
+
+// (j) the PERMIT caller on a probe MISS (round 8, F990-3: the maker's m4 survivor, made reachable). A base whose BASENAME has no case to
+// flip misses the probe, so a PERMIT caller must NOT fold. Here the root is cs/T/123 and a junction inside it reaches cs/t/123, which holds
+// the other folder's file: the case-variant ANCESTOR must be refused by both repoEntryKind and readRepoFileBounded.
+test('repoEntryKind and readRepoFileBounded: a junction into the case-variant folder of a root with no case to flip is refused (permit side, probe miss)', (t) => {
+  const sb = sandbox(t);
+  const cs = path.join(sb.T, 'cs'); fs.mkdirSync(cs);
+  if (!sensitiveFolder(t, cs)) return;
+  const root = path.join(cs, 'T', '123'); w(path.join(root, 'own.md'), 'own');
+  const other = path.join(cs, 't', '123'); w(path.join(other, 'secret.md'), 'SECRET-OTHER');
+  if (fs.statSync(path.join(cs, 'T'), { bigint: true }).ino === fs.statSync(path.join(cs, 't'), { bigint: true }).ino) {
+    t.skip('NAMED SKIP: T and t are one folder on this volume, so there is no other folder to reach'); return;
+  }
+  const lnk = path.join(root, 'lnk');
+  try { fs.symlinkSync(other, lnk, 'junction'); } catch (e) { t.skip(`NAMED SKIP: a junction cannot be made here (${e.code})`); return; }
+  sb.track(lnk);
+  const child = path.join(lnk, 'secret.md');
+  const rootPhys = fs.realpathSync.native(root);
+  assert.strictEqual(repoEntryKind(child, rootPhys), null, 'a PERMIT caller on a probe miss does not fold: the other folder is outside the root');
+  assert.strictEqual(readRepoFileBounded(child, rootPhys, 1000), null, 'the bounded read refuses the other folder through the same permit side');
 });
