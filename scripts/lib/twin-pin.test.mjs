@@ -478,3 +478,51 @@ test('TWIN-PIN, polarity: an absent base (a probe MISS) answers the caller\'s de
   assert.strictEqual(pathWithin(child, base, false), false, 'PERMIT (foldOnMiss=false): a miss does not fold the case-variant child into the base');
   assert.strictEqual(pathWithin(child, base, true), true, 'REFUSE (foldOnMiss=true): a miss folds, so the case-variant child is contained');
 });
+
+// ROUND 8 (F990-2): the link probe pinned on BOTH twins. Each row goes RED when the matching line of EITHER twin is reverted:
+// the lstat at the flipped name (config-load and explode), and the identity check on the cache (both twins).
+
+// A link at the flipped name is a DIFFERENT entry from the folder, so both twins must measure case-SENSITIVE and refuse the case-variant.
+test('TWIN-PIN, a link at the flipped name: config-load pathWithin and explode containment both refuse a case-variant of a held folder', (t) => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-LINK-')));
+  try {
+    if (WIN) {
+      const r = spawnSync('fsutil.exe', ['file', 'setCaseSensitiveInfo', root, 'enable'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+      if (r.status !== 0) { t.skip(`NAMED SKIP: fsutil exit ${r.status}`); return; }
+    }
+    const held = path.join(root, 'held'); fs.mkdirSync(held); fs.writeFileSync(path.join(held, 'secret.md'), 'x');
+    const other = path.join(root, 'Held'); fs.mkdirSync(other); fs.writeFileSync(path.join(other, 'x.txt'), 'OTHER');
+    const link = path.join(root, 'HELD');
+    try { fs.symlinkSync(held, link, WIN ? 'junction' : 'dir'); } catch (e) { t.skip(`NAMED SKIP: a link cannot be made here (${e.code})`); return; }
+    try {
+      const child = path.join(other, 'x.txt');
+      const a = pathWithin(child, held, false);
+      const b = containment(child, held, false) === 'inside';
+      assert.strictEqual(a, b, `TWIN DRIFT at a link at the flipped name: config-load pathWithin=${a} vs explode containment=${b}.`);
+      assert.strictEqual(a, false, 'a link at the flipped name does not fold: the case-variant Held/ is outside held/ (both twins)');
+    } finally { try { fs.unlinkSync(link); } catch { fs.rmdirSync(link); } }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// The identity pin (Windows only): the SAME path string names a NEW folder in a case-SENSITIVE parent. A cache that replays on the path
+// string alone keeps the earlier measured true in BOTH twins; the identity check re-measures false in both.
+test('TWIN-PIN, a replaced folder: both twins re-measure when the identity at a path moves', (t) => {
+  if (!WIN) { t.skip('NAMED SKIP: the identity leg swaps an insensitive parent for a case-sensitive one, which needs fsutil'); return; }
+  const top = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-ID-')));
+  try {
+    const A = path.join(top, 'A'); fs.mkdirSync(A);
+    const P = path.join(A, 'held'); fs.mkdirSync(P); fs.writeFileSync(path.join(P, 'f.md'), 'x');
+    const variant = path.join(A, 'HELD', 'f.md');
+    if (!pathWithin(variant, P, false)) { t.skip('NAMED SKIP: the temp parent is case-sensitive, so there is no insensitive answer to replay'); return; }
+    assert.strictEqual(containment(variant, P, false) === 'inside', true, 'precondition: explode measures the insensitive parent as folding, and caches it');
+    fs.rmSync(A, { recursive: true, force: true });
+    fs.mkdirSync(A);
+    const r = spawnSync('fsutil.exe', ['file', 'setCaseSensitiveInfo', A, 'enable'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+    if (r.status !== 0) { t.skip(`NAMED SKIP: fsutil exit ${r.status}`); return; }
+    fs.mkdirSync(P); fs.writeFileSync(path.join(P, 'f.md'), 'y');
+    const a = pathWithin(variant, P, false);
+    const b = containment(variant, P, false) === 'inside';
+    assert.strictEqual(a, b, `TWIN DRIFT after the identity moved: config-load pathWithin=${a} vs explode containment=${b}.`);
+    assert.strictEqual(a, false, 'the same path now names a new folder in a case-sensitive parent: the cached true is not replayed (both twins)');
+  } finally { fs.rmSync(top, { recursive: true, force: true }); }
+});

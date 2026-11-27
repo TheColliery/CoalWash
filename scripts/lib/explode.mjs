@@ -199,26 +199,20 @@ function flipCase(s) {
 // the inject/exfil vector this file's own BREAK 2 comment claims to have closed,
 // re-opened along the case axis.
 //
-// FORGEABILITY, BOUNDED: anyone who can write to `anchorPhys`'s PARENT can plant a
-// junction/hardlink at the flipped spelling (no admin) and push the probe toward
-// `folds:true`. That is safe at a REFUSE caller (folding more only refuses more) and is
-// an EXPOSURE at a PERMIT caller, which must treat this answer as untrusted input
-// rather than assume the opposite default rescues it. The reverse forgery is not
-// available through junctions (a plant can only make a failing stat succeed), but that
-// is a claim about junctions and NOT a claim that a wrong `folds:false` cannot arise at
-// all — the JS-vs-OS mapping mismatch bounded above is a separate, non-forgery route to
-// exactly that, which is why it is routed to MISS instead of trusted.
+// FORGEABILITY (round 8, F990-5): a junction or hardlink planted at the flipped spelling is a SEPARATE entry from the folder, so its
+// lstat never carries the folder's own dev+ino: a planted link measures `folds:false`, and the probe no longer lets a plant push it to
+// `folds:true`. On an insensitive parent the flipped spelling is the folder's own entry, so a plant there cannot be created at all. A
+// forged answer therefore needs a wrong `folds:false` on a folding volume, which is the JS-vs-OS mapping mismatch bounded above, routed to
+// MISS instead of trusted. A `folds:false` is the direction a REFUSE caller must not trust; a PERMIT caller treats it as the safe side.
 //
-// CACHES MEASURED ANSWERS ONLY, keyed on the exact path — never on `st.dev` (Windows
-// sets this per-directory, so a device-keyed cache would learn from whichever directory
-// probed first and misapply it to every other directory on the drive). A MISS is never
-// cached: its value depends on the CALLER's `foldOnMiss`, so caching one would let the
-// first caller's polarity freeze a wrong answer for the other one, process-wide.
+// CACHES MEASURED ANSWERS ONLY. The key is the exact path, and each entry also records the folder's dev+ino: an entry is reused only while
+// the outer stat still reports that identity, so a folder replaced at the same path re-measures. The device alone is never the key (Windows
+// sets case sensitivity per directory, so a device-keyed cache would learn from whichever directory probed first). A MISS is never cached:
+// its value depends on the CALLER's `foldOnMiss`, so caching one would let the first caller's polarity freeze a wrong answer for the other.
 //
-// SUSPECTED, NOT CONFIRMED, RECORDED WITH ITS POLARITY: a MEASURED answer is never
-// re-probed, so a directory whose case-sensitivity setting is toggled MID-PROCESS keeps
-// its first reading. The direction matters and does not need re-deriving: a stale
-// `folds:true` read by a PERMIT-polarity caller is an exposure in EXACTLY the direction
+// SUSPECTED, NOT CONFIRMED, RECORDED WITH ITS POLARITY: a directory whose case-sensitivity flag is toggled IN PLACE, with its identity
+// unchanged, keeps its first reading (round 8 re-probes on identity change, not on a flag change). The direction matters and does not need
+// re-deriving: a stale `folds:true` read by a PERMIT-polarity caller is an exposure in EXACTLY the direction
 // this unit closed (over-folding admits a case-variant sibling); a stale `folds:false`
 // there is safe (it only ever over-refuses). Both engines in this repo are short-lived
 // CLI processes and this is unreached in practice — recorded as a bound, not fixed.

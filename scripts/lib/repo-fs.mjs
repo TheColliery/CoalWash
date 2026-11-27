@@ -127,7 +127,7 @@ function repoDirRefusal(dir, root) {
   if (anc === null) return { why: `no existing directory above ${dir}`, folder: null, kind: null };
   const ancPhys = canonicalOrNull(anc);
   if (!ancPhys) return { why: `${anc} does not resolve`, ...folderToFix(anc, root) };
-  if (!pathWithin(ancPhys, rootPhys)) return { why: `${anc} resolves to ${ancPhys}, outside ${rootPhys}`, ...folderToFix(anc, root) };
+  if (!pathWithin(ancPhys, rootPhys, false)) return { why: `${anc} resolves to ${ancPhys}, outside ${rootPhys}`, ...folderToFix(anc, root) }; // PERMIT side, written at the call (round 8, F990-4)
   return null;
 }
 function folderToFix(anc, root) {

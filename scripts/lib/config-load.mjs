@@ -259,15 +259,16 @@ function flipCase(s) {
 // three-value STRING ('inside'/'outside'/'unknown') because it has genuine
 // live callers of BOTH polarities that must each interpret an unknown answer
 // correctly; this file has never had — and does not now gain — a live
-// PERMIT-polarity caller (this function's only 3 call sites, all REFUSE, are
-// listed below), so there is no safe boolean to fall back to on a bad argument.
+// PERMIT-polarity caller in the sense the class-A twin means (round 8: `pathWithin`
+// has PERMIT callers too, all listed below with their side), so there is no safe
+// boolean to fall back to on a bad argument.
 // A boolean silently coerced through truthy/falsy `? :` cannot represent
 // "unknown" the way a compared string can, so this file THROWS instead of
 // inventing a three-state contract nothing here needs — least mechanism for
 // the polarity this file actually has, not a copy of class-A's for its own sake.
 //
 // THE THREE CALL SITES, their polarity, and why each is REFUSE:
-//   `pathWithin`'s `norm`, below — its only 2 callers, `touchesClaudeBase` (a
+//   `pathWithin`'s `norm`, below — its REFUSE callers, `touchesClaudeBase` (a
 //     real trust boundary) and `findProjectRoot`'s `isBase` (declared
 //     non-security), are REFUSE. NOT because folding more narrows `isBase`'s
 //     own root selection — it does not: `isBase(dir)=true` skips `dir`'s own
@@ -301,7 +302,7 @@ export function volumeCaseFolds(dirPhys, foldOnMiss) {
   // returned DIRECTLY, bypassing the cache below on purpose. This branch's
   // answer now IS `foldOnMiss` itself — a value that can differ PER CALLER for
   // the identical `dirPhys` (the whole point of making it a required argument).
-  // The cache is keyed on `dirPhys` alone; caching a miss answer would let
+  // The cache is keyed on `dirPhys` and reused only while its dev+ino still match; caching a miss answer would let
   // whichever caller happened to probe this path FIRST silently overwrite every
   // later caller's own declared polarity for the same path — a cross-caller
   // leak through the cache that would defeat the required parameter as
