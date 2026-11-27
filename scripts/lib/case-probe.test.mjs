@@ -156,6 +156,9 @@ test('the case probe: a cached MEASURED answer is dropped when the folder at tha
   fs.rmSync(A, { recursive: true, force: true });
   fs.mkdirSync(A);
   if (!sensitiveFolder(t, A)) return; // fsutil needs an EMPTY folder, which A is here
+  // Round 9 (F993-2): the replacement parent must MEASURE case-sensitive before the assertion below means anything. A folding volume
+  // (macOS APFS) cannot make it sensitive, so the probe decides and the leg skips by name there, instead of asserting on the wrong volume.
+  if (foldsOrSkip(t, A)) return;
   w(path.join(P, 'f.md'), 'y');
   assert.strictEqual(volumeCaseFolds(P, false), false, 'the same path now names a new folder in a case-sensitive parent: the cached true is not replayed');
 });

@@ -171,7 +171,7 @@ test('pathWithin REFUSES a non-canonical argument on EITHER side', () => {
 // that on an insensitive folder, where the case-variant IS the same folder. The case-SENSITIVE rows
 // live in the table above and in case-held.test.mjs.
 test('containedIn follows the folder probe: a case-variant of an INSENSITIVE folder is contained', (t) => {
-  if (!WIN) { t.skip('win32-only fixture — the case-variant rows need the probe to measure a folding folder'); return; }
+  // Round 9 (F993-3): no platform gate. The probe below measures the folder; a case-sensitive volume skips by name there.
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-FOLD-')));
   const child = path.join(base, 'a', 'b');
   try {
@@ -190,13 +190,19 @@ test('containedIn follows the folder probe: a case-variant of an INSENSITIVE fol
 // THE MISSING ROW (976, F1): a case-SENSITIVE folder, where all three shapes must agree a case-variant is OUTSIDE. Before 976 the
 // class-B shape folded here on win32 and the other two did not, so this table could not have caught it.
 test('TWIN-PIN, case-SENSITIVE folder: pathWithin, isContainedIn and containedIn all refuse a case-variant sibling', (t) => {
-  if (!WIN) { t.skip('win32-only fixture (the case-sensitive folder is made with fsutil)'); return; }
   const cs = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-CS-')));
   try {
-    const r = spawnSync('fsutil.exe', ['file', 'setCaseSensitiveInfo', cs, 'enable'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
-    if (r.status !== 0) { t.skip(`NAMED SKIP: fsutil exit ${r.status}`); return; }
-    const proj = path.join(cs, 'proj'); const sib = path.join(cs, 'PROJ');
-    fs.mkdirSync(proj); fs.mkdirSync(sib);
+    // Round 9 (F993-3): fsutil (Windows) only MAKES the folder sensitive; the probe decides whether the row runs. No platform gate.
+    if (WIN) {
+      const r = spawnSync('fsutil.exe', ['file', 'setCaseSensitiveInfo', cs, 'enable'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+      if (r.status !== 0) { t.skip(`NAMED SKIP: fsutil exit ${r.status}`); return; }
+    }
+    const proj = path.join(cs, 'proj');
+    fs.mkdirSync(proj);
+    // Probe BEFORE the case-variant sibling exists (F993-1's shape): on a folding volume PROJ would be proj, so the mkdir would EEXIST.
+    if (volumeCaseFolds(proj, false)) { t.skip('NAMED SKIP: this folder folds case, so there is no case-variant sibling to refuse'); return; }
+    const sib = path.join(cs, 'PROJ');
+    fs.mkdirSync(sib);
     const child = path.join(sib, 'a.txt'); fs.writeFileSync(child, 'x');
     assert.strictEqual(volumeCaseFolds(proj, false), false, 'precondition: the probe measures the folder case-SENSITIVE');
     assert.strictEqual(pathWithin(child, proj), false, 'pathWithin refuses the case-variant');
@@ -491,7 +497,14 @@ test('TWIN-PIN, a link at the flipped name: config-load pathWithin and explode c
       if (r.status !== 0) { t.skip(`NAMED SKIP: fsutil exit ${r.status}`); return; }
     }
     const held = path.join(root, 'held'); fs.mkdirSync(held); fs.writeFileSync(path.join(held, 'secret.md'), 'x');
-    const other = path.join(root, 'Held'); fs.mkdirSync(other); fs.writeFileSync(path.join(other, 'x.txt'), 'OTHER');
+    // Round 9 (F993-1): the case-variant sibling is created by PROBE, never assumed. On a folding volume 'Held' IS 'held', so the mkdir
+    // throws EEXIST: that is the measurement, and the row skips by name rather than failing before its own assertions.
+    const other = path.join(root, 'Held');
+    try { fs.mkdirSync(other); } catch (e) {
+      if (e.code === 'EEXIST') { t.skip('NAMED SKIP: this folder folds case, so the case-variant sibling is the held folder itself'); return; }
+      throw e;
+    }
+    fs.writeFileSync(path.join(other, 'x.txt'), 'OTHER');
     const link = path.join(root, 'HELD');
     try { fs.symlinkSync(held, link, WIN ? 'junction' : 'dir'); } catch (e) { t.skip(`NAMED SKIP: a link cannot be made here (${e.code})`); return; }
     try {
@@ -504,10 +517,12 @@ test('TWIN-PIN, a link at the flipped name: config-load pathWithin and explode c
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-// The identity pin (Windows only): the SAME path string names a NEW folder in a case-SENSITIVE parent. A cache that replays on the path
+// The identity pin: the SAME path string names a NEW folder in a case-SENSITIVE parent. The first precondition measures the parent FOLDING
+// (so the cache holds a true to replay); on case-sensitive POSIX it skips there. On a folding Windows volume fsutil makes the replacement
+// parent sensitive; on a folding volume that cannot, the replacement probe skips by name. A cache that replays on the path
 // string alone keeps the earlier measured true in BOTH twins; the identity check re-measures false in both.
 test('TWIN-PIN, a replaced folder: both twins re-measure when the identity at a path moves', (t) => {
-  if (!WIN) { t.skip('NAMED SKIP: the identity leg swaps an insensitive parent for a case-sensitive one, which needs fsutil'); return; }
+  // Round 9 (F993-3): no platform gate. The replacement parent is probed below; a folding volume that cannot make it sensitive skips by name.
   const top = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'CW-TWINPIN-ID-')));
   try {
     const A = path.join(top, 'A'); fs.mkdirSync(A);
@@ -517,8 +532,13 @@ test('TWIN-PIN, a replaced folder: both twins re-measure when the identity at a 
     assert.strictEqual(containment(variant, P, false) === 'inside', true, 'precondition: explode measures the insensitive parent as folding, and caches it');
     fs.rmSync(A, { recursive: true, force: true });
     fs.mkdirSync(A);
-    const r = spawnSync('fsutil.exe', ['file', 'setCaseSensitiveInfo', A, 'enable'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
-    if (r.status !== 0) { t.skip(`NAMED SKIP: fsutil exit ${r.status}`); return; }
+    if (WIN) {
+      const r = spawnSync('fsutil.exe', ['file', 'setCaseSensitiveInfo', A, 'enable'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+      if (r.status !== 0) { t.skip(`NAMED SKIP: fsutil exit ${r.status}`); return; }
+    }
+    // Round 9 (F993-3): PROBE the replacement parent. Only a parent that measures case-sensitive can show the identity move; a folding one skips by name.
+    const probe = path.join(A, 'zz-precheck'); fs.mkdirSync(probe);
+    if (volumeCaseFolds(probe, false)) { t.skip('NAMED SKIP: the replacement parent cannot be made case-sensitive here, so there is no identity move to show'); return; }
     fs.mkdirSync(P); fs.writeFileSync(path.join(P, 'f.md'), 'y');
     const a = pathWithin(variant, P, false);
     const b = containment(variant, P, false) === 'inside';
