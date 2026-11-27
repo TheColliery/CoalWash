@@ -223,20 +223,23 @@ function flipCase(s) {
 // there is safe (it only ever over-refuses). Both engines in this repo are short-lived
 // CLI processes and this is unreached in practice — recorded as a bound, not fixed.
 function volumeCaseFolds(anchorPhys, foldOnMiss) {
-  if (CASE_FOLD_CACHE.has(anchorPhys)) return CASE_FOLD_CACHE.get(anchorPhys);
   let st;
   try { st = fs.statSync(anchorPhys, { bigint: true }); } catch { return foldOnMiss; } // miss (1)
+  // Identity-keyed (round 7, F3, the twin of config-load's cache): reuse only while the measured folder is the same file.
+  const cached = CASE_FOLD_CACHE.get(anchorPhys);
+  if (cached && cached.dev === st.dev && cached.ino === st.ino) return cached.folds;
   const parent = path.dirname(anchorPhys);
   const flipped = parent === anchorPhys ? null : flipCase(path.basename(anchorPhys)); // miss (2)/(3)/(4)
   if (flipped === null) return foldOnMiss;
   let folds;
   try {
-    const flippedSt = fs.statSync(path.join(parent, flipped), { bigint: true });
-    folds = flippedSt.dev === st.dev && flippedSt.ino === st.ino;
+    // lstat, never stat (round 7, F3): a link at the flipped name is a different entry, so it measures case-SENSITIVE.
+    const flippedLst = fs.lstatSync(path.join(parent, flipped), { bigint: true });
+    folds = !flippedLst.isSymbolicLink() && flippedLst.dev === st.dev && flippedLst.ino === st.ino;
   } catch {
     folds = false; // MEASURED case-sensitive (the flipped spelling is not the same file) — NOT a miss
   }
-  CASE_FOLD_CACHE.set(anchorPhys, folds);
+  CASE_FOLD_CACHE.set(anchorPhys, { folds, dev: st.dev, ino: st.ino });
   return folds;
 }
 // ---------------------------------------------------------------------------

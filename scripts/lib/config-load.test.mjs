@@ -757,7 +757,9 @@ test('RE-INSPECT/R2: a non-involutive Unicode case flip (eszett) must not report
     // went through realpathSync -- this is what actually exercises `norm`, since
     // canonicalOrNull on an EXISTING path would normalize the case away first.
     const variantPhys = basePhys.slice(0, basePhys.length - 'Straße'.length) + 'STRAßE';
-    assert.strictEqual(pathWithin(variantPhys, basePhys), true,
+    // Named step, round 7 (F3): pathWithin's default polarity is now PERMIT (a probe
+    // miss does not fold). This assertion is the REFUSE answer, so the caller says so.
+    assert.strictEqual(pathWithin(variantPhys, basePhys, true), true,
       'a directory that genuinely folds case must read its own OS-recognized case-variant spelling as the SAME path -- a non-involutive flip (ß -> SS) manufactures a spelling the OS never produces, misses it, and confidently reports "case-sensitive" (folds:false) here instead of falling back to the safe default');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -798,7 +800,8 @@ test('RE-INSPECT/R3-1: a singleton/compatibility Unicode remap (Kelvin sign) mus
     const osVariant = path.join(root, 'nKX');
     assert.strictEqual(canonicalOrNull(osVariant), basePhys, 'sanity: the OS itself treats n-KELVIN-X as the same directory as N-KELVIN-x (the ordinary letters fold; the Kelvin sign is untouched either way)');
     const variantPhys = basePhys.slice(0, basePhys.length - 'NKx'.length) + 'nKX';
-    assert.strictEqual(pathWithin(variantPhys, basePhys), true,
+    // Named step, round 7 (F3): the same polarity note as R2 above; REFUSE answer, stated.
+    assert.strictEqual(pathWithin(variantPhys, basePhys, true), true,
       'a directory whose parent folds ASCII case must read its own OS-recognized variant as the SAME path -- a singleton/compatibility remap (Kelvin sign treated by JS as a case-pair of ordinary K) manufactures a spelling the OS never produces for this codepoint, misses it, and confidently reports "case-sensitive" here instead of falling back to the safe default');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

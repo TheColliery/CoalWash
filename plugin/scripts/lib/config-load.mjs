@@ -133,16 +133,11 @@ export function isCanonicalShape(p) {
 // callers on the SAME root (the common case — `touchesClaudeBase` re-checking one
 // claudeBaseDir many times) still hit the cache.
 //
-// SUSPECTED, NOT CONFIRMED, RECORDED WITH ITS POLARITY (station-3 findings-back,
-// F4 — the mirror of explode.mjs's own identical note on its copy of this cache):
-// a MEASURED answer is never re-probed, so a directory whose case-sensitivity is
-// toggled MID-PROCESS keeps its first reading. This file's callers are ALL
-// REFUSE-polarity (`touchesClaudeBase`, `isBase`, and apply.mjs's KEEPS-GATE), so
-// the direction is the mirror of explode.mjs's PERMIT-polarity note: a stale
-// cached `folds:true` only ever OVER-refuses (safe); a stale cached `folds:false`
-// UNDER-folds, which is the fail-OPEN direction at a REFUSE gate. Every engine in
-// this repo is a short-lived CLI process and this is unreached in practice —
-// recorded as a bound, not fixed, matching the sibling file's own treatment.
+// ROUND 7 (F3): each entry carries the dev+ino of the folder it measured. The
+// lookup re-stats the folder on every call (the outer stat above) and reuses the
+// entry only while that identity is unchanged, so a link planted or a folder
+// swapped after a measurement re-probes instead of replaying the old answer. A
+// miss is never stored (see the miss branches of volumeCaseFolds).
 const CASE_FOLD_CACHE = new Map();
 // THE CLAIM THIS FUNCTION MAKES IS BOUNDED, NOT UNIVERSAL — read this before
 // changing the round-trip check below. JS's Unicode case mapping and a volume's
@@ -284,19 +279,22 @@ function flipCase(s) {
 //     boundary — a check `isBase` does not perform and does not need to.
 //   `apply.mjs`'s `samePathForKeep` (2 call sites) — a MATCH makes a pinned
 //     keep BIND and EXCLUDE the action, so folding more only ever refuses more.
-// `pathWithin` itself is NOT threaded a `foldOnMiss` parameter (unlike class-A's
-// `isUnder`, which threads `containment`'s): it has no live caller that needs
-// anything but REFUSE, so adding API surface for a polarity nobody uses would be
-// exactly the over-hardening skill-authoring.md §2 forbids. If a PERMIT-polarity
-// consumer of path containment is ever needed here, it earns its own function
-// when it exists, matching this file's own YAGNI precedent everywhere else.
+// `pathWithin` IS threaded the same polarity (round 7, F3): its `foldOnMiss`
+// argument defaults to false (PERMIT), and each caller states its side. A REFUSE
+// caller (`touchesClaudeBase`, `isBase`) passes true; a PERMIT caller
+// (`repoEntryVerdict`, `repoReadOutcome`, `repoDirRefusal`) passes false, so a
+// probe miss never folds a child into a base it does not literally match.
 export function volumeCaseFolds(dirPhys, foldOnMiss) {
   if (typeof foldOnMiss !== 'boolean') {
     throw new TypeError(`volumeCaseFolds: foldOnMiss is REQUIRED, no default — every caller must declare its polarity explicitly (REFUSE callers pass true; a future PERMIT caller must pass false and read the forgeability note above first). Got ${JSON.stringify(foldOnMiss)}.`);
   }
-  if (CASE_FOLD_CACHE.has(dirPhys)) return CASE_FOLD_CACHE.get(dirPhys);
   let st;
   try { st = fs.statSync(dirPhys, { bigint: true }); } catch { return foldOnMiss; } // OUTER stat: a real probe MISS -> the caller's own declared direction. NEVER cached (see below) — a transient stat failure must not freeze a wrong answer for the process lifetime.
+  // IDENTITY-KEYED CACHE (round 7, F3): an entry is reused only while the folder
+  // the OUTER stat just measured is still the SAME file (dev+ino). A folder swapped
+  // for another, or a poisoned answer from before a link was removed, re-probes.
+  const cached = CASE_FOLD_CACHE.get(dirPhys);
+  if (cached && cached.dev === st.dev && cached.ino === st.ino) return cached.folds;
   const parent = path.dirname(dirPhys);
   const flipped = parent === dirPhys ? null : flipCase(path.basename(dirPhys));
   // MISS (root, or no case-bearing char) -> the caller's declared direction,
@@ -315,20 +313,25 @@ export function volumeCaseFolds(dirPhys, foldOnMiss) {
   if (flipped === null) return foldOnMiss;
   let folds;
   try {
-    const flippedSt = fs.statSync(path.join(parent, flipped), { bigint: true });
-    folds = flippedSt.dev === st.dev && flippedSt.ino === st.ino;
+    // lstat, never stat (round 7, F3): a stat follows a link, so a link planted at
+    // the flipped name would answer as the held folder and a case-sensitive folder
+    // would read as folding. A link at the flipped name is a DIFFERENT entry from the
+    // folder, so it measures case-SENSITIVE; the dev+ino compare then says so on its own.
+    const flippedLst = fs.lstatSync(path.join(parent, flipped), { bigint: true });
+    folds = !flippedLst.isSymbolicLink() && flippedLst.dev === st.dev && flippedLst.ino === st.ino;
   } catch {
     folds = false; // INNER stat: NOT a miss — the probe SUCCEEDED. The flipped spelling does not resolve, so the directory is genuinely case-SENSITIVE. Opposite direction to the outer catch above, deliberately.
   }
-  CASE_FOLD_CACHE.set(dirPhys, folds);
+  CASE_FOLD_CACHE.set(dirPhys, { folds, dev: st.dev, ino: st.ino });
   return folds;
 }
-export function pathWithin(childPhys, basePhys) {
+// `foldOnMiss` is REQUIRED-by-convention with a PERMIT default (false): an
+// omitted argument permits, and REFUSE callers pass true explicitly. See
+// volumeCaseFolds's header for the polarity each caller takes.
+export function pathWithin(childPhys, basePhys, foldOnMiss = false) {
   if (!childPhys || !basePhys) return false; // fail-closed
   if (!isCanonicalShape(childPhys) || !isCanonicalShape(basePhys)) return false; // fail-closed: caller must canonicalize
-  // REFUSE-polarity, explicit — see volumeCaseFolds's own header for why this is
-  // hardcoded here rather than threaded as a parameter of pathWithin itself.
-  const norm = (s) => (volumeCaseFolds(basePhys, true) ? s.toLowerCase() : s);
+  const norm = (s) => (volumeCaseFolds(basePhys, foldOnMiss) ? s.toLowerCase() : s);
   const c = norm(childPhys);
   const b = norm(basePhys);
   return c === b || c.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
@@ -343,7 +346,7 @@ export function touchesClaudeBase(p, home = os.homedir()) {
   if (!target) return true; // unresolvable ANCHOR: refuse
   return claudeBaseDirs(home).some((b) => {
     const base = canonicalOrNull(b);
-    if (base) return pathWithin(target, base) || pathWithin(base, target);
+    if (base) return pathWithin(target, base, true) || pathWithin(base, target, true); // REFUSE side, both directions
     // A TWO-SIDED CONTAINMENT COMPARE HAS TWO ATTACK INPUTS. Hardening the subject
     // while letting "the reference didn't resolve" be a free pass is the same
     // false-completeness shape one axis over — and it was exploitable: a
@@ -477,7 +480,7 @@ function repoEntryVerdict(p, root) {
     const pPhys = canonicalOrNull(p);
     if (!pPhys) return { why: lst.isSymbolicLink() ? 'dangling' : 'unreadable' };
     if (!rootPhys) return { why: 'root-unresolvable' }; // the ROOT could not be canonicalized (UNC, a device path, a mapped drive): not the path's fault
-    if (!pathWithin(pPhys, rootPhys)) return { why: 'outside-root' };
+    if (!pathWithin(pPhys, rootPhys, false)) return { why: 'outside-root' }; // PERMIT side
   }
   let st = lst;
   if (lst.isSymbolicLink()) {
@@ -516,7 +519,7 @@ export function repoReadOutcome(file, root, maxBytes, prefixOnly = false) {
       // and mtime then pass, the named limit of that fallback. Any throw refuses (`changed`).
       const rootPhys = canonicalOrNull(root);
       const pPhys = canonicalOrNull(file);
-      if (!rootPhys || !pPhys || !pathWithin(pPhys, rootPhys)) return { why: 'changed' };
+      if (!rootPhys || !pPhys || !pathWithin(pPhys, rootPhys, false)) return { why: 'changed' }; // PERMIT side
       hs = fs.fstatSync(fd, { bigint: true });
       let ps;
       try { ps = fs.lstatSync(pPhys, { bigint: true }); } catch { return { why: 'changed' }; }
@@ -660,7 +663,7 @@ export function findProjectRoot(startDir = process.cwd(), home = os.homedir(), o
   // rather than refusing. State hygiene either way, not a security check — but a
   // future edit that starts trusting this comment's canonicalization claim inherits
   // a wrong assumption, so it is corrected rather than merely narrowed.
-  const isBase = (d) => bases.some((b) => pathWithin(d, b) && pathWithin(b, d));
+  const isBase = (d) => bases.some((b) => pathWithin(d, b, true) && pathWithin(b, d, true)); // REFUSE side
   while (true) {
     if (!isBase(dir) && markers.some((m) => fs.existsSync(path.join(dir, m)))) return dir;
     if (dir === homeAbs) return startDir;

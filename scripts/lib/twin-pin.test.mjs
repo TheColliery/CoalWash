@@ -25,7 +25,7 @@ import { execSync, spawnSync } from 'node:child_process';
 
 import { physicalForCreate as pfcClassB, physicalOrNull as ponClassB, containedIn } from './class-b.mjs';
 import { pathWithin, volumeCaseFolds } from './config-load.mjs';
-import { physicalForCreate as pfcClassA, isContainedIn, snapshotSource } from './explode.mjs';
+import { physicalForCreate as pfcClassA, isContainedIn, snapshotSource, containment } from './explode.mjs';
 import { detonate } from './detonate.mjs';
 
 const WIN = process.platform === 'win32';
@@ -460,4 +460,21 @@ test('TWIN-PIN: the case-fold PROBE agrees across the twins on a genuinely case-
       'Both twins are capability-converted, so a disagreement here is real drift, not a pending landing.');
     assert.strictEqual(pathWithin(real, base), true, 'a genuine child of the declared store IS contained (twin)');
   } finally { fs.rmSync(cs.root, { recursive: true, force: true }); }
+});
+
+// ROUND 7 (F3), E1 row: a base the probe CANNOT measure (absent, so the outer stat
+// misses) answers the CALLER'S declared polarity, identically in both twins. The
+// PERMIT side (false) must not fold a case-variant child into the base; the REFUSE
+// side (true) must. Pinned on both twins, both polarities, never on a platform name.
+test('TWIN-PIN, polarity: an absent base (a probe MISS) answers the caller\'s declared side in both twins', () => {
+  const root = fs.realpathSync.native(os.tmpdir());
+  const base = path.join(root, 'CW-TWIN-POL-955-STRAßE-ABSENT'); // does not exist: the probe misses
+  const child = path.join(root, 'cw-twin-pol-955-straße-absent', 'a.txt');
+  for (const polarity of [false, true]) {
+    const a = pathWithin(child, base, polarity);
+    const b = containment(child, base, polarity) === 'inside';
+    assert.strictEqual(a, b, `TWIN DRIFT on a probe MISS (foldOnMiss=${polarity}): config-load pathWithin=${a} vs explode containment=${b}.`);
+  }
+  assert.strictEqual(pathWithin(child, base, false), false, 'PERMIT (foldOnMiss=false): a miss does not fold the case-variant child into the base');
+  assert.strictEqual(pathWithin(child, base, true), true, 'REFUSE (foldOnMiss=true): a miss folds, so the case-variant child is contained');
 });
