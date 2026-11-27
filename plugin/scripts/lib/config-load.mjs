@@ -258,28 +258,26 @@ function flipCase(s) {
 // adapted to this file's return type: class-A's `containment` returns a
 // three-value STRING ('inside'/'outside'/'unknown') because it has genuine
 // live callers of BOTH polarities that must each interpret an unknown answer
-// correctly; this file has never had — and does not now gain — a live
-// PERMIT-polarity caller in the sense the class-A twin means (round 8: `pathWithin`
-// has PERMIT callers too, all listed below with their side), so there is no safe
-// boolean to fall back to on a bad argument.
+// correctly. This file has a PERMIT caller too (`pathWithin`'s, listed below with its
+// side), but the polarity is the caller's argument, and a missing or non-boolean one
+// THROWS (checked in volumeCaseFolds), so there is no "unknown" to fall back to.
 // A boolean silently coerced through truthy/falsy `? :` cannot represent
 // "unknown" the way a compared string can, so this file THROWS instead of
 // inventing a three-state contract nothing here needs — least mechanism for
-// the polarity this file actually has, not a copy of class-A's for its own sake.
+// the polarities this file has, not a copy of class-A's three-state contract for its own sake.
 //
-// THE THREE CALL SITES, their polarity, and why each is REFUSE:
-//   `pathWithin`'s `norm`, below — its REFUSE callers, `touchesClaudeBase` (a
-//     real trust boundary) and `findProjectRoot`'s `isBase` (declared
-//     non-security), are REFUSE. NOT because folding more narrows `isBase`'s
-//     own root selection — it does not: `isBase(dir)=true` skips `dir`'s own
-//     marker check and keeps climbing (`findProjectRoot`'s while-loop), which
-//     can select a WIDER root than `dir` when a marker exists further up, so
-//     folding more can widen the picked anchor at THIS function alone. The
-//     safety is `applyPlan`'s `touchesClaudeBase` refusing any anchor that
-//     touches config territory, in either direction, at the actual trust
-//     boundary — a check `isBase` does not perform and does not need to.
-//   `apply.mjs`'s `samePathForKeep` (2 call sites) — a MATCH makes a pinned
-//     keep BIND and EXCLUDE the action, so folding more only ever refuses more.
+// THE CALL SITES of volumeCaseFolds, re-derived by grep (`grep -n "volumeCaseFolds(" scripts/lib/*.mjs`,
+// the shipped files; round 7, the NIT on `## 997`). Six sit outside this file, each with its argument:
+//   class-b.mjs:252     containedIn's root probe        `false`  PERMIT
+//   class-b.mjs:567     the seen-set compare            `true`   REFUSE
+//   anchor-diff.mjs:65  the same-file check for a restore candidate  `false`  PERMIT
+//   parcel.mjs:169      the adapter-spelling twin lookup             `false`  PERMIT
+//   apply.mjs:1184      the shared-target compare       `true`   REFUSE
+//   apply.mjs:1352      samePathForKeep (a MATCH binds and excludes, so folding more only refuses more)  `true`  REFUSE
+// The seventh is `pathWithin`'s `norm`, below: its polarity is the caller's `foldOnMiss`.
+// `isBase`'s REFUSE is not because folding more narrows its own root selection: `isBase(dir)=true` skips
+// `dir`'s marker check and keeps climbing, which can select a WIDER root. The safety is `applyPlan`'s
+// `touchesClaudeBase` refusing any anchor that touches config territory, at the actual trust boundary.
 // `pathWithin` IS threaded the same polarity (round 7, F3): its `foldOnMiss`
 // argument defaults to false (PERMIT), and each caller states its side. A REFUSE
 // caller (`touchesClaudeBase`, `isBase`) passes true; a PERMIT caller

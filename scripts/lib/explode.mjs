@@ -199,7 +199,7 @@ function flipCase(s) {
 // the inject/exfil vector this file's own BREAK 2 comment claims to have closed,
 // re-opened along the case axis.
 //
-// FORGEABILITY (round 8, F990-5): a junction or hardlink planted at the flipped spelling is a SEPARATE entry from the folder, so its
+// FORGEABILITY (round 7, F990-5): a junction or hardlink planted at the flipped spelling is a SEPARATE entry from the folder, so its
 // lstat never carries the folder's own dev+ino: a planted link measures `folds:false`, and the probe no longer lets a plant push it to
 // `folds:true`. On an insensitive parent the flipped spelling is the folder's own entry, so a plant there cannot be created at all. A
 // forged answer therefore needs a wrong `folds:false` on a folding volume, which is the JS-vs-OS mapping mismatch bounded above, routed to
@@ -211,7 +211,7 @@ function flipCase(s) {
 // its value depends on the CALLER's `foldOnMiss`, so caching one would let the first caller's polarity freeze a wrong answer for the other.
 //
 // SUSPECTED, NOT CONFIRMED, RECORDED WITH ITS POLARITY: a directory whose case-sensitivity flag is toggled IN PLACE, with its identity
-// unchanged, keeps its first reading (round 8 re-probes on identity change, not on a flag change). The direction matters and does not need
+// unchanged, keeps its first reading (round 7 re-probes on identity change, not on a flag change). The direction matters and does not need
 // re-deriving: a stale `folds:true` read by a PERMIT-polarity caller is an exposure in EXACTLY the direction
 // this unit closed (over-folding admits a case-variant sibling); a stale `folds:false`
 // there is safe (it only ever over-refuses). Both engines in this repo are short-lived
